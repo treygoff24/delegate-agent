@@ -26,6 +26,13 @@ def make_git_repo():
     return temp
 
 
+GIT_TEST_IDENTITY = ("-c", "user.name=Delegate Test", "-c", "user.email=delegate-test@example.com")
+
+
+def cursor_safe_temp_dirs() -> set[Path]:
+    return set(Path(tempfile.gettempdir()).glob("delegate-cursor-safe-*"))
+
+
 class ExecutionTests(unittest.TestCase):
     def setUp(self):
         self.delegate = load_delegate()
@@ -159,3 +166,117 @@ class ExecutionTests(unittest.TestCase):
         for text in forbidden:
             with self.subTest(text=text):
                 self.assertNotIn(text, source)
+
+    def make_cursor_safe_fake_agent(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        bin_dir = Path(temp.name)
+        path = bin_dir / "agent"
+        path.write_text(
+            "#!/usr/bin/env bash\n"
+            "touch mutated-by-agent.txt\n"
+            "printf 'OUT:%s\\n' \"$*\"\n"
+            "exit \"${FAKE_EXIT:-0}\"\n"
+        )
+        path.chmod(0o755)
+        return bin_dir
+
+    def test_cursor_safe_json_reports_source_workspace_not_temp_copy(self):
+        repo = make_git_repo()
+        self.addCleanup(repo.cleanup)
+        subprocess.run(
+            ["git", "-C", repo.name, *GIT_TEST_IDENTITY, "commit", "--allow-empty", "-m", "init"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        fake_bin = self.make_cursor_safe_fake_agent()
+        config = Path(repo.name) / "config.json"
+        config.write_text(json.dumps(self.delegate.DEFAULT_CONFIG))
+        env = os.environ.copy()
+        env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
+        env["DELEGATE_CONFIG"] = str(config)
+
+        completed = subprocess.run(
+            [sys.executable, str(MODULE_PATH), "--json", "--cwd", repo.name, "cursor", "safe", "review"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0)
+        payload = json.loads(completed.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["isolatedWorkspace"])
+        self.assertEqual(Path(payload["cwd"]).resolve(), Path(repo.name).resolve())
+        self.assertIn("executionCwd", payload)
+        self.assertNotEqual(Path(payload["executionCwd"]).resolve(), Path(payload["cwd"]).resolve())
+
+    def test_cursor_safe_git_execution_does_not_mutate_original_workspace(self):
+        repo = make_git_repo()
+        self.addCleanup(repo.cleanup)
+        tracked = Path(repo.name) / "tracked.txt"
+        tracked.write_text("before\n")
+        subprocess.run(
+            ["git", "-C", repo.name, *GIT_TEST_IDENTITY, "add", "tracked.txt"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            ["git", "-C", repo.name, *GIT_TEST_IDENTITY, "commit", "-m", "init"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        tracked.write_text("dirty\n")
+        untracked = Path(repo.name) / "notes.txt"
+        untracked.write_text("local-only\n")
+
+        fake_bin = self.make_cursor_safe_fake_agent()
+        config = Path(repo.name) / "config.json"
+        config.write_text(json.dumps(self.delegate.DEFAULT_CONFIG))
+        env = os.environ.copy()
+        env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
+        env["DELEGATE_CONFIG"] = str(config)
+        temp_dirs_before = cursor_safe_temp_dirs()
+
+        completed = subprocess.run(
+            [sys.executable, str(MODULE_PATH), "--cwd", repo.name, "cursor", "safe", "review"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0)
+        self.assertFalse((Path(repo.name) / "mutated-by-agent.txt").exists())
+        self.assertEqual(tracked.read_text(), "dirty\n")
+        self.assertEqual(untracked.read_text(), "local-only\n")
+        self.assertEqual(cursor_safe_temp_dirs() - temp_dirs_before, set())
+
+    def test_cursor_safe_directory_execution_does_not_mutate_original_workspace(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            source = Path(workspace) / "source.txt"
+            source.write_text("keep-me\n")
+            fake_bin = self.make_cursor_safe_fake_agent()
+            config = Path(workspace) / "config.json"
+            config.write_text(json.dumps(self.delegate.DEFAULT_CONFIG))
+            env = os.environ.copy()
+            env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
+            env["DELEGATE_CONFIG"] = str(config)
+            temp_dirs_before = cursor_safe_temp_dirs()
+
+            completed = subprocess.run(
+                [sys.executable, str(MODULE_PATH), "--cwd", workspace, "cursor", "safe", "review"],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0)
+            self.assertFalse((Path(workspace) / "mutated-by-agent.txt").exists())
+            self.assertEqual(source.read_text(), "keep-me\n")
+            self.assertEqual(cursor_safe_temp_dirs() - temp_dirs_before, set())

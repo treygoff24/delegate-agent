@@ -9,10 +9,12 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any, Iterator, TextIO
 
 
 VERSION = "0.1.2"
@@ -27,6 +29,38 @@ MODE_SAFE = "safe"
 MODE_WORK = "work"
 VALID_MODES = {MODE_SAFE, MODE_WORK}
 RUN_INPUT_KEYS = {"engine", "mode", "model", "cwd", "prompt"}
+CURSOR_SAFE_REVIEW_PREFIX = (
+    "Delegate review mode (code review/investigation only): "
+    "Do not edit, create, or delete files. "
+    "Report findings with file path, line reference, severity, and rationale. "
+    "If a write is blocked, do not retry it.\n\n"
+)
+CURSOR_SAFE_CLI_CONFIG: dict[str, Any] = {
+    "version": 1,
+    "permissions": {
+        "allow": [
+            "Read(**)",
+            "Shell(rg)",
+            "Shell(grep)",
+            "Shell(cat)",
+            "Shell(head)",
+            "Shell(tail)",
+            "Shell(wc)",
+        ],
+        "deny": [
+            "Write(**)",
+            "Shell(rm)",
+            "Shell(mv)",
+            "Shell(tee)",
+            "Shell(curl)",
+            "Shell(wget)",
+            "Read(.env*)",
+            "Read(**/.env*)",
+            "Read(**/id_rsa*)",
+            "Read(**/*.pem)",
+        ],
+    },
+}
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "cursor": {
@@ -79,6 +113,12 @@ class ResolvedWorkspace:
     kind: str
 
 
+@dataclass(frozen=True)
+class SafeIsolationContext:
+    source_workspace: str
+    execution_workspace: str
+
+
 @dataclass
 class Request:
     engine: str
@@ -89,6 +129,7 @@ class Request:
     model: str
     dry_run: bool = False
     workspace_kind: str = "git"
+    safe_isolation: SafeIsolationContext | None = None
 
 
 HELP = f"""delegate {VERSION}
@@ -486,12 +527,196 @@ def build_request(
     raise DelegateError("invalid_engine", "engine must be cursor or droid.")
 
 
+def prefix_cursor_safe_prompt(prompt: str) -> str:
+    if prompt.startswith(CURSOR_SAFE_REVIEW_PREFIX):
+        return prompt
+    return f"{CURSOR_SAFE_REVIEW_PREFIX}{prompt}"
+
+
+def replace_argv_workspace(argv: list[str], workspace: str) -> list[str]:
+    updated = list(argv)
+    for index, token in enumerate(updated):
+        if token == "--workspace" and index + 1 < len(updated):
+            updated[index + 1] = workspace
+            break
+    return updated
+
+
+def write_cursor_safe_project_config(workspace: Path) -> None:
+    config_dir = workspace / ".cursor"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "cli.json").write_text(json.dumps(CURSOR_SAFE_CLI_CONFIG, indent=2) + "\n")
+
+
+def read_git_tracked_diff(git_root: str) -> bytes:
+    diff = subprocess.run(
+        ["git", "-C", git_root, "diff", "HEAD", "--binary"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if diff.returncode != 0:
+        stderr = diff.stderr.decode(errors="replace").strip()
+        raise DelegateError("safe_workspace_sync_failed", f"Failed to read tracked diff: {stderr}")
+    return diff.stdout
+
+
+def apply_git_tracked_diff(worktree_path: str, diff: bytes) -> None:
+    if not diff.strip():
+        return
+    applied = subprocess.run(
+        ["git", "-C", worktree_path, "apply", "--whitespace=nowarn"],
+        input=diff,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if applied.returncode != 0:
+        stderr = applied.stderr.decode(errors="replace").strip()
+        raise DelegateError(
+            "safe_workspace_sync_failed",
+            f"Failed to apply tracked diff to isolated workspace: {stderr}",
+        )
+
+
+def mirror_path_preserving_symlinks(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if source.is_symlink():
+        if destination.exists() or destination.is_symlink():
+            destination.unlink()
+        os.symlink(os.readlink(source), destination)
+        return
+    if source.is_dir():
+        shutil.copytree(source, destination, dirs_exist_ok=True, symlinks=True)
+        return
+    shutil.copy2(source, destination)
+
+
+def sync_git_workspace_snapshot(git_root: str, worktree_path: str) -> None:
+    apply_git_tracked_diff(worktree_path, read_git_tracked_diff(git_root))
+    untracked = subprocess.run(
+        ["git", "-C", git_root, "ls-files", "--others", "--exclude-standard"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if untracked.returncode != 0:
+        raise DelegateError("safe_workspace_sync_failed", f"Failed to list untracked files: {untracked.stderr.strip()}")
+    for relative in untracked.stdout.splitlines():
+        if not relative:
+            continue
+        mirror_path_preserving_symlinks(Path(git_root) / relative, Path(worktree_path) / relative)
+
+
+def discard_git_safe_workspace(git_root: str, worktree_path: str, temp_base: str, *, worktree_added: bool) -> None:
+    if worktree_added:
+        remove_git_safe_workspace(git_root, worktree_path)
+    shutil.rmtree(temp_base, ignore_errors=True)
+
+
+def create_git_safe_workspace(git_root: str) -> tuple[str, str]:
+    temp_base = tempfile.mkdtemp(prefix="delegate-cursor-safe-")
+    worktree_path = str(Path(temp_base) / "wt")
+    worktree_added = False
+    try:
+        added = subprocess.run(
+            ["git", "-C", git_root, "worktree", "add", "--detach", worktree_path, "HEAD"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if added.returncode != 0:
+            raise DelegateError(
+                "safe_workspace_create_failed",
+                f"Failed to create detached git worktree: {added.stderr.strip()}",
+            )
+        worktree_added = True
+        sync_git_workspace_snapshot(git_root, worktree_path)
+    except Exception:
+        discard_git_safe_workspace(git_root, worktree_path, temp_base, worktree_added=worktree_added)
+        raise
+    return worktree_path, temp_base
+
+
+def create_directory_safe_workspace(source_workspace: str) -> tuple[str, str]:
+    temp_base = tempfile.mkdtemp(prefix="delegate-cursor-safe-")
+    copy_path = str(Path(temp_base) / "copy")
+    try:
+        shutil.copytree(
+            source_workspace,
+            copy_path,
+            ignore=shutil.ignore_patterns(".git"),
+            dirs_exist_ok=True,
+            symlinks=True,
+        )
+    except Exception:
+        shutil.rmtree(temp_base, ignore_errors=True)
+        raise
+    return copy_path, temp_base
+
+
+def remove_git_safe_workspace(git_root: str, worktree_path: str) -> None:
+    subprocess.run(
+        ["git", "-C", git_root, "worktree", "remove", "--force", worktree_path],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+
+
+def cleanup_cursor_safe_workspace(
+    *,
+    git_root: str | None,
+    isolated_workspace: str,
+    temp_base: str,
+) -> None:
+    if git_root is not None:
+        remove_git_safe_workspace(git_root, isolated_workspace)
+    shutil.rmtree(temp_base, ignore_errors=True)
+
+
+@contextmanager
+def cursor_safe_isolated_request(request: Request) -> Iterator[Request]:
+    if request.engine != "cursor" or request.mode != MODE_SAFE:
+        yield request
+        return
+
+    git_root = request.workspace if request.workspace_kind == "git" else None
+    if git_root is not None:
+        isolated_workspace, temp_base = create_git_safe_workspace(git_root)
+    else:
+        isolated_workspace, temp_base = create_directory_safe_workspace(request.workspace)
+
+    isolation = SafeIsolationContext(request.workspace, isolated_workspace)
+    try:
+        write_cursor_safe_project_config(Path(isolated_workspace))
+        yield Request(
+            request.engine,
+            request.mode,
+            isolated_workspace,
+            request.prompt,
+            replace_argv_workspace(request.argv, isolated_workspace),
+            request.model,
+            request.dry_run,
+            request.workspace_kind,
+            safe_isolation=isolation,
+        )
+    finally:
+        cleanup_cursor_safe_workspace(
+            git_root=git_root,
+            isolated_workspace=isolated_workspace,
+            temp_base=temp_base,
+        )
+
+
 def build_cursor_argv(prefix: list[str], mode: str, workspace: str, model: str, prompt: str) -> list[str]:
-    argv = [*prefix, "--workspace", workspace, "-p", "--trust", "--approve-mcps"]
-    if mode == MODE_SAFE:
-        argv.append("--mode=plan")
-    elif mode == MODE_WORK:
-        argv.append("--force")
+    argv = [*prefix, "--workspace", workspace, "-p", "--trust"]
+    if mode == MODE_WORK:
+        argv.extend(["--approve-mcps", "--force"])
+    elif mode == MODE_SAFE:
+        prompt = prefix_cursor_safe_prompt(prompt)
     else:
         validate_mode(mode)
     argv.extend(["--model", model, "--output-format", "text", prompt])
@@ -508,8 +733,18 @@ def build_droid_argv(binary: str, mode: str, workspace: str, model: str, prompt:
     return argv
 
 
+def json_workspace_fields(request: Request) -> dict[str, Any]:
+    if request.safe_isolation is not None:
+        return {
+            "cwd": request.safe_isolation.source_workspace,
+            "executionCwd": request.safe_isolation.execution_workspace,
+            "isolatedWorkspace": True,
+        }
+    return {"cwd": request.workspace}
+
+
 def dry_run_payload(request: Request) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "ok": True,
         "dryRun": True,
         "cwd": request.workspace,
@@ -519,6 +754,13 @@ def dry_run_payload(request: Request) -> dict[str, Any]:
         "model": request.model,
         "argv": request.argv,
     }
+    if request.engine == "cursor" and request.mode == MODE_SAFE:
+        payload["isolatedWorkspace"] = True
+        payload["isolation"] = (
+            "Execution uses a temporary detached git worktree or directory copy; "
+            "the original workspace is not modified."
+        )
+    return payload
 
 
 def ensure_binary(argv: list[str]) -> None:
@@ -528,8 +770,7 @@ def ensure_binary(argv: list[str]) -> None:
         raise DelegateError("missing_binary", f"Missing binary: {argv[0]}", EXIT_MISSING_BINARY)
 
 
-def execute_request(request: Request, json_mode: bool) -> tuple[int, dict[str, Any] | None]:
-    ensure_binary(request.argv)
+def run_child(request: Request, json_mode: bool) -> tuple[int, dict[str, Any] | None]:
     started = time.monotonic()
     if json_mode:
         completed = subprocess.run(
@@ -546,7 +787,7 @@ def execute_request(request: Request, json_mode: bool) -> tuple[int, dict[str, A
             "engine": request.engine,
             "mode": request.mode,
             "model": request.model,
-            "cwd": request.workspace,
+            **json_workspace_fields(request),
             "workspaceKind": request.workspace_kind,
             "exitCode": completed.returncode,
             "durationMs": duration_ms,
@@ -559,6 +800,12 @@ def execute_request(request: Request, json_mode: bool) -> tuple[int, dict[str, A
         return completed.returncode, payload
     completed = subprocess.run(request.argv, cwd=request.workspace, text=True, check=False)
     return completed.returncode, None
+
+
+def execute_request(request: Request, json_mode: bool) -> tuple[int, dict[str, Any] | None]:
+    ensure_binary(request.argv)
+    with cursor_safe_isolated_request(request) as isolated_request:
+        return run_child(isolated_request, json_mode)
 
 
 def models_payload(config: dict[str, Any], config_source: str) -> dict[str, Any]:
@@ -583,7 +830,23 @@ def describe_payload(config: dict[str, Any], config_source: str) -> dict[str, An
         "cwdResolution": "Git directories resolve to the repository root; non-Git directories are used directly.",
         "modeMapping": {
             "cursor": {
-                "safe": [*config["cursor"]["argvPrefix"], "--workspace", "<workspace>", "-p", "--trust", "--approve-mcps", "--mode=plan", "--model", config["cursor"]["defaultModel"], "--output-format", "text", "<prompt>"],
+                "safe": [
+                    *config["cursor"]["argvPrefix"],
+                    "--workspace",
+                    "<isolated-workspace>",
+                    "-p",
+                    "--trust",
+                    "--model",
+                    config["cursor"]["defaultModel"],
+                    "--output-format",
+                    "text",
+                    "<review-prefixed-prompt>",
+                ],
+                "safeNotes": [
+                    "No --mode=plan, --mode=ask, --force, or --approve-mcps.",
+                    "Runs in an isolated temporary workspace (detached git worktree or directory copy).",
+                    "Writes .cursor/cli.json in the isolated workspace (Read(**), read-only shell helpers; no git/find shell).",
+                ],
                 "work": [*config["cursor"]["argvPrefix"], "--workspace", "<workspace>", "-p", "--trust", "--approve-mcps", "--force", "--model", config["cursor"]["defaultModel"], "--output-format", "text", "<prompt>"],
             },
             "droid": {
@@ -627,13 +890,18 @@ def emit_agent_help(stdout: TextIO) -> int:
 
 Good defaults:
   delegate cursor work "Implement the scoped task; report changed files and tests."
-  delegate cursor safe "Analyze this workspace and report findings only."
+  delegate cursor safe "Review this diff for regressions; report findings with file/line/severity."
   delegate droid minimax safe "Investigate this issue; do not edit."
   delegate droid <alias> work "Implement this bounded change; run the named check."
 
 Droid work mode:
+  - Droid safe mode remains read-only: no --auto, --use-spec, or unsafe skip.
   - Uses Factory Droid --skip-permissions-unsafe, not --auto high.
   - This is intentionally no-prompt; use only for bounded tasks in workspaces you trust.
+
+Cursor safe mode:
+  - Uses default Cursor Agent behavior in an isolated temporary workspace, not plan/ask mode.
+  - The original workspace is not modified; review prompts are prefixed with read-only instructions.
 
 Rules for agents:
   - Keep prompts bounded: task, scope, verification, report format.
@@ -703,10 +971,13 @@ def main(argv: list[str] | None = None, stdin: TextIO | None = None, stdout: Tex
 
         request = request_from_parsed(parsed, config, stdin)
         if request.dry_run:
+            payload = dry_run_payload(request)
             if parsed.json_mode:
-                print_json(dry_run_payload(request), stdout)
+                print_json(payload, stdout)
             else:
                 print(f"cwd: {request.workspace} ({request.workspace_kind})", file=stdout)
+                if payload.get("isolatedWorkspace"):
+                    print(f"isolation: {payload['isolation']}", file=stdout)
                 print(f"argv: {shell_join(request.argv)}", file=stdout)
             return EXIT_OK
 

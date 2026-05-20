@@ -24,10 +24,37 @@ Delegate Agent has two modes:
 
 | Mode | Intent | Cursor flags | Droid flags |
 | --- | --- | --- | --- |
-| `safe` | Read-only analysis/planning | `-p --trust --approve-mcps --mode=plan` | no auto-execution flag |
+| `safe` | Read-only review/analysis | `-p --trust` (no plan/ask/force/MCP auto-approve) | default read-only (no unsafe skip) |
 | `work` | File-writing execution in a trusted workspace | `-p --trust --approve-mcps --force` | `--skip-permissions-unsafe` |
 
-`work` mode is intentionally powerful. Use it only for bounded tasks in trusted workspaces. In Git workspaces, always review diffs afterward; outside Git, manually review changed files and rely on whatever backup/versioning the folder provides.
+### Cursor safe
+
+Optimized for code review and investigation. Uses **default Cursor Agent**, not `--mode=plan` or `--mode=ask`.
+
+**Hard boundary — workspace isolation**
+
+- Delegate creates a temporary isolated copy (detached git worktree or directory copy) and passes that path as `--workspace`.
+- The original resolved workspace is not modified.
+- Isolation is the guarantee that protects your tree; everything below is defense-in-depth inside the copy only.
+
+**Defense-in-depth (isolated copy only)**
+
+- Prepends read-only review instructions to the prompt.
+- Writes `.cursor/cli.json` in the isolated workspace: allow `Read(**)` and read-oriented shell helpers (`rg`, `grep`, `cat`, etc.); deny `Write(**)`, destructive shell, and reads of common secret paths.
+
+**Excluded Cursor flags:** `--mode=plan`, `--mode=ask`, `--force`, `--approve-mcps`.
+
+### Cursor work
+
+Runs in the real workspace with `--approve-mcps --force`. Review diffs afterward in Git workspaces; outside Git, manually inspect changed files.
+
+### Droid safe
+
+Runs in the real workspace on Droid's default read-only posture. Delegate does not pass `--auto`, `--use-spec`, or `--skip-permissions-unsafe`, so review prompts are not pushed into Droid's implementation-spec workflow.
+
+### Droid work
+
+Uses `--skip-permissions-unsafe` in the real workspace. Treat as intentionally powerful; use only for bounded tasks you trust.
 
 ## Installation for development
 
@@ -110,6 +137,8 @@ For Droid, include a model alias:
 ```
 
 Unknown JSON keys are rejected. See [`examples/`](examples/) for starting points.
+
+With `--json`, `cursor safe` reports the original workspace as `cwd`, the temporary isolated copy as `executionCwd`, and `isolatedWorkspace: true`. Other engines and modes keep `cwd` as the execution directory.
 
 ## Development
 
