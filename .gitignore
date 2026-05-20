@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+.env
+.env.*
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# OS/editor noise
+.DS_Store
+.idea/
+.vscode/
+
+# Local runtime/config state. Commit examples instead.
+config.json
+cursor-prereq.json
+*.bak*
+
+# Local Codex/TLDR daemon state
+.codex/
+.tldr/
+.tldrignore

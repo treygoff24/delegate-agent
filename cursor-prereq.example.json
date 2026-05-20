@@ -1,0 +1,13 @@
+{
+  "cursorArgvPrefix": [
+    "agent"
+  ],
+  "helpReady": true,
+  "authReady": true,
+  "modelReady": true,
+  "defaultModel": "composer-2.5",
+  "displayModel": "Composer 2.5",
+  "statusSummary": "agent status returned: logged in",
+  "modelSummary": "agent --list-models includes composer-2.5 - Composer 2.5",
+  "note": "Example only. Real prerequisite state is local to each machine and should not be committed."
+}

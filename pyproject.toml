@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "delegate-agent"
+version = "0.1.2"
+description = "A tiny CLI for delegating bounded agent tasks to Cursor or Droid runtimes."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = []
+dependencies = []
+license = "MIT"
+keywords = ["agents", "cli", "delegation", "cursor", "droid"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development",
+]
+
+[project.scripts]
+delegate = "delegate_agent.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

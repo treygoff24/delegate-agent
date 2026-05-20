@@ -1,0 +1,7 @@
+{
+  "engine": "droid",
+  "model": "minimax",
+  "mode": "safe",
+  "cwd": "/path/to/workspace",
+  "prompt": "Investigate this issue. Do not edit files. Report findings and suggested next steps."
+}

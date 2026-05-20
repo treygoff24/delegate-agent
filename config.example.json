@@ -1,0 +1,23 @@
+{
+  "cursor": {
+    "argvPrefix": [
+      "agent"
+    ],
+    "defaultModel": "composer-2.5"
+  },
+  "droid": {
+    "binary": "droid",
+    "models": {
+      "glm": "custom:OpenCode-Go-:-GLM-5.1-4",
+      "kimi": "custom:OpenCode-Go-:-Kimi-K2.6-5",
+      "mimo": "custom:OpenCode-Go-:-MiMo-V2.5-6",
+      "mimo pro": "custom:OpenCode-Go-:-MiMo-V2.5-Pro-7",
+      "minimax": "custom:OpenCode-Go-:-MiniMax-M2.7-8",
+      "qwen": "custom:OpenCode-Go-:-Qwen3.6-Plus-9",
+      "deepseek pro": "custom:OpenCode-Go-:-DeepSeek-V4-Pro-10",
+      "deepseek flash": "custom:OpenCode-Go-:-DeepSeek-V4-Flash-11",
+      "grok": "custom:xAI-:-Grok-4.3-44",
+      "gemini": "custom:Gemini-:-3.5-Flash-15"
+    }
+  }
+}
