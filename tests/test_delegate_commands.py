@@ -149,6 +149,8 @@ class CommandTests(unittest.TestCase):
 
     def test_describe_preserves_safe_read_only_modes(self):
         payload = self.delegate.describe_payload(self.delegate.DEFAULT_CONFIG, "embedded-default")
+        self.assertIn("promptTransforms", payload)
+        self.assertIn("skill review", payload["promptTransforms"][0])
         cursor_safe = payload["modeMapping"]["cursor"]["safe"]
         self.assertNotIn("--mode=plan", cursor_safe)
         self.assertNotIn("--mode=ask", cursor_safe)

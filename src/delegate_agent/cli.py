@@ -954,6 +954,7 @@ def resolve_completion_report_mode(parsed: ParsedCommand, config: JsonObject) ->
 
 
 def effective_prompt(prompt: str, *, completion_report_mode: str) -> str:
+    prompt = delegate_runner.prepend_skill_review_instructions(prompt)
     if completion_report_mode == delegate_config.COMPLETION_REPORT_MODE_MARKDOWN:
         return delegate_runner.append_completion_report_instructions(prompt)
     return prompt
@@ -1445,6 +1446,10 @@ def describe_payload(config: JsonObject, config_source: str) -> JsonObject:
             "--no-completion-report",
         ],
         "completionReportModes": list(delegate_config.COMPLETION_REPORT_MODES),
+        "promptTransforms": [
+            "Always prepends mandatory skill review instructions before the operator prompt.",
+            "Optionally appends completion-report instructions unless disabled.",
+        ],
         "passThrough": "Opt-in raw child stdout/stderr streaming; incompatible with --json.",
         "cwdResolution": "Git directories resolve to the repository root; non-Git directories are used directly.",
         "modeMapping": {
@@ -1460,7 +1465,7 @@ def describe_payload(config: JsonObject, config_source: str) -> JsonObject:
                     "--print",
                     "--output-format",
                     "stream-json",
-                    "<review-prefixed-prompt>",
+                    "<read-only-review-prefixed-skill-review-prompt>",
                 ],
                 "safeNotes": [
                     "No --mode=plan, --mode=ask, --force, or --approve-mcps.",
@@ -1480,7 +1485,7 @@ def describe_payload(config: JsonObject, config_source: str) -> JsonObject:
                     "--print",
                     "--output-format",
                     "stream-json",
-                    "<prompt>",
+                    "<skill-review-prompt>",
                 ],
             },
             "droid": {
@@ -1493,7 +1498,7 @@ def describe_payload(config: JsonObject, config_source: str) -> JsonObject:
                     "<model-id>",
                     "--output-format",
                     "stream-json",
-                    "<prompt>",
+                    "<skill-review-prompt>",
                 ],
                 "work": [
                     config["droid"]["binary"],
@@ -1505,7 +1510,7 @@ def describe_payload(config: JsonObject, config_source: str) -> JsonObject:
                     "<model-id>",
                     "--output-format",
                     "stream-json",
-                    "<prompt>",
+                    "<skill-review-prompt>",
                 ],
             },
         },
@@ -1563,6 +1568,7 @@ Cursor safe mode:
 
 Rules for agents:
   - Keep prompts bounded: task, scope, verification, report format.
+  - Delegate always prepends a mandatory skill-review instruction before your prompt.
   - Use --prompt-file or delegate --json run --input-json for long prompts.
   - Run from the target workspace, or pass --cwd before the subcommand.
   - Inside Git, --cwd resolves to the repo root; outside Git, the directory is used directly.

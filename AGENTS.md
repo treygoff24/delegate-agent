@@ -14,6 +14,8 @@ python3 -m unittest discover -s tests
 
 `delegate cursor safe` is for read-only code review and investigation. It does **not** use Cursor plan/ask mode.
 
+All Delegate execution prompts are normalized through the CLI prompt middleware before launch. That middleware always prepends a mandatory skill-review instruction requiring the child agent to inspect its full list of available skills and load/apply relevant ones. This invariant applies to direct prompts, prompt files, stdin, JSON input, dry runs, tracked runs, and pass-through runs.
+
 **Hard boundary (workspace isolation):**
 
 - Runs Cursor Agent in an isolated temporary copy of the workspace (detached git worktree or directory copy).
@@ -27,6 +29,7 @@ python3 -m unittest discover -s tests
 
 **Defense-in-depth (isolated copy only):**
 
+- Includes the mandatory skill-review instruction.
 - Prepends a read-only review instruction block to the prompt.
 - Writes `.cursor/cli.json` in the isolated workspace (allow `Read(**)` and read-oriented shell helpers; deny writes and destructive shell). This does not protect the source workspace if isolation fails—treat isolation as the guarantee.
 

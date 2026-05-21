@@ -20,6 +20,10 @@ _Avoid_: Transcript, raw log tail, full trace
 The final worker-authored report produced by a Harness at the end of a Delegate Run. Delegate captures this report from the final assistant output and stores it at a deterministic path in the Run Registry, rather than asking the worker to create its own file.
 _Avoid_: Handoff, arbitrary report file
 
+**Skill Review Instruction**:
+The mandatory prompt prefix Delegate injects into every Delegate Run before the operator prompt. It tells the child agent to review the full list of available skills at task start and load/apply relevant ones. This is an invariant prompt transform, separate from optional completion-report instructions.
+_Avoid_: Parent-agent reminder, optional skill boilerplate
+
 **Run Alias**:
 A short project-local handle assigned to a Delegate Run for agent-friendly lookup, usually based on the Harness name. The first active or historical run for a Harness may use the base alias, such as `cursor`; later runs receive deterministic suffixes, such as `cursor-2`. Bare alias lookup is exact and aliases are not reused; "latest" lookup is an explicit query, not the default meaning of a bare alias.
 _Avoid_: Nickname, display name, random ID
@@ -46,5 +50,6 @@ Operator: "Use the Run Alias or Delegate Run ID from launch output and ask for a
 
 - Prefer `delegate snapshot <alias>`, `delegate runs`, and `delegate run-output` over reading `.delegate/runs/*/stdout.log` or `events.jsonl` directly.
 - Default launch output is bounded; use `--pass-through` only when raw harness streaming is required.
+- Do not manually repeat skill-loading boilerplate for ordinary runs; Delegate injects the mandatory skill-review instruction for every launched child prompt.
 - Raw logs may be gzip-archived under `.delegate/archive/` after the configured age threshold; snapshots and index lookup still work.
 - This repository is the development CLI; do not mutate the operator's live runtime at `~/.delegate` or installed shims unless explicitly asked to promote changes.

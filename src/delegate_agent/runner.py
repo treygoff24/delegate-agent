@@ -31,6 +31,12 @@ def should_persist_running_progress(*, dirty: bool) -> bool:
     return dirty
 
 
+SKILL_REVIEW_PREFIX = """## Delegate sub-agent skill review requirement
+
+Before doing the task, review the full list of skills available in your current agent environment. Load/read and apply any skill instructions that are relevant to the task, workspace, tools, code quality, verification, or final deliverable. If no skill is relevant, proceed normally after explicitly deciding that. This requirement is mandatory for every Delegate Agent run; do not skip it just because the parent prompt did not mention skills.
+
+"""
+
 COMPLETION_REPORT_SUFFIX = """
 
 ## Delegate completion report requirement
@@ -61,6 +67,12 @@ class RunContext:
     workspace_kind: str
     isolated_workspace: bool
     started_at: str
+
+
+def prepend_skill_review_instructions(prompt: str) -> str:
+    if prompt.startswith(SKILL_REVIEW_PREFIX):
+        return prompt
+    return SKILL_REVIEW_PREFIX + prompt
 
 
 def append_completion_report_instructions(prompt: str) -> str:

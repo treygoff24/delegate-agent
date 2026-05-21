@@ -120,7 +120,19 @@ class ParserTests(unittest.TestCase):
         mode = self.delegate.resolve_completion_report_mode(parsed, self.delegate.DEFAULT_CONFIG)
         self.assertEqual(mode, "none")
         effective = self.delegate.effective_prompt("hello", completion_report_mode=mode)
+        self.assertTrue(effective.startswith(self.delegate.delegate_runner.SKILL_REVIEW_PREFIX))
         self.assertNotIn("Delegate completion report requirement", effective)
+
+    def test_effective_prompt_always_prepends_skill_review(self):
+        effective = self.delegate.effective_prompt("hello", completion_report_mode="none")
+        self.assertTrue(effective.startswith(self.delegate.delegate_runner.SKILL_REVIEW_PREFIX))
+        self.assertTrue(effective.endswith("hello"))
+        self.assertIn("mandatory for every Delegate Agent run", effective)
+
+    def test_effective_prompt_does_not_duplicate_skill_review(self):
+        original = self.delegate.delegate_runner.SKILL_REVIEW_PREFIX + "hello"
+        effective = self.delegate.effective_prompt(original, completion_report_mode="none")
+        self.assertEqual(effective, original)
 
     def test_prompt_file_is_not_mutated_for_completion_report(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -134,6 +146,7 @@ class ParserTests(unittest.TestCase):
                 prompt,
                 completion_report_mode="markdown",
             )
+            self.assertIn("Delegate sub-agent skill review requirement", effective)
             self.assertIn("Delegate completion report requirement", effective)
             self.assertEqual(prompt_path.read_text(), "original prompt\n")
 

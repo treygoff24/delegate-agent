@@ -18,6 +18,8 @@ delegate droid minimax work "Implement this bounded change and run the specified
 
 The CLI does **not** commit, push, merge, deploy, run a daemon, or create background jobs. It launches the selected runtime with a bounded prompt and returns the child command's result.
 
+Every Delegate run also receives an in-memory skill-review instruction before the operator prompt. The child agent must review the full list of available skills at task start and load/apply any relevant ones; this is a product invariant, not something the parent agent has to remember.
+
 By default, Delegate also keeps a **workspace-local run registry** under `.delegate/` so you can inspect runs without tailing raw harness streams. Default parent-facing output is bounded; use explicit commands when you need raw logs.
 
 ## Safety model
@@ -41,6 +43,7 @@ Optimized for code review and investigation. Uses **default Cursor Agent**, not 
 
 **Defense-in-depth (isolated copy only)**
 
+- All prompts first receive the mandatory Delegate skill-review instruction.
 - Prepends read-only review instructions to the prompt.
 - Writes `.cursor/cli.json` in the isolated workspace: allow `Read(**)` and read-oriented shell helpers (`rg`, `grep`, `cat`, etc.); deny `Write(**)`, destructive shell, and reads of common secret paths.
 
@@ -146,6 +149,8 @@ Do not tail `.delegate/runs/*/stdout.log` or `events.jsonl` from orchestration s
 ### Completion reports
 
 Work/safe prompts get an in-memory completion-report instruction by default (prompt files on disk are not modified). Disable with `--no-completion-report` or `--completion-report none`. Workspace config can set `tracking.completionReport.defaultMode` to `markdown` or `none`.
+
+The skill-review instruction is separate from completion reports and is not configurable. It is prepended for direct prompts, `--prompt-file`, stdin, JSON input, dry runs, tracked runs, and `--pass-through`; prompt files on disk are not modified.
 
 Global flags must come before the subcommand:
 

@@ -140,6 +140,7 @@ class ValidationTests(unittest.TestCase):
         request = self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
         self.assertEqual(Path(request.workspace).resolve(), Path(repo.name).resolve())
         self.assertEqual(request.workspace_kind, "git")
+        self.assertTrue(request.prompt.startswith(self.delegate.delegate_runner.SKILL_REVIEW_PREFIX))
 
     def test_run_input_json_non_git_cwd_succeeds(self):
         with tempfile.TemporaryDirectory() as tmp:
