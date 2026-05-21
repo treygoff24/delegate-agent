@@ -41,3 +41,10 @@ _Avoid_: Raw stream, transcript dump
 Developer: "I launched a Droid worker through Delegate. How do I check what it is doing without tailing JSONL?"
 
 Operator: "Use the Run Alias or Delegate Run ID from launch output and ask for a Snapshot. The Snapshot reads the Run Registry and points to the Completion Report without exposing the full harness transcript."
+
+## Orchestrating agents
+
+- Prefer `delegate snapshot <alias>`, `delegate runs`, and `delegate run-output` over reading `.delegate/runs/*/stdout.log` or `events.jsonl` directly.
+- Default launch output is bounded; use `--pass-through` only when raw harness streaming is required.
+- Raw logs may be gzip-archived under `.delegate/archive/` after the configured age threshold; snapshots and index lookup still work.
+- This repository is the development CLI; do not mutate the operator's live runtime at `~/.delegate` or installed shims unless explicitly asked to promote changes.

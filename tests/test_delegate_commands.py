@@ -1,6 +1,4 @@
 import importlib.util
-import io
-import json
 import os
 import shutil
 import subprocess
@@ -8,10 +6,14 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
+SRC = str(ROOT / "src")
 MODULE_PATH = ROOT / "src" / "delegate_agent" / "cli.py"
+
+if SRC not in sys.path:
+    sys.path.insert(0, SRC)
+
 
 def load_delegate():
     spec = importlib.util.spec_from_file_location("delegate_cli_under_test", MODULE_PATH)
@@ -21,9 +23,15 @@ def load_delegate():
     spec.loader.exec_module(module)
     return module
 
+
 def make_git_repo():
     temp = tempfile.TemporaryDirectory()
-    subprocess.run(["git", "-C", temp.name, "init"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(
+        ["git", "-C", temp.name, "init"],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
     return temp
 
 
@@ -34,42 +42,109 @@ class CommandTests(unittest.TestCase):
     def test_cursor_safe_argv_agent_prefix(self):
         argv = self.delegate.build_cursor_argv(["agent"], "safe", "/repo", "composer-2.5", "hello")
         self.assertEqual(argv[0], "agent")
-        self.assertEqual(argv[1:8], ["--workspace", "/repo", "-p", "--trust", "--model", "composer-2.5", "--output-format"])
-        self.assertEqual(argv[8], "text")
-        self.assertTrue(argv[9].startswith(self.delegate.CURSOR_SAFE_REVIEW_PREFIX))
-        self.assertTrue(argv[9].endswith("hello"))
+        self.assertEqual(
+            argv[1:10],
+            [
+                "--workspace",
+                "/repo",
+                "-p",
+                "--trust",
+                "--model",
+                "composer-2.5",
+                "--print",
+                "--output-format",
+                "stream-json",
+            ],
+        )
+        self.assertTrue(argv[10].startswith(self.delegate.CURSOR_SAFE_REVIEW_PREFIX))
+        self.assertTrue(argv[10].endswith("hello"))
         self.assertNotIn("--mode=plan", argv)
         self.assertNotIn("--mode=ask", argv)
         self.assertNotIn("--force", argv)
         self.assertNotIn("--approve-mcps", argv)
 
     def test_cursor_work_argv_cursor_agent_prefix(self):
-        argv = self.delegate.build_cursor_argv(["cursor", "agent"], "work", "/repo", "composer-2.5", "hello")
-        self.assertEqual(argv, [
-            "cursor", "agent", "--workspace", "/repo", "-p", "--trust", "--approve-mcps", "--force",
-            "--model", "composer-2.5", "--output-format", "text", "hello"
-        ])
+        argv = self.delegate.build_cursor_argv(
+            ["cursor", "agent"], "work", "/repo", "composer-2.5", "hello"
+        )
+        self.assertEqual(
+            argv,
+            [
+                "cursor",
+                "agent",
+                "--workspace",
+                "/repo",
+                "-p",
+                "--trust",
+                "--approve-mcps",
+                "--force",
+                "--model",
+                "composer-2.5",
+                "--print",
+                "--output-format",
+                "stream-json",
+                "hello",
+            ],
+        )
         self.assertNotIn("--mode=agent", argv)
         self.assertNotIn("--mode=plan", argv)
         self.assertNotIn("--mode=ask", argv)
 
     def test_droid_safe_argv(self):
         argv = self.delegate.build_droid_argv("droid", "safe", "/repo", "model-id", "hello")
-        self.assertEqual(argv, ["droid", "exec", "--cwd", "/repo", "--model", "model-id", "hello"])
+        self.assertEqual(
+            argv,
+            [
+                "droid",
+                "exec",
+                "--cwd",
+                "/repo",
+                "--model",
+                "model-id",
+                "--output-format",
+                "stream-json",
+                "hello",
+            ],
+        )
         self.assertNotIn("--auto", argv)
         self.assertNotIn("--use-spec", argv)
         self.assertNotIn("--skip-permissions-unsafe", argv)
 
     def test_droid_work_argv(self):
         argv = self.delegate.build_droid_argv("droid", "work", "/repo", "model-id", "hello")
-        self.assertEqual(argv, [
-            "droid", "exec", "--cwd", "/repo", "--skip-permissions-unsafe",
-            "--model", "model-id", "hello"
-        ])
+        self.assertEqual(
+            argv,
+            [
+                "droid",
+                "exec",
+                "--cwd",
+                "/repo",
+                "--skip-permissions-unsafe",
+                "--model",
+                "model-id",
+                "--output-format",
+                "stream-json",
+                "hello",
+            ],
+        )
+
+    def test_pass_through_restores_text_argv(self):
+        cursor = self.delegate.build_cursor_argv(
+            ["agent"], "work", "/repo", "composer-2.5", "hello", stream_capture=False
+        )
+        self.assertIn("--output-format", cursor)
+        self.assertIn("text", cursor)
+        self.assertNotIn("--print", cursor)
+        droid = self.delegate.build_droid_argv(
+            "droid", "safe", "/repo", "model-id", "hello", stream_capture=False
+        )
+        self.assertNotIn("--output-format", droid)
 
     def test_invalid_alias_rejected_before_argv(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.build_request("droid", "safe", "nope", "/repo", "hello", self.delegate.DEFAULT_CONFIG, True)
+            self.delegate.build_request(
+                "droid", "safe", "nope", "/repo", "hello", self.delegate.DEFAULT_CONFIG, True
+            )
         self.assertEqual(ctx.exception.error, "invalid_alias")
 
     def test_describe_preserves_safe_read_only_modes(self):

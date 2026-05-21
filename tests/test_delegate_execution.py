@@ -10,7 +10,12 @@ from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
+SRC = str(ROOT / "src")
 MODULE_PATH = ROOT / "src" / "delegate_agent" / "cli.py"
+
+if SRC not in sys.path:
+    sys.path.insert(0, SRC)
+
 
 def load_delegate():
     spec = importlib.util.spec_from_file_location("delegate_cli_under_test", MODULE_PATH)
@@ -20,9 +25,15 @@ def load_delegate():
     spec.loader.exec_module(module)
     return module
 
+
 def make_git_repo():
     temp = tempfile.TemporaryDirectory()
-    subprocess.run(["git", "-C", temp.name, "init"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(
+        ["git", "-C", temp.name, "init"],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
     return temp
 
 
@@ -43,7 +54,9 @@ class ExecutionTests(unittest.TestCase):
         bin_dir = Path(temp.name)
         for name in ("droid", "agent"):
             path = bin_dir / name
-            path.write_text("#!/usr/bin/env bash\nprintf 'OUT:%s\\n' \"$*\"\nprintf 'ERR:%s\\n' \"$*\" >&2\nexit \"${FAKE_EXIT:-0}\"\n")
+            path.write_text(
+                '#!/usr/bin/env bash\nprintf \'OUT:%s\\n\' "$*"\nprintf \'ERR:%s\\n\' "$*" >&2\nexit "${FAKE_EXIT:-0}"\n'
+            )
             path.chmod(0o755)
         return bin_dir
 
@@ -52,27 +65,54 @@ class ExecutionTests(unittest.TestCase):
         fake_bin = self.make_fake_bin()
         self.addCleanup(repo.cleanup)
         env_path = str(fake_bin) + os.pathsep + os.environ.get("PATH", "")
+        workspace = self.delegate.resolve_workspace(repo.name)
         request = self.delegate.Request(
-            "droid", "safe", repo.name, "hello",
+            "droid",
+            "safe",
+            repo.name,
+            "hello",
             ["droid", "exec", "--cwd", repo.name, "--model", "model-id", "hello"],
             "model-id",
         )
         with mock.patch.dict(os.environ, {"PATH": env_path}):
-            code, payload = self.delegate.execute_request(request, json_mode=True)
+            code, payload = self.delegate.execute_request(
+                request,
+                json_mode=True,
+                pass_through=False,
+                completion_report_mode="markdown",
+                source_workspace=workspace,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
         self.assertEqual(code, 0)
         self.assertIsNotNone(payload)
         self.assertTrue(payload["ok"])
-        self.assertIn("OUT:", payload["stdout"])
-        self.assertIn("ERR:", payload["stderr"])
+        self.assertIn("alias", payload)
+        self.assertIn("runId", payload)
+        self.assertIn("snapshotCommand", payload)
+        self.assertEqual(payload["exitCode"], 0)
+        self.assertNotIn("stdout", payload)
+        self.assertNotIn("stderr", payload)
 
     def test_json_failure_shape_with_fake_binary(self):
         repo = make_git_repo()
         fake_bin = self.make_fake_bin()
         self.addCleanup(repo.cleanup)
         env_path = str(fake_bin) + os.pathsep + os.environ.get("PATH", "")
-        request = self.delegate.Request("droid", "safe", repo.name, "hello", ["droid", "exec", "hello"], "model-id")
+        workspace = self.delegate.resolve_workspace(repo.name)
+        request = self.delegate.Request(
+            "droid", "safe", repo.name, "hello", ["droid", "exec", "hello"], "model-id"
+        )
         with mock.patch.dict(os.environ, {"PATH": env_path, "FAKE_EXIT": "7"}):
-            code, payload = self.delegate.execute_request(request, json_mode=True)
+            code, payload = self.delegate.execute_request(
+                request,
+                json_mode=True,
+                pass_through=False,
+                completion_report_mode="markdown",
+                source_workspace=workspace,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
         self.assertEqual(code, 7)
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["error"], "child_failed")
@@ -82,7 +122,7 @@ class ExecutionTests(unittest.TestCase):
             self.delegate.ensure_binary(["delegate-definitely-missing-binary"])
         self.assertEqual(ctx.exception.exit_code, 3)
 
-    def test_text_mode_preserves_child_stdout_stderr(self):
+    def test_text_mode_preserves_child_stdout_stderr_with_pass_through(self):
         repo = make_git_repo()
         fake_bin = self.make_fake_bin()
         self.addCleanup(repo.cleanup)
@@ -92,10 +132,19 @@ class ExecutionTests(unittest.TestCase):
         env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
         env["DELEGATE_CONFIG"] = str(config)
         completed = subprocess.run(
-            [sys.executable, str(MODULE_PATH), "--cwd", repo.name, "droid", "minimax", "safe", "hello"],
+            [
+                sys.executable,
+                str(MODULE_PATH),
+                "--pass-through",
+                "--cwd",
+                repo.name,
+                "droid",
+                "minimax",
+                "safe",
+                "hello",
+            ],
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             env=env,
             check=False,
         )
@@ -107,10 +156,19 @@ class ExecutionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             missing = str(Path(tmp) / "missing")
             completed = subprocess.run(
-                [sys.executable, str(MODULE_PATH), "--json", "--cwd", missing, "droid", "minimax", "safe", "hello"],
+                [
+                    sys.executable,
+                    str(MODULE_PATH),
+                    "--json",
+                    "--cwd",
+                    missing,
+                    "droid",
+                    "minimax",
+                    "safe",
+                    "hello",
+                ],
                 text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 check=False,
             )
         self.assertEqual(completed.returncode, 2)
@@ -123,10 +181,20 @@ class ExecutionTests(unittest.TestCase):
     def test_json_dry_run_allows_non_git_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
             completed = subprocess.run(
-                [sys.executable, str(MODULE_PATH), "--json", "--cwd", tmp, "dry-run", "droid", "minimax", "safe", "hello"],
+                [
+                    sys.executable,
+                    str(MODULE_PATH),
+                    "--json",
+                    "--cwd",
+                    tmp,
+                    "dry-run",
+                    "droid",
+                    "minimax",
+                    "safe",
+                    "hello",
+                ],
                 text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 check=False,
             )
         self.assertEqual(completed.returncode, 0)
@@ -140,14 +208,18 @@ class ExecutionTests(unittest.TestCase):
         repo = make_git_repo()
         self.addCleanup(repo.cleanup)
         task = Path(repo.name) / "task.json"
-        task.write_text(json.dumps({
-            "engine": "droid",
-            "mode": "safe",
-            "model": "minimax",
-            "cwd": repo.name,
-            "prompt": "hello",
-            "promtp": "typo"
-        }))
+        task.write_text(
+            json.dumps(
+                {
+                    "engine": "droid",
+                    "mode": "safe",
+                    "model": "minimax",
+                    "cwd": repo.name,
+                    "prompt": "hello",
+                    "promtp": "typo",
+                }
+            )
+        )
         parsed = self.delegate.ParsedCommand("run", json_mode=True, input_json=str(task))
         with self.assertRaises(self.delegate.DelegateError) as ctx:
             self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
@@ -176,7 +248,7 @@ class ExecutionTests(unittest.TestCase):
             "#!/usr/bin/env bash\n"
             "touch mutated-by-agent.txt\n"
             "printf 'OUT:%s\\n' \"$*\"\n"
-            "exit \"${FAKE_EXIT:-0}\"\n"
+            'exit "${FAKE_EXIT:-0}"\n'
         )
         path.chmod(0o755)
         return bin_dir
@@ -198,10 +270,18 @@ class ExecutionTests(unittest.TestCase):
         env["DELEGATE_CONFIG"] = str(config)
 
         completed = subprocess.run(
-            [sys.executable, str(MODULE_PATH), "--json", "--cwd", repo.name, "cursor", "safe", "review"],
+            [
+                sys.executable,
+                str(MODULE_PATH),
+                "--json",
+                "--cwd",
+                repo.name,
+                "cursor",
+                "safe",
+                "review",
+            ],
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             env=env,
             check=False,
         )
@@ -212,6 +292,8 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(Path(payload["cwd"]).resolve(), Path(repo.name).resolve())
         self.assertIn("executionCwd", payload)
         self.assertNotEqual(Path(payload["executionCwd"]).resolve(), Path(payload["cwd"]).resolve())
+        self.assertIn("alias", payload)
+        self.assertNotIn("stdout", payload)
 
     def test_cursor_safe_git_execution_does_not_mutate_original_workspace(self):
         repo = make_git_repo()
@@ -245,8 +327,7 @@ class ExecutionTests(unittest.TestCase):
         completed = subprocess.run(
             [sys.executable, str(MODULE_PATH), "--cwd", repo.name, "cursor", "safe", "review"],
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             env=env,
             check=False,
         )
@@ -271,8 +352,7 @@ class ExecutionTests(unittest.TestCase):
             completed = subprocess.run(
                 [sys.executable, str(MODULE_PATH), "--cwd", workspace, "cursor", "safe", "review"],
                 text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 env=env,
                 check=False,
             )

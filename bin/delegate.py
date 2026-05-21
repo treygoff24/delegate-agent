@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Run the repository checkout of delegate without installing it."""
+
 from __future__ import annotations
 
 import sys

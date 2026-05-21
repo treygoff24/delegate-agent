@@ -1,4 +1,13 @@
 {
+  "tracking": {
+    "completionReport": {
+      "defaultMode": "markdown"
+    },
+    "retention": {
+      "enabled": true,
+      "rawLogDays": 7
+    }
+  },
   "cursor": {
     "argvPrefix": [
       "agent"

@@ -18,6 +18,8 @@ delegate droid minimax work "Implement this bounded change and run the specified
 
 The CLI does **not** commit, push, merge, deploy, run a daemon, or create background jobs. It launches the selected runtime with a bounded prompt and returns the child command's result.
 
+By default, Delegate also keeps a **workspace-local run registry** under `.delegate/` so you can inspect runs without tailing raw harness streams. Default parent-facing output is bounded; use explicit commands when you need raw logs.
+
 ## Safety model
 
 Delegate Agent has two modes:
@@ -90,18 +92,60 @@ DELEGATE_CONFIG=/path/to/config.json delegate --json models
 
 Start from [`config.example.json`](config.example.json). Do not commit machine-local `config.json`, `cursor-prereq.json`, API keys, or provider credentials.
 
+Optional workspace-local overrides live at `.delegate/config.json` (see config precedence in [`CONTEXT.md`](CONTEXT.md)).
+
+### Local registry and retention
+
+Each workspace gets `.delegate/` (Git workspaces: added to `.git/info/exclude`, not tracked `.gitignore`):
+
+- `index.json` — alias and run ID lookup
+- `runs/<runId>/` — manifest, state, snapshot, completion report, and recent raw logs
+- `archive/<runId>.tar.gz` — older `stdout.log`, `stderr.log`, and `events.jsonl` after the raw-log retention window (default 7 days)
+
+Retention is **archive-only**: completed runs older than the window have bulky logs moved into gzip tarballs; lightweight metadata and index entries remain. Active, running, and stale runs are never archived. There are no `prune` or `delete` commands in v1.
+
+Delegate runs a cheap retention pass opportunistically during normal commands that touch the registry. Disable or tune via `tracking.retention` in config (`enabled`, `rawLogDays`).
+
+**Do not** copy this development checkout into `~/.delegate` or `~/.local/bin/delegate` unless you explicitly intend to promote it; other agents may be using the live runtime ([`docs/live-runtime.md`](docs/live-runtime.md)).
+
 ## Commands
 
 ```bash
-delegate [--cwd PATH] [--json] cursor {safe,work} [--prompt-file PATH] [prompt...]
-delegate [--cwd PATH] [--json] droid MODEL_ALIAS {safe,work} [--prompt-file PATH] [prompt...]
+delegate [--cwd PATH] [--json] [--pass-through] [--completion-report markdown|none] [--no-completion-report] \
+  cursor {safe,work} [--prompt-file PATH] [prompt...]
+delegate [--cwd PATH] [--json] [--pass-through] [--completion-report markdown|none] [--no-completion-report] \
+  droid MODEL_ALIAS {safe,work} [--prompt-file PATH] [prompt...]
 delegate [--cwd PATH] [--json] dry-run cursor {safe,work} [--prompt-file PATH] [prompt...]
 delegate [--cwd PATH] [--json] dry-run droid MODEL_ALIAS {safe,work} [--prompt-file PATH] [prompt...]
 delegate [--cwd PATH] [--json] run --input-json FILE
+delegate [--cwd PATH] [--json] snapshot [--latest HARNESS] [--no-redact] <alias-or-runId>
+delegate [--cwd PATH] [--json] runs [--active] [--recent] [--harness HARNESS] [--limit N]
+delegate [--cwd PATH] [--json] run-output <alias-or-runId> [--completion-report] [--stdout] [--stderr] [--tail N] [--raw] [--no-redact]
 delegate [--json] models
 delegate [--json] describe
 delegate agent-help
 ```
+
+### Default bounded output vs `--pass-through`
+
+Normal `cursor` / `droid` runs return a short Delegate-owned summary (alias, status, snapshot command, completion-report command). Raw harness stdout/stderr are captured under `.delegate/runs/<runId>/` but are **not** streamed to the parent by default.
+
+Use `--pass-through` when you need the previous raw streaming behavior. It is incompatible with `--json`.
+
+### Run inspection (preferred for orchestrating agents)
+
+```bash
+delegate snapshot cursor          # bounded status + recent activity
+delegate runs --active            # running/stale runs
+delegate run-output cursor --completion-report
+delegate run-output cursor --stderr --tail 100
+```
+
+Do not tail `.delegate/runs/*/stdout.log` or `events.jsonl` from orchestration scripts; use `snapshot`, `runs`, and `run-output` instead.
+
+### Completion reports
+
+Work/safe prompts get an in-memory completion-report instruction by default (prompt files on disk are not modified). Disable with `--no-completion-report` or `--completion-report none`. Workspace config can set `tracking.completionReport.defaultMode` to `markdown` or `none`.
 
 Global flags must come before the subcommand:
 
