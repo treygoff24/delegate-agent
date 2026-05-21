@@ -25,6 +25,7 @@ cursor-prereq.json
 
 # Local Codex/TLDR daemon state
 .codex/
+codex/
 .tldr/
 .tldrignore
 
