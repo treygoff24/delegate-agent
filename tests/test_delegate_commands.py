@@ -185,6 +185,17 @@ class CommandTests(unittest.TestCase):
         self.assertNotIn("Shell(find)", allow)
         self.assertNotIn("Shell(ls)", allow)
 
+    def test_cursor_safe_cli_config_is_permissions_only(self):
+        self.assertEqual(set(self.delegate.CURSOR_SAFE_CLI_CONFIG), {"permissions"})
+
+    def test_write_cursor_safe_project_config_serializes_permissions_only(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            self.delegate.write_cursor_safe_project_config(Path(workspace))
+            config = self.delegate.json.loads((Path(workspace) / ".cursor" / "cli.json").read_text())
+        self.assertEqual(set(config), {"permissions"})
+        self.assertIn("allow", config["permissions"])
+        self.assertIn("deny", config["permissions"])
+
     def test_mirror_path_preserving_symlinks_keeps_link_target(self):
         with tempfile.TemporaryDirectory() as outside, tempfile.TemporaryDirectory() as workspace:
             secret = Path(outside) / "secret.txt"

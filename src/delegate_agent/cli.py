@@ -53,8 +53,9 @@ CURSOR_SAFE_REVIEW_PREFIX = (
     "Report findings with file path, line reference, severity, and rationale. "
     "If a write is blocked, do not retry it.\n\n"
 )
+# Project .cursor/cli.json is permissions-only; global cli-config examples may
+# include other top-level keys such as "version", but Cursor rejects them here.
 CURSOR_SAFE_CLI_CONFIG: JsonObject = {
-    "version": 1,
     "permissions": {
         "allow": [
             "Read(**)",
