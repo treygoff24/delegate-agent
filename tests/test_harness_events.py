@@ -34,6 +34,21 @@ class HarnessEventsTests(unittest.TestCase):
         )
         self.assertIn("Hello parent", acc.assistant_text)
 
+    def test_assistant_text_is_cached_until_chunks_change(self):
+        acc = self.events.StreamAccumulator()
+        acc.ingest_line(
+            json.dumps({"type": "message", "role": "assistant", "content": "Hello parent"})
+        )
+        first = acc.assistant_text
+        second = acc.assistant_text
+        self.assertIs(first, second)
+        acc.ingest_line(
+            json.dumps({"type": "message", "role": "assistant", "content": "More detail"})
+        )
+        third = acc.assistant_text
+        self.assertIsNot(first, third)
+        self.assertIn("More detail", third)
+
     def test_reasoning_events_are_ignored(self):
         acc = self.events.StreamAccumulator()
         acc.ingest_line(json.dumps({"type": "reasoning", "content": "hidden chain"}))

@@ -8,6 +8,7 @@ from typing import Any, TextIO
 
 from delegate_agent import retention as delegate_retention
 from delegate_agent import run_registry
+from delegate_agent.run_registry import parse_utc_timestamp as parse_timestamp
 
 REDACT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"(?i)(api[_-]?key|apikey)(\s*[:=]\s*)\S+"), r"\1\2***"),
@@ -35,17 +36,6 @@ def redact_value(value: Any) -> Any:
     if isinstance(value, dict):
         return {key: redact_value(item) for key, item in value.items()}
     return value
-
-
-def parse_timestamp(value: str | None) -> datetime | None:
-    if not value or not isinstance(value, str):
-        return None
-    try:
-        if value.endswith("Z"):
-            return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
-        return datetime.fromisoformat(value)
-    except ValueError:
-        return None
 
 
 def format_age(started_at: str | None, *, now: datetime | None = None) -> str:
@@ -112,11 +102,11 @@ def merge_snapshot_view(
     if warnings:
         view["warnings"] = warnings
     if isinstance(alias, str):
-        view.setdefault("snapshotCommand", f"delegate snapshot {alias}")
+        view.setdefault("snapshotCommand", run_registry.snapshot_command(alias))
         if "completionReport" in view and isinstance(view["completionReport"], dict):
             view["completionReport"].setdefault(
                 "command",
-                f"delegate run-output {alias} --completion-report",
+                run_registry.run_output_command(alias, completion_report=True),
             )
     if redact:
         view = redact_value(view)
@@ -227,7 +217,7 @@ def tail_file_lines(path: Path, lines: int) -> str:
             handle.seek(position)
             chunk = handle.read(read_size)
             chunks.insert(0, chunk)
-            newline_count = b"".join(chunks).count(b"\n")
+            newline_count += chunk.count(b"\n")
         text = b"".join(chunks).decode("utf-8", errors="replace")
     split = text.splitlines()
     return "\n".join(split[-lines:]) + ("\n" if split else "")

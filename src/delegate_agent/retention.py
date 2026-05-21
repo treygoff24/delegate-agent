@@ -9,7 +9,11 @@ from typing import Any, BinaryIO
 
 from delegate_agent import run_registry
 
-ARCHIVE_MEMBER_NAMES = ("stdout.log", "stderr.log", "events.jsonl")
+ARCHIVE_MEMBER_NAMES = (
+    run_registry.STDOUT_LOG,
+    run_registry.STDERR_LOG,
+    run_registry.EVENTS_JSONL,
+)
 DEFAULT_RAW_LOG_RETENTION_DAYS = 7
 
 
@@ -30,9 +34,7 @@ def retention_settings(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def retention_enabled(config: dict[str, Any]) -> bool:
-    settings = retention_settings(config)
-    enabled = settings.get("enabled", True)
-    return bool(enabled) if enabled is not None else True
+    return bool(retention_settings(config).get("enabled", True))
 
 
 def raw_log_retention_days(config: dict[str, Any]) -> int:
@@ -43,47 +45,13 @@ def raw_log_retention_days(config: dict[str, Any]) -> int:
     return days
 
 
-def parse_activity_timestamp(
-    state: dict[str, Any] | None,
-    manifest: dict[str, Any] | None,
-    run_id: str,
-) -> datetime | None:
-    candidates: list[str] = []
-    if state:
-        for key in ("finishedAt", "lastActivityAt", "startedAt"):
-            value = state.get(key)
-            if isinstance(value, str) and value:
-                candidates.append(value)
-    if manifest:
-        started = manifest.get("startedAt")
-        if isinstance(started, str) and started:
-            candidates.append(started)
-    run_stamp = run_registry.timestamp_from_run_id(run_id)
-    if run_stamp:
-        candidates.append(run_stamp)
-    for value in candidates:
-        parsed = _parse_utc_timestamp(value)
-        if parsed is not None:
-            return parsed
-    return None
-
-
-def _parse_utc_timestamp(value: str) -> datetime | None:
-    try:
-        if value.endswith("Z"):
-            return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
-        return datetime.fromisoformat(value)
-    except ValueError:
-        return None
-
-
 def should_skip_archival(registry_root: Path, run_id: str) -> bool:
     state = run_registry.load_run_state(registry_root, run_id)
     status = run_registry.effective_status(state)
     return status in (
         run_registry.STATUS_RUNNING,
         run_registry.STATUS_STALE,
-        "unknown",
+        run_registry.STATUS_UNKNOWN,
     )
 
 
@@ -126,25 +94,42 @@ def _tail_text_stream(stream: BinaryIO, lines: int) -> str:
     return "\n".join(buffer) + "\n"
 
 
+def _state_archived_log_byte_sizes(state: dict[str, Any] | None) -> tuple[int, int] | None:
+    if not state:
+        return None
+    stdout_bytes = state.get("stdoutBytes")
+    stderr_bytes = state.get("stderrBytes")
+    if isinstance(stdout_bytes, int) and isinstance(stderr_bytes, int):
+        return stdout_bytes, stderr_bytes
+    return None
+
+
 def archived_log_byte_sizes(registry_root: Path, run_id: str) -> tuple[int, int]:
+    state_sizes = _state_archived_log_byte_sizes(
+        run_registry.load_run_state(registry_root, run_id)
+    )
+    if state_sizes is not None:
+        return state_sizes
     path = archive_path(registry_root, run_id)
-    if not path.exists():
+    try:
+        archive = tarfile.open(path, "r:gz")
+    except FileNotFoundError:
         return 0, 0
-    stdout_bytes = 0
-    stderr_bytes = 0
-    with tarfile.open(path, "r:gz") as archive:
+    with archive:
+        stdout_bytes = 0
+        stderr_bytes = 0
         for member in archive.getmembers():
-            if member.name == "stdout.log":
+            if member.name == run_registry.STDOUT_LOG:
                 stdout_bytes = member.size
-            elif member.name == "stderr.log":
+            elif member.name == run_registry.STDERR_LOG:
                 stderr_bytes = member.size
-    return stdout_bytes, stderr_bytes
+        return stdout_bytes, stderr_bytes
 
 
 def effective_log_byte_sizes(registry_root: Path, run_id: str) -> tuple[int, int]:
     run_path = run_registry.run_directory(registry_root, run_id)
-    stdout_path = run_path / "stdout.log"
-    stderr_path = run_path / "stderr.log"
+    stdout_path = run_path / run_registry.STDOUT_LOG
+    stderr_path = run_path / run_registry.STDERR_LOG
     if stdout_path.exists() or stderr_path.exists():
         return run_registry.log_byte_sizes(registry_root, run_id)
     if raw_logs_archived(registry_root, run_id):
@@ -156,7 +141,7 @@ def archived_log_warning(alias: str | None, run_id: str) -> str:
     handle = alias or run_id
     return (
         f"raw logs archived for {handle}; use "
-        f"delegate run-output {handle} --stdout|--stderr --tail N or --raw"
+        f"{run_registry.run_output_command(handle)} --stdout|--stderr --tail N or --raw"
     )
 
 
@@ -179,7 +164,7 @@ def is_eligible_for_archival(
     if not archive_exists and not logs_present:
         return False
     moment = now or datetime.now(UTC)
-    activity = parse_activity_timestamp(
+    activity = run_registry.activity_datetime(
         run_registry.load_run_state(registry_root, run_id),
         run_registry.load_run_manifest(registry_root, run_id),
         run_id,
@@ -190,10 +175,17 @@ def is_eligible_for_archival(
     return activity < cutoff
 
 
-def _mark_raw_logs_archived(run_path: Path) -> None:
-    state_path = run_path / "state.json"
+def _mark_raw_logs_archived(
+    run_path: Path,
+    *,
+    stdout_bytes: int = 0,
+    stderr_bytes: int = 0,
+) -> None:
+    state_path = run_path / run_registry.STATE_FILE
     state = run_registry.read_json_object(state_path) or {}
-    state["rawLogsArchivedAt"] = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    state["rawLogsArchivedAt"] = run_registry.utc_now_iso()
+    state["stdoutBytes"] = stdout_bytes
+    state["stderrBytes"] = stderr_bytes
     run_registry.write_json_atomic(state_path, state)
 
 
@@ -216,7 +208,11 @@ def _complete_archival_after_archive(
     if not _verify_archive_members(destination, expected_sizes):
         return False
     _remove_archived_raw_logs(run_path, members)
-    _mark_raw_logs_archived(run_path)
+    _mark_raw_logs_archived(
+        run_path,
+        stdout_bytes=expected_sizes.get(run_registry.STDOUT_LOG, 0),
+        stderr_bytes=expected_sizes.get(run_registry.STDERR_LOG, 0),
+    )
     return True
 
 
@@ -341,10 +337,18 @@ def log_file_byte_size(registry_root: Path, run_id: str, log_name: str) -> int:
     live_path = run_path / log_name
     if live_path.exists():
         return live_path.stat().st_size
+    state = run_registry.load_run_state(registry_root, run_id)
+    if state is not None:
+        key = "stdoutBytes" if log_name == run_registry.STDOUT_LOG else "stderrBytes"
+        value = state.get(key)
+        if isinstance(value, int):
+            return value
     archive_file = archive_path(registry_root, run_id)
-    if not archive_file.exists():
+    try:
+        archive = tarfile.open(archive_file, "r:gz")
+    except FileNotFoundError:
         return 0
-    with tarfile.open(archive_file, "r:gz") as archive:
+    with archive:
         try:
             return archive.getmember(log_name).size
         except KeyError:

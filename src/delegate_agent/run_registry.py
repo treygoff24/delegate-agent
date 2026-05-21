@@ -16,6 +16,14 @@ from typing import Any
 DELEGATE_DIR_NAME = ".delegate"
 GIT_EXCLUDE_ENTRY = ".delegate/"
 RUN_ID_RE = re.compile(r"^del_\d{8}T\d{6}Z_[0-9a-f]{6}$")
+
+STDOUT_LOG = "stdout.log"
+STDERR_LOG = "stderr.log"
+EVENTS_JSONL = "events.jsonl"
+MANIFEST_FILE = "manifest.json"
+STATE_FILE = "state.json"
+SNAPSHOT_FILE = "snapshot.json"
+COMPLETION_REPORT_FILE = "completion-report.md"
 INDEX_VERSION = 1
 REGISTRY_LOCK_NAME = ".registry.lock"
 REGISTRY_LOCK_TIMEOUT_SECONDS = 30.0
@@ -206,6 +214,35 @@ LARGE_LOG_WARN_BYTES = 50 * 1024 * 1024
 DEFAULT_RUNS_LIMIT = 20
 STATUS_RUNNING = "running"
 STATUS_STALE = "stale"
+STATUS_UNKNOWN = "unknown"
+
+UTC_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def utc_now_iso() -> str:
+    return datetime.now(UTC).strftime(UTC_TIMESTAMP_FORMAT)
+
+
+def parse_utc_timestamp(value: str | None) -> datetime | None:
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        if value.endswith("Z"):
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def snapshot_command(alias: str) -> str:
+    return f"delegate snapshot {alias}"
+
+
+def run_output_command(handle: str, *, completion_report: bool = False) -> str:
+    base = f"delegate run-output {handle}"
+    if completion_report:
+        return f"{base} --completion-report"
+    return base
 
 
 @dataclass(frozen=True)
@@ -232,9 +269,9 @@ def run_directory(registry_root: Path, run_id: str) -> Path:
 def large_log_warnings(stdout_bytes: int, stderr_bytes: int) -> list[str]:
     warnings: list[str] = []
     if stdout_bytes > LARGE_LOG_WARN_BYTES:
-        warnings.append(f"stdout.log > 50 MB ({stdout_bytes} bytes)")
+        warnings.append(f"{STDOUT_LOG} > 50 MB ({stdout_bytes} bytes)")
     if stderr_bytes > LARGE_LOG_WARN_BYTES:
-        warnings.append(f"stderr.log > 50 MB ({stderr_bytes} bytes)")
+        warnings.append(f"{STDERR_LOG} > 50 MB ({stderr_bytes} bytes)")
     return warnings
 
 
@@ -305,23 +342,23 @@ def resolve_handle(index: dict[str, Any], handle: str) -> ResolveResult:
 
 
 def load_run_state(registry_root: Path, run_id: str) -> dict[str, Any] | None:
-    return read_json_object(run_directory(registry_root, run_id) / "state.json")
+    return read_json_object(run_directory(registry_root, run_id) / STATE_FILE)
 
 
 def load_run_snapshot(registry_root: Path, run_id: str) -> dict[str, Any] | None:
-    return read_json_object(run_directory(registry_root, run_id) / "snapshot.json")
+    return read_json_object(run_directory(registry_root, run_id) / SNAPSHOT_FILE)
 
 
 def load_run_manifest(registry_root: Path, run_id: str) -> dict[str, Any] | None:
-    return read_json_object(run_directory(registry_root, run_id) / "manifest.json")
+    return read_json_object(run_directory(registry_root, run_id) / MANIFEST_FILE)
 
 
 def log_byte_sizes(registry_root: Path, run_id: str) -> tuple[int, int]:
     run_path = run_directory(registry_root, run_id)
     stdout_bytes = 0
     stderr_bytes = 0
-    stdout_path = run_path / "stdout.log"
-    stderr_path = run_path / "stderr.log"
+    stdout_path = run_path / STDOUT_LOG
+    stderr_path = run_path / STDERR_LOG
     if stdout_path.exists():
         stdout_bytes = stdout_path.stat().st_size
     if stderr_path.exists():
@@ -329,9 +366,13 @@ def log_byte_sizes(registry_root: Path, run_id: str) -> tuple[int, int]:
     return stdout_bytes, stderr_bytes
 
 
-def _activity_timestamp(state: dict[str, Any] | None, manifest: dict[str, Any] | None) -> str:
+def activity_timestamp(
+    state: dict[str, Any] | None,
+    manifest: dict[str, Any] | None,
+    run_id: str | None = None,
+) -> str:
     if state:
-        for key in ("lastActivityAt", "finishedAt", "startedAt"):
+        for key in ("finishedAt", "lastActivityAt", "startedAt"):
             value = state.get(key)
             if isinstance(value, str) and value:
                 return value
@@ -339,7 +380,29 @@ def _activity_timestamp(state: dict[str, Any] | None, manifest: dict[str, Any] |
         started = manifest.get("startedAt")
         if isinstance(started, str) and started:
             return started
+    if run_id:
+        return timestamp_from_run_id(run_id)
     return ""
+
+
+def activity_datetime(
+    state: dict[str, Any] | None,
+    manifest: dict[str, Any] | None,
+    run_id: str | None = None,
+) -> datetime | None:
+    return parse_utc_timestamp(activity_timestamp(state, manifest, run_id))
+
+
+def alias_for_run(index: dict[str, Any], run_id: str) -> str | None:
+    entry = index.get("runs", {}).get(run_id)
+    if isinstance(entry, dict):
+        alias = entry.get("alias")
+        if isinstance(alias, str):
+            return alias
+    for candidate, candidate_id in index.get("aliases", {}).items():
+        if candidate_id == run_id and isinstance(candidate, str):
+            return candidate
+    return None
 
 
 def build_run_summary(
@@ -362,12 +425,12 @@ def build_run_summary(
         "stdoutBytes": stdout_bytes,
         "stderrBytes": stderr_bytes,
         "warnings": large_log_warnings(stdout_bytes, stderr_bytes),
-        "activityAt": _activity_timestamp(state, manifest),
+        "activityAt": activity_timestamp(state, manifest),
     }
     if state and isinstance(state.get("current"), str):
         summary["current"] = state["current"]
     if isinstance(alias, str):
-        summary["snapshotCommand"] = f"delegate snapshot {alias}"
+        summary["snapshotCommand"] = snapshot_command(alias)
     return summary
 
 
@@ -414,8 +477,7 @@ def latest_run_id_for_harness(
             continue
         state = load_run_state(registry_root, run_id)
         manifest = load_run_manifest(registry_root, run_id)
-        activity = _activity_timestamp(state, manifest)
-        sort_ts = activity or timestamp_from_run_id(run_id)
+        sort_ts = activity_timestamp(state, manifest, run_id)
         matches.append((sort_ts, run_id))
     if not matches:
         return None

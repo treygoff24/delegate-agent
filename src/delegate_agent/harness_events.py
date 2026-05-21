@@ -42,7 +42,10 @@ class StreamAccumulator:
     events: list[NormalizedEvent] = field(default_factory=list)
     completion_text: str | None = None
     current: str | None = None
-    warnings: list[str] = field(default_factory=list)
+    _assistant_text_cache: str | None = field(default=None, repr=False)
+
+    def _invalidate_assistant_text_cache(self) -> None:
+        self._assistant_text_cache = None
 
     def ingest_line(self, line: str) -> None:
         stripped = line.strip()
@@ -105,6 +108,7 @@ class StreamAccumulator:
         text = _extract_text(payload.get("content"))
         if text:
             self.assistant_chunks.append(text)
+            self._invalidate_assistant_text_cache()
             self.current = _current_from_text(text)
 
     def _ingest_cursor_assistant(self, payload: dict[str, Any]) -> None:
@@ -113,6 +117,7 @@ class StreamAccumulator:
             text = _extract_text(message.get("content"))
             if text:
                 self.assistant_chunks.append(text)
+                self._invalidate_assistant_text_cache()
                 self.current = _current_from_text(text)
 
     def _ingest_completion(self, payload: dict[str, Any]) -> None:
@@ -120,6 +125,7 @@ class StreamAccumulator:
         if isinstance(final_text, str) and final_text.strip():
             self.completion_text = final_text.strip()
             self.assistant_chunks.append(final_text)
+            self._invalidate_assistant_text_cache()
             self.current = _current_from_text(final_text)
             self.events.append(NormalizedEvent(kind="run.completed", status="succeeded"))
 
@@ -128,6 +134,7 @@ class StreamAccumulator:
         if isinstance(result, str) and result.strip():
             self.completion_text = result.strip()
             self.assistant_chunks.append(result)
+            self._invalidate_assistant_text_cache()
             self.current = _current_from_text(result)
             self.events.append(NormalizedEvent(kind="run.completed", status="succeeded"))
 
@@ -155,7 +162,11 @@ class StreamAccumulator:
 
     @property
     def assistant_text(self) -> str:
-        return "\n\n".join(chunk for chunk in self.assistant_chunks if chunk).strip()
+        if self._assistant_text_cache is None:
+            self._assistant_text_cache = "\n\n".join(
+                chunk for chunk in self.assistant_chunks if chunk
+            ).strip()
+        return self._assistant_text_cache
 
     def bounded_assistant_text(self) -> tuple[str, dict[str, Any]]:
         text = self.assistant_text

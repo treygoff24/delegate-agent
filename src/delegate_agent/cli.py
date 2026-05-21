@@ -106,7 +106,6 @@ class ParsedCommand:
     snapshot_latest_harness: str | None = None
     snapshot_no_redact: bool = False
     runs_active: bool = False
-    runs_recent: bool = False
     runs_harness: str | None = None
     runs_limit: int | None = None
     run_output_handle: str | None = None
@@ -536,6 +535,9 @@ def parse_snapshot(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedC
     )
 
 
+KNOWN_HARNESSES = ("cursor", "droid")
+
+
 def parse_runs(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
     active = False
     recent = False
@@ -556,6 +558,11 @@ def parse_runs(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedComma
             if i + 1 >= len(rest):
                 raise DelegateError("missing_harness", "runs --harness requires a harness name.")
             harness = rest[i + 1]
+            if harness not in KNOWN_HARNESSES:
+                raise DelegateError(
+                    "invalid_harness",
+                    f"runs --harness must be one of {', '.join(KNOWN_HARNESSES)}.",
+                )
             i += 2
             continue
         if token == "--limit":
@@ -582,7 +589,6 @@ def parse_runs(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedComma
         json_mode=json_mode,
         cwd=cwd,
         runs_active=active,
-        runs_recent=recent,
         runs_harness=harness,
         runs_limit=limit,
     )
@@ -686,8 +692,7 @@ def resolve_run_target(
                 "no_matching_runs",
                 f"No runs found for harness: {latest_harness}",
             )
-        alias = index.get("runs", {}).get(run_id, {}).get("alias")
-        return run_id, alias if isinstance(alias, str) else None
+        return run_id, run_registry.alias_for_run(index, run_id)
     assert handle is not None
     resolved = run_registry.resolve_handle(index, handle)
     if resolved.run_id is None:
@@ -754,7 +759,7 @@ def emit_run_output(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout:
     sections: dict[str, Any] = {}
     text_sections: dict[str, str] = {}
     if parsed.run_output_completion_report:
-        report_path = run_path / "completion-report.md"
+        report_path = run_path / run_registry.COMPLETION_REPORT_FILE
         if not report_path.exists():
             raise DelegateError(
                 "missing_completion_report",
@@ -770,13 +775,13 @@ def emit_run_output(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout:
                 content, truncated = delegate_retention.read_log_output(
                     registry_root,
                     run_id,
-                    "stdout.log",
+                    run_registry.STDOUT_LOG,
                     tail=parsed.run_output_tail,
                     raw=parsed.run_output_raw,
                 )
                 sections["stdout"] = {
                     "bytes": delegate_retention.log_file_byte_size(
-                        registry_root, run_id, "stdout.log"
+                        registry_root, run_id, run_registry.STDOUT_LOG
                     ),
                     "truncated": truncated,
                     "archived": delegate_retention.raw_logs_archived(registry_root, run_id),
@@ -786,13 +791,13 @@ def emit_run_output(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout:
                 content, truncated = delegate_retention.read_log_output(
                     registry_root,
                     run_id,
-                    "stderr.log",
+                    run_registry.STDERR_LOG,
                     tail=parsed.run_output_tail,
                     raw=parsed.run_output_raw,
                 )
                 sections["stderr"] = {
                     "bytes": delegate_retention.log_file_byte_size(
-                        registry_root, run_id, "stderr.log"
+                        registry_root, run_id, run_registry.STDERR_LOG
                     ),
                     "truncated": truncated,
                     "archived": delegate_retention.raw_logs_archived(registry_root, run_id),
@@ -800,11 +805,15 @@ def emit_run_output(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout:
                 text_sections["stderr"] = content
         except ValueError as exc:
             raise DelegateError("missing_tail", str(exc)) from exc
-    for key, text in text_sections.items():
-        if parsed.run_output_raw and key in ("stdout", "stderr"):
-            continue
-        if not parsed.run_output_no_redact:
-            text_sections[key] = delegate_rendering.redact_string(text)
+    if not parsed.run_output_no_redact:
+        text_sections = {
+            key: (
+                text
+                if parsed.run_output_raw and key in ("stdout", "stderr")
+                else delegate_rendering.redact_string(text)
+            )
+            for key, text in text_sections.items()
+        }
     if parsed.json_mode:
         merged_sections: dict[str, Any] = {}
         for key, meta in sections.items():
@@ -1494,7 +1503,7 @@ def describe_payload(config: dict[str, Any], config_source: str) -> dict[str, An
 
 def emit_models(config: dict[str, Any], config_source: str, json_mode: bool, stdout: TextIO) -> int:
     if json_mode:
-        print_json(models_payload(config, config_source), stdout)
+        delegate_rendering.print_json(models_payload(config, config_source), stdout)
         return EXIT_OK
     if config_source == "embedded-default":
         print("warning: using embedded default config", file=stdout)
@@ -1513,7 +1522,7 @@ def emit_describe(
 ) -> int:
     payload = describe_payload(config, config_source)
     if json_mode:
-        print_json(payload, stdout)
+        delegate_rendering.print_json(payload, stdout)
         return EXIT_OK
     print(f"delegate {VERSION}", file=stdout)
     print(f"config: {payload['configPath']} ({payload['configSource']})", file=stdout)
@@ -1569,17 +1578,13 @@ Discovery:
     return EXIT_OK
 
 
-def print_json(payload: dict[str, Any], stdout: TextIO) -> None:
-    print(json.dumps(payload, sort_keys=True), file=stdout)
-
-
 def shell_join(argv: list[str]) -> str:
     return " ".join(shlex.quote(arg) for arg in argv)
 
 
 def emit_error(error: DelegateError, json_mode: bool, stdout: TextIO, stderr: TextIO) -> int:
     if json_mode:
-        print_json(
+        delegate_rendering.print_json(
             {
                 "ok": False,
                 "error": error.error,
@@ -1643,7 +1648,7 @@ def main(
         if request.dry_run:
             payload = dry_run_payload(request)
             if parsed.json_mode:
-                print_json(payload, stdout)
+                delegate_rendering.print_json(payload, stdout)
             else:
                 print(f"cwd: {request.workspace} ({request.workspace_kind})", file=stdout)
                 if payload.get("isolatedWorkspace"):
@@ -1662,7 +1667,7 @@ def main(
             stderr=stderr,
         )
         if parsed.json_mode and payload is not None:
-            print_json(payload, stdout)
+            delegate_rendering.print_json(payload, stdout)
         return exit_code
     except DelegateError as exc:
         return emit_error(exc, json_mode, stdout, stderr)

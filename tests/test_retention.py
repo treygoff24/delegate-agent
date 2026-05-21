@@ -4,6 +4,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -264,6 +265,25 @@ class RetentionTests(unittest.TestCase):
             self.registry_root,
             run_id,
         )
+        self.assertEqual(stdout_bytes, len("stdout-data\n"))
+        self.assertEqual(stderr_bytes, len("stderr-data\n"))
+
+    def test_effective_log_byte_sizes_reads_state_without_opening_archive(self):
+        run_id, _alias = self.write_completed_run()
+        old = (datetime.now(UTC) - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        state = json.loads((run_path / "state.json").read_text(encoding="utf-8"))
+        state["finishedAt"] = old
+        self.registry.write_json_atomic(run_path / "state.json", state)
+        self.retention.run_retention_pass(
+            self.registry_root,
+            {"tracking": {"retention": {"enabled": True, "rawLogDays": 0}}},
+        )
+        with mock.patch.object(tarfile, "open", side_effect=AssertionError("tar must not open")):
+            stdout_bytes, stderr_bytes = self.retention.effective_log_byte_sizes(
+                self.registry_root,
+                run_id,
+            )
         self.assertEqual(stdout_bytes, len("stdout-data\n"))
         self.assertEqual(stderr_bytes, len("stderr-data\n"))
 

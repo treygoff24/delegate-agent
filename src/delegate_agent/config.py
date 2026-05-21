@@ -121,8 +121,6 @@ def load_config(
         merged = deep_merge(merged, cli_overrides)
         primary_source = "cli-overrides"
 
-    if primary_source == "embedded-default":
-        return merged, primary_source
     return merged, primary_source
 
 
