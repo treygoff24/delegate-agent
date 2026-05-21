@@ -27,3 +27,7 @@ cursor-prereq.json
 .codex/
 .tldr/
 .tldrignore
+
+# Personal Claude Code state
+CLAUDE.local.md
+.claude/settings.local.json
