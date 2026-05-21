@@ -29,6 +29,7 @@ DRAIN_JOIN_TIMEOUT_SEC = 5.0
 def should_persist_running_progress(*, dirty: bool) -> bool:
     return dirty
 
+
 COMPLETION_REPORT_SUFFIX = """
 
 ## Delegate completion report requirement

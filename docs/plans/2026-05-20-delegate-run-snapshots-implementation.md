@@ -25,10 +25,10 @@ Do not mutate `~/.delegate`, `~/.local/bin/delegate`, or any installed live Dele
 
 ## Wave 0: Feature branch, skill install, baseline
 
-**Parallel:** no  
-**Blocked by:** none  
-**Owned files:** `docs/plans/2026-05-20-delegate-run-snapshots-implementation.md`, `.codex/skills/writing-plans`  
-**Invariants:** Begin work on a feature branch before implementation; do not promote or install the checkout into the live runtime.  
+**Parallel:** no
+**Blocked by:** none
+**Owned files:** `docs/plans/2026-05-20-delegate-run-snapshots-implementation.md`, `.codex/skills/writing-plans`
+**Invariants:** Begin work on a feature branch before implementation; do not promote or install the checkout into the live runtime.
 **Out of scope:** Any code changes beyond plan/skill setup.
 
 **Files:**
@@ -70,10 +70,10 @@ No GLM code review is needed for Wave 0 because it creates only the plan and loc
 
 ## Wave 1: Registry foundation, IDs, aliases, config precedence
 
-**Parallel:** no  
-**Blocked by:** Wave 0  
-**Owned files:** `src/delegate_agent/run_registry.py`, `src/delegate_agent/config.py`, `src/delegate_agent/cli.py`, `tests/test_run_registry.py`, `tests/test_delegate_validation.py`, `tests/test_delegate_parser.py`  
-**Invariants:** Registry is workspace-local by default; aliases are exact handles and never reused; `.delegate/` is excluded via `.git/info/exclude`, not tracked `.gitignore`; global/user config remains supported.  
+**Parallel:** no
+**Blocked by:** Wave 0
+**Owned files:** `src/delegate_agent/run_registry.py`, `src/delegate_agent/config.py`, `src/delegate_agent/cli.py`, `tests/test_run_registry.py`, `tests/test_delegate_validation.py`, `tests/test_delegate_parser.py`
+**Invariants:** Registry is workspace-local by default; aliases are exact handles and never reused; `.delegate/` is excluded via `.git/info/exclude`, not tracked `.gitignore`; global/user config remains supported.
 **Out of scope:** Streaming subprocess changes and snapshot rendering.
 
 **Files:**
@@ -163,10 +163,10 @@ Then rerun Wave 1 verification.
 
 ## Wave 2: Streaming runner, capture, bounded completion output
 
-**Parallel:** no  
-**Blocked by:** Wave 1  
-**Owned files:** `src/delegate_agent/runner.py`, `src/delegate_agent/harness_events.py`, `src/delegate_agent/cli.py`, `tests/test_delegate_execution.py`, `tests/test_runner_capture.py`, `tests/test_harness_events.py`  
-**Invariants:** Default parent-facing output is bounded; raw harness output is stored locally, not streamed to the caller unless `--pass-through`; `--json --pass-through` is invalid; Delegate remains synchronous.  
+**Parallel:** no
+**Blocked by:** Wave 1
+**Owned files:** `src/delegate_agent/runner.py`, `src/delegate_agent/harness_events.py`, `src/delegate_agent/cli.py`, `tests/test_delegate_execution.py`, `tests/test_runner_capture.py`, `tests/test_harness_events.py`
+**Invariants:** Default parent-facing output is bounded; raw harness output is stored locally, not streamed to the caller unless `--pass-through`; `--json --pass-through` is invalid; Delegate remains synchronous.
 **Out of scope:** Full snapshot command rendering and archive retention.
 
 **Files:**
@@ -257,10 +257,10 @@ Resolve actionable findings with Cursor Composer, then rerun Wave 2 verification
 
 ## Wave 3: `runs`, `snapshot`, and `run-output` commands
 
-**Parallel:** no  
-**Blocked by:** Wave 2  
-**Owned files:** `src/delegate_agent/rendering.py`, `src/delegate_agent/cli.py`, `src/delegate_agent/run_registry.py`, `tests/test_snapshot_commands.py`, `tests/test_delegate_parser.py`, `tests/test_run_registry.py`  
-**Invariants:** Snapshot/listing commands are bounded by default and never dump raw logs; exact alias lookup never guesses latest; raw retrieval requires explicit `run-output`.  
+**Parallel:** no
+**Blocked by:** Wave 2
+**Owned files:** `src/delegate_agent/rendering.py`, `src/delegate_agent/cli.py`, `src/delegate_agent/run_registry.py`, `tests/test_snapshot_commands.py`, `tests/test_delegate_parser.py`, `tests/test_run_registry.py`
+**Invariants:** Snapshot/listing commands are bounded by default and never dump raw logs; exact alias lookup never guesses latest; raw retrieval requires explicit `run-output`.
 **Out of scope:** Age-based archival.
 
 **Files:**
@@ -336,10 +336,10 @@ Resolve actionable findings with Cursor Composer, then rerun Wave 3 verification
 
 ## Wave 4: Retention/archive pass and documentation/skill surface
 
-**Parallel:** no  
-**Blocked by:** Wave 3  
-**Owned files:** `src/delegate_agent/retention.py`, `src/delegate_agent/cli.py`, `tests/test_retention.py`, `README.md`, `CONTEXT.md`, `docs/development.md`, `docs/live-runtime.md`, `.codex/skills/delegate-agent/SKILL.md`  
-**Invariants:** Retention is archive-only; active runs are never archived; docs distinguish repo checkout from live installed runtime.  
+**Parallel:** no
+**Blocked by:** Wave 3
+**Owned files:** `src/delegate_agent/retention.py`, `src/delegate_agent/cli.py`, `tests/test_retention.py`, `README.md`, `CONTEXT.md`, `docs/development.md`, `docs/live-runtime.md`, `.codex/skills/delegate-agent/SKILL.md`
+**Invariants:** Retention is archive-only; active runs are never archived; docs distinguish repo checkout from live installed runtime.
 **Out of scope:** Installing/promoting the changed CLI into `~/.delegate` or `~/.local/bin`.
 
 **Files:**
@@ -422,10 +422,10 @@ Resolve actionable findings with Cursor Composer, then rerun Wave 4 verification
 
 ## Wave 5: End-to-end dogfood and final review/fix loop
 
-**Parallel:** no  
-**Blocked by:** Wave 4  
-**Owned files:** `tests/test_end_to_end_tracking.py`, any files touched by review fixes  
-**Invariants:** Dogfood must use fake harness binaries or controlled repo-local commands; do not require real Cursor/Droid auth for automated tests; final Codex review is against `main`.  
+**Parallel:** no
+**Blocked by:** Wave 4
+**Owned files:** `tests/test_end_to_end_tracking.py`, any files touched by review fixes
+**Invariants:** Dogfood must use fake harness binaries or controlled repo-local commands; do not require real Cursor/Droid auth for automated tests; final Codex review is against `main`.
 **Out of scope:** Commit, push, release, or live install unless Trey separately asks.
 
 **Files:**

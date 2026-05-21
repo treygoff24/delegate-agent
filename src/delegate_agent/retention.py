@@ -105,25 +105,22 @@ def _state_archived_log_byte_sizes(state: dict[str, Any] | None) -> tuple[int, i
 
 
 def archived_log_byte_sizes(registry_root: Path, run_id: str) -> tuple[int, int]:
-    state_sizes = _state_archived_log_byte_sizes(
-        run_registry.load_run_state(registry_root, run_id)
-    )
+    state_sizes = _state_archived_log_byte_sizes(run_registry.load_run_state(registry_root, run_id))
     if state_sizes is not None:
         return state_sizes
     path = archive_path(registry_root, run_id)
     try:
-        archive = tarfile.open(path, "r:gz")
+        with tarfile.open(path, "r:gz") as archive:
+            stdout_bytes = 0
+            stderr_bytes = 0
+            for member in archive.getmembers():
+                if member.name == run_registry.STDOUT_LOG:
+                    stdout_bytes = member.size
+                elif member.name == run_registry.STDERR_LOG:
+                    stderr_bytes = member.size
+            return stdout_bytes, stderr_bytes
     except FileNotFoundError:
         return 0, 0
-    with archive:
-        stdout_bytes = 0
-        stderr_bytes = 0
-        for member in archive.getmembers():
-            if member.name == run_registry.STDOUT_LOG:
-                stdout_bytes = member.size
-            elif member.name == run_registry.STDERR_LOG:
-                stderr_bytes = member.size
-        return stdout_bytes, stderr_bytes
 
 
 def effective_log_byte_sizes(registry_root: Path, run_id: str) -> tuple[int, int]:
@@ -345,11 +342,10 @@ def log_file_byte_size(registry_root: Path, run_id: str, log_name: str) -> int:
             return value
     archive_file = archive_path(registry_root, run_id)
     try:
-        archive = tarfile.open(archive_file, "r:gz")
+        with tarfile.open(archive_file, "r:gz") as archive:
+            try:
+                return archive.getmember(log_name).size
+            except KeyError:
+                return 0
     except FileNotFoundError:
         return 0
-    with archive:
-        try:
-            return archive.getmember(log_name).size
-        except KeyError:
-            return 0
