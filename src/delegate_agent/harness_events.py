@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any
+
+from delegate_agent.json_types import JsonObject, JsonValue
 
 ASSISTANT_TEXT_LIMIT = 30_000
 ASSISTANT_TEXT_HEAD = 20_000
@@ -21,8 +22,8 @@ class NormalizedEvent:
     status: str | None = None
     message: str | None = None
 
-    def to_dict(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {"kind": self.kind}
+    def to_dict(self) -> JsonObject:
+        payload: JsonObject = {"kind": self.kind}
         if self.tool is not None:
             payload["tool"] = self.tool
         if self.target is not None:
@@ -52,7 +53,7 @@ class StreamAccumulator:
         if not stripped:
             return
         try:
-            payload = json.loads(stripped)
+            payload: JsonValue = json.loads(stripped)
         except json.JSONDecodeError:
             self._ingest_text_fallback(stripped)
             return
@@ -67,7 +68,7 @@ class StreamAccumulator:
         if len(self.events) == 1:
             self.current = bounded[:120]
 
-    def _ingest_object(self, payload: dict[str, Any]) -> None:
+    def _ingest_object(self, payload: JsonObject) -> None:
         event_type = payload.get("type")
         if not isinstance(event_type, str):
             return
@@ -96,12 +97,12 @@ class StreamAccumulator:
         if event_type == "result":
             self._ingest_cursor_result(payload)
 
-    def _ingest_system(self, payload: dict[str, Any]) -> None:
+    def _ingest_system(self, payload: JsonObject) -> None:
         cwd = payload.get("cwd")
         if isinstance(cwd, str) and cwd:
             self.current = f"session cwd {cwd}"
 
-    def _ingest_message(self, payload: dict[str, Any]) -> None:
+    def _ingest_message(self, payload: JsonObject) -> None:
         role = payload.get("role")
         if role not in (None, "assistant"):
             return
@@ -111,7 +112,7 @@ class StreamAccumulator:
             self._invalidate_assistant_text_cache()
             self.current = _current_from_text(text)
 
-    def _ingest_cursor_assistant(self, payload: dict[str, Any]) -> None:
+    def _ingest_cursor_assistant(self, payload: JsonObject) -> None:
         message = payload.get("message")
         if isinstance(message, dict):
             text = _extract_text(message.get("content"))
@@ -120,7 +121,7 @@ class StreamAccumulator:
                 self._invalidate_assistant_text_cache()
                 self.current = _current_from_text(text)
 
-    def _ingest_completion(self, payload: dict[str, Any]) -> None:
+    def _ingest_completion(self, payload: JsonObject) -> None:
         final_text = payload.get("finalText")
         if isinstance(final_text, str) and final_text.strip():
             self.completion_text = final_text.strip()
@@ -129,7 +130,7 @@ class StreamAccumulator:
             self.current = _current_from_text(final_text)
             self.events.append(NormalizedEvent(kind="run.completed", status="succeeded"))
 
-    def _ingest_cursor_result(self, payload: dict[str, Any]) -> None:
+    def _ingest_cursor_result(self, payload: JsonObject) -> None:
         result = payload.get("result")
         if isinstance(result, str) and result.strip():
             self.completion_text = result.strip()
@@ -138,7 +139,7 @@ class StreamAccumulator:
             self.current = _current_from_text(result)
             self.events.append(NormalizedEvent(kind="run.completed", status="succeeded"))
 
-    def _ingest_tool_call(self, payload: dict[str, Any]) -> None:
+    def _ingest_tool_call(self, payload: JsonObject) -> None:
         tool = _string_field(payload, "tool", "name", "toolName") or "tool"
         target = _tool_target(payload)
         kind = "tool.started"
@@ -147,7 +148,7 @@ class StreamAccumulator:
         )
         self.current = _tool_current(tool, target)
 
-    def _ingest_cursor_tool(self, payload: dict[str, Any], event_type: str) -> None:
+    def _ingest_cursor_tool(self, payload: JsonObject, event_type: str) -> None:
         tool_call = payload.get("tool_call")
         if not isinstance(tool_call, dict):
             return
@@ -168,7 +169,7 @@ class StreamAccumulator:
             ).strip()
         return self._assistant_text_cache
 
-    def bounded_assistant_text(self) -> tuple[str, dict[str, Any]]:
+    def bounded_assistant_text(self) -> tuple[str, JsonObject]:
         text = self.assistant_text
         meta = {
             "assistantTextChars": len(text),
@@ -192,7 +193,7 @@ class StreamAccumulator:
         )
         return bounded, meta
 
-    def bounded_recent_events(self) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    def bounded_recent_events(self) -> tuple[list[JsonObject], JsonObject]:
         serialized = [event.to_dict() for event in self.events]
         total = len(serialized)
         meta = {
@@ -216,7 +217,7 @@ class StreamAccumulator:
         return head + tail, meta
 
 
-def _extract_text(content: Any) -> str:
+def _extract_text(content: JsonValue) -> str:
     if isinstance(content, str):
         return content.strip()
     if isinstance(content, list):
@@ -232,7 +233,7 @@ def _extract_text(content: Any) -> str:
     return ""
 
 
-def _string_field(payload: dict[str, Any], *keys: str) -> str | None:
+def _string_field(payload: JsonObject, *keys: str) -> str | None:
     for key in keys:
         value = payload.get(key)
         if isinstance(value, str) and value.strip():
@@ -240,7 +241,7 @@ def _string_field(payload: dict[str, Any], *keys: str) -> str | None:
     return None
 
 
-def _tool_target(payload: dict[str, Any]) -> str | None:
+def _tool_target(payload: JsonObject) -> str | None:
     for key in ("path", "file", "command", "target", "uri"):
         value = payload.get(key)
         if isinstance(value, str) and value.strip():

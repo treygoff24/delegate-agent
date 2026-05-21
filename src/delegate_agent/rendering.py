@@ -4,10 +4,11 @@ import json
 import re
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, TextIO
+from typing import TextIO
 
 from delegate_agent import retention as delegate_retention
 from delegate_agent import run_registry
+from delegate_agent.json_types import JsonObject, JsonValue
 from delegate_agent.run_registry import parse_utc_timestamp as parse_timestamp
 
 REDACT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
@@ -28,7 +29,7 @@ def redact_string(value: str) -> str:
     return redacted
 
 
-def redact_value(value: Any) -> Any:
+def redact_value(value: JsonValue) -> JsonValue:
     if isinstance(value, str):
         return redact_string(value)
     if isinstance(value, list):
@@ -60,17 +61,17 @@ def format_age(started_at: str | None, *, now: datetime | None = None) -> str:
 def merge_snapshot_view(
     registry_root: Path,
     run_id: str,
-    snapshot: dict[str, Any] | None,
+    snapshot: JsonObject | None,
     *,
     redact: bool,
-) -> dict[str, Any]:
+) -> JsonObject:
     state = run_registry.load_run_state(registry_root, run_id)
     manifest = run_registry.load_run_manifest(registry_root, run_id)
     stdout_bytes, stderr_bytes = delegate_retention.effective_log_byte_sizes(registry_root, run_id)
-    view: dict[str, Any] = dict(snapshot or {})
+    view: JsonObject = dict(snapshot or {})
     if not view:
         view = {
-            "schema": "delegate.snapshot.v1",
+            "schema": run_registry.SNAPSHOT_SCHEMA,
             "ok": True,
             "runId": run_id,
         }
@@ -113,11 +114,11 @@ def merge_snapshot_view(
     return view
 
 
-def snapshot_json_payload(view: dict[str, Any]) -> dict[str, Any]:
+def snapshot_json_payload(view: JsonObject) -> JsonObject:
     return view
 
 
-def render_snapshot_text(view: dict[str, Any], stdout: TextIO) -> None:
+def render_snapshot_text(view: JsonObject, stdout: TextIO) -> None:
     alias = view.get("alias", view.get("runId", "?"))
     status = view.get("status", "unknown")
     started_at = view.get("startedAt")
@@ -168,13 +169,13 @@ def render_snapshot_text(view: dict[str, Any], stdout: TextIO) -> None:
 
 
 def runs_json_payload(
-    summaries: list[dict[str, Any]],
+    summaries: list[JsonObject],
     *,
     limit: int,
     mode: str,
-) -> dict[str, Any]:
+) -> JsonObject:
     return {
-        "schema": "delegate.runs.v1",
+        "schema": run_registry.RUNS_SCHEMA,
         "ok": True,
         "mode": mode,
         "limit": limit,
@@ -182,7 +183,7 @@ def runs_json_payload(
     }
 
 
-def render_runs_text(summaries: list[dict[str, Any]], stdout: TextIO, *, mode: str) -> None:
+def render_runs_text(summaries: list[JsonObject], stdout: TextIO, *, mode: str) -> None:
     print(f"mode: {mode}", file=stdout)
     print("alias      status    harness  age      current", file=stdout)
     for summary in summaries:
@@ -197,51 +198,14 @@ def render_runs_text(summaries: list[dict[str, Any]], stdout: TextIO, *, mode: s
         print(f"{alias:<10} {status:<9} {harness:<8} {age:<8} {current}", file=stdout)
 
 
-def tail_file_lines(path: Path, lines: int) -> str:
-    if lines < 1:
-        raise ValueError("tail lines must be at least 1")
-    if not path.exists():
-        return ""
-    with path.open("rb") as handle:
-        handle.seek(0, 2)
-        end = handle.tell()
-        if end == 0:
-            return ""
-        block = 4096
-        chunks: list[bytes] = []
-        position = end
-        newline_count = 0
-        while position > 0 and newline_count <= lines:
-            read_size = min(block, position)
-            position -= read_size
-            handle.seek(position)
-            chunk = handle.read(read_size)
-            chunks.insert(0, chunk)
-            newline_count += chunk.count(b"\n")
-        text = b"".join(chunks).decode("utf-8", errors="replace")
-    split = text.splitlines()
-    return "\n".join(split[-lines:]) + ("\n" if split else "")
-
-
-def read_log_output(path: Path, *, tail: int | None, raw: bool) -> tuple[str, bool]:
-    """Return log text and whether the response is a bounded tail (truncated) view."""
-    if not path.exists():
-        return "", False
-    if raw:
-        return path.read_text(encoding="utf-8", errors="replace"), False
-    if tail is None:
-        raise ValueError("add --tail N or --raw to read stdout/stderr log output")
-    return tail_file_lines(path, tail), True
-
-
 def run_output_json_payload(
     *,
     alias: str | None,
     run_id: str,
-    sections: dict[str, Any],
-) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "schema": "delegate.run-output.v1",
+    sections: JsonObject,
+) -> JsonObject:
+    payload: JsonObject = {
+        "schema": run_registry.RUN_OUTPUT_SCHEMA,
         "ok": True,
         "runId": run_id,
         "sections": sections,
@@ -260,5 +224,5 @@ def render_run_output_text(sections: dict[str, str], stdout: TextIO) -> None:
         print(content, end="" if content.endswith("\n") else "\n", file=stdout)
 
 
-def print_json(payload: dict[str, Any], stdout: TextIO) -> None:
+def print_json(payload: JsonObject, stdout: TextIO) -> None:
     print(json.dumps(payload, sort_keys=True), file=stdout)

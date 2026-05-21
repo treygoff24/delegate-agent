@@ -5,9 +5,10 @@ import tarfile
 from collections import deque
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import BinaryIO
 
-from delegate_agent import run_registry
+from delegate_agent import archived_logs, run_registry
+from delegate_agent.json_types import JsonObject
 
 ARCHIVE_MEMBER_NAMES = (
     run_registry.STDOUT_LOG,
@@ -18,14 +19,14 @@ DEFAULT_RAW_LOG_RETENTION_DAYS = 7
 
 
 def archive_dir(registry_root: Path) -> Path:
-    return registry_root / "archive"
+    return archived_logs.archive_dir(registry_root)
 
 
 def archive_path(registry_root: Path, run_id: str) -> Path:
-    return archive_dir(registry_root) / f"{run_id}.tar.gz"
+    return archived_logs.archive_path(registry_root, run_id)
 
 
-def retention_settings(config: dict[str, Any]) -> dict[str, Any]:
+def retention_settings(config: JsonObject) -> JsonObject:
     tracking = config.get("tracking")
     if not isinstance(tracking, dict):
         return {}
@@ -33,11 +34,11 @@ def retention_settings(config: dict[str, Any]) -> dict[str, Any]:
     return retention if isinstance(retention, dict) else {}
 
 
-def retention_enabled(config: dict[str, Any]) -> bool:
+def retention_enabled(config: JsonObject) -> bool:
     return bool(retention_settings(config).get("enabled", True))
 
 
-def raw_log_retention_days(config: dict[str, Any]) -> int:
+def raw_log_retention_days(config: JsonObject) -> int:
     settings = retention_settings(config)
     days = settings.get("rawLogDays", DEFAULT_RAW_LOG_RETENTION_DAYS)
     if not isinstance(days, int) or days < 0:
@@ -94,44 +95,8 @@ def _tail_text_stream(stream: BinaryIO, lines: int) -> str:
     return "\n".join(buffer) + "\n"
 
 
-def _state_archived_log_byte_sizes(state: dict[str, Any] | None) -> tuple[int, int] | None:
-    if not state:
-        return None
-    stdout_bytes = state.get("stdoutBytes")
-    stderr_bytes = state.get("stderrBytes")
-    if isinstance(stdout_bytes, int) and isinstance(stderr_bytes, int):
-        return stdout_bytes, stderr_bytes
-    return None
-
-
-def archived_log_byte_sizes(registry_root: Path, run_id: str) -> tuple[int, int]:
-    state_sizes = _state_archived_log_byte_sizes(run_registry.load_run_state(registry_root, run_id))
-    if state_sizes is not None:
-        return state_sizes
-    path = archive_path(registry_root, run_id)
-    try:
-        with tarfile.open(path, "r:gz") as archive:
-            stdout_bytes = 0
-            stderr_bytes = 0
-            for member in archive.getmembers():
-                if member.name == run_registry.STDOUT_LOG:
-                    stdout_bytes = member.size
-                elif member.name == run_registry.STDERR_LOG:
-                    stderr_bytes = member.size
-            return stdout_bytes, stderr_bytes
-    except FileNotFoundError:
-        return 0, 0
-
-
 def effective_log_byte_sizes(registry_root: Path, run_id: str) -> tuple[int, int]:
-    run_path = run_registry.run_directory(registry_root, run_id)
-    stdout_path = run_path / run_registry.STDOUT_LOG
-    stderr_path = run_path / run_registry.STDERR_LOG
-    if stdout_path.exists() or stderr_path.exists():
-        return run_registry.log_byte_sizes(registry_root, run_id)
-    if raw_logs_archived(registry_root, run_id):
-        return archived_log_byte_sizes(registry_root, run_id)
-    return 0, 0
+    return run_registry.effective_log_byte_sizes(registry_root, run_id)
 
 
 def archived_log_warning(alias: str | None, run_id: str) -> str:
@@ -146,7 +111,7 @@ def is_eligible_for_archival(
     registry_root: Path,
     run_id: str,
     *,
-    config: dict[str, Any],
+    config: JsonObject,
     now: datetime | None = None,
 ) -> bool:
     if not retention_enabled(config):
@@ -251,7 +216,7 @@ def archive_run_raw_logs(registry_root: Path, run_id: str) -> bool:
 
 def run_retention_pass(
     registry_root: Path,
-    config: dict[str, Any],
+    config: JsonObject,
     *,
     now: datetime | None = None,
 ) -> dict[str, int]:
@@ -309,13 +274,13 @@ def read_log_output(
     tail: int | None,
     raw: bool,
 ) -> tuple[str, bool]:
-    from delegate_agent import rendering
+    from delegate_agent.log_output import read_log_output as read_live_log_output
 
     _validate_archive_member_name(log_name)
     run_path = run_registry.run_directory(registry_root, run_id)
     live_path = run_path / log_name
     if live_path.exists():
-        return rendering.read_log_output(live_path, tail=tail, raw=raw)
+        return read_live_log_output(live_path, tail=tail, raw=raw)
     archive_file = archive_path(registry_root, run_id)
     if not archive_file.exists():
         return "", False

@@ -7,11 +7,12 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, TextIO
+from typing import BinaryIO, TextIO
 
+from delegate_agent import config as delegate_config
 from delegate_agent import harness_events, run_registry
+from delegate_agent.json_types import JsonObject
 
 STDOUT_LOG = run_registry.STDOUT_LOG
 STDERR_LOG = run_registry.STDERR_LOG
@@ -68,15 +69,15 @@ def append_completion_report_instructions(prompt: str) -> str:
     return prompt + COMPLETION_REPORT_SUFFIX
 
 
-def write_manifest(run_path: Path, manifest: dict[str, Any]) -> None:
+def write_manifest(run_path: Path, manifest: JsonObject) -> None:
     run_registry.write_json_atomic(run_path / MANIFEST_FILE, manifest)
 
 
-def write_state(run_path: Path, state: dict[str, Any]) -> None:
+def write_state(run_path: Path, state: JsonObject) -> None:
     run_registry.write_json_atomic(run_path / STATE_FILE, state)
 
 
-def write_snapshot(run_path: Path, snapshot: dict[str, Any]) -> None:
+def write_snapshot(run_path: Path, snapshot: JsonObject) -> None:
     run_registry.write_json_atomic(run_path / SNAPSHOT_FILE, snapshot)
 
 
@@ -85,16 +86,8 @@ def open_events_log(run_path: Path) -> TextIO:
     return (run_path / EVENTS_JSONL).open("a", encoding="utf-8")
 
 
-def append_event(handle: TextIO, event: dict[str, Any]) -> None:
+def append_event(handle: TextIO, event: JsonObject) -> None:
     handle.write(json.dumps(event, sort_keys=True) + "\n")
-
-
-def snapshot_command(alias: str) -> str:
-    return f"delegate snapshot {alias}"
-
-
-def completion_report_command(alias: str) -> str:
-    return f"delegate run-output {alias} --completion-report"
 
 
 def completion_report_path(run_id: str) -> str:
@@ -116,9 +109,9 @@ def status_from_exit(exit_code: int) -> str:
     return "succeeded" if exit_code == 0 else "failed"
 
 
-def build_manifest(ctx: RunContext, argv: list[str]) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "schema": "delegate.manifest.v1",
+def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
+    payload: JsonObject = {
+        "schema": run_registry.MANIFEST_SCHEMA,
         "runId": ctx.run_id,
         "alias": ctx.alias,
         "harness": ctx.harness,
@@ -145,10 +138,10 @@ def build_state(
     stderr_bytes: int = 0,
     current: str | None = None,
     pid: int | None = None,
-) -> dict[str, Any]:
-    now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    state: dict[str, Any] = {
-        "schema": "delegate.state.v1",
+) -> JsonObject:
+    now = run_registry.utc_now_iso()
+    state: JsonObject = {
+        "schema": run_registry.STATE_SCHEMA,
         "runId": ctx.run_id,
         "alias": ctx.alias,
         "status": status,
@@ -172,11 +165,11 @@ def build_snapshot(
     accumulator: harness_events.StreamAccumulator,
     exit_code: int | None = None,
     completion_report_written: bool = False,
-) -> dict[str, Any]:
+) -> JsonObject:
     _assistant_text, assistant_meta = accumulator.bounded_assistant_text()
     recent_events, events_meta = accumulator.bounded_recent_events()
-    snapshot: dict[str, Any] = {
-        "schema": "delegate.snapshot.v1",
+    snapshot: JsonObject = {
+        "schema": run_registry.SNAPSHOT_SCHEMA,
         "ok": True,
         "alias": ctx.alias,
         "runId": ctx.run_id,
@@ -199,7 +192,7 @@ def build_snapshot(
         report_path = completion_report_path(ctx.run_id)
         snapshot["completionReport"] = {
             "path": report_path,
-            "command": completion_report_command(ctx.alias),
+            "command": run_registry.run_output_command(ctx.alias, completion_report=True),
         }
     return snapshot
 
@@ -262,8 +255,11 @@ def emit_bounded_text_summary(
     )
     print(f"alias: {ctx.alias}", file=stdout)
     print(f"status: {status}", file=stdout)
-    print(f"snapshot: {snapshot_command(ctx.alias)}", file=stdout)
-    print(f"completion report: {completion_report_command(ctx.alias)}", file=stdout)
+    print(f"snapshot: {run_registry.snapshot_command(ctx.alias)}", file=stdout)
+    print(
+        f"completion report: {run_registry.run_output_command(ctx.alias, completion_report=True)}",
+        file=stdout,
+    )
 
 
 def completion_json_payload(
@@ -275,8 +271,8 @@ def completion_json_payload(
     duration_ms: int,
     stdout_bytes: int,
     stderr_bytes: int,
-) -> dict[str, Any]:
-    payload: dict[str, Any] = {
+) -> JsonObject:
+    payload: JsonObject = {
         "ok": ok,
         "exitCode": exit_code,
         "alias": ctx.alias,
@@ -289,8 +285,10 @@ def completion_json_payload(
         "executionCwd": ctx.execution_cwd,
         "workspaceKind": ctx.workspace_kind,
         "durationMs": duration_ms,
-        "snapshotCommand": snapshot_command(ctx.alias),
-        "completionReportCommand": completion_report_command(ctx.alias),
+        "snapshotCommand": run_registry.snapshot_command(ctx.alias),
+        "completionReportCommand": run_registry.run_output_command(
+            ctx.alias, completion_report=True
+        ),
         "completionReportPath": completion_report_path(ctx.run_id),
         "stdoutBytes": stdout_bytes,
         "stderrBytes": stderr_bytes,
@@ -304,7 +302,7 @@ def completion_json_payload(
 
 
 def _drain_stream(
-    pipe: Any,
+    pipe: BinaryIO,
     log_path: Path,
     byte_counter: list[int],
     *,
@@ -321,7 +319,7 @@ def _drain_stream(
                 on_line(chunk.decode("utf-8", errors="replace"))
 
 
-def _join_drain_thread(thread: threading.Thread, pipe: Any | None) -> None:
+def _join_drain_thread(thread: threading.Thread, pipe: BinaryIO | None) -> None:
     thread.join(timeout=DRAIN_JOIN_TIMEOUT_SEC)
     if thread.is_alive() and pipe is not None:
         with contextlib.suppress(OSError):
@@ -337,8 +335,8 @@ def execute_tracked(
     json_mode: bool,
     stdout: TextIO,
     stderr: TextIO,
-    completion_report_mode: str = "markdown",
-) -> tuple[int, dict[str, Any] | None]:
+    completion_report_mode: str = delegate_config.COMPLETION_REPORT_MODE_MARKDOWN,
+) -> tuple[int, JsonObject | None]:
     run_path = run_registry.run_directory(ctx.registry_root, ctx.run_id)
     run_path.mkdir(parents=True, exist_ok=True)
     write_manifest(run_path, build_manifest(ctx, argv))
@@ -435,7 +433,7 @@ def execute_tracked(
     status = status_from_exit(exit_code)
     if accumulator.completion_text:
         report_source = accumulator.completion_text
-    elif completion_report_mode == "markdown":
+    elif completion_report_mode == delegate_config.COMPLETION_REPORT_MODE_MARKDOWN:
         report_source = accumulator.assistant_text
     else:
         report_source = ""

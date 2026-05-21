@@ -11,7 +11,9 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+
+from delegate_agent import archived_logs
+from delegate_agent.json_types import JsonObject, JsonValue
 
 DELEGATE_DIR_NAME = ".delegate"
 GIT_EXCLUDE_ENTRY = ".delegate/"
@@ -25,6 +27,11 @@ STATE_FILE = "state.json"
 SNAPSHOT_FILE = "snapshot.json"
 COMPLETION_REPORT_FILE = "completion-report.md"
 INDEX_VERSION = 1
+MANIFEST_SCHEMA = "delegate.manifest.v1"
+STATE_SCHEMA = "delegate.state.v1"
+SNAPSHOT_SCHEMA = "delegate.snapshot.v1"
+RUNS_SCHEMA = "delegate.runs.v1"
+RUN_OUTPUT_SCHEMA = "delegate.run-output.v1"
 REGISTRY_LOCK_NAME = ".registry.lock"
 REGISTRY_LOCK_TIMEOUT_SECONDS = 30.0
 REGISTRY_LOCK_POLL_SECONDS = 0.05
@@ -56,15 +63,15 @@ def index_path(registry_root: Path) -> Path:
     return registry_root / "index.json"
 
 
-def empty_index() -> dict[str, Any]:
+def empty_index() -> JsonObject:
     return {"version": INDEX_VERSION, "aliases": {}, "runs": {}}
 
 
-def load_index(registry_root: Path) -> dict[str, Any]:
+def load_index(registry_root: Path) -> JsonObject:
     path = index_path(registry_root)
     if not path.exists():
         return empty_index()
-    data = json.loads(path.read_text())
+    data: JsonValue = json.loads(path.read_text())
     if not isinstance(data, dict):
         raise ValueError("index.json root must be an object")
     aliases = data.get("aliases")
@@ -78,14 +85,14 @@ def load_index(registry_root: Path) -> dict[str, Any]:
     }
 
 
-def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+def write_json_atomic(path: Path, payload: JsonObject) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(path.suffix + ".tmp")
     temp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     os.replace(temp, path)
 
 
-def save_index(registry_root: Path, index: dict[str, Any]) -> None:
+def save_index(registry_root: Path, index: JsonObject) -> None:
     write_json_atomic(index_path(registry_root), index)
 
 
@@ -178,7 +185,7 @@ def register_run(
     *,
     harness: str,
     run_id: str | None = None,
-    metadata: dict[str, Any] | None = None,
+    metadata: JsonObject | None = None,
 ) -> tuple[str, str]:
     run_id = run_id or generate_run_id()
     if not RUN_ID_RE.match(run_id):
@@ -196,7 +203,7 @@ def register_run(
     return run_id, alias
 
 
-def lookup_run_id(index: dict[str, Any], handle: str) -> str | None:
+def lookup_run_id(index: JsonObject, handle: str) -> str | None:
     if handle in index.get("runs", {}):
         return handle
     aliases = index.get("aliases", {})
@@ -205,7 +212,7 @@ def lookup_run_id(index: dict[str, Any], handle: str) -> str | None:
     return None
 
 
-def lookup_alias(index: dict[str, Any], alias: str) -> str | None:
+def lookup_alias(index: JsonObject, alias: str) -> str | None:
     run_id = index.get("aliases", {}).get(alias)
     return run_id if isinstance(run_id, str) else None
 
@@ -252,11 +259,11 @@ class ResolveResult:
     suggestions: tuple[str, ...]
 
 
-def read_json_object(path: Path) -> dict[str, Any] | None:
+def read_json_object(path: Path) -> JsonObject | None:
     if not path.exists():
         return None
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data: JsonValue = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
     return data if isinstance(data, dict) else None
@@ -289,7 +296,7 @@ def process_alive(pid: int | None) -> bool | None:
     return True
 
 
-def effective_status(state: dict[str, Any] | None) -> str:
+def effective_status(state: JsonObject | None) -> str:
     if not state:
         return "unknown"
     status = state.get("status")
@@ -306,7 +313,7 @@ def effective_status(state: dict[str, Any] | None) -> str:
     return STATUS_RUNNING
 
 
-def suggest_handles(index: dict[str, Any], handle: str, *, limit: int = 8) -> list[str]:
+def suggest_handles(index: JsonObject, handle: str, *, limit: int = 8) -> list[str]:
     aliases = sorted(index.get("aliases", {}).keys())
     if not aliases:
         return []
@@ -327,7 +334,7 @@ def suggest_handles(index: dict[str, Any], handle: str, *, limit: int = 8) -> li
     return ordered
 
 
-def resolve_handle(index: dict[str, Any], handle: str) -> ResolveResult:
+def resolve_handle(index: JsonObject, handle: str) -> ResolveResult:
     run_id = lookup_run_id(index, handle)
     if run_id is None:
         return ResolveResult(None, None, tuple(suggest_handles(index, handle)))
@@ -341,15 +348,15 @@ def resolve_handle(index: dict[str, Any], handle: str) -> ResolveResult:
     return ResolveResult(run_id, alias, ())
 
 
-def load_run_state(registry_root: Path, run_id: str) -> dict[str, Any] | None:
+def load_run_state(registry_root: Path, run_id: str) -> JsonObject | None:
     return read_json_object(run_directory(registry_root, run_id) / STATE_FILE)
 
 
-def load_run_snapshot(registry_root: Path, run_id: str) -> dict[str, Any] | None:
+def load_run_snapshot(registry_root: Path, run_id: str) -> JsonObject | None:
     return read_json_object(run_directory(registry_root, run_id) / SNAPSHOT_FILE)
 
 
-def load_run_manifest(registry_root: Path, run_id: str) -> dict[str, Any] | None:
+def load_run_manifest(registry_root: Path, run_id: str) -> JsonObject | None:
     return read_json_object(run_directory(registry_root, run_id) / MANIFEST_FILE)
 
 
@@ -366,9 +373,43 @@ def log_byte_sizes(registry_root: Path, run_id: str) -> tuple[int, int]:
     return stdout_bytes, stderr_bytes
 
 
+def _state_archived_log_byte_sizes(state: JsonObject | None) -> tuple[int, int] | None:
+    return archived_logs.state_log_byte_sizes(state)
+
+
+def _archive_path(registry_root: Path, run_id: str) -> Path:
+    return archived_logs.archive_path(registry_root, run_id)
+
+
+def _archived_log_byte_sizes(registry_root: Path, run_id: str) -> tuple[int, int]:
+    state_sizes = _state_archived_log_byte_sizes(load_run_state(registry_root, run_id))
+    if state_sizes is not None:
+        return state_sizes
+    return archived_logs.archive_log_byte_sizes(
+        _archive_path(registry_root, run_id),
+        stdout_log=STDOUT_LOG,
+        stderr_log=STDERR_LOG,
+    )
+
+
+def raw_logs_archived(registry_root: Path, run_id: str) -> bool:
+    return _archive_path(registry_root, run_id).exists()
+
+
+def effective_log_byte_sizes(registry_root: Path, run_id: str) -> tuple[int, int]:
+    run_path = run_directory(registry_root, run_id)
+    stdout_path = run_path / STDOUT_LOG
+    stderr_path = run_path / STDERR_LOG
+    if stdout_path.exists() or stderr_path.exists():
+        return log_byte_sizes(registry_root, run_id)
+    if raw_logs_archived(registry_root, run_id):
+        return _archived_log_byte_sizes(registry_root, run_id)
+    return 0, 0
+
+
 def activity_timestamp(
-    state: dict[str, Any] | None,
-    manifest: dict[str, Any] | None,
+    state: JsonObject | None,
+    manifest: JsonObject | None,
     run_id: str | None = None,
 ) -> str:
     if state:
@@ -386,14 +427,14 @@ def activity_timestamp(
 
 
 def activity_datetime(
-    state: dict[str, Any] | None,
-    manifest: dict[str, Any] | None,
+    state: JsonObject | None,
+    manifest: JsonObject | None,
     run_id: str | None = None,
 ) -> datetime | None:
     return parse_utc_timestamp(activity_timestamp(state, manifest, run_id))
 
 
-def alias_for_run(index: dict[str, Any], run_id: str) -> str | None:
+def alias_for_run(index: JsonObject, run_id: str) -> str | None:
     entry = index.get("runs", {}).get(run_id)
     if isinstance(entry, dict):
         alias = entry.get("alias")
@@ -408,16 +449,15 @@ def alias_for_run(index: dict[str, Any], run_id: str) -> str | None:
 def build_run_summary(
     registry_root: Path,
     run_id: str,
-    index_entry: dict[str, Any],
-) -> dict[str, Any]:
+    index_entry: JsonObject,
+) -> JsonObject:
     state = load_run_state(registry_root, run_id)
     manifest = load_run_manifest(registry_root, run_id)
-    from delegate_agent import retention as delegate_retention
 
-    stdout_bytes, stderr_bytes = delegate_retention.effective_log_byte_sizes(registry_root, run_id)
+    stdout_bytes, stderr_bytes = effective_log_byte_sizes(registry_root, run_id)
     alias = index_entry.get("alias")
     harness = index_entry.get("harness")
-    summary: dict[str, Any] = {
+    summary: JsonObject = {
         "runId": run_id,
         "alias": alias if isinstance(alias, str) else None,
         "harness": harness if isinstance(harness, str) else None,
@@ -436,15 +476,15 @@ def build_run_summary(
 
 def list_run_summaries(
     registry_root: Path,
-    index: dict[str, Any],
+    index: JsonObject,
     *,
     active: bool = False,
     harness: str | None = None,
     limit: int = DEFAULT_RUNS_LIMIT,
-) -> list[dict[str, Any]]:
+) -> list[JsonObject]:
     if limit < 1:
         raise ValueError("limit must be at least 1")
-    summaries: list[dict[str, Any]] = []
+    summaries: list[JsonObject] = []
     for run_id, entry in index.get("runs", {}).items():
         if not isinstance(entry, dict):
             continue
@@ -468,9 +508,7 @@ def timestamp_from_run_id(run_id: str) -> str:
     return f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}T{raw[9:11]}:{raw[11:13]}:{raw[13:15]}Z"
 
 
-def latest_run_id_for_harness(
-    registry_root: Path, index: dict[str, Any], harness: str
-) -> str | None:
+def latest_run_id_for_harness(registry_root: Path, index: JsonObject, harness: str) -> str | None:
     matches: list[tuple[str, str]] = []
     for run_id, entry in index.get("runs", {}).items():
         if not isinstance(entry, dict) or entry.get("harness") != harness:

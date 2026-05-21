@@ -12,9 +12,8 @@ import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, TextIO
+from typing import TextIO
 
 try:
     from delegate_agent import config as delegate_config
@@ -22,6 +21,7 @@ try:
     from delegate_agent import retention as delegate_retention
     from delegate_agent import run_registry
     from delegate_agent import runner as delegate_runner
+    from delegate_agent.json_types import JsonObject, JsonValue
 except ModuleNotFoundError:  # pragma: no cover - direct cli.py invocation in tests
     _src_root = Path(__file__).resolve().parent.parent
     if str(_src_root) not in sys.path:
@@ -31,6 +31,7 @@ except ModuleNotFoundError:  # pragma: no cover - direct cli.py invocation in te
     from delegate_agent import retention as delegate_retention
     from delegate_agent import run_registry
     from delegate_agent import runner as delegate_runner
+    from delegate_agent.json_types import JsonObject, JsonValue
 
 
 VERSION = "0.1.2"
@@ -52,7 +53,7 @@ CURSOR_SAFE_REVIEW_PREFIX = (
     "Report findings with file path, line reference, severity, and rationale. "
     "If a write is blocked, do not retry it.\n\n"
 )
-CURSOR_SAFE_CLI_CONFIG: dict[str, Any] = {
+CURSOR_SAFE_CLI_CONFIG: JsonObject = {
     "version": 1,
     "permissions": {
         "allow": [
@@ -81,7 +82,7 @@ CURSOR_SAFE_CLI_CONFIG: dict[str, Any] = {
 
 
 class DelegateError(Exception):
-    def __init__(self, error: str, message: str, exit_code: int = EXIT_USAGE):
+    def __init__(self, error: str, message: str, exit_code: int = EXIT_USAGE) -> None:
         super().__init__(message)
         self.error = error
         self.message = message
@@ -174,15 +175,15 @@ def load_config(
     path: Path | None = None,
     *,
     workspace: Path | None = None,
-    cli_overrides: dict[str, Any] | None = None,
-) -> tuple[dict[str, Any], str]:
+    cli_overrides: JsonObject | None = None,
+) -> tuple[JsonObject, str]:
     try:
         return delegate_config.load_config(path, workspace=workspace, cli_overrides=cli_overrides)
     except delegate_config.ConfigError as exc:
         raise DelegateError(exc.error, exc.message) from exc
 
 
-def validate_config(config: dict[str, Any]) -> None:
+def validate_config(config: JsonObject) -> None:
     try:
         delegate_config.validate_config(config)
     except delegate_config.ConfigError as exc:
@@ -239,7 +240,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             i += 1
             continue
         if token == "--no-completion-report":
-            completion_report = "none"
+            completion_report = delegate_config.COMPLETION_REPORT_MODE_NONE
             i += 1
             continue
         if token == "--completion-report":
@@ -248,7 +249,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
                     "missing_completion_report", "--completion-report requires markdown or none."
                 )
             completion_report = argv[i + 1]
-            if completion_report not in ("markdown", "none"):
+            if completion_report not in delegate_config.COMPLETION_REPORT_MODES:
                 raise DelegateError(
                     "invalid_completion_report",
                     "--completion-report must be markdown or none.",
@@ -674,7 +675,7 @@ def registry_for_workspace(workspace: ResolvedWorkspace) -> Path:
     return run_registry.ensure_registry(Path(workspace.path), workspace_kind=workspace.kind)
 
 
-def maybe_run_retention_pass(registry_root: Path, config: dict[str, Any]) -> None:
+def maybe_run_retention_pass(registry_root: Path, config: JsonObject) -> None:
     delegate_retention.run_retention_pass(registry_root, config)
 
 
@@ -748,6 +749,32 @@ def emit_runs(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout: TextI
     return EXIT_OK
 
 
+def _add_log_output_section(
+    *,
+    registry_root: Path,
+    run_id: str,
+    log_name: str,
+    section_name: str,
+    tail: int | None,
+    raw: bool,
+    sections: JsonObject,
+    text_sections: dict[str, str],
+) -> None:
+    content, truncated = delegate_retention.read_log_output(
+        registry_root,
+        run_id,
+        log_name,
+        tail=tail,
+        raw=raw,
+    )
+    sections[section_name] = {
+        "bytes": delegate_retention.log_file_byte_size(registry_root, run_id, log_name),
+        "truncated": truncated,
+        "archived": delegate_retention.raw_logs_archived(registry_root, run_id),
+    }
+    text_sections[section_name] = content
+
+
 def emit_run_output(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout: TextIO) -> int:
     registry_root = registry_for_workspace(workspace)
     run_id, alias = resolve_run_target(
@@ -756,7 +783,7 @@ def emit_run_output(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout:
         latest_harness=None,
     )
     run_path = run_registry.run_directory(registry_root, run_id)
-    sections: dict[str, Any] = {}
+    sections: JsonObject = {}
     text_sections: dict[str, str] = {}
     if parsed.run_output_completion_report:
         report_path = run_path / run_registry.COMPLETION_REPORT_FILE
@@ -772,37 +799,27 @@ def emit_run_output(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout:
     if log_flags:
         try:
             if parsed.run_output_stdout or parsed.run_output_raw:
-                content, truncated = delegate_retention.read_log_output(
-                    registry_root,
-                    run_id,
-                    run_registry.STDOUT_LOG,
+                _add_log_output_section(
+                    registry_root=registry_root,
+                    run_id=run_id,
+                    log_name=run_registry.STDOUT_LOG,
+                    section_name="stdout",
                     tail=parsed.run_output_tail,
                     raw=parsed.run_output_raw,
+                    sections=sections,
+                    text_sections=text_sections,
                 )
-                sections["stdout"] = {
-                    "bytes": delegate_retention.log_file_byte_size(
-                        registry_root, run_id, run_registry.STDOUT_LOG
-                    ),
-                    "truncated": truncated,
-                    "archived": delegate_retention.raw_logs_archived(registry_root, run_id),
-                }
-                text_sections["stdout"] = content
             if parsed.run_output_stderr or parsed.run_output_raw:
-                content, truncated = delegate_retention.read_log_output(
-                    registry_root,
-                    run_id,
-                    run_registry.STDERR_LOG,
+                _add_log_output_section(
+                    registry_root=registry_root,
+                    run_id=run_id,
+                    log_name=run_registry.STDERR_LOG,
+                    section_name="stderr",
                     tail=parsed.run_output_tail,
                     raw=parsed.run_output_raw,
+                    sections=sections,
+                    text_sections=text_sections,
                 )
-                sections["stderr"] = {
-                    "bytes": delegate_retention.log_file_byte_size(
-                        registry_root, run_id, run_registry.STDERR_LOG
-                    ),
-                    "truncated": truncated,
-                    "archived": delegate_retention.raw_logs_archived(registry_root, run_id),
-                }
-                text_sections["stderr"] = content
         except ValueError as exc:
             raise DelegateError("missing_tail", str(exc)) from exc
     if not parsed.run_output_no_redact:
@@ -815,7 +832,7 @@ def emit_run_output(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout:
             for key, text in text_sections.items()
         }
     if parsed.json_mode:
-        merged_sections: dict[str, Any] = {}
+        merged_sections: JsonObject = {}
         for key, meta in sections.items():
             entry = dict(meta)
             if key in text_sections:
@@ -891,13 +908,15 @@ def resolve_prompt(
     if has_direct:
         return validate_prompt(direct)
     if has_prompt_file:
-        path = Path(prompt_file or "").expanduser()
+        assert prompt_file is not None
+        path = Path(prompt_file).expanduser()
         try:
             return validate_prompt(path.read_text())
         except FileNotFoundError:
             raise DelegateError("prompt_file_not_found", f"Prompt file not found: {path}") from None
     if has_stdin:
-        return validate_prompt(stdin_text or "")
+        assert stdin_text is not None
+        return validate_prompt(stdin_text)
     raise DelegateError(
         "missing_prompt", "Missing prompt; pass prompt text, --prompt-file, or stdin."
     )
@@ -926,21 +945,21 @@ def validate_prompt(prompt: str) -> str:
     return prompt
 
 
-def resolve_completion_report_mode(parsed: ParsedCommand, config: dict[str, Any]) -> str:
+def resolve_completion_report_mode(parsed: ParsedCommand, config: JsonObject) -> str:
     if parsed.pass_through:
-        return "none"
+        return delegate_config.COMPLETION_REPORT_MODE_NONE
     if parsed.completion_report is not None:
         return parsed.completion_report
     return delegate_config.completion_report_default_mode(config)
 
 
 def effective_prompt(prompt: str, *, completion_report_mode: str) -> str:
-    if completion_report_mode == "markdown":
+    if completion_report_mode == delegate_config.COMPLETION_REPORT_MODE_MARKDOWN:
         return delegate_runner.append_completion_report_instructions(prompt)
     return prompt
 
 
-def request_from_parsed(parsed: ParsedCommand, config: dict[str, Any], stdin: TextIO) -> Request:
+def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO) -> Request:
     validate_config(config)
     if parsed.subcommand == "run":
         return request_from_input_json(parsed, config)
@@ -962,10 +981,11 @@ def request_from_parsed(parsed: ParsedCommand, config: dict[str, Any], stdin: Te
     )
 
 
-def request_from_input_json(parsed: ParsedCommand, config: dict[str, Any]) -> Request:
-    path = Path(parsed.input_json or "").expanduser()
+def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Request:
+    assert parsed.input_json is not None
+    path = Path(parsed.input_json).expanduser()
     try:
-        raw = json.loads(path.read_text())
+        raw: JsonValue = json.loads(path.read_text())
     except FileNotFoundError:
         raise DelegateError("input_json_not_found", f"Input JSON file not found: {path}") from None
     except json.JSONDecodeError as exc:
@@ -1019,7 +1039,7 @@ def build_request(
     model_alias: str | None,
     workspace: ResolvedWorkspace | str,
     prompt: str,
-    config: dict[str, Any],
+    config: JsonObject,
     dry_run: bool,
     *,
     stream_capture: bool = True,
@@ -1041,7 +1061,8 @@ def build_request(
         models = droid["models"]
         if model_alias not in models:
             raise DelegateError("invalid_alias", f"Unknown Droid model alias: {model_alias}")
-        model = models[model_alias or ""]
+        assert model_alias is not None
+        model = models[model_alias]
         argv = build_droid_argv(
             droid["binary"], mode, resolved.path, model, prompt, stream_capture=stream_capture
         )
@@ -1280,18 +1301,8 @@ def build_droid_argv(
     return argv
 
 
-def json_workspace_fields(request: Request) -> dict[str, Any]:
-    if request.safe_isolation is not None:
-        return {
-            "cwd": request.safe_isolation.source_workspace,
-            "executionCwd": request.safe_isolation.execution_workspace,
-            "isolatedWorkspace": True,
-        }
-    return {"cwd": request.workspace}
-
-
-def dry_run_payload(request: Request) -> dict[str, Any]:
-    payload: dict[str, Any] = {
+def dry_run_payload(request: Request) -> JsonObject:
+    payload: JsonObject = {
         "ok": True,
         "dryRun": True,
         "cwd": request.workspace,
@@ -1343,7 +1354,7 @@ def make_run_context(
         execution_cwd=execution_cwd,
         workspace_kind=source_workspace.kind,
         isolated_workspace=request.safe_isolation is not None,
-        started_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        started_at=run_registry.utc_now_iso(),
     )
 
 
@@ -1356,7 +1367,7 @@ def execute_request(
     source_workspace: ResolvedWorkspace,
     stdout: TextIO,
     stderr: TextIO,
-) -> tuple[int, dict[str, Any] | None]:
+) -> tuple[int, JsonObject | None]:
     ensure_binary(request.argv)
     with cursor_safe_isolated_request(request) as isolated_request:
         if pass_through:
@@ -1405,7 +1416,7 @@ def execute_request(
         )
 
 
-def models_payload(config: dict[str, Any], config_source: str) -> dict[str, Any]:
+def models_payload(config: JsonObject, config_source: str) -> JsonObject:
     return {
         "ok": True,
         "configSource": config_source,
@@ -1417,7 +1428,7 @@ def models_payload(config: dict[str, Any], config_source: str) -> dict[str, Any]
     }
 
 
-def describe_payload(config: dict[str, Any], config_source: str) -> dict[str, Any]:
+def describe_payload(config: JsonObject, config_source: str) -> JsonObject:
     return {
         "ok": True,
         "version": VERSION,
@@ -1433,7 +1444,7 @@ def describe_payload(config: dict[str, Any], config_source: str) -> dict[str, An
             "--completion-report",
             "--no-completion-report",
         ],
-        "completionReportModes": ["markdown", "none"],
+        "completionReportModes": list(delegate_config.COMPLETION_REPORT_MODES),
         "passThrough": "Opt-in raw child stdout/stderr streaming; incompatible with --json.",
         "cwdResolution": "Git directories resolve to the repository root; non-Git directories are used directly.",
         "modeMapping": {
@@ -1501,7 +1512,7 @@ def describe_payload(config: dict[str, Any], config_source: str) -> dict[str, An
     }
 
 
-def emit_models(config: dict[str, Any], config_source: str, json_mode: bool, stdout: TextIO) -> int:
+def emit_models(config: JsonObject, config_source: str, json_mode: bool, stdout: TextIO) -> int:
     if json_mode:
         delegate_rendering.print_json(models_payload(config, config_source), stdout)
         return EXIT_OK
@@ -1517,9 +1528,7 @@ def emit_models(config: dict[str, Any], config_source: str, json_mode: bool, std
     return EXIT_OK
 
 
-def emit_describe(
-    config: dict[str, Any], config_source: str, json_mode: bool, stdout: TextIO
-) -> int:
+def emit_describe(config: JsonObject, config_source: str, json_mode: bool, stdout: TextIO) -> int:
     payload = describe_payload(config, config_source)
     if json_mode:
         delegate_rendering.print_json(payload, stdout)

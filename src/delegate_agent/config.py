@@ -4,16 +4,23 @@ import copy
 import json
 import os
 from pathlib import Path
-from typing import Any
+
+from delegate_agent.json_types import JsonObject, JsonValue
 
 DEFAULT_CONFIG_PATH = Path.home() / ".delegate" / "config.json"
 WORKSPACE_CONFIG_RELATIVE = Path(".delegate") / "config.json"
 CONFIG_ENV = "DELEGATE_CONFIG"
+COMPLETION_REPORT_MODE_MARKDOWN = "markdown"
+COMPLETION_REPORT_MODE_NONE = "none"
+COMPLETION_REPORT_MODES = (
+    COMPLETION_REPORT_MODE_MARKDOWN,
+    COMPLETION_REPORT_MODE_NONE,
+)
 
-DEFAULT_CONFIG: dict[str, Any] = {
+DEFAULT_CONFIG: JsonObject = {
     "tracking": {
         "completionReport": {
-            "defaultMode": "markdown",
+            "defaultMode": COMPLETION_REPORT_MODE_MARKDOWN,
         },
         "retention": {
             "enabled": True,
@@ -43,13 +50,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
 
 class ConfigError(Exception):
-    def __init__(self, error: str, message: str):
+    def __init__(self, error: str, message: str) -> None:
         super().__init__(message)
         self.error = error
         self.message = message
 
 
-def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+def deep_merge(base: JsonObject, override: JsonObject) -> JsonObject:
     merged = copy.deepcopy(base)
     for key, value in override.items():
         if isinstance(value, dict) and isinstance(merged.get(key), dict):
@@ -67,9 +74,9 @@ def workspace_config_path(workspace: Path) -> Path:
     return workspace / WORKSPACE_CONFIG_RELATIVE
 
 
-def read_config_file(path: Path) -> dict[str, Any]:
+def read_config_file(path: Path) -> JsonObject:
     try:
-        loaded = json.loads(path.read_text())
+        loaded: JsonValue = json.loads(path.read_text())
     except json.JSONDecodeError as exc:
         raise ConfigError("invalid_config_json", f"Invalid JSON in {path}: {exc}") from exc
     if not isinstance(loaded, dict):
@@ -81,8 +88,8 @@ def load_config(
     path: Path | None = None,
     *,
     workspace: Path | None = None,
-    cli_overrides: dict[str, Any] | None = None,
-) -> tuple[dict[str, Any], str]:
+    cli_overrides: JsonObject | None = None,
+) -> tuple[JsonObject, str]:
     """Load config with precedence: cli > DELEGATE_CONFIG > workspace > global > embedded.
 
     When DELEGATE_CONFIG is set, the path must exist; a missing file raises ConfigError
@@ -124,7 +131,7 @@ def load_config(
     return merged, primary_source
 
 
-def validate_config(config: dict[str, Any]) -> None:
+def validate_config(config: JsonObject) -> None:
     cursor = config.get("cursor")
     droid = config.get("droid")
     if not isinstance(cursor, dict):
@@ -170,7 +177,7 @@ def validate_config(config: dict[str, Any]) -> None:
                     "invalid_tracking_config", "tracking.completionReport must be an object."
                 )
             default_mode = completion.get("defaultMode")
-            if default_mode is not None and default_mode not in ("markdown", "none"):
+            if default_mode is not None and default_mode not in COMPLETION_REPORT_MODES:
                 raise ConfigError(
                     "invalid_tracking_config",
                     "tracking.completionReport.defaultMode must be markdown or none.",
@@ -194,12 +201,12 @@ def validate_config(config: dict[str, Any]) -> None:
                 )
 
 
-def completion_report_default_mode(config: dict[str, Any]) -> str:
+def completion_report_default_mode(config: JsonObject) -> str:
     tracking = config.get("tracking")
     if not isinstance(tracking, dict):
-        return "markdown"
+        return COMPLETION_REPORT_MODE_MARKDOWN
     completion = tracking.get("completionReport")
     if not isinstance(completion, dict):
-        return "markdown"
-    mode = completion.get("defaultMode", "markdown")
-    return mode if mode in ("markdown", "none") else "markdown"
+        return COMPLETION_REPORT_MODE_MARKDOWN
+    mode = completion.get("defaultMode", COMPLETION_REPORT_MODE_MARKDOWN)
+    return mode if mode in COMPLETION_REPORT_MODES else COMPLETION_REPORT_MODE_MARKDOWN
