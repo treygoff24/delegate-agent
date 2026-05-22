@@ -53,6 +53,12 @@ CURSOR_SAFE_REVIEW_PREFIX = (
     "Report findings with file path, line reference, severity, and rationale. "
     "If a write is blocked, do not retry it.\n\n"
 )
+CODEX_SAFE_REVIEW_PREFIX = (
+    "Delegate Codex safe mode (code review/investigation only): "
+    "Do not edit, create, or delete files. "
+    "Report findings with file path, line reference, severity, and rationale. "
+    "If a write is blocked, do not retry it.\n\n"
+)
 # Project .cursor/cli.json is permissions-only; global cli-config examples may
 # include other top-level keys such as "version", but Cursor rejects them here.
 CURSOR_SAFE_CLI_CONFIG: JsonObject = {
@@ -1001,8 +1007,24 @@ def resolve_completion_report_mode(parsed: ParsedCommand, config: JsonObject) ->
     return delegate_config.completion_report_default_mode(config)
 
 
-def effective_prompt(prompt: str, *, completion_report_mode: str) -> str:
+def effective_prompt(
+    prompt: str,
+    *,
+    engine: str = "",
+    mode: str = "",
+    completion_report_mode: str,
+) -> str:
     prompt = delegate_runner.prepend_skill_review_instructions(prompt)
+    if engine == "codex" and mode == MODE_SAFE:
+        # Inject Codex safe prefix immediately after the skill-review block.
+        # Anchor to the literal SKILL_REVIEW_PREFIX if present (simple suffix match).
+        marker = delegate_runner.SKILL_REVIEW_PREFIX
+        if marker in prompt:
+            idx = prompt.find(marker) + len(marker)
+            prompt = prompt[:idx] + CODEX_SAFE_REVIEW_PREFIX + prompt[idx:]
+        else:
+            # Fallback safety: prepend Codex prefix after skill-review wrapping.
+            prompt = CODEX_SAFE_REVIEW_PREFIX + prompt
     if completion_report_mode == delegate_config.COMPLETION_REPORT_MODE_MARKDOWN:
         return delegate_runner.append_completion_report_instructions(prompt)
     return prompt
@@ -1017,7 +1039,9 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
     workspace = resolve_workspace(parsed.cwd)
     prompt = resolve_prompt(parsed.prompt_parts, parsed.prompt_file, stdin)
     completion_report_mode = resolve_completion_report_mode(parsed, config)
-    prompt = effective_prompt(prompt, completion_report_mode=completion_report_mode)
+    prompt = effective_prompt(
+        prompt, engine=parsed.engine, mode=parsed.mode, completion_report_mode=completion_report_mode
+    )
     return build_request(
         parsed.engine,
         parsed.mode,
@@ -1078,7 +1102,10 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
     workspace = resolve_workspace(parsed.cwd, json_cwd)
     completion_report_mode = resolve_completion_report_mode(parsed, config)
     prompt = effective_prompt(
-        validate_prompt(prompt), completion_report_mode=completion_report_mode
+        validate_prompt(prompt),
+        engine=engine,
+        mode=mode,
+        completion_report_mode=completion_report_mode,
     )
     return build_request(
         engine,
@@ -1164,6 +1191,23 @@ def replace_argv_workspace(argv: list[str], workspace: str) -> list[str]:
     return updated
 
 
+def replace_argv_after_flag(argv: list[str], flag: str, value: str) -> list[str]:
+    updated = list(argv)
+    for index, token in enumerate(updated):
+        if token == flag and index + 1 < len(updated):
+            updated[index + 1] = value
+            return updated
+    return updated
+
+
+def replace_safe_workspace_arg(request: Request, isolated_workspace: str) -> list[str]:
+    if request.engine == "cursor":
+        return replace_argv_after_flag(request.argv, "--workspace", isolated_workspace)
+    if request.engine == "codex":
+        return replace_argv_after_flag(request.argv, "--cd", isolated_workspace)
+    return list(request.argv)
+
+
 def write_cursor_safe_project_config(workspace: Path) -> None:
     config_dir = workspace / ".cursor"
     config_dir.mkdir(parents=True, exist_ok=True)
@@ -1240,7 +1284,7 @@ def discard_git_safe_workspace(
 
 
 def create_git_safe_workspace(git_root: str) -> tuple[str, str]:
-    temp_base = tempfile.mkdtemp(prefix="delegate-cursor-safe-")
+    temp_base = tempfile.mkdtemp(prefix="delegate-safe-")
     worktree_path = str(Path(temp_base) / "wt")
     worktree_added = False
     try:
@@ -1266,7 +1310,7 @@ def create_git_safe_workspace(git_root: str) -> tuple[str, str]:
 
 
 def create_directory_safe_workspace(source_workspace: str) -> tuple[str, str]:
-    temp_base = tempfile.mkdtemp(prefix="delegate-cursor-safe-")
+    temp_base = tempfile.mkdtemp(prefix="delegate-safe-")
     copy_path = str(Path(temp_base) / "copy")
     try:
         shutil.copytree(
@@ -1323,6 +1367,41 @@ def cursor_safe_isolated_request(request: Request) -> Iterator[Request]:
             isolated_workspace,
             request.prompt,
             replace_argv_workspace(request.argv, isolated_workspace),
+            request.model,
+            request.dry_run,
+            request.workspace_kind,
+            safe_isolation=isolation,
+        )
+    finally:
+        cleanup_cursor_safe_workspace(
+            git_root=git_root,
+            isolated_workspace=isolated_workspace,
+            temp_base=temp_base,
+        )
+
+
+@contextmanager
+def safe_isolated_request(request: Request) -> Iterator[Request]:
+    if request.mode != MODE_SAFE or request.engine not in ("cursor", "codex"):
+        yield request
+        return
+
+    git_root = request.workspace if request.workspace_kind == "git" else None
+    if git_root is not None:
+        isolated_workspace, temp_base = create_git_safe_workspace(git_root)
+    else:
+        isolated_workspace, temp_base = create_directory_safe_workspace(request.workspace)
+
+    isolation = SafeIsolationContext(request.workspace, isolated_workspace)
+    try:
+        if request.engine == "cursor":
+            write_cursor_safe_project_config(Path(isolated_workspace))
+        yield Request(
+            request.engine,
+            request.mode,
+            isolated_workspace,
+            request.prompt,
+            replace_safe_workspace_arg(request, isolated_workspace),
             request.model,
             request.dry_run,
             request.workspace_kind,
@@ -1439,7 +1518,7 @@ def dry_run_payload(request: Request) -> JsonObject:
         "model": request.model,
         "argv": request.argv,
     }
-    if request.engine == "cursor" and request.mode == MODE_SAFE:
+    if request.engine in ("cursor", "codex") and request.mode == MODE_SAFE:
         payload["isolatedWorkspace"] = True
         payload["isolation"] = (
             "Execution uses a temporary detached git worktree or directory copy; "
@@ -1496,7 +1575,7 @@ def execute_request(
     stderr: TextIO,
 ) -> tuple[int, JsonObject | None]:
     ensure_binary(request.argv)
-    with cursor_safe_isolated_request(request) as isolated_request:
+    with safe_isolated_request(request) as isolated_request:
         if pass_through:
             if json_mode:
                 raise DelegateError(
@@ -1790,14 +1869,24 @@ Rules for agents:
   - Inside Git, --cwd resolves to the repo root; outside Git, the directory is used directly.
   - Always review diffs after work mode when Git is available; outside Git, manually review changed files.
   - Do not use delegate for production deploys or repository publishing unless the operator explicitly asks.
-  - After a tracked run, use delegate snapshot/runs/run-output; do not tail .delegate log files.
+  - Launch normally; do not pipe delegate launches through tail just to suppress noise.
+  - After a tracked run, use delegate snapshot/runs/run-output; do not tail launch output or .delegate log files.
   - Default output is bounded; use --pass-through only when raw harness streaming is required.
+  - If you intentionally pipe delegate output in a shell script, use set -o pipefail.
 
 Run inspection:
   delegate snapshot <alias-or-runId>
   delegate runs --active
   delegate run-output <alias> --completion-report
   delegate run-output <alias> --stderr --tail 100
+
+Avoid:
+  delegate cursor work --prompt-file task.md 2>&1 | tail -20
+
+Prefer:
+  delegate cursor work --prompt-file task.md
+  delegate snapshot cursor
+  delegate run-output cursor --completion-report
 
 Discovery:
   delegate --json models
