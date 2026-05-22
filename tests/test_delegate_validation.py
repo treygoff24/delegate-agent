@@ -330,3 +330,27 @@ class ValidationTests(unittest.TestCase):
         )
         policy = config_mod.effective_policy(loaded, engine="codex", mode="work")
         self.assertFalse(policy["bypassHookTrust"])
+
+    def test_policy_harness_override_beats_explicit_mode_policy(self):
+        config_mod = load_config_module()
+        loaded = config_mod.deep_merge(
+            config_mod.DEFAULT_CONFIG,
+            {
+                "policy": {
+                    "work": {"networkAccess": True, "bypassHookTrust": False},
+                    "harness": {
+                        "codex": {"work": {"bypassHookTrust": True}},
+                        "cursor": {"work": {"networkAccess": False}},
+                    },
+                }
+            },
+        )
+        codex_policy = config_mod.effective_policy(loaded, engine="codex", mode="work")
+        self.assertTrue(codex_policy["bypassHookTrust"])
+        self.assertTrue(codex_policy["networkAccess"])
+        cursor_policy = config_mod.effective_policy(loaded, engine="cursor", mode="work")
+        self.assertFalse(cursor_policy["networkAccess"])
+        self.assertFalse(cursor_policy["bypassHookTrust"])
+        droid_policy = config_mod.effective_policy(loaded, engine="droid", mode="work")
+        self.assertTrue(droid_policy["networkAccess"])
+        self.assertFalse(droid_policy["bypassHookTrust"])
