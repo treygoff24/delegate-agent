@@ -43,11 +43,11 @@ Read the traceback, find the failing assertion, then read the module under test 
 
 - `test_delegate_parser` — CLI argv parsing
 - `test_delegate_validation` — input validation
-- `test_delegate_commands` — Cursor/Droid argv construction
+- `test_delegate_commands` — Cursor/Droid/Codex argv construction
 - `test_delegate_execution` — execution path, output capture
 - `test_runner_capture` — stream capture, progress, completion reports
 - `test_run_registry` — registry index, alias allocation, locking
-- `test_harness_events` — Cursor/Droid event stream parsing
+- `test_harness_events` — Cursor/Droid/Codex event stream parsing
 - `test_snapshot_commands` — snapshot/run-output rendering
 - `test_retention` — archive-only tarball retention
 - `test_end_to_end_tracking` — full integration

@@ -31,9 +31,11 @@ PYTHONPATH=src python3 -m delegate_agent.cli <args>
 ## Helpful flags
 
 - `--json` — machine-readable output (default-friendly for inspection).
-- `describe` — dump effective config and resolved binaries; safe smoke test.
+- `describe` — dump effective config, resolved binaries, mode mappings, and policy metadata; safe smoke test.
 - `cursor safe …` — isolated read-only review run (workspace gets copied to a temp dir; original is never passed to Cursor).
-- `cursor work …` / `droid work …` — edit-capable runs.
+- `codex safe …` — isolated read-only Codex review run (same source-workspace protection as Cursor safe).
+- `cursor work …` / `droid work …` / `codex work …` — edit-capable runs.
+- `dry-run codex work …` — inspect effective Codex argv/policy without launching Codex.
 
 ## Workspace state
 
@@ -45,4 +47,4 @@ Run registry lives at `.delegate/index.json` + `.delegate/runs/<runId>/` and `.d
 python3 bin/delegate.py --json describe
 ```
 
-If that prints resolved Cursor/Droid binaries and the merged config, the dev checkout is wired up correctly.
+If that prints resolved Cursor/Droid/Codex metadata and the merged config, the dev checkout is wired up correctly.
