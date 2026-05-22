@@ -13,5 +13,6 @@ live runtime only through an explicit install/update step after review and tests
 The development checkout may add workspace-local `.delegate/` registries, bounded
 default output, `snapshot` / `runs` / `run-output` commands, and archive-only
 retention. None of that affects the live runtime until promotion. Orchestrating
-agents should use `delegate snapshot` and related commands instead of tailing raw
-log files under `.delegate/runs/`.
+agents should launch Delegate normally and use `delegate snapshot` plus related
+commands instead of piping launches through `tail` or tailing raw log files under
+`.delegate/runs/`.

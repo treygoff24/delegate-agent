@@ -42,6 +42,8 @@ All Delegate execution prompts are normalized through the CLI prompt middleware 
 When this checkout tracks Delegate runs under `.delegate/`:
 
 - Default parent-facing output is **bounded**; raw harness streams are not returned unless the operator passes `--pass-through`.
+- Launch Delegate normally; do **not** pipe launch commands through `tail` (for example, avoid `delegate ... 2>&1 | tail -20`) just to keep output short. The default launch output is already bounded.
 - Inspect runs with `delegate snapshot <alias>`, `delegate runs`, and `delegate run-output` — do **not** tail `stdout.log`, `stderr.log`, or `events.jsonl` from scripts.
+- Use `--pass-through` only when raw child streaming is explicitly required. If an operator intentionally pipes Delegate output in a shell script, they should also use `set -o pipefail` so child failures are not hidden by `tail`.
 - After the raw-log retention window, bulky logs move to `.delegate/archive/<runId>.tar.gz`; snapshots and alias lookup still work. Retention is archive-only (no prune/delete commands).
 - Use `python3 bin/delegate.py` from this repo for development; do not overwrite `~/.delegate` or `~/.local/bin/delegate` unless the operator explicitly asks to promote.

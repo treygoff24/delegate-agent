@@ -173,6 +173,9 @@ Run output options (before subcommand):
   --pass-through              Stream raw child stdout/stderr (incompatible with --json)
   --completion-report MODE    markdown (default) or none
   --no-completion-report      Disable completion-report prompt injection
+
+Tracked runs return bounded summaries by default. Avoid piping launches through tail;
+inspect runs with delegate snapshot, delegate runs, and delegate run-output.
 """
 
 

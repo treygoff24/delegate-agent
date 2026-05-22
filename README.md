@@ -131,9 +131,24 @@ delegate agent-help
 
 ### Default bounded output vs `--pass-through`
 
-Normal `cursor` / `droid` runs return a short Delegate-owned summary (alias, status, snapshot command, completion-report command). Raw harness stdout/stderr are captured under `.delegate/runs/<runId>/` but are **not** streamed to the parent by default.
+Normal harness runs return a short Delegate-owned summary (alias, status, snapshot command, completion-report command). Raw harness stdout/stderr are captured under `.delegate/runs/<runId>/` but are **not** streamed to the parent by default.
 
 Use `--pass-through` when you need the previous raw streaming behavior. It is incompatible with `--json`.
+
+Do not pipe normal launch commands through `tail` just to suppress noise:
+
+```bash
+# Avoid: can hide earlier errors and, without pipefail, can mask Delegate failure.
+delegate cursor work --prompt-file task.md 2>&1 | tail -20
+
+# Prefer: launch normally, then inspect the tracked run by alias.
+delegate cursor work --prompt-file task.md
+delegate snapshot cursor
+delegate run-output cursor --completion-report
+delegate run-output cursor --stderr --tail 100
+```
+
+If a script intentionally pipes Delegate output anyway, enable `set -o pipefail` so the pipeline preserves Delegate failures.
 
 ### Run inspection (preferred for orchestrating agents)
 
@@ -144,7 +159,7 @@ delegate run-output cursor --completion-report
 delegate run-output cursor --stderr --tail 100
 ```
 
-Do not tail `.delegate/runs/*/stdout.log` or `events.jsonl` from orchestration scripts; use `snapshot`, `runs`, and `run-output` instead.
+Do not tail launch output or `.delegate/runs/*/stdout.log` / `events.jsonl` from orchestration scripts; use `snapshot`, `runs`, and `run-output` instead.
 
 ### Completion reports
 

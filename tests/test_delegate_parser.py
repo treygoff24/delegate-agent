@@ -89,6 +89,15 @@ class ParserTests(unittest.TestCase):
             self.delegate.parse_cli(["cursor", "agent", "hello"])
         self.assertEqual(ctx.exception.error, "invalid_mode")
 
+    def test_agent_help_discourages_shell_tail_launches(self):
+        stdout = io.StringIO()
+        code = self.delegate.emit_agent_help(stdout)
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        help_text = stdout.getvalue()
+        self.assertIn("do not pipe delegate launches through tail", help_text)
+        self.assertIn("delegate snapshot cursor", help_text)
+        self.assertIn("set -o pipefail", help_text)
+
     def test_codex_direct_commands_parse(self):
         parsed = self.delegate.parse_cli(["codex", "work", "implement"])
         self.assertEqual(parsed.subcommand, "codex")
