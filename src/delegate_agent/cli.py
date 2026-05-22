@@ -1324,7 +1324,7 @@ def remove_git_safe_workspace(git_root: str, worktree_path: str) -> None:
     )
 
 
-def cleanup_cursor_safe_workspace(
+def cleanup_safe_isolated_workspace(
     *,
     git_root: str | None,
     isolated_workspace: str,
@@ -1363,7 +1363,7 @@ def safe_isolated_request(request: Request) -> Iterator[Request]:
             safe_isolation=isolation,
         )
     finally:
-        cleanup_cursor_safe_workspace(
+        cleanup_safe_isolated_workspace(
             git_root=git_root,
             isolated_workspace=isolated_workspace,
             temp_base=temp_base,
