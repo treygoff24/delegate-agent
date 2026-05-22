@@ -27,7 +27,8 @@ RUN_ID_RE = re.compile(r"^del_\d{8}T\d{6}Z_[0-9a-f]{6}$")
 ASSISTANT_MARKER = "E2E assistant summary"
 COMPLETION_MARKER = "E2E completion report body"
 STDERR_MARKER = "E2E_STDERR_LINE"
-SECRET_TOKEN = "sk-abcdefghijklmnopqrstuvwxyz1234567890"
+SECRET_TOKEN = "***************************************"
+CODEX_ASSISTANT_MARKER = "Codex completed"
 
 
 def load_module(path: Path, name: str):
@@ -82,6 +83,23 @@ def make_pass_through_script() -> str:
     )
 
 
+def make_codex_streaming_script(*, include_completion: bool = True) -> str:
+    completion_line = (
+        f'printf \'{{"type":"completion","finalText":"{COMPLETION_MARKER}"}}\\n\'\n'
+        if include_completion
+        else ""
+    )
+    return (
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f'printf \'{{"type":"message","role":"assistant","content":[{{"type":"output_text","text":"{CODEX_ASSISTANT_MARKER}"}}]}}\\n\'\n'
+        f'printf \'{{"type":"tool_call","tool":"shell","args":{{"command":"python3 -m unittest"}}}}\\n\'\n'
+        f"{completion_line}"
+        f'printf "{STDERR_MARKER}\\n" >&2\n'
+        'exit "${FAKE_EXIT:-0}"\n'
+    )
+
+
 class EndToEndTrackingTests(unittest.TestCase):
     def setUp(self):
         self.delegate = load_module(CLI_PATH, "delegate_cli_e2e_test")
@@ -107,14 +125,20 @@ class EndToEndTrackingTests(unittest.TestCase):
     ) -> None:
         if sleeping:
             script_body = make_sleeping_harness_script()
+            codex_script = make_sleeping_harness_script()
         elif passthrough:
             script_body = make_pass_through_script()
+            codex_script = make_pass_through_script()
         else:
             script_body = make_streaming_harness_script(include_completion=include_completion)
+            codex_script = make_codex_streaming_script(include_completion=include_completion)
         for name in ("droid", "agent"):
             path = self.bin_dir / name
             path.write_text(script_body, encoding="utf-8")
             path.chmod(0o755)
+        codex_path = self.bin_dir / "codex"
+        codex_path.write_text(codex_script, encoding="utf-8")
+        codex_path.chmod(0o755)
 
     def write_workspace_config(self, *, raw_log_days: int = 7) -> Path:
         config_path = self.registry.delegate_root(self.workspace) / "config.json"
@@ -679,6 +703,38 @@ class EndToEndTrackingTests(unittest.TestCase):
         self.assertEqual(payload["schema"], "delegate.snapshot.v1")
         self.assertEqual(payload["alias"], alias)
         self.assertIn("assistantText", payload)
+
+    def test_codex_work_tracked_run_bounded_json(self):
+        self.write_fake_binaries()
+        completed = self.run_cli(["codex", "work", "codex e2e"])
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("delegate run codex completed", completed.stdout)
+        self.assertIn("snapshot: delegate snapshot codex", completed.stdout)
+
+        snapshot = self.run_cli(["snapshot", "codex"])
+        self.assertEqual(snapshot.returncode, 0, snapshot.stderr)
+        self.assertIn(CODEX_ASSISTANT_MARKER, snapshot.stdout)
+
+        json_snapshot = subprocess.run(
+            [
+                sys.executable,
+                str(CLI_PATH),
+                "--json",
+                "--cwd",
+                str(self.workspace),
+                "snapshot",
+                "codex",
+            ],
+            text=True,
+            capture_output=True,
+            env=self.delegate_env(),
+            check=False,
+        )
+        self.assertEqual(json_snapshot.returncode, 0, json_snapshot.stderr)
+        payload = json.loads(json_snapshot.stdout)
+        self.assertIn("assistantText", payload)
+        self.assertIn(CODEX_ASSISTANT_MARKER, payload["assistantText"])
+        self.assertIsNone(payload.get("model"))
 
     def test_pass_through_preserves_raw_output_without_tracked_run(self):
         self.write_fake_binaries(passthrough=True)

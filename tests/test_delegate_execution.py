@@ -416,6 +416,19 @@ class ExecutionTests(unittest.TestCase):
         )
         self.assertNotIn("Delegate Codex safe mode", p)
 
+    def test_codex_missing_binary_exit_3(self):
+        request = self.delegate.Request(
+            "codex",
+            "work",
+            "/repo",
+            "hello",
+            ["delegate-definitely-missing-codex", "exec", "hello"],
+            None,
+        )
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.ensure_binary(request.argv)
+        self.assertEqual(ctx.exception.exit_code, 3)
+
 
 if __name__ == "__main__":
     unittest.main()
