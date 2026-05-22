@@ -163,13 +163,17 @@ class CommandTests(unittest.TestCase):
             policy,
             workspace_kind="git",
         )
-        self.assertIn("--ask-for-approval", argv)
-        self.assertIn("never", argv)
-        self.assertIn("--sandbox", argv)
-        self.assertIn("workspace-write", argv)
-        self.assertIn("-c", argv)
-        self.assertIn("sandbox_workspace_write.network_access=true", argv)
-        self.assertIn("--json", argv)
+        exec_index = argv.index("exec")
+        self.assertIn("--ask-for-approval", argv[:exec_index])
+        self.assertEqual(
+            argv[argv.index("--ask-for-approval") + 1],
+            "never",
+        )
+        self.assertIn("--sandbox", argv[exec_index:])
+        self.assertEqual(argv[argv.index("--sandbox") + 1], "workspace-write")
+        self.assertIn("-c", argv[exec_index:])
+        self.assertIn("sandbox_workspace_write.network_access=true", argv[exec_index:])
+        self.assertIn("--json", argv[exec_index:])
         self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", argv)
 
     def test_codex_work_trusted_hooks_argv_adds_hook_bypass_only(self):
@@ -191,9 +195,11 @@ class CommandTests(unittest.TestCase):
             policy,
             workspace_kind="git",
         )
-        self.assertIn("--dangerously-bypass-hook-trust", argv)
+        exec_index = argv.index("exec")
+        self.assertIn("--dangerously-bypass-hook-trust", argv[exec_index:])
         self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", argv)
-        self.assertIn("--sandbox", argv)
+        self.assertIn("--sandbox", argv[exec_index:])
+        self.assertIn("--ask-for-approval", argv[:exec_index])
 
     def test_codex_work_web_search_argv_when_enabled(self):
         config = self.delegate.delegate_config.deep_merge(
