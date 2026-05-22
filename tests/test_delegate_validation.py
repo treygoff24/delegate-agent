@@ -261,3 +261,72 @@ class ValidationTests(unittest.TestCase):
                 workspace=self.delegate.workspace_path_for_config(parsed.cwd)
             )
             self.assertEqual(config["cursor"]["defaultModel"], "from-workspace")
+
+    def test_policy_default_profile_safe_resolves_work_network(self):
+        config_mod = load_config_module()
+        policy = config_mod.effective_policy(
+            config_mod.DEFAULT_CONFIG,
+            engine="codex",
+            mode="work",
+        )
+        self.assertTrue(policy["networkAccess"])
+        self.assertNotIn("approvalPolicy", policy)
+        self.assertFalse(policy["bypassApprovalsAndSandbox"])
+        self.assertFalse(policy["bypassHookTrust"])
+
+    def test_policy_default_profile_safe_resolves_safe_no_network_or_bypasses(self):
+        config_mod = load_config_module()
+        policy = config_mod.effective_policy(
+            config_mod.DEFAULT_CONFIG,
+            engine="codex",
+            mode="safe",
+        )
+        self.assertFalse(policy["networkAccess"])
+        self.assertFalse(policy["webSearch"])
+        self.assertFalse(policy["bypassApprovalsAndSandbox"])
+        self.assertFalse(policy["bypassHookTrust"])
+
+    def test_policy_rejects_approval_policy_field(self):
+        config_mod = load_config_module()
+        with self.assertRaises(config_mod.ConfigError):
+            config_mod.validate_config(
+                config_mod.deep_merge(
+                    config_mod.DEFAULT_CONFIG,
+                    {"policy": {"work": {"approvalPolicy": "on-request"}}},
+                )
+            )
+
+    def test_policy_trusted_hooks_profile_enables_codex_work_hook_bypass(self):
+        config_mod = load_config_module()
+        loaded = config_mod.deep_merge(
+            config_mod.DEFAULT_CONFIG,
+            {"policy": {"profile": "trusted-hooks"}},
+        )
+        policy = config_mod.effective_policy(loaded, engine="codex", mode="work")
+        self.assertTrue(policy["networkAccess"])
+        self.assertTrue(policy["bypassHookTrust"])
+        self.assertFalse(policy["bypassApprovalsAndSandbox"])
+
+    def test_policy_external_sandbox_profile_enables_full_codex_work_bypass(self):
+        config_mod = load_config_module()
+        loaded = config_mod.deep_merge(
+            config_mod.DEFAULT_CONFIG,
+            {"policy": {"profile": "external-sandbox"}},
+        )
+        policy = config_mod.effective_policy(loaded, engine="codex", mode="work")
+        self.assertTrue(policy["bypassApprovalsAndSandbox"])
+        self.assertTrue(policy["bypassHookTrust"])
+
+    def test_policy_explicit_mode_override_beats_profile_defaults(self):
+        config_mod = load_config_module()
+        loaded = config_mod.deep_merge(
+            config_mod.DEFAULT_CONFIG,
+            {
+                "policy": {
+                    "profile": "trusted-hooks",
+                    "work": {"bypassHookTrust": False},
+                }
+            },
+        )
+        policy = config_mod.effective_policy(loaded, engine="codex", mode="work")
+        self.assertFalse(policy["bypassHookTrust"])

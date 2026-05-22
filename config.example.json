@@ -28,5 +28,19 @@
       "grok": "custom:xAI-:-Grok-4.3-44",
       "gemini": "custom:Gemini-:-3.5-Flash-15"
     }
+  },
+  "policy": {
+    "profile": "safe",
+    "work": {
+      "networkAccess": true
+    }
+  },
+  "codex": {
+    "binary": "codex",
+    "defaultModel": null,
+    "profile": null,
+    "workSandbox": "workspace-write",
+    "ephemeral": true,
+    "ignoreUserConfig": false
   }
 }

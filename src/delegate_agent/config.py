@@ -17,6 +17,24 @@ COMPLETION_REPORT_MODES = (
     COMPLETION_REPORT_MODE_NONE,
 )
 
+POLICY_PROFILES = ("safe", "trusted-hooks", "external-sandbox", "custom")
+POLICY_MODE_KEYS = frozenset(
+    {
+        "networkAccess",
+        "webSearch",
+        "bypassApprovalsAndSandbox",
+        "bypassHookTrust",
+    }
+)
+CODEX_WORK_SANDBOX_VALUES = ("read-only", "workspace-write", "danger-full-access")
+
+DEFAULT_MODE_POLICY: JsonObject = {
+    "networkAccess": False,
+    "webSearch": False,
+    "bypassApprovalsAndSandbox": False,
+    "bypassHookTrust": False,
+}
+
 DEFAULT_CONFIG: JsonObject = {
     "tracking": {
         "completionReport": {
@@ -46,7 +64,153 @@ DEFAULT_CONFIG: JsonObject = {
             "gemini": "custom:Gemini-:-3.5-Flash-15",
         },
     },
+    "policy": {
+        "profile": "safe",
+        "work": {
+            "networkAccess": True,
+        },
+    },
+    "codex": {
+        "binary": "codex",
+        "defaultModel": None,
+        "profile": None,
+        "workSandbox": "workspace-write",
+        "ephemeral": True,
+        "ignoreUserConfig": False,
+    },
 }
+
+
+def _profile_policy(profile: str) -> JsonObject:
+    if profile == "trusted-hooks":
+        return {"work": {"bypassHookTrust": True}}
+    if profile == "external-sandbox":
+        return {
+            "work": {
+                "bypassApprovalsAndSandbox": True,
+                "bypassHookTrust": True,
+            }
+        }
+    return {}
+
+
+def effective_policy(config: JsonObject, *, engine: str, mode: str) -> JsonObject:
+    policy = config.get("policy", {})
+    if not isinstance(policy, dict):
+        policy = {}
+    profile = policy.get("profile", "safe")
+    profile_defaults = _profile_policy(profile if isinstance(profile, str) else "safe")
+    profile_mode = profile_defaults.get(mode)
+    mode_policy = deep_merge(
+        DEFAULT_MODE_POLICY,
+        profile_mode if isinstance(profile_mode, dict) else {},
+    )
+    explicit_mode = policy.get(mode)
+    if isinstance(explicit_mode, dict):
+        mode_policy = deep_merge(mode_policy, explicit_mode)
+    harness = policy.get("harness")
+    if isinstance(harness, dict):
+        engine_policy = harness.get(engine)
+        if isinstance(engine_policy, dict):
+            mode_override = engine_policy.get(mode)
+            if isinstance(mode_override, dict):
+                mode_policy = deep_merge(mode_policy, mode_override)
+    return mode_policy
+
+
+def _validate_policy_mode_policy(mode_policy: JsonObject, path: str) -> None:
+    if not isinstance(mode_policy, dict):
+        raise ConfigError("invalid_policy_config", f"{path} must be an object.")
+    unknown = set(mode_policy) - POLICY_MODE_KEYS
+    if unknown:
+        raise ConfigError(
+            "invalid_policy_config",
+            f"{path} has unknown keys: {', '.join(sorted(unknown))}.",
+        )
+    for key in POLICY_MODE_KEYS:
+        value = mode_policy.get(key)
+        if value is not None and not isinstance(value, bool):
+            raise ConfigError(
+                "invalid_policy_config",
+                f"{path}.{key} must be a boolean.",
+            )
+
+
+def _validate_policy_section(policy: JsonValue, *, path: str = "policy") -> None:
+    if policy is None:
+        return
+    if not isinstance(policy, dict):
+        raise ConfigError("invalid_policy_config", f"{path} must be an object.")
+    profile = policy.get("profile", "safe")
+    if profile not in POLICY_PROFILES:
+        raise ConfigError(
+            "invalid_policy_config",
+            f"{path}.profile must be one of: {', '.join(POLICY_PROFILES)}.",
+        )
+    for mode in ("safe", "work"):
+        mode_policy = policy.get(mode)
+        if mode_policy is not None:
+            _validate_policy_mode_policy(mode_policy, f"{path}.{mode}")
+    harness = policy.get("harness")
+    if harness is not None:
+        if not isinstance(harness, dict):
+            raise ConfigError("invalid_policy_config", f"{path}.harness must be an object.")
+        for engine, engine_policy in harness.items():
+            if not isinstance(engine, str) or not engine:
+                raise ConfigError(
+                    "invalid_policy_config",
+                    f"{path}.harness engine names must be non-empty strings.",
+                )
+            if not isinstance(engine_policy, dict):
+                raise ConfigError(
+                    "invalid_policy_config",
+                    f"{path}.harness.{engine} must be an object.",
+                )
+            for mode in ("safe", "work"):
+                mode_policy = engine_policy.get(mode)
+                if mode_policy is not None:
+                    _validate_policy_mode_policy(
+                        mode_policy,
+                        f"{path}.harness.{engine}.{mode}",
+                    )
+
+
+def _validate_codex_section(codex: JsonValue) -> None:
+    if codex is None:
+        return
+    if not isinstance(codex, dict):
+        raise ConfigError("invalid_codex_config", "codex config must be an object.")
+    if not isinstance(codex.get("binary"), str) or not codex["binary"].strip():
+        raise ConfigError("invalid_codex_config", "codex.binary must be a non-empty string.")
+    default_model = codex.get("defaultModel")
+    if default_model is not None and not isinstance(default_model, str):
+        raise ConfigError(
+            "invalid_codex_config",
+            "codex.defaultModel must be a string or null.",
+        )
+    profile = codex.get("profile")
+    if profile is not None and not isinstance(profile, str):
+        raise ConfigError("invalid_codex_config", "codex.profile must be a string or null.")
+    work_sandbox = codex.get("workSandbox", "workspace-write")
+    if work_sandbox not in CODEX_WORK_SANDBOX_VALUES:
+        raise ConfigError(
+            "invalid_codex_config",
+            "codex.workSandbox must be read-only, workspace-write, or danger-full-access.",
+        )
+    if "safeSandbox" in codex:
+        raise ConfigError(
+            "invalid_codex_config",
+            "codex.safeSandbox is not supported; Codex safe always uses read-only.",
+        )
+    ephemeral = codex.get("ephemeral", True)
+    if not isinstance(ephemeral, bool):
+        raise ConfigError("invalid_codex_config", "codex.ephemeral must be a boolean.")
+    ignore_user = codex.get("ignoreUserConfig", False)
+    if not isinstance(ignore_user, bool):
+        raise ConfigError(
+            "invalid_codex_config",
+            "codex.ignoreUserConfig must be a boolean.",
+        )
 
 
 class ConfigError(Exception):
@@ -199,6 +363,8 @@ def validate_config(config: JsonObject) -> None:
                     "invalid_tracking_config",
                     "tracking.retention.rawLogDays must be a non-negative integer.",
                 )
+    _validate_policy_section(config.get("policy"))
+    _validate_codex_section(config.get("codex"))
 
 
 def completion_report_default_mode(config: JsonObject) -> str:
