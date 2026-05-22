@@ -1,6 +1,6 @@
 # Delegate Agent
 
-Delegate Agent is a small local CLI for handing bounded tasks to agent runtimes such as Cursor Agent and Factory Droid. It gives operators a consistent command shape for read-only analysis (`safe`) and file-editing execution (`work`) while keeping prompts scoped and auditable.
+Delegate Agent is a small local CLI for handing bounded tasks to agent runtimes such as Cursor Agent, Factory Droid, and OpenAI Codex CLI. It gives operators a consistent command shape for read-only analysis (`safe`) and file-editing execution (`work`) while keeping prompts scoped and auditable.
 
 > Status: early development. The CLI is useful today, but the public API and installation workflow may change before a stable release.
 
@@ -14,6 +14,9 @@ delegate cursor work "Implement the scoped fix, run the named check, and report 
 
 delegate droid minimax safe "Investigate this issue. Do not edit files."
 delegate droid minimax work "Implement this bounded change and run the specified tests."
+
+delegate codex safe "Review this workspace. Do not edit files."
+delegate codex work "Implement the scoped fix, run the named check, and report changed files."
 ```
 
 The CLI does **not** commit, push, merge, deploy, run a daemon, or create background jobs. It launches the selected runtime with a bounded prompt and returns the child command's result.
@@ -26,10 +29,10 @@ By default, Delegate also keeps a **workspace-local run registry** under `.deleg
 
 Delegate Agent has two modes:
 
-| Mode | Intent | Cursor flags | Droid flags |
-| --- | --- | --- | --- |
-| `safe` | Read-only review/analysis | `-p --trust` (no plan/ask/force/MCP auto-approve) | default read-only (no unsafe skip) |
-| `work` | File-writing execution in a trusted workspace | `-p --trust --approve-mcps --force` | `--skip-permissions-unsafe` |
+| Mode | Intent | Cursor flags | Droid flags | Codex flags |
+| --- | --- | --- | --- | --- |
+| `safe` | Read-only review/analysis | `-p --trust` (no plan/ask/force/MCP auto-approve) | default read-only (no unsafe skip) | isolated workspace + `codex exec --sandbox read-only --ask-for-approval never` |
+| `work` | File-writing execution in a trusted workspace | `-p --trust --approve-mcps --force` | `--skip-permissions-unsafe` | real workspace + `codex exec --sandbox workspace-write -c sandbox_workspace_write.network_access=true --ask-for-approval never` |
 
 ### Cursor safe
 
@@ -60,6 +63,20 @@ Runs in the real workspace on Droid's default read-only posture. Delegate does n
 ### Droid work
 
 Uses `--skip-permissions-unsafe` in the real workspace. Treat as intentionally powerful; use only for bounded tasks you trust.
+
+### Codex safe
+
+Runs OpenAI Codex CLI in an isolated temporary workspace (detached git worktree or directory copy), same hard boundary as Cursor safe. Delegate passes `codex exec --cd <isolated-copy> --sandbox read-only --ask-for-approval never`. The original workspace is not modified; JSON output reports `cwd` (source), `executionCwd` (isolated copy), and `isolatedWorkspace: true`.
+
+Codex safe always uses `read-only` sandboxing. There is no `codex.safeSandbox` config field — safe sandbox is not configurable.
+
+Defense-in-depth in the isolated copy: mandatory skill-review instruction, then a Codex safe prompt prefix (`do not edit, create, or delete files`), then the operator prompt.
+
+### Codex work
+
+Runs in the real workspace with `codex exec --sandbox workspace-write` and, when effective work policy enables network access (default), `-c sandbox_workspace_write.network_access=true`. Always passes `--ask-for-approval never` for tracked non-interactive runs unless a dangerous bypass profile is active.
+
+Workspace containment, approval behavior (`never` vs bypass), subprocess network access, hook trust, and full dangerous bypass are separate concerns — see [Policy controls](#policy-controls) below.
 
 ## Installation for development
 
@@ -111,6 +128,51 @@ Delegate runs a cheap retention pass opportunistically during normal commands th
 
 **Do not** copy this development checkout into `~/.delegate` or `~/.local/bin/delegate` unless you explicitly intend to promote it; other agents may be using the live runtime ([`docs/live-runtime.md`](docs/live-runtime.md)).
 
+### Policy controls
+
+Delegate resolves an **effective policy** per harness and mode before building argv. Precedence (lowest to highest): built-in safe defaults → `policy.profile` expansion → explicit `policy.safe` / `policy.work` → `policy.harness.<engine>.<mode>` overrides.
+
+| `policy.profile` | Effect |
+| --- | --- |
+| `safe` (default) | Safe mode: no network, no bypasses. Work mode: workspace-write sandbox with network when the harness supports it. |
+| `trusted-hooks` | Same as `safe`, but work mode defaults `bypassHookTrust: true` (Codex: `--dangerously-bypass-hook-trust`; Cursor/Droid ignore). |
+| `external-sandbox` | Work mode defaults full dangerous bypass plus hook trust bypass for Codex. **High risk** — see warning below. |
+| `custom` | No profile expansion; only explicit `policy.safe` / `policy.work` / harness overrides apply. |
+
+Mode policy fields (booleans on `policy.safe`, `policy.work`, or `policy.harness.<engine>.<mode>`):
+
+- `networkAccess` — subprocess/network egress inside Codex sandbox (e.g. package installs). Distinct from native web search.
+- `webSearch` — Codex global `--search` when supported.
+- `bypassHookTrust` — Codex `--dangerously-bypass-hook-trust` (middle tier).
+- `bypassApprovalsAndSandbox` — Codex `--dangerously-bypass-approvals-and-sandbox` (full dangerous bypass; loudest tier).
+
+`approvalPolicy` is not a config field in v1. Tracked Codex runs always use `--ask-for-approval never` unless full bypass is enabled.
+
+> **`external-sandbox` is not a convenience mode.** It disables Codex approvals and sandboxing and should only be used when Delegate itself is already running inside a container, VM, disposable worktree, or similarly hardened environment with controlled filesystem, credentials, and egress.
+
+### Codex configuration
+
+| Field | Purpose |
+| --- | --- |
+| `codex.binary` | Codex CLI executable (default `codex`). |
+| `codex.defaultModel` | Optional default model; omitted from argv when null. |
+| `codex.profile` | Optional Codex `--profile` (config-only in v1; not overridable per JSON run). |
+| `codex.workSandbox` | Work-mode sandbox: `workspace-write` (default), `read-only`, or `danger-full-access`. Safe mode always uses `read-only` regardless of this setting. |
+| `codex.ephemeral` | When true (default), adds `--ephemeral` to tracked JSONL runs. |
+| `codex.ignoreUserConfig` | When true, passes `--ignore-user-config` on `codex exec`. |
+
+`codex.workSandbox` behavior:
+
+- `workspace-write` with `networkAccess: true` (work default) emits `-c sandbox_workspace_write.network_access=true`.
+- `read-only` for work mode never emits the workspace-write network config.
+- `danger-full-access` is an advanced/high-risk sandbox setting, distinct from `bypassApprovalsAndSandbox`; it does not emit the workspace-write network config.
+
+There is no `codex.safeSandbox` field. Codex safe is locked to `read-only`.
+
+### Models discovery
+
+`delegate models` lists Cursor and Droid model aliases from config. Codex does not expose a fixed alias list through Delegate in v1. Use `delegate --json models` to read `codex.defaultModel`, `codex.profile`, and `codex.binary` from your merged config. Use `delegate --json describe` for effective policy metadata and per-harness supported/unsupported policy fields.
+
 ## Commands
 
 ```bash
@@ -118,8 +180,11 @@ delegate [--cwd PATH] [--json] [--pass-through] [--completion-report markdown|no
   cursor {safe,work} [--prompt-file PATH] [prompt...]
 delegate [--cwd PATH] [--json] [--pass-through] [--completion-report markdown|none] [--no-completion-report] \
   droid MODEL_ALIAS {safe,work} [--prompt-file PATH] [prompt...]
+delegate [--cwd PATH] [--json] [--pass-through] [--completion-report markdown|none] [--no-completion-report] \
+  codex {safe,work} [--prompt-file PATH] [prompt...]
 delegate [--cwd PATH] [--json] dry-run cursor {safe,work} [--prompt-file PATH] [prompt...]
 delegate [--cwd PATH] [--json] dry-run droid MODEL_ALIAS {safe,work} [--prompt-file PATH] [prompt...]
+delegate [--cwd PATH] [--json] dry-run codex {safe,work} [--prompt-file PATH] [prompt...]
 delegate [--cwd PATH] [--json] run --input-json FILE
 delegate [--cwd PATH] [--json] snapshot [--latest HARNESS] [--no-redact] <alias-or-runId>
 delegate [--cwd PATH] [--json] runs [--active] [--recent] [--harness HARNESS] [--limit N]
@@ -200,9 +265,24 @@ For Droid, include a model alias:
 }
 ```
 
+For Codex, `model` is optional (uses `codex.defaultModel` when omitted):
+
+```json
+{
+  "engine": "codex",
+  "mode": "work",
+  "cwd": "/path/to/workspace",
+  "prompt": "Implement the scoped task. Verify with the named checks. Report changed files."
+}
+```
+
 Unknown JSON keys are rejected. See [`examples/`](examples/) for starting points.
 
-With `--json`, `cursor safe` reports the original workspace as `cwd`, the temporary isolated copy as `executionCwd`, and `isolatedWorkspace: true`. Other engines and modes keep `cwd` as the execution directory.
+With `--json`, `cursor safe` and `codex safe` report the original workspace as `cwd`, the temporary isolated copy as `executionCwd`, and `isolatedWorkspace: true`. Other engines and modes keep `cwd` as the execution directory.
+
+## Future enhancements
+
+Codex `--output-last-message` is available in codex-cli 0.133.0 and may be useful for a future completion-extraction improvement. v1 uses JSONL capture to stay aligned with Delegate's existing tracked-run pipeline.
 
 ## Development
 
@@ -221,7 +301,7 @@ Before publishing changes, also run a secret scan and inspect for machine-local 
 | 0 | success |
 | 2 | usage or validation error |
 | 3 | missing dependency/binary |
-| child code | Cursor/Droid launched but failed |
+| child code | Cursor/Droid/Codex launched but failed |
 
 ## Contributing
 

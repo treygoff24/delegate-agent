@@ -29,7 +29,7 @@ A short project-local handle assigned to a Delegate Run for agent-friendly looku
 _Avoid_: Nickname, display name, random ID
 
 **Harness**:
-The external agent runtime that Delegate launches, such as Droid, Cursor CLI, Factory, or Claude Code. Harnesses own their native execution semantics; Delegate normalizes only the launch contract and inspection surface.
+The external agent runtime that Delegate launches, such as Droid, Cursor CLI, OpenAI Codex CLI, Factory, or Claude Code. Harnesses own their native execution semantics; Delegate normalizes only the launch contract and inspection surface.
 _Avoid_: Provider, backend
 
 **Harness Stream**:
@@ -39,6 +39,34 @@ _Avoid_: Parent response, final answer
 **Parent-Facing Output**:
 The bounded output Delegate returns to the caller that launched the Delegate Run. Parent-Facing Output should remain concise and stable even when Delegate captures a verbose Harness Stream internally.
 _Avoid_: Raw stream, transcript dump
+
+**Policy Profile**:
+A named preset in config (`policy.profile`: `safe`, `trusted-hooks`, `external-sandbox`, or `custom`) that expands default mode-policy fields before explicit overrides are applied.
+_Avoid_: Sandbox mode, harness profile
+
+**Effective Policy**:
+The merged boolean policy Delegate computes for a specific harness and mode (`safe` or `work`) after profile defaults, explicit `policy.safe` / `policy.work`, and optional `policy.harness.<engine>.<mode>` overrides. Harness argv builders consume only the fields they support.
+_Avoid_: Runtime config, argv list
+
+**Harness Policy Override**:
+An explicit per-harness, per-mode policy block under `policy.harness.<engine>.<mode>` that wins over profile defaults and global mode policy for that harness only.
+_Avoid_: Engine config, profile
+
+**Dangerous Bypass**:
+The highest-risk Codex policy tier: `bypassApprovalsAndSandbox` maps to `--dangerously-bypass-approvals-and-sandbox`, disabling Codex approvals and sandboxing. Intended only when Delegate already runs inside an externally isolated environment.
+_Avoid_: Unsafe mode, force flag
+
+**Hook Trust Bypass**:
+A middle-tier Codex policy control: `bypassHookTrust` maps to `--dangerously-bypass-hook-trust` without disabling sandboxing. The `trusted-hooks` profile enables it for work mode by default.
+_Avoid_: Trusted mode, MCP approve
+
+**Network Access**:
+Policy control for subprocess/network egress inside a Codex sandbox (for example package installs). For work mode with `workspace-write`, `networkAccess: true` emits `-c sandbox_workspace_write.network_access=true`. Distinct from native web search.
+_Avoid_: Internet mode, online
+
+**Native Web Search**:
+Policy control for Codex's built-in web search tool (`webSearch: true` adds global `--search`). Separate from sandbox subprocess network access; work mode defaults network on and web search off.
+_Avoid_: Search mode, browsing
 
 ## Example dialogue
 

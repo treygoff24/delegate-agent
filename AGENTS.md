@@ -37,6 +37,16 @@ All Delegate execution prompts are normalized through the CLI prompt middleware 
 
 **Droid safe** stays on Droid defaults in the real workspace: no `--auto`, `--use-spec`, or `--skip-permissions-unsafe`.
 
+## Codex modes
+
+`delegate codex safe` runs Codex in an isolated temporary workspace and passes `codex exec --sandbox read-only --ask-for-approval never`.
+
+`delegate codex work` runs in the real workspace and defaults to `codex exec --sandbox workspace-write -c sandbox_workspace_write.network_access=true --ask-for-approval never`.
+
+Policy profiles can enable Codex hook-trust bypass (`trusted-hooks`) or external-sandbox bypass (`external-sandbox`), but the default profile keeps sandboxing on. Workspace containment, approval behavior, network access, hook trust, and full dangerous bypass are separate controls — do not treat `external-sandbox` as a convenience toggle.
+
+Do not promote repo changes into `~/.delegate` unless explicitly asked.
+
 ## Run registry (orchestrating agents)
 
 When this checkout tracks Delegate runs under `.delegate/`:
