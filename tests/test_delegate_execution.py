@@ -379,6 +379,43 @@ class ExecutionTests(unittest.TestCase):
         self.assertGreater(user_idx, codex_idx)
         self.assertGreater(suffix_idx, user_idx)
 
+    def test_effective_prompt_codex_safe_idempotent(self):
+        # effective_prompt run twice on the same string must not double-inject the
+        # codex safe prefix. prepend_skill_review_instructions is already idempotent;
+        # the codex inject must be too.
+        once = self.delegate.effective_prompt(
+            "review the diff",
+            engine="codex",
+            mode="safe",
+            completion_report_mode="none",
+        )
+        twice = self.delegate.effective_prompt(
+            once,
+            engine="codex",
+            mode="safe",
+            completion_report_mode="none",
+        )
+        self.assertEqual(once, twice)
+        self.assertEqual(once.count("Delegate Codex safe mode"), 1)
+
+    def test_effective_prompt_codex_work_omits_safe_prefix(self):
+        p = self.delegate.effective_prompt(
+            "ship the fix",
+            engine="codex",
+            mode="work",
+            completion_report_mode="none",
+        )
+        self.assertNotIn("Delegate Codex safe mode", p)
+
+    def test_effective_prompt_cursor_safe_omits_codex_prefix(self):
+        p = self.delegate.effective_prompt(
+            "review the diff",
+            engine="cursor",
+            mode="safe",
+            completion_report_mode="none",
+        )
+        self.assertNotIn("Delegate Codex safe mode", p)
+
 
 if __name__ == "__main__":
     unittest.main()

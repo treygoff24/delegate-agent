@@ -1018,16 +1018,11 @@ def effective_prompt(
     completion_report_mode: str,
 ) -> str:
     prompt = delegate_runner.prepend_skill_review_instructions(prompt)
-    if engine == "codex" and mode == MODE_SAFE:
-        # Inject Codex safe prefix immediately after the skill-review block.
-        # Anchor to the literal SKILL_REVIEW_PREFIX if present (simple suffix match).
-        marker = delegate_runner.SKILL_REVIEW_PREFIX
-        if marker in prompt:
-            idx = prompt.find(marker) + len(marker)
-            prompt = prompt[:idx] + CODEX_SAFE_REVIEW_PREFIX + prompt[idx:]
-        else:
-            # Fallback safety: prepend Codex prefix after skill-review wrapping.
-            prompt = CODEX_SAFE_REVIEW_PREFIX + prompt
+    if engine == "codex" and mode == MODE_SAFE and CODEX_SAFE_REVIEW_PREFIX not in prompt:
+        # prepend_skill_review_instructions guarantees SKILL_REVIEW_PREFIX at index 0,
+        # so the codex safe prefix slots in cleanly between skill-review and the user prompt.
+        insert_at = len(delegate_runner.SKILL_REVIEW_PREFIX)
+        prompt = prompt[:insert_at] + CODEX_SAFE_REVIEW_PREFIX + prompt[insert_at:]
     if completion_report_mode == delegate_config.COMPLETION_REPORT_MODE_MARKDOWN:
         return delegate_runner.append_completion_report_instructions(prompt)
     return prompt
@@ -1185,15 +1180,6 @@ def prefix_cursor_safe_prompt(prompt: str) -> str:
     return f"{CURSOR_SAFE_REVIEW_PREFIX}{prompt}"
 
 
-def replace_argv_workspace(argv: list[str], workspace: str) -> list[str]:
-    updated = list(argv)
-    for index, token in enumerate(updated):
-        if token == "--workspace" and index + 1 < len(updated):
-            updated[index + 1] = workspace
-            break
-    return updated
-
-
 def replace_argv_after_flag(argv: list[str], flag: str, value: str) -> list[str]:
     updated = list(argv)
     for index, token in enumerate(updated):
@@ -1347,40 +1333,6 @@ def cleanup_cursor_safe_workspace(
     if git_root is not None:
         remove_git_safe_workspace(git_root, isolated_workspace)
     shutil.rmtree(temp_base, ignore_errors=True)
-
-
-@contextmanager
-def cursor_safe_isolated_request(request: Request) -> Iterator[Request]:
-    if request.engine != "cursor" or request.mode != MODE_SAFE:
-        yield request
-        return
-
-    git_root = request.workspace if request.workspace_kind == "git" else None
-    if git_root is not None:
-        isolated_workspace, temp_base = create_git_safe_workspace(git_root)
-    else:
-        isolated_workspace, temp_base = create_directory_safe_workspace(request.workspace)
-
-    isolation = SafeIsolationContext(request.workspace, isolated_workspace)
-    try:
-        write_cursor_safe_project_config(Path(isolated_workspace))
-        yield Request(
-            request.engine,
-            request.mode,
-            isolated_workspace,
-            request.prompt,
-            replace_argv_workspace(request.argv, isolated_workspace),
-            request.model,
-            request.dry_run,
-            request.workspace_kind,
-            safe_isolation=isolation,
-        )
-    finally:
-        cleanup_cursor_safe_workspace(
-            git_root=git_root,
-            isolated_workspace=isolated_workspace,
-            temp_base=temp_base,
-        )
 
 
 @contextmanager
