@@ -19,6 +19,7 @@ build/
 .vscode/
 
 # Local runtime/config state. Commit examples instead.
+.delegate/
 config.json
 cursor-prereq.json
 *.bak*

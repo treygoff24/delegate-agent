@@ -5,6 +5,7 @@ import json
 import os
 import re
 import secrets
+import subprocess
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -49,6 +50,32 @@ def generate_run_id(now: datetime | None = None) -> str:
 
 def delegate_root(workspace: Path) -> Path:
     return workspace / DELEGATE_DIR_NAME
+
+
+def registry_root_if_exists(workspace: Path) -> Path | None:
+    root = delegate_root(workspace)
+    if not index_path(root).exists():
+        return None
+    return root
+
+
+def git_info_exclude_path(git_root: Path) -> Path | None:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(git_root), "rev-parse", "--git-path", "info/exclude"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return None
+    relative = completed.stdout.strip()
+    if not relative:
+        return None
+    exclude_file = Path(relative)
+    if not exclude_file.is_absolute():
+        exclude_file = (git_root / exclude_file).resolve()
+    return exclude_file
 
 
 def aliases_dir(registry_root: Path) -> Path:
@@ -97,8 +124,8 @@ def save_index(registry_root: Path, index: JsonObject) -> None:
 
 
 def ensure_git_delegate_exclude(git_root: Path) -> None:
-    exclude_file = git_root / ".git" / "info" / "exclude"
-    if not exclude_file.parent.exists():
+    exclude_file = git_info_exclude_path(git_root)
+    if exclude_file is None or not exclude_file.parent.exists():
         return
     existing = exclude_file.read_text() if exclude_file.exists() else ""
     lines = existing.splitlines()

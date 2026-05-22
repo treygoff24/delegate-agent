@@ -4,7 +4,7 @@ Delegate Agent can launch powerful agent runtimes. Treat `work` mode as privileg
 
 ## Reporting a vulnerability
 
-If this repository is public, please report security issues privately through the repository's security advisory flow or the maintainer contact listed by the project. Do not include secrets, API keys, or private logs in public issues.
+Please report security issues privately through GitHub Security Advisories for this repository. Do not include secrets, API keys, private logs, or unreleased vulnerability details in public issues.
 
 ## Secret handling
 

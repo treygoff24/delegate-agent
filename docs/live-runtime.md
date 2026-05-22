@@ -27,6 +27,6 @@ When this checkout is promoted, the live runtime gains the same harness contract
 | `droid` | Real workspace; default read-only | Real workspace; `--skip-permissions-unsafe` |
 | `codex` | Isolated workspace copy; `codex --ask-for-approval never exec --sandbox read-only` | Real workspace; `codex --ask-for-approval never exec --sandbox workspace-write` plus network config when policy allows |
 
-`delegate codex safe` reports `isolatedWorkspace: true` in JSON/dry-run metadata, same isolation guarantee as `cursor safe`: the source tree is not passed as `--cd` and is not modified by the child process.
+`delegate codex safe` reports `isolatedWorkspace: true` in JSON/dry-run metadata, same isolation guarantee as `cursor safe`: the source tree is not passed as `--cd` and is not modified by the child process. Tracked runs may still write Delegate metadata under `.delegate/` in the source workspace.
 
 Policy profiles (`safe`, `trusted-hooks`, `external-sandbox`, `custom`) and per-mode overrides apply system-wide; only fields a harness supports affect its argv. See README policy controls and `delegate --json describe` on the promoted runtime.

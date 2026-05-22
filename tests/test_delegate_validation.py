@@ -47,6 +47,12 @@ def make_git_repo():
     return temp
 
 
+def droid_test_config(delegate):
+    config = json.loads(json.dumps(delegate.DEFAULT_CONFIG))
+    config["droid"]["models"] = {"minimax": "model-id"}
+    return config
+
+
 class TtyStdin(io.StringIO):
     def isatty(self):
         return True
@@ -137,7 +143,7 @@ class ValidationTests(unittest.TestCase):
         parsed = self.delegate.ParsedCommand(
             "run", json_mode=True, cwd=str(nested), input_json=str(task)
         )
-        request = self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+        request = self.delegate.request_from_input_json(parsed, droid_test_config(self.delegate))
         self.assertEqual(Path(request.workspace).resolve(), Path(repo.name).resolve())
         self.assertEqual(request.workspace_kind, "git")
         self.assertTrue(
@@ -159,7 +165,9 @@ class ValidationTests(unittest.TestCase):
                 )
             )
             parsed = self.delegate.ParsedCommand("run", json_mode=True, input_json=str(task))
-            request = self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+            request = self.delegate.request_from_input_json(
+                parsed, droid_test_config(self.delegate)
+            )
             self.assertEqual(Path(request.workspace).resolve(), Path(tmp).resolve())
             self.assertEqual(request.workspace_kind, "directory")
 

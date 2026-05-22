@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -25,14 +26,32 @@ def load_delegate():
     return module
 
 
-def make_git_repo():
+def make_git_repo(*, with_commit: bool = False):
     temp = tempfile.TemporaryDirectory()
+    git = ["git", "-C", temp.name]
     subprocess.run(
-        ["git", "-C", temp.name, "init"],
+        [*git, "init"],
         check=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+    if with_commit:
+        subprocess.run(
+            [
+                *git,
+                "-c",
+                "user.name=Delegate Test",
+                "-c",
+                "user.email=delegate-test@example.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
     return temp
 
 
@@ -147,6 +166,20 @@ class CommandTests(unittest.TestCase):
                 "droid", "safe", "nope", "/repo", "hello", self.delegate.DEFAULT_CONFIG, True
             )
         self.assertEqual(ctx.exception.error, "invalid_alias")
+
+    def test_placeholder_droid_model_rejected_before_argv(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.build_request(
+                "droid", "safe", "my-model", "/repo", "hello", self.delegate.DEFAULT_CONFIG, True
+            )
+        self.assertEqual(ctx.exception.error, "unconfigured_model")
+        self.assertIn("placeholder", ctx.exception.message)
+
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["droid"]["models"] = {"my-model": "your-droid-model-id"}
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.build_request("droid", "safe", "my-model", "/repo", "hello", config, True)
+        self.assertEqual(ctx.exception.error, "unconfigured_model")
 
     def test_codex_work_default_argv_uses_workspace_sandbox_with_network(self):
         policy = self.delegate.delegate_config.effective_policy(
@@ -383,3 +416,28 @@ class CommandTests(unittest.TestCase):
                 self.assertEqual(os.readlink(copied), str(secret))
             finally:
                 shutil.rmtree(temp_base, ignore_errors=True)
+
+    def test_dry_run_codex_safe_does_not_create_delegate_dir(self):
+        repo = make_git_repo(with_commit=True)
+        self.addCleanup(repo.cleanup)
+        workspace = Path(repo.name)
+        delegate_dir = workspace / ".delegate"
+        self.assertFalse(delegate_dir.exists())
+        stdout = io.StringIO()
+        code = self.delegate.main(
+            ["--cwd", str(workspace), "dry-run", "codex", "safe", "review"],
+            stdout=stdout,
+        )
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertFalse(delegate_dir.exists())
+
+    def test_runs_without_registry_returns_empty_list(self):
+        repo = make_git_repo()
+        self.addCleanup(repo.cleanup)
+        stdout = io.StringIO()
+        code = self.delegate.main(["--cwd", str(repo.name), "runs"], stdout=stdout)
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertFalse((Path(repo.name) / ".delegate").exists())
+        output = stdout.getvalue()
+        self.assertIn("mode: recent", output)
+        self.assertNotIn("cursor", output)

@@ -49,7 +49,7 @@ Default embedded config after this feature:
   "droid": {
     "binary": "droid",
     "models": {
-      "minimax": "custom:OpenCode-Go-:-MiniMax-M2.7-8"
+      "minimax": "replace-with-your-droid-model-id"
     }
   },
   "codex": {
@@ -74,7 +74,7 @@ Built-in `policy.profile` values:
 
 Important default-config rule: the embedded `DEFAULT_CONFIG` and `config.example.json` must be sparse for false/default policy fields. Do **not** pin `bypassHookTrust: false`, `bypassApprovalsAndSandbox: false`, `webSearch: false`, or a default `policy.harness.codex.work.bypassHookTrust: false` in embedded config, because those explicit false values would override built-in profiles after config merge. The resolver's `DEFAULT_MODE_POLICY` supplies safe false defaults; config files only need to set fields that intentionally differ from that baseline.
 
-Example Trey/local power-user config:
+Example local power-user config:
 
 ```json
 {

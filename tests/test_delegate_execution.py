@@ -78,6 +78,7 @@ class ExecutionTests(unittest.TestCase):
             code, payload = self.delegate.execute_request(
                 request,
                 json_mode=True,
+                config=self.delegate.DEFAULT_CONFIG,
                 pass_through=False,
                 completion_report_mode="markdown",
                 source_workspace=workspace,
@@ -112,6 +113,7 @@ class ExecutionTests(unittest.TestCase):
             code, payload = self.delegate.execute_request(
                 request,
                 json_mode=True,
+                config=self.delegate.DEFAULT_CONFIG,
                 pass_through=False,
                 completion_report_mode="markdown",
                 source_workspace=workspace,

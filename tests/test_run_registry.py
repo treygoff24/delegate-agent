@@ -21,15 +21,45 @@ def load_registry():
     return module
 
 
-def make_git_repo():
+def make_git_repo(*, with_commit: bool = False):
     temp = tempfile.TemporaryDirectory()
+    git = ["git", "-C", temp.name]
     subprocess.run(
-        ["git", "-C", temp.name, "init"],
+        [*git, "init"],
         check=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+    if with_commit:
+        subprocess.run(
+            [
+                *git,
+                "-c",
+                "user.name=Delegate Test",
+                "-c",
+                "user.email=delegate-test@example.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
     return temp
+
+
+def make_linked_worktree():
+    main = make_git_repo(with_commit=True)
+    linked = tempfile.mkdtemp()
+    subprocess.run(
+        ["git", "-C", main.name, "worktree", "add", linked, "-b", "linked-branch"],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return main, Path(linked)
 
 
 class RunRegistryTests(unittest.TestCase):
@@ -100,6 +130,29 @@ class RunRegistryTests(unittest.TestCase):
         self.registry.ensure_registry(workspace, workspace_kind="git")
         exclude = workspace / ".git" / "info" / "exclude"
         self.assertEqual(exclude.read_text().count(self.registry.GIT_EXCLUDE_ENTRY), 1)
+
+    def test_linked_worktree_adds_delegate_to_info_exclude(self):
+        main, linked = make_linked_worktree()
+        self.addCleanup(main.cleanup)
+        self.addCleanup(
+            lambda: subprocess.run(
+                ["git", "-C", main.name, "worktree", "remove", "--force", str(linked)],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        )
+        self.registry.ensure_registry(linked, workspace_kind="git")
+        exclude = self.registry.git_info_exclude_path(linked)
+        self.assertIsNotNone(exclude)
+        self.assertIn(self.registry.GIT_EXCLUDE_ENTRY, exclude.read_text())
+        check = subprocess.run(
+            ["git", "-C", str(linked), "check-ignore", "-v", ".delegate/"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(check.returncode, 0, check.stderr)
 
     def test_index_json_maintains_alias_and_run_lookup(self):
         with tempfile.TemporaryDirectory() as tmp:

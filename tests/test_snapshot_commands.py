@@ -186,15 +186,17 @@ class SnapshotCommandTests(unittest.TestCase):
         self.assertIn("=", self.rendering.redact_string("token=secret-value"))
 
     def test_snapshot_redacts_secrets_by_default(self):
-        _, alias = self.write_run(assistant_text="export API_KEY=sk-abcdefghijklmnopqrstuvwxyz")
+        _, alias = self.write_run(  # pragma: allowlist secret
+            assistant_text="export API_KEY=sk-abcdefghijklmnopqrstuvwxyz"
+        )
         stdout = io.StringIO()
         self.delegate.main(["--cwd", str(self.workspace), "snapshot", alias], stdout=stdout)
         output = stdout.getvalue()
         self.assertIn("***", output)
-        self.assertNotIn("sk-abcdefghijklmnopqrstuvwxyz", output)
+        self.assertNotIn("sk-abcdefghijklmnopqrstuvwxyz", output)  # pragma: allowlist secret
 
     def test_snapshot_no_redact_preserves_secret_like_text(self):
-        secret = "sk-abcdefghijklmnopqrstuvwxyz"
+        secret = "sk-abcdefghijklmnopqrstuvwxyz"  # pragma: allowlist secret
         _, alias = self.write_run(assistant_text=f"token {secret}")
         stdout = io.StringIO()
         self.delegate.main(
@@ -374,7 +376,7 @@ class SnapshotCommandTests(unittest.TestCase):
     def test_run_output_redacts_secrets_by_default(self):
         run_id, alias = self.write_run()
         run_path = self.registry.run_directory(self.registry_root, run_id)
-        secret = "sk-abcdefghijklmnopqrstuvwxyz"
+        secret = "sk-abcdefghijklmnopqrstuvwxyz"  # pragma: allowlist secret
         (run_path / "stdout.log").write_text(f"API_KEY={secret}\n", encoding="utf-8")
         stdout = io.StringIO()
         self.delegate.main(
@@ -385,22 +387,24 @@ class SnapshotCommandTests(unittest.TestCase):
         self.assertIn("***", output)
         self.assertNotIn(secret, output)
 
-    def test_run_output_raw_preserves_secrets(self):
+    def test_run_output_raw_redacts_secrets_by_default(self):
         run_id, alias = self.write_run()
         run_path = self.registry.run_directory(self.registry_root, run_id)
-        secret = "sk-abcdefghijklmnopqrstuvwxyz"
+        secret = "sk-abcdefghijklmnopqrstuvwxyz"  # pragma: allowlist secret
         (run_path / "stdout.log").write_text(f"token: {secret}\n", encoding="utf-8")
         stdout = io.StringIO()
         self.delegate.main(
             ["--cwd", str(self.workspace), "run-output", alias, "--raw"],
             stdout=stdout,
         )
-        self.assertIn(secret, stdout.getvalue())
+        output = stdout.getvalue()
+        self.assertIn("***", output)
+        self.assertNotIn(secret, output)
 
     def test_run_output_no_redact_preserves_completion_report_secrets(self):
         run_id, alias = self.write_run()
         run_path = self.registry.run_directory(self.registry_root, run_id)
-        secret = "ghp_abcdefghijklmnopqrstuvwxyz123456"
+        secret = "ghp_abcdefghijklmnopqrstuvwxyz123456"  # pragma: allowlist secret
         (run_path / "completion-report.md").write_text(secret, encoding="utf-8")
         stdout = io.StringIO()
         self.delegate.main(

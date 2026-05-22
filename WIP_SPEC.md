@@ -1,3 +1,5 @@
+> Historical note: this was the working design spec for Delegate run snapshots. Some details may lag the current CLI. Start with README.md for current user-facing behavior.
+
 # Delegate Run Snapshots WIP Spec
 
 > **Note:** The tool ergonomics and `skill.md` file (which agents use to understand their capabilities) will require significant updates as part of the implementation phase. This will be addressed in the upcoming implementation plan, but is flagged now to inform future work.
@@ -626,7 +628,7 @@ Nuance: enabling too many event types can increase stream volume, so Delegate sh
 
 ### Codex
 
-Codex is not currently a Delegate harness in this repo, but if added later, `codex exec --json` provides JSONL events on stdout and should fit the same internal parsing model.
+Codex is now a Delegate harness. `codex exec --json` provides JSONL events on stdout and fits the same internal parsing model.
 
 ## Normalized Event Model
 

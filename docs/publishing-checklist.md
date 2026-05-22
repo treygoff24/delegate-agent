@@ -2,11 +2,13 @@
 
 Before publishing this repository publicly:
 
-- [ ] Choose and add an open-source license.
-- [ ] Confirm project name and package name.
+- [x] Add an open-source license.
+- [x] Confirm project name and package name.
+- [x] Document simple install and first-run usage in `README.md`.
+- [x] Keep `config.example.json` limited to safe placeholder values.
 - [ ] Run the test suite.
-- [ ] Run a dedicated secret scanner such as Gitleaks or TruffleHog.
-- [ ] Scan for private local paths, emails, logs, and runtime artifacts.
-- [ ] Review `config.example.json` for only safe placeholder values.
-- [ ] Decide whether to publish packages, GitHub releases, or source only.
-- [ ] Document the installation/promote workflow for replacing a live runtime.
+- [ ] Run Gitleaks and TruffleHog.
+- [ ] Run a path/private-artifact scan.
+- [ ] Build sdist/wheel from a clean archive and run `twine check`.
+- [ ] Confirm GitHub Security Advisories are enabled.
+- [ ] Decide whether the first launch is source-only, GitHub release, PyPI, or all three.

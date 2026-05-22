@@ -19,7 +19,7 @@ All Delegate execution prompts are normalized through the CLI prompt middleware 
 **Hard boundary (workspace isolation):**
 
 - Runs Cursor Agent in an isolated temporary copy of the workspace (detached git worktree or directory copy).
-- The original resolved workspace is never passed as `--workspace`; it is not modified by delegate.
+- The original resolved workspace is never passed as `--workspace`; the child agent runs in the isolated copy. Tracked runs may still write Delegate metadata under `.delegate/` in the source workspace.
 - With `--json`, output reports `cwd` (source), `executionCwd` (isolated copy), and `isolatedWorkspace: true`.
 
 **Argv exclusions:**

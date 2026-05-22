@@ -728,10 +728,6 @@ def parse_run_output(rest: list[str], json_mode: bool, cwd: str | None) -> Parse
     )
 
 
-def registry_for_workspace(workspace: ResolvedWorkspace) -> Path:
-    return run_registry.ensure_registry(Path(workspace.path), workspace_kind=workspace.kind)
-
-
 def maybe_run_retention_pass(registry_root: Path, config: JsonObject) -> None:
     delegate_retention.run_retention_pass(registry_root, config)
 
@@ -762,8 +758,24 @@ def resolve_run_target(
     return resolved.run_id, resolved.alias
 
 
+def _raise_no_registry_snapshot_error(parsed: ParsedCommand) -> None:
+    if parsed.snapshot_latest_harness is not None:
+        raise DelegateError(
+            "no_matching_runs",
+            f"No runs found for harness: {parsed.snapshot_latest_harness}",
+        )
+    handle = parsed.snapshot_handle
+    assert handle is not None
+    raise DelegateError(
+        "unknown_handle",
+        f"Unknown run handle: {handle}. Suggestions: (none)",
+    )
+
+
 def emit_snapshot(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout: TextIO) -> int:
-    registry_root = registry_for_workspace(workspace)
+    registry_root = run_registry.registry_root_if_exists(Path(workspace.path))
+    if registry_root is None:
+        _raise_no_registry_snapshot_error(parsed)
     run_id, _alias = resolve_run_target(
         registry_root,
         handle=parsed.snapshot_handle,
@@ -784,17 +796,20 @@ def emit_snapshot(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout: T
 
 
 def emit_runs(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout: TextIO) -> int:
-    registry_root = registry_for_workspace(workspace)
-    index = run_registry.load_index(registry_root)
+    registry_root = run_registry.registry_root_if_exists(Path(workspace.path))
     limit = parsed.runs_limit or run_registry.DEFAULT_RUNS_LIMIT
     mode = "active" if parsed.runs_active else "recent"
-    summaries = run_registry.list_run_summaries(
-        registry_root,
-        index,
-        active=parsed.runs_active,
-        harness=parsed.runs_harness,
-        limit=limit,
-    )
+    if registry_root is None:
+        summaries: list[JsonObject] = []
+    else:
+        index = run_registry.load_index(registry_root)
+        summaries = run_registry.list_run_summaries(
+            registry_root,
+            index,
+            active=parsed.runs_active,
+            harness=parsed.runs_harness,
+            limit=limit,
+        )
     summaries = [delegate_rendering.redact_value(summary) for summary in summaries]
     if parsed.json_mode:
         delegate_rendering.print_json(
@@ -833,7 +848,14 @@ def _add_log_output_section(
 
 
 def emit_run_output(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout: TextIO) -> int:
-    registry_root = registry_for_workspace(workspace)
+    registry_root = run_registry.registry_root_if_exists(Path(workspace.path))
+    if registry_root is None:
+        handle = parsed.run_output_handle
+        assert handle is not None
+        raise DelegateError(
+            "unknown_handle",
+            f"Unknown run handle: {handle}. Suggestions: (none)",
+        )
     run_id, alias = resolve_run_target(
         registry_root,
         handle=parsed.run_output_handle,
@@ -881,12 +903,7 @@ def emit_run_output(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout:
             raise DelegateError("missing_tail", str(exc)) from exc
     if not parsed.run_output_no_redact:
         text_sections = {
-            key: (
-                text
-                if parsed.run_output_raw and key in ("stdout", "stderr")
-                else delegate_rendering.redact_string(text)
-            )
-            for key, text in text_sections.items()
+            key: delegate_rendering.redact_string(text) for key, text in text_sections.items()
         }
     if parsed.json_mode:
         merged_sections: JsonObject = {}
@@ -1152,6 +1169,17 @@ def build_request(
             raise DelegateError("invalid_alias", f"Unknown Droid model alias: {model_alias}")
         assert model_alias is not None
         model = models[model_alias]
+        if model.startswith("replace-with-") or model in {
+            "your-droid-model-id",
+            "real-droid-model-id",
+        }:
+            raise DelegateError(
+                "unconfigured_model",
+                (
+                    f"Droid model alias '{model_alias}' is still a placeholder. "
+                    "Copy config.example.json to ~/.delegate/config.json and set a real Droid model ID."
+                ),
+            )
         argv = build_droid_argv(
             droid["binary"], mode, resolved.path, model, prompt, stream_capture=stream_capture
         )
@@ -1482,7 +1510,7 @@ def dry_run_payload(request: Request) -> JsonObject:
         payload["isolatedWorkspace"] = True
         payload["isolation"] = (
             "Execution uses a temporary detached git worktree or directory copy; "
-            "the original workspace is not modified."
+            "the child runs outside the original workspace; tracked runs may write .delegate metadata."
         )
     return payload
 
@@ -1528,6 +1556,7 @@ def execute_request(
     request: Request,
     json_mode: bool,
     *,
+    config: JsonObject,
     pass_through: bool,
     completion_report_mode: str,
     source_workspace: ResolvedWorkspace,
@@ -1551,6 +1580,7 @@ def execute_request(
             Path(source_workspace.path),
             workspace_kind=source_workspace.kind,
         )
+        maybe_run_retention_pass(registry_root, config)
         run_id, alias = run_registry.register_run(
             registry_root,
             harness=isolated_request.engine,
@@ -1811,7 +1841,7 @@ def emit_agent_help(stdout: TextIO) -> int:
 Good defaults:
   delegate cursor work "Implement the scoped task; report changed files and tests."
   delegate cursor safe "Review this diff for regressions; report findings with file/line/severity."
-  delegate droid minimax safe "Investigate this issue; do not edit."
+  delegate droid <alias> safe "Investigate this issue; do not edit."
   delegate droid <alias> work "Implement this bounded change; run the named check."
   delegate codex safe "Review this workspace. Do not edit files."
   delegate codex work "Implement the scoped fix, run the named check, and report changed files."
@@ -1827,7 +1857,7 @@ Droid work mode:
 
 Cursor safe mode:
   - Uses default Cursor Agent behavior in an isolated temporary workspace, not plan/ask mode.
-  - The original workspace is not modified; review prompts are prefixed with read-only instructions.
+  - The child runs in the isolated copy; tracked runs may still write .delegate metadata in the source workspace.
 
 Rules for agents:
   - Keep prompts bounded: task, scope, verification, report format.
@@ -1915,17 +1945,10 @@ def main(
         if parsed.subcommand == "agent-help":
             return emit_agent_help(stdout)
         workspace = resolve_workspace(parsed.cwd)
-        if parsed.subcommand in {
-            "snapshot",
-            "runs",
-            "run-output",
-            "cursor",
-            "droid",
-            "codex",
-            "dry-run",
-            "run",
-        }:
-            maybe_run_retention_pass(registry_for_workspace(workspace), config)
+        if parsed.subcommand in {"snapshot", "runs", "run-output"}:
+            existing_registry = run_registry.registry_root_if_exists(Path(workspace.path))
+            if existing_registry is not None:
+                maybe_run_retention_pass(existing_registry, config)
         if parsed.subcommand == "snapshot":
             return emit_snapshot(parsed, workspace, stdout)
         if parsed.subcommand == "runs":
@@ -1949,6 +1972,7 @@ def main(
         exit_code, payload = execute_request(
             request,
             parsed.json_mode,
+            config=config,
             pass_through=parsed.pass_through,
             completion_report_mode=completion_report_mode,
             source_workspace=workspace,

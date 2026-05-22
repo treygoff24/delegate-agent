@@ -17,8 +17,8 @@ Every sub-agent prompt in this plan must begin with:
 Use repo-local Delegate, not the installed live shim:
 
 ```bash
-python3 bin/delegate.py --cwd /Users/treygoff/Code/delegate-agent cursor work --prompt-file .delegate-task-prompts/<prompt>.md
-python3 bin/delegate.py --cwd /Users/treygoff/Code/delegate-agent droid glm safe --prompt-file .delegate-task-prompts/<prompt>.md
+python3 bin/delegate.py --cwd <repo-root> cursor work --prompt-file .delegate-task-prompts/<prompt>.md
+python3 bin/delegate.py --cwd <repo-root> droid glm safe --prompt-file .delegate-task-prompts/<prompt>.md
 ```
 
 Do not mutate `~/.delegate`, `~/.local/bin/delegate`, or any installed live Delegate runtime during implementation.
@@ -53,7 +53,7 @@ codex-skill add writing-plans
 codex-skill installed writing-plans
 ```
 
-Expected: `writing-plans` is listed and project-installed for `/Users/treygoff/Code/delegate-agent`.
+Expected: `writing-plans` is listed and project-installed for `<repo-root>`.
 
 **Step 3: Baseline verification**
 Run:
@@ -143,7 +143,7 @@ Expected: all pass.
 Run:
 
 ```bash
-python3 bin/delegate.py --cwd /Users/treygoff/Code/delegate-agent droid glm safe --prompt-file .delegate-task-prompts/wave-1-glm-review.md
+python3 bin/delegate.py --cwd <repo-root> droid glm safe --prompt-file .delegate-task-prompts/wave-1-glm-review.md
 ```
 
 Review prompt must start with the global-skill instruction and ask GLM to review the diff against `main` for:
@@ -156,7 +156,7 @@ Review prompt must start with the global-skill instruction and ask GLM to review
 If GLM reports actionable issues, resolve them with Cursor Composer:
 
 ```bash
-python3 bin/delegate.py --cwd /Users/treygoff/Code/delegate-agent cursor work --prompt-file .delegate-task-prompts/wave-1-fixes.md
+python3 bin/delegate.py --cwd <repo-root> cursor work --prompt-file .delegate-task-prompts/wave-1-fixes.md
 ```
 
 Then rerun Wave 1 verification.
