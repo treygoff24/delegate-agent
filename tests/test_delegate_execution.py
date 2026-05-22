@@ -108,7 +108,7 @@ class ExecutionTests(unittest.TestCase):
             ["droid", "exec", "--cwd", repo.name, "--model", "model-id", "hello"],
             "model-id",
         )
-        with mock.patch.dict(os.environ, {"PATH": env_path}):
+        with mock.patch.dict(os.environ, {"PATH": env_path, "FAKE_EXIT": "7"}):
             code, payload = self.delegate.execute_request(
                 request,
                 json_mode=True,
@@ -118,8 +118,12 @@ class ExecutionTests(unittest.TestCase):
                 stdout=io.StringIO(),
                 stderr=io.StringIO(),
             )
-        self.assertEqual(code, 0)
+        self.assertEqual(code, 7)
         self.assertIsNotNone(payload)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"], "child_failed")
+        self.assertEqual(payload["status"], "failed")
+        self.assertEqual(payload["exitCode"], 7)
 
     def test_run_input_json_rejects_unknown_keys(self):
         repo = make_git_repo()

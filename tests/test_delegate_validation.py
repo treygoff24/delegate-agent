@@ -296,6 +296,17 @@ class ValidationTests(unittest.TestCase):
                 )
             )
 
+    def test_codex_config_rejects_null_section(self):
+        config_mod = load_config_module()
+        with self.assertRaises(config_mod.ConfigError) as ctx:
+            config_mod.validate_config(
+                config_mod.deep_merge(
+                    config_mod.DEFAULT_CONFIG,
+                    {"codex": None},
+                )
+            )
+        self.assertEqual(ctx.exception.error, "invalid_codex_config")
+
     def test_policy_trusted_hooks_profile_enables_codex_work_hook_bypass(self):
         config_mod = load_config_module()
         loaded = config_mod.deep_merge(

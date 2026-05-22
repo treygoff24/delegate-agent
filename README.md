@@ -31,8 +31,8 @@ Delegate Agent has two modes:
 
 | Mode | Intent | Cursor flags | Droid flags | Codex flags |
 | --- | --- | --- | --- | --- |
-| `safe` | Read-only review/analysis | `-p --trust` (no plan/ask/force/MCP auto-approve) | default read-only (no unsafe skip) | isolated workspace + `codex exec --sandbox read-only --ask-for-approval never` |
-| `work` | File-writing execution in a trusted workspace | `-p --trust --approve-mcps --force` | `--skip-permissions-unsafe` | real workspace + `codex exec --sandbox workspace-write -c sandbox_workspace_write.network_access=true --ask-for-approval never` |
+| `safe` | Read-only review/analysis | `-p --trust` (no plan/ask/force/MCP auto-approve) | default read-only (no unsafe skip) | isolated workspace + `codex --ask-for-approval never exec --sandbox read-only` |
+| `work` | File-writing execution in a trusted workspace | `-p --trust --approve-mcps --force` | `--skip-permissions-unsafe` | real workspace + `codex --ask-for-approval never exec --sandbox workspace-write -c sandbox_workspace_write.network_access=true` |
 
 ### Cursor safe
 
@@ -66,7 +66,7 @@ Uses `--skip-permissions-unsafe` in the real workspace. Treat as intentionally p
 
 ### Codex safe
 
-Runs OpenAI Codex CLI in an isolated temporary workspace (detached git worktree or directory copy), same hard boundary as Cursor safe. Delegate passes `codex exec --cd <isolated-copy> --sandbox read-only --ask-for-approval never`. The original workspace is not modified; JSON output reports `cwd` (source), `executionCwd` (isolated copy), and `isolatedWorkspace: true`.
+Runs OpenAI Codex CLI in an isolated temporary workspace (detached git worktree or directory copy), same hard boundary as Cursor safe. Delegate passes `codex --ask-for-approval never exec --cd <isolated-copy> --sandbox read-only`. The original workspace is not modified; JSON output reports `cwd` (source), `executionCwd` (isolated copy), and `isolatedWorkspace: true`.
 
 Codex safe always uses `read-only` sandboxing. There is no `codex.safeSandbox` config field — safe sandbox is not configurable.
 
@@ -74,7 +74,7 @@ Defense-in-depth in the isolated copy: mandatory skill-review instruction, then 
 
 ### Codex work
 
-Runs in the real workspace with `codex exec --sandbox workspace-write` and, when effective work policy enables network access (default), `-c sandbox_workspace_write.network_access=true`. Always passes `--ask-for-approval never` for tracked non-interactive runs unless a dangerous bypass profile is active.
+Runs in the real workspace with `codex --ask-for-approval never exec --sandbox workspace-write` and, when effective work policy enables network access (default), `-c sandbox_workspace_write.network_access=true`. Always passes `--ask-for-approval never` before `exec` for tracked non-interactive runs unless a dangerous bypass profile is active.
 
 Workspace containment, approval behavior (`never` vs bypass), subprocess network access, hook trust, and full dangerous bypass are separate concerns — see [Policy controls](#policy-controls) below.
 

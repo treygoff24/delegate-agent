@@ -25,7 +25,7 @@ When this checkout is promoted, the live runtime gains the same harness contract
 | --- | --- | --- |
 | `cursor` | Isolated workspace copy; `-p --trust` only | Real workspace; `--approve-mcps --force` |
 | `droid` | Real workspace; default read-only | Real workspace; `--skip-permissions-unsafe` |
-| `codex` | Isolated workspace copy; `codex exec --sandbox read-only --ask-for-approval never` | Real workspace; `codex exec --sandbox workspace-write` plus network config when policy allows |
+| `codex` | Isolated workspace copy; `codex --ask-for-approval never exec --sandbox read-only` | Real workspace; `codex --ask-for-approval never exec --sandbox workspace-write` plus network config when policy allows |
 
 `delegate codex safe` reports `isolatedWorkspace: true` in JSON/dry-run metadata, same isolation guarantee as `cursor safe`: the source tree is not passed as `--cd` and is not modified by the child process.
 

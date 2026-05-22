@@ -176,8 +176,6 @@ def _validate_policy_section(policy: JsonValue, *, path: str = "policy") -> None
 
 
 def _validate_codex_section(codex: JsonValue) -> None:
-    if codex is None:
-        return
     if not isinstance(codex, dict):
         raise ConfigError("invalid_codex_config", "codex config must be an object.")
     if not isinstance(codex.get("binary"), str) or not codex["binary"].strip():
