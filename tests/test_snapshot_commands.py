@@ -104,6 +104,26 @@ class SnapshotCommandTests(unittest.TestCase):
             (run_path / "stderr.log").write_bytes(b"y" * stderr_bytes)
         return run_id, alias
 
+    def test_snapshot_codex_null_model_round_trips(self):
+        run_id, alias = self.write_run(
+            harness="codex",
+            assistant_text="codex planning",
+        )
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        manifest = json.loads((run_path / "manifest.json").read_text(encoding="utf-8"))
+        manifest["model"] = None
+        self.registry.write_json_atomic(run_path / "manifest.json", manifest)
+        snapshot = json.loads((run_path / "snapshot.json").read_text(encoding="utf-8"))
+        snapshot["model"] = None
+        self.registry.write_json_atomic(run_path / "snapshot.json", snapshot)
+        stdout = io.StringIO()
+        code = self.delegate.main(
+            ["--json", "--cwd", str(self.workspace), "snapshot", alias], stdout=stdout
+        )
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertIsNone(payload.get("model"))
+
     def test_snapshot_exact_handle_text(self):
         _, alias = self.write_run()
         stdout = io.StringIO()

@@ -89,12 +89,29 @@ class ParserTests(unittest.TestCase):
             self.delegate.parse_cli(["cursor", "agent", "hello"])
         self.assertEqual(ctx.exception.error, "invalid_mode")
 
+    def test_codex_direct_commands_parse(self):
+        parsed = self.delegate.parse_cli(["codex", "work", "implement"])
+        self.assertEqual(parsed.subcommand, "codex")
+        self.assertEqual(parsed.engine, "codex")
+        self.assertEqual(parsed.mode, "work")
+
+    def test_dry_run_codex_parses(self):
+        parsed = self.delegate.parse_cli(["dry-run", "codex", "safe", "review"])
+        self.assertEqual(parsed.subcommand, "codex")
+        self.assertTrue(parsed.dry_run)
+
     def test_json_describe_shape(self):
         payload = self.delegate.describe_payload(self.delegate.DEFAULT_CONFIG, "embedded-default")
         self.assertTrue(payload["ok"])
         self.assertIn("safe", payload["modes"])
         self.assertIn("work", payload["modes"])
         self.assertIn("cursor", payload["modeMapping"])
+        self.assertIn("codex", payload["modeMapping"])
+        self.assertIn("codex", payload["engines"])
+        self.assertIn("policyProfiles", payload)
+        self.assertIn("policyFieldSupport", payload)
+        self.assertIn("effectivePolicy", payload)
+        self.assertIn("codex", payload["effectivePolicy"])
         self.assertIn("passThrough", payload)
 
     def test_pass_through_parses_before_subcommand(self):

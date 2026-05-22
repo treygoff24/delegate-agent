@@ -138,7 +138,7 @@ class Request:
     workspace: str
     prompt: str
     argv: list[str]
-    model: str
+    model: str | None
     dry_run: bool = False
     workspace_kind: str = "git"
     safe_isolation: SafeIsolationContext | None = None
@@ -149,8 +149,10 @@ HELP = f"""delegate {VERSION}
 Usage:
   delegate [--cwd PATH] [--json] cursor {{safe,work}} [--prompt-file PATH] [prompt...]
   delegate [--cwd PATH] [--json] droid MODEL_ALIAS {{safe,work}} [--prompt-file PATH] [prompt...]
+  delegate [--cwd PATH] [--json] codex {{safe,work}} [--prompt-file PATH] [prompt...]
   delegate [--cwd PATH] [--json] dry-run cursor {{safe,work}} [--prompt-file PATH] [prompt...]
   delegate [--cwd PATH] [--json] dry-run droid MODEL_ALIAS {{safe,work}} [--prompt-file PATH] [prompt...]
+  delegate [--cwd PATH] [--json] dry-run codex {{safe,work}} [--prompt-file PATH] [prompt...]
   delegate [--cwd PATH] [--json] run --input-json FILE
   delegate [--cwd PATH] [--json] snapshot [--latest HARNESS] [--no-redact] <alias-or-runId>
   delegate [--cwd PATH] [--json] runs [--active] [--recent] [--harness HARNESS] [--limit N]
@@ -322,6 +324,15 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             pass_through=pass_through,
             completion_report=completion_report,
         )
+    if subcommand == "codex":
+        return parse_codex(
+            rest,
+            json_mode,
+            cwd,
+            dry_run=False,
+            pass_through=pass_through,
+            completion_report=completion_report,
+        )
     if subcommand == "dry-run":
         return parse_dry_run(rest, json_mode, cwd, pass_through, completion_report)
     if subcommand == "snapshot":
@@ -424,6 +435,33 @@ def parse_droid(
     )
 
 
+def parse_codex(
+    rest: list[str],
+    json_mode: bool,
+    cwd: str | None,
+    dry_run: bool,
+    pass_through: bool,
+    completion_report: str | None,
+) -> ParsedCommand:
+    if not rest:
+        raise DelegateError("missing_mode", "codex requires mode: safe or work.")
+    mode = rest[0]
+    validate_mode(mode)
+    prompt_file, prompt_parts = parse_prompt_tail(rest[1:])
+    return ParsedCommand(
+        "codex",
+        json_mode=json_mode,
+        cwd=cwd,
+        engine="codex",
+        mode=mode,
+        prompt_file=prompt_file,
+        prompt_parts=prompt_parts,
+        dry_run=dry_run,
+        pass_through=pass_through,
+        completion_report=completion_report,
+    )
+
+
 def parse_dry_run(
     rest: list[str],
     json_mode: bool,
@@ -432,7 +470,7 @@ def parse_dry_run(
     completion_report: str | None,
 ) -> ParsedCommand:
     if not rest:
-        raise DelegateError("missing_engine", "dry-run requires cursor or droid.")
+        raise DelegateError("missing_engine", "dry-run requires cursor, droid, or codex.")
     engine = rest[0]
     if engine == "cursor":
         return parse_cursor(
@@ -452,7 +490,16 @@ def parse_dry_run(
             pass_through=pass_through,
             completion_report=completion_report,
         )
-    raise DelegateError("invalid_engine", "dry-run engine must be cursor or droid.")
+    if engine == "codex":
+        return parse_codex(
+            rest[1:],
+            json_mode,
+            cwd,
+            dry_run=True,
+            pass_through=pass_through,
+            completion_report=completion_report,
+        )
+    raise DelegateError("invalid_engine", "dry-run engine must be cursor, droid, or codex.")
 
 
 def parse_prompt_tail(rest: list[str]) -> tuple[str | None, list[str]]:
@@ -537,7 +584,7 @@ def parse_snapshot(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedC
     )
 
 
-KNOWN_HARNESSES = ("cursor", "droid")
+KNOWN_HARNESSES = ("cursor", "droid", "codex")
 
 
 def parse_runs(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
@@ -965,7 +1012,7 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
     validate_config(config)
     if parsed.subcommand == "run":
         return request_from_input_json(parsed, config)
-    if parsed.engine not in ("cursor", "droid") or parsed.mode is None:
+    if parsed.engine not in ("cursor", "droid", "codex") or parsed.mode is None:
         raise DelegateError("invalid_command", "Command does not map to an execution request.")
     workspace = resolve_workspace(parsed.cwd)
     prompt = resolve_prompt(parsed.prompt_parts, parsed.prompt_file, stdin)
@@ -994,14 +1041,19 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         raise DelegateError("invalid_input_json", f"Invalid input JSON: {exc}") from exc
     if not isinstance(raw, dict):
         raise DelegateError("invalid_input_json", "Input JSON root must be an object.")
+    if "profile" in raw:
+        raise DelegateError(
+            "invalid_input_key",
+            "Input JSON must not include profile; set codex.profile in config for Codex.",
+        )
     unknown = sorted(set(raw) - RUN_INPUT_KEYS)
     if unknown:
         raise DelegateError("unknown_input_key", f"Unknown input JSON keys: {', '.join(unknown)}")
     engine = raw.get("engine")
     mode = raw.get("mode")
     prompt = raw.get("prompt")
-    if engine not in ("cursor", "droid"):
-        raise DelegateError("invalid_engine", "engine must be cursor or droid.")
+    if engine not in ("cursor", "droid", "codex"):
+        raise DelegateError("invalid_engine", "engine must be cursor, droid, or codex.")
     if not isinstance(mode, str):
         raise DelegateError("invalid_mode", "mode must be safe or work.")
     validate_mode(mode)
@@ -1011,6 +1063,11 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
     if engine == "droid":
         if not isinstance(model_alias, str) or not model_alias:
             raise DelegateError("missing_model", "droid run input requires model alias.")
+    elif engine == "codex":
+        if model_alias is not None and not isinstance(model_alias, str):
+            raise DelegateError("invalid_model", "model must be a string or null for codex.")
+        if model_alias == "":
+            raise DelegateError("invalid_model", "model must be a non-empty string or omitted for codex.")
     elif model_alias is not None and model_alias != config["cursor"]["defaultModel"]:
         raise DelegateError(
             "invalid_model", "cursor model override must match configured Composer model."
@@ -1069,7 +1126,27 @@ def build_request(
             droid["binary"], mode, resolved.path, model, prompt, stream_capture=stream_capture
         )
         return Request(engine, mode, resolved.path, prompt, argv, model, dry_run, resolved.kind)
-    raise DelegateError("invalid_engine", "engine must be cursor or droid.")
+    if engine == "codex":
+        codex = config["codex"]
+        model: str | None
+        if isinstance(model_alias, str) and model_alias:
+            model = model_alias
+        else:
+            default_model = codex.get("defaultModel")
+            model = default_model if isinstance(default_model, str) and default_model else None
+        policy = delegate_config.effective_policy(config, engine="codex", mode=mode)
+        argv = build_codex_argv(
+            codex,
+            mode,
+            resolved.path,
+            model,
+            prompt,
+            policy,
+            workspace_kind=resolved.kind,
+            stream_capture=stream_capture,
+        )
+        return Request(engine, mode, resolved.path, prompt, argv, model, dry_run, resolved.kind)
+    raise DelegateError("invalid_engine", "engine must be cursor, droid, or codex.")
 
 
 def prefix_cursor_safe_prompt(prompt: str) -> str:
@@ -1303,6 +1380,54 @@ def build_droid_argv(
     return argv
 
 
+def build_codex_argv(
+    codex: JsonObject,
+    mode: str,
+    workspace: str,
+    model: str | None,
+    prompt: str,
+    policy: JsonObject,
+    *,
+    workspace_kind: str,
+    stream_capture: bool = True,
+) -> list[str]:
+    binary = str(codex["binary"])
+    argv = [binary]
+    if policy.get("webSearch") is True:
+        argv.append("--search")
+    if policy.get("bypassApprovalsAndSandbox") is not True:
+        argv.extend(["--ask-for-approval", "never"])
+    if codex.get("profile"):
+        argv.extend(["--profile", str(codex["profile"])])
+    if model:
+        argv.extend(["--model", model])
+    argv.append("exec")
+    argv.extend(["--cd", workspace])
+    if codex.get("ignoreUserConfig") is True:
+        argv.append("--ignore-user-config")
+    if workspace_kind != "git":
+        argv.append("--skip-git-repo-check")
+    if policy.get("bypassApprovalsAndSandbox") is True:
+        argv.append("--dangerously-bypass-approvals-and-sandbox")
+    else:
+        sandbox = codex["workSandbox"] if mode == MODE_WORK else "read-only"
+        argv.extend(["--sandbox", str(sandbox)])
+        if (
+            mode == MODE_WORK
+            and sandbox == "workspace-write"
+            and policy.get("networkAccess") is True
+        ):
+            argv.extend(["-c", "sandbox_workspace_write.network_access=true"])
+    if policy.get("bypassHookTrust") is True:
+        argv.append("--dangerously-bypass-hook-trust")
+    if stream_capture:
+        argv.extend(["--color", "never", "--json"])
+        if codex.get("ephemeral", True) is True:
+            argv.append("--ephemeral")
+    argv.append(prompt)
+    return argv
+
+
 def dry_run_payload(request: Request) -> JsonObject:
     payload: JsonObject = {
         "ok": True,
@@ -1427,16 +1552,47 @@ def models_payload(config: JsonObject, config_source: str) -> JsonObject:
             "argvPrefix": config["cursor"]["argvPrefix"],
         },
         "droid": {"models": config["droid"]["models"]},
+        "codex": {
+            "binary": config["codex"]["binary"],
+            "defaultModel": config["codex"]["defaultModel"],
+            "profile": config["codex"]["profile"],
+        },
+    }
+
+
+def _policy_field_support_matrix() -> JsonObject:
+    supported = {
+        "networkAccess": True,
+        "webSearch": True,
+        "bypassApprovalsAndSandbox": True,
+        "bypassHookTrust": True,
+    }
+    unsupported = {key: False for key in delegate_config.POLICY_MODE_KEYS}
+    return {
+        "codex": supported,
+        "cursor": unsupported,
+        "droid": unsupported,
     }
 
 
 def describe_payload(config: JsonObject, config_source: str) -> JsonObject:
+    codex = config["codex"]
+    codex_safe_policy = delegate_config.effective_policy(config, engine="codex", mode=MODE_SAFE)
+    codex_work_policy = delegate_config.effective_policy(config, engine="codex", mode=MODE_WORK)
     return {
         "ok": True,
         "version": VERSION,
         "configPath": str(config_path()),
         "configSource": config_source,
-        "engines": ["cursor", "droid"],
+        "engines": ["cursor", "droid", "codex"],
+        "policyProfiles": list(delegate_config.POLICY_PROFILES),
+        "policyFieldSupport": _policy_field_support_matrix(),
+        "effectivePolicy": {
+            "codex": {
+                "safe": codex_safe_policy,
+                "work": codex_work_policy,
+            },
+        },
         "modes": [MODE_SAFE, MODE_WORK],
         "promptSources": ["direct", "prompt-file", "stdin"],
         "globalOptions": [
@@ -1514,6 +1670,50 @@ def describe_payload(config: JsonObject, config_source: str) -> JsonObject:
                     "<skill-review-prompt>",
                 ],
             },
+            "codex": {
+                "safe": [
+                    codex["binary"],
+                    "--ask-for-approval",
+                    "never",
+                    "exec",
+                    "--cd",
+                    "<isolated-workspace>",
+                    "--sandbox",
+                    "read-only",
+                    "--color",
+                    "never",
+                    "--json",
+                    "--ephemeral",
+                    "<skill-review-prompt>",
+                ],
+                "safeNotes": [
+                    "Runs in an isolated temporary workspace (detached git worktree or directory copy).",
+                    "Always uses --sandbox read-only; safe sandbox is not configurable in v1.",
+                    "Non-interactive: --ask-for-approval never.",
+                ],
+                "work": [
+                    codex["binary"],
+                    "--ask-for-approval",
+                    "never",
+                    "exec",
+                    "--cd",
+                    "<workspace>",
+                    "--sandbox",
+                    codex["workSandbox"],
+                    "-c",
+                    "sandbox_workspace_write.network_access=true",
+                    "--color",
+                    "never",
+                    "--json",
+                    "--ephemeral",
+                    "<skill-review-prompt>",
+                ],
+                "workNotes": [
+                    "networkAccess enables -c sandbox_workspace_write.network_access=true when workSandbox is workspace-write.",
+                    "webSearch enables global --search before exec.",
+                    "profile is config-only (codex.profile); not accepted in run input JSON.",
+                ],
+            },
         },
     }
 
@@ -1531,6 +1731,15 @@ def emit_models(config: JsonObject, config_source: str, json_mode: bool, stdout:
     print("droid:", file=stdout)
     for alias, model_id in sorted(config["droid"]["models"].items()):
         print(f"  {alias} -> {model_id}", file=stdout)
+    codex = config["codex"]
+    default_model = codex.get("defaultModel")
+    model_label = default_model if isinstance(default_model, str) and default_model else "(none)"
+    profile = codex.get("profile")
+    profile_label = profile if isinstance(profile, str) and profile else "(none)"
+    print(
+        f"codex: binary={codex['binary']} defaultModel={model_label} profile={profile_label}",
+        file=stdout,
+    )
     return EXIT_OK
 
 
@@ -1541,7 +1750,7 @@ def emit_describe(config: JsonObject, config_source: str, json_mode: bool, stdou
         return EXIT_OK
     print(f"delegate {VERSION}", file=stdout)
     print(f"config: {payload['configPath']} ({payload['configSource']})", file=stdout)
-    print("engines: cursor, droid", file=stdout)
+    print("engines: cursor, droid, codex", file=stdout)
     print("modes: safe, work", file=stdout)
     print("prompt sources: direct, --prompt-file, stdin", file=stdout)
     print("global options must appear before the subcommand", file=stdout)
@@ -1557,6 +1766,12 @@ Good defaults:
   delegate cursor safe "Review this diff for regressions; report findings with file/line/severity."
   delegate droid minimax safe "Investigate this issue; do not edit."
   delegate droid <alias> work "Implement this bounded change; run the named check."
+  delegate codex safe "Review this workspace. Do not edit files."
+  delegate codex work "Implement the scoped fix, run the named check, and report changed files."
+
+Codex:
+  - Model selection uses codex.defaultModel in config or optional JSON input model; no CLI model alias in v1.
+  - Codex profile (codex.profile) is config-only; run input JSON must not include profile.
 
 Droid work mode:
   - Droid safe mode remains read-only: no --auto, --use-spec, or unsafe skip.
@@ -1649,6 +1864,7 @@ def main(
             "run-output",
             "cursor",
             "droid",
+            "codex",
             "dry-run",
             "run",
         }:

@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 import shutil
 import subprocess
@@ -147,6 +148,145 @@ class CommandTests(unittest.TestCase):
             )
         self.assertEqual(ctx.exception.error, "invalid_alias")
 
+    def test_codex_work_default_argv_uses_workspace_sandbox_with_network(self):
+        policy = self.delegate.delegate_config.effective_policy(
+            self.delegate.DEFAULT_CONFIG,
+            engine="codex",
+            mode="work",
+        )
+        argv = self.delegate.build_codex_argv(
+            self.delegate.DEFAULT_CONFIG["codex"],
+            "work",
+            "/repo",
+            None,
+            "hello",
+            policy,
+            workspace_kind="git",
+        )
+        self.assertIn("--ask-for-approval", argv)
+        self.assertIn("never", argv)
+        self.assertIn("--sandbox", argv)
+        self.assertIn("workspace-write", argv)
+        self.assertIn("-c", argv)
+        self.assertIn("sandbox_workspace_write.network_access=true", argv)
+        self.assertIn("--json", argv)
+        self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", argv)
+
+    def test_codex_work_trusted_hooks_argv_adds_hook_bypass_only(self):
+        config = self.delegate.delegate_config.deep_merge(
+            self.delegate.DEFAULT_CONFIG,
+            {"policy": {"profile": "trusted-hooks"}},
+        )
+        policy = self.delegate.delegate_config.effective_policy(
+            config,
+            engine="codex",
+            mode="work",
+        )
+        argv = self.delegate.build_codex_argv(
+            config["codex"],
+            "work",
+            "/repo",
+            None,
+            "hello",
+            policy,
+            workspace_kind="git",
+        )
+        self.assertIn("--dangerously-bypass-hook-trust", argv)
+        self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", argv)
+        self.assertIn("--sandbox", argv)
+
+    def test_codex_work_web_search_argv_when_enabled(self):
+        config = self.delegate.delegate_config.deep_merge(
+            self.delegate.DEFAULT_CONFIG,
+            {"policy": {"work": {"webSearch": True}}},
+        )
+        policy = self.delegate.delegate_config.effective_policy(
+            config,
+            engine="codex",
+            mode="work",
+        )
+        argv = self.delegate.build_codex_argv(
+            config["codex"],
+            "work",
+            "/repo",
+            None,
+            "hello",
+            policy,
+            workspace_kind="git",
+        )
+        self.assertIn("--search", argv[: argv.index("exec")])
+
+    def test_codex_default_model_null_omits_model_flag(self):
+        policy = self.delegate.delegate_config.effective_policy(
+            self.delegate.DEFAULT_CONFIG,
+            engine="codex",
+            mode="work",
+        )
+        argv = self.delegate.build_codex_argv(
+            self.delegate.DEFAULT_CONFIG["codex"],
+            "work",
+            "/repo",
+            None,
+            "hello",
+            policy,
+            workspace_kind="git",
+        )
+        self.assertNotIn("--model", argv)
+
+    def test_codex_dry_run_model_null_is_allowed(self):
+        request = self.delegate.build_request(
+            "codex",
+            "work",
+            None,
+            "/repo",
+            "hello",
+            self.delegate.DEFAULT_CONFIG,
+            dry_run=True,
+        )
+        payload = self.delegate.dry_run_payload(request)
+        self.assertIsNone(payload["model"])
+        self.assertNotIn("--model", payload["argv"])
+
+    def test_run_input_json_codex_allows_omitted_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "task.json"
+            task.write_text(
+                json.dumps(
+                    {
+                        "engine": "codex",
+                        "mode": "work",
+                        "cwd": tmp,
+                        "prompt": "hello",
+                    }
+                )
+            )
+            parsed = self.delegate.ParsedCommand("run", json_mode=True, input_json=str(task))
+            request = self.delegate.request_from_input_json(
+                parsed, self.delegate.DEFAULT_CONFIG
+            )
+            self.assertIsNone(request.model)
+            self.assertNotIn("--model", request.argv)
+
+    def test_run_input_json_codex_rejects_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "task.json"
+            task.write_text(
+                json.dumps(
+                    {
+                        "engine": "codex",
+                        "mode": "work",
+                        "cwd": tmp,
+                        "prompt": "hello",
+                        "profile": "my-profile",
+                    }
+                )
+            )
+            parsed = self.delegate.ParsedCommand("run", json_mode=True, input_json=str(task))
+            with self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+            self.assertEqual(ctx.exception.error, "invalid_input_key")
+            self.assertIn("profile", ctx.exception.message)
+
     def test_describe_preserves_safe_read_only_modes(self):
         payload = self.delegate.describe_payload(self.delegate.DEFAULT_CONFIG, "embedded-default")
         self.assertIn("promptTransforms", payload)
@@ -158,6 +298,11 @@ class CommandTests(unittest.TestCase):
         self.assertNotIn("--approve-mcps", cursor_safe)
         self.assertIn("<isolated-workspace>", cursor_safe)
         self.assertIn("safeNotes", payload["modeMapping"]["cursor"])
+        codex_safe = payload["modeMapping"]["codex"]["safe"]
+        self.assertIn("--sandbox", codex_safe)
+        self.assertIn("read-only", codex_safe)
+        self.assertIn("safeNotes", payload["modeMapping"]["codex"])
+        self.assertIn("isolated", payload["modeMapping"]["codex"]["safeNotes"][0].lower())
         self.assertNotIn("--auto", payload["modeMapping"]["droid"]["safe"])
         self.assertNotIn("--use-spec", payload["modeMapping"]["droid"]["safe"])
         self.assertNotIn("--skip-permissions-unsafe", payload["modeMapping"]["droid"]["safe"])

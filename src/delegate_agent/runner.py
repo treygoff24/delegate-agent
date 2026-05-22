@@ -61,7 +61,7 @@ class RunContext:
     harness: str
     engine: str
     mode: str
-    model: str
+    model: str | None
     source_cwd: str
     execution_cwd: str
     workspace_kind: str
