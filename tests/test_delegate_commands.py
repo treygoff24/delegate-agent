@@ -267,9 +267,7 @@ class CommandTests(unittest.TestCase):
                 )
             )
             parsed = self.delegate.ParsedCommand("run", json_mode=True, input_json=str(task))
-            request = self.delegate.request_from_input_json(
-                parsed, self.delegate.DEFAULT_CONFIG
-            )
+            request = self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
             self.assertIsNone(request.model)
             self.assertNotIn("--model", request.argv)
 
@@ -313,6 +311,16 @@ class CommandTests(unittest.TestCase):
         self.assertNotIn("--use-spec", payload["modeMapping"]["droid"]["safe"])
         self.assertNotIn("--skip-permissions-unsafe", payload["modeMapping"]["droid"]["safe"])
 
+    def test_describe_codex_work_argv_matches_effective_network_policy(self):
+        config = self.delegate.delegate_config.deep_merge(
+            self.delegate.DEFAULT_CONFIG,
+            {"policy": {"work": {"networkAccess": False}}},
+        )
+        payload = self.delegate.describe_payload(config, "test-config")
+        codex_work = payload["modeMapping"]["codex"]["work"]
+        self.assertEqual(payload["effectivePolicy"]["codex"]["work"]["networkAccess"], False)
+        self.assertNotIn("sandbox_workspace_write.network_access=true", codex_work)
+
     def test_cursor_safe_dry_run_reports_isolation(self):
         request = self.delegate.build_request(
             "cursor",
@@ -342,7 +350,9 @@ class CommandTests(unittest.TestCase):
     def test_write_cursor_safe_project_config_serializes_permissions_only(self):
         with tempfile.TemporaryDirectory() as workspace:
             self.delegate.write_cursor_safe_project_config(Path(workspace))
-            config = self.delegate.json.loads((Path(workspace) / ".cursor" / "cli.json").read_text())
+            config = self.delegate.json.loads(
+                (Path(workspace) / ".cursor" / "cli.json").read_text()
+            )
         self.assertEqual(set(config), {"permissions"})
         self.assertIn("allow", config["permissions"])
         self.assertIn("deny", config["permissions"])

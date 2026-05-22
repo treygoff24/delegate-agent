@@ -192,7 +192,16 @@ class ExecutionTests(unittest.TestCase):
         temp_dirs_before = safe_temp_dirs()
 
         completed = subprocess.run(
-            [sys.executable, str(MODULE_PATH), "--cwd", repo.name, "--json", "cursor", "safe", "review"],
+            [
+                sys.executable,
+                str(MODULE_PATH),
+                "--cwd",
+                repo.name,
+                "--json",
+                "cursor",
+                "safe",
+                "review",
+            ],
             text=True,
             capture_output=True,
             env=env,
@@ -280,18 +289,18 @@ class ExecutionTests(unittest.TestCase):
         bin_dir = Path(temp.name)
         path = bin_dir / "codex"
         path.write_text(
-            '#!/usr/bin/env bash\n'
+            "#!/usr/bin/env bash\n"
             'dir="$PWD"\n'
             'while [ "$#" -gt 0 ]; do\n'
             '  case "$1" in\n'
             '    --cd) dir="$2"; shift 2 ;;\n'
             '    -C) dir="$2"; shift 2 ;;\n'
-            '    *) shift ;;\n'
-            '  esac\n'
-            'done\n'
+            "    *) shift ;;\n"
+            "  esac\n"
+            "done\n"
             'touch "$dir/mutated-by-codex.txt"\n'
             'printf \'{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Codex completed"}]}\n\'\n'
-            'exit 0\n'
+            "exit 0\n"
         )
         path.chmod(0o755)
         return bin_dir
@@ -337,7 +346,16 @@ class ExecutionTests(unittest.TestCase):
         temp_dirs_before = safe_temp_dirs()
 
         completed = subprocess.run(
-            [sys.executable, str(MODULE_PATH), "--cwd", repo.name, "--json", "codex", "safe", "review"],
+            [
+                sys.executable,
+                str(MODULE_PATH),
+                "--cwd",
+                repo.name,
+                "--json",
+                "codex",
+                "safe",
+                "review",
+            ],
             text=True,
             capture_output=True,
             env=env,

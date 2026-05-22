@@ -1038,7 +1038,10 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
     prompt = resolve_prompt(parsed.prompt_parts, parsed.prompt_file, stdin)
     completion_report_mode = resolve_completion_report_mode(parsed, config)
     prompt = effective_prompt(
-        prompt, engine=parsed.engine, mode=parsed.mode, completion_report_mode=completion_report_mode
+        prompt,
+        engine=parsed.engine,
+        mode=parsed.mode,
+        completion_report_mode=completion_report_mode,
     )
     return build_request(
         parsed.engine,
@@ -1089,7 +1092,9 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         if model_alias is not None and not isinstance(model_alias, str):
             raise DelegateError("invalid_model", "model must be a string or null for codex.")
         if model_alias == "":
-            raise DelegateError("invalid_model", "model must be a non-empty string or omitted for codex.")
+            raise DelegateError(
+                "invalid_model", "model must be a non-empty string or omitted for codex."
+            )
     elif model_alias is not None and model_alias != config["cursor"]["defaultModel"]:
         raise DelegateError(
             "invalid_model", "cursor model override must match configured Composer model."
@@ -1609,10 +1614,48 @@ def _policy_field_support_matrix() -> JsonObject:
     }
 
 
+def _codex_describe_model(codex: JsonObject) -> str | None:
+    default_model = codex.get("defaultModel")
+    return default_model if isinstance(default_model, str) and default_model else None
+
+
+def _codex_describe_argv(
+    codex: JsonObject,
+    *,
+    mode: str,
+    workspace: str,
+    prompt: str,
+    policy: JsonObject,
+) -> list[str]:
+    return build_codex_argv(
+        codex,
+        mode,
+        workspace,
+        _codex_describe_model(codex),
+        prompt,
+        policy,
+        workspace_kind="git",
+    )
+
+
 def describe_payload(config: JsonObject, config_source: str) -> JsonObject:
     codex = config["codex"]
     codex_safe_policy = delegate_config.effective_policy(config, engine="codex", mode=MODE_SAFE)
     codex_work_policy = delegate_config.effective_policy(config, engine="codex", mode=MODE_WORK)
+    codex_safe_argv = _codex_describe_argv(
+        codex,
+        mode=MODE_SAFE,
+        workspace="<isolated-workspace>",
+        prompt="<codex-safe-prefixed-skill-review-prompt>",
+        policy=codex_safe_policy,
+    )
+    codex_work_argv = _codex_describe_argv(
+        codex,
+        mode=MODE_WORK,
+        workspace="<workspace>",
+        prompt="<skill-review-prompt>",
+        policy=codex_work_policy,
+    )
     return {
         "ok": True,
         "version": VERSION,
@@ -1705,43 +1748,13 @@ def describe_payload(config: JsonObject, config_source: str) -> JsonObject:
                 ],
             },
             "codex": {
-                "safe": [
-                    codex["binary"],
-                    "--ask-for-approval",
-                    "never",
-                    "exec",
-                    "--cd",
-                    "<isolated-workspace>",
-                    "--sandbox",
-                    "read-only",
-                    "--color",
-                    "never",
-                    "--json",
-                    "--ephemeral",
-                    "<skill-review-prompt>",
-                ],
+                "safe": codex_safe_argv,
                 "safeNotes": [
                     "Runs in an isolated temporary workspace (detached git worktree or directory copy).",
                     "Always uses --sandbox read-only; safe sandbox is not configurable in v1.",
                     "Non-interactive: --ask-for-approval never.",
                 ],
-                "work": [
-                    codex["binary"],
-                    "--ask-for-approval",
-                    "never",
-                    "exec",
-                    "--cd",
-                    "<workspace>",
-                    "--sandbox",
-                    codex["workSandbox"],
-                    "-c",
-                    "sandbox_workspace_write.network_access=true",
-                    "--color",
-                    "never",
-                    "--json",
-                    "--ephemeral",
-                    "<skill-review-prompt>",
-                ],
+                "work": codex_work_argv,
                 "workNotes": [
                     "networkAccess enables -c sandbox_workspace_write.network_access=true when workSandbox is workspace-write.",
                     "webSearch enables global --search before exec.",
