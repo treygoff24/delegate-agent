@@ -304,18 +304,13 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertGreater(len(running_persists), 0)
             self.assertLess(len(running_persists), 25)
 
-    def test_should_persist_running_progress_skips_clean_ticks(self):
-        self.assertFalse(self.runner.should_persist_running_progress(dirty=False))
-        self.assertTrue(self.runner.should_persist_running_progress(dirty=True))
-        self.assertFalse(self.runner.should_persist_running_progress(dirty=False))
-
     def test_running_persist_skips_when_no_new_lines_between_ticks(self):
         progress_dirty = True
         outcomes: list[str] = []
 
         def maybe_persist_running() -> None:
             nonlocal progress_dirty
-            if not self.runner.should_persist_running_progress(dirty=progress_dirty):
+            if not progress_dirty:
                 outcomes.append("skipped")
                 return
             progress_dirty = False

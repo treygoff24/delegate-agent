@@ -239,11 +239,6 @@ def lookup_run_id(index: JsonObject, handle: str) -> str | None:
     return None
 
 
-def lookup_alias(index: JsonObject, alias: str) -> str | None:
-    run_id = index.get("aliases", {}).get(alias)
-    return run_id if isinstance(run_id, str) else None
-
-
 LARGE_LOG_WARN_BYTES = 50 * 1024 * 1024
 DEFAULT_RUNS_LIMIT = 20
 STATUS_RUNNING = "running"

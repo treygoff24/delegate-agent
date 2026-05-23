@@ -13,9 +13,10 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TextIO
+from typing import NoReturn, TextIO
 
 try:
+    from delegate_agent import VERSION
     from delegate_agent import config as delegate_config
     from delegate_agent import rendering as delegate_rendering
     from delegate_agent import retention as delegate_retention
@@ -26,6 +27,7 @@ except ModuleNotFoundError:  # pragma: no cover - direct cli.py invocation in te
     _src_root = Path(__file__).resolve().parent.parent
     if str(_src_root) not in sys.path:
         sys.path.insert(0, str(_src_root))
+    from delegate_agent import VERSION
     from delegate_agent import config as delegate_config
     from delegate_agent import rendering as delegate_rendering
     from delegate_agent import retention as delegate_retention
@@ -34,7 +36,6 @@ except ModuleNotFoundError:  # pragma: no cover - direct cli.py invocation in te
     from delegate_agent.json_types import JsonObject, JsonValue
 
 
-VERSION = "0.1.2"
 DEFAULT_CONFIG = delegate_config.DEFAULT_CONFIG
 DEFAULT_CONFIG_PATH = delegate_config.DEFAULT_CONFIG_PATH
 CONFIG_ENV = delegate_config.CONFIG_ENV
@@ -134,7 +135,6 @@ class ResolvedWorkspace:
 @dataclass(frozen=True)
 class SafeIsolationContext:
     source_workspace: str
-    execution_workspace: str
 
 
 @dataclass
@@ -315,8 +315,9 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
         )
     if subcommand == "run":
         return parse_run(rest, json_mode, cwd, pass_through, completion_report)
-    if subcommand == "cursor":
-        return parse_cursor(
+    if subcommand in ("cursor", "codex"):
+        return parse_modeless_engine(
+            subcommand,
             rest,
             json_mode,
             cwd,
@@ -326,15 +327,6 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
         )
     if subcommand == "droid":
         return parse_droid(
-            rest,
-            json_mode,
-            cwd,
-            dry_run=False,
-            pass_through=pass_through,
-            completion_report=completion_report,
-        )
-    if subcommand == "codex":
-        return parse_codex(
             rest,
             json_mode,
             cwd,
@@ -388,7 +380,8 @@ def parse_run(
     )
 
 
-def parse_cursor(
+def parse_modeless_engine(
+    engine: str,
     rest: list[str],
     json_mode: bool,
     cwd: str | None,
@@ -396,16 +389,17 @@ def parse_cursor(
     pass_through: bool,
     completion_report: str | None,
 ) -> ParsedCommand:
+    """Parse the shared cursor/codex grammar: <mode> [--prompt-file PATH] [prompt...]."""
     if not rest:
-        raise DelegateError("missing_mode", "cursor requires mode: safe or work.")
+        raise DelegateError("missing_mode", f"{engine} requires mode: safe or work.")
     mode = rest[0]
     validate_mode(mode)
     prompt_file, prompt_parts = parse_prompt_tail(rest[1:])
     return ParsedCommand(
-        "cursor",
+        engine,
         json_mode=json_mode,
         cwd=cwd,
-        engine="cursor",
+        engine=engine,
         mode=mode,
         prompt_file=prompt_file,
         prompt_parts=prompt_parts,
@@ -444,33 +438,6 @@ def parse_droid(
     )
 
 
-def parse_codex(
-    rest: list[str],
-    json_mode: bool,
-    cwd: str | None,
-    dry_run: bool,
-    pass_through: bool,
-    completion_report: str | None,
-) -> ParsedCommand:
-    if not rest:
-        raise DelegateError("missing_mode", "codex requires mode: safe or work.")
-    mode = rest[0]
-    validate_mode(mode)
-    prompt_file, prompt_parts = parse_prompt_tail(rest[1:])
-    return ParsedCommand(
-        "codex",
-        json_mode=json_mode,
-        cwd=cwd,
-        engine="codex",
-        mode=mode,
-        prompt_file=prompt_file,
-        prompt_parts=prompt_parts,
-        dry_run=dry_run,
-        pass_through=pass_through,
-        completion_report=completion_report,
-    )
-
-
 def parse_dry_run(
     rest: list[str],
     json_mode: bool,
@@ -481,8 +448,9 @@ def parse_dry_run(
     if not rest:
         raise DelegateError("missing_engine", "dry-run requires cursor, droid, or codex.")
     engine = rest[0]
-    if engine == "cursor":
-        return parse_cursor(
+    if engine in ("cursor", "codex"):
+        return parse_modeless_engine(
+            engine,
             rest[1:],
             json_mode,
             cwd,
@@ -492,15 +460,6 @@ def parse_dry_run(
         )
     if engine == "droid":
         return parse_droid(
-            rest[1:],
-            json_mode,
-            cwd,
-            dry_run=True,
-            pass_through=pass_through,
-            completion_report=completion_report,
-        )
-    if engine == "codex":
-        return parse_codex(
             rest[1:],
             json_mode,
             cwd,
@@ -758,7 +717,7 @@ def resolve_run_target(
     return resolved.run_id, resolved.alias
 
 
-def _raise_no_registry_snapshot_error(parsed: ParsedCommand) -> None:
+def _raise_no_registry_snapshot_error(parsed: ParsedCommand) -> NoReturn:
     if parsed.snapshot_latest_harness is not None:
         raise DelegateError(
             "no_matching_runs",
@@ -1380,7 +1339,7 @@ def safe_isolated_request(request: Request) -> Iterator[Request]:
     else:
         isolated_workspace, temp_base = create_directory_safe_workspace(request.workspace)
 
-    isolation = SafeIsolationContext(request.workspace, isolated_workspace)
+    isolation = SafeIsolationContext(request.workspace)
     try:
         if request.engine == "cursor":
             write_cursor_safe_project_config(Path(isolated_workspace))

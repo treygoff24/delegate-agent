@@ -102,10 +102,10 @@ class RunRegistryTests(unittest.TestCase):
             index = self.registry.load_index(root)
             self.assertEqual(first_alias, "cursor")
             self.assertEqual(second_alias, "cursor-2")
-            self.assertEqual(self.registry.lookup_alias(index, "cursor"), first_id)
-            self.assertEqual(self.registry.lookup_alias(index, "cursor-2"), second_id)
-            self.assertIsNone(self.registry.lookup_alias(index, "cursor-3"))
-            self.assertNotEqual(self.registry.lookup_alias(index, "cursor"), second_id)
+            self.assertEqual(self.registry.lookup_run_id(index, "cursor"), first_id)
+            self.assertEqual(self.registry.lookup_run_id(index, "cursor-2"), second_id)
+            self.assertIsNone(self.registry.lookup_run_id(index, "cursor-3"))
+            self.assertNotEqual(self.registry.lookup_run_id(index, "cursor"), second_id)
 
     def test_lookup_run_id_accepts_exact_run_id(self):
         with tempfile.TemporaryDirectory() as tmp:
