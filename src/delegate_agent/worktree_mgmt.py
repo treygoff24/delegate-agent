@@ -610,16 +610,19 @@ def _apply_branch_removal_result(
         payload["branchRemovalError"] = result.error
 
 
-def remove_worktree(
-    registry_root: Path,
+def _normalize_remove_options(
     *,
+    discard_uncommitted: bool,
+    force_branch: bool,
+    keep_branch: bool,
+    force: bool,
     handle: str,
-    discard_uncommitted: bool = False,
-    force_branch: bool = False,
-    keep_branch: bool = False,
-    force: bool = False,
-    _skip_lock: bool = False,
-) -> JsonObject:
+) -> tuple[bool, bool, bool]:
+    """Normalize raw CLI flags into canonical removal booleans.
+
+    Returns (discard_uncommitted, force_branch, keep_branch) after applying
+    the ``--force`` shorthand and validating mutual exclusions.
+    """
     if force:
         discard_uncommitted = True
         force_branch = True
@@ -631,6 +634,179 @@ def remove_worktree(
                 next_actions=[f"delegate worktree remove {handle} --keep-branch"],
             )
         )
+    return discard_uncommitted, force_branch, keep_branch
+
+
+def _raise_if_dirty_without_discard(
+    *,
+    dirty: bool | None,
+    dirty_paths: list[str],
+    discard_uncommitted: bool,
+    record: JsonObject,
+    alias: str,
+) -> None:
+    """Raise ``dirty_worktree`` when the worktree has uncommitted changes and
+    the caller did not request ``--discard-uncommitted``."""
+    if dirty is True and not discard_uncommitted:
+        raise WorktreeManagementError(
+            _error_payload(
+                "dirty_worktree",
+                f"Worktree has {len(dirty_paths)} uncommitted changes; pass --discard-uncommitted to remove anyway.",
+                record=record,
+                dirty_paths=dirty_paths,
+                next_actions=[
+                    f"delegate worktree show {alias}",
+                    f"delegate worktree remove {alias} --discard-uncommitted",
+                ],
+            )
+        )
+
+
+def _raise_if_unmerged_without_override(
+    *,
+    record: JsonObject,
+    status: str,
+    branch: str | None,
+    keep_branch: bool,
+    force_branch: bool,
+    alias: str,
+) -> None:
+    """Raise ``unmerged_branch`` when the branch is not merged into source
+    and the caller did not request ``--keep-branch`` or ``--force-branch``."""
+    if status != STATUS_PRESENT:
+        return
+    if not isinstance(branch, str) or not branch:
+        return
+    if keep_branch or force_branch:
+        return
+    merged, merge_warnings = merged_into_source(record, status)
+    if merged is not True:
+        raise WorktreeManagementError(
+            _error_payload(
+                "unmerged_branch",
+                "Worktree branch is not merged into current source HEAD; inspect it, merge it, or pass --keep-branch/--force-branch explicitly.",
+                record=record,
+                next_actions=[
+                    f"delegate worktree show {alias}",
+                    f"delegate worktree remove {alias} --keep-branch",
+                    f"delegate worktree remove {alias} --force-branch",
+                ],
+                warnings=merge_warnings or None,
+            )
+        )
+
+
+def _require_removal_metadata(record: JsonObject) -> tuple[str, str]:
+    """Validate that ``sourceGitRoot`` and ``executionCwd`` are present.
+
+    Returns ``(source_git_root, execution_cwd)`` for direct use by the caller.
+    """
+    source_git_root = record.get("sourceGitRoot")
+    execution_cwd = record.get("executionCwd")
+    if not isinstance(source_git_root, str) or not isinstance(execution_cwd, str):
+        raise WorktreeManagementError(
+            _error_payload(
+                "worktree_remove_failed",
+                "Run is missing sourceGitRoot or executionCwd metadata.",
+                record=record,
+            )
+        )
+    return source_git_root, execution_cwd
+
+
+def _remove_worktree_path(
+    *,
+    source_git_root: str,
+    execution_cwd: str,
+    discard_uncommitted: bool,
+    record: JsonObject,
+    alias: str,
+) -> None:
+    """Execute ``git worktree remove`` and raise on failure."""
+    remove_args = ["worktree", "remove"]
+    if discard_uncommitted:
+        remove_args.append("--force")
+    remove_args.append(execution_cwd)
+    result = _run_git(source_git_root, remove_args)
+    if result.returncode != 0:
+        raise WorktreeManagementError(
+            _error_payload(
+                "worktree_remove_failed",
+                f"git worktree remove failed: {result.stderr.strip()}",
+                record=record,
+                next_actions=[f"delegate worktree show {alias}"],
+                retry_safe=True,
+            )
+        )
+
+
+def _remove_branch_if_requested(
+    *,
+    source_git_root: str | None,
+    branch: str | None,
+    keep_branch: bool,
+    force_branch: bool,
+    status: str,
+) -> BranchRemovalResult:
+    """Decide and execute branch removal after the worktree path is gone.
+
+    Returns the ``BranchRemovalResult`` describing what happened to the branch.
+    For the normal-success path (not missing, not already-removed), the caller
+    should post-process the result to handle prune-originated ``keep_branch``
+    with an unmerged branch (spec L673).
+    """
+    if keep_branch:
+        return BranchRemovalResult(removed=False, kept_reason="requested")
+    if status == STATUS_REMOVED and not force_branch:
+        return BranchRemovalResult(removed=False)
+    if (
+        force_branch
+        and isinstance(source_git_root, str)
+        and isinstance(branch, str)
+        and branch
+    ):
+        return _remove_branch(source_git_root, branch, force=True)
+    if status == STATUS_MISSING:
+        return BranchRemovalResult(removed=False, kept_reason="path_missing")
+    if isinstance(source_git_root, str) and isinstance(branch, str) and branch:
+        return _remove_branch(source_git_root, branch, force=False)
+    return BranchRemovalResult(removed=False)
+
+
+def _mark_worktree_removed(
+    *,
+    registry_root: Path,
+    run_id: str,
+    discarded_paths: list[str] | None,
+) -> None:
+    """Update registry state to mark the run as removed."""
+    run_registry.set_worktree_status(
+        registry_root,
+        run_id,
+        "removed",
+        removed_at=_utc_now_iso(),
+        discarded_dirty_paths=discarded_paths,
+        _skip_lock=True,
+    )
+
+
+def remove_worktree(
+    registry_root: Path,
+    *,
+    handle: str,
+    discard_uncommitted: bool = False,
+    force_branch: bool = False,
+    keep_branch: bool = False,
+    force: bool = False,
+    _skip_lock: bool = False,
+) -> JsonObject:
+    discard_uncommitted, force_branch, keep_branch = _normalize_remove_options(
+        discard_uncommitted=discard_uncommitted,
+        force_branch=force_branch,
+        keep_branch=keep_branch,
+        force=force,
+        handle=handle,
+    )
     # _skip_lock is set by callers that already hold the registry lock
     # (e.g. prune_worktrees when called from maybe_auto_prune while holding the lock).
     if _skip_lock:
@@ -641,22 +817,18 @@ def remove_worktree(
         record = resolve_record(registry_root, handle=handle)
         status, warnings = detect_worktree_status(record)
         alias = str(record.get("alias") or handle)
+
+        # Already-removed: optionally clean up a leftover branch.
         if status == STATUS_REMOVED:
             source_git_root = record.get("sourceGitRoot")
             branch = record.get("branch")
-            branch_result = BranchRemovalResult(removed=False)
-            if (
-                force_branch
-                and not keep_branch
-                and isinstance(source_git_root, str)
-                and isinstance(branch, str)
-                and branch
-            ):
-                branch_result = _remove_branch(
-                    source_git_root,
-                    branch,
-                    force=True,
-                )
+            branch_result = _remove_branch_if_requested(
+                source_git_root=source_git_root,
+                branch=branch,
+                keep_branch=keep_branch,
+                force_branch=force_branch,
+                status=status,
+            )
             payload: JsonObject = {
                 "schema": SCHEMA_REMOVE,
                 "ok": not bool(branch_result.error),
@@ -673,80 +845,46 @@ def remove_worktree(
             _apply_branch_removal_result(payload, branch_result, alias=alias)
             return payload
 
+        # Dirty guard: refuse to remove uncommitted work unless explicitly asked.
         dirty, dirty_paths, _dirty_total, dirty_warnings = dirty_info(record, status)
         all_warnings = [*warnings, *dirty_warnings]
-        if dirty is True and not discard_uncommitted:
-            raise WorktreeManagementError(
-                _error_payload(
-                    "dirty_worktree",
-                    f"Worktree has {len(dirty_paths)} uncommitted changes; pass --discard-uncommitted to remove anyway.",
-                    record=record,
-                    dirty_paths=dirty_paths,
-                    next_actions=[
-                        f"delegate worktree show {alias}",
-                        f"delegate worktree remove {alias} --discard-uncommitted",
-                    ],
-                )
-            )
+        _raise_if_dirty_without_discard(
+            dirty=dirty,
+            dirty_paths=dirty_paths,
+            discard_uncommitted=discard_uncommitted,
+            record=record,
+            alias=alias,
+        )
 
-        source_git_root = record.get("sourceGitRoot")
-        execution_cwd = record.get("executionCwd")
+        # Metadata validation.
+        source_git_root, execution_cwd = _require_removal_metadata(record)
         branch = record.get("branch")
-        if not isinstance(source_git_root, str) or not isinstance(execution_cwd, str):
-            raise WorktreeManagementError(
-                _error_payload(
-                    "worktree_remove_failed",
-                    "Run is missing sourceGitRoot or executionCwd metadata.",
-                    record=record,
-                )
-            )
 
-        if (
-            status == STATUS_PRESENT
-            and isinstance(branch, str)
-            and branch
-            and not keep_branch
-            and not force_branch
-        ):
-            merged, merge_warnings = merged_into_source(record, status)
-            if merged is not True:
-                raise WorktreeManagementError(
-                    _error_payload(
-                        "unmerged_branch",
-                        "Worktree branch is not merged into current source HEAD; inspect it, merge it, or pass --keep-branch/--force-branch explicitly.",
-                        record=record,
-                        next_actions=[
-                            f"delegate worktree show {alias}",
-                            f"delegate worktree remove {alias} --keep-branch",
-                            f"delegate worktree remove {alias} --force-branch",
-                        ],
-                        warnings=merge_warnings or None,
-                    )
-                )
+        # Unmerged-branch guard.
+        _raise_if_unmerged_without_override(
+            record=record,
+            status=status,
+            branch=branch,
+            keep_branch=keep_branch,
+            force_branch=force_branch,
+            alias=alias,
+        )
 
-        path_removed = False
-        branch_result = BranchRemovalResult(removed=False)
         discarded_paths = dirty_paths if discard_uncommitted and dirty_paths else None
 
+        # Missing path: update registry and optionally delete the branch.
         if status == STATUS_MISSING:
-            branch_kept: str | None = "path_missing"
-            if (
-                force_branch
-                and not keep_branch
-                and isinstance(source_git_root, str)
-                and isinstance(branch, str)
-                and branch
-            ):
-                branch_result = _remove_branch(source_git_root, branch, force=True)
-                if branch_result.removed:
-                    branch_kept = None
-            run_registry.set_worktree_status(
-                registry_root,
-                str(record["runId"]),
-                "removed",
-                removed_at=_utc_now_iso(),
-                discarded_dirty_paths=discarded_paths,
-                _skip_lock=True,
+            branch_result = _remove_branch_if_requested(
+                source_git_root=source_git_root,
+                branch=branch,
+                keep_branch=keep_branch,
+                force_branch=force_branch,
+                status=status,
+            )
+            _mark_worktree_removed(
+                registry_root=registry_root,
+                run_id=str(record["runId"]),
+                discarded_paths=discarded_paths,
             )
             payload = {
                 "schema": SCHEMA_REMOVE,
@@ -762,53 +900,42 @@ def remove_worktree(
                 "noop": False,
             }
             _apply_branch_removal_result(payload, branch_result, alias=alias)
-            if branch_kept:
-                payload["branchKept"] = branch_kept
             return payload
 
-        remove_args = ["worktree", "remove"]
-        if discard_uncommitted:
-            remove_args.append("--force")
-        remove_args.append(execution_cwd)
-        result = _run_git(source_git_root, remove_args)
-        if result.returncode != 0:
-            raise WorktreeManagementError(
-                _error_payload(
-                    "worktree_remove_failed",
-                    f"git worktree remove failed: {result.stderr.strip()}",
-                    record=record,
-                    next_actions=[f"delegate worktree show {alias}"],
-                    retry_safe=True,
-                )
-            )
-        path_removed = True
+        # Remove the worktree directory.
+        _remove_worktree_path(
+            source_git_root=source_git_root,
+            execution_cwd=execution_cwd,
+            discard_uncommitted=discard_uncommitted,
+            record=record,
+            alias=alias,
+        )
 
-        if keep_branch:
-            branch_result = BranchRemovalResult(removed=False, kept_reason="requested")
-        elif isinstance(branch, str) and branch:
-            branch_result = _remove_branch(
-                source_git_root,
-                branch,
-                force=force_branch,
-            )
+        # Branch removal.
+        branch_result = _remove_branch_if_requested(
+            source_git_root=source_git_root,
+            branch=branch,
+            keep_branch=keep_branch,
+            force_branch=force_branch,
+            status=status,
+        )
         # Override branchKept when keep_branch came from prune on a clean
         # worktree whose branch is not merged into source (spec L673).
         # In that case _remove_branch was not called (force_branch=False),
-        # branch_kept is "requested", and the branch is still present.
+        # kept_reason is "requested", and the branch is still present.
         if keep_branch and branch_result.kept_reason == "requested" and isinstance(branch, str):
             merged_val, _ = merged_into_source(record, status)
             if merged_val is False:
                 branch_result = BranchRemovalResult(removed=False, kept_reason="unmerged")
 
-        run_registry.set_worktree_status(
-            registry_root,
-            str(record["runId"]),
-            "removed",
-            removed_at=_utc_now_iso(),
-            discarded_dirty_paths=discarded_paths,
-            _skip_lock=True,
+        # Update registry.
+        _mark_worktree_removed(
+            registry_root=registry_root,
+            run_id=str(record["runId"]),
+            discarded_paths=discarded_paths,
         )
-        payload: JsonObject = {
+
+        payload = {
             "schema": SCHEMA_REMOVE,
             "ok": True,
             "alias": record.get("alias"),
@@ -817,7 +944,7 @@ def remove_worktree(
             "executionCwd": execution_cwd,
             "sourceGitRoot": source_git_root,
             "removed": True,
-            "pathRemoved": path_removed,
+            "pathRemoved": True,
             "worktreeStatus": STATUS_REMOVED,
             "noop": False,
         }
