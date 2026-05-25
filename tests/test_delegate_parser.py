@@ -208,6 +208,33 @@ class ParserTests(unittest.TestCase):
         self.assertIn("--tail", ctx.exception.message)
         self.assertIn("--raw", ctx.exception.message)
 
+    def test_worktree_misplaced_global_option_is_rejected(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(["worktree", "list", "--json"])
+        self.assertEqual(ctx.exception.error, "misplaced_global_option")
+
+    def test_worktree_unknown_option_is_action_specific(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(["worktree", "remove", "cursor-1", "--older-than", "7"])
+        self.assertEqual(ctx.exception.error, "unknown_option")
+        self.assertIn("worktree remove", ctx.exception.message)
+
+    def test_worktree_show_latest_and_handle_are_mutually_exclusive(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(["worktree", "show", "--latest", "cursor", "cursor-1"])
+        self.assertEqual(ctx.exception.error, "invalid_option_combination")
+
+    def test_worktree_remove_keep_branch_and_force_are_mutually_exclusive(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(["worktree", "remove", "cursor-1", "--keep-branch", "--force"])
+        self.assertEqual(ctx.exception.error, "invalid_option_combination")
+
+    def test_worktree_prune_requires_filter_at_execution_time(self):
+        parsed = self.delegate.parse_cli(["worktree", "prune"])
+        self.assertEqual(parsed.worktree_action, "prune")
+        self.assertFalse(parsed.worktree_merged)
+        self.assertIsNone(parsed.worktree_older_than)
+
     def test_load_config_cli_overrides_win(self):
         config_path = ROOT / "src" / "delegate_agent" / "config.py"
         spec = importlib.util.spec_from_file_location("delegate_config_parser_test", config_path)

@@ -24,9 +24,12 @@ from delegate_agent.config import (  # noqa: F401  # re-exported
     VALID_ISOLATION_VALUES,
     ConfigError,
 )
+from delegate_agent.git_utils import (
+    GIT_MUTATION_TIMEOUT_SECONDS,
+    GIT_TIMEOUT_RETURN_CODE,
+    timeout_completed_process,
+)
 from delegate_agent.json_types import JsonObject
-
-GIT_COMMAND_TIMEOUT_SECONDS = 30
 
 
 @dataclass(frozen=True)
@@ -87,15 +90,19 @@ def _run_git(source_git_root: str, args: list[str]) -> subprocess.CompletedProce
             text=True,
             capture_output=True,
             check=False,
-            timeout=GIT_COMMAND_TIMEOUT_SECONDS,
+            timeout=GIT_MUTATION_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired as exc:
-        return subprocess.CompletedProcess(
+        return timeout_completed_process(
             command,
-            124,
-            exc.stdout or "",
-            f"git command timed out after {GIT_COMMAND_TIMEOUT_SECONDS}s",
+            exc,
+            timeout_seconds=GIT_MUTATION_TIMEOUT_SECONDS,
         )
+
+
+def _raise_if_git_timed_out(result: subprocess.CompletedProcess[str], action: str) -> None:
+    if result.returncode == GIT_TIMEOUT_RETURN_CODE:
+        raise IsolationExecutionError("git_timeout", f"{action} timed out: {result.stderr}")
 
 
 def short_run_id(run_id: str) -> str:
@@ -288,6 +295,7 @@ def require_valid_head(source_git_root: str) -> str:
     repository has no commits (empty/unborn repo).
     """
     result = _run_git(source_git_root, ["rev-parse", "--verify", "HEAD"])
+    _raise_if_git_timed_out(result, "git rev-parse HEAD")
     if result.returncode != 0:
         raise IsolationExecutionError(
             "missing_git_head",
@@ -307,6 +315,7 @@ def require_clean_source(source_git_root: str) -> None:
         source_git_root,
         ["status", "--porcelain=v1", "--untracked-files=normal", "--ignore-submodules=none"],
     )
+    _raise_if_git_timed_out(result, "git status")
     if result.returncode != 0:
         raise IsolationExecutionError(
             "dirty_source_check_failed",
@@ -340,6 +349,7 @@ def create_persistent_worktree(
         source_git_root,
         ["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
     )
+    _raise_if_git_timed_out(branch_probe, "git branch availability check")
     if branch_probe.returncode == 0:
         raise IsolationExecutionError(
             "branch_collision",
@@ -355,6 +365,7 @@ def create_persistent_worktree(
         source_git_root,
         ["worktree", "add", "-b", branch, worktree_path, base_oid],
     )
+    _raise_if_git_timed_out(result, "git worktree add")
     if result.returncode != 0:
         stderr = result.stderr.strip()
         raise IsolationExecutionError(

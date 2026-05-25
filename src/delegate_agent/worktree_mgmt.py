@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from delegate_agent import run_registry
+from delegate_agent.git_utils import GIT_MUTATION_TIMEOUT_SECONDS, timeout_completed_process
 from delegate_agent.json_types import JsonObject
 
 SCHEMA_LIST = "delegate.worktree-list.v1"
@@ -15,7 +16,6 @@ SCHEMA_SHOW = "delegate.worktree-show.v1"
 SCHEMA_REMOVE = "delegate.worktree-remove.v1"
 SCHEMA_PRUNE = "delegate.worktree-prune.v1"
 SCHEMA_GC = "delegate.worktree-gc.v1"
-GIT_COMMAND_TIMEOUT_SECONDS = 30
 WORKTREE_ERROR_EXIT_CODE = 2
 
 STATUS_PRESENT = "present"
@@ -69,14 +69,13 @@ def _run_git(cwd: str, args: list[str]) -> subprocess.CompletedProcess[str]:
             text=True,
             capture_output=True,
             check=False,
-            timeout=GIT_COMMAND_TIMEOUT_SECONDS,
+            timeout=GIT_MUTATION_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired as exc:
-        return subprocess.CompletedProcess(
+        return timeout_completed_process(
             command,
-            124,
-            exc.stdout or "",
-            f"git command timed out after {GIT_COMMAND_TIMEOUT_SECONDS}s",
+            exc,
+            timeout_seconds=GIT_MUTATION_TIMEOUT_SECONDS,
         )
 
 
@@ -887,7 +886,7 @@ def prune_worktrees(
                 if merged_value is False and not force_branch and dirty is not True:
                     keep_branch_for_prune = True
                 else:
-                    reason = "merge_status_unknown" if merged_value is None else "unmerged_branch"
+                    reason = "merge_check_failed" if merged_value is None else "unmerged_branch"
                     skipped.append({"alias": alias, "runId": record.get("runId"), "reason": reason})
                     continue
         if older_than_days is not None and not _older_than(record, older_than_days):

@@ -903,10 +903,10 @@ class WorktreeMgmtTests(unittest.TestCase):
                     self._registry_root(path),
                     merged=True,
                     dry_run=True,
-                )
+            )
             self.assertEqual(result["planned"], [])
             skipped_reasons = {entry["alias"]: entry["reason"] for entry in result["skipped"]}
-            self.assertEqual(skipped_reasons["cursor-merge-unknown"], "merge_status_unknown")
+            self.assertEqual(skipped_reasons["cursor-merge-unknown"], "merge_check_failed")
 
     def test_prune_older_than_filters(self):
         _repo, path = self._make_repo()
@@ -995,6 +995,131 @@ class WorktreeMgmtTests(unittest.TestCase):
             st = self.delegate.run_registry.load_run_state(self._registry_root(path), run_id)
             self.assertEqual(st.get("worktreeStatus"), "present")
 
+    def test_worktree_list_no_auto_prune_cli_skips_opportunistic_pass(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            branch = "delegate/cursor-noap-cli"
+            wt_path = str(Path(fake_home) / "wt" / "cursor-noap-cli")
+            self._seed_persistent_run(path, alias="cursor-noap-cli", branch=branch, execution_cwd=wt_path)
+            self._create_worktree_at(path, branch, wt_path)
+            config_path = self._registry_root(path) / "config.json"
+            config_path.write_text(
+                json.dumps({"worktrees": {"autoPrune": {"enabled": True, "mergedOlderThanDays": 1}}}),
+                encoding="utf-8",
+            )
+            run_id = self.delegate.run_registry.load_index(self._registry_root(path))["aliases"][
+                "cursor-noap-cli"
+            ]
+
+            code, out, _err = self._run_cli(
+                ["--cwd", path, "--json", "worktree", "list", "--no-auto-prune"],
+                home=fake_home,
+            )
+
+            self.assertEqual(code, 0)
+            payload = json.loads(out)
+            self.assertNotIn("autoPrune", payload)
+            state = self.delegate.run_registry.load_run_state(self._registry_root(path), run_id)
+            self.assertEqual(state.get("worktreeStatus"), "present")
+            self.assertTrue(Path(wt_path).exists())
+
+    def test_worktree_prune_include_detached_cli_plans_detached_worktree(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            branch = "delegate/cursor-detached-cli"
+            wt_path = str(Path(fake_home) / "wt" / "cursor-detached-cli")
+            self._seed_persistent_run(
+                path,
+                alias="cursor-detached-cli",
+                branch=branch,
+                execution_cwd=wt_path,
+                source_head_ref=None,
+            )
+            self._create_worktree_at(path, branch, wt_path)
+
+            code, out, _err = self._run_cli(
+                [
+                    "--cwd",
+                    path,
+                    "--json",
+                    "worktree",
+                    "prune",
+                    "--merged",
+                    "--include-detached",
+                    "--dry-run",
+                ],
+                home=fake_home,
+            )
+
+            self.assertEqual(code, 0)
+            payload = json.loads(out)
+            planned_aliases = {entry["alias"] for entry in payload["planned"]}
+            self.assertIn("cursor-detached-cli", planned_aliases)
+
+    def test_worktree_prune_harness_filter_limits_candidates(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            cursor_branch = "delegate/cursor-prune-filter"
+            droid_branch = "delegate/droid-prune-filter"
+            cursor_wt = str(Path(fake_home) / "wt" / "cursor-prune-filter")
+            droid_wt = str(Path(fake_home) / "wt" / "droid-prune-filter")
+            self._seed_persistent_run(
+                path,
+                alias="cursor-prune-filter",
+                harness="cursor",
+                branch=cursor_branch,
+                execution_cwd=cursor_wt,
+            )
+            self._seed_persistent_run(
+                path,
+                alias="droid-prune-filter",
+                harness="droid",
+                branch=droid_branch,
+                execution_cwd=droid_wt,
+            )
+            self._create_worktree_at(path, cursor_branch, cursor_wt)
+            self._create_worktree_at(path, droid_branch, droid_wt)
+
+            result = self.delegate.worktree_mgmt.prune_worktrees(
+                self._registry_root(path),
+                merged=True,
+                harness="droid",
+                dry_run=True,
+            )
+
+            self.assertEqual({entry["alias"] for entry in result["planned"]}, {"droid-prune-filter"})
+            skipped = {entry["alias"]: entry["reason"] for entry in result["skipped"]}
+            self.assertEqual(skipped["cursor-prune-filter"], "harness_filter")
+
+    def test_worktree_prune_force_discards_dirty_and_removes_branch(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            branch = "delegate/cursor-prune-force"
+            wt_path = str(Path(fake_home) / "wt" / "cursor-prune-force")
+            run_id, _alias = self._seed_persistent_run(
+                path,
+                alias="cursor-prune-force",
+                branch=branch,
+                execution_cwd=wt_path,
+            )
+            self._create_worktree_at(path, branch, wt_path, dirty_file="scratch.txt")
+
+            result = self.delegate.worktree_mgmt.prune_worktrees(
+                self._registry_root(path),
+                merged=True,
+                force=True,
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual([entry["alias"] for entry in result["removed"]], ["cursor-prune-force"])
+            removed = result["removed"][0]
+            self.assertTrue(removed["pathRemoved"])
+            self.assertTrue(removed["branchRemoved"])
+            self.assertFalse(Path(wt_path).exists())
+            self.assertNotEqual(git("rev-parse", "--verify", branch, cwd=path, check=False).returncode, 0)
+            state = self.delegate.run_registry.load_run_state(self._registry_root(path), run_id)
+            self.assertIn("discardedDirtyPaths", state)
+
     def test_maybe_auto_prune_skips_when_lock_contended(self):
         """maybe_auto_prune returns within ~1s when registry lock is contended."""
         _repo, path = self._make_repo()
@@ -1070,6 +1195,18 @@ class WorktreeMgmtTests(unittest.TestCase):
             )
             self.assertIsNone(result)
             self.assertTrue(len(warnings) > 0)
+            self.assertTrue(warnings[0].startswith("git status failed:"))
+
+    def test_run_git_timeout_returns_structured_failure(self):
+        _repo, path = self._make_repo()
+        with mock.patch.object(
+            self.delegate.worktree_mgmt.subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired(["git", "status"], 30),
+        ):
+            result = self.delegate.worktree_mgmt._run_git(path, ["status"])
+        self.assertEqual(result.returncode, 124)
+        self.assertIn("git command timed out", result.stderr)
 
     def test_merged_into_source_returns_null_when_git_unavailable(self):
         _repo, path = self._make_repo()
@@ -1089,6 +1226,7 @@ class WorktreeMgmtTests(unittest.TestCase):
             result, warnings = self.delegate.worktree_mgmt.merged_into_source(record, "present")
             self.assertIsNone(result)
             self.assertTrue(len(warnings) > 0)
+            self.assertIn("could not determine whether branch is merged", warnings[0])
 
     def test_snapshot_json_has_cleanup_hints(self):
         _repo, path = self._make_repo()

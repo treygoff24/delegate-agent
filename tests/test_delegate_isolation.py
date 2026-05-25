@@ -12,6 +12,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = str(ROOT / "src")
@@ -402,6 +403,37 @@ class BuildIsolationContextTests(unittest.TestCase):
         self.assertEqual(ctx.source_head_oid, "abc123def456")
         self.assertEqual(ctx.source_head_ref, "refs/heads/main")
         self.assertEqual(ctx.source_branch, "main")
+
+
+class GitTimeoutTests(unittest.TestCase):
+    def test_require_clean_source_raises_git_timeout(self):
+        iso = load_isolation()
+        with mock.patch.object(
+            iso.subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired(["git", "status"], 30),
+        ):
+            with self.assertRaises(iso.IsolationExecutionError) as ctx:
+                iso.require_clean_source("/repo")
+        self.assertEqual(ctx.exception.error, "git_timeout")
+        self.assertIn("git status timed out", ctx.exception.message)
+
+    def test_create_persistent_worktree_branch_probe_timeout_is_structured(self):
+        iso = load_isolation()
+        with mock.patch.object(
+            iso.subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired(["git", "show-ref"], 30),
+        ):
+            with self.assertRaises(iso.IsolationExecutionError) as ctx:
+                iso.create_persistent_worktree(
+                    "/repo",
+                    "delegate/cursor-timeout",
+                    "/tmp/delegate-timeout",
+                    "HEAD",
+                )
+        self.assertEqual(ctx.exception.error, "git_timeout")
+        self.assertIn("branch availability check timed out", ctx.exception.message)
 
 
 class ReexportTests(unittest.TestCase):
