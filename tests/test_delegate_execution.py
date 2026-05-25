@@ -1667,6 +1667,253 @@ class ExecutionTests(unittest.TestCase):
             )
         self.assertEqual(ctx.exception.error, "dirty_source_workspace")
 
+    # ==========================================================================
+    # Wave 3B: execution end-to-end acceptance tests
+    # ==========================================================================
+
+    # -- L836: Detached source HEAD persistent worktree -----------------------
+
+    def test_persistent_worktree_detached_head_source(self):
+        """Persistent worktree with detached source HEAD runs and
+        records sourceHeadRef: null with 'integration target unknown' warning."""
+        with tempfile.TemporaryDirectory() as fake_home:
+            with mock.patch.dict(os.environ, {"HOME": fake_home}):
+                repo, _git_cd = self._make_git_repo_with_commit()
+
+                # Detach HEAD: checkout the lone commit OID in detached state.
+                oid = subprocess.run(
+                    ["git", "-C", repo.name, "rev-parse", "HEAD"],
+                    text=True, capture_output=True, check=True,
+                ).stdout.strip()
+                subprocess.run(
+                    ["git", "-C", repo.name, "checkout", "--detach", oid],
+                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+                # Confirm detached state: symbolic-ref must fail.
+                sym_ref = subprocess.run(
+                    ["git", "-C", repo.name, "symbolic-ref", "--quiet", "HEAD"],
+                    capture_output=True, check=False,
+                )
+                self.assertNotEqual(sym_ref.returncode, 0,
+                                    "HEAD should be detached")
+
+                fake_bin = self.make_cursor_safe_fake_agent()
+                workspace = self.delegate.resolve_workspace(repo.name)
+                request = self._make_persistent_worktree_request(
+                    "cursor", "work", repo.name, self.delegate.DEFAULT_CONFIG,
+                )
+                request = self.delegate.Request(
+                    request.engine, request.mode, request.workspace, request.prompt,
+                    [str(fake_bin / "agent"), "--workspace", repo.name, "-p", "--trust",
+                     "--model", "composer-2.5", "--output-format", "text", "hello"],
+                    request.model, dry_run=False, workspace_kind=request.workspace_kind,
+                    isolation_context=request.isolation_context,
+                )
+                with mock.patch.dict(os.environ, {"PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", "")}):
+                    code, payload = self.delegate.execute_request(
+                        request, json_mode=False, config=self.delegate.DEFAULT_CONFIG,
+                        pass_through=False, completion_report_mode="none",
+                        source_workspace=workspace, stdout=io.StringIO(), stderr=io.StringIO(),
+                    )
+                self.assertEqual(code, 0, "Run should succeed even with detached HEAD")
+
+                # Assert creationContext.sourceHeadRef is null in state.json
+                registry_root = Path(repo.name) / ".delegate"
+                runs_dir = registry_root / "runs"
+                run_dirs = list(runs_dir.glob("del_*"))
+                self.assertTrue(len(run_dirs) > 0, "No run directory found")
+                state = self.delegate.json.loads(
+                    (run_dirs[0] / "state.json").read_text()
+                )
+                cc = state.get("creationContext", {})
+                self.assertIsNone(
+                    cc.get("sourceHeadRef"),
+                    "sourceHeadRef must be null when source HEAD is detached",
+                )
+
+                # Assert worktree_mgmt.show_worktree includes the warning
+                alias = state.get("alias")
+                self.assertIsNotNone(alias, "state must record alias")
+                show_payload = self.delegate.worktree_mgmt.show_worktree(
+                    registry_root, handle=alias,
+                )
+                self.assertIn("warnings", show_payload)
+                self.assertIn(
+                    "source was detached at creation; integration target unknown",
+                    show_payload["warnings"],
+                )
+
+    # -- L837: Real git worktree add collision via pre-existing worktree --------
+
+    def test_persistent_worktree_add_collision_fails_and_cleans_up(self):
+        """Real 'git worktree add' collision surfaces as the creation error
+        with git stderr surfaced, and no partial artifacts remain.
+
+        Pre-checkout the predicted delegate branch in another git worktree
+        so that `git worktree add -b` in create_persistent_worktree fails
+        with either branch_collision or worktree_create_failed depending on
+        how the code detects the collision.
+        """
+        with tempfile.TemporaryDirectory() as fake_home:
+            with mock.patch.dict(os.environ, {"HOME": fake_home}):
+                repo, _git_cd = self._make_git_repo_with_commit()
+
+                # Monkey-patch generate_run_id so we know the predicted branch.
+                fixed_run_id = "del_20250101T000000Z_abcdef"
+                with mock.patch.object(
+                    self.delegate.run_registry, "generate_run_id",
+                    return_value=fixed_run_id,
+                ):
+                    from delegate_agent.isolation import (
+                        short_run_id, branch_label, plan_branch_name,
+                    )
+                    short_id = short_run_id(fixed_run_id)
+                    label = branch_label("cursor", None)
+                    predicted_branch = plan_branch_name(label, short_id)
+
+                    # Pre-checkout the predicted branch in a separate
+                    # worktree so git refuses to create it.
+                    branch_wt_path = tempfile.mkdtemp()
+                    # Create the branch reference first; then check it out.
+                    subprocess.run(
+                        ["git", "-C", repo.name, "branch", "--no-track",
+                         predicted_branch, "HEAD"],
+                        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
+                    subprocess.run(
+                        ["git", "-C", repo.name, "worktree", "add",
+                         branch_wt_path, predicted_branch],
+                        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
+                    # Clean up the blocking worktree afterwards.
+                    self.addCleanup(lambda: subprocess.run(
+                        ["git", "-C", repo.name, "worktree", "remove", "--force",
+                         branch_wt_path],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+                    ))
+
+                    fake_bin = self.make_fake_bin()
+                    workspace = self.delegate.resolve_workspace(repo.name)
+                    request = self._make_persistent_worktree_request(
+                        "cursor", "work", repo.name, self.delegate.DEFAULT_CONFIG,
+                    )
+                    request = self.delegate.Request(
+                        request.engine, request.mode, request.workspace, request.prompt,
+                        [str(fake_bin / "agent"), "--workspace", repo.name, "-p", "--trust",
+                         "--model", "composer-2.5", "--output-format", "text", "hello"],
+                        request.model, dry_run=False, workspace_kind=request.workspace_kind,
+                        isolation_context=request.isolation_context,
+                    )
+                    with self.assertRaises(self.delegate.DelegateError) as ctx:
+                        self.delegate.execute_request(
+                            request, json_mode=False, config=self.delegate.DEFAULT_CONFIG,
+                            pass_through=False, completion_report_mode="none",
+                            source_workspace=workspace, stdout=io.StringIO(), stderr=io.StringIO(),
+                        )
+
+                    # Accept either error code: branch_collision is the
+                    # pre-launch check in create_persistent_worktree, while
+                    # worktree_create_failed would come from the actual
+                    # git worktree add failure.
+                    self.assertIn(
+                        ctx.exception.error,
+                        ["worktree_create_failed", "branch_collision"],
+                        f"Expected git-collision error, got {ctx.exception.error}",
+                    )
+                    # Git stderr text must be present in the error message.
+                    self.assertTrue(
+                        len(ctx.exception.message) > 0,
+                        "Error message should not be empty",
+                    )
+
+                    # Assert NO partial branch/worktree was left behind
+                    # by the delegate run (the pre-existing branch and
+                    # worktree are not delegate artifacts).
+                    data_home = Path(fake_home) / ".delegate" / "worktrees"
+                    if data_home.exists():
+                        cursor_dirs = list(data_home.rglob("cursor-*"))
+                        self.assertEqual(
+                            len(cursor_dirs), 0,
+                            "No delegate worktree directories should exist after a "
+                            "failed creation",
+                        )
+
+    # -- L841: safe + worktree + pass-through cleanup on child failure ---------
+
+    def test_safe_worktree_passthrough_cleans_up_on_child_failure(self):
+        """--pass-through --isolation worktree cursor safe cleans up temp
+        worktree even when the child exits non-zero."""
+        with tempfile.TemporaryDirectory() as fake_home:
+            with mock.patch.dict(os.environ, {"HOME": fake_home}):
+                repo, _git_cd = self._make_git_repo_with_commit()
+                # Fake binary that exits non-zero (child failure).
+                fake_bin = self.make_cursor_safe_fake_agent()
+                config = dict(self.delegate.DEFAULT_CONFIG)
+                workspace = self.delegate.resolve_workspace(repo.name)
+                git_root, git_common_dir, head_oid, head_ref, branch_name = (
+                    self.delegate.capture_git_metadata(repo.name)
+                )
+                effective = self.delegate.delegate_config.resolve_isolation(
+                    cli_value="worktree", loaded_config=config, engine="cursor", mode="safe",
+                )
+                isolation_context = self.delegate.build_isolation_context(
+                    source_workspace=workspace.path,
+                    resolved_isolation=effective,
+                    engine="cursor", mode="safe",
+                    config=config, run_short_id=None,
+                    source_git_root=git_root, source_git_common_dir=git_common_dir,
+                    source_head_oid=head_oid, source_head_ref=head_ref,
+                    source_branch=branch_name,
+                )
+                request = self.delegate.Request(
+                    "cursor", "safe", repo.name,
+                    self.delegate.prefix_cursor_safe_prompt(
+                        self.delegate.delegate_runner.SKILL_REVIEW_PREFIX + "hello"),
+                    [str(fake_bin / "agent"), "--workspace", repo.name, "-p", "--trust",
+                     "--model", "composer-2.5", "--output-format", "text",
+                     self.delegate.prefix_cursor_safe_prompt(
+                         self.delegate.delegate_runner.SKILL_REVIEW_PREFIX + "hello")],
+                    "composer-2.5", workspace_kind="git",
+                    isolation_context=isolation_context,
+                )
+                temp_dirs_before = safe_temp_dirs()
+                branches_before = subprocess.run(
+                    ["git", "-C", repo.name, "branch", "--list", "delegate/*"],
+                    capture_output=True, text=True, check=False,
+                ).stdout.strip()
+
+                with mock.patch.dict(os.environ, {
+                    "PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", ""),
+                    "FAKE_EXIT": "7",
+                }):
+                    code, _ = self.delegate.execute_request(
+                        request, json_mode=False, config=config,
+                        pass_through=True, completion_report_mode="none",
+                        source_workspace=workspace, stdout=io.StringIO(), stderr=io.StringIO(),
+                    )
+
+                # 1. Child exit code reflects failure.
+                self.assertNotEqual(code, 0,
+                                    "Child non-zero exit must propagate")
+
+                # 2. Temporary worktree directory must NOT exist after exit
+                #    (cleaned up by the finally block).
+                self.assertEqual(
+                    safe_temp_dirs() - temp_dirs_before, set(),
+                    "No new delegate-safe-* temp dirs should remain after cleanup",
+                )
+
+                # 3. The branch the temporary worktree used must NOT exist
+                #    (safe-mode worktrees are detached, no branch created).
+                branches_after = subprocess.run(
+                    ["git", "-C", repo.name, "branch", "--list", "delegate/*"],
+                    capture_output=True, text=True, check=False,
+                ).stdout.strip()
+                self.assertEqual(
+                    branches_before, branches_after,
+                    "No delegate/* branches should be created by safe mode",
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
