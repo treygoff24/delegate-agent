@@ -755,6 +755,24 @@ class WorktreeMgmtTests(unittest.TestCase):
             self.assertEqual(len(removed_result["entries"]), 1)
             self.assertEqual(removed_result["entries"][0]["alias"], "cursor-removed")
 
+    def test_worktree_public_payloads_do_not_expose_private_record_keys(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            branch = "delegate/cursor-public"
+            wt_path = str(Path(fake_home) / "wt" / "cursor-public")
+            self._seed_persistent_run(path, alias="cursor-public", branch=branch, execution_cwd=wt_path)
+            self._create_worktree_at(path, branch, wt_path)
+
+            list_payload = self.delegate.worktree_mgmt.list_worktrees(self._registry_root(path))
+            show_payload = self.delegate.worktree_mgmt.show_worktree(
+                self._registry_root(path),
+                handle="cursor-public",
+            )
+
+            for payload in (list_payload["entries"][0], show_payload):
+                private_keys = [key for key in payload if key.startswith("_")]
+                self.assertEqual(private_keys, [])
+
     def test_worktree_show_latest_harness(self):
         _repo, path = self._make_repo()
         with tempfile.TemporaryDirectory() as fake_home:

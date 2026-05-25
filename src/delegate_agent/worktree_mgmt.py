@@ -17,6 +17,7 @@ SCHEMA_REMOVE = "delegate.worktree-remove.v1"
 SCHEMA_PRUNE = "delegate.worktree-prune.v1"
 SCHEMA_GC = "delegate.worktree-gc.v1"
 WORKTREE_ERROR_EXIT_CODE = 2
+MAX_DIRTY_PATHS_REPORTED = 20
 
 STATUS_PRESENT = "present"
 STATUS_REMOVED = "removed"
@@ -86,12 +87,24 @@ def _first_string(*values: object) -> str | None:
     return None
 
 
+def _get_str(source: object, key: str) -> str | None:
+    if not isinstance(source, dict):
+        return None
+    value = source.get(key)
+    return value if isinstance(value, str) and value else None
+
+
+def _get_dict(source: object, key: str) -> JsonObject:
+    if not isinstance(source, dict):
+        return {}
+    value = source.get(key)
+    return value if isinstance(value, dict) else {}
+
+
 def _creation_context(manifest: JsonObject | None, snapshot: JsonObject | None) -> JsonObject:
     for source in (manifest, snapshot):
-        if not isinstance(source, dict):
-            continue
-        value = source.get("creationContext")
-        if isinstance(value, dict):
+        value = _get_dict(source, "creationContext")
+        if value:
             return value
     return {}
 
@@ -99,10 +112,10 @@ def _creation_context(manifest: JsonObject | None, snapshot: JsonObject | None) 
 def _branch_from(manifest: JsonObject | None, snapshot: JsonObject | None) -> str | None:
     creation = _creation_context(manifest, snapshot)
     return _first_string(
-        manifest.get("branch") if isinstance(manifest, dict) else None,
-        snapshot.get("branch") if isinstance(snapshot, dict) else None,
-        creation.get("branch"),
-        creation.get("plannedBranch"),
+        _get_str(manifest, "branch"),
+        _get_str(snapshot, "branch"),
+        _get_str(creation, "branch"),
+        _get_str(creation, "plannedBranch"),
     )
 
 
@@ -112,18 +125,18 @@ def _execution_cwd_from(
     state: JsonObject | None,
 ) -> str | None:
     return _first_string(
-        manifest.get("executionCwd") if isinstance(manifest, dict) else None,
-        snapshot.get("executionCwd") if isinstance(snapshot, dict) else None,
-        state.get("plannedExecutionCwd") if isinstance(state, dict) else None,
+        _get_str(manifest, "executionCwd"),
+        _get_str(snapshot, "executionCwd"),
+        _get_str(state, "plannedExecutionCwd"),
     )
 
 
 def _source_git_root_from(manifest: JsonObject | None, snapshot: JsonObject | None) -> str | None:
     return _first_string(
-        manifest.get("sourceGitRoot") if isinstance(manifest, dict) else None,
-        snapshot.get("sourceGitRoot") if isinstance(snapshot, dict) else None,
-        manifest.get("cwd") if isinstance(manifest, dict) else None,
-        snapshot.get("cwd") if isinstance(snapshot, dict) else None,
+        _get_str(manifest, "sourceGitRoot"),
+        _get_str(snapshot, "sourceGitRoot"),
+        _get_str(manifest, "cwd"),
+        _get_str(snapshot, "cwd"),
     )
 
 
@@ -133,9 +146,7 @@ def _registry_worktree_status(
     snapshot: JsonObject | None,
 ) -> str | None:
     for source in (state, manifest, snapshot):
-        if not isinstance(source, dict):
-            continue
-        value = source.get("worktreeStatus")
+        value = _get_str(source, "worktreeStatus")
         if isinstance(value, str) and value in VALID_STATUSES:
             return value
     return None
@@ -168,20 +179,20 @@ def _record_for_run(
         return None
     entry = index_entry if isinstance(index_entry, dict) else {}
     alias = _first_string(
-        state.get("alias") if isinstance(state, dict) else None,
-        manifest.get("alias") if isinstance(manifest, dict) else None,
-        snapshot.get("alias") if isinstance(snapshot, dict) else None,
-        entry.get("alias"),
+        _get_str(state, "alias"),
+        _get_str(manifest, "alias"),
+        _get_str(snapshot, "alias"),
+        _get_str(entry, "alias"),
     )
     harness = _first_string(
-        entry.get("harness"),
-        manifest.get("harness") if isinstance(manifest, dict) else None,
-        snapshot.get("harness") if isinstance(snapshot, dict) else None,
+        _get_str(entry, "harness"),
+        _get_str(manifest, "harness"),
+        _get_str(snapshot, "harness"),
     )
     creation = _creation_context(manifest, snapshot)
     created_at = _first_string(
-        manifest.get("startedAt") if isinstance(manifest, dict) else None,
-        snapshot.get("startedAt") if isinstance(snapshot, dict) else None,
+        _get_str(manifest, "startedAt"),
+        _get_str(snapshot, "startedAt"),
         run_registry.timestamp_from_run_id(run_id),
     )
     last_activity = run_registry.activity_timestamp(state, manifest, run_id)
@@ -196,9 +207,6 @@ def _record_for_run(
         "lastActivityAt": last_activity,
         "creationContext": creation,
         "registryWorktreeStatus": _registry_worktree_status(state, manifest, snapshot),
-        "_state": state or {},
-        "_manifest": manifest or {},
-        "_snapshot": snapshot or {},
     }
 
 
@@ -420,7 +428,7 @@ def decorate_record(record: JsonObject, *, include_detached: bool = False) -> Js
     if all_warnings:
         output["warnings"] = all_warnings
     if dirty_paths:
-        output["dirtyPaths"] = dirty_paths[:20]
+        output["dirtyPaths"] = dirty_paths[:MAX_DIRTY_PATHS_REPORTED]
         output["dirtyPathsTotal"] = dirty_total
     return output
 
@@ -474,8 +482,8 @@ def _error_payload(
             if isinstance(value, str) and value:
                 payload[key] = value
     if dirty_paths is not None:
-        capped = dirty_paths[:20]
-        if len(dirty_paths) > 20:
+        capped = dirty_paths[:MAX_DIRTY_PATHS_REPORTED]
+        if len(dirty_paths) > MAX_DIRTY_PATHS_REPORTED:
             capped.append("...")
             payload["dirtyPathsTotal"] = len(dirty_paths)
         payload["dirtyPaths"] = capped
