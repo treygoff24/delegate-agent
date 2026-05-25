@@ -377,20 +377,6 @@ PERSISTENT_WORKTREE_CONTEXT_NOTE = (
 )
 
 
-# Imported lazily to avoid circular imports with cli.py importing runner.
-SKILL_REVIEW_PREFIX = (
-    "## Delegate sub-agent skill review requirement\n\n"
-    "Before doing the task, review the full list of skills available "
-    "in your current agent environment. Load/read and apply any skill "
-    "instructions that are relevant to the task, workspace, tools, code "
-    "quality, verification, or final deliverable. If no skill is "
-    "relevant, proceed normally after explicitly deciding that. "
-    "This requirement is mandatory for every Delegate Agent run; "
-    "do not skip it just because the parent prompt did not mention skills."
-    "\n\n"
-)
-
-
 def prepend_persistent_worktree_context(prompt: str) -> str:
     """Prepend the persistent-worktree context note AFTER the mandatory
     skill-review prefix and BEFORE the user prompt.
@@ -400,6 +386,8 @@ def prepend_persistent_worktree_context(prompt: str) -> str:
     function inserts the worktree context between the skill-review
     prefix and the rest of the prompt.
     """
+    from delegate_agent.runner import SKILL_REVIEW_PREFIX  # lazy: avoids runner -> cli -> isolation cycle
+
     if prompt.startswith(SKILL_REVIEW_PREFIX):
         insert_at = len(SKILL_REVIEW_PREFIX)
         return prompt[:insert_at] + PERSISTENT_WORKTREE_CONTEXT_NOTE + prompt[insert_at:]
