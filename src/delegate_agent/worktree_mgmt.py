@@ -780,13 +780,12 @@ def _mark_worktree_removed(
     discarded_paths: list[str] | None,
 ) -> None:
     """Update registry state to mark the run as removed."""
-    run_registry.set_worktree_status(
+    run_registry.set_worktree_status_locked(
         registry_root,
         run_id,
         "removed",
         removed_at=_utc_now_iso(),
         discarded_dirty_paths=discarded_paths,
-        _skip_lock=True,
     )
 
 
@@ -1141,12 +1140,11 @@ def gc_worktrees(registry_root: Path, *, dry_run: bool = False) -> JsonObject:
                     fresh, fresh_source, fresh_execution = fresh_candidate
                     if Path(fresh_execution).exists():
                         continue
-                    run_registry.set_worktree_status(
+                    run_registry.set_worktree_status_locked(
                         registry_root,
                         str(fresh["runId"]),
                         "missing",
                         removed_at=_utc_now_iso(),
-                        _skip_lock=True,
                     )
                     prune_roots.add(fresh_source)
                     append_missing(fresh, fresh_execution)
@@ -1166,11 +1164,10 @@ def gc_worktrees(registry_root: Path, *, dry_run: bool = False) -> JsonObject:
                         and fresh_paths is not None
                         and fresh_execution not in fresh_paths
                     ):
-                        run_registry.set_worktree_status(
+                        run_registry.set_worktree_status_locked(
                             registry_root,
                             str(fresh["runId"]),
                             "unknown",
-                            _skip_lock=True,
                         )
                         append_orphan(fresh, fresh_execution, "worktree_metadata_missing")
             continue
@@ -1189,11 +1186,10 @@ def gc_worktrees(registry_root: Path, *, dry_run: bool = False) -> JsonObject:
                         and Path(fresh_execution).exists()
                         and _branch_exists(fresh_source, fresh_branch) is False
                     ):
-                        run_registry.set_worktree_status(
+                        run_registry.set_worktree_status_locked(
                             registry_root,
                             str(fresh["runId"]),
                             "unknown",
-                            _skip_lock=True,
                         )
                         append_orphan(fresh, fresh_execution, "branch_missing")
     if not dry_run:

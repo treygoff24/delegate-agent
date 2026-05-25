@@ -586,6 +586,25 @@ def set_worktree_status(
         return _write()
 
 
+def set_worktree_status_locked(
+    registry_root: Path,
+    run_id: str,
+    status: str,
+    *,
+    removed_at: str | None = None,
+    discarded_dirty_paths: list[str] | None = None,
+) -> JsonObject:
+    """Set worktree status when the caller already holds the registry lock."""
+    return set_worktree_status(
+        registry_root,
+        run_id,
+        status,
+        removed_at=removed_at,
+        discarded_dirty_paths=discarded_dirty_paths,
+        _skip_lock=True,
+    )
+
+
 def latest_run_id_for_harness(registry_root: Path, index: JsonObject, harness: str) -> str | None:
     matches: list[tuple[str, str]] = []
     for run_id, entry in index.get("runs", {}).items():

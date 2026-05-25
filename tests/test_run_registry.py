@@ -296,6 +296,26 @@ class RunRegistryTests(unittest.TestCase):
             self.assertEqual(updated2["worktreeStatus"], "removed")
             self.assertEqual(updated2["worktreeRemovedAt"], removed_at)
 
+    def test_set_worktree_status_locked_updates_under_existing_lock(self):
+        """set_worktree_status_locked is the explicit helper for lock-held callers."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="cursor")
+            run_path = self.registry.run_directory(root, run_id)
+            run_path.mkdir(parents=True, exist_ok=True)
+            state = {
+                "schema": "delegate.state.v1",
+                "runId": run_id,
+                "alias": alias,
+                "status": "succeeded",
+            }
+            self.registry.write_json_atomic(run_path / "state.json", state)
+
+            with self.registry.registry_lock(root):
+                updated = self.registry.set_worktree_status_locked(root, run_id, "unknown")
+
+            self.assertEqual(updated["worktreeStatus"], "unknown")
+
     def test_set_worktree_status_missing_state_raises(self):
         """set_worktree_status on a missing state file raises."""
         with tempfile.TemporaryDirectory() as tmp:
