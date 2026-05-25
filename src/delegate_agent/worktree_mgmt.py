@@ -8,7 +8,11 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from delegate_agent import run_registry
-from delegate_agent.git_utils import GIT_MUTATION_TIMEOUT_SECONDS, timeout_completed_process
+from delegate_agent.git_utils import (
+    GIT_MUTATION_TIMEOUT_SECONDS,
+    GIT_TIMEOUT_RETURN_CODE,
+    timeout_completed_process,
+)
 from delegate_agent.json_types import JsonObject
 
 SCHEMA_LIST = "delegate.worktree-list.v1"
@@ -52,6 +56,7 @@ class BranchRemovalResult:
     removed: bool
     kept_reason: str | None = None
     error: str | None = None
+    error_code: str | None = None
 
 
 def _utc_now_iso() -> str:
@@ -588,6 +593,8 @@ def _remove_branch(source_git_root: str, branch: str, *, force: bool) -> BranchR
     if result.returncode == 0:
         return BranchRemovalResult(removed=True)
     stderr = result.stderr.strip() or "delete_failed"
+    if result.returncode == GIT_TIMEOUT_RETURN_CODE:
+        return BranchRemovalResult(removed=False, error=stderr, error_code="git_timeout")
     lowered = stderr.lower()
     if not force and ("not fully merged" in lowered or "not merged" in lowered):
         return BranchRemovalResult(removed=False, kept_reason="unmerged")
@@ -607,8 +614,9 @@ def _apply_branch_removal_result(
             payload["nextActions"] = [f"delegate worktree remove {alias} --force-branch"]
     if result.error:
         payload["ok"] = False
-        payload["code"] = "branch_remove_failed"
-        payload["error"] = "branch_remove_failed"
+        code = result.error_code or "branch_remove_failed"
+        payload["code"] = code
+        payload["error"] = code
         payload["exitCode"] = WORKTREE_ERROR_EXIT_CODE
         payload["branchRemovalError"] = result.error
 
@@ -732,6 +740,16 @@ def _remove_worktree_path(
     remove_args.append(execution_cwd)
     result = _run_git(source_git_root, remove_args)
     if result.returncode != 0:
+        if result.returncode == GIT_TIMEOUT_RETURN_CODE:
+            raise WorktreeManagementError(
+                _error_payload(
+                    "git_timeout",
+                    f"git worktree remove timed out: {result.stderr.strip()}",
+                    record=record,
+                    next_actions=[f"delegate worktree show {alias}"],
+                    retry_safe=True,
+                )
+            )
         raise WorktreeManagementError(
             _error_payload(
                 "worktree_remove_failed",
@@ -1054,6 +1072,8 @@ def prune_worktrees(
                         _skip_lock=_skip_lock,
                     )
                 )
+                if removed[-1].get("ok") is False:
+                    errors.append(removed[-1])
             except WorktreeManagementError as exc:
                 errors.append(exc.payload)
     return {

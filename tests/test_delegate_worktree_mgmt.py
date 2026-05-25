@@ -911,6 +911,71 @@ class WorktreeMgmtTests(unittest.TestCase):
             self.assertEqual(payload["code"], "branch_remove_failed")
             self.assertEqual(payload["exitCode"], self.delegate.EXIT_USAGE)
 
+    def test_worktree_remove_branch_delete_timeout_uses_git_timeout_code(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            self._seed_persistent_run(
+                path,
+                alias="cursor-removed",
+                branch="delegate/cursor-delete-timeout",
+                worktree_status="removed",
+            )
+            timeout = subprocess.CompletedProcess(
+                ["git", "branch", "-D", "delegate/cursor-delete-timeout"],
+                124,
+                "",
+                "git command timed out after 30s\n",
+            )
+            with mock.patch.object(self.delegate.worktree_mgmt, "_run_git", return_value=timeout):
+                code, out, _err = self._run_cli(
+                    [
+                        "--cwd",
+                        path,
+                        "--json",
+                        "worktree",
+                        "remove",
+                        "cursor-removed",
+                        "--force-branch",
+                    ],
+                    home=fake_home,
+                )
+            payload = json.loads(out)
+            self.assertEqual(code, self.delegate.EXIT_USAGE)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["code"], "git_timeout")
+            self.assertEqual(payload["error"], "git_timeout")
+            self.assertEqual(payload["exitCode"], self.delegate.EXIT_USAGE)
+
+    def test_worktree_prune_reports_nested_remove_payload_failure(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            branch = "delegate/cursor-prune-branch-error"
+            wt_path = str(Path(fake_home) / "wt" / "cursor-prune-branch-error")
+            self._seed_persistent_run(
+                path,
+                alias="cursor-prune-branch-error",
+                branch=branch,
+                execution_cwd=wt_path,
+            )
+            self._create_worktree_at(path, branch, wt_path)
+            branch_failure = self.delegate.worktree_mgmt.BranchRemovalResult(
+                removed=False,
+                error="fatal: cannot delete branch",
+            )
+            with mock.patch.object(
+                self.delegate.worktree_mgmt,
+                "_remove_branch",
+                return_value=branch_failure,
+            ):
+                result = self.delegate.worktree_mgmt.prune_worktrees(
+                    self._registry_root(path),
+                    merged=True,
+                )
+            self.assertFalse(result["ok"])
+            self.assertEqual(len(result["errors"]), 1)
+            self.assertEqual(result["errors"][0]["code"], "branch_remove_failed")
+            self.assertEqual(result["removed"][0]["code"], "branch_remove_failed")
+
     def test_prune_includes_detached_with_flag(self):
         _repo, path = self._make_repo()
         with tempfile.TemporaryDirectory() as fake_home:
