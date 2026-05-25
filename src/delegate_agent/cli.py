@@ -23,6 +23,7 @@ try:
     from delegate_agent import run_registry
     from delegate_agent import runner as delegate_runner
     from delegate_agent import worktree_mgmt
+    from delegate_agent import harness_events
     from delegate_agent.isolation import (
         IsolationContext,
         build_isolation_context,
@@ -50,6 +51,7 @@ except ModuleNotFoundError:  # pragma: no cover - direct cli.py invocation in te
     from delegate_agent import run_registry
     from delegate_agent import runner as delegate_runner
     from delegate_agent import worktree_mgmt
+    from delegate_agent import harness_events
     from delegate_agent.isolation import (
         IsolationContext,
         build_isolation_context,
@@ -2289,23 +2291,19 @@ def _execute_persistent_worktree(
             },
         )
         delegate_runner.write_state(run_path, failed_state)
-        # Build a minimal snapshot for post-mortem inspection.
-        failed_snapshot: JsonObject = {
-            "schema": run_registry.SNAPSHOT_SCHEMA,
-            "ok": False,
-            "alias": pre_ctx.alias,
-            "runId": pre_ctx.run_id,
-            "harness": pre_ctx.harness,
-            "cwd": pre_ctx.source_cwd,
-            "mode": pre_ctx.mode,
-            "model": pre_ctx.model,
-            "startedAt": pre_ctx.started_at,
-            "error": exc.error,
-            "message": exc.message,
-            "status": "failed",
-            "plannedBranch": branch,
-            "plannedExecutionCwd": worktree_path,
-        }
+        # Build snapshot via runner helper so isolation fields, worktreeCleanupCommands,
+        # and all other structured metadata are included rather than dropped from a
+        # hand-rolled dict (DEV-2).
+        failed_snapshot = delegate_runner.build_snapshot(
+            pre_ctx,
+            accumulator=harness_events.StreamAccumulator(),
+        )
+        failed_snapshot["ok"] = False
+        failed_snapshot["error"] = exc.error
+        failed_snapshot["message"] = exc.message
+        failed_snapshot["status"] = "failed"
+        failed_snapshot["plannedBranch"] = branch
+        failed_snapshot["plannedExecutionCwd"] = worktree_path
         delegate_runner.write_snapshot(run_path, failed_snapshot)
         # Attempt cleanup of partial branch/worktree; if unsafe, preserve and record.
         if exc.error != "branch_collision":
@@ -2392,10 +2390,7 @@ def _execute_persistent_worktree(
     # manifest/state; Wave 4 will read those for snapshot/runs output.
 
     # Post-run: update the state to include worktreeStatus = "present".
-    final_state = run_registry.load_run_state(registry_root, run_id)
-    if final_state is not None:
-        final_state["worktreeStatus"] = "present"
-        delegate_runner.write_state(run_path, final_state)
+    run_registry.set_worktree_status(registry_root, run_id, "present")
 
     return exit_code, payload
 

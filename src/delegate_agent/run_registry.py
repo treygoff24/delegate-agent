@@ -551,6 +551,8 @@ def set_worktree_status(
     status: str,
     *,
     removed_at: str | None = None,
+    discarded_dirty_paths: list[str] | None = None,
+    _skip_lock: bool = False,
 ) -> JsonObject:
     """Set the worktreeStatus field on a run's state, and optionally worktreeRemovedAt.
 
@@ -558,12 +560,13 @@ def set_worktree_status(
     persists via write_json_atomic, and returns the updated state.
 
     Status must be one of: 'present', 'removed', 'missing', 'unknown'.
+    _skip_lock is for internal use when the caller already holds the registry lock.
     """
     valid_statuses = {"present", "removed", "missing", "unknown"}
     if status not in valid_statuses:
         raise ValueError(f"worktree status must be one of: {', '.join(sorted(valid_statuses))}")
 
-    with registry_lock(registry_root):
+    def _write():
         run_path = run_directory(registry_root, run_id)
         state_path = run_path / STATE_FILE
         if not state_path.exists():
@@ -572,8 +575,15 @@ def set_worktree_status(
         state["worktreeStatus"] = status
         if removed_at is not None:
             state["worktreeRemovedAt"] = removed_at
+        if discarded_dirty_paths is not None:
+            state["discardedDirtyPaths"] = discarded_dirty_paths
         write_json_atomic(state_path, state)
-    return state
+        return state
+
+    if _skip_lock:
+        return _write()
+    with registry_lock(registry_root):
+        return _write()
 
 
 def latest_run_id_for_harness(registry_root: Path, index: JsonObject, harness: str) -> str | None:

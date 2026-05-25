@@ -344,6 +344,8 @@ class WorktreeMgmtTests(unittest.TestCase):
             )
             self.assertEqual(code, 0)
             payload = json.loads(out)
+            # Branch is merged; branchKept="requested" reflects the keep-branch
+            # request on a merged branch (not the "unmerged" per-spec state).
             self.assertEqual(payload["branchKept"], "requested")
             self.assertEqual(git("rev-parse", "--verify", branch, cwd=path).returncode, 0)
 
@@ -398,7 +400,9 @@ class WorktreeMgmtTests(unittest.TestCase):
             first_payload = json.loads(out)
             self.assertTrue(first_payload["pathRemoved"])
             self.assertFalse(first_payload["branchRemoved"])
-            self.assertEqual(first_payload["branchKept"], "requested")
+            # Branch is unmerged and kept (spec L673); branchKept reflects
+            # the branch state, not the --keep-branch origin.
+            self.assertEqual(first_payload["branchKept"], "unmerged")
             self.assertFalse(Path(wt_path).exists())
             self.assertEqual(git("rev-parse", "--verify", branch, cwd=path).returncode, 0)
             state = self.delegate.run_registry.load_run_state(self._registry_root(path), run_id)
@@ -529,10 +533,18 @@ class WorktreeMgmtTests(unittest.TestCase):
             self.assertEqual(code, 0)
             payload = json.loads(out)
             removed_aliases = {entry["alias"] for entry in payload["removed"]}
+            removed_with_branch_kept = {
+                entry["alias"]: entry.get("branchKept")
+                for entry in payload["removed"]
+                if "branchKept" in entry
+            }
             skipped = {entry["alias"]: entry["reason"] for entry in payload["skipped"]}
             self.assertIn("clean-merged", removed_aliases)
+            # Per spec L673: clean unmerged worktrees are removed with path gone
+            # but branch kept (branchKept: "unmerged"), not skipped.
+            self.assertEqual(removed_with_branch_kept.get("unmerged"), "unmerged")
             self.assertEqual(skipped["dirty-merged"], "dirty")
-            self.assertEqual(skipped["unmerged"], "not_merged")
+            self.assertNotIn("unmerged", skipped)
             self.assertEqual(skipped["detached"], "detached_source")
 
             clean_branch, clean_wt = cases["clean-merged"]
@@ -541,11 +553,10 @@ class WorktreeMgmtTests(unittest.TestCase):
             self.assertFalse(Path(clean_wt).exists())
             self.assertTrue(Path(dirty_wt).exists())
             self.assertTrue((Path(dirty_wt) / "scratch.txt").exists())
-            self.assertTrue(Path(unmerged_wt).exists())
-            self.assertTrue(Path(detached_wt).exists())
-            self.assertNotEqual(git("rev-parse", "--verify", clean_branch, cwd=path, check=False).returncode, 0)
-            self.assertEqual(git("rev-parse", "--verify", dirty_branch, cwd=path).returncode, 0)
+            # Per spec L673: path is removed but branch is kept.
+            self.assertFalse(Path(unmerged_wt).exists())
             self.assertEqual(git("rev-parse", "--verify", unmerged_branch, cwd=path).returncode, 0)
+            self.assertEqual(git("rev-parse", "--verify", dirty_branch, cwd=path).returncode, 0)
             self.assertEqual(git("rev-parse", "--verify", detached_branch, cwd=path).returncode, 0)
 
     def test_worktree_gc_missing_path_reconciles(self):
