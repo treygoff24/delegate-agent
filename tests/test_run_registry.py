@@ -9,7 +9,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+SRC = str(ROOT / "src")
 REGISTRY_PATH = ROOT / "src" / "delegate_agent" / "run_registry.py"
+
+if SRC not in sys.path:
+    sys.path.insert(0, SRC)
 
 
 def load_registry():
