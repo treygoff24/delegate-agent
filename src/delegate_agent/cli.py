@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -830,12 +830,77 @@ def _require_option_value(rest: list[str], index: int, option: str) -> str:
     return rest[index + 1]
 
 
+WorktreeOptionSpec = tuple[str, str]
+
+
+WORKTREE_OPTION_SPECS: dict[str, dict[str, WorktreeOptionSpec]] = {
+    "list": {
+        "--harness": ("str", "worktree_harness"),
+        "--status": ("status", "worktree_status"),
+        "--limit": ("positive_int", "worktree_limit"),
+        "--no-auto-prune": ("flag", "worktree_no_auto_prune"),
+    },
+    "show": {
+        "--latest": ("str", "worktree_latest_harness"),
+    },
+    "remove": {
+        "--discard-uncommitted": ("flag", "worktree_discard_uncommitted"),
+        "--force-branch": ("flag", "worktree_force_branch"),
+        "--force": ("flag", "worktree_force"),
+        "--keep-branch": ("flag", "worktree_keep_branch"),
+    },
+    "prune": {
+        "--merged": ("flag", "worktree_merged"),
+        "--older-than": ("non_negative_int", "worktree_older_than"),
+        "--harness": ("str", "worktree_harness"),
+        "--include-detached": ("flag", "worktree_include_detached"),
+        "--dry-run": ("flag", "worktree_dry_run"),
+        "--discard-uncommitted": ("flag", "worktree_discard_uncommitted"),
+        "--force-branch": ("flag", "worktree_force_branch"),
+        "--force": ("flag", "worktree_force"),
+    },
+    "gc": {
+        "--dry-run": ("flag", "worktree_dry_run"),
+    },
+}
+
+
+def _apply_worktree_option(
+    parsed: ParsedCommand,
+    args: list[str],
+    index: int,
+    option: str,
+    spec: WorktreeOptionSpec,
+) -> int:
+    kind, attr = spec
+    if kind == "flag":
+        setattr(parsed, attr, True)
+        return index + 1
+    value = _require_option_value(args, index, option)
+    if kind == "str":
+        setattr(parsed, attr, value)
+    elif kind == "status":
+        if value not in worktree_mgmt.VALID_STATUSES:
+            raise DelegateError(
+                "invalid_option_value",
+                "--status must be present, removed, missing, or unknown.",
+            )
+        setattr(parsed, attr, value)
+    elif kind == "positive_int":
+        setattr(parsed, attr, parse_positive_int(value, option=option))
+    elif kind == "non_negative_int":
+        setattr(parsed, attr, parse_non_negative_int(value, option=option))
+    else:  # pragma: no cover - table construction bug
+        raise AssertionError(f"unknown worktree option kind: {kind}")
+    return index + 2
+
+
 def parse_worktree(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
     if not rest:
         raise DelegateError("missing_worktree_action", "worktree requires list, show, remove, prune, or gc.")
     action = rest[0]
     args = rest[1:]
-    if action not in {"list", "show", "remove", "prune", "gc"}:
+    if action not in WORKTREE_OPTION_SPECS:
         raise DelegateError("unknown_worktree_action", f"Unknown worktree action: {action}")
     parsed = ParsedCommand(
         "worktree",
@@ -845,6 +910,7 @@ def parse_worktree(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedC
     )
     positional: list[str] = []
     i = 0
+    action_specs = WORKTREE_OPTION_SPECS[action]
     while i < len(args):
         token = args[i]
         if token in {"--json", "--cwd", "--isolation"}:
@@ -852,93 +918,9 @@ def parse_worktree(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedC
                 "misplaced_global_option",
                 f"{token} must appear before the subcommand.",
             )
-        if action == "list":
-            if token == "--harness":
-                parsed.worktree_harness = _require_option_value(args, i, token)
-                i += 2
-                continue
-            if token == "--status":
-                value = _require_option_value(args, i, token)
-                if value not in worktree_mgmt.VALID_STATUSES:
-                    raise DelegateError(
-                        "invalid_option_value",
-                        "--status must be present, removed, missing, or unknown.",
-                    )
-                parsed.worktree_status = value
-                i += 2
-                continue
-            if token == "--limit":
-                parsed.worktree_limit = parse_positive_int(
-                    _require_option_value(args, i, token),
-                    option=token,
-                )
-                i += 2
-                continue
-            if token == "--no-auto-prune":
-                parsed.worktree_no_auto_prune = True
-                i += 1
-                continue
-        elif action == "show":
-            if token == "--latest":
-                parsed.worktree_latest_harness = _require_option_value(args, i, token)
-                i += 2
-                continue
-        elif action == "remove":
-            if token == "--discard-uncommitted":
-                parsed.worktree_discard_uncommitted = True
-                i += 1
-                continue
-            if token == "--force-branch":
-                parsed.worktree_force_branch = True
-                i += 1
-                continue
-            if token == "--force":
-                parsed.worktree_force = True
-                i += 1
-                continue
-            if token == "--keep-branch":
-                parsed.worktree_keep_branch = True
-                i += 1
-                continue
-        elif action == "prune":
-            if token == "--merged":
-                parsed.worktree_merged = True
-                i += 1
-                continue
-            if token == "--older-than":
-                parsed.worktree_older_than = parse_non_negative_int(
-                    _require_option_value(args, i, token),
-                    option=token,
-                )
-                i += 2
-                continue
-            if token == "--harness":
-                parsed.worktree_harness = _require_option_value(args, i, token)
-                i += 2
-                continue
-            if token == "--include-detached":
-                parsed.worktree_include_detached = True
-                i += 1
-                continue
-            if token == "--dry-run":
-                parsed.worktree_dry_run = True
-                i += 1
-                continue
-            if token == "--discard-uncommitted":
-                parsed.worktree_discard_uncommitted = True
-                i += 1
-                continue
-            if token == "--force-branch":
-                parsed.worktree_force_branch = True
-                i += 1
-                continue
-            if token == "--force":
-                parsed.worktree_force = True
-                i += 1
-                continue
-        elif action == "gc" and token == "--dry-run":
-            parsed.worktree_dry_run = True
-            i += 1
+        spec = action_specs.get(token)
+        if spec is not None:
+            i = _apply_worktree_option(parsed, args, i, token, spec)
             continue
         if token.startswith("--"):
             raise DelegateError("unknown_option", f"worktree {action} does not support option: {token}")
@@ -1165,6 +1147,95 @@ def emit_run_output(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout:
     return EXIT_OK
 
 
+def _worktree_list_payload(
+    parsed: ParsedCommand,
+    registry_root: Path,
+    config: JsonObject,
+) -> JsonObject:
+    auto_prune = worktree_mgmt.maybe_auto_prune(
+        registry_root,
+        config,
+        no_auto_prune=parsed.worktree_no_auto_prune,
+    )
+    payload = worktree_mgmt.list_worktrees(
+        registry_root,
+        harness=parsed.worktree_harness,
+        status=parsed.worktree_status,
+        limit=parsed.worktree_limit or run_registry.DEFAULT_RUNS_LIMIT,
+    )
+    if auto_prune is not None:
+        payload["autoPrune"] = auto_prune
+    return payload
+
+
+def _worktree_show_payload(
+    parsed: ParsedCommand,
+    registry_root: Path,
+    _config: JsonObject,
+) -> JsonObject:
+    return worktree_mgmt.show_worktree(
+        registry_root,
+        handle=parsed.worktree_handle,
+        latest_harness=parsed.worktree_latest_harness,
+    )
+
+
+def _worktree_remove_payload(
+    parsed: ParsedCommand,
+    registry_root: Path,
+    _config: JsonObject,
+) -> JsonObject:
+    assert parsed.worktree_handle is not None
+    return worktree_mgmt.remove_worktree(
+        registry_root,
+        handle=parsed.worktree_handle,
+        discard_uncommitted=parsed.worktree_discard_uncommitted,
+        force_branch=parsed.worktree_force_branch,
+        keep_branch=parsed.worktree_keep_branch,
+        force=parsed.worktree_force,
+    )
+
+
+def _worktree_prune_payload(
+    parsed: ParsedCommand,
+    registry_root: Path,
+    _config: JsonObject,
+) -> JsonObject:
+    return worktree_mgmt.prune_worktrees(
+        registry_root,
+        merged=parsed.worktree_merged,
+        older_than_days=parsed.worktree_older_than,
+        harness=parsed.worktree_harness,
+        include_detached=parsed.worktree_include_detached,
+        dry_run=parsed.worktree_dry_run,
+        discard_uncommitted=parsed.worktree_discard_uncommitted,
+        force_branch=parsed.worktree_force_branch,
+        force=parsed.worktree_force,
+    )
+
+
+def _worktree_gc_payload(
+    parsed: ParsedCommand,
+    registry_root: Path,
+    _config: JsonObject,
+) -> JsonObject:
+    return worktree_mgmt.gc_worktrees(
+        registry_root,
+        dry_run=parsed.worktree_dry_run,
+    )
+
+
+WorktreePayloadBuilder = Callable[[ParsedCommand, Path, JsonObject], JsonObject]
+WorktreeTextRenderer = Callable[[JsonObject, TextIO], None]
+WORKTREE_ACTION_DISPATCH: dict[str, tuple[WorktreePayloadBuilder, WorktreeTextRenderer]] = {
+    "list": (_worktree_list_payload, delegate_rendering.render_worktree_list_text),
+    "show": (_worktree_show_payload, delegate_rendering.render_worktree_show_text),
+    "remove": (_worktree_remove_payload, delegate_rendering.render_worktree_remove_text),
+    "prune": (_worktree_prune_payload, delegate_rendering.render_worktree_prune_text),
+    "gc": (_worktree_gc_payload, delegate_rendering.render_worktree_gc_text),
+}
+
+
 def emit_worktree(
     parsed: ParsedCommand,
     workspace: ResolvedWorkspace,
@@ -1184,79 +1255,15 @@ def emit_worktree(
             }
         )
     action = parsed.worktree_action
-    if action == "list":
-        auto_prune = worktree_mgmt.maybe_auto_prune(
-            registry_root,
-            config,
-            no_auto_prune=parsed.worktree_no_auto_prune,
-        )
-        payload = worktree_mgmt.list_worktrees(
-            registry_root,
-            harness=parsed.worktree_harness,
-            status=parsed.worktree_status,
-            limit=parsed.worktree_limit or run_registry.DEFAULT_RUNS_LIMIT,
-        )
-        if auto_prune is not None:
-            payload["autoPrune"] = auto_prune
-        if parsed.json_mode:
-            delegate_rendering.print_json(payload, stdout)
-        else:
-            delegate_rendering.render_worktree_list_text(payload, stdout)
-        return EXIT_OK
-    if action == "show":
-        payload = worktree_mgmt.show_worktree(
-            registry_root,
-            handle=parsed.worktree_handle,
-            latest_harness=parsed.worktree_latest_harness,
-        )
-        if parsed.json_mode:
-            delegate_rendering.print_json(payload, stdout)
-        else:
-            delegate_rendering.render_worktree_show_text(payload, stdout)
-        return EXIT_OK
-    if action == "remove":
-        assert parsed.worktree_handle is not None
-        payload = worktree_mgmt.remove_worktree(
-            registry_root,
-            handle=parsed.worktree_handle,
-            discard_uncommitted=parsed.worktree_discard_uncommitted,
-            force_branch=parsed.worktree_force_branch,
-            keep_branch=parsed.worktree_keep_branch,
-            force=parsed.worktree_force,
-        )
-        if parsed.json_mode:
-            delegate_rendering.print_json(payload, stdout)
-        else:
-            delegate_rendering.render_worktree_remove_text(payload, stdout)
-        return EXIT_OK
-    if action == "prune":
-        payload = worktree_mgmt.prune_worktrees(
-            registry_root,
-            merged=parsed.worktree_merged,
-            older_than_days=parsed.worktree_older_than,
-            harness=parsed.worktree_harness,
-            include_detached=parsed.worktree_include_detached,
-            dry_run=parsed.worktree_dry_run,
-            discard_uncommitted=parsed.worktree_discard_uncommitted,
-            force_branch=parsed.worktree_force_branch,
-            force=parsed.worktree_force,
-        )
-        if parsed.json_mode:
-            delegate_rendering.print_json(payload, stdout)
-        else:
-            delegate_rendering.render_worktree_prune_text(payload, stdout)
-        return EXIT_OK
-    if action == "gc":
-        payload = worktree_mgmt.gc_worktrees(
-            registry_root,
-            dry_run=parsed.worktree_dry_run,
-        )
-        if parsed.json_mode:
-            delegate_rendering.print_json(payload, stdout)
-        else:
-            delegate_rendering.render_worktree_gc_text(payload, stdout)
-        return EXIT_OK
-    raise DelegateError("unknown_worktree_action", f"Unknown worktree action: {action}")
+    if action not in WORKTREE_ACTION_DISPATCH:
+        raise DelegateError("unknown_worktree_action", f"Unknown worktree action: {action}")
+    build_payload, render_text = WORKTREE_ACTION_DISPATCH[action]
+    payload = build_payload(parsed, registry_root, config)
+    if parsed.json_mode:
+        delegate_rendering.print_json(payload, stdout)
+    else:
+        render_text(payload, stdout)
+    return EXIT_OK
 
 
 def resolve_workspace(global_cwd: str | None, json_cwd: str | None = None) -> ResolvedWorkspace:
