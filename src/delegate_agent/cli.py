@@ -2304,6 +2304,12 @@ def _execute_persistent_worktree(
         failed_snapshot["status"] = "failed"
         failed_snapshot["plannedBranch"] = branch
         failed_snapshot["plannedExecutionCwd"] = worktree_path
+        # The worktree was never created — build_snapshot populated these with
+        # values for a present worktree, but they don't apply to a failed creation.
+        # Remove them so the snapshot doesn't falsely imply the worktree exists.
+        # Keep creationContext (captures intended creation state).
+        for key in ("executionCwd", "worktreeStatus", "worktreeCleanupCommands", "branch"):
+            failed_snapshot.pop(key, None)
         delegate_runner.write_snapshot(run_path, failed_snapshot)
         # Attempt cleanup of partial branch/worktree; if unsafe, preserve and record.
         if exc.error != "branch_collision":

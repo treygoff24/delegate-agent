@@ -2,11 +2,23 @@ from __future__ import annotations
 
 import shlex
 import subprocess
+from contextlib import AbstractContextManager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from delegate_agent import run_registry
 from delegate_agent.json_types import JsonObject
+
+
+class _DummyLockContext:
+    """A no-op context manager used when the caller already holds the registry lock."""
+
+    def __enter__(self) -> None:
+        pass
+
+    def __exit__(self, *args: object) -> None:
+        pass
+
 
 SCHEMA_LIST = "delegate.worktree-list.v1"
 SCHEMA_SHOW = "delegate.worktree-show.v1"
@@ -557,6 +569,7 @@ def remove_worktree(
     force_branch: bool = False,
     keep_branch: bool = False,
     force: bool = False,
+    _skip_lock: bool = False,
 ) -> JsonObject:
     if force:
         discard_uncommitted = True
@@ -569,7 +582,13 @@ def remove_worktree(
                 next_actions=[f"delegate worktree remove {handle} --keep-branch"],
             )
         )
-    with run_registry.registry_lock(registry_root):
+    # _skip_lock is set by callers that already hold the registry lock
+    # (e.g. prune_worktrees when called from maybe_auto_prune while holding the lock).
+    if _skip_lock:
+        lock_ctx: AbstractContextManager = _DummyLockContext()
+    else:
+        lock_ctx = run_registry.registry_lock(registry_root)
+    with lock_ctx:
         record = resolve_record(registry_root, handle=handle)
         status, warnings = detect_worktree_status(record)
         if status == STATUS_REMOVED:
@@ -773,6 +792,7 @@ def prune_worktrees(
     discard_uncommitted: bool = False,
     force_branch: bool = False,
     force: bool = False,
+    _skip_lock: bool = False,
 ) -> JsonObject:
     if not merged and older_than_days is None:
         raise WorktreeManagementError(
@@ -845,6 +865,7 @@ def prune_worktrees(
                         discard_uncommitted=discard_uncommitted,
                         force_branch=force_branch,
                         keep_branch=candidate.get("keep_branch", False),
+                        _skip_lock=_skip_lock,
                     )
                 )
             except WorktreeManagementError as exc:
@@ -1024,13 +1045,16 @@ def maybe_auto_prune(
     if not isinstance(days, int):
         days = 7
     try:
+        # Hold the lock briefly (timeout=0) to probe availability, then keep it
+        # held while pruning so remove_worktree calls don't re-acquire and block
+        # on contention (spec L700: skip-and-report when lock is contended).
         with run_registry.registry_lock(registry_root, timeout_seconds=0.0):
-            pass
-        return prune_worktrees(
-            registry_root,
-            merged=True,
-            older_than_days=days,
-            dry_run=False,
-        )
+            return prune_worktrees(
+                registry_root,
+                merged=True,
+                older_than_days=days,
+                dry_run=False,
+                _skip_lock=True,
+            )
     except (TimeoutError, WorktreeManagementError):
         return {"ok": False, "skipped": True, "reason": "auto_prune_unavailable"}

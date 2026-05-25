@@ -906,6 +906,45 @@ class WorktreeMgmtTests(unittest.TestCase):
             st = self.delegate.run_registry.load_run_state(self._registry_root(path), run_id)
             self.assertEqual(st.get("worktreeStatus"), "present")
 
+    def test_maybe_auto_prune_skips_when_lock_contended(self):
+        """maybe_auto_prune returns within ~1s when registry lock is contended."""
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            branch = "delegate/cursor-locked"
+            wt_path = str(Path(fake_home) / "wt" / "cursor-locked")
+            self._seed_persistent_run(
+                path, alias="cursor-locked", branch=branch, execution_cwd=wt_path,
+            )
+            self._create_worktree_at(path, branch, wt_path)
+            registry_root = self._registry_root(path)
+            config = {"worktrees": {"autoPrune": {"enabled": True, "mergedOlderThanDays": 1}}}
+
+            # Hold the registry lock in a background thread.
+            import threading
+            lock_held = threading.Event()
+            def hold_lock():
+                with self.delegate.run_registry.registry_lock(registry_root, timeout_seconds=30):
+                    lock_held.set()
+                    # Keep lock for 5 seconds — long enough for maybe_auto_prune to notice.
+                    time.sleep(5)
+
+            holder = threading.Thread(target=hold_lock)
+            holder.start()
+            lock_held.wait(timeout=5)  # wait for lock to be acquired
+
+            # now maybe_auto_prune should return quickly (within 1s) since lock is contended.
+            t0 = time.monotonic()
+            result = self.delegate.worktree_mgmt.maybe_auto_prune(registry_root, config)
+            elapsed = time.monotonic() - t0
+
+            holder.join(timeout=10)
+
+            # Result should indicate skip/unavailable (lock contention).
+            self.assertIsNotNone(result)
+            self.assertTrue(result.get("skipped") or not result.get("ok"))
+            # Should return within 1s (not block for the 30s default lock timeout).
+            self.assertLess(elapsed, 3.0, msg="maybe_auto_prune blocked on lock contention")
+
     def test_double_remove_noop_under_5s(self):
         _repo, path = self._make_repo()
         with tempfile.TemporaryDirectory() as fake_home:
@@ -971,24 +1010,38 @@ class WorktreeMgmtTests(unittest.TestCase):
                 path, alias="cursor-cleanup", branch=branch, execution_cwd=wt_path
             )
             self._create_worktree_at(path, branch, wt_path)
-            snapshot_path = (
-                self.delegate.run_registry.run_directory(self._registry_root(path), run_id)
-                / "snapshot.json"
-            )
-            snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+            registry_root = self._registry_root(path)
+            run_path = self.delegate.run_registry.run_directory(registry_root, run_id)
+
+            # Add worktreeCleanupCommands to the MANIFEST (not the snapshot).
+            # This proves merge_snapshot_view lifts it from manifest → view.
+            manifest = self.delegate.run_registry.load_run_manifest(registry_root, run_id)
+            assert isinstance(manifest, dict)
+            manifest["worktreeCleanupCommands"] = {
+                "safe": "delegate worktree remove cursor-cleanup",
+                "forceBranch": "delegate worktree remove cursor-cleanup --force-branch",
+                "discardUncommitted": "delegate worktree remove cursor-cleanup --discard-uncommitted",
+                "rawGit": "git -C /src worktree remove --force /wt/cursor-cleanup && git -C /src branch -D delegate/cursor-cleanup",
+            }
+            self.delegate.run_registry.write_json_atomic(run_path / "manifest.json", manifest)
+
+            # Write snapshot WITHOUT worktreeCleanupCommands (proves lift from manifest).
             snapshot_data = {
                 "runId": run_id,
                 "alias": "cursor-cleanup",
-                "worktreeCleanupCommands": {
-                    "safe": "delegate worktree remove cursor-cleanup",
-                    "forceBranch": "delegate worktree remove cursor-cleanup --force-branch",
-                    "discardUncommitted": "delegate worktree remove cursor-cleanup --discard-uncommitted",
-                    "rawGit": "git -C /src worktree remove --force /wt/cursor-cleanup && git -C /src branch -D delegate/cursor-cleanup",
-                },
             }
-            self.delegate.run_registry.write_json_atomic(snapshot_path, snapshot_data)
-            loaded = self.delegate.run_registry.load_run_snapshot(self._registry_root(path), run_id)
-            cleanup = loaded.get("worktreeCleanupCommands", {})
+            self.delegate.run_registry.write_json_atomic(run_path / "snapshot.json", snapshot_data)
+
+            # merge_snapshot_view should lift worktreeCleanupCommands from manifest.
+            from delegate_agent import rendering as delegate_rendering
+            loaded_snapshot = self.delegate.run_registry.load_run_snapshot(registry_root, run_id)
+            view = delegate_rendering.merge_snapshot_view(
+                registry_root,
+                run_id,
+                loaded_snapshot,
+                redact=False,
+            )
+            cleanup = view.get("worktreeCleanupCommands", {})
             self.assertIn("safe", cleanup)
             self.assertIn("forceBranch", cleanup)
             self.assertIn("discardUncommitted", cleanup)
@@ -1030,6 +1083,81 @@ class WorktreeMgmtTests(unittest.TestCase):
                 result["vsCreationBase"]["baseOid"],
                 result["vsCurrentHead"]["baseOid"],
             )
+
+    def test_worktree_show_text_render_order(self):
+        """render_worktree_show_text outputs lines in spec L621 order:
+        creation-context → dirty → merged → ahead/behind → porcelain → suggested-commands → trailing metadata."""
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            branch = "delegate/cursor-order"
+            wt_path = str(Path(fake_home) / "wt" / "cursor-order")
+            base_oid = git("rev-parse", "HEAD", cwd=path).stdout.strip()
+            run_id, _alias = self._seed_persistent_run(
+                path,
+                alias="cursor-order",
+                branch=branch,
+                execution_cwd=wt_path,
+                creation_oid=base_oid,
+            )
+            self._create_worktree_at(path, branch, wt_path)
+            registry_root = self._registry_root(path)
+            # Build a payload with all fields populated.
+            from delegate_agent import rendering as delegate_rendering
+            payload = {
+                "alias": "cursor-order",
+                "runId": run_id,
+                "worktreeStatus": "present",
+                "creationContext": {
+                    "sourceHeadOid": base_oid,
+                    "sourceHeadRef": "refs/heads/main",
+                    "sourceBranch": "main",
+                    "sourceGitCommonDir": str(Path(path) / ".git"),
+                },
+                "currentSourceHeadRef": "refs/heads/main",
+                "dirty": True,
+                "mergedIntoSource": False,
+                "aheadBehind": {
+                    "vsCreationBase": {"ahead": 3, "behind": 0, "baseOid": base_oid},
+                    "vsCurrentHead": {"ahead": 3, "behind": 2, "baseOid": base_oid},
+                },
+                "porcelainStatus": [],  # clean worktree
+                "suggestedCommands": {
+                    "reviewDiff": "git diff HEAD",
+                },
+                "executionCwd": wt_path,
+                "sourceGitRoot": path,
+                "branch": branch,
+                "harness": "cursor",
+            }
+            output = io.StringIO()
+            delegate_rendering.render_worktree_show_text(payload, output)
+            lines = output.getvalue()
+
+            # Assert ordering per spec L621.
+            idx_creation = lines.find("created from")
+            idx_dirty = lines.find("dirty: yes")
+            idx_merged = lines.find("merged: no")
+            idx_ahead = lines.find("vs creation base")
+            idx_porcelain = lines.find("porcelain: clean")
+            idx_suggested = lines.find("suggested commands")
+            idx_trail_meta = lines.find("execution:")  # start of trailing metadata
+
+            self.assertGreater(idx_creation, -1, "creation-context line missing")
+            self.assertGreater(idx_dirty, -1, "dirty line missing")
+            self.assertGreater(idx_merged, -1, "merged line missing")
+            self.assertGreater(idx_ahead, -1, "ahead/behind line missing")
+            self.assertGreater(idx_porcelain, -1, "porcelain: clean line missing")
+            self.assertGreater(idx_suggested, -1, "suggested commands missing")
+            self.assertGreater(idx_trail_meta, -1, "trailing metadata missing")
+
+            # Assert each section appears after the previous one.
+            self.assertLess(idx_creation, idx_dirty)
+            self.assertLess(idx_dirty, idx_merged)
+            self.assertLess(idx_merged, idx_ahead)
+            self.assertLess(idx_ahead, idx_porcelain)
+            self.assertLess(idx_porcelain, idx_suggested)
+            # Trailing metadata should come AFTER suggested commands (spec L621 order).
+            self.assertLess(idx_suggested, idx_trail_meta)
 
 
 if __name__ == "__main__":

@@ -417,5 +417,31 @@ class ReexportTests(unittest.TestCase):
         self.assertIn("worktree", iso.VALID_ISOLATION_VALUES)
 
 
+class LazyImportCycleTests(unittest.TestCase):
+    """DEV-3: SKILL_REVIEW_PREFIX is lazily imported from runner to avoid cycle."""
+
+    def test_skill_review_prefix_lazy_import_no_cycle(self):
+        """Subprocess imports isolation first (before runner) to prove no import cycle."""
+        # Run in a clean subprocess to get a guaranteed fresh import order.
+        # isolation.py lazy-imports SKILL_REVIEW_PREFIX from runner.py at call time,
+        # not at module load time, which avoids a potential import cycle.
+        code = "\n".join([
+            "import sys",
+            "sys.path.insert(0, %r)" % SRC,
+            "from delegate_agent import isolation",
+            # Call a function that triggers the lazy import of SKILL_REVIEW_PREFIX
+            "result = isolation.prepend_persistent_worktree_context('hi')",
+            "print('ok')",
+        ])
+        proc = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(proc.returncode, 0, msg=f"import cycle detected: {proc.stderr}")
+        self.assertIn("ok", proc.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -365,15 +365,6 @@ def render_worktree_show_text(payload: JsonObject, stdout: TextIO) -> None:
     else:
         print("merged: unknown", file=stdout)
 
-    for key, label in (
-        ("executionCwd", "execution"),
-        ("sourceGitRoot", "source"),
-        ("branch", "branch"),
-        ("harness", "harness"),
-    ):
-        value = payload.get(key)
-        if isinstance(value, str) and value:
-            print(f"{label}: {value}", file=stdout)
     ahead = payload.get("aheadBehind")
     if isinstance(ahead, dict):
         for key, label in (("vsCreationBase", "vs creation base"), ("vsCurrentHead", "vs current HEAD")):
@@ -390,12 +381,27 @@ def render_worktree_show_text(payload: JsonObject, stdout: TextIO) -> None:
             print(f"  {line}", file=stdout)
         if payload.get("porcelainStatusTruncated"):
             print("  ...", file=stdout)
+    elif isinstance(porcelain, list):
+        # Empty porcelainStatus means the worktree is clean.
+        print("porcelain: clean", file=stdout)
     commands = payload.get("suggestedCommands")
     if isinstance(commands, dict):
         print("suggested commands:", file=stdout)
         for key, value in commands.items():
             if isinstance(value, str) and value:
                 print(f"  {key}: {value}", file=stdout)
+
+    # Trailing metadata block (spec L621: rendered after suggested-commands).
+    for key, label in (
+        ("executionCwd", "execution"),
+        ("sourceGitRoot", "source"),
+        ("branch", "branch"),
+        ("harness", "harness"),
+    ):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            print(f"{label}: {value}", file=stdout)
+
     warnings = payload.get("warnings")
     if isinstance(warnings, list) and warnings:
         print("warnings:", file=stdout)

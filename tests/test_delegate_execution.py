@@ -1454,6 +1454,51 @@ class ExecutionTests(unittest.TestCase):
                 finally:
                     self.delegate.create_persistent_worktree = original_create
 
+    def test_prelaunch_failure_snapshot_omits_unrealized_fields(self):
+        """Pre-launch failure snapshot omits executionCwd/worktreeStatus/worktreeCleanupCommands
+        so a failed git worktree add doesn't imply the worktree exists."""
+        with tempfile.TemporaryDirectory() as fake_home:
+            with mock.patch.dict(os.environ, {"HOME": fake_home}):
+                repo, _git_cd = self._make_git_repo_with_commit()
+                workspace = self.delegate.resolve_workspace(repo.name)
+                request = self._make_persistent_worktree_request(
+                    "cursor", "work", repo.name, self.delegate.DEFAULT_CONFIG,
+                )
+                original_create = self.delegate.create_persistent_worktree
+                def failing_create(*args, **kwargs):
+                    raise self.delegate.IsolationExecutionError(
+                        "worktree_create_failed", "Simulated worktree failure"
+                    )
+                self.delegate.create_persistent_worktree = failing_create
+                try:
+                    with self.assertRaises(self.delegate.DelegateError) as ctx:
+                        self.delegate.execute_request(
+                            request, json_mode=False, config=self.delegate.DEFAULT_CONFIG,
+                            pass_through=False, completion_report_mode="none",
+                            source_workspace=workspace, stdout=io.StringIO(), stderr=io.StringIO(),
+                        )
+                    self.assertEqual(ctx.exception.error, "worktree_create_failed")
+
+                    # Load the failed snapshot directly.
+                    registry_root = Path(repo.name) / ".delegate"
+                    runs_dir = registry_root / "runs"
+                    run_dirs = list(runs_dir.glob("del_*"))
+                    self.assertTrue(len(run_dirs) > 0)
+                    run_id = run_dirs[0].name
+                    snapshot = self.delegate.run_registry.load_run_snapshot(registry_root, run_id)
+
+                    # Planned fields MUST be present (they carry the intent).
+                    self.assertIn("plannedBranch", snapshot)
+                    self.assertIn("plannedExecutionCwd", snapshot)
+
+                    # Unrealized fields must NOT be present (worktree was never created).
+                    self.assertNotIn("executionCwd", snapshot)
+                    self.assertNotIn("worktreeStatus", snapshot)
+                    self.assertNotIn("worktreeCleanupCommands", snapshot)
+                    self.assertNotIn("branch", snapshot)
+                finally:
+                    self.delegate.create_persistent_worktree = original_create
+
     # -- Finding 4: Popen-launch failure after git worktree add succeeds --------
 
     def test_popen_failure_after_worktree_create_preserves_worktree(self):
