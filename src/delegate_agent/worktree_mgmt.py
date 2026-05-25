@@ -1076,6 +1076,23 @@ def _worktree_list_paths(source_git_root: str) -> set[str] | None:
     return paths
 
 
+def _reload_gc_candidate(
+    registry_root: Path,
+    record: JsonObject,
+) -> tuple[JsonObject, str, str] | None:
+    fresh = _reload_record(registry_root, str(record["runId"]))
+    if fresh is None:
+        return None
+    fresh_current = fresh.get("registryWorktreeStatus")
+    if fresh_current not in (STATUS_PRESENT, STATUS_UNKNOWN, None):
+        return None
+    fresh_source = fresh.get("sourceGitRoot")
+    fresh_execution = fresh.get("executionCwd")
+    if not isinstance(fresh_source, str) or not isinstance(fresh_execution, str):
+        return None
+    return fresh, fresh_source, fresh_execution
+
+
 def gc_worktrees(registry_root: Path, *, dry_run: bool = False) -> JsonObject:
     records = load_persistent_records(registry_root)
     paths_by_root: dict[str, set[str] | None] = {}
@@ -1118,16 +1135,10 @@ def gc_worktrees(registry_root: Path, *, dry_run: bool = False) -> JsonObject:
                 append_missing(record, execution)
             else:
                 with run_registry.registry_lock(registry_root):
-                    fresh = _reload_record(registry_root, str(record["runId"]))
-                    if fresh is None:
+                    fresh_candidate = _reload_gc_candidate(registry_root, record)
+                    if fresh_candidate is None:
                         continue
-                    fresh_current = fresh.get("registryWorktreeStatus")
-                    if fresh_current not in (STATUS_PRESENT, STATUS_UNKNOWN, None):
-                        continue
-                    fresh_source = fresh.get("sourceGitRoot")
-                    fresh_execution = fresh.get("executionCwd")
-                    if not isinstance(fresh_source, str) or not isinstance(fresh_execution, str):
-                        continue
+                    fresh, fresh_source, fresh_execution = fresh_candidate
                     if Path(fresh_execution).exists():
                         continue
                     run_registry.set_worktree_status(
@@ -1145,16 +1156,10 @@ def gc_worktrees(registry_root: Path, *, dry_run: bool = False) -> JsonObject:
                 append_orphan(record, execution, "worktree_metadata_missing")
             else:
                 with run_registry.registry_lock(registry_root):
-                    fresh = _reload_record(registry_root, str(record["runId"]))
-                    if fresh is None:
+                    fresh_candidate = _reload_gc_candidate(registry_root, record)
+                    if fresh_candidate is None:
                         continue
-                    fresh_current = fresh.get("registryWorktreeStatus")
-                    if fresh_current not in (STATUS_PRESENT, STATUS_UNKNOWN, None):
-                        continue
-                    fresh_source = fresh.get("sourceGitRoot")
-                    fresh_execution = fresh.get("executionCwd")
-                    if not isinstance(fresh_source, str) or not isinstance(fresh_execution, str):
-                        continue
+                    fresh, fresh_source, fresh_execution = fresh_candidate
                     fresh_paths = _worktree_list_paths(fresh_source)
                     if (
                         Path(fresh_execution).exists()
@@ -1174,19 +1179,13 @@ def gc_worktrees(registry_root: Path, *, dry_run: bool = False) -> JsonObject:
                 append_orphan(record, execution, "branch_missing")
             else:
                 with run_registry.registry_lock(registry_root):
-                    fresh = _reload_record(registry_root, str(record["runId"]))
-                    if fresh is None:
+                    fresh_candidate = _reload_gc_candidate(registry_root, record)
+                    if fresh_candidate is None:
                         continue
-                    fresh_current = fresh.get("registryWorktreeStatus")
-                    if fresh_current not in (STATUS_PRESENT, STATUS_UNKNOWN, None):
-                        continue
-                    fresh_source = fresh.get("sourceGitRoot")
-                    fresh_execution = fresh.get("executionCwd")
+                    fresh, fresh_source, fresh_execution = fresh_candidate
                     fresh_branch = fresh.get("branch")
                     if (
-                        isinstance(fresh_source, str)
-                        and isinstance(fresh_execution, str)
-                        and isinstance(fresh_branch, str)
+                        isinstance(fresh_branch, str)
                         and Path(fresh_execution).exists()
                         and _branch_exists(fresh_source, fresh_branch) is False
                     ):
