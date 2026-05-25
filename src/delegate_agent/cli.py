@@ -1263,6 +1263,9 @@ def emit_worktree(
         delegate_rendering.print_json(payload, stdout)
     else:
         render_text(payload, stdout)
+    if payload.get("ok") is False:
+        exit_code = payload.get("exitCode")
+        return exit_code if isinstance(exit_code, int) else EXIT_USAGE
     return EXIT_OK
 
 

@@ -607,6 +607,9 @@ def _apply_branch_removal_result(
             payload["nextActions"] = [f"delegate worktree remove {alias} --force-branch"]
     if result.error:
         payload["ok"] = False
+        payload["code"] = "branch_remove_failed"
+        payload["error"] = "branch_remove_failed"
+        payload["exitCode"] = WORKTREE_ERROR_EXIT_CODE
         payload["branchRemovalError"] = result.error
 
 

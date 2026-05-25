@@ -870,9 +870,46 @@ class WorktreeMgmtTests(unittest.TestCase):
                     force_branch=True,
                 )
             self.assertFalse(result["ok"])
+            self.assertEqual(result["code"], "branch_remove_failed")
+            self.assertEqual(result["error"], "branch_remove_failed")
+            self.assertEqual(result["exitCode"], self.delegate.EXIT_USAGE)
             self.assertFalse(result["branchRemoved"])
             self.assertEqual(result["branchRemovalError"], "fatal: cannot delete branch")
             self.assertNotIn("branchKept", result)
+
+    def test_worktree_remove_branch_delete_error_exits_nonzero(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            self._seed_persistent_run(
+                path,
+                alias="cursor-removed",
+                branch="delegate/cursor-delete-error",
+                worktree_status="removed",
+            )
+            failed_delete = subprocess.CompletedProcess(
+                ["git", "branch", "-D", "delegate/cursor-delete-error"],
+                1,
+                "",
+                "fatal: cannot delete branch\n",
+            )
+            with mock.patch.object(self.delegate.worktree_mgmt, "_run_git", return_value=failed_delete):
+                code, out, _err = self._run_cli(
+                    [
+                        "--cwd",
+                        path,
+                        "--json",
+                        "worktree",
+                        "remove",
+                        "cursor-removed",
+                        "--force-branch",
+                    ],
+                    home=fake_home,
+                )
+            payload = json.loads(out)
+            self.assertEqual(code, self.delegate.EXIT_USAGE)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["code"], "branch_remove_failed")
+            self.assertEqual(payload["exitCode"], self.delegate.EXIT_USAGE)
 
     def test_prune_includes_detached_with_flag(self):
         _repo, path = self._make_repo()

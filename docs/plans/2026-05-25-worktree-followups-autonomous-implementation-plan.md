@@ -96,10 +96,10 @@ Do not pipe Delegate launches through `tail`; use `snapshot`, `runs`, and `run-o
 
 ## Task 0: Preflight and Branch Setup
 
-**Parallel:** no  
-**Blocked by:** none  
-**Owned files:** none  
-**Invariants:** Do not delete or stage unrelated user files. Do not promote installed runtime.  
+**Parallel:** no
+**Blocked by:** none
+**Owned files:** none
+**Invariants:** Do not delete or stage unrelated user files. Do not promote installed runtime.
 **Out of scope:** Any code changes.
 
 **Files:**
@@ -141,10 +141,10 @@ If `git status --short` reports only local tooling artifacts such as `.code-brie
 
 ## Task 1: Read-Only Mapping Subagents
 
-**Parallel:** yes  
-**Blocked by:** Task 0  
-**Owned files:** none  
-**Invariants:** Read-only only; no files changed.  
+**Parallel:** yes
+**Blocked by:** Task 0
+**Owned files:** none
+**Invariants:** Read-only only; no files changed.
 **Out of scope:** Implementation.
 
 **Files:**
@@ -222,11 +222,11 @@ python3 bin/delegate.py run-output <alias> --completion-report
 
 ## Task 2: Worktree Removal and Prune Correctness
 
-**Parallel:** no  
-**Blocked by:** Task 1  
-**Execution:** `python3 bin/delegate.py --json --isolation worktree droid "deepseek v4 pro" work --prompt-file docs/plans/prompts/worktree-followups-task-2.md` or coordinator; max concurrent implementation worktrees = 1  
-**Owned files:** `src/delegate_agent/worktree_mgmt.py`, `tests/test_delegate_worktree_mgmt.py`  
-**Invariants:** Dirty worktrees and unmerged branches remain protected by default. `--force` remains shorthand for `--discard-uncommitted --force-branch`.  
+**Parallel:** no
+**Blocked by:** Task 1
+**Execution:** `python3 bin/delegate.py --json --isolation worktree droid "deepseek v4 pro" work --prompt-file docs/plans/prompts/worktree-followups-task-2.md` or coordinator; max concurrent implementation worktrees = 1
+**Owned files:** `src/delegate_agent/worktree_mgmt.py`, `tests/test_delegate_worktree_mgmt.py`
+**Invariants:** Dirty worktrees and unmerged branches remain protected by default. `--force` remains shorthand for `--discard-uncommitted --force-branch`.
 **Out of scope:** Parser rewrites and docs.
 
 **Files:**
@@ -292,11 +292,11 @@ python3 -m unittest discover -s tests
 
 ## Task 3: Temporary Isolation Request Construction Bug
 
-**Parallel:** no  
-**Blocked by:** Task 2  
-**Execution:** coordinator preferred (small targeted `cli.py` fix)  
-**Owned files:** `src/delegate_agent/cli.py`, `tests/test_delegate_execution.py`  
-**Invariants:** Cursor/Codex safe still run in isolated temporary workspaces by default. JSON `cwd` remains source; `executionCwd` remains isolated copy.  
+**Parallel:** no
+**Blocked by:** Task 2
+**Execution:** coordinator preferred (small targeted `cli.py` fix)
+**Owned files:** `src/delegate_agent/cli.py`, `tests/test_delegate_execution.py`
+**Invariants:** Cursor/Codex safe still run in isolated temporary workspaces by default. JSON `cwd` remains source; `executionCwd` remains isolated copy.
 **Out of scope:** Persistent-worktree implementation refactor.
 
 **Files:**
@@ -348,11 +348,11 @@ python3 -m unittest tests.test_delegate_execution
 
 ## Task 4: Branch-Collision Detection and Repo Fingerprint Naming
 
-**Parallel:** no  
-**Blocked by:** Task 3  
-**Execution:** `python3 bin/delegate.py --json --isolation worktree droid "deepseek v4 pro" work --prompt-file docs/plans/prompts/worktree-followups-task-4.md` or coordinator; max concurrent implementation worktrees = 1  
-**Owned files:** `src/delegate_agent/isolation.py`, `src/delegate_agent/cli.py`, `tests/test_delegate_execution.py`, `tests/test_delegate_isolation.py`  
-**Invariants:** Existing `branch_collision` behavior remains for pre-existing branch refs. Real `git worktree add` failures surface as `worktree_create_failed` with Git stderr.  
+**Parallel:** no
+**Blocked by:** Task 3
+**Execution:** `python3 bin/delegate.py --json --isolation worktree droid "deepseek v4 pro" work --prompt-file docs/plans/prompts/worktree-followups-task-4.md` or coordinator; max concurrent implementation worktrees = 1
+**Owned files:** `src/delegate_agent/isolation.py`, `src/delegate_agent/cli.py`, `tests/test_delegate_execution.py`, `tests/test_delegate_isolation.py`
+**Invariants:** Existing `branch_collision` behavior remains for pre-existing branch refs. Real `git worktree add` failures surface as `worktree_create_failed` with Git stderr.
 **Out of scope:** General git timeout helper; Task 5 owns that.
 
 **Files:**
@@ -398,11 +398,11 @@ python3 -m unittest tests.test_delegate_execution.DelegateExecutionTests.test_pe
 
 ## Task 5: Git Subprocess Timeout Helper
 
-**Parallel:** no  
-**Blocked by:** Tasks 2 and 4  
-**Execution:** `python3 bin/delegate.py --json --isolation worktree droid "deepseek v4 pro" work --prompt-file docs/plans/prompts/worktree-followups-task-5.md` or coordinator; max concurrent implementation worktrees = 1  
-**Owned files:** `src/delegate_agent/isolation.py`, `src/delegate_agent/worktree_mgmt.py`, `tests/test_delegate_isolation.py`, `tests/test_delegate_worktree_mgmt.py`  
-**Invariants:** Timeout failures become structured, user-actionable errors; normal Git failures still surface stderr.  
+**Parallel:** no
+**Blocked by:** Tasks 2 and 4
+**Execution:** `python3 bin/delegate.py --json --isolation worktree droid "deepseek v4 pro" work --prompt-file docs/plans/prompts/worktree-followups-task-5.md` or coordinator; max concurrent implementation worktrees = 1
+**Owned files:** `src/delegate_agent/isolation.py`, `src/delegate_agent/worktree_mgmt.py`, `tests/test_delegate_isolation.py`, `tests/test_delegate_worktree_mgmt.py`
+**Invariants:** Timeout failures become structured, user-actionable errors; normal Git failures still surface stderr.
 **Out of scope:** Child-agent process runtime timeout policy.
 
 **Files:**
@@ -445,11 +445,11 @@ Expected: pass.
 
 ## Task 6: Worktree Error Payload Contract
 
-**Parallel:** no  
-**Blocked by:** Task 5  
-**Execution:** coordinator preferred because this touches shared CLI/error contract  
-**Owned files:** `src/delegate_agent/worktree_mgmt.py`, `src/delegate_agent/cli.py`, `tests/test_delegate_worktree_mgmt.py`, `tests/test_delegate_parser.py`  
-**Invariants:** Existing `code` field remains for compatibility; JSON errors also include standard `error` and `exitCode`.  
+**Parallel:** no
+**Blocked by:** Task 5
+**Execution:** coordinator preferred because this touches shared CLI/error contract
+**Owned files:** `src/delegate_agent/worktree_mgmt.py`, `src/delegate_agent/cli.py`, `tests/test_delegate_worktree_mgmt.py`, `tests/test_delegate_parser.py`
+**Invariants:** Existing `code` field remains for compatibility; JSON errors also include standard `error` and `exitCode`.
 **Out of scope:** Large renderer refactor.
 
 **Files:**
@@ -486,7 +486,7 @@ Change constructor to require valid shape:
 - `message` must be a non-empty string.
 - `ok` should be `False`.
 
-Option A: leave payload-builder call sites but validate.  
+Option A: leave payload-builder call sites but validate.
 Option B: change constructor to `WorktreeManagementError(code, message, **extra)` and build payload centrally. Prefer Option A if less invasive.
 
 **Step 4: Normalize in `_error_payload` or catch block**
@@ -503,11 +503,11 @@ python3 -m unittest tests.test_delegate_worktree_mgmt tests.test_delegate_parser
 
 ## Task 7: Coverage Gap Closeout
 
-**Parallel:** no  
-**Blocked by:** Tasks 2, 4, 5, 6  
-**Execution:** coordinator preferred; use Delegate safe reviewers for test adequacy only  
-**Owned files:** `tests/test_delegate_worktree_mgmt.py`, `tests/test_delegate_execution.py`, `tests/test_delegate_parser.py`  
-**Invariants:** Tests must use temp homes and must not write to real `~/.delegate`.  
+**Parallel:** no
+**Blocked by:** Tasks 2, 4, 5, 6
+**Execution:** coordinator preferred; use Delegate safe reviewers for test adequacy only
+**Owned files:** `tests/test_delegate_worktree_mgmt.py`, `tests/test_delegate_execution.py`, `tests/test_delegate_parser.py`
+**Invariants:** Tests must use temp homes and must not write to real `~/.delegate`.
 **Out of scope:** New behavior not needed to satisfy tests.
 
 **Files:**
@@ -541,11 +541,11 @@ python3 -m unittest tests.test_delegate_worktree_mgmt tests.test_delegate_execut
 
 ## Task 8: Decompose `_execute_persistent_worktree`
 
-**Parallel:** no  
-**Blocked by:** Tasks 2-7  
-**Execution:** `python3 bin/delegate.py --json --isolation worktree cursor work --prompt-file docs/plans/prompts/worktree-followups-task-8.md` acceptable after Task 7 passes; max concurrent implementation worktrees = 1  
-**Owned files:** `src/delegate_agent/cli.py`, `tests/test_delegate_execution.py`  
-**Invariants:** No behavior changes; this task is refactor-only.  
+**Parallel:** no
+**Blocked by:** Tasks 2-7
+**Execution:** `python3 bin/delegate.py --json --isolation worktree cursor work --prompt-file docs/plans/prompts/worktree-followups-task-8.md` acceptable after Task 7 passes; max concurrent implementation worktrees = 1
+**Owned files:** `src/delegate_agent/cli.py`, `tests/test_delegate_execution.py`
+**Invariants:** No behavior changes; this task is refactor-only.
 **Out of scope:** Parser rewrite.
 
 **Files:**
@@ -593,11 +593,11 @@ Expected: pass.
 
 ## Task 9: Decompose `remove_worktree`
 
-**Parallel:** no  
-**Blocked by:** Tasks 2, 6, and 7  
-**Execution:** `python3 bin/delegate.py --json --isolation worktree cursor work --prompt-file docs/plans/prompts/worktree-followups-task-9.md` acceptable after Task 7 passes; max concurrent implementation worktrees = 1  
-**Owned files:** `src/delegate_agent/worktree_mgmt.py`, `tests/test_delegate_worktree_mgmt.py`  
-**Invariants:** Payload keys and safety semantics stay compatible except intentional additions from Tasks 2 and 6.  
+**Parallel:** no
+**Blocked by:** Tasks 2, 6, and 7
+**Execution:** `python3 bin/delegate.py --json --isolation worktree cursor work --prompt-file docs/plans/prompts/worktree-followups-task-9.md` acceptable after Task 7 passes; max concurrent implementation worktrees = 1
+**Owned files:** `src/delegate_agent/worktree_mgmt.py`, `tests/test_delegate_worktree_mgmt.py`
+**Invariants:** Payload keys and safety semantics stay compatible except intentional additions from Tasks 2 and 6.
 **Out of scope:** Parser changes.
 
 **Files:**
@@ -635,11 +635,11 @@ python3 -m unittest tests.test_delegate_worktree_mgmt
 
 ## Task 10: Table-Drive Worktree Parser and Dispatcher
 
-**Parallel:** no  
-**Blocked by:** Tasks 6, 7, and 8  
-**Execution:** `python3 bin/delegate.py --json --isolation worktree cursor work --prompt-file docs/plans/prompts/worktree-followups-task-10.md` or coordinator; max concurrent implementation worktrees = 1  
-**Owned files:** `src/delegate_agent/cli.py`, `tests/test_delegate_parser.py`, `tests/test_delegate_worktree_mgmt.py`  
-**Invariants:** Existing error codes (`misplaced_global_option`, `unknown_option`, `missing_handle`, etc.) remain stable.  
+**Parallel:** no
+**Blocked by:** Tasks 6, 7, and 8
+**Execution:** `python3 bin/delegate.py --json --isolation worktree cursor work --prompt-file docs/plans/prompts/worktree-followups-task-10.md` or coordinator; max concurrent implementation worktrees = 1
+**Owned files:** `src/delegate_agent/cli.py`, `tests/test_delegate_parser.py`, `tests/test_delegate_worktree_mgmt.py`
+**Invariants:** Existing error codes (`misplaced_global_option`, `unknown_option`, `missing_handle`, etc.) remain stable.
 **Out of scope:** Worktree-management behavior.
 
 **Files:**
@@ -680,11 +680,11 @@ python3 -m unittest tests.test_delegate_parser tests.test_delegate_worktree_mgmt
 
 ## Task 11: Deduplicate `gc_worktrees`
 
-**Parallel:** no  
-**Blocked by:** Tasks 5, 7, and 9  
-**Execution:** `python3 bin/delegate.py --json --isolation worktree cursor work --prompt-file docs/plans/prompts/worktree-followups-task-11.md` acceptable after Task 7 passes; max concurrent implementation worktrees = 1  
-**Owned files:** `src/delegate_agent/worktree_mgmt.py`, `tests/test_delegate_worktree_mgmt.py`  
-**Invariants:** `gc` never deletes worktree paths; it only reconciles registry state and runs safe `git worktree prune` for missing paths.  
+**Parallel:** no
+**Blocked by:** Tasks 5, 7, and 9
+**Execution:** `python3 bin/delegate.py --json --isolation worktree cursor work --prompt-file docs/plans/prompts/worktree-followups-task-11.md` acceptable after Task 7 passes; max concurrent implementation worktrees = 1
+**Owned files:** `src/delegate_agent/worktree_mgmt.py`, `tests/test_delegate_worktree_mgmt.py`
+**Invariants:** `gc` never deletes worktree paths; it only reconciles registry state and runs safe `git worktree prune` for missing paths.
 **Out of scope:** Remove/prune behavior.
 
 **Files:**
@@ -715,11 +715,11 @@ python3 -m unittest tests.test_delegate_worktree_mgmt
 
 ## Task 12: Centralize Cleanup-Hint Rendering
 
-**Parallel:** yes  
-**Blocked by:** Tasks 2 and 6  
-**Execution:** `python3 bin/delegate.py --json --isolation worktree cursor work --prompt-file docs/plans/prompts/worktree-followups-task-12.md`; may run in parallel only if no other active task touches `runner.py`, `rendering.py`, `test_runner_capture.py`, or `test_snapshot_commands.py`  
-**Owned files:** `src/delegate_agent/rendering.py`, `src/delegate_agent/runner.py`, `tests/test_runner_capture.py`, `tests/test_snapshot_commands.py`  
-**Invariants:** Text output stays byte-for-byte compatible unless tests are updated in the same task for intentional wording changes.  
+**Parallel:** yes
+**Blocked by:** Tasks 2 and 6
+**Execution:** `python3 bin/delegate.py --json --isolation worktree cursor work --prompt-file docs/plans/prompts/worktree-followups-task-12.md`; may run in parallel only if no other active task touches `runner.py`, `rendering.py`, `test_runner_capture.py`, or `test_snapshot_commands.py`
+**Owned files:** `src/delegate_agent/rendering.py`, `src/delegate_agent/runner.py`, `tests/test_runner_capture.py`, `tests/test_snapshot_commands.py`
+**Invariants:** Text output stays byte-for-byte compatible unless tests are updated in the same task for intentional wording changes.
 **Out of scope:** Worktree-management logic.
 
 **Files:**
@@ -748,11 +748,11 @@ python3 -m unittest tests.test_runner_capture tests.test_snapshot_commands
 
 ## Task 13: Typed Persistent Record and Dict Access Helpers
 
-**Parallel:** no  
-**Blocked by:** Tasks 2 and 11  
-**Execution:** `python3 bin/delegate.py --json --isolation worktree droid "deepseek v4 pro" work --prompt-file docs/plans/prompts/worktree-followups-task-13.md` or coordinator; max concurrent implementation worktrees = 1  
-**Owned files:** `src/delegate_agent/worktree_mgmt.py`, `tests/test_delegate_worktree_mgmt.py`  
-**Invariants:** Public JSON from `list/show/remove/prune/gc` never includes private `_state`, `_manifest`, `_snapshot`.  
+**Parallel:** no
+**Blocked by:** Tasks 2 and 11
+**Execution:** `python3 bin/delegate.py --json --isolation worktree droid "deepseek v4 pro" work --prompt-file docs/plans/prompts/worktree-followups-task-13.md` or coordinator; max concurrent implementation worktrees = 1
+**Owned files:** `src/delegate_agent/worktree_mgmt.py`, `tests/test_delegate_worktree_mgmt.py`
+**Invariants:** Public JSON from `list/show/remove/prune/gc` never includes private `_state`, `_manifest`, `_snapshot`.
 **Out of scope:** Run registry storage format changes.
 
 **Files:**
@@ -787,11 +787,11 @@ python3 -m unittest tests.test_delegate_worktree_mgmt
 
 ## Task 14: Dirty Status Helpers and Constants
 
-**Parallel:** no  
-**Blocked by:** Task 13  
-**Execution:** coordinator preferred; small refactor in shared worktree-management path  
-**Owned files:** `src/delegate_agent/worktree_mgmt.py`, `tests/test_delegate_worktree_mgmt.py`  
-**Invariants:** Dirty-path truncation remains 20 entries unless explicitly changed later.  
+**Parallel:** no
+**Blocked by:** Task 13
+**Execution:** coordinator preferred; small refactor in shared worktree-management path
+**Owned files:** `src/delegate_agent/worktree_mgmt.py`, `tests/test_delegate_worktree_mgmt.py`
+**Invariants:** Dirty-path truncation remains 20 entries unless explicitly changed later.
 **Out of scope:** Prune/remove safety policy.
 
 **Files:**
@@ -820,11 +820,11 @@ python3 -m unittest tests.test_delegate_worktree_mgmt
 
 ## Task 15: Lock Discipline Hardening
 
-**Parallel:** no  
-**Blocked by:** Tasks 2, 6, 9, 11  
-**Execution:** `python3 bin/delegate.py --json --isolation worktree droid "deepseek v4 pro" work --prompt-file docs/plans/prompts/worktree-followups-task-15.md` or coordinator; max concurrent implementation worktrees = 1  
-**Owned files:** `src/delegate_agent/run_registry.py`, `src/delegate_agent/worktree_mgmt.py`, `tests/test_run_registry.py`, `tests/test_delegate_worktree_mgmt.py`  
-**Invariants:** No nested-flock deadlock; all registry mutations still happen under lock.  
+**Parallel:** no
+**Blocked by:** Tasks 2, 6, 9, 11
+**Execution:** `python3 bin/delegate.py --json --isolation worktree droid "deepseek v4 pro" work --prompt-file docs/plans/prompts/worktree-followups-task-15.md` or coordinator; max concurrent implementation worktrees = 1
+**Owned files:** `src/delegate_agent/run_registry.py`, `src/delegate_agent/worktree_mgmt.py`, `tests/test_run_registry.py`, `tests/test_delegate_worktree_mgmt.py`
+**Invariants:** No nested-flock deadlock; all registry mutations still happen under lock.
 **Out of scope:** Replacing file locks entirely.
 
 **Files:**
@@ -857,11 +857,11 @@ python3 -m unittest tests.test_run_registry tests.test_delegate_worktree_mgmt
 
 ## Task 16: Docs, Examples, and Runtime-Handoff Cleanup
 
-**Parallel:** yes  
-**Blocked by:** Tasks 2-7 for behavior facts; can draft earlier but final patch must wait.  
-**Execution:** `python3 bin/delegate.py --json --isolation worktree cursor work --prompt-file docs/plans/prompts/worktree-followups-task-16.md`; may run in parallel with Task 12 only if Task 12 is not modifying docs and the coordinator can integrate one worktree at a time  
-**Owned files:** `README.md`, `AGENTS.md`, `docs/development.md`, `docs/live-runtime.md`, `config.example.json`, `docs/plans/2026-05-25-post-ship-followups.md`  
-**Invariants:** Do not claim installed `delegate` has the feature until promotion occurs. Do not instruct manual deletion of Delegate-managed worktrees.  
+**Parallel:** yes
+**Blocked by:** Tasks 2-7 for behavior facts; can draft earlier but final patch must wait.
+**Execution:** `python3 bin/delegate.py --json --isolation worktree cursor work --prompt-file docs/plans/prompts/worktree-followups-task-16.md`; may run in parallel with Task 12 only if Task 12 is not modifying docs and the coordinator can integrate one worktree at a time
+**Owned files:** `README.md`, `AGENTS.md`, `docs/development.md`, `docs/live-runtime.md`, `config.example.json`, `docs/plans/2026-05-25-post-ship-followups.md`
+**Invariants:** Do not claim installed `delegate` has the feature until promotion occurs. Do not instruct manual deletion of Delegate-managed worktrees.
 **Out of scope:** Promoting live runtime.
 
 **Files:**
@@ -927,10 +927,10 @@ Expected:
 
 ## Task 17: Full Integration Review and Gates
 
-**Parallel:** no  
-**Blocked by:** Tasks 2-16  
-**Owned files:** all touched files  
-**Invariants:** Review findings must be grounded in diff lines. Patch real issues before final readiness.  
+**Parallel:** no
+**Blocked by:** Tasks 2-16
+**Owned files:** all touched files
+**Invariants:** Review findings must be grounded in diff lines. Patch real issues before final readiness.
 **Out of scope:** Live runtime promotion unless Trey explicitly asks.
 
 **Files:**
