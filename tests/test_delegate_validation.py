@@ -416,6 +416,20 @@ class ValidationTests(unittest.TestCase):
             )
         self.assertEqual(ctx.exception.error, "invalid_worktrees_config")
 
+    def test_worktrees_data_home_relative_path_raises(self):
+        config_mod = load_config_module()
+        for value in ("relative/path", "./relative"):
+            with self.subTest(value=value):
+                with self.assertRaises(config_mod.ConfigError) as ctx:
+                    config_mod.validate_config(
+                        config_mod.deep_merge(
+                            config_mod.DEFAULT_CONFIG,
+                            {"worktrees": {"dataHome": value}},
+                        )
+                    )
+                self.assertEqual(ctx.exception.error, "invalid_worktrees_config")
+                self.assertIn("absolute path", ctx.exception.message)
+
     def test_worktrees_auto_prune_enabled_not_bool_raises(self):
         config_mod = load_config_module()
         with self.assertRaises(config_mod.ConfigError) as ctx:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import shlex
 import subprocess
 import threading
 import time
@@ -141,8 +142,14 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
         "argv": argv,
     }
     payload["isolatedWorkspace"] = ctx.isolated_workspace
+    payload["isolationMode"] = ctx.isolation_mode
+    payload["effectiveIsolation"] = ctx.effective_isolation
+    payload["isolationLifecycle"] = ctx.isolation_lifecycle
+    payload["preservedWorkspace"] = ctx.preserved_workspace
     if ctx.source_git_root is not None:
         payload["sourceGitRoot"] = ctx.source_git_root
+    if ctx.branch is not None:
+        payload["branch"] = ctx.branch
     if ctx.creation_context is not None:
         payload["creationContext"] = ctx.creation_context
     if ctx.worktree_status is not None:
@@ -194,14 +201,13 @@ def _worktree_cleanup_commands(ctx: RunContext) -> JsonObject | None:
     source_git = ctx.source_git_root or ""
     exec_cwd = ctx.execution_cwd
     branch = ctx.branch
+    remove_argv = ["git", "-C", source_git, "worktree", "remove", "--force", exec_cwd]
+    branch_argv = ["git", "-C", source_git, "branch", "-D", branch]
     return {
         "safe": f"delegate worktree remove {alias_str}",
         "forceBranch": f"delegate worktree remove {alias_str} --force-branch",
         "discardUncommitted": f"delegate worktree remove {alias_str} --discard-uncommitted",
-        "rawGit": (
-            f"git -C {source_git} worktree remove --force {exec_cwd}"
-            f" && git -C {source_git} branch -D {branch}"
-        ),
+        "rawGit": f"{shlex.join(remove_argv)} && {shlex.join(branch_argv)}",
     }
 
 
@@ -331,9 +337,9 @@ def emit_bounded_text_summary(
         print(f"branch: {ctx.branch}", file=stdout)
     lifecycle = ctx.isolation_lifecycle
     if lifecycle == "persistent":
-        print(f"isolation: worktree persistent", file=stdout)
+        print("isolation: worktree persistent", file=stdout)
     elif lifecycle == "temporary":
-        print(f"isolation: worktree temporary", file=stdout)
+        print("isolation: worktree temporary", file=stdout)
     else:
         print(f"isolation: {lifecycle}", file=stdout)
     print(f"snapshot: {run_registry.snapshot_command(ctx.alias)}", file=stdout)
@@ -342,17 +348,25 @@ def emit_bounded_text_summary(
         file=stdout,
     )
     if ctx.execution_cwd and (lifecycle == "temporary" or lifecycle == "persistent"):
-        print(f"inspect: git -C {ctx.execution_cwd} status --short", file=stdout)
-        print(f"review diff: git -C {ctx.execution_cwd} diff --stat HEAD", file=stdout)
+        print(
+            f"inspect: {shlex.join(['git', '-C', ctx.execution_cwd, 'status', '--short'])}",
+            file=stdout,
+        )
+        print(
+            f"review diff: {shlex.join(['git', '-C', ctx.execution_cwd, 'diff', '--stat', 'HEAD'])}",
+            file=stdout,
+        )
     if lifecycle == "persistent" and ctx.branch and ctx.source_git_root:
         alias_str = ctx.alias
         source_git = ctx.source_git_root
         exec_cwd = ctx.execution_cwd
         branch = ctx.branch
+        raw_remove = shlex.join(["git", "-C", source_git, "worktree", "remove", "--force", exec_cwd])
+        raw_branch = shlex.join(["git", "-C", source_git, "branch", "-D", branch])
         print(f"cleanup (refuses dirty / unmerged):       delegate worktree remove {alias_str}", file=stdout)
         print(f"cleanup (allow unmerged branch deletion): delegate worktree remove {alias_str} --force-branch", file=stdout)
         print(f"cleanup (DISCARD uncommitted edits):      delegate worktree remove {alias_str} --discard-uncommitted", file=stdout)
-        print(f"raw git equivalent:                       git -C {source_git} worktree remove --force {exec_cwd} && git -C {source_git} branch -D {branch}", file=stdout)
+        print(f"raw git equivalent:                       {raw_remove} && {raw_branch}", file=stdout)
 
 
 def completion_json_payload(

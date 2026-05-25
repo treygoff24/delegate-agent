@@ -18,10 +18,14 @@ from typing import NoReturn, TextIO
 try:
     from delegate_agent import VERSION
     from delegate_agent import config as delegate_config
+    from delegate_agent import rendering as delegate_rendering
+    from delegate_agent import retention as delegate_retention
+    from delegate_agent import run_registry
+    from delegate_agent import runner as delegate_runner
+    from delegate_agent import worktree_mgmt
     from delegate_agent.isolation import IsolationContext, build_isolation_context
     from delegate_agent.isolation import (
         IsolationExecutionError,
-        PERSISTENT_WORKTREE_CONTEXT_NOTE,
         branch_label,
         create_persistent_worktree,
         plan_branch_name,
@@ -33,10 +37,6 @@ try:
         short_run_id,
         worktrees_data_home,
     )
-    from delegate_agent import rendering as delegate_rendering
-    from delegate_agent import retention as delegate_retention
-    from delegate_agent import run_registry
-    from delegate_agent import runner as delegate_runner
     from delegate_agent.json_types import JsonObject, JsonValue
 except ModuleNotFoundError:  # pragma: no cover - direct cli.py invocation in tests
     _src_root = Path(__file__).resolve().parent.parent
@@ -44,10 +44,14 @@ except ModuleNotFoundError:  # pragma: no cover - direct cli.py invocation in te
         sys.path.insert(0, str(_src_root))
     from delegate_agent import VERSION
     from delegate_agent import config as delegate_config
+    from delegate_agent import rendering as delegate_rendering
+    from delegate_agent import retention as delegate_retention
+    from delegate_agent import run_registry
+    from delegate_agent import runner as delegate_runner
+    from delegate_agent import worktree_mgmt
     from delegate_agent.isolation import IsolationContext, build_isolation_context
     from delegate_agent.isolation import (
         IsolationExecutionError,
-        PERSISTENT_WORKTREE_CONTEXT_NOTE,
         branch_label,
         create_persistent_worktree,
         plan_branch_name,
@@ -59,10 +63,6 @@ except ModuleNotFoundError:  # pragma: no cover - direct cli.py invocation in te
         short_run_id,
         worktrees_data_home,
     )
-    from delegate_agent import rendering as delegate_rendering
-    from delegate_agent import retention as delegate_retention
-    from delegate_agent import run_registry
-    from delegate_agent import runner as delegate_runner
     from delegate_agent.json_types import JsonObject, JsonValue
 
 
@@ -155,6 +155,21 @@ class ParsedCommand:
     run_output_raw: bool = False
     run_output_no_redact: bool = False
     isolation: str | None = None
+    worktree_action: str | None = None
+    worktree_handle: str | None = None
+    worktree_latest_harness: str | None = None
+    worktree_harness: str | None = None
+    worktree_status: str | None = None
+    worktree_limit: int | None = None
+    worktree_no_auto_prune: bool = False
+    worktree_discard_uncommitted: bool = False
+    worktree_force_branch: bool = False
+    worktree_force: bool = False
+    worktree_keep_branch: bool = False
+    worktree_merged: bool = False
+    worktree_older_than: int | None = None
+    worktree_include_detached: bool = False
+    worktree_dry_run: bool = False
 
 
 @dataclass(frozen=True)
@@ -190,6 +205,12 @@ Usage:
   delegate [--cwd PATH] [--json] snapshot [--latest HARNESS] [--no-redact] <alias-or-runId>
   delegate [--cwd PATH] [--json] runs [--active] [--recent] [--harness HARNESS] [--limit N]
   delegate [--cwd PATH] [--json] run-output <alias-or-runId> [--completion-report] [--stdout] [--stderr] [--tail N] [--raw] [--no-redact]
+  delegate [--cwd PATH] [--json] worktree list [--harness HARNESS] [--status STATUS] [--limit N] [--no-auto-prune]
+  delegate [--cwd PATH] [--json] worktree show <alias-or-runId>
+  delegate [--cwd PATH] [--json] worktree show --latest HARNESS
+  delegate [--cwd PATH] [--json] worktree remove <alias-or-runId> [--discard-uncommitted] [--force-branch] [--force] [--keep-branch]
+  delegate [--cwd PATH] [--json] worktree prune [--merged] [--older-than DAYS] [--harness HARNESS] [--include-detached] [--dry-run] [--discard-uncommitted] [--force-branch] [--force]
+  delegate [--cwd PATH] [--json] worktree gc [--dry-run]
   delegate [--json] models
   delegate [--json] describe
   delegate agent-help
@@ -388,6 +409,13 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
         return parse_runs(rest, json_mode, cwd)
     if subcommand == "run-output":
         return parse_run_output(rest, json_mode, cwd)
+    if subcommand == "worktree":
+        if isolation is not None:
+            raise DelegateError(
+                "invalid_option_combination",
+                "--isolation is not supported with delegate worktree commands.",
+            )
+        return parse_worktree(rest, json_mode, cwd)
 
     raise DelegateError("unknown_subcommand", f"Unknown subcommand: {subcommand}")
 
@@ -758,6 +786,169 @@ def parse_run_output(rest: list[str], json_mode: bool, cwd: str | None) -> Parse
     )
 
 
+def parse_non_negative_int(value: str, *, option: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise DelegateError("invalid_option_value", f"{option} must be an integer.") from None
+    if parsed < 0:
+        raise DelegateError("invalid_option_value", f"{option} must be non-negative.")
+    return parsed
+
+
+def parse_positive_int(value: str, *, option: str) -> int:
+    parsed = parse_non_negative_int(value, option=option)
+    if parsed < 1:
+        raise DelegateError("invalid_option_value", f"{option} must be at least 1.")
+    return parsed
+
+
+def _require_option_value(rest: list[str], index: int, option: str) -> str:
+    if index + 1 >= len(rest):
+        raise DelegateError("missing_option_value", f"{option} requires a value.")
+    return rest[index + 1]
+
+
+def parse_worktree(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
+    if not rest:
+        raise DelegateError("missing_worktree_action", "worktree requires list, show, remove, prune, or gc.")
+    action = rest[0]
+    args = rest[1:]
+    if action not in {"list", "show", "remove", "prune", "gc"}:
+        raise DelegateError("unknown_worktree_action", f"Unknown worktree action: {action}")
+    parsed = ParsedCommand(
+        "worktree",
+        json_mode=json_mode,
+        cwd=cwd,
+        worktree_action=action,
+    )
+    positional: list[str] = []
+    i = 0
+    while i < len(args):
+        token = args[i]
+        if token in {"--json", "--cwd", "--isolation"}:
+            raise DelegateError(
+                "misplaced_global_option",
+                f"{token} must appear before the subcommand.",
+            )
+        if action == "list":
+            if token == "--harness":
+                parsed.worktree_harness = _require_option_value(args, i, token)
+                i += 2
+                continue
+            if token == "--status":
+                value = _require_option_value(args, i, token)
+                if value not in worktree_mgmt.VALID_STATUSES:
+                    raise DelegateError(
+                        "invalid_option_value",
+                        "--status must be present, removed, missing, or unknown.",
+                    )
+                parsed.worktree_status = value
+                i += 2
+                continue
+            if token == "--limit":
+                parsed.worktree_limit = parse_positive_int(
+                    _require_option_value(args, i, token),
+                    option=token,
+                )
+                i += 2
+                continue
+            if token == "--no-auto-prune":
+                parsed.worktree_no_auto_prune = True
+                i += 1
+                continue
+        elif action == "show":
+            if token == "--latest":
+                parsed.worktree_latest_harness = _require_option_value(args, i, token)
+                i += 2
+                continue
+        elif action == "remove":
+            if token == "--discard-uncommitted":
+                parsed.worktree_discard_uncommitted = True
+                i += 1
+                continue
+            if token == "--force-branch":
+                parsed.worktree_force_branch = True
+                i += 1
+                continue
+            if token == "--force":
+                parsed.worktree_force = True
+                i += 1
+                continue
+            if token == "--keep-branch":
+                parsed.worktree_keep_branch = True
+                i += 1
+                continue
+        elif action == "prune":
+            if token == "--merged":
+                parsed.worktree_merged = True
+                i += 1
+                continue
+            if token == "--older-than":
+                parsed.worktree_older_than = parse_non_negative_int(
+                    _require_option_value(args, i, token),
+                    option=token,
+                )
+                i += 2
+                continue
+            if token == "--harness":
+                parsed.worktree_harness = _require_option_value(args, i, token)
+                i += 2
+                continue
+            if token == "--include-detached":
+                parsed.worktree_include_detached = True
+                i += 1
+                continue
+            if token == "--dry-run":
+                parsed.worktree_dry_run = True
+                i += 1
+                continue
+            if token == "--discard-uncommitted":
+                parsed.worktree_discard_uncommitted = True
+                i += 1
+                continue
+            if token == "--force-branch":
+                parsed.worktree_force_branch = True
+                i += 1
+                continue
+            if token == "--force":
+                parsed.worktree_force = True
+                i += 1
+                continue
+        elif action == "gc" and token == "--dry-run":
+            parsed.worktree_dry_run = True
+            i += 1
+            continue
+        if token.startswith("--"):
+            raise DelegateError("unknown_option", f"worktree {action} does not support option: {token}")
+        positional.append(token)
+        i += 1
+
+    if action in {"list", "prune", "gc"} and positional:
+        raise DelegateError("unexpected_argument", f"worktree {action} does not accept positional arguments.")
+    if action == "show":
+        if parsed.worktree_latest_harness is not None:
+            if positional:
+                raise DelegateError(
+                    "invalid_option_combination",
+                    "worktree show accepts either --latest HARNESS or a handle, not both.",
+                )
+        elif len(positional) != 1:
+            raise DelegateError("missing_handle", "worktree show requires an alias or run id.")
+        else:
+            parsed.worktree_handle = positional[0]
+    if action == "remove":
+        if len(positional) != 1:
+            raise DelegateError("missing_handle", "worktree remove requires an alias or run id.")
+        parsed.worktree_handle = positional[0]
+    if parsed.worktree_keep_branch and (parsed.worktree_force_branch or parsed.worktree_force):
+        raise DelegateError(
+            "invalid_option_combination",
+            "worktree remove --keep-branch is mutually exclusive with --force-branch/--force.",
+        )
+    return parsed
+
+
 def maybe_run_retention_pass(registry_root: Path, config: JsonObject) -> None:
     delegate_retention.run_retention_pass(registry_root, config)
 
@@ -951,6 +1142,100 @@ def emit_run_output(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout:
     else:
         delegate_rendering.render_run_output_text(text_sections, stdout)
     return EXIT_OK
+
+
+def emit_worktree(
+    parsed: ParsedCommand,
+    workspace: ResolvedWorkspace,
+    config: JsonObject,
+    stdout: TextIO,
+) -> int:
+    registry_root = run_registry.registry_root_if_exists(Path(workspace.path))
+    if registry_root is None:
+        raise worktree_mgmt.WorktreeManagementError(
+            {
+                "ok": False,
+                "code": "no_registry",
+                "message": "No Delegate run registry exists in this workspace.",
+                "sourceGitRoot": workspace.path,
+                "nextActions": ["run a tracked delegate command first"],
+                "retrySafe": False,
+            }
+        )
+    action = parsed.worktree_action
+    if action == "list":
+        auto_prune = worktree_mgmt.maybe_auto_prune(
+            registry_root,
+            config,
+            no_auto_prune=parsed.worktree_no_auto_prune,
+        )
+        payload = worktree_mgmt.list_worktrees(
+            registry_root,
+            harness=parsed.worktree_harness,
+            status=parsed.worktree_status,
+            limit=parsed.worktree_limit or run_registry.DEFAULT_RUNS_LIMIT,
+        )
+        if auto_prune is not None:
+            payload["autoPrune"] = auto_prune
+        if parsed.json_mode:
+            delegate_rendering.print_json(payload, stdout)
+        else:
+            delegate_rendering.render_worktree_list_text(payload, stdout)
+        return EXIT_OK
+    if action == "show":
+        payload = worktree_mgmt.show_worktree(
+            registry_root,
+            handle=parsed.worktree_handle,
+            latest_harness=parsed.worktree_latest_harness,
+        )
+        if parsed.json_mode:
+            delegate_rendering.print_json(payload, stdout)
+        else:
+            delegate_rendering.render_worktree_show_text(payload, stdout)
+        return EXIT_OK
+    if action == "remove":
+        assert parsed.worktree_handle is not None
+        payload = worktree_mgmt.remove_worktree(
+            registry_root,
+            handle=parsed.worktree_handle,
+            discard_uncommitted=parsed.worktree_discard_uncommitted,
+            force_branch=parsed.worktree_force_branch,
+            keep_branch=parsed.worktree_keep_branch,
+            force=parsed.worktree_force,
+        )
+        if parsed.json_mode:
+            delegate_rendering.print_json(payload, stdout)
+        else:
+            delegate_rendering.render_worktree_remove_text(payload, stdout)
+        return EXIT_OK
+    if action == "prune":
+        payload = worktree_mgmt.prune_worktrees(
+            registry_root,
+            merged=parsed.worktree_merged,
+            older_than_days=parsed.worktree_older_than,
+            harness=parsed.worktree_harness,
+            include_detached=parsed.worktree_include_detached,
+            dry_run=parsed.worktree_dry_run,
+            discard_uncommitted=parsed.worktree_discard_uncommitted,
+            force_branch=parsed.worktree_force_branch,
+            force=parsed.worktree_force,
+        )
+        if parsed.json_mode:
+            delegate_rendering.print_json(payload, stdout)
+        else:
+            delegate_rendering.render_worktree_prune_text(payload, stdout)
+        return EXIT_OK
+    if action == "gc":
+        payload = worktree_mgmt.gc_worktrees(
+            registry_root,
+            dry_run=parsed.worktree_dry_run,
+        )
+        if parsed.json_mode:
+            delegate_rendering.print_json(payload, stdout)
+        else:
+            delegate_rendering.render_worktree_gc_text(payload, stdout)
+        return EXIT_OK
+    raise DelegateError("unknown_worktree_action", f"Unknown worktree action: {action}")
 
 
 def resolve_workspace(global_cwd: str | None, json_cwd: str | None = None) -> ResolvedWorkspace:
@@ -1783,6 +2068,8 @@ def _cleanup_partial_worktree(
     worktree_path: str,
     branch: str,
     run_path: Path,
+    *,
+    remove_branch: bool = True,
 ) -> None:
     """Attempt to clean up a partially-created worktree after creation failure.
 
@@ -1801,19 +2088,24 @@ def _cleanup_partial_worktree(
                 cleanup_failed = True
         except (OSError, subprocess.SubprocessError):
             cleanup_failed = True
-    # Try to delete the branch even if worktree removal failed.
-    try:
-        subprocess.run(
-            ["git", "-C", source_git_root, "branch", "-D", branch],
-            text=True, capture_output=True, check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        cleanup_failed = True
+    if remove_branch:
+        # Try to delete the branch even if worktree removal failed. Callers
+        # must only set remove_branch when this run actually created the
+        # branch; branch-collision cleanup must not delete pre-existing refs.
+        try:
+            subprocess.run(
+                ["git", "-C", source_git_root, "branch", "-D", branch],
+                text=True, capture_output=True, check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            cleanup_failed = True
     if cleanup_failed:
-        manual = (
-            f"git -C {source_git_root} worktree remove --force {worktree_path} && "
-            f"git -C {source_git_root} branch -D {branch}"
-        )
+        commands = [
+            shlex.join(["git", "-C", source_git_root, "worktree", "remove", "--force", worktree_path])
+        ]
+        if remove_branch:
+            commands.append(shlex.join(["git", "-C", source_git_root, "branch", "-D", branch]))
+        manual = " && ".join(commands)
         snapshot_path = run_path / run_registry.SNAPSHOT_FILE
         if snapshot_path.exists():
             try:
@@ -1843,11 +2135,11 @@ def _execute_persistent_worktree(
 ) -> tuple[int, JsonObject | None]:
     """Implement the 13-step persistent worktree launch sequence.
 
-    Steps 1–5: validation (git workspace, valid HEAD, reject pass-through,
+    Steps 1-5: validation (git workspace, valid HEAD, reject pass-through,
     ensure registry, clean-source check).
-    Steps 6–8: register run, write pre-launch state, create worktree.
-    Steps 9–11: rewrite argv, inject prompt context, launch child.
-    Steps 12–13: preserve worktree, record metadata.
+    Steps 6-8: register run, write pre-launch state, create worktree.
+    Steps 9-11: rewrite argv, inject prompt context, launch child.
+    Steps 12-13: preserve worktree, record metadata.
 
     If any step before child launch fails after pre-launch state was
     written, writes final state "failed" with error/message/planned*
@@ -1869,6 +2161,14 @@ def _execute_persistent_worktree(
         base_oid = require_valid_head(source_git_root)
     except IsolationExecutionError as exc:
         raise DelegateError(exc.error, exc.message) from exc
+    (
+        _current_git_root,
+        current_git_common_dir,
+        current_head_oid,
+        current_head_ref,
+        current_branch,
+    ) = capture_git_metadata(source_git_root)
+    current_head_oid = base_oid
 
     # Step 4: Reject pass-through.
     if pass_through:
@@ -1909,20 +2209,22 @@ def _execute_persistent_worktree(
     branch = plan_branch_name(label, short_id)
     dh = worktrees_data_home(config)
 
-    if iso_ctx.source_git_common_dir is None:
+    source_git_common_dir = current_git_common_dir or iso_ctx.source_git_common_dir
+    if source_git_common_dir is None:
         raise DelegateError(
             "worktree_requires_git",
             "--isolation worktree could not determine the Git common directory.",
         )
 
-    fingerprint = repo_fingerprint(iso_ctx.source_git_common_dir)
+    fingerprint = repo_fingerprint(source_git_common_dir)
     worktree_path = str(plan_worktree_path(dh, fingerprint, label, short_id))
 
     creation_context: JsonObject = {
-        "sourceHeadOid": iso_ctx.source_head_oid or "",
-        "sourceHeadRef": iso_ctx.source_head_ref,
-        "sourceBranch": iso_ctx.source_branch,
-        "sourceGitCommonDir": iso_ctx.source_git_common_dir,
+        "sourceHeadOid": current_head_oid,
+        "sourceHeadRef": current_head_ref,
+        "sourceBranch": current_branch,
+        "sourceGitCommonDir": source_git_common_dir,
+        "branch": branch,
         "plannedBranch": branch,
         "plannedExecutionCwd": worktree_path,
         "label": label,
@@ -2004,7 +2306,14 @@ def _execute_persistent_worktree(
         }
         delegate_runner.write_snapshot(run_path, failed_snapshot)
         # Attempt cleanup of partial branch/worktree; if unsafe, preserve and record.
-        _cleanup_partial_worktree(source_git_root, worktree_path, branch, run_path)
+        if exc.error != "branch_collision":
+            _cleanup_partial_worktree(
+                source_git_root,
+                worktree_path,
+                branch,
+                run_path,
+                remove_branch=True,
+            )
         raise DelegateError(exc.error, exc.message) from exc
 
     # Step 9: Rewrite child argv workspace argument → worktree path.
@@ -2074,9 +2383,9 @@ def _execute_persistent_worktree(
                 },
             ),
         )
-        raise
+        raise DelegateError(error_code, error_msg) from exc
 
-    # Steps 12–13: Preserve worktree (nothing to clean up).
+    # Steps 12-13: Preserve worktree (nothing to clean up).
     # After child exit, the final state already has worktreeStatus from the
     # manifest/state; Wave 4 will read those for snapshot/runs output.
 
@@ -2624,7 +2933,7 @@ def main(
             workspace = resolve_workspace(parsed.cwd)
             # (non-run path uses workspace resolved above)
 
-        if parsed.subcommand in {"snapshot", "runs", "run-output"}:
+        if parsed.subcommand in {"snapshot", "runs", "run-output", "worktree"}:
             existing_registry = run_registry.registry_root_if_exists(Path(workspace.path))
             if existing_registry is not None:
                 maybe_run_retention_pass(existing_registry, config)
@@ -2634,6 +2943,8 @@ def main(
             return emit_runs(parsed, workspace, stdout)
         if parsed.subcommand == "run-output":
             return emit_run_output(parsed, workspace, stdout)
+        if parsed.subcommand == "worktree":
+            return emit_worktree(parsed, workspace, config, stdout)
 
         request = request_from_parsed(parsed, config, stdin)
         if request.dry_run:
@@ -2671,6 +2982,12 @@ def main(
         if parsed.json_mode and payload is not None:
             delegate_rendering.print_json(payload, stdout)
         return exit_code
+    except worktree_mgmt.WorktreeManagementError as exc:
+        if json_mode:
+            delegate_rendering.print_json(exc.payload, stdout)
+        else:
+            print(f"{exc.code}: {exc.message}", file=stderr)
+        return EXIT_USAGE
     except DelegateError as exc:
         return emit_error(exc, json_mode, stdout, stderr)
 

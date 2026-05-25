@@ -16,15 +16,15 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from delegate_agent.json_types import JsonObject
-
 # Re-export isolation constants from config for convenience
 from delegate_agent.config import (  # noqa: F401  # re-exported
+    ConfigError,
     ISOLATION_AUTO,
     ISOLATION_NONE,
     ISOLATION_WORKTREE,
     VALID_ISOLATION_VALUES,
 )
+from delegate_agent.json_types import JsonObject
 
 
 @dataclass(frozen=True)
@@ -133,7 +133,13 @@ def worktrees_data_home(config: JsonObject) -> Path:
         return Path.home() / ".delegate" / "worktrees"
     data_home = cfg.get("dataHome")
     if isinstance(data_home, str) and data_home:
-        return Path(data_home).expanduser()
+        expanded = Path(data_home).expanduser()
+        if not expanded.is_absolute():
+            raise ConfigError(
+                "invalid_worktrees_config",
+                "worktrees.dataHome must be an absolute path or start with ~/.",
+            )
+        return expanded
     return Path.home() / ".delegate" / "worktrees"
 
 

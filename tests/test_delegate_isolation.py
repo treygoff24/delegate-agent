@@ -198,6 +198,11 @@ class WorktreesDataHomeTests(unittest.TestCase):
         result = iso.worktrees_data_home(config)
         self.assertEqual(result, Path.home() / "custom" / "worktrees")
 
+    def test_config_relative_path_raises(self):
+        iso = load_isolation()
+        with self.assertRaises(iso.ConfigError):
+            iso.worktrees_data_home({"worktrees": {"dataHome": "relative/path"}})
+
     def test_explicit_null_uses_default(self):
         iso = load_isolation()
         config = {"worktrees": {"dataHome": None}}

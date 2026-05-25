@@ -17,6 +17,63 @@ agents should launch Delegate normally and use `delegate snapshot` plus related
 commands instead of piping launches through `tail` or tailing raw log files under
 `.delegate/runs/`.
 
+## Worktree isolation
+
+When `--isolation worktree` is used with `work` mode, Delegate creates persistent
+Git worktrees under the Delegate data home (`~/.delegate/worktrees/<repo-fingerprint>/`)
+that survive after the child agent exits. The persistent worktree is the
+**execution workspace** — the source checkout is not modified by the child agent's
+relative-path edits.
+
+### Pass-through restriction
+
+`--pass-through` is rejected with persistent worktree runs (work mode +
+`--isolation worktree`). The combination would skip the registry-centered output
+path, but persistent worktrees need a run id, branch name, metadata, and cleanup
+instructions. Fail fast avoids orphaning worktrees without aliases or snapshots.
+
+`--pass-through` is still allowed with:
+- Default work mode (isolation `none` or `auto` legacy).
+- Temporary safe-mode isolation (including `--isolation worktree cursor safe`).
+
+### Config block
+
+The `worktrees` config section controls persistent worktree behavior:
+
+```json
+{
+  "worktrees": {
+    "dataHome": null,
+    "autoPrune": {
+      "enabled": false,
+      "mergedOlderThanDays": 7
+    }
+  }
+}
+```
+
+- `worktrees.dataHome` — override the persistent-worktree root. Defaults to
+  `~/.delegate/worktrees`. When set, must be an absolute or `~/`-prefixed path;
+  tilde expansion uses `Path.expanduser()`.
+- `worktrees.autoPrune.enabled` — when `true`, `delegate worktree list` runs a
+  single opportunistic prune pass before producing output (only clean, fully-merged
+  worktrees older than `mergedOlderThanDays` qualify). Disabled by default.
+- `worktrees.autoPrune.mergedOlderThanDays` — non-negative integer, default 7.
+
+### Worktree management
+
+Use `delegate worktree {list,show,remove,prune,gc}` from the workspace that
+spawned the run. Do not manually delete paths under `~/.delegate/worktrees/` —
+this orphans registry entries. See the README for full command reference.
+
+### Test/runtime separation
+
+Tests that exercise worktree creation or management must set `HOME` to a
+`TemporaryDirectory` and assert the produced worktree path is under that
+temporary home. They must not write to the real `~/.delegate/worktrees/`
+directory or use the installed `delegate` shim. Use `python3 bin/delegate.py`
+from the repo root for development instead.
+
 ## Harness behavior (after promotion)
 
 When this checkout is promoted, the live runtime gains the same harness contracts documented in the repo:

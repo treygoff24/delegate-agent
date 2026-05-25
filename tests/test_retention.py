@@ -209,7 +209,8 @@ class RetentionTests(unittest.TestCase):
 
     def test_no_delete_commands_exist(self):
         help_text = self.delegate.HELP
-        self.assertNotIn("prune", help_text.lower())
+        self.assertIn("worktree prune", help_text.lower())
+        self.assertNotIn("retention prune", help_text.lower())
         self.assertNotIn("delete", help_text.lower())
 
     def test_unknown_status_is_not_archived(self):

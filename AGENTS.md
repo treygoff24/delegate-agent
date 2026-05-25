@@ -57,3 +57,38 @@ When this checkout tracks Delegate runs under `.delegate/`:
 - Use `--pass-through` only when raw child streaming is explicitly required. If an operator intentionally pipes Delegate output in a shell script, they should also use `set -o pipefail` so child failures are not hidden by `tail`.
 - After the raw-log retention window, bulky logs move to `.delegate/archive/<runId>.tar.gz`; snapshots and alias lookup still work. Retention is archive-only (no prune/delete commands).
 - Use `python3 bin/delegate.py` from this repo for development; do not overwrite `~/.delegate` or `~/.local/bin/delegate` unless the operator explicitly asks to promote.
+
+## Persistent worktree workflow
+
+When `--isolation worktree` is combined with `work` mode, Delegate creates a persistent Git worktree that is preserved after the child agent exits. This keeps edit-capable agent runs separate from the source checkout.
+
+### Agent-facing prompt note
+
+Persistent worktree runs prepend a context note after the mandatory skill-review prefix and before the user's prompt. The note tells the child agent:
+
+> You are running in a Delegate-created isolated Git worktree. Make changes in this execution workspace only. Do not attempt to modify, merge into, or clean the source checkout. Do not delete, rename, or `git worktree remove` this workspace; the orchestrator manages worktree lifecycle. Report changed files, verification, and suggested integration steps. Your orchestrator can inspect this run via `delegate worktree show <alias>` and retire it via `delegate worktree remove <alias>` (refuses on dirty or unmerged), `delegate worktree remove <alias> --force-branch` (allow unmerged-branch deletion), `delegate worktree remove <alias> --discard-uncommitted` (DISCARDS uncommitted edits), or `delegate worktree prune --merged` for bulk integrated entries.
+
+### Orchestrator rules for persistent worktrees
+
+1. Use `delegate worktree show <alias>` to inspect the worktree state (porcelain status, ahead/behind both creation base and current source HEAD).
+2. Use `delegate worktree remove <alias>` for single-worktree cleanup. The default refuses uncommitted changes and unmerged branches. Pass `--discard-uncommitted` (data-loss) or `--force-branch` (unmerged-branch deletion) explicitly.
+3. Use `delegate worktree prune --merged` for bulk cleanup of worktrees whose branches are reachable from the current source HEAD.
+4. Do **not** delete `~/.delegate/worktrees/` paths directly — this orphans registry entries and leaves stale metadata. The structured `worktree` commands keep registry state consistent.
+5. Do **not** manually run `git worktree remove` or `git branch -D` on Delegate-managed worktrees unless you understand the registry implications.
+6. Tests must set `HOME` to a `TemporaryDirectory` to avoid writing to the real `~/.delegate/worktrees/` directory. Subprocess tests that can create worktrees must assert the produced path is under the temporary home.
+
+### Worktree lifecycle summary
+
+| Stage | Action | Who does it |
+| --- | --- | --- |
+| Creation | `delegate --isolation worktree cursor work "..."` creates branch + worktree | Delegate runner |
+| Inspection | `delegate worktree show <alias>` or `delegate worktree list` | Orchestrator / operator |
+| Integration | Review diff, cherry-pick, merge — standard Git operations | Orchestrator / operator |
+| Cleanup (safe) | `delegate worktree remove <alias>` (refuses if dirty or unmerged) | Orchestrator |
+| Cleanup (force) | `delegate worktree remove <alias> --force` (discards edits + force-deletes branch) | Orchestrator |
+| Bulk cleanup | `delegate worktree prune --merged` | Orchestrator |
+| Repair | `delegate worktree gc` (reconcile registry vs disk, never deletes paths) | Orchestrator |
+
+### Always use the dev entry point
+
+`python3 bin/delegate.py` from this repo. Never use the bare `delegate` command — that hits the installed shim at `~/.local/bin/delegate`, which is being used by other agents. See `.claude/skills/delegate-dev/SKILL.md` for details.

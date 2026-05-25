@@ -644,13 +644,14 @@ Default flow (no override flags):
 3. If `worktreeStatus == removed` already, exit success with `removed: true, pathRemoved: false, branchRemoved: false, noop: true`.
 4. If `worktreeStatus == missing`, fall through to registry cleanup and exit success with `removed: true, pathRemoved: false`.
 5. Run the strict dirty check inside the worktree. If dirty, fail with `dirty_worktree`. Include `dirtyPaths` (first 20) and a `nextActions` array containing `delegate worktree show <alias>` and `delegate worktree remove <alias> --discard-uncommitted`.
-6. Run `git -C <sourceGitRoot> worktree remove <executionCwd>`. On non-zero, fail with `worktree_remove_failed` (include git stderr) and preserve everything. Release lock.
-7. Unless `--keep-branch`, run `git -C <sourceGitRoot> branch -d <branch>`. If `-d` refuses because the branch is unmerged into source `HEAD`, leave the branch in place and report `branchRemoved: false, branchKept: "unmerged"` with `nextActions: ["delegate worktree remove <alias> --force-branch"]`.
-8. Update registry: set `worktreeStatus = removed`, `worktreeRemovedAt = utc_now_iso()`. Do not delete the run record itself; snapshot/run-output history is preserved. Release lock.
+6. If branch deletion is in scope and the branch is not merged into source `HEAD`, fail with `unmerged_branch` before removing the path. Include `nextActions` for `delegate worktree show <alias>`, `delegate worktree remove <alias> --keep-branch`, and `delegate worktree remove <alias> --force-branch`.
+7. Run `git -C <sourceGitRoot> worktree remove <executionCwd>`. On non-zero, fail with `worktree_remove_failed` (include git stderr) and preserve everything. Release lock.
+8. Unless `--keep-branch`, run `git -C <sourceGitRoot> branch -d <branch>`.
+9. Update registry: set `worktreeStatus = removed`, `worktreeRemovedAt = utc_now_iso()`. Do not delete the run record itself; snapshot/run-output history is preserved. Release lock.
 
 `--discard-uncommitted` flow: same as default but step 5 logs `dirtyPaths` to the run's state file (so the user can see what was discarded post-hoc via `delegate snapshot`) and step 6 uses `git worktree remove --force`.
 
-`--force-branch` flow: same as default but step 7 uses `git branch -D`.
+`--force-branch` flow: same as default but skips the step 6 refusal and step 8 uses `git branch -D`.
 
 JSON schema: `delegate.worktree-remove.v1`. Fields: `ok`, `alias`, `runId`, `branch`, `executionCwd`, `sourceGitRoot`, `removed`, `pathRemoved`, `branchRemoved`, `branchKept`, `worktreeStatus`, `discardedDirtyPaths` (when `--discard-uncommitted` was used), `noop`.
 
@@ -811,7 +812,7 @@ Worktree management:
 - `delegate worktree remove <alias>` on a clean fully-merged worktree removes path + branch and sets `worktreeStatus = removed`.
 - `delegate worktree remove <alias>` on a dirty worktree fails with `dirty_worktree`, includes `dirtyPaths` and the structured `nextActions`, and preserves both path and branch.
 - `delegate worktree remove <alias> --discard-uncommitted` removes a dirty worktree and records `discardedDirtyPaths` in the run's state file for post-hoc inspection via `delegate snapshot`.
-- `delegate worktree remove <alias>` on a clean worktree with an unmerged branch removes the path but leaves the branch with `branchKept: "unmerged"`; a second invocation with `--force-branch` deletes the branch.
+- `delegate worktree remove <alias>` on a clean worktree with an unmerged branch fails with `unmerged_branch` before removing the path; use `--keep-branch` to remove only the path or `--force-branch` to delete the branch explicitly.
 - `delegate worktree remove <alias> --force` is equivalent to passing both `--discard-uncommitted` and `--force-branch`.
 - `delegate worktree remove <alias> --keep-branch` removes the path but never deletes the branch.
 - `delegate worktree remove <alias> --keep-branch --force-branch` fails with `invalid_option_combination`.

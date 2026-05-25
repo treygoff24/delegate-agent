@@ -279,5 +279,111 @@ def render_run_output_text(sections: dict[str, str], stdout: TextIO) -> None:
         print(content, end="" if content.endswith("\n") else "\n", file=stdout)
 
 
+def render_worktree_list_text(payload: JsonObject, stdout: TextIO) -> None:
+    entries = payload.get("entries")
+    print("alias        status   harness  age      branch                                      dirty merged", file=stdout)
+    if not isinstance(entries, list):
+        return
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        alias = entry.get("alias") or entry.get("runId") or "?"
+        status = entry.get("worktreeStatus") or "unknown"
+        harness = entry.get("harness") or "?"
+        age = format_age(entry.get("lastActivityAt") if isinstance(entry.get("lastActivityAt"), str) else None)
+        branch = entry.get("branch") or "-"
+        branch_label = str(branch)
+        if len(branch_label) > 42:
+            branch_label = branch_label[:39] + "..."
+        dirty_value = entry.get("dirty")
+        dirty = "yes" if dirty_value is True else "no" if dirty_value is False else "-"
+        merged_value = entry.get("mergedIntoSource")
+        merged = "yes" if merged_value is True else "no" if merged_value is False else "-"
+        print(
+            f"{alias!s:<12} {status!s:<8} {harness!s:<8} {age:<8} {branch_label:<43} {dirty:<5} {merged}",
+            file=stdout,
+        )
+
+
+def render_worktree_show_text(payload: JsonObject, stdout: TextIO) -> None:
+    alias = payload.get("alias") or payload.get("runId") or "?"
+    status = payload.get("worktreeStatus", "unknown")
+    print(f"{alias} · {status}", file=stdout)
+    for key, label in (
+        ("executionCwd", "execution"),
+        ("sourceGitRoot", "source"),
+        ("branch", "branch"),
+        ("harness", "harness"),
+    ):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            print(f"{label}: {value}", file=stdout)
+    ahead = payload.get("aheadBehind")
+    if isinstance(ahead, dict):
+        for key, label in (("vsCreationBase", "vs creation base"), ("vsCurrentHead", "vs current HEAD")):
+            pair = ahead.get(key)
+            if isinstance(pair, dict):
+                print(
+                    f"{label}: ahead {pair.get('ahead')} / behind {pair.get('behind')} ({pair.get('baseOid')})",
+                    file=stdout,
+                )
+    porcelain = payload.get("porcelainStatus")
+    if isinstance(porcelain, list) and porcelain:
+        print("status:", file=stdout)
+        for line in porcelain:
+            print(f"  {line}", file=stdout)
+        if payload.get("porcelainStatusTruncated"):
+            print("  ...", file=stdout)
+    commands = payload.get("suggestedCommands")
+    if isinstance(commands, dict):
+        print("suggested commands:", file=stdout)
+        for key, value in commands.items():
+            if isinstance(value, str) and value:
+                print(f"  {key}: {value}", file=stdout)
+    warnings = payload.get("warnings")
+    if isinstance(warnings, list) and warnings:
+        print("warnings:", file=stdout)
+        for warning in warnings:
+            print(f"  - {warning}", file=stdout)
+
+
+def render_worktree_remove_text(payload: JsonObject, stdout: TextIO) -> None:
+    alias = payload.get("alias") or payload.get("runId") or "?"
+    print(f"{alias}: removed={payload.get('removed')} pathRemoved={payload.get('pathRemoved')} branchRemoved={payload.get('branchRemoved')}", file=stdout)
+    if payload.get("branchKept"):
+        print(f"branch kept: {payload['branchKept']}", file=stdout)
+    if payload.get("noop"):
+        print("noop: already removed", file=stdout)
+    actions = payload.get("nextActions")
+    if isinstance(actions, list) and actions:
+        print("next actions:", file=stdout)
+        for action in actions:
+            print(f"  - {action}", file=stdout)
+
+
+def render_worktree_prune_text(payload: JsonObject, stdout: TextIO) -> None:
+    for section in ("planned", "removed", "skipped", "errors"):
+        items = payload.get(section)
+        count = len(items) if isinstance(items, list) else 0
+        print(f"{section}: {count}", file=stdout)
+        if isinstance(items, list):
+            for item in items[:20]:
+                if isinstance(item, dict):
+                    label = item.get("alias") or item.get("runId") or "?"
+                    detail = item.get("reason") or item.get("code") or item.get("worktreeStatus") or ""
+                    print(f"  - {label} {detail}", file=stdout)
+
+
+def render_worktree_gc_text(payload: JsonObject, stdout: TextIO) -> None:
+    print(f"reconciled: {payload.get('reconciled', 0)}", file=stdout)
+    print(f"pruned source roots: {payload.get('prunedSourceRoots', 0)}", file=stdout)
+    orphans = payload.get("orphans")
+    if isinstance(orphans, list) and orphans:
+        print("orphans:", file=stdout)
+        for orphan in orphans:
+            if isinstance(orphan, dict):
+                print(f"  - {orphan.get('alias') or orphan.get('runId')} {orphan.get('reason')}", file=stdout)
+
+
 def print_json(payload: JsonObject, stdout: TextIO) -> None:
     print(json.dumps(payload, sort_keys=True), file=stdout)

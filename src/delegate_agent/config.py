@@ -220,6 +220,13 @@ def _validate_worktrees_section(worktrees: JsonValue) -> None:
             "invalid_worktrees_config",
             "worktrees.dataHome must be null or a non-empty string.",
         )
+    if isinstance(data_home, str) and data_home:
+        expanded = Path(data_home).expanduser()
+        if not expanded.is_absolute():
+            raise ConfigError(
+                "invalid_worktrees_config",
+                "worktrees.dataHome must be an absolute path or start with ~/.",
+            )
     auto_prune = worktrees.get("autoPrune")
     if auto_prune is not None:
         if not isinstance(auto_prune, dict):
