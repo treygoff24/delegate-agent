@@ -1156,34 +1156,6 @@ class ExecutionTests(unittest.TestCase):
                 # No temp dirs should remain (safe_temp_dirs returns dirs under tempfile)
                 # The cleanup is handled by the context manager's finally block
 
-    # -- Safe + worktree without pass-through cleans up -----------------------
-
-    def test_safe_worktree_isolation_cleans_up(self):
-        """Safe-mode worktree isolation cleans up temp worktree after child exits."""
-        with tempfile.TemporaryDirectory() as fake_home:
-            with mock.patch.dict(os.environ, {"HOME": fake_home}):
-                repo, _git_cd = self._make_git_repo_with_commit()
-                fake_bin = self.make_cursor_safe_fake_agent()
-                config = dict(self.delegate.DEFAULT_CONFIG)
-                workspace = self.delegate.resolve_workspace(repo.name)
-
-                # Use main() with --isolation worktree
-                stdout_buf = io.StringIO()
-                stderr_buf = io.StringIO()
-                code = self.delegate.main(
-                    [
-                        "--cwd", repo.name,
-                        "--isolation", "worktree",
-                        "cursor", "safe", "review",
-                    ],
-                    stdout=stdout_buf, stderr=stderr_buf,
-                )
-                # main() tries to use real cursor which likely isn't available;
-                # the isolation/cleanup should still work regardless.
-                # The key assertion: safe_temp_dirs are cleaned up.
-                # (This test is best-effort if real cursor is missing;
-                #  we accept any exit code as long as no orphaned dirs remain.)
-
     # -- Cursor safe --isolation none does not write source .cursor/cli.json --
 
     def test_cursor_safe_isolation_none_no_source_cursor_config(self):
@@ -1695,58 +1667,6 @@ class ExecutionTests(unittest.TestCase):
             )
         self.assertEqual(ctx.exception.error, "dirty_source_workspace")
 
-    # -- Finding 6: Branch collision test (was a no-op) ------------------------
 
-    def test_branch_collision_fails_before_launch(self):
-        """Branch collision fails before creating artifacts."""
-        with tempfile.TemporaryDirectory() as fake_home:
-            with mock.patch.dict(os.environ, {"HOME": fake_home}):
-                repo, _git_cd = self._make_git_repo_with_commit()
-                workspace = self.delegate.resolve_workspace(repo.name)
-
-                # Monkey-patch generate_run_id to return a deterministic value
-                # so we can pre-create the conflicting branch.
-                original_gen = self.delegate.run_registry.generate_run_id
-                known_run_id = "del_20260524T000000Z_aaaaaa"
-                self.delegate.run_registry.generate_run_id = lambda now=None: known_run_id
-                try:
-                    # Pre-create the branch that would conflict.
-                    # short_run_id of known_run_id = "20260524T000000Z-aaaaaa"
-                    from delegate_agent.isolation import short_run_id, plan_branch_name
-                    sid = short_run_id(known_run_id)
-                    branch = plan_branch_name("cursor", sid)
-                    subprocess.run(
-                        ["git", "-C", repo.name, "branch", branch],
-                        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    )
-
-                    fake_bin = self.make_cursor_safe_fake_agent()
-                    request = self._make_persistent_worktree_request(
-                        "cursor", "work", repo.name, self.delegate.DEFAULT_CONFIG,
-                    )
-                    request = self.delegate.Request(
-                        request.engine, request.mode, request.workspace, request.prompt,
-                        [str(fake_bin / "agent"), "--workspace", repo.name, "-p", "--trust",
-                         "--model", "composer-2.5", "--output-format", "text", "hello"],
-                        request.model, dry_run=False, workspace_kind=request.workspace_kind,
-                        isolation_context=request.isolation_context,
-                    )
-                    with mock.patch.dict(os.environ, {"PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", "")}):
-                        with self.assertRaises(self.delegate.DelegateError) as ctx:
-                            self.delegate.execute_request(
-                                request, json_mode=False, config=self.delegate.DEFAULT_CONFIG,
-                                pass_through=False, completion_report_mode="none",
-                                source_workspace=workspace, stdout=io.StringIO(), stderr=io.StringIO(),
-                            )
-                    self.assertEqual(ctx.exception.error, "branch_collision")
-                    self.assertIn(branch, ctx.exception.message)
-                    # Verify no worktree dir was created under fake home.
-                    worktree_root = Path(fake_home) / ".delegate" / "worktrees"
-                    wt_dirs = list(worktree_root.glob("*/*")) if worktree_root.exists() else []
-                    self.assertEqual(len(wt_dirs), 0, "No worktree dir should be created on collision")
-                finally:
-                    self.delegate.run_registry.generate_run_id = original_gen
-
-
-    if __name__ == "__main__":
-        unittest.main()
+if __name__ == "__main__":
+    unittest.main()

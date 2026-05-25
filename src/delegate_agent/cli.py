@@ -23,8 +23,9 @@ try:
     from delegate_agent import run_registry
     from delegate_agent import runner as delegate_runner
     from delegate_agent import worktree_mgmt
-    from delegate_agent.isolation import IsolationContext, build_isolation_context
     from delegate_agent.isolation import (
+        IsolationContext,
+        build_isolation_context,
         IsolationExecutionError,
         branch_label,
         create_persistent_worktree,
@@ -49,8 +50,9 @@ except ModuleNotFoundError:  # pragma: no cover - direct cli.py invocation in te
     from delegate_agent import run_registry
     from delegate_agent import runner as delegate_runner
     from delegate_agent import worktree_mgmt
-    from delegate_agent.isolation import IsolationContext, build_isolation_context
     from delegate_agent.isolation import (
+        IsolationContext,
+        build_isolation_context,
         IsolationExecutionError,
         branch_label,
         create_persistent_worktree,
