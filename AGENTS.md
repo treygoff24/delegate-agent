@@ -52,6 +52,7 @@ Do not promote repo changes into `~/.delegate` unless explicitly asked.
 When this checkout tracks Delegate runs under `.delegate/`:
 
 - Default parent-facing output is **bounded**; raw harness streams are not returned unless the operator passes `--pass-through`.
+- `--pass-through` is unsupported for any persistent worktree run (`work` mode + effective `worktree` isolation), including Droid; it fails before artifacts are created.
 - Launch Delegate normally; do **not** pipe launch commands through `tail` (for example, avoid `delegate ... 2>&1 | tail -20`) just to keep output short. The default launch output is already bounded.
 - Inspect runs with `delegate snapshot <alias>`, `delegate runs`, and `delegate run-output` — do **not** tail `stdout.log`, `stderr.log`, or `events.jsonl` from scripts.
 - Use `--pass-through` only when raw child streaming is explicitly required. If an operator intentionally pipes Delegate output in a shell script, they should also use `set -o pipefail` so child failures are not hidden by `tail`.

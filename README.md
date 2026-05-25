@@ -136,7 +136,7 @@ With no `--isolation` flag, Delegate uses its legacy defaults:
 | `delegate droid MODEL safe` | real workspace | Droid default read-only; no auto/spec/unsafe | read-only review intent |
 | `delegate cursor work` | real workspace | `--approve-mcps --force` | can edit files |
 | `delegate codex work` | real workspace with Codex workspace-write sandbox | `--ask-for-approval never exec --sandbox workspace-write` + network access | can edit files |
-| `delegate droid MODEL work` | real workspace | none beyond Droid work defaults | can edit files |
+| `delegate droid MODEL work` | real workspace | `--skip-permissions-unsafe` | can edit files |
 
 Delegate may write its own local run metadata under `.delegate/` in the source workspace for tracked runs. That metadata is ignored by Git. The child agent in Cursor safe or Codex safe still receives the isolated copy, not your source tree.
 
@@ -164,7 +164,7 @@ delegate --isolation none cursor safe "Review in the real workspace (use sparing
 
 #### Pass-through restriction
 
-`--pass-through` is unsupported with `--isolation worktree cursor work` or `--isolation worktree codex work` (persistent worktree runs). The combination fails before any artifacts are created. `--pass-through` is still allowed with temporary safe-mode worktree isolation.
+`--pass-through` is unsupported for any persistent worktree run (work mode + effective `worktree` isolation), including Droid. The combination fails before any artifacts are created. `--pass-through` is still allowed with temporary safe-mode worktree isolation.
 
 ### Configurable defaults
 
@@ -207,7 +207,7 @@ When `--isolation worktree` and `work` mode are combined:
 delegate worktree list
 delegate worktree show <alias-or-runId>
 delegate worktree remove <alias-or-runId>
-delegate worktree prune
+delegate worktree prune --merged --dry-run
 delegate worktree gc
 ```
 
