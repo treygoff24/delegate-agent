@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -80,6 +81,7 @@ class WorktreeMgmtTests(unittest.TestCase):
         worktree_status: str = "present",
         creation_oid: str | None = None,
         source_head_ref: str | None | object = object(),
+        last_activity_at: str | None = None,
     ) -> tuple[str, str]:
         registry_root = self.delegate.run_registry.ensure_registry(
             Path(repo_path),
@@ -145,13 +147,15 @@ class WorktreeMgmtTests(unittest.TestCase):
             "creationContext": creation_context,
             "startedAt": self.delegate.run_registry.utc_now_iso(),
         }
+        if last_activity_at is None:
+            last_activity_at = self.delegate.run_registry.utc_now_iso()
         state = {
             "schema": self.delegate.run_registry.STATE_SCHEMA,
             "runId": run_id,
             "alias": manifest_alias,
             "status": "succeeded",
             "worktreeStatus": worktree_status,
-            "lastActivityAt": self.delegate.run_registry.utc_now_iso(),
+            "lastActivityAt": last_activity_at,
         }
         self.delegate.run_registry.write_json_atomic(run_path / "manifest.json", manifest)
         self.delegate.run_registry.write_json_atomic(run_path / "state.json", state)
@@ -679,6 +683,353 @@ class WorktreeMgmtTests(unittest.TestCase):
             worktree_root = Path(fake_home) / ".delegate" / "worktrees"
             wt_dirs = list(worktree_root.glob("*/*")) if worktree_root.exists() else []
             self.assertEqual(wt_dirs, [])
+
+    def test_runs_json_exposes_persistent_worktree_metadata(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            branch = "delegate/cursor-runs-meta"
+            wt_path = str(Path(fake_home) / "wt" / "cursor-runs-meta")
+            self._seed_persistent_run(path, alias="cursor-runs", branch=branch, execution_cwd=wt_path)
+            self._create_worktree_at(path, branch, wt_path)
+            code, out, _err = self._run_cli(
+                ["--cwd", path, "--json", "runs"],
+                home=fake_home,
+            )
+            self.assertEqual(code, 0)
+            payload = json.loads(out)
+            entries = payload.get("runs", [])
+            matching = [
+                e for e in entries
+                if e.get("alias") == "cursor-runs"
+            ]
+            self.assertEqual(len(matching), 1)
+            entry = matching[0]
+            self.assertEqual(entry.get("isolationLifecycle"), "persistent")
+            self.assertIn("executionCwd", entry)
+            self.assertIn("worktreeStatus", entry)
+
+    def test_worktree_list_harness_filter(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            self._seed_persistent_run(path, alias="cursor-a", harness="cursor")
+            self._seed_persistent_run(path, alias="cursor-b", harness="cursor")
+            self._seed_persistent_run(path, alias="droid-c", harness="droid")
+            result = self.delegate.worktree_mgmt.list_worktrees(
+                self._registry_root(path),
+                harness="cursor",
+            )
+            entries = result.get("entries", [])
+            self.assertEqual(len(entries), 2)
+            for e in entries:
+                self.assertEqual(e.get("harness"), "cursor")
+
+    def test_worktree_list_status_filter(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            branch_a = "delegate/cursor-present"
+            wt_path_a = str(Path(fake_home) / "wt" / "cursor-present")
+            branch_b = "delegate/cursor-removed"
+            wt_path_b = str(Path(fake_home) / "wt" / "cursor-removed")
+            self._seed_persistent_run(
+                path, alias="cursor-present", branch=branch_a, execution_cwd=wt_path_a,
+                worktree_status="present",
+            )
+            self._seed_persistent_run(
+                path, alias="cursor-removed", branch=branch_b, execution_cwd=wt_path_b,
+                worktree_status="removed",
+            )
+            self._create_worktree_at(path, branch_a, wt_path_a)
+            # Worktree at wt_path_b doesn't exist (simulates removed)
+            present_result = self.delegate.worktree_mgmt.list_worktrees(
+                self._registry_root(path),
+                status="present",
+            )
+            self.assertEqual(len(present_result["entries"]), 1)
+            self.assertEqual(present_result["entries"][0]["alias"], "cursor-present")
+            removed_result = self.delegate.worktree_mgmt.list_worktrees(
+                self._registry_root(path),
+                status="removed",
+            )
+            self.assertEqual(len(removed_result["entries"]), 1)
+            self.assertEqual(removed_result["entries"][0]["alias"], "cursor-removed")
+
+    def test_worktree_show_latest_harness(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            from datetime import UTC, datetime, timedelta
+            old_ts = (datetime.now(UTC) - timedelta(days=2)).strftime(
+                self.delegate.run_registry.UTC_TIMESTAMP_FORMAT
+            )
+            self._seed_persistent_run(
+                path, alias="droid-old", harness="droid", last_activity_at=old_ts
+            )
+            recent_ts = (datetime.now(UTC) - timedelta(hours=1)).strftime(
+                self.delegate.run_registry.UTC_TIMESTAMP_FORMAT
+            )
+            self._seed_persistent_run(
+                path, alias="droid-recent", harness="droid", last_activity_at=recent_ts
+            )
+            result = self.delegate.worktree_mgmt.show_worktree(
+                self._registry_root(path),
+                handle=None,
+                latest_harness="droid",
+            )
+            self.assertEqual(result.get("alias"), "droid-recent")
+
+    def test_worktree_remove_missing_path(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            wt_path = str(Path(fake_home) / "nonexistent" / "path")
+            self._seed_persistent_run(
+                path, alias="cursor-missing", execution_cwd=wt_path, worktree_status="missing"
+            )
+            result = self.delegate.worktree_mgmt.remove_worktree(
+                self._registry_root(path),
+                handle="cursor-missing",
+            )
+            self.assertTrue(result.get("ok"))
+            self.assertTrue(result.get("removed"))
+            self.assertFalse(result.get("pathRemoved"))
+            self.assertFalse(result.get("branchRemoved"))
+            self.assertEqual(result.get("worktreeStatus"), "removed")
+
+    def test_prune_includes_detached_with_flag(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            branch = "delegate/cursor-detached"
+            wt_path = str(Path(fake_home) / "wt" / "cursor-detached")
+            self._seed_persistent_run(
+                path,
+                alias="cursor-detached",
+                branch=branch,
+                execution_cwd=wt_path,
+                source_head_ref=None,
+            )
+            self._create_worktree_at(path, branch, wt_path)
+            # sourceHeadRef=None makes creationContext.sourceHeadRef null
+            # include_detached=True should override the detached skip
+            result = self.delegate.worktree_mgmt.prune_worktrees(
+                self._registry_root(path),
+                merged=True,
+                include_detached=True,
+                dry_run=True,
+            )
+            planned_aliases = {e["alias"] for e in result.get("planned", [])}
+            self.assertIn("cursor-detached", planned_aliases)
+            skipped_reasons = {e["alias"]: e["reason"] for e in result.get("skipped", [])}
+            self.assertNotIn("cursor-detached", skipped_reasons)
+
+    def test_prune_older_than_filters(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            from datetime import UTC, datetime, timedelta
+            old_ts = (datetime.now(UTC) - timedelta(days=10)).strftime(
+                self.delegate.run_registry.UTC_TIMESTAMP_FORMAT
+            )
+            recent_ts = (datetime.now(UTC) - timedelta(hours=1)).strftime(
+                self.delegate.run_registry.UTC_TIMESTAMP_FORMAT
+            )
+            branch_old = "delegate/cursor-old"
+            wt_path_old = str(Path(fake_home) / "wt" / "cursor-old")
+            branch_recent = "delegate/cursor-recent"
+            wt_path_recent = str(Path(fake_home) / "wt" / "cursor-recent")
+            self._seed_persistent_run(
+                path, alias="cursor-old", branch=branch_old, execution_cwd=wt_path_old,
+                last_activity_at=old_ts,
+            )
+            self._seed_persistent_run(
+                path, alias="cursor-recent", branch=branch_recent, execution_cwd=wt_path_recent,
+                last_activity_at=recent_ts,
+            )
+            self._create_worktree_at(path, branch_old, wt_path_old)
+            self._create_worktree_at(path, branch_recent, wt_path_recent)
+            result = self.delegate.worktree_mgmt.prune_worktrees(
+                self._registry_root(path),
+                merged=True,
+                older_than_days=7,
+                dry_run=True,
+            )
+            planned_aliases = {e["alias"] for e in result.get("planned", [])}
+            skipped_aliases = {e["alias"]: e["reason"] for e in result.get("skipped", [])}
+            self.assertIn("cursor-old", planned_aliases)
+            self.assertEqual(skipped_aliases.get("cursor-recent"), "not_yet_old_enough")
+
+    def test_maybe_auto_prune_runs_when_enabled(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            branch = "delegate/cursor-ap"
+            wt_path = str(Path(fake_home) / "wt" / "cursor-ap")
+            from datetime import UTC, datetime, timedelta
+            old_ts = (datetime.now(UTC) - timedelta(days=2)).strftime(
+                self.delegate.run_registry.UTC_TIMESTAMP_FORMAT
+            )
+            self._seed_persistent_run(
+                path, alias="cursor-ap", branch=branch, execution_cwd=wt_path,
+                last_activity_at=old_ts,
+            )
+            self._create_worktree_at(path, branch, wt_path)
+            config = {"worktrees": {"autoPrune": {"enabled": True, "mergedOlderThanDays": 1}}}
+            result = self.delegate.worktree_mgmt.maybe_auto_prune(
+                self._registry_root(path), config
+            )
+            self.assertIsNotNone(result)
+            index = self.delegate.run_registry.load_index(self._registry_root(path))
+            run_id = index["aliases"].get("cursor-ap")
+            self.assertIsNotNone(run_id)
+            st = self.delegate.run_registry.load_run_state(self._registry_root(path), run_id)
+            self.assertEqual(st.get("worktreeStatus"), "removed")
+
+    def test_maybe_auto_prune_skipped_when_disabled(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            self._seed_persistent_run(path, alias="cursor-ap-off")
+            config = {"worktrees": {"autoPrune": {"enabled": False}}}
+            result = self.delegate.worktree_mgmt.maybe_auto_prune(
+                self._registry_root(path), config
+            )
+            self.assertIsNone(result)
+
+    def test_worktree_list_no_auto_prune_skips_opportunistic_pass(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            branch = "delegate/cursor-noap"
+            wt_path = str(Path(fake_home) / "wt" / "cursor-noap")
+            self._seed_persistent_run(path, alias="cursor-noap", branch=branch, execution_cwd=wt_path)
+            self._create_worktree_at(path, branch, wt_path)
+            config = {"worktrees": {"autoPrune": {"enabled": True, "mergedOlderThanDays": 1}}}
+            index = self.delegate.run_registry.load_index(self._registry_root(path))
+            run_id = index["aliases"].get("cursor-noap")
+            self.assertIsNotNone(run_id)
+            self.delegate.worktree_mgmt.maybe_auto_prune(
+                self._registry_root(path), config, no_auto_prune=True
+            )
+            st = self.delegate.run_registry.load_run_state(self._registry_root(path), run_id)
+            self.assertEqual(st.get("worktreeStatus"), "present")
+
+    def test_double_remove_noop_under_5s(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            branch = "delegate/cursor-double"
+            wt_path = str(Path(fake_home) / "wt" / "cursor-double")
+            self._seed_persistent_run(path, alias="cursor-dbl", branch=branch, execution_cwd=wt_path)
+            self._create_worktree_at(path, branch, wt_path)
+            registry_root = self._registry_root(path)
+            first = self.delegate.worktree_mgmt.remove_worktree(registry_root, handle="cursor-dbl")
+            self.assertTrue(first.get("removed"))
+            t0 = time.monotonic()
+            second = self.delegate.worktree_mgmt.remove_worktree(registry_root, handle="cursor-dbl")
+            elapsed = time.monotonic() - t0
+            self.assertTrue(second.get("noop"))
+            self.assertLess(elapsed, 5.0)
+
+    def test_dirty_info_returns_null_when_git_unavailable(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            # Create a plain (non-git) directory as execution_cwd
+            plain_dir = Path(fake_home) / "plain-worktree"
+            plain_dir.mkdir()
+            (plain_dir / "somefile.txt").write_text("content\n", encoding="utf-8")
+            self._seed_persistent_run(
+                path, alias="cursor-gitfail", execution_cwd=str(plain_dir)
+            )
+            index = self.delegate.run_registry.load_index(self._registry_root(path))
+            run_id = index["aliases"].get("cursor-gitfail")
+            record = self.delegate.worktree_mgmt._record_for_run(
+                self._registry_root(path), run_id, {}
+            )
+            result, paths, total, warnings = self.delegate.worktree_mgmt.dirty_info(
+                record, "present"
+            )
+            self.assertIsNone(result)
+            self.assertTrue(len(warnings) > 0)
+
+    def test_merged_into_source_returns_null_when_git_unavailable(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            # Create a plain (non-git) directory as execution_cwd
+            plain_dir = Path(fake_home) / "plain-worktree2"
+            plain_dir.mkdir()
+            (plain_dir / "somefile.txt").write_text("content\n", encoding="utf-8")
+            self._seed_persistent_run(
+                path, alias="cursor-mgitfail", execution_cwd=str(plain_dir)
+            )
+            index = self.delegate.run_registry.load_index(self._registry_root(path))
+            run_id = index["aliases"].get("cursor-mgitfail")
+            record = self.delegate.worktree_mgmt._record_for_run(
+                self._registry_root(path), run_id, {}
+            )
+            result, warnings = self.delegate.worktree_mgmt.merged_into_source(record, "present")
+            self.assertIsNone(result)
+            self.assertTrue(len(warnings) > 0)
+
+    def test_snapshot_json_has_cleanup_hints(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            branch = "delegate/cursor-cleanup"
+            wt_path = str(Path(fake_home) / "wt" / "cursor-cleanup")
+            run_id, _alias = self._seed_persistent_run(
+                path, alias="cursor-cleanup", branch=branch, execution_cwd=wt_path
+            )
+            self._create_worktree_at(path, branch, wt_path)
+            snapshot_path = (
+                self.delegate.run_registry.run_directory(self._registry_root(path), run_id)
+                / "snapshot.json"
+            )
+            snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+            snapshot_data = {
+                "runId": run_id,
+                "alias": "cursor-cleanup",
+                "worktreeCleanupCommands": {
+                    "safe": "delegate worktree remove cursor-cleanup",
+                    "forceBranch": "delegate worktree remove cursor-cleanup --force-branch",
+                    "discardUncommitted": "delegate worktree remove cursor-cleanup --discard-uncommitted",
+                    "rawGit": "git -C /src worktree remove --force /wt/cursor-cleanup && git -C /src branch -D delegate/cursor-cleanup",
+                },
+            }
+            self.delegate.run_registry.write_json_atomic(snapshot_path, snapshot_data)
+            loaded = self.delegate.run_registry.load_run_snapshot(self._registry_root(path), run_id)
+            cleanup = loaded.get("worktreeCleanupCommands", {})
+            self.assertIn("safe", cleanup)
+            self.assertIn("forceBranch", cleanup)
+            self.assertIn("discardUncommitted", cleanup)
+            self.assertIn("rawGit", cleanup)
+
+    def test_ahead_behind_vs_creation_base_and_current_head(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            base_oid = git("rev-parse", "HEAD", cwd=path).stdout.strip()
+            branch = "delegate/cursor-ahead"
+            wt_path = str(Path(fake_home) / "wt" / "cursor-ahead")
+            self._seed_persistent_run(
+                path,
+                alias="cursor-ahead",
+                branch=branch,
+                execution_cwd=wt_path,
+                creation_oid=base_oid,
+            )
+            self._create_worktree_at(path, branch, wt_path)
+            (Path(wt_path) / "feature.txt").write_text("feature\n", encoding="utf-8")
+            git("add", "feature.txt", cwd=wt_path)
+            git("commit", "-m", "feature", cwd=wt_path)
+            # Make a new commit on the SOURCE to advance HEAD (not the worktree branch)
+            (Path(path) / "newfile.txt").write_text("new\n", encoding="utf-8")
+            git("add", "newfile.txt", cwd=path)
+            git("commit", "-m", "new source commit", cwd=path)
+            new_commit = git("rev-parse", "HEAD", cwd=path).stdout.strip()
+            self.assertNotEqual(new_commit, base_oid)
+            index = self.delegate.run_registry.load_index(self._registry_root(path))
+            run_id = index["aliases"].get("cursor-ahead")
+            record = self.delegate.worktree_mgmt._record_for_run(
+                self._registry_root(path), run_id, {}
+            )
+            result = self.delegate.worktree_mgmt.ahead_behind(record, "present")
+            self.assertIsNotNone(result)
+            self.assertEqual(result["vsCreationBase"]["baseOid"], base_oid)
+            self.assertEqual(result["vsCurrentHead"]["baseOid"], new_commit)
+            self.assertNotEqual(
+                result["vsCreationBase"]["baseOid"],
+                result["vsCurrentHead"]["baseOid"],
+            )
 
 
 if __name__ == "__main__":
