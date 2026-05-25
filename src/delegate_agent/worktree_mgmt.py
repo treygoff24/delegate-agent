@@ -286,6 +286,14 @@ def _rev_parse(source_git_root: str, rev: str) -> str | None:
     return result.stdout.strip()
 
 
+def _symbolic_ref(source_git_root: str, rev: str) -> str | None:
+    """Return the symbolic ref (e.g. `refs/heads/main`) or None if detached/missing."""
+    result = _run_git(source_git_root, ["symbolic-ref", "--quiet", rev])
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
 def _ahead_behind(source_git_root: str, branch: str, base: str) -> JsonObject | None:
     result = _run_git(source_git_root, ["rev-list", "--left-right", "--count", f"{base}...{branch}"])
     if result.returncode != 0:
@@ -514,6 +522,10 @@ def show_worktree(
     entry["porcelainStatusTruncated"] = porcelain_truncated
     entry["aheadBehind"] = ahead_behind(record, str(entry.get("worktreeStatus")))
     entry["suggestedCommands"] = suggested_commands(record, str(entry.get("worktreeStatus")))
+    source_git_root = record.get("sourceGitRoot")
+    entry["currentSourceHeadRef"] = (
+        _symbolic_ref(source_git_root, "HEAD") if isinstance(source_git_root, str) else None
+    )
     creation = record.get("creationContext")
     if isinstance(creation, dict) and creation.get("sourceHeadRef") is None:
         warnings = list(entry.get("warnings") or [])

@@ -331,7 +331,9 @@ def render_worktree_show_text(payload: JsonObject, stdout: TextIO) -> None:
         src_ref = _short_ref(creation.get("sourceHeadRef"))
         src_oid = _short_oid(creation.get("sourceHeadOid"))
         if src_oid is not None:
-            # Current HEAD OID from vsCurrentHead.baseOid (computed by worktree_mgmt)
+            # Current source HEAD: ref from currentSourceHeadRef (re-read by show_worktree),
+            # oid from vsCurrentHead.baseOid (computed by ahead_behind).
+            current_ref = _short_ref(payload.get("currentSourceHeadRef"))
             ahead = payload.get("aheadBehind")
             current_oid: str | None = None
             if isinstance(ahead, dict):
@@ -341,7 +343,7 @@ def render_worktree_show_text(payload: JsonObject, stdout: TextIO) -> None:
             if current_oid is None:
                 current_oid = "(unknown)"
             print(
-                f"created from {src_ref}@{src_oid}; source now at {src_ref}@{current_oid}",
+                f"created from {src_ref}@{src_oid}; source now at {current_ref}@{current_oid}",
                 file=stdout,
             )
 
