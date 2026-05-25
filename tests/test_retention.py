@@ -339,6 +339,62 @@ class RetentionTests(unittest.TestCase):
         )
         self.assertEqual(output, "line-198\nline-199\n")
 
+    def test_retention_preserves_persistent_worktree_dirs(self):
+        """Raw-log retention preserves persistent worktree directories outside the registry runs dir."""
+        with tempfile.TemporaryDirectory() as fake_home, mock.patch.dict(
+            "os.environ", {"HOME": fake_home}
+        ):
+            # Create a persistent-worktree run with logs.
+            run_id, _alias = self.write_completed_run()
+            old = (datetime.now(UTC) - timedelta(days=30)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
+            run_path = self.registry.run_directory(self.registry_root, run_id)
+
+            # Simulate a persistent worktree under the fake home, never the
+            # operator's real ~/.delegate runtime.
+            worktree_root = (
+                Path(fake_home)
+                / ".delegate"
+                / "worktrees"
+                / "abc123def456"
+                / "cursor-test"
+            )
+            worktree_root.mkdir(parents=True, exist_ok=True)
+            (worktree_root / "mutated-file.txt").write_text(
+                "worktree content\n", encoding="utf-8"
+            )
+
+            # Set worktreeStatus in state to simulate a persistent worktree run.
+            state = json.loads((run_path / "state.json").read_text(encoding="utf-8"))
+            state["finishedAt"] = old
+            state["lastActivityAt"] = old
+            state["worktreeStatus"] = "present"
+            self.registry.write_json_atomic(run_path / "state.json", state)
+
+            # Run retention pass with zero-day retention to force archival.
+            zero_day_config = {
+                "tracking": {"retention": {"enabled": True, "rawLogDays": 0}}
+            }
+            result = self.retention.run_retention_pass(self.registry_root, zero_day_config)
+
+            # Assert raw logs were archived.
+            self.assertEqual(result["archived"], 1)
+
+            # Assert the worktree directory under fake ~/.delegate/worktrees/ still exists.
+            self.assertTrue(
+                worktree_root.exists(),
+                "Worktree directory should be preserved after retention pass",
+            )
+            self.assertEqual(
+                (worktree_root / "mutated-file.txt").read_text(encoding="utf-8"),
+                "worktree content\n",
+            )
+
+            # Assert the registry entry still has worktreeStatus: present.
+            state_after = json.loads((run_path / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(state_after.get("worktreeStatus"), "present")
+
 
 if __name__ == "__main__":
     unittest.main()

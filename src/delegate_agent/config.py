@@ -17,6 +17,11 @@ COMPLETION_REPORT_MODES = (
     COMPLETION_REPORT_MODE_NONE,
 )
 
+ISOLATION_AUTO = "auto"
+ISOLATION_NONE = "none"
+ISOLATION_WORKTREE = "worktree"
+VALID_ISOLATION_VALUES = (ISOLATION_AUTO, ISOLATION_NONE, ISOLATION_WORKTREE)
+
 POLICY_PROFILES = ("safe", "trusted-hooks", "external-sandbox", "custom")
 POLICY_MODE_KEYS = frozenset(
     {
@@ -68,6 +73,17 @@ DEFAULT_CONFIG: JsonObject = {
         "workSandbox": "workspace-write",
         "ephemeral": True,
         "ignoreUserConfig": False,
+    },
+    "isolation": {
+        "safe": ISOLATION_AUTO,
+        "work": ISOLATION_NONE,
+    },
+    "worktrees": {
+        "dataHome": None,
+        "autoPrune": {
+            "enabled": False,
+            "mergedOlderThanDays": 7,
+        },
     },
 }
 
@@ -166,6 +182,77 @@ def _validate_policy_section(policy: JsonValue, *, path: str = "policy") -> None
                     )
 
 
+def _validate_isolation_section(isolation: JsonValue) -> None:
+    if isolation is None:
+        return
+    if not isinstance(isolation, dict):
+        raise ConfigError(
+            "invalid_isolation_config",
+            "isolation config must be an object.",
+        )
+    for mode in ("safe", "work"):
+        if mode not in isolation:
+            continue
+        value = isolation[mode]
+        if value is None:
+            raise ConfigError(
+                "invalid_isolation_config",
+                f"isolation.{mode} must not be null; use one of: {', '.join(VALID_ISOLATION_VALUES)}.",
+            )
+        if value not in VALID_ISOLATION_VALUES:
+            raise ConfigError(
+                "invalid_isolation_config",
+                f"isolation.{mode} must be one of: {', '.join(VALID_ISOLATION_VALUES)}.",
+            )
+
+
+def _validate_worktrees_section(worktrees: JsonValue) -> None:
+    if worktrees is None:
+        return
+    if not isinstance(worktrees, dict):
+        raise ConfigError(
+            "invalid_worktrees_config",
+            "worktrees config must be an object.",
+        )
+    data_home = worktrees.get("dataHome")
+    if data_home is not None and not (isinstance(data_home, str) and data_home):
+        raise ConfigError(
+            "invalid_worktrees_config",
+            "worktrees.dataHome must be null or a non-empty string.",
+        )
+    auto_prune = worktrees.get("autoPrune")
+    if auto_prune is not None:
+        if not isinstance(auto_prune, dict):
+            raise ConfigError(
+                "invalid_worktrees_config",
+                "worktrees.autoPrune must be an object.",
+            )
+        if "enabled" in auto_prune:
+            enabled = auto_prune["enabled"]
+            if enabled is None:
+                raise ConfigError(
+                    "invalid_worktrees_config",
+                    "worktrees.autoPrune.enabled must not be null.",
+                )
+            if not isinstance(enabled, bool):
+                raise ConfigError(
+                    "invalid_worktrees_config",
+                    "worktrees.autoPrune.enabled must be a boolean.",
+                )
+        if "mergedOlderThanDays" in auto_prune:
+            merged_days = auto_prune["mergedOlderThanDays"]
+            if merged_days is None:
+                raise ConfigError(
+                    "invalid_worktrees_config",
+                    "worktrees.autoPrune.mergedOlderThanDays must not be null.",
+                )
+            if not isinstance(merged_days, int) or isinstance(merged_days, bool) or merged_days < 0:
+                raise ConfigError(
+                    "invalid_worktrees_config",
+                    "worktrees.autoPrune.mergedOlderThanDays must be a non-negative integer.",
+                )
+
+
 def _validate_codex_section(codex: JsonValue) -> None:
     if not isinstance(codex, dict):
         raise ConfigError("invalid_codex_config", "codex config must be an object.")
@@ -200,6 +287,57 @@ def _validate_codex_section(codex: JsonValue) -> None:
             "invalid_codex_config",
             "codex.ignoreUserConfig must be a boolean.",
         )
+
+
+class InvalidIsolationError(Exception):
+    """Raised when an isolation value is invalid; caller translates to DelegateError or ConfigError."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+
+
+def resolve_isolation(
+    cli_value: str | None = None,
+    input_json_value: str | None = None,
+    loaded_config: JsonObject | None = None,
+    engine: str = "",
+    mode: str = "",
+) -> str:
+    if cli_value is not None:
+        if cli_value not in VALID_ISOLATION_VALUES:
+            raise InvalidIsolationError(
+                f"--isolation must be one of: {', '.join(VALID_ISOLATION_VALUES)}."
+            )
+        return cli_value
+    if input_json_value is not None:
+        if input_json_value not in VALID_ISOLATION_VALUES:
+            raise InvalidIsolationError(
+                f"isolation must be one of: {', '.join(VALID_ISOLATION_VALUES)}."
+            )
+        return input_json_value
+    if isinstance(loaded_config, dict):
+        isolation_cfg = loaded_config.get("isolation")
+        if "isolation" in loaded_config and not isinstance(isolation_cfg, dict):
+            raise InvalidIsolationError(
+                "config isolation must be an object when present."
+            )
+        if isinstance(isolation_cfg, dict):
+            if mode in isolation_cfg and isolation_cfg[mode] is None:
+                raise InvalidIsolationError(
+                    f"config isolation.{mode} must not be null; "
+                    f"use one of: {', '.join(VALID_ISOLATION_VALUES)}."
+                )
+            value = isolation_cfg.get(mode)
+            if value is not None:
+                if not isinstance(value, str) or value not in VALID_ISOLATION_VALUES:
+                    raise InvalidIsolationError(
+                        f"config isolation.{mode} must be one of: {', '.join(VALID_ISOLATION_VALUES)}."
+                    )
+                return value
+    # Embedded defaults
+    if mode == "work":
+        return ISOLATION_NONE
+    return ISOLATION_AUTO
 
 
 class ConfigError(Exception):
@@ -354,6 +492,8 @@ def validate_config(config: JsonObject) -> None:
                 )
     _validate_policy_section(config.get("policy"))
     _validate_codex_section(config.get("codex"))
+    _validate_isolation_section(config.get("isolation"))
+    _validate_worktrees_section(config.get("worktrees"))
 
 
 def completion_report_default_mode(config: JsonObject) -> str:

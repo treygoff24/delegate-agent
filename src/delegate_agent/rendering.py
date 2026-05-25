@@ -84,8 +84,21 @@ def merge_snapshot_view(
         for key in ("lastActivityAt", "current", "exitCode", "finishedAt"):
             if key in state and key not in view:
                 view[key] = state[key]
+        # Surface pre-launch failure fields when status is "failed".
+        if state.get("status") == "failed":
+            for key in ("error", "message", "plannedBranch", "plannedExecutionCwd"):
+                if key in state and key not in view:
+                    view[key] = state[key]
+        # Surface isolation metadata from state when present.
+        for key in ("worktreeStatus",):
+            if key in state and key not in view:
+                view[key] = state[key]
     if manifest:
         for key in ("alias", "harness", "cwd", "executionCwd", "mode", "model", "startedAt"):
+            if key in manifest and key not in view:
+                view[key] = manifest[key]
+        for key in ("isolationMode", "effectiveIsolation", "isolationLifecycle",
+                     "preservedWorkspace", "sourceGitRoot", "branch", "worktreeStatus"):
             if key in manifest and key not in view:
                 view[key] = manifest[key]
     warnings = list(view.get("warnings") or [])
@@ -133,9 +146,44 @@ def render_snapshot_text(view: JsonObject, stdout: TextIO) -> None:
         value = view.get(key)
         if isinstance(value, str) and value:
             print(f"{label}: {value}", file=stdout)
+    # Isolation metadata
+    isolation_lifecycle = view.get("isolationLifecycle")
+    if isolation_lifecycle == "persistent":
+        print("isolation: worktree persistent", file=stdout)
+    elif isolation_lifecycle == "temporary":
+        print("isolation: worktree temporary", file=stdout)
+    elif isolation_lifecycle:
+        print(f"isolation: {isolation_lifecycle}", file=stdout)
+    branch = view.get("branch")
+    if isinstance(branch, str) and branch:
+        print(f"branch: {branch}", file=stdout)
+    source_git_root = view.get("sourceGitRoot")
+    if isinstance(source_git_root, str) and source_git_root:
+        print(f"source git root: {source_git_root}", file=stdout)
+    worktree_status = view.get("worktreeStatus")
+    if isinstance(worktree_status, str):
+        print(f"worktree status: {worktree_status}", file=stdout)
+
     current = view.get("current")
     if isinstance(current, str) and current:
         print(f"current: {current}", file=stdout)
+
+    # Cleanup commands for persistent worktree runs
+    cleanup = view.get("worktreeCleanupCommands")
+    if isinstance(cleanup, dict):
+        safe_cmd = cleanup.get("safe")
+        force_branch = cleanup.get("forceBranch")
+        discard = cleanup.get("discardUncommitted")
+        raw_git = cleanup.get("rawGit")
+        if safe_cmd:
+            print(f"cleanup (refuses dirty / unmerged):       {safe_cmd}", file=stdout)
+        if force_branch:
+            print(f"cleanup (allow unmerged branch deletion): {force_branch}", file=stdout)
+        if discard:
+            print(f"cleanup (DISCARD uncommitted edits):      {discard}", file=stdout)
+        if raw_git:
+            print(f"raw git equivalent:                       {raw_git}", file=stdout)
+
     assistant_text = view.get("assistantText")
     if isinstance(assistant_text, str) and assistant_text:
         print("assistant text:", file=stdout)
@@ -185,17 +233,24 @@ def runs_json_payload(
 
 def render_runs_text(summaries: list[JsonObject], stdout: TextIO, *, mode: str) -> None:
     print(f"mode: {mode}", file=stdout)
-    print("alias      status    harness  age      current", file=stdout)
+    print("alias      status    harness  age      iso          current", file=stdout)
     for summary in summaries:
         alias = summary.get("alias") or summary.get("runId") or "?"
         status = summary.get("status", "unknown")
         harness = summary.get("harness", "?")
         activity = summary.get("activityAt")
         age = format_age(activity if isinstance(activity, str) else None)
+        isolation = summary.get("isolationLifecycle", "")
+        if isolation == "persistent":
+            iso_label = "persistent"
+        elif isolation == "temporary":
+            iso_label = "temporary"
+        else:
+            iso_label = ""
         current = summary.get("current", "")
         if isinstance(current, str) and len(current) > 40:
             current = current[:37] + "..."
-        print(f"{alias:<10} {status:<9} {harness:<8} {age:<8} {current}", file=stdout)
+        print(f"{alias:<10} {status:<9} {harness:<8} {age:<8} {iso_label:<11} {current}", file=stdout)
 
 
 def run_output_json_payload(

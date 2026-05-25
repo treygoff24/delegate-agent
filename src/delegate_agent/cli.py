@@ -18,6 +18,21 @@ from typing import NoReturn, TextIO
 try:
     from delegate_agent import VERSION
     from delegate_agent import config as delegate_config
+    from delegate_agent.isolation import IsolationContext, build_isolation_context
+    from delegate_agent.isolation import (
+        IsolationExecutionError,
+        PERSISTENT_WORKTREE_CONTEXT_NOTE,
+        branch_label,
+        create_persistent_worktree,
+        plan_branch_name,
+        plan_worktree_path,
+        prepend_persistent_worktree_context,
+        repo_fingerprint,
+        require_clean_source,
+        require_valid_head,
+        short_run_id,
+        worktrees_data_home,
+    )
     from delegate_agent import rendering as delegate_rendering
     from delegate_agent import retention as delegate_retention
     from delegate_agent import run_registry
@@ -29,6 +44,21 @@ except ModuleNotFoundError:  # pragma: no cover - direct cli.py invocation in te
         sys.path.insert(0, str(_src_root))
     from delegate_agent import VERSION
     from delegate_agent import config as delegate_config
+    from delegate_agent.isolation import IsolationContext, build_isolation_context
+    from delegate_agent.isolation import (
+        IsolationExecutionError,
+        PERSISTENT_WORKTREE_CONTEXT_NOTE,
+        branch_label,
+        create_persistent_worktree,
+        plan_branch_name,
+        plan_worktree_path,
+        prepend_persistent_worktree_context,
+        repo_fingerprint,
+        require_clean_source,
+        require_valid_head,
+        short_run_id,
+        worktrees_data_home,
+    )
     from delegate_agent import rendering as delegate_rendering
     from delegate_agent import retention as delegate_retention
     from delegate_agent import run_registry
@@ -47,7 +77,7 @@ EXIT_MISSING_BINARY = 3
 MODE_SAFE = "safe"
 MODE_WORK = "work"
 VALID_MODES = {MODE_SAFE, MODE_WORK}
-RUN_INPUT_KEYS = {"engine", "mode", "model", "cwd", "prompt"}
+RUN_INPUT_KEYS = {"engine", "mode", "model", "cwd", "prompt", "isolation"}
 CURSOR_SAFE_REVIEW_PREFIX = (
     "Delegate review mode (code review/investigation only): "
     "Do not edit, create, or delete files. "
@@ -124,17 +154,13 @@ class ParsedCommand:
     run_output_tail: int | None = None
     run_output_raw: bool = False
     run_output_no_redact: bool = False
+    isolation: str | None = None
 
 
 @dataclass(frozen=True)
 class ResolvedWorkspace:
     path: str
     kind: str
-
-
-@dataclass(frozen=True)
-class SafeIsolationContext:
-    source_workspace: str
 
 
 @dataclass
@@ -145,21 +171,22 @@ class Request:
     prompt: str
     argv: list[str]
     model: str | None
+    model_alias: str | None = None
     dry_run: bool = False
     workspace_kind: str = "git"
-    safe_isolation: SafeIsolationContext | None = None
+    isolation_context: IsolationContext | None = None
 
 
 HELP = f"""delegate {VERSION}
 
 Usage:
-  delegate [--cwd PATH] [--json] cursor {{safe,work}} [--prompt-file PATH] [prompt...]
-  delegate [--cwd PATH] [--json] droid MODEL_ALIAS {{safe,work}} [--prompt-file PATH] [prompt...]
-  delegate [--cwd PATH] [--json] codex {{safe,work}} [--prompt-file PATH] [prompt...]
-  delegate [--cwd PATH] [--json] dry-run cursor {{safe,work}} [--prompt-file PATH] [prompt...]
-  delegate [--cwd PATH] [--json] dry-run droid MODEL_ALIAS {{safe,work}} [--prompt-file PATH] [prompt...]
-  delegate [--cwd PATH] [--json] dry-run codex {{safe,work}} [--prompt-file PATH] [prompt...]
-  delegate [--cwd PATH] [--json] run --input-json FILE
+  delegate [--cwd PATH] [--json] [--isolation auto|none|worktree] cursor {{safe,work}} [--prompt-file PATH] [prompt...]
+  delegate [--cwd PATH] [--json] [--isolation auto|none|worktree] droid MODEL_ALIAS {{safe,work}} [--prompt-file PATH] [prompt...]
+  delegate [--cwd PATH] [--json] [--isolation auto|none|worktree] codex {{safe,work}} [--prompt-file PATH] [prompt...]
+  delegate [--cwd PATH] [--json] [--isolation auto|none|worktree] dry-run cursor {{safe,work}} [--prompt-file PATH] [prompt...]
+  delegate [--cwd PATH] [--json] [--isolation auto|none|worktree] dry-run droid MODEL_ALIAS {{safe,work}} [--prompt-file PATH] [prompt...]
+  delegate [--cwd PATH] [--json] [--isolation auto|none|worktree] dry-run codex {{safe,work}} [--prompt-file PATH] [prompt...]
+  delegate [--cwd PATH] [--json] [--isolation auto|none|worktree] run --input-json FILE
   delegate [--cwd PATH] [--json] snapshot [--latest HARNESS] [--no-redact] <alias-or-runId>
   delegate [--cwd PATH] [--json] runs [--active] [--recent] [--harness HARNESS] [--limit N]
   delegate [--cwd PATH] [--json] run-output <alias-or-runId> [--completion-report] [--stdout] [--stderr] [--tail N] [--raw] [--no-redact]
@@ -234,6 +261,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
     cwd: str | None = None
     pass_through = False
     completion_report: str | None = None
+    isolation: str | None = None
     i = 0
     while i < len(argv):
         token = argv[i]
@@ -268,6 +296,19 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
                 )
             i += 2
             continue
+        if token == "--isolation":
+            if i + 1 >= len(argv):
+                raise DelegateError(
+                    "missing_isolation_value", "--isolation requires a value."
+                )
+            isolation = argv[i + 1]
+            if isolation not in delegate_config.VALID_ISOLATION_VALUES:
+                raise DelegateError(
+                    "invalid_isolation",
+                    "--isolation must be auto, none, or worktree.",
+                )
+            i += 2
+            continue
         break
 
     if json_mode and pass_through:
@@ -294,6 +335,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             cwd=cwd,
             pass_through=pass_through,
             completion_report=completion_report,
+            isolation=isolation,
         )
     if subcommand == "describe":
         require_no_extra(rest, "describe")
@@ -303,6 +345,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             cwd=cwd,
             pass_through=pass_through,
             completion_report=completion_report,
+            isolation=isolation,
         )
     if subcommand == "agent-help":
         require_no_extra(rest, "agent-help")
@@ -312,9 +355,10 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             cwd=cwd,
             pass_through=pass_through,
             completion_report=completion_report,
+            isolation=isolation,
         )
     if subcommand == "run":
-        return parse_run(rest, json_mode, cwd, pass_through, completion_report)
+        return parse_run(rest, json_mode, cwd, pass_through, completion_report, isolation)
     if subcommand in ("cursor", "codex"):
         return parse_modeless_engine(
             subcommand,
@@ -324,6 +368,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             dry_run=False,
             pass_through=pass_through,
             completion_report=completion_report,
+            isolation=isolation,
         )
     if subcommand == "droid":
         return parse_droid(
@@ -333,9 +378,10 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             dry_run=False,
             pass_through=pass_through,
             completion_report=completion_report,
+            isolation=isolation,
         )
     if subcommand == "dry-run":
-        return parse_dry_run(rest, json_mode, cwd, pass_through, completion_report)
+        return parse_dry_run(rest, json_mode, cwd, pass_through, completion_report, isolation)
     if subcommand == "snapshot":
         return parse_snapshot(rest, json_mode, cwd)
     if subcommand == "runs":
@@ -348,7 +394,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
 
 def require_no_extra(rest: list[str], name: str) -> None:
     if rest:
-        if any(tok in ("--json", "--cwd") for tok in rest):
+        if any(tok in ("--json", "--cwd", "--isolation") for tok in rest):
             raise DelegateError(
                 "misplaced_global_option", "Global options must appear before the subcommand."
             )
@@ -363,9 +409,10 @@ def parse_run(
     cwd: str | None,
     pass_through: bool,
     completion_report: str | None,
+    isolation: str | None,
 ) -> ParsedCommand:
     if len(rest) != 2 or rest[0] != "--input-json":
-        if any(tok in ("--json", "--cwd") for tok in rest):
+        if any(tok in ("--json", "--cwd", "--isolation") for tok in rest):
             raise DelegateError(
                 "misplaced_global_option", "Global options must appear before the subcommand."
             )
@@ -377,6 +424,7 @@ def parse_run(
         input_json=rest[1],
         pass_through=pass_through,
         completion_report=completion_report,
+        isolation=isolation,
     )
 
 
@@ -388,11 +436,16 @@ def parse_modeless_engine(
     dry_run: bool,
     pass_through: bool,
     completion_report: str | None,
+    isolation: str | None,
 ) -> ParsedCommand:
     """Parse the shared cursor/codex grammar: <mode> [--prompt-file PATH] [prompt...]."""
     if not rest:
         raise DelegateError("missing_mode", f"{engine} requires mode: safe or work.")
     mode = rest[0]
+    if mode.startswith("-"):
+        raise DelegateError(
+            "misplaced_global_option", "Global options must appear before the subcommand."
+        )
     validate_mode(mode)
     prompt_file, prompt_parts = parse_prompt_tail(rest[1:])
     return ParsedCommand(
@@ -406,6 +459,7 @@ def parse_modeless_engine(
         dry_run=dry_run,
         pass_through=pass_through,
         completion_report=completion_report,
+        isolation=isolation,
     )
 
 
@@ -416,11 +470,20 @@ def parse_droid(
     dry_run: bool,
     pass_through: bool,
     completion_report: str | None,
+    isolation: str | None,
 ) -> ParsedCommand:
     if len(rest) < 2:
         raise DelegateError("missing_droid_args", "droid requires MODEL_ALIAS and mode.")
     model_alias = rest[0]
+    if model_alias.startswith("-"):
+        raise DelegateError(
+            "misplaced_global_option", "Global options must appear before the subcommand."
+        )
     mode = rest[1]
+    if mode.startswith("-"):
+        raise DelegateError(
+            "misplaced_global_option", "Global options must appear before the subcommand."
+        )
     validate_mode(mode)
     prompt_file, prompt_parts = parse_prompt_tail(rest[2:])
     return ParsedCommand(
@@ -435,6 +498,7 @@ def parse_droid(
         dry_run=dry_run,
         pass_through=pass_through,
         completion_report=completion_report,
+        isolation=isolation,
     )
 
 
@@ -444,10 +508,15 @@ def parse_dry_run(
     cwd: str | None,
     pass_through: bool,
     completion_report: str | None,
+    isolation: str | None,
 ) -> ParsedCommand:
     if not rest:
         raise DelegateError("missing_engine", "dry-run requires cursor, droid, or codex.")
     engine = rest[0]
+    if engine.startswith("-"):
+        raise DelegateError(
+            "misplaced_global_option", "Global options must appear before the subcommand."
+        )
     if engine in ("cursor", "codex"):
         return parse_modeless_engine(
             engine,
@@ -457,6 +526,7 @@ def parse_dry_run(
             dry_run=True,
             pass_through=pass_through,
             completion_report=completion_report,
+            isolation=isolation,
         )
     if engine == "droid":
         return parse_droid(
@@ -466,6 +536,7 @@ def parse_dry_run(
             dry_run=True,
             pass_through=pass_through,
             completion_report=completion_report,
+            isolation=isolation,
         )
     raise DelegateError("invalid_engine", "dry-run engine must be cursor, droid, or codex.")
 
@@ -495,7 +566,7 @@ def parse_prompt_tail(rest: list[str]) -> tuple[str | None, list[str]]:
         raise DelegateError(
             "ambiguous_prompt_source", "--prompt-file must appear before direct prompt text."
         )
-    if any(tok in ("--json", "--cwd") for tok in prompt_parts):
+    if any(tok in ("--json", "--cwd", "--isolation") for tok in prompt_parts):
         raise DelegateError(
             "misplaced_global_option",
             "Global options must appear before the subcommand; use --prompt-file for literal flag text.",
@@ -1012,6 +1083,36 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         raise DelegateError("invalid_command", "Command does not map to an execution request.")
     workspace = resolve_workspace(parsed.cwd)
     prompt = resolve_prompt(parsed.prompt_parts, parsed.prompt_file, stdin)
+
+    # Capture git metadata for isolation planning (read-only, safe in dry-run too).
+    git_root, git_common_dir, git_head_oid, git_head_ref, git_branch = capture_git_metadata(workspace.path)
+
+    # Resolve effective isolation and build isolation context.
+    try:
+        effective_isolation = delegate_config.resolve_isolation(
+            cli_value=parsed.isolation,
+            loaded_config=config,
+            engine=parsed.engine,
+            mode=parsed.mode,
+        )
+    except delegate_config.InvalidIsolationError as exc:
+        raise DelegateError("invalid_isolation", str(exc)) from exc
+
+    isolation_context = build_isolation_context(
+        source_workspace=workspace.path,
+        resolved_isolation=effective_isolation,
+        engine=parsed.engine,
+        mode=parsed.mode,
+        model_alias=parsed.model_alias,
+        config=config,
+        run_short_id="<short-run-id-placeholder>" if parsed.dry_run else None,
+        source_git_root=git_root,
+        source_git_common_dir=git_common_dir,
+        source_head_oid=git_head_oid,
+        source_head_ref=git_head_ref,
+        source_branch=git_branch,
+    )
+
     completion_report_mode = resolve_completion_report_mode(parsed, config)
     prompt = effective_prompt(
         prompt,
@@ -1028,6 +1129,7 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         config,
         parsed.dry_run,
         stream_capture=not parsed.pass_through,
+        isolation_context=isolation_context,
     )
 
 
@@ -1042,6 +1144,7 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         raise DelegateError("invalid_input_json", f"Invalid input JSON: {exc}") from exc
     if not isinstance(raw, dict):
         raise DelegateError("invalid_input_json", "Input JSON root must be an object.")
+
     if "profile" in raw:
         raise DelegateError(
             "invalid_input_key",
@@ -1075,26 +1178,76 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         raise DelegateError(
             "invalid_model", "cursor model override must match configured Composer model."
         )
+
+    # Pre-read cwd and isolation from JSON for config discovery (already done in main() for
+    # config loading, but re-validate and resolve here for the request).
     json_cwd = raw.get("cwd")
     if json_cwd is not None and not isinstance(json_cwd, str):
         raise DelegateError("invalid_cwd", "cwd must be a string.")
+
+    # Reject explicit null isolation in the JSON (distinguish missing-key from null).
+    if "isolation" in raw and raw["isolation"] is None:
+        raise DelegateError(
+            "invalid_isolation",
+            "isolation in input JSON must be auto, none, or worktree (null is not allowed).",
+        )
+    json_isolation = raw.get("isolation")
+    if json_isolation is not None and json_isolation not in delegate_config.VALID_ISOLATION_VALUES:
+        raise DelegateError(
+            "invalid_isolation",
+            "isolation in input JSON must be auto, none, or worktree.",
+        )
+
+    # Resolve workspace from CLI --cwd and JSON cwd.
     workspace = resolve_workspace(parsed.cwd, json_cwd)
+
+    # Capture git metadata for isolation planning (read-only).
+    git_root, git_common_dir, git_head_oid, git_head_ref, git_branch = capture_git_metadata(workspace.path)
+
+    # Resolve effective isolation and build isolation context.
+    try:
+        effective_isolation = delegate_config.resolve_isolation(
+            cli_value=parsed.isolation,
+            input_json_value=json_isolation,
+            loaded_config=config,
+            engine=str(engine),
+            mode=str(mode),
+        )
+    except delegate_config.InvalidIsolationError as exc:
+        raise DelegateError("invalid_isolation", str(exc)) from exc
+
+    isolation_context = build_isolation_context(
+        source_workspace=workspace.path,
+        resolved_isolation=effective_isolation,
+        engine=str(engine),
+        mode=str(mode),
+        model_alias=model_alias,
+        config=config,
+        run_short_id="<short-run-id-placeholder>" if parsed.dry_run else None,
+        source_git_root=git_root,
+        source_git_common_dir=git_common_dir,
+        source_head_oid=git_head_oid,
+        source_head_ref=git_head_ref,
+        source_branch=git_branch,
+    )
+
     completion_report_mode = resolve_completion_report_mode(parsed, config)
     prompt = effective_prompt(
         validate_prompt(prompt),
-        engine=engine,
-        mode=mode,
+        engine=str(engine),
+        mode=str(mode),
         completion_report_mode=completion_report_mode,
     )
     return build_request(
-        engine,
-        mode,
+        str(engine),
+        str(mode),
         model_alias,
         workspace,
         prompt,
         config,
         dry_run=False,
         stream_capture=not parsed.pass_through,
+        isolation_context=isolation_context,
     )
 
 
@@ -1108,6 +1261,7 @@ def build_request(
     dry_run: bool,
     *,
     stream_capture: bool = True,
+    isolation_context: IsolationContext | None = None,
 ) -> Request:
     resolved = (
         workspace
@@ -1120,7 +1274,7 @@ def build_request(
         argv = build_cursor_argv(
             cursor["argvPrefix"], mode, resolved.path, model, prompt, stream_capture=stream_capture
         )
-        return Request(engine, mode, resolved.path, prompt, argv, model, dry_run, resolved.kind)
+        return Request(engine, mode, resolved.path, prompt, argv, model, model_alias=None, dry_run=dry_run, workspace_kind=resolved.kind, isolation_context=isolation_context)
     if engine == "droid":
         droid = config["droid"]
         models = droid["models"]
@@ -1142,7 +1296,7 @@ def build_request(
         argv = build_droid_argv(
             droid["binary"], mode, resolved.path, model, prompt, stream_capture=stream_capture
         )
-        return Request(engine, mode, resolved.path, prompt, argv, model, dry_run, resolved.kind)
+        return Request(engine, mode, resolved.path, prompt, argv, model, model_alias=model_alias, dry_run=dry_run, workspace_kind=resolved.kind, isolation_context=isolation_context)
     if engine == "codex":
         codex = config["codex"]
         model: str | None
@@ -1162,7 +1316,7 @@ def build_request(
             workspace_kind=resolved.kind,
             stream_capture=stream_capture,
         )
-        return Request(engine, mode, resolved.path, prompt, argv, model, dry_run, resolved.kind)
+        return Request(engine, mode, resolved.path, prompt, argv, model, model_alias=model_alias, dry_run=dry_run, workspace_kind=resolved.kind, isolation_context=isolation_context)
     raise DelegateError("invalid_engine", "engine must be cursor, droid, or codex.")
 
 
@@ -1186,7 +1340,66 @@ def replace_safe_workspace_arg(request: Request, isolated_workspace: str) -> lis
         return replace_argv_after_flag(request.argv, "--workspace", isolated_workspace)
     if request.engine == "codex":
         return replace_argv_after_flag(request.argv, "--cd", isolated_workspace)
+    if request.engine == "droid":
+        return replace_argv_after_flag(request.argv, "--cwd", isolated_workspace)
     return list(request.argv)
+
+
+def replace_workspace_arg(request: Request, execution_workspace: str) -> list[str]:
+    """Rewrite the workspace/--cwd argument for all engines."""
+    if request.engine == "cursor":
+        return replace_argv_after_flag(request.argv, "--workspace", execution_workspace)
+    if request.engine == "codex":
+        return replace_argv_after_flag(request.argv, "--cd", execution_workspace)
+    if request.engine == "droid":
+        return replace_argv_after_flag(request.argv, "--cwd", execution_workspace)
+    return list(request.argv)
+
+
+def capture_git_metadata(workspace_path: str) -> tuple[str | None, str | None, str | None, str | None, str | None]:
+    """Capture git metadata from a workspace path for isolation planning.
+
+    Returns (git_root, git_common_dir, head_oid, head_ref, branch_name).
+    All None if the workspace is not a git repo or git commands fail.
+    This is read-only -- safe to call in dry-run.
+    """
+    try:
+        root_result = subprocess.run(
+            ["git", "-C", workspace_path, "rev-parse", "--show-toplevel"],
+            text=True, capture_output=True, check=False,
+        )
+        if root_result.returncode != 0:
+            return None, None, None, None, None
+        git_root = root_result.stdout.strip()
+
+        common_result = subprocess.run(
+            ["git", "-C", workspace_path, "rev-parse", "--git-common-dir"],
+            text=True, capture_output=True, check=False,
+        )
+        git_common_dir = common_result.stdout.strip() if common_result.returncode == 0 else None
+        # If common dir is relative, make it absolute relative to git root
+        if git_common_dir and not git_common_dir.startswith("/"):
+            git_common_dir = str(Path(git_root) / git_common_dir)
+
+        oid_result = subprocess.run(
+            ["git", "-C", workspace_path, "rev-parse", "HEAD"],
+            text=True, capture_output=True, check=False,
+        )
+        head_oid = oid_result.stdout.strip() if oid_result.returncode == 0 else None
+
+        ref_result = subprocess.run(
+            ["git", "-C", workspace_path, "symbolic-ref", "--quiet", "HEAD"],
+            text=True, capture_output=True, check=False,
+        )
+        head_ref = ref_result.stdout.strip() if ref_result.returncode == 0 else None
+
+        branch_name = None
+        if head_ref and head_ref.startswith("refs/heads/"):
+            branch_name = head_ref[11:]
+
+        return git_root, git_common_dir, head_oid, head_ref, branch_name
+    except (FileNotFoundError, OSError):
+        return None, None, None, None, None
 
 
 def write_cursor_safe_project_config(workspace: Path) -> None:
@@ -1329,17 +1542,45 @@ def cleanup_safe_isolated_workspace(
 
 @contextmanager
 def safe_isolated_request(request: Request) -> Iterator[Request]:
-    if request.mode != MODE_SAFE or request.engine not in ("cursor", "codex"):
+    """Context manager that creates a temporary isolated workspace for safe-mode runs.
+
+    Respects the isolation context:
+    - effective_isolation == "none": skip isolation, yield original request.
+    - effective_isolation == "worktree": create temp git worktree (or dir copy
+      for auto legacy fallback). For cursor, writes .cursor/cli.json in the
+      isolated workspace only.
+    """
+    ctx = request.isolation_context
+    effective = ctx.effective_isolation if ctx is not None else None
+
+    # No isolation needed.
+    if effective != "worktree":
         yield request
         return
 
+    # Isolation is worktree — create temp workspace.
+    isolation_mode = ctx.isolation_mode if ctx is not None else "auto"
     git_root = request.workspace if request.workspace_kind == "git" else None
+
     if git_root is not None:
         isolated_workspace, temp_base = create_git_safe_workspace(git_root)
-    else:
+    elif isolation_mode == "auto":
+        # Legacy auto fallback for non-git cursor/codex safe: directory copy.
         isolated_workspace, temp_base = create_directory_safe_workspace(request.workspace)
+    else:
+        raise DelegateError(
+            "worktree_requires_git",
+            "--isolation worktree requires a Git workspace for safe mode.",
+        )
 
-    isolation = SafeIsolationContext(request.workspace)
+    isolation = IsolationContext(
+        source_workspace=request.workspace,
+        effective_isolation=effective,
+        isolation_mode=isolation_mode,
+        isolation_lifecycle="temporary",
+        preserved_workspace=False,
+        source_git_root=git_root,
+    )
     try:
         if request.engine == "cursor":
             write_cursor_safe_project_config(Path(isolated_workspace))
@@ -1352,7 +1593,7 @@ def safe_isolated_request(request: Request) -> Iterator[Request]:
             request.model,
             request.dry_run,
             request.workspace_kind,
-            safe_isolation=isolation,
+            isolation_context=isolation,
         )
     finally:
         cleanup_safe_isolated_workspace(
@@ -1463,15 +1704,389 @@ def dry_run_payload(request: Request) -> JsonObject:
         "engine": request.engine,
         "mode": request.mode,
         "model": request.model,
-        "argv": request.argv,
+        "argv": list(request.argv),
     }
-    if request.engine in ("cursor", "codex") and request.mode == MODE_SAFE:
-        payload["isolatedWorkspace"] = True
-        payload["isolation"] = (
-            "Execution uses a temporary detached git worktree or directory copy; "
-            "the child runs outside the original workspace; tracked runs may write .delegate metadata."
-        )
+
+    # Structured isolation fields from the isolation context.
+    if request.isolation_context is not None:
+        ctx = request.isolation_context
+
+        # Keep the existing human-readable `isolation` note for legacy use.
+        if ctx.effective_isolation == "worktree" and ctx.isolation_lifecycle == "persistent":
+            payload["isolation"] = "worktree persistent"
+        elif ctx.effective_isolation == "worktree":
+            payload["isolation"] = "worktree temporary"
+        elif ctx.effective_isolation == "none":
+            payload["isolation"] = "none"
+        else:
+            payload["isolation"] = "source workspace"
+
+        payload["isolationMode"] = ctx.isolation_mode
+        payload["effectiveIsolation"] = ctx.effective_isolation
+        payload["isolationLifecycle"] = ctx.isolation_lifecycle
+        payload["preservedWorkspace"] = ctx.preserved_workspace
+
+        # For worktree isolation, add planned placeholders with real
+        # computed paths when available.
+        if ctx.effective_isolation == "worktree":
+            planned_cwd = ctx.planned_execution_cwd or "<planned-worktree-path>"
+            planned_branch = ctx.planned_branch or "<planned-branch>"
+            payload["plannedExecutionCwd"] = planned_cwd
+            payload["plannedBranch"] = planned_branch
+            # Rewrite argv to show the planned workspace path, not the source.
+            if request.engine == "cursor":
+                payload["argv"] = replace_argv_after_flag(
+                    payload["argv"], "--workspace", planned_cwd
+                )
+            elif request.engine == "codex":
+                payload["argv"] = replace_argv_after_flag(
+                    payload["argv"], "--cd", planned_cwd
+                )
+            elif request.engine == "droid":
+                payload["argv"] = replace_argv_after_flag(
+                    payload["argv"], "--cwd", planned_cwd
+                )
+        else:
+            payload["plannedExecutionCwd"] = None
+            payload["plannedBranch"] = None
+
+        # Always emit isolatedWorkspace as explicit boolean (mirrors preservedWorkspace).
+        payload["isolatedWorkspace"] = ctx.isolation_lifecycle in ("temporary", "persistent")
+    else:
+        # Fallback when no isolation context is provided (e.g. direct build_request calls in tests).
+        # Use embedded-default logic: cursor/codex safe -> worktree temporary, others -> none.
+        if request.engine in ("cursor", "codex") and request.mode == MODE_SAFE:
+            payload["isolatedWorkspace"] = True
+            payload["isolation"] = (
+                "Execution uses a temporary detached git worktree or directory copy; "
+                "the child runs outside the original workspace; tracked runs may write .delegate metadata."
+            )
+            payload["isolationMode"] = "worktree"
+            payload["effectiveIsolation"] = "worktree"
+            payload["isolationLifecycle"] = "temporary"
+            payload["preservedWorkspace"] = False
+        else:
+            payload["isolatedWorkspace"] = False
+            payload["isolation"] = "source workspace"
+            payload["isolationMode"] = "none"
+            payload["effectiveIsolation"] = "none"
+            payload["isolationLifecycle"] = "none"
+            payload["preservedWorkspace"] = False
+        payload["plannedExecutionCwd"] = None
+        payload["plannedBranch"] = None
+
     return payload
+
+
+def _cleanup_partial_worktree(
+    source_git_root: str,
+    worktree_path: str,
+    branch: str,
+    run_path: Path,
+) -> None:
+    """Attempt to clean up a partially-created worktree after creation failure.
+
+    If cleanup is unsafe or fails, preserve the path, record it in the
+    snapshot, and print manual cleanup instructions to stderr.
+    """
+    path = Path(worktree_path)
+    cleanup_failed = False
+    if path.exists() or path.is_symlink():
+        try:
+            result = subprocess.run(
+                ["git", "-C", source_git_root, "worktree", "remove", "--force", worktree_path],
+                text=True, capture_output=True, check=False,
+            )
+            if result.returncode != 0:
+                cleanup_failed = True
+        except (OSError, subprocess.SubprocessError):
+            cleanup_failed = True
+    # Try to delete the branch even if worktree removal failed.
+    try:
+        subprocess.run(
+            ["git", "-C", source_git_root, "branch", "-D", branch],
+            text=True, capture_output=True, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        cleanup_failed = True
+    if cleanup_failed:
+        manual = (
+            f"git -C {source_git_root} worktree remove --force {worktree_path} && "
+            f"git -C {source_git_root} branch -D {branch}"
+        )
+        snapshot_path = run_path / run_registry.SNAPSHOT_FILE
+        if snapshot_path.exists():
+            try:
+                existing = run_registry.read_json_object(snapshot_path)
+                if existing is not None:
+                    existing["cleanupFailed"] = True
+                    existing["manualCleanup"] = manual
+                    run_registry.write_json_atomic(snapshot_path, existing)
+            except (OSError, ValueError):
+                pass
+        print(
+            f"warning: partial worktree cleanup failed; manual cleanup required: {manual}",
+            file=sys.stderr,
+        )
+
+
+def _execute_persistent_worktree(
+    request: Request,
+    json_mode: bool,
+    *,
+    config: JsonObject,
+    pass_through: bool,
+    completion_report_mode: str,
+    source_workspace: ResolvedWorkspace,
+    stdout: TextIO,
+    stderr: TextIO,
+) -> tuple[int, JsonObject | None]:
+    """Implement the 13-step persistent worktree launch sequence.
+
+    Steps 1–5: validation (git workspace, valid HEAD, reject pass-through,
+    ensure registry, clean-source check).
+    Steps 6–8: register run, write pre-launch state, create worktree.
+    Steps 9–11: rewrite argv, inject prompt context, launch child.
+    Steps 12–13: preserve worktree, record metadata.
+
+    If any step before child launch fails after pre-launch state was
+    written, writes final state "failed" with error/message/planned*
+    fields, then re-raises.
+    """
+    iso_ctx = request.isolation_context
+    assert iso_ctx is not None
+
+    # Step 2: Require Git workspace.
+    if request.workspace_kind != "git":
+        raise DelegateError(
+            "worktree_requires_git",
+            "--isolation worktree requires a Git workspace.",
+        )
+    source_git_root = request.workspace
+
+    # Step 3: Require valid HEAD and capture the base OID.
+    try:
+        base_oid = require_valid_head(source_git_root)
+    except IsolationExecutionError as exc:
+        raise DelegateError(exc.error, exc.message) from exc
+
+    # Step 4: Reject pass-through.
+    if pass_through:
+        raise DelegateError(
+            "pass_through_with_persistent_isolation",
+            "--pass-through is not supported with --isolation worktree in work mode.",
+        )
+
+    # Step 5: Ensure registry for the source workspace.
+    registry_root = run_registry.ensure_registry(
+        Path(source_workspace.path),
+        workspace_kind=source_workspace.kind,
+    )
+    maybe_run_retention_pass(registry_root, config)
+
+    # Step 6: Strict clean-source check.
+    try:
+        require_clean_source(source_git_root)
+    except IsolationExecutionError as exc:
+        raise DelegateError(exc.error, exc.message) from exc
+
+    # Compute planned branch, worktree path, and label.
+    label = branch_label(request.engine, request.model_alias)
+    short_id = "<placeholder>"  # replaced after registration
+
+    # Step 7: Register the run and write pre-launch state.
+    run_id, alias = run_registry.register_run(
+        registry_root,
+        harness=request.engine,
+        metadata={
+            "mode": request.mode,
+            "model": request.model,
+            "cwd": source_workspace.path,
+        },
+    )
+
+    short_id = short_run_id(run_id)
+    branch = plan_branch_name(label, short_id)
+    dh = worktrees_data_home(config)
+
+    if iso_ctx.source_git_common_dir is None:
+        raise DelegateError(
+            "worktree_requires_git",
+            "--isolation worktree could not determine the Git common directory.",
+        )
+
+    fingerprint = repo_fingerprint(iso_ctx.source_git_common_dir)
+    worktree_path = str(plan_worktree_path(dh, fingerprint, label, short_id))
+
+    creation_context: JsonObject = {
+        "sourceHeadOid": iso_ctx.source_head_oid or "",
+        "sourceHeadRef": iso_ctx.source_head_ref,
+        "sourceBranch": iso_ctx.source_branch,
+        "sourceGitCommonDir": iso_ctx.source_git_common_dir,
+        "plannedBranch": branch,
+        "plannedExecutionCwd": worktree_path,
+        "label": label,
+        "shortRunId": short_id,
+    }
+
+    # Build a provisional RunContext for pre-launch state writes.
+    pre_ctx = delegate_runner.RunContext(
+        registry_root=registry_root,
+        run_id=run_id,
+        alias=alias,
+        harness=request.engine,
+        engine=request.engine,
+        mode=request.mode,
+        model=request.model,
+        source_cwd=source_workspace.path,
+        execution_cwd=worktree_path,
+        workspace_kind=source_workspace.kind,
+        isolated_workspace=True,
+        started_at=run_registry.utc_now_iso(),
+        creation_context=creation_context,
+        source_git_root=iso_ctx.source_git_root or source_git_root,
+        isolation_mode=iso_ctx.isolation_mode,
+        effective_isolation=iso_ctx.effective_isolation,
+        isolation_lifecycle=iso_ctx.isolation_lifecycle,
+        preserved_workspace=iso_ctx.preserved_workspace,
+        branch=branch,
+        worktree_status="present",
+    )
+    run_path = run_registry.run_directory(registry_root, run_id)
+    run_path.mkdir(parents=True, exist_ok=True)
+    delegate_runner.write_manifest(
+        run_path, delegate_runner.build_manifest(pre_ctx, request.argv)
+    )
+
+    # Write pre-launch "creating_isolation" state.
+    delegate_runner.write_state(
+        run_path,
+        delegate_runner.build_state(
+            pre_ctx,
+            status="creating_isolation",
+            extra={"plannedBranch": branch, "plannedExecutionCwd": worktree_path},
+        ),
+    )
+
+    # Step 8: Create the persistent worktree.
+    try:
+        create_persistent_worktree(source_git_root, branch, worktree_path, base_oid)
+    except IsolationExecutionError as exc:
+        # Write both state.json and snapshot.json so delegate snapshot <alias>
+        # surfaces the failure cleanly.
+        failed_state = delegate_runner.build_state(
+            pre_ctx,
+            status="failed",
+            extra={
+                "error": exc.error,
+                "message": exc.message,
+                "plannedBranch": branch,
+                "plannedExecutionCwd": worktree_path,
+            },
+        )
+        delegate_runner.write_state(run_path, failed_state)
+        # Build a minimal snapshot for post-mortem inspection.
+        failed_snapshot: JsonObject = {
+            "schema": run_registry.SNAPSHOT_SCHEMA,
+            "ok": False,
+            "alias": pre_ctx.alias,
+            "runId": pre_ctx.run_id,
+            "harness": pre_ctx.harness,
+            "cwd": pre_ctx.source_cwd,
+            "mode": pre_ctx.mode,
+            "model": pre_ctx.model,
+            "startedAt": pre_ctx.started_at,
+            "error": exc.error,
+            "message": exc.message,
+            "status": "failed",
+            "plannedBranch": branch,
+            "plannedExecutionCwd": worktree_path,
+        }
+        delegate_runner.write_snapshot(run_path, failed_snapshot)
+        # Attempt cleanup of partial branch/worktree; if unsafe, preserve and record.
+        _cleanup_partial_worktree(source_git_root, worktree_path, branch, run_path)
+        raise DelegateError(exc.error, exc.message) from exc
+
+    # Step 9: Rewrite child argv workspace argument → worktree path.
+    # Step 10: Inject persistent-worktree prompt context.
+    # Steps 9-13: Post-create through child launch. Wrap in try/except so
+    # any failure after successful git worktree add is captured as a failed
+    # state while preserving the worktree (spec requires worktrees be kept).
+    try:
+        execution_argv = replace_workspace_arg(request, worktree_path)
+        execution_prompt = prepend_persistent_worktree_context(request.prompt)
+
+        # Replace the prompt in argv with the execution prompt.
+        # For all harnesses the prompt is the last positional argument.
+        execution_argv[-1] = execution_prompt
+
+        # Step 11: Launch child in the worktree (reuse the standard tracked runner).
+        exec_ctx = delegate_runner.RunContext(
+            registry_root=registry_root,
+            run_id=run_id,
+            alias=alias,
+            harness=request.engine,
+            engine=request.engine,
+            mode=request.mode,
+            model=request.model,
+            source_cwd=source_workspace.path,
+            execution_cwd=worktree_path,
+            workspace_kind=source_workspace.kind,
+            isolated_workspace=True,
+            started_at=run_registry.utc_now_iso(),
+            creation_context=creation_context,
+            source_git_root=iso_ctx.source_git_root or source_git_root,
+            isolation_mode=iso_ctx.isolation_mode,
+            effective_isolation=iso_ctx.effective_isolation,
+            isolation_lifecycle=iso_ctx.isolation_lifecycle,
+            preserved_workspace=iso_ctx.preserved_workspace,
+            branch=branch,
+            worktree_status="present",
+        )
+        # The manifest was already written; execute_tracked will overwrite it.
+        # We re-write it here so the argv reflects the execution argv, not the source argv.
+        delegate_runner.write_manifest(
+            run_path, delegate_runner.build_manifest(exec_ctx, execution_argv)
+        )
+        exit_code, payload = delegate_runner.execute_tracked(
+            execution_argv,
+            worktree_path,
+            exec_ctx,
+            json_mode=json_mode,
+            stdout=stdout,
+            stderr=stderr,
+            completion_report_mode=completion_report_mode,
+        )
+    except Exception as exc:
+        # Preserve the worktree and write a failed state.
+        error_msg = str(exc)
+        error_code = getattr(exc, "error", "execution_failed")
+        delegate_runner.write_state(
+            run_path,
+            delegate_runner.build_state(
+                pre_ctx,
+                status="failed",
+                extra={
+                    "error": error_code,
+                    "message": error_msg,
+                    "plannedBranch": branch,
+                    "plannedExecutionCwd": worktree_path,
+                },
+            ),
+        )
+        raise
+
+    # Steps 12–13: Preserve worktree (nothing to clean up).
+    # After child exit, the final state already has worktreeStatus from the
+    # manifest/state; Wave 4 will read those for snapshot/runs output.
+
+    # Post-run: update the state to include worktreeStatus = "present".
+    final_state = run_registry.load_run_state(registry_root, run_id)
+    if final_state is not None:
+        final_state["worktreeStatus"] = "present"
+        delegate_runner.write_state(run_path, final_state)
+
+    return exit_code, payload
 
 
 def ensure_binary(argv: list[str]) -> None:
@@ -1488,13 +2103,39 @@ def make_run_context(
     run_id: str,
     alias: str,
     source_workspace: ResolvedWorkspace,
+    creation_context: JsonObject | None = None,
 ) -> delegate_runner.RunContext:
     source_cwd = (
-        request.safe_isolation.source_workspace
-        if request.safe_isolation is not None
+        request.isolation_context.source_workspace
+        if request.isolation_context is not None
         else source_workspace.path
     )
     execution_cwd = request.workspace
+    # isolated_workspace must reflect the EFFECTIVE behavior, not the
+    # mere presence of an isolation_context object.  Only "temporary" or
+    # "persistent" lifecycle means a physically separate execution workspace.
+    isolated_workspace = (
+        request.isolation_context.isolation_lifecycle in ("temporary", "persistent")
+        if request.isolation_context is not None
+        else False
+    )
+    # Extract isolation metadata from the isolation context.
+    iso_ctx = request.isolation_context
+    if iso_ctx is not None:
+        isolation_mode = iso_ctx.isolation_mode
+        effective_isolation = iso_ctx.effective_isolation
+        isolation_lifecycle = iso_ctx.isolation_lifecycle
+        preserved_workspace = iso_ctx.preserved_workspace
+        branch = iso_ctx.planned_branch
+        source_git_root = iso_ctx.source_git_root
+    else:
+        isolation_mode = "none"
+        effective_isolation = "none"
+        isolation_lifecycle = "none"
+        preserved_workspace = False
+        branch = None
+        source_git_root = None
+
     return delegate_runner.RunContext(
         registry_root=registry_root,
         run_id=run_id,
@@ -1506,8 +2147,15 @@ def make_run_context(
         source_cwd=source_cwd,
         execution_cwd=execution_cwd,
         workspace_kind=source_workspace.kind,
-        isolated_workspace=request.safe_isolation is not None,
+        isolated_workspace=isolated_workspace,
         started_at=run_registry.utc_now_iso(),
+        creation_context=creation_context,
+        source_git_root=source_git_root,
+        isolation_mode=isolation_mode,
+        effective_isolation=effective_isolation,
+        isolation_lifecycle=isolation_lifecycle,
+        preserved_workspace=preserved_workspace,
+        branch=branch,
     )
 
 
@@ -1523,6 +2171,22 @@ def execute_request(
     stderr: TextIO,
 ) -> tuple[int, JsonObject | None]:
     ensure_binary(request.argv)
+
+    ctx = request.isolation_context
+
+    # --- Persistent worktree path (work + worktree) ---
+    if ctx is not None and ctx.isolation_lifecycle == "persistent":
+        return _execute_persistent_worktree(
+            request,
+            json_mode,
+            config=config,
+            pass_through=pass_through,
+            completion_report_mode=completion_report_mode,
+            source_workspace=source_workspace,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
     with safe_isolated_request(request) as isolated_request:
         if pass_through:
             if json_mode:
@@ -1547,13 +2211,13 @@ def execute_request(
                 "mode": isolated_request.mode,
                 "model": isolated_request.model,
                 "cwd": (
-                    isolated_request.safe_isolation.source_workspace
-                    if isolated_request.safe_isolation is not None
+                    isolated_request.isolation_context.source_workspace
+                    if isolated_request.isolation_context is not None
                     else source_workspace.path
                 ),
             },
         )
-        ctx = make_run_context(
+        ctx_runner = make_run_context(
             registry_root,
             isolated_request,
             run_id=run_id,
@@ -1563,7 +2227,7 @@ def execute_request(
         return delegate_runner.execute_tracked(
             isolated_request.argv,
             isolated_request.workspace,
-            ctx,
+            ctx_runner,
             json_mode=json_mode,
             stdout=stdout,
             stderr=stderr,
@@ -1664,6 +2328,7 @@ def describe_payload(config: JsonObject, config_source: str) -> JsonObject:
         "globalOptions": [
             "--cwd",
             "--json",
+            "--isolation",
             "--pass-through",
             "--completion-report",
             "--no-completion-report",
@@ -1675,6 +2340,14 @@ def describe_payload(config: JsonObject, config_source: str) -> JsonObject:
         ],
         "passThrough": "Opt-in raw child stdout/stderr streaming; incompatible with --json.",
         "cwdResolution": "Git directories resolve to the repository root; non-Git directories are used directly.",
+        "isolation": {
+            "defaults": config["isolation"],
+            "supportedValues": list(delegate_config.VALID_ISOLATION_VALUES),
+        },
+        "worktrees": {
+            "dataHome": config["worktrees"]["dataHome"],
+            "autoPrune": config["worktrees"]["autoPrune"],
+        },
         "modeMapping": {
             "cursor": {
                 "safe": [
@@ -1859,6 +2532,39 @@ def shell_join(argv: list[str]) -> str:
     return " ".join(shlex.quote(arg) for arg in argv)
 
 
+def pre_read_run_json_for_config(
+    input_json_path: str, cli_cwd: str | None
+) -> tuple[ResolvedWorkspace, JsonObject, str]:
+    """Pre-read run input JSON for config discovery: extract cwd/isolation, resolve workspace,
+    load config from that workspace, validate config. Returns (workspace, config, source)."""
+    path = Path(input_json_path).expanduser()
+    try:
+        raw: JsonValue = json.loads(path.read_text())
+    except FileNotFoundError:
+        raise DelegateError("input_json_not_found", f"Input JSON file not found: {path}") from None
+    except json.JSONDecodeError as exc:
+        raise DelegateError("invalid_input_json", f"Invalid input JSON: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise DelegateError("invalid_input_json", "Input JSON root must be an object.")
+
+    # Read ONLY cwd and isolation for config discovery.
+    json_cwd = raw.get("cwd")
+    if json_cwd is not None and not isinstance(json_cwd, str):
+        raise DelegateError("invalid_cwd", "cwd must be a string.")
+
+    # Reject explicit null isolation in the JSON pre-read.
+    if "isolation" in raw and raw["isolation"] is None:
+        raise DelegateError(
+            "invalid_isolation",
+            "isolation in input JSON must be auto, none, or worktree (null is not allowed).",
+        )
+
+    workspace = resolve_workspace(cli_cwd, json_cwd)
+    config, source = load_config(workspace=Path(workspace.path))
+    validate_config(config)
+    return workspace, config, source
+
+
 def emit_error(error: DelegateError, json_mode: bool, stdout: TextIO, stderr: TextIO) -> int:
     if json_mode:
         delegate_rendering.print_json(
@@ -1895,15 +2601,29 @@ def main(
         if parsed.subcommand == "version":
             print(VERSION, file=stdout)
             return EXIT_OK
-        config, source = load_config(workspace=workspace_path_for_config(parsed.cwd))
-        validate_config(config)
+
+        # For run --input-json, pre-read the JSON to discover config from the
+        # JSON-resolved workspace before loading/finalizing config.
+        if parsed.subcommand == "run":
+            assert parsed.input_json is not None
+            workspace, config, source = pre_read_run_json_for_config(
+                parsed.input_json, parsed.cwd
+            )
+        else:
+            config, source = load_config(workspace=workspace_path_for_config(parsed.cwd))
+            validate_config(config)
+
         if parsed.subcommand == "models":
             return emit_models(config, source, parsed.json_mode, stdout)
         if parsed.subcommand == "describe":
             return emit_describe(config, source, parsed.json_mode, stdout)
         if parsed.subcommand == "agent-help":
             return emit_agent_help(stdout)
-        workspace = resolve_workspace(parsed.cwd)
+
+        if parsed.subcommand != "run":
+            workspace = resolve_workspace(parsed.cwd)
+            # (non-run path uses workspace resolved above)
+
         if parsed.subcommand in {"snapshot", "runs", "run-output"}:
             existing_registry = run_registry.registry_root_if_exists(Path(workspace.path))
             if existing_registry is not None:
@@ -1924,7 +2644,17 @@ def main(
                 print(f"cwd: {request.workspace} ({request.workspace_kind})", file=stdout)
                 if payload.get("isolatedWorkspace"):
                     print(f"isolation: {payload['isolation']}", file=stdout)
-                print(f"argv: {shell_join(request.argv)}", file=stdout)
+                lifecycle = payload.get("isolationLifecycle", "")
+                if lifecycle:
+                    print(f"isolationLifecycle: {lifecycle}", file=stdout)
+                if payload.get("plannedBranch"):
+                    print(f"plannedBranch: {payload['plannedBranch']}", file=stdout)
+                if payload.get("plannedExecutionCwd"):
+                    print(f"plannedExecutionCwd: {payload['plannedExecutionCwd']}", file=stdout)
+                # Use the payload's rewritten argv (which shows planned paths) when
+                # worktree isolation is active; otherwise use the source request.argv.
+                display_argv = payload.get("argv", request.argv)
+                print(f"argv: {shell_join(display_argv)}", file=stdout)
             return EXIT_OK
 
         completion_report_mode = resolve_completion_report_mode(parsed, config)
