@@ -169,21 +169,9 @@ def render_snapshot_text(view: JsonObject, stdout: TextIO) -> None:
     if isinstance(current, str) and current:
         print(f"current: {current}", file=stdout)
 
-    # Cleanup commands for persistent worktree runs
     cleanup = view.get("worktreeCleanupCommands")
     if isinstance(cleanup, dict):
-        safe_cmd = cleanup.get("safe")
-        force_branch = cleanup.get("forceBranch")
-        discard = cleanup.get("discardUncommitted")
-        raw_git = cleanup.get("rawGit")
-        if safe_cmd:
-            print(f"cleanup (refuses dirty / unmerged):       {safe_cmd}", file=stdout)
-        if force_branch:
-            print(f"cleanup (allow unmerged branch deletion): {force_branch}", file=stdout)
-        if discard:
-            print(f"cleanup (DISCARD uncommitted edits):      {discard}", file=stdout)
-        if raw_git:
-            print(f"raw git equivalent:                       {raw_git}", file=stdout)
+        render_worktree_cleanup_commands(cleanup, stdout)
 
     assistant_text = view.get("assistantText")
     if isinstance(assistant_text, str) and assistant_text:
@@ -269,6 +257,21 @@ def run_output_json_payload(
     if alias:
         payload["alias"] = alias
     return payload
+
+
+def render_worktree_cleanup_commands(cleanup: JsonObject, stdout: TextIO) -> None:
+    safe_cmd = cleanup.get("safe")
+    force_branch = cleanup.get("forceBranch")
+    discard = cleanup.get("discardUncommitted")
+    raw_git = cleanup.get("rawGit")
+    if safe_cmd:
+        print(f"cleanup (refuses dirty / unmerged):       {safe_cmd}", file=stdout)
+    if force_branch:
+        print(f"cleanup (allow unmerged branch deletion): {force_branch}", file=stdout)
+    if discard:
+        print(f"cleanup (DISCARD uncommitted edits):      {discard}", file=stdout)
+    if raw_git:
+        print(f"raw git equivalent:                       {raw_git}", file=stdout)
 
 
 def render_run_output_text(sections: dict[str, str], stdout: TextIO) -> None:

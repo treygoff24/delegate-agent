@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import BinaryIO, TextIO
 
 from delegate_agent import config as delegate_config
-from delegate_agent import harness_events, run_registry
+from delegate_agent import harness_events, rendering, run_registry
 from delegate_agent.json_types import JsonObject
 
 STDOUT_LOG = run_registry.STDOUT_LOG
@@ -357,16 +357,9 @@ def emit_bounded_text_summary(
             file=stdout,
         )
     if lifecycle == "persistent" and ctx.branch and ctx.source_git_root:
-        alias_str = ctx.alias
-        source_git = ctx.source_git_root
-        exec_cwd = ctx.execution_cwd
-        branch = ctx.branch
-        raw_remove = shlex.join(["git", "-C", source_git, "worktree", "remove", "--force", exec_cwd])
-        raw_branch = shlex.join(["git", "-C", source_git, "branch", "-D", branch])
-        print(f"cleanup (refuses dirty / unmerged):       delegate worktree remove {alias_str}", file=stdout)
-        print(f"cleanup (allow unmerged branch deletion): delegate worktree remove {alias_str} --force-branch", file=stdout)
-        print(f"cleanup (DISCARD uncommitted edits):      delegate worktree remove {alias_str} --discard-uncommitted", file=stdout)
-        print(f"raw git equivalent:                       {raw_remove} && {raw_branch}", file=stdout)
+        cleanup = _worktree_cleanup_commands(ctx)
+        if cleanup is not None:
+            rendering.render_worktree_cleanup_commands(cleanup, stdout)
 
 
 def completion_json_payload(

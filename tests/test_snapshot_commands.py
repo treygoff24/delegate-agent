@@ -433,6 +433,45 @@ class SnapshotCommandTests(unittest.TestCase):
         self.assertIn("--tail", message)
         self.assertIn("--raw", message)
 
+    def test_render_worktree_cleanup_commands_formats_all_lines(self):
+        cleanup = {
+            "safe": "delegate worktree remove demo",
+            "forceBranch": "delegate worktree remove demo --force-branch",
+            "discardUncommitted": "delegate worktree remove demo --discard-uncommitted",
+            "rawGit": "git -C /repo worktree remove --force /wt && git -C /repo branch -D demo",
+        }
+        stdout = io.StringIO()
+        self.rendering.render_worktree_cleanup_commands(cleanup, stdout)
+        output = stdout.getvalue()
+        self.assertEqual(
+            output,
+            (
+                "cleanup (refuses dirty / unmerged):       delegate worktree remove demo\n"
+                "cleanup (allow unmerged branch deletion): delegate worktree remove demo --force-branch\n"
+                "cleanup (DISCARD uncommitted edits):      delegate worktree remove demo --discard-uncommitted\n"
+                "raw git equivalent:                       git -C /repo worktree remove --force /wt && git -C /repo branch -D demo\n"
+            ),
+        )
+
+    def test_render_snapshot_text_uses_shared_cleanup_renderer(self):
+        stdout = io.StringIO()
+        self.rendering.render_snapshot_text(
+            {
+                "alias": "demo",
+                "status": "running",
+                "worktreeCleanupCommands": {
+                    "safe": "delegate worktree remove demo",
+                    "forceBranch": "delegate worktree remove demo --force-branch",
+                    "discardUncommitted": "delegate worktree remove demo --discard-uncommitted",
+                    "rawGit": "git -C /repo worktree remove --force /wt",
+                },
+            },
+            stdout,
+        )
+        output = stdout.getvalue()
+        self.assertIn("cleanup (refuses dirty / unmerged):       delegate worktree remove demo", output)
+        self.assertIn("raw git equivalent:                       git -C /repo worktree remove --force /wt", output)
+
 
 if __name__ == "__main__":
     unittest.main()
