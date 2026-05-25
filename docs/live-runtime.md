@@ -10,6 +10,20 @@ This repository can be used as a development checkout while an already-installed
 Keep those paths unchanged while doing development here. Promote changes to a
 live runtime only through an explicit install/update step after review and tests.
 
+## Development vs installed runtime
+
+Features added in this checkout are available through the development entry
+point before they are available through the installed `delegate` command:
+
+```bash
+python3 bin/delegate.py --isolation worktree cursor work "task"
+python3 bin/delegate.py worktree list
+```
+
+Users running bare `delegate` from `PATH` get the installed runtime, which may
+lag behind this checkout. Do not assume installed-runtime worktree support until
+promotion occurs.
+
 The development checkout may add workspace-local `.delegate/` registries, bounded
 default output, `snapshot` / `runs` / `run-output` commands, and archive-only
 retention. None of that affects the live runtime until promotion. Orchestrating
@@ -74,9 +88,10 @@ temporary home. They must not write to the real `~/.delegate/worktrees/`
 directory or use the installed `delegate` shim. Use `python3 bin/delegate.py`
 from the repo root for development instead.
 
-## Harness behavior (after promotion)
+## Harness behavior
 
-When this checkout is promoted, the live runtime gains the same harness contracts documented in the repo:
+The development checkout uses the harness contracts below. After explicit
+promotion, the installed runtime gains the same contracts:
 
 | Harness | Safe | Work |
 | --- | --- | --- |

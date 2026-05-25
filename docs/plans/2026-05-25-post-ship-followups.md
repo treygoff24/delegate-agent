@@ -134,11 +134,23 @@ Identified by the consolidated review but deliberately not addressed in the clea
 ### 4.1 Live runtime is stale
 The installed runtime at `~/.local/bin/delegate` (launcher pointing at `~/.delegate/`) does NOT have the worktree feature. Anyone using `delegate` from PATH on this machine cannot pass `--isolation worktree`. Per `CLAUDE.local.md`'s hard rule, the orchestrator did not auto-publish — Trey decides when to do it explicitly ("publish" / "install").
 
+**Status (2026-05-25 autonomous follow-up):** Documented in `docs/live-runtime.md` with a development-vs-installed-runtime section. Runtime promotion remains an explicit operator action; this implementation does not mutate `~/.delegate` or the installed shim.
+
 ### 4.2 Persistent worktrees from cleanup-pass session
 Several `~/.delegate/worktrees/<fingerprint>/{cursor,droid}-*` directories from this session linger after cherry-picking commits to main. They're preserved by design (the spec's persistent contract), but a `delegate worktree prune --merged` will clear the ones whose branches were cherry-picked (the cherry-pick gives the merged branch a different OID, so `--merged` may not match — verify before relying on it; may need explicit `worktree remove`).
 
+**Status (2026-05-25 autonomous follow-up):** Inventoried with `python3 bin/delegate.py --json worktree list --no-auto-prune`. Active implementation worktrees at inventory time: `cursor-20`, `droid-53`, `codex-15`, and `droid-54`; each was Delegate-managed, dirty with its subagent diff, and `mergedIntoSource: true` after coordinator integration or pending inspection. Older entries (`droid-31` through `droid-40`, `cursor-16`) were already registry-removed. Cleanup should continue through `python3 bin/delegate.py worktree remove <alias>` after confirming each diff is integrated or intentionally discarded; do not manually delete worktree paths.
+
 ### 4.3 README / AGENTS.md / live-runtime docs
 The spec (L843-850) lists doc updates as part of the acceptance set. Doc updates landed in the original `44586a1` checkpoint; this followup doc deliberately does NOT modify them. If any of the bug fixes above (especially BUG-1 / BUG-2 / BUG-3 / DEV-1 / DEV-2 / DEV-3) changed user-visible behavior, the docs may need a re-pass. Skim recommended.
+
+**Status (2026-05-25 autonomous follow-up):** Re-passed and updated:
+- `config.example.json` now includes `isolation` and `worktrees`.
+- README states Droid work uses `--skip-permissions-unsafe`.
+- README states `--pass-through` is unsupported for any persistent worktree run, including Droid.
+- README no longer advertises invalid bare `delegate worktree prune`; the summary uses `delegate worktree prune --merged --dry-run`.
+- AGENTS.md now calls out the same persistent-worktree pass-through restriction for orchestrators.
+- `docs/live-runtime.md` keeps the dev-checkout vs installed-runtime boundary explicit.
 
 ---
 

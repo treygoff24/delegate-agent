@@ -7,7 +7,7 @@ Delegate Agent is intentionally small:
 - `src/delegate_agent/isolation.py` owns first-class isolation constants, `IsolationContext`, effective-isolation planning, Git clean/HEAD checks, creation-context capture, and worktree create helpers. See `docs/plans/2026-05-24-work-mode-isolation-spec.md`.
 - `src/delegate_agent/worktree_mgmt.py` owns lifecycle logic for persistent-worktree management: worktree status detection, dirty/merged predicates, ahead/behind computation, prune selection, gc reconciliation, and the single-entry removal primitive shared between `worktree remove` and `worktree prune`.
 - `bin/delegate.py` runs the checkout directly without installing it.
-- `config.example.json` documents safe default configuration shape, including `tracking.retention`, `tracking.completionReport`, and now `isolation` / `worktrees` config sections.
+- `config.example.json` documents safe default configuration shape, including `tracking.retention`, `tracking.completionReport`, `isolation`, and `worktrees` config sections.
 - `tests/` covers parser, validation, command construction, execution output, snapshots, retention, static safety guards, and worktree management.
 
 The live runtime used by an operator may be separate from this checkout. Do not update an installed shim or runtime as a side effect of normal development. Verify with `python3 bin/delegate.py` from the repo root; promote to `~/.delegate` only after review and explicit operator request.
