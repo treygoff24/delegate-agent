@@ -98,7 +98,8 @@ def merge_snapshot_view(
             if key in manifest and key not in view:
                 view[key] = manifest[key]
         for key in ("isolationMode", "effectiveIsolation", "isolationLifecycle",
-                     "preservedWorkspace", "sourceGitRoot", "branch", "worktreeStatus"):
+                     "preservedWorkspace", "sourceGitRoot", "branch", "worktreeStatus",
+                     "worktreeCleanupCommands"):
             if key in manifest and key not in view:
                 view[key] = manifest[key]
     warnings = list(view.get("warnings") or [])
@@ -305,10 +306,63 @@ def render_worktree_list_text(payload: JsonObject, stdout: TextIO) -> None:
         )
 
 
+def _short_ref(ref: str | None) -> str:
+    if ref is None:
+        return "(detached)"
+    if ref.startswith("refs/heads/"):
+        return ref[len("refs/heads/"):]
+    return ref
+
+
+def _short_oid(oid: str | None) -> str | None:
+    if not isinstance(oid, str) or not oid:
+        return None
+    return oid[:7]
+
+
 def render_worktree_show_text(payload: JsonObject, stdout: TextIO) -> None:
     alias = payload.get("alias") or payload.get("runId") or "?"
     status = payload.get("worktreeStatus", "unknown")
     print(f"{alias} · {status}", file=stdout)
+
+    # Creation-context line: created from <ref>@<oid>; source now at <ref>@<oid>
+    creation = payload.get("creationContext")
+    if isinstance(creation, dict):
+        src_ref = _short_ref(creation.get("sourceHeadRef"))
+        src_oid = _short_oid(creation.get("sourceHeadOid"))
+        if src_oid is not None:
+            # Current HEAD OID from vsCurrentHead.baseOid (computed by worktree_mgmt)
+            ahead = payload.get("aheadBehind")
+            current_oid: str | None = None
+            if isinstance(ahead, dict):
+                vs_current = ahead.get("vsCurrentHead")
+                if isinstance(vs_current, dict):
+                    current_oid = _short_oid(vs_current.get("baseOid"))
+            if current_oid is None:
+                current_oid = "(unknown)"
+            print(
+                f"created from {src_ref}@{src_oid}; source now at {src_ref}@{current_oid}",
+                file=stdout,
+            )
+
+    # Dirty flag (tri-state: yes / no / unknown)
+    dirty_value = payload.get("dirty")
+    if dirty_value is True:
+        print("dirty: yes", file=stdout)
+    elif dirty_value is False:
+        print("dirty: no", file=stdout)
+    else:
+        print("dirty: unknown", file=stdout)
+
+    # Merged flag (tri-state: yes / no / unknown)
+    merged_value = payload.get("mergedIntoSource")
+    if merged_value is True:
+        print("merged: yes", file=stdout)
+    elif merged_value is False:
+        print("merged: no", file=stdout)
+    else:
+        print("merged: unknown", file=stdout)
+
     for key, label in (
         ("executionCwd", "execution"),
         ("sourceGitRoot", "source"),
