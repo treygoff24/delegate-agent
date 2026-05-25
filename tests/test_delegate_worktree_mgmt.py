@@ -193,6 +193,8 @@ class WorktreeMgmtTests(unittest.TestCase):
         self.assertEqual(code, self.delegate.EXIT_USAGE)
         payload = json.loads(out)
         self.assertEqual(payload["code"], "no_registry")
+        self.assertEqual(payload["error"], "no_registry")
+        self.assertEqual(payload["exitCode"], self.delegate.EXIT_USAGE)
 
     def test_worktree_list_json_schema_and_status(self):
         _repo, path = self._make_repo()
@@ -793,6 +795,67 @@ class WorktreeMgmtTests(unittest.TestCase):
             self.assertFalse(result.get("branchRemoved"))
             self.assertEqual(result.get("worktreeStatus"), "removed")
 
+    def test_worktree_remove_missing_path_force_branch_deletes_branch(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            branch = "delegate/cursor-missing-force"
+            wt_path = str(Path(fake_home) / "nonexistent" / "path")
+            git("branch", branch, cwd=path)
+            self._seed_persistent_run(
+                path,
+                alias="cursor-missing",
+                branch=branch,
+                execution_cwd=wt_path,
+                worktree_status="missing",
+            )
+            code, out, _err = self._run_cli(
+                [
+                    "--cwd",
+                    path,
+                    "--json",
+                    "worktree",
+                    "remove",
+                    "cursor-missing",
+                    "--force-branch",
+                ],
+                home=fake_home,
+            )
+            self.assertEqual(code, 0)
+            payload = json.loads(out)
+            self.assertTrue(payload.get("ok"))
+            self.assertTrue(payload.get("branchRemoved"))
+            self.assertNotIn("branchKept", payload)
+            self.assertNotEqual(
+                git("rev-parse", "--verify", branch, cwd=path, check=False).returncode,
+                0,
+            )
+
+    def test_worktree_remove_branch_delete_error_uses_error_field(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory():
+            self._seed_persistent_run(
+                path,
+                alias="cursor-removed",
+                branch="delegate/cursor-delete-error",
+                worktree_status="removed",
+            )
+            failed_delete = subprocess.CompletedProcess(
+                ["git", "branch", "-D", "delegate/cursor-delete-error"],
+                1,
+                "",
+                "fatal: cannot delete branch\n",
+            )
+            with mock.patch.object(self.delegate.worktree_mgmt, "_run_git", return_value=failed_delete):
+                result = self.delegate.worktree_mgmt.remove_worktree(
+                    self._registry_root(path),
+                    handle="cursor-removed",
+                    force_branch=True,
+                )
+            self.assertFalse(result["ok"])
+            self.assertFalse(result["branchRemoved"])
+            self.assertEqual(result["branchRemovalError"], "fatal: cannot delete branch")
+            self.assertNotIn("branchKept", result)
+
     def test_prune_includes_detached_with_flag(self):
         _repo, path = self._make_repo()
         with tempfile.TemporaryDirectory() as fake_home:
@@ -818,6 +881,32 @@ class WorktreeMgmtTests(unittest.TestCase):
             self.assertIn("cursor-detached", planned_aliases)
             skipped_reasons = {e["alias"]: e["reason"] for e in result.get("skipped", [])}
             self.assertNotIn("cursor-detached", skipped_reasons)
+
+    def test_prune_skips_when_merge_status_unknown(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            branch = "delegate/cursor-merge-unknown"
+            wt_path = str(Path(fake_home) / "wt" / "cursor-merge-unknown")
+            self._seed_persistent_run(
+                path,
+                alias="cursor-merge-unknown",
+                branch=branch,
+                execution_cwd=wt_path,
+            )
+            self._create_worktree_at(path, branch, wt_path)
+            with mock.patch.object(
+                self.delegate.worktree_mgmt,
+                "merged_into_source",
+                return_value=(None, ["merge state unavailable"]),
+            ):
+                result = self.delegate.worktree_mgmt.prune_worktrees(
+                    self._registry_root(path),
+                    merged=True,
+                    dry_run=True,
+                )
+            self.assertEqual(result["planned"], [])
+            skipped_reasons = {entry["alias"]: entry["reason"] for entry in result["skipped"]}
+            self.assertEqual(skipped_reasons["cursor-merge-unknown"], "merge_status_unknown")
 
     def test_prune_older_than_filters(self):
         _repo, path = self._make_repo()

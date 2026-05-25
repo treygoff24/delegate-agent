@@ -26,33 +26,33 @@ def load_isolation():
 
 
 class RepoFingerprintTests(unittest.TestCase):
-    """repo_fingerprint: stable 12-char SHA-256[:12] fingerprint."""
+    """compute_repo_fingerprint_from_common_dir: stable 12-char SHA-256[:12] fingerprint."""
 
     def test_returns_12_hex_chars(self):
         iso = load_isolation()
         with tempfile.TemporaryDirectory() as tmp:
-            fp = iso.repo_fingerprint(tmp)
+            fp = iso.compute_repo_fingerprint_from_common_dir(tmp)
         self.assertEqual(len(fp), 12)
         int(fp, 16)  # must be valid hex
 
     def test_stable_across_calls(self):
         iso = load_isolation()
         with tempfile.TemporaryDirectory() as tmp:
-            fp1 = iso.repo_fingerprint(tmp)
-            fp2 = iso.repo_fingerprint(tmp)
+            fp1 = iso.compute_repo_fingerprint_from_common_dir(tmp)
+            fp2 = iso.compute_repo_fingerprint_from_common_dir(tmp)
         self.assertEqual(fp1, fp2)
 
     def test_path_with_spaces(self):
         iso = load_isolation()
         with tempfile.TemporaryDirectory(suffix=" my repo") as tmp:
-            fp = iso.repo_fingerprint(tmp)
+            fp = iso.compute_repo_fingerprint_from_common_dir(tmp)
         self.assertEqual(len(fp), 12)
         int(fp, 16)
 
     def test_path_with_unicode(self):
         iso = load_isolation()
         with tempfile.TemporaryDirectory(suffix="\u00e9\u00e0\u00f1") as tmp:
-            fp = iso.repo_fingerprint(tmp)
+            fp = iso.compute_repo_fingerprint_from_common_dir(tmp)
         self.assertEqual(len(fp), 12)
         int(fp, 16)
 
@@ -62,23 +62,23 @@ class RepoFingerprintTests(unittest.TestCase):
             tempfile.TemporaryDirectory() as tmp1,
             tempfile.TemporaryDirectory() as tmp2,
         ):
-            fp1 = iso.repo_fingerprint(tmp1)
-            fp2 = iso.repo_fingerprint(tmp2)
+            fp1 = iso.compute_repo_fingerprint_from_common_dir(tmp1)
+            fp2 = iso.compute_repo_fingerprint_from_common_dir(tmp2)
         self.assertNotEqual(fp1, fp2)
 
     def test_symlink_to_same_path_produces_same_fingerprint(self):
         iso = load_isolation()
         with tempfile.TemporaryDirectory() as real_dir:
-            fp_real = iso.repo_fingerprint(real_dir)
+            fp_real = iso.compute_repo_fingerprint_from_common_dir(real_dir)
             link_dir = Path(real_dir) / "linked"
             link_dir.symlink_to(real_dir, target_is_directory=True)
-            fp_link = iso.repo_fingerprint(str(link_dir))
+            fp_link = iso.compute_repo_fingerprint_from_common_dir(str(link_dir))
             self.assertEqual(fp_real, fp_link)
 
     def test_resolve_strict_raises_for_missing_path(self):
         iso = load_isolation()
         with self.assertRaises(FileNotFoundError):
-            iso.repo_fingerprint("/nonexistent/path")
+            iso.compute_repo_fingerprint_from_common_dir("/nonexistent/path")
 
 
 class ShortRunIdTests(unittest.TestCase):

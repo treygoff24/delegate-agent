@@ -2,29 +2,21 @@ from __future__ import annotations
 
 import shlex
 import subprocess
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, nullcontext
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from delegate_agent import run_registry
 from delegate_agent.json_types import JsonObject
 
-
-class _DummyLockContext:
-    """A no-op context manager used when the caller already holds the registry lock."""
-
-    def __enter__(self) -> None:
-        pass
-
-    def __exit__(self, *args: object) -> None:
-        pass
-
-
 SCHEMA_LIST = "delegate.worktree-list.v1"
 SCHEMA_SHOW = "delegate.worktree-show.v1"
 SCHEMA_REMOVE = "delegate.worktree-remove.v1"
 SCHEMA_PRUNE = "delegate.worktree-prune.v1"
 SCHEMA_GC = "delegate.worktree-gc.v1"
+GIT_COMMAND_TIMEOUT_SECONDS = 30
+WORKTREE_ERROR_EXIT_CODE = 2
 
 STATUS_PRESENT = "present"
 STATUS_REMOVED = "removed"
@@ -35,10 +27,30 @@ VALID_STATUSES = {STATUS_PRESENT, STATUS_REMOVED, STATUS_MISSING, STATUS_UNKNOWN
 
 class WorktreeManagementError(Exception):
     def __init__(self, payload: JsonObject) -> None:
-        super().__init__(str(payload.get("message", payload.get("code", "worktree_error"))))
-        self.payload = payload
-        self.code = str(payload.get("code", "worktree_error"))
-        self.message = str(payload.get("message", self.code))
+        code = payload.get("code")
+        message = payload.get("message")
+        if not isinstance(code, str) or not code:
+            raise ValueError("worktree error payload requires non-empty string code")
+        if not isinstance(message, str) or not message:
+            raise ValueError("worktree error payload requires non-empty string message")
+        normalized = dict(payload)
+        normalized["ok"] = False
+        normalized["code"] = code
+        normalized["error"] = str(normalized.get("error") or code)
+        normalized["message"] = message
+        exit_code = normalized.get("exitCode")
+        normalized["exitCode"] = exit_code if isinstance(exit_code, int) else WORKTREE_ERROR_EXIT_CODE
+        super().__init__(message)
+        self.payload = normalized
+        self.code = code
+        self.message = message
+
+
+@dataclass(frozen=True)
+class BranchRemovalResult:
+    removed: bool
+    kept_reason: str | None = None
+    error: str | None = None
 
 
 def _utc_now_iso() -> str:
@@ -50,12 +62,22 @@ def _shell(args: list[str]) -> str:
 
 
 def _run_git(cwd: str, args: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", "-C", cwd, *args],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    command = ["git", "-C", cwd, *args]
+    try:
+        return subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=GIT_COMMAND_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return subprocess.CompletedProcess(
+            command,
+            124,
+            exc.stdout or "",
+            f"git command timed out after {GIT_COMMAND_TIMEOUT_SECONDS}s",
+        )
 
 
 def _first_string(*values: object) -> str | None:
@@ -200,7 +222,7 @@ def _reload_record(registry_root: Path, run_id: str) -> JsonObject | None:
 
 
 def _branch_exists(source_git_root: str, branch: str) -> bool | None:
-    result = _run_git(source_git_root, ["rev-parse", "--verify", "--quiet", branch])
+    result = _run_git(source_git_root, ["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"])
     if result.returncode == 0:
         return True
     if result.returncode == 1:
@@ -442,7 +464,9 @@ def _error_payload(
     payload: JsonObject = {
         "ok": False,
         "code": code,
+        "error": code,
         "message": message,
+        "exitCode": WORKTREE_ERROR_EXIT_CODE,
         "retrySafe": retry_safe,
     }
     if record is not None:
@@ -551,14 +575,32 @@ def show_worktree(
 
 
 
-def _remove_branch(source_git_root: str, branch: str, *, force: bool) -> tuple[bool, str | None]:
+def _remove_branch(source_git_root: str, branch: str, *, force: bool) -> BranchRemovalResult:
     flag = "-D" if force else "-d"
     result = _run_git(source_git_root, ["branch", flag, branch])
     if result.returncode == 0:
-        return True, None
-    if not force:
-        return False, "unmerged"
-    return False, result.stderr.strip() or "delete_failed"
+        return BranchRemovalResult(removed=True)
+    stderr = result.stderr.strip() or "delete_failed"
+    lowered = stderr.lower()
+    if not force and ("not fully merged" in lowered or "not merged" in lowered):
+        return BranchRemovalResult(removed=False, kept_reason="unmerged")
+    return BranchRemovalResult(removed=False, error=stderr)
+
+
+def _apply_branch_removal_result(
+    payload: JsonObject,
+    result: BranchRemovalResult,
+    *,
+    alias: str,
+) -> None:
+    payload["branchRemoved"] = result.removed
+    if result.kept_reason:
+        payload["branchKept"] = result.kept_reason
+        if result.kept_reason == "unmerged":
+            payload["nextActions"] = [f"delegate worktree remove {alias} --force-branch"]
+    if result.error:
+        payload["ok"] = False
+        payload["branchRemovalError"] = result.error
 
 
 def remove_worktree(
@@ -585,17 +627,17 @@ def remove_worktree(
     # _skip_lock is set by callers that already hold the registry lock
     # (e.g. prune_worktrees when called from maybe_auto_prune while holding the lock).
     if _skip_lock:
-        lock_ctx: AbstractContextManager = _DummyLockContext()
+        lock_ctx: AbstractContextManager = nullcontext()
     else:
         lock_ctx = run_registry.registry_lock(registry_root)
     with lock_ctx:
         record = resolve_record(registry_root, handle=handle)
         status, warnings = detect_worktree_status(record)
+        alias = str(record.get("alias") or handle)
         if status == STATUS_REMOVED:
-            branch_removed = False
-            branch_kept: str | None = None
             source_git_root = record.get("sourceGitRoot")
             branch = record.get("branch")
+            branch_result = BranchRemovalResult(removed=False)
             if (
                 force_branch
                 and not keep_branch
@@ -603,14 +645,14 @@ def remove_worktree(
                 and isinstance(branch, str)
                 and branch
             ):
-                branch_removed, branch_kept = _remove_branch(
+                branch_result = _remove_branch(
                     source_git_root,
                     branch,
                     force=True,
                 )
-            return {
+            payload: JsonObject = {
                 "schema": SCHEMA_REMOVE,
-                "ok": True,
+                "ok": not bool(branch_result.error),
                 "alias": record.get("alias"),
                 "runId": record.get("runId"),
                 "branch": branch,
@@ -618,15 +660,14 @@ def remove_worktree(
                 "sourceGitRoot": source_git_root,
                 "removed": True,
                 "pathRemoved": False,
-                "branchRemoved": branch_removed,
-                "branchKept": branch_kept,
                 "worktreeStatus": STATUS_REMOVED,
-                "noop": not branch_removed,
+                "noop": not branch_result.removed,
             }
+            _apply_branch_removal_result(payload, branch_result, alias=alias)
+            return payload
 
         dirty, dirty_paths, _dirty_total, dirty_warnings = dirty_info(record, status)
         all_warnings = [*warnings, *dirty_warnings]
-        alias = str(record.get("alias") or handle)
         if dirty is True and not discard_uncommitted:
             raise WorktreeManagementError(
                 _error_payload(
@@ -677,11 +718,21 @@ def remove_worktree(
                 )
 
         path_removed = False
-        branch_removed = False
-        branch_kept: str | None = None
+        branch_result = BranchRemovalResult(removed=False)
         discarded_paths = dirty_paths if discard_uncommitted and dirty_paths else None
 
         if status == STATUS_MISSING:
+            branch_kept: str | None = "path_missing"
+            if (
+                force_branch
+                and not keep_branch
+                and isinstance(source_git_root, str)
+                and isinstance(branch, str)
+                and branch
+            ):
+                branch_result = _remove_branch(source_git_root, branch, force=True)
+                if branch_result.removed:
+                    branch_kept = None
             run_registry.set_worktree_status(
                 registry_root,
                 str(record["runId"]),
@@ -690,9 +741,9 @@ def remove_worktree(
                 discarded_dirty_paths=discarded_paths,
                 _skip_lock=True,
             )
-            return {
+            payload = {
                 "schema": SCHEMA_REMOVE,
-                "ok": True,
+                "ok": not bool(branch_result.error),
                 "alias": record.get("alias"),
                 "runId": record.get("runId"),
                 "branch": branch,
@@ -700,11 +751,13 @@ def remove_worktree(
                 "sourceGitRoot": source_git_root,
                 "removed": True,
                 "pathRemoved": False,
-                "branchRemoved": False,
-                "branchKept": "path_missing",
                 "worktreeStatus": STATUS_REMOVED,
                 "noop": False,
             }
+            _apply_branch_removal_result(payload, branch_result, alias=alias)
+            if branch_kept:
+                payload["branchKept"] = branch_kept
+            return payload
 
         remove_args = ["worktree", "remove"]
         if discard_uncommitted:
@@ -724,9 +777,9 @@ def remove_worktree(
         path_removed = True
 
         if keep_branch:
-            branch_kept = "requested"
+            branch_result = BranchRemovalResult(removed=False, kept_reason="requested")
         elif isinstance(branch, str) and branch:
-            branch_removed, branch_kept = _remove_branch(
+            branch_result = _remove_branch(
                 source_git_root,
                 branch,
                 force=force_branch,
@@ -735,10 +788,10 @@ def remove_worktree(
         # worktree whose branch is not merged into source (spec L673).
         # In that case _remove_branch was not called (force_branch=False),
         # branch_kept is "requested", and the branch is still present.
-        if keep_branch and branch_kept == "requested" and isinstance(branch, str):
+        if keep_branch and branch_result.kept_reason == "requested" and isinstance(branch, str):
             merged_val, _ = merged_into_source(record, status)
             if merged_val is False:
-                branch_kept = "unmerged"
+                branch_result = BranchRemovalResult(removed=False, kept_reason="unmerged")
 
         run_registry.set_worktree_status(
             registry_root,
@@ -758,14 +811,10 @@ def remove_worktree(
             "sourceGitRoot": source_git_root,
             "removed": True,
             "pathRemoved": path_removed,
-            "branchRemoved": branch_removed,
             "worktreeStatus": STATUS_REMOVED,
             "noop": False,
         }
-        if branch_kept:
-            payload["branchKept"] = branch_kept
-            if branch_kept == "unmerged":
-                payload["nextActions"] = [f"delegate worktree remove {alias} --force-branch"]
+        _apply_branch_removal_result(payload, branch_result, alias=alias)
         if discarded_paths is not None:
             payload["discardedDirtyPaths"] = discarded_paths
         if all_warnings:
@@ -814,7 +863,7 @@ def prune_worktrees(
             skipped.append({"alias": alias, "runId": record.get("runId"), "reason": "harness_filter"})
             continue
         status, _warnings = detect_worktree_status(record)
-        if status == STATUS_REMOVED or status == STATUS_UNKNOWN:
+        if status in (STATUS_REMOVED, STATUS_UNKNOWN):
             # Not candidates — filter silently (spec L678).
             continue
         if status == STATUS_MISSING:
@@ -835,10 +884,11 @@ def prune_worktrees(
                 include_detached=include_detached,
             )
             if merged_value is not True:
-                if not force_branch and dirty is not True:
+                if merged_value is False and not force_branch and dirty is not True:
                     keep_branch_for_prune = True
                 else:
-                    skipped.append({"alias": alias, "runId": record.get("runId"), "reason": "unmerged_branch"})
+                    reason = "merge_status_unknown" if merged_value is None else "unmerged_branch"
+                    skipped.append({"alias": alias, "runId": record.get("runId"), "reason": reason})
                     continue
         if older_than_days is not None and not _older_than(record, older_than_days):
             skipped.append({"alias": alias, "runId": record.get("runId"), "reason": "not_yet_old_enough"})

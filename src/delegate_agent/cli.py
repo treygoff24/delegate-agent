@@ -16,24 +16,21 @@ from pathlib import Path
 from typing import NoReturn, TextIO
 
 try:
-    from delegate_agent import VERSION
+    from delegate_agent import VERSION, harness_events, run_registry, worktree_mgmt
     from delegate_agent import config as delegate_config
     from delegate_agent import rendering as delegate_rendering
     from delegate_agent import retention as delegate_retention
-    from delegate_agent import run_registry
     from delegate_agent import runner as delegate_runner
-    from delegate_agent import worktree_mgmt
-    from delegate_agent import harness_events
     from delegate_agent.isolation import (
         IsolationContext,
-        build_isolation_context,
         IsolationExecutionError,
         branch_label,
+        build_isolation_context,
+        compute_repo_fingerprint_from_common_dir,
         create_persistent_worktree,
         plan_branch_name,
         plan_worktree_path,
         prepend_persistent_worktree_context,
-        repo_fingerprint,
         require_clean_source,
         require_valid_head,
         short_run_id,
@@ -44,24 +41,21 @@ except ModuleNotFoundError:  # pragma: no cover - direct cli.py invocation in te
     _src_root = Path(__file__).resolve().parent.parent
     if str(_src_root) not in sys.path:
         sys.path.insert(0, str(_src_root))
-    from delegate_agent import VERSION
+    from delegate_agent import VERSION, harness_events, run_registry, worktree_mgmt
     from delegate_agent import config as delegate_config
     from delegate_agent import rendering as delegate_rendering
     from delegate_agent import retention as delegate_retention
-    from delegate_agent import run_registry
     from delegate_agent import runner as delegate_runner
-    from delegate_agent import worktree_mgmt
-    from delegate_agent import harness_events
     from delegate_agent.isolation import (
         IsolationContext,
-        build_isolation_context,
         IsolationExecutionError,
         branch_label,
+        build_isolation_context,
+        compute_repo_fingerprint_from_common_dir,
         create_persistent_worktree,
         plan_branch_name,
         plan_worktree_path,
         prepend_persistent_worktree_context,
-        repo_fingerprint,
         require_clean_source,
         require_valid_head,
         short_run_id,
@@ -1874,14 +1868,15 @@ def safe_isolated_request(request: Request) -> Iterator[Request]:
         if request.engine == "cursor":
             write_cursor_safe_project_config(Path(isolated_workspace))
         yield Request(
-            request.engine,
-            request.mode,
-            isolated_workspace,
-            request.prompt,
-            replace_safe_workspace_arg(request, isolated_workspace),
-            request.model,
-            request.dry_run,
-            request.workspace_kind,
+            engine=request.engine,
+            mode=request.mode,
+            workspace=isolated_workspace,
+            prompt=request.prompt,
+            argv=replace_safe_workspace_arg(request, isolated_workspace),
+            model=request.model,
+            model_alias=request.model_alias,
+            dry_run=request.dry_run,
+            workspace_kind=request.workspace_kind,
             isolation_context=isolation,
         )
     finally:
@@ -2220,7 +2215,7 @@ def _execute_persistent_worktree(
             "--isolation worktree could not determine the Git common directory.",
         )
 
-    fingerprint = repo_fingerprint(source_git_common_dir)
+    fingerprint = compute_repo_fingerprint_from_common_dir(source_git_common_dir)
     worktree_path = str(plan_worktree_path(dh, fingerprint, label, short_id))
 
     creation_context: JsonObject = {

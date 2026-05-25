@@ -1200,6 +1200,48 @@ class ExecutionTests(unittest.TestCase):
         self.assertFalse(source_cursor_config.exists(),
                          "Source .cursor/cli.json should NOT be written for --isolation none")
 
+    def test_safe_isolated_request_preserves_request_metadata(self):
+        """Temporary safe isolation must not shift Request dataclass fields."""
+        repo, _git_cd = self._make_git_repo_with_commit()
+        isolation_context = self.delegate.IsolationContext(
+            source_workspace=repo.name,
+            effective_isolation="worktree",
+            isolation_mode="worktree",
+            isolation_lifecycle="temporary",
+            preserved_workspace=False,
+            source_git_root=repo.name,
+        )
+        request = self.delegate.Request(
+            engine="cursor",
+            mode="safe",
+            workspace=repo.name,
+            prompt="review this",
+            argv=[
+                "agent",
+                "--workspace",
+                repo.name,
+                "-p",
+                "--trust",
+                "--model",
+                "composer-2.5",
+                "review this",
+            ],
+            model="composer-2.5",
+            model_alias="composer",
+            dry_run=True,
+            workspace_kind="git",
+            isolation_context=isolation_context,
+        )
+
+        with self.delegate.safe_isolated_request(request) as isolated:
+            self.assertEqual(isolated.model, "composer-2.5")
+            self.assertEqual(isolated.model_alias, "composer")
+            self.assertTrue(isolated.dry_run)
+            self.assertEqual(isolated.workspace_kind, "git")
+            self.assertNotEqual(isolated.workspace, repo.name)
+            self.assertIn(isolated.workspace, isolated.argv)
+            self.assertNotIn(repo.name, isolated.argv)
+
     # -- Persistent prompt note ordering --------------------------------------
 
     def test_persistent_worktree_prompt_note_after_skill_review(self):

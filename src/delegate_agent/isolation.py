@@ -18,13 +18,15 @@ from pathlib import Path
 
 # Re-export isolation constants from config for convenience
 from delegate_agent.config import (  # noqa: F401  # re-exported
-    ConfigError,
     ISOLATION_AUTO,
     ISOLATION_NONE,
     ISOLATION_WORKTREE,
     VALID_ISOLATION_VALUES,
+    ConfigError,
 )
 from delegate_agent.json_types import JsonObject
+
+GIT_COMMAND_TIMEOUT_SECONDS = 30
 
 
 @dataclass(frozen=True)
@@ -60,15 +62,40 @@ class IsolationContext:
     source_branch: str | None = None
 
 
-def repo_fingerprint(git_common_dir: str) -> str:
+def compute_repo_fingerprint_from_common_dir(git_common_dir: str) -> str:
     """Compute a deterministic 12-char fingerprint for a git common directory.
 
-    Uses SHA-256 of the resolved posix path, truncated to 12 hex chars.
+    Resolves the filesystem path, then hashes the resolved posix path with
+    SHA-256 and truncates to 12 hex chars.
     Stable across paths with spaces, unicode, and symlinks pointing to the same dir.
     Distinct repos produce distinct fingerprints.
     """
     resolved = Path(git_common_dir).resolve(strict=True).as_posix()
     return hashlib.sha256(resolved.encode("utf-8")).hexdigest()[:12]
+
+
+def repo_fingerprint(git_common_dir: str) -> str:
+    """Backward-compatible alias for compute_repo_fingerprint_from_common_dir."""
+    return compute_repo_fingerprint_from_common_dir(git_common_dir)
+
+
+def _run_git(source_git_root: str, args: list[str]) -> subprocess.CompletedProcess[str]:
+    command = ["git", "-C", source_git_root, *args]
+    try:
+        return subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=GIT_COMMAND_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return subprocess.CompletedProcess(
+            command,
+            124,
+            exc.stdout or "",
+            f"git command timed out after {GIT_COMMAND_TIMEOUT_SECONDS}s",
+        )
 
 
 def short_run_id(run_id: str) -> str:
@@ -208,7 +235,7 @@ def build_isolation_context(
     planned_execution_cwd: str | None = None
     if effective == ISOLATION_WORKTREE and source_git_common_dir is not None:
         try:
-            fp = repo_fingerprint(source_git_common_dir)
+            fp = compute_repo_fingerprint_from_common_dir(source_git_common_dir)
         except (FileNotFoundError, OSError):
             fp = None
         if fp is not None:
@@ -260,12 +287,7 @@ def require_valid_head(source_git_root: str) -> str:
     Raises IsolationExecutionError("missing_git_head", ...) when the
     repository has no commits (empty/unborn repo).
     """
-    result = subprocess.run(
-        ["git", "-C", source_git_root, "rev-parse", "--verify", "HEAD"],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    result = _run_git(source_git_root, ["rev-parse", "--verify", "HEAD"])
     if result.returncode != 0:
         raise IsolationExecutionError(
             "missing_git_head",
@@ -281,19 +303,9 @@ def require_clean_source(source_git_root: str) -> None:
     Raises IsolationExecutionError("dirty_source_workspace", ...) when
     git status --porcelain produces any output or exits non-zero.
     """
-    result = subprocess.run(
-        [
-            "git",
-            "-C",
-            source_git_root,
-            "status",
-            "--porcelain=v1",
-            "--untracked-files=normal",
-            "--ignore-submodules=none",
-        ],
-        text=True,
-        capture_output=True,
-        check=False,
+    result = _run_git(
+        source_git_root,
+        ["status", "--porcelain=v1", "--untracked-files=normal", "--ignore-submodules=none"],
     )
     if result.returncode != 0:
         raise IsolationExecutionError(
@@ -324,33 +336,27 @@ def create_persistent_worktree(
     "worktree_create_failed", ...) for other git failures (including
     "branch already checked out").
     """
+    branch_probe = _run_git(
+        source_git_root,
+        ["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+    )
+    if branch_probe.returncode == 0:
+        raise IsolationExecutionError(
+            "branch_collision",
+            f"Branch '{branch}' already exists. This indicates registry corruption or a clock anomaly.",
+        )
+    if branch_probe.returncode != 1:
+        raise IsolationExecutionError(
+            "worktree_create_failed",
+            f"Failed to verify branch availability for '{branch}': {branch_probe.stderr.strip()}",
+        )
     Path(worktree_path).parent.mkdir(parents=True, exist_ok=True)
-    result = subprocess.run(
-        [
-            "git",
-            "-C",
-            source_git_root,
-            "worktree",
-            "add",
-            "-b",
-            branch,
-            worktree_path,
-            base_oid,
-        ],
-        text=True,
-        capture_output=True,
-        check=False,
+    result = _run_git(
+        source_git_root,
+        ["worktree", "add", "-b", branch, worktree_path, base_oid],
     )
     if result.returncode != 0:
         stderr = result.stderr.strip()
-        # Detect "branch already exists" vs other failures.
-        if "already exists" in stderr and "branch" in stderr.lower():
-            raise IsolationExecutionError(
-                "branch_collision",
-                f"Branch '{branch}' already exists. "
-                f"This indicates registry corruption or a clock anomaly. "
-                f"Git stderr: {stderr}",
-            )
         raise IsolationExecutionError(
             "worktree_create_failed",
             f"Failed to create git worktree: {stderr}",
@@ -386,7 +392,9 @@ def prepend_persistent_worktree_context(prompt: str) -> str:
     function inserts the worktree context between the skill-review
     prefix and the rest of the prompt.
     """
-    from delegate_agent.runner import SKILL_REVIEW_PREFIX  # lazy: avoids runner -> cli -> isolation cycle
+    from delegate_agent.runner import (
+        SKILL_REVIEW_PREFIX,  # lazy: avoids runner -> cli -> isolation cycle
+    )
 
     if prompt.startswith(SKILL_REVIEW_PREFIX):
         insert_at = len(SKILL_REVIEW_PREFIX)
