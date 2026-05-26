@@ -263,6 +263,7 @@ def render_worktree_cleanup_commands(cleanup: JsonObject, stdout: TextIO) -> Non
     safe_cmd = cleanup.get("safe")
     force_branch = cleanup.get("forceBranch")
     discard = cleanup.get("discardUncommitted")
+    force = cleanup.get("force")
     raw_git = cleanup.get("rawGit")
     if safe_cmd:
         print(f"cleanup (refuses dirty / unmerged):       {safe_cmd}", file=stdout)
@@ -270,6 +271,8 @@ def render_worktree_cleanup_commands(cleanup: JsonObject, stdout: TextIO) -> Non
         print(f"cleanup (allow unmerged branch deletion): {force_branch}", file=stdout)
     if discard:
         print(f"cleanup (DISCARD uncommitted edits):      {discard}", file=stdout)
+    if force:
+        print(f"cleanup (DISCARD edits + delete branch):  {force}", file=stdout)
     if raw_git:
         print(f"raw git equivalent:                       {raw_git}", file=stdout)
 

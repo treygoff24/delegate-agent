@@ -438,6 +438,7 @@ class SnapshotCommandTests(unittest.TestCase):
             "safe": "delegate worktree remove demo",
             "forceBranch": "delegate worktree remove demo --force-branch",
             "discardUncommitted": "delegate worktree remove demo --discard-uncommitted",
+            "force": "delegate worktree remove demo --force",
             "rawGit": "git -C /repo worktree remove /wt && git -C /repo branch -d demo",
         }
         stdout = io.StringIO()
@@ -449,6 +450,7 @@ class SnapshotCommandTests(unittest.TestCase):
                 "cleanup (refuses dirty / unmerged):       delegate worktree remove demo\n"
                 "cleanup (allow unmerged branch deletion): delegate worktree remove demo --force-branch\n"
                 "cleanup (DISCARD uncommitted edits):      delegate worktree remove demo --discard-uncommitted\n"
+                "cleanup (DISCARD edits + delete branch):  delegate worktree remove demo --force\n"
                 "raw git equivalent:                       git -C /repo worktree remove /wt && git -C /repo branch -d demo\n"
             ),
         )
@@ -463,6 +465,7 @@ class SnapshotCommandTests(unittest.TestCase):
                     "safe": "delegate worktree remove demo",
                     "forceBranch": "delegate worktree remove demo --force-branch",
                     "discardUncommitted": "delegate worktree remove demo --discard-uncommitted",
+                    "force": "delegate worktree remove demo --force",
                     "rawGit": "git -C /repo worktree remove /wt",
                 },
             },
@@ -470,6 +473,7 @@ class SnapshotCommandTests(unittest.TestCase):
         )
         output = stdout.getvalue()
         self.assertIn("cleanup (refuses dirty / unmerged):       delegate worktree remove demo", output)
+        self.assertIn("cleanup (DISCARD edits + delete branch):  delegate worktree remove demo --force", output)
         self.assertIn("raw git equivalent:                       git -C /repo worktree remove /wt", output)
 
     def test_render_worktree_list_text_includes_auto_prune_footer(self):

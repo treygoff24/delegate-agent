@@ -207,6 +207,7 @@ def _worktree_cleanup_commands(ctx: RunContext) -> JsonObject | None:
         "safe": f"delegate worktree remove {alias_str}",
         "forceBranch": f"delegate worktree remove {alias_str} --force-branch",
         "discardUncommitted": f"delegate worktree remove {alias_str} --discard-uncommitted",
+        "force": f"delegate worktree remove {alias_str} --force",
         "rawGit": f"{shlex.join(remove_argv)} && {shlex.join(branch_argv)}",
     }
 

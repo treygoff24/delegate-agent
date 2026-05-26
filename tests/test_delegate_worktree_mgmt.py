@@ -641,6 +641,10 @@ class WorktreeMgmtTests(unittest.TestCase):
             self.assertEqual(payload["orphans"][0]["reason"], "worktree_metadata_missing")
             state = self.delegate.run_registry.load_run_state(self._registry_root(path), run_id)
             self.assertEqual(state["worktreeStatus"], "unknown")
+            listed = self.delegate.worktree_mgmt.list_worktrees(self._registry_root(path))
+            entry = listed["entries"][0]
+            self.assertEqual(entry["worktreeStatus"], "unknown")
+            self.assertIn("worktree path is not registered with git", entry["warnings"])
 
     def test_not_worktree_run_error(self):
         _repo, path = self._make_repo()

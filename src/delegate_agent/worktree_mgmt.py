@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shlex
 import subprocess
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -28,6 +29,15 @@ STATUS_REMOVED = "removed"
 STATUS_MISSING = "missing"
 STATUS_UNKNOWN = "unknown"
 VALID_STATUSES = {STATUS_PRESENT, STATUS_REMOVED, STATUS_MISSING, STATUS_UNKNOWN}
+
+
+def _registered_worktree_path_matches(listed_paths: set[str], execution_cwd: str) -> bool:
+    if execution_cwd in listed_paths:
+        return True
+    try:
+        return str(Path(execution_cwd).resolve()) in listed_paths
+    except OSError:
+        return False
 
 
 class WorktreeManagementError(Exception):
@@ -271,6 +281,11 @@ def detect_worktree_status(record: JsonObject) -> tuple[str, list[str]]:
         return STATUS_UNKNOWN, ["missing sourceGitRoot metadata"]
     if not isinstance(branch, str) or not branch:
         return STATUS_UNKNOWN, ["missing branch metadata"]
+    listed_paths, list_warning = _worktree_list_paths_with_warning(source_git_root)
+    if listed_paths is None:
+        return STATUS_UNKNOWN, [list_warning or "could not list registered git worktrees"]
+    if not _registered_worktree_path_matches(listed_paths, execution_cwd):
+        return STATUS_UNKNOWN, ["worktree path is not registered with git"]
     branch_exists = _branch_exists(source_git_root, branch)
     if branch_exists is True:
         return STATUS_PRESENT, warnings
@@ -1168,7 +1183,10 @@ def _worktree_list_paths_with_warning(source_git_root: str) -> tuple[set[str] | 
     paths: set[str] = set()
     for line in result.stdout.splitlines():
         if line.startswith("worktree "):
-            paths.add(line[len("worktree "):])
+            path = line[len("worktree "):]
+            paths.add(path)
+            with suppress(OSError):
+                paths.add(str(Path(path).resolve()))
     return paths, None
 
 
@@ -1287,7 +1305,7 @@ def gc_worktrees(registry_root: Path, *, dry_run: bool = False) -> JsonObject:
                         )
                         append_orphan(fresh, fresh_execution, "worktree_list_failed", list_warning)
             continue
-        if listed_paths is not None and execution not in listed_paths:
+        if listed_paths is not None and not _registered_worktree_path_matches(listed_paths, execution):
             if dry_run:
                 append_orphan(record, execution, "worktree_metadata_missing")
             else:
@@ -1302,7 +1320,7 @@ def gc_worktrees(registry_root: Path, *, dry_run: bool = False) -> JsonObject:
                     if (
                         Path(fresh_execution).exists()
                         and fresh_paths is not None
-                        and fresh_execution not in fresh_paths
+                        and not _registered_worktree_path_matches(fresh_paths, fresh_execution)
                     ):
                         run_registry.set_worktree_status_locked(
                             registry_root,

@@ -633,7 +633,7 @@ The two destructive overrides are split deliberately so an LLM orchestrator cann
 
 - `--discard-uncommitted`: override the dirty-worktree refusal. **This is the data-loss flag** — uncommitted edits in the worktree are lost.
 - `--force-branch`: switch `git branch -d` → `git branch -D` so an unmerged branch is deleted. The branch tip is still recoverable via reflog for ~30 days, so this is less destructive than `--discard-uncommitted` but still worth being explicit.
-- `--force`: shorthand for `--discard-uncommitted --force-branch`. Provided for convenience; docs and the prompt note discourage routine use. Completion output prints the split form, not the shorthand.
+- `--force`: shorthand for `--discard-uncommitted --force-branch`. Provided for convenience; docs and the prompt note discourage routine use. Completion output prints both the split forms and the shorthand so orchestrators can choose the least destructive explicit verb.
 
 `--keep-branch`: removes the worktree path but skips branch deletion entirely. Useful when the branch was already merged/pushed externally and the user wants to retain it as a ref. Mutually exclusive with `--force-branch`.
 
@@ -708,10 +708,11 @@ The completion output for a persistent worktree run prints structured cleanup ve
 cleanup (refuses dirty / unmerged):       delegate worktree remove cursor-4
 cleanup (allow unmerged branch deletion): delegate worktree remove cursor-4 --force-branch
 cleanup (DISCARD uncommitted edits):      delegate worktree remove cursor-4 --discard-uncommitted
+cleanup (DISCARD edits + delete branch):  delegate worktree remove cursor-4 --force
 raw git equivalent:                       git -C /Users/treygoff/Code/example worktree remove --force /Users/treygoff/.delegate/worktrees/abc123def456/cursor-20260524T184455Z-a1b2c3 && git -C /Users/treygoff/Code/example branch -D delegate/cursor-20260524T184455Z-a1b2c3
 ```
 
-Snapshot JSON gains `worktreeCleanupCommands` (object with `safe`, `forceBranch`, `discardUncommitted`, and `rawGit` keys) when the run is persistent worktree mode. Agents should prefer the structured verbs; the raw line is for human eyeball use.
+Snapshot JSON gains `worktreeCleanupCommands` (object with `safe`, `forceBranch`, `discardUncommitted`, `force`, and `rawGit` keys) when the run is persistent worktree mode. Agents should prefer the structured verbs; the raw line is for human eyeball use.
 
 ## Policy and sandbox interaction
 
@@ -832,7 +833,7 @@ Worktree management:
 - Error payloads include `code`, `message`, `alias`, `runId`, `branch`, `executionCwd`, `sourceGitRoot`, optional `dirtyPaths`, `nextActions`, and `retrySafe`. Tested for `dirty_worktree`, `worktree_remove_failed`, `not_worktree_run`, `no_registry`, `unknown_handle`.
 - Two `delegate worktree remove` invocations on the same handle race-free: the second sees `worktreeStatus = removed` and exits success with `noop: true` without re-running git, and without blocking for the full 30s `registry_lock` timeout (assert elapsed < 5s).
 - Lazy `dirty` / `mergedIntoSource` fields are tri-state and return `null` (with a warning) when git is unavailable or returns non-zero.
-- Cleanup hints in completion output and snapshot JSON show `safe`, `forceBranch`, `discardUncommitted`, and `rawGit` forms.
+- Cleanup hints in completion output and snapshot JSON show `safe`, `forceBranch`, `discardUncommitted`, `force`, and `rawGit` forms.
 - `ahead/behind` reports both `vsCreationBase` (using `creationContext.sourceHeadOid`) and `vsCurrentHead`, and the two diverge correctly after the source advances.
 - Persistent worktree run with source `HEAD` detached at creation records `sourceHeadRef: null` and `worktree show` includes the "integration target unknown" warning.
 - `git worktree add` failure with `branch already checked out` surfaces as `worktree_create_failed` with the underlying git stderr.
