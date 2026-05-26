@@ -9,6 +9,7 @@ from pathlib import Path
 from delegate_agent import run_registry
 from delegate_agent.git_utils import (
     GIT_MUTATION_TIMEOUT_SECONDS,
+    GIT_QUICK_TIMEOUT_SECONDS,
     GIT_TIMEOUT_RETURN_CODE,
     timeout_completed_process,
 )
@@ -66,7 +67,12 @@ def _shell(args: list[str]) -> str:
     return shlex.join(args)
 
 
-def _run_git(cwd: str, args: list[str]) -> subprocess.CompletedProcess[str]:
+def _run_git(
+    cwd: str,
+    args: list[str],
+    *,
+    timeout_seconds: int = GIT_MUTATION_TIMEOUT_SECONDS,
+) -> subprocess.CompletedProcess[str]:
     command = ["git", "-C", cwd, *args]
     try:
         return subprocess.run(
@@ -74,13 +80,13 @@ def _run_git(cwd: str, args: list[str]) -> subprocess.CompletedProcess[str]:
             text=True,
             capture_output=True,
             check=False,
-            timeout=GIT_MUTATION_TIMEOUT_SECONDS,
+            timeout=timeout_seconds,
         )
     except subprocess.TimeoutExpired as exc:
         return timeout_completed_process(
             command,
             exc,
-            timeout_seconds=GIT_MUTATION_TIMEOUT_SECONDS,
+            timeout_seconds=timeout_seconds,
         )
 
 
@@ -237,7 +243,11 @@ def _branch_ref(branch: str) -> str:
 
 
 def _branch_exists(source_git_root: str, branch: str) -> bool | None:
-    result = _run_git(source_git_root, ["rev-parse", "--verify", "--quiet", _branch_ref(branch)])
+    result = _run_git(
+        source_git_root,
+        ["rev-parse", "--verify", "--quiet", _branch_ref(branch)],
+        timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
+    )
     if result.returncode == 0:
         return True
     if result.returncode == 1:
@@ -277,6 +287,7 @@ def porcelain_status(
     result = _run_git(
         execution_cwd,
         ["status", "--porcelain=v1", "--untracked-files=normal", "--ignore-submodules=none"],
+        timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
     )
     if result.returncode != 0:
         return None, None, [f"git status failed: {result.stderr.strip()}"]
@@ -299,7 +310,11 @@ def dirty_info(record: JsonObject, status: str) -> tuple[bool | None, list[str],
 
 
 def _merge_base_is_ancestor(source_git_root: str, branch: str) -> bool | None:
-    result = _run_git(source_git_root, ["merge-base", "--is-ancestor", _branch_ref(branch), "HEAD"])
+    result = _run_git(
+        source_git_root,
+        ["merge-base", "--is-ancestor", _branch_ref(branch), "HEAD"],
+        timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
+    )
     if result.returncode == 0:
         return True
     if result.returncode == 1:
@@ -329,7 +344,11 @@ def merged_into_source(
 
 
 def _rev_parse(source_git_root: str, rev: str) -> str | None:
-    result = _run_git(source_git_root, ["rev-parse", "--verify", rev])
+    result = _run_git(
+        source_git_root,
+        ["rev-parse", "--verify", rev],
+        timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
+    )
     if result.returncode != 0:
         return None
     return result.stdout.strip()
@@ -337,14 +356,22 @@ def _rev_parse(source_git_root: str, rev: str) -> str | None:
 
 def _symbolic_ref(source_git_root: str, rev: str) -> str | None:
     """Return the symbolic ref (e.g. `refs/heads/main`) or None if detached/missing."""
-    result = _run_git(source_git_root, ["symbolic-ref", "--quiet", rev])
+    result = _run_git(
+        source_git_root,
+        ["symbolic-ref", "--quiet", rev],
+        timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
+    )
     if result.returncode != 0:
         return None
     return result.stdout.strip() or None
 
 
 def _ahead_behind(source_git_root: str, branch: str, base: str) -> JsonObject | None:
-    result = _run_git(source_git_root, ["rev-list", "--left-right", "--count", f"{base}...{branch}"])
+    result = _run_git(
+        source_git_root,
+        ["rev-list", "--left-right", "--count", f"{base}...{branch}"],
+        timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
+    )
     if result.returncode != 0:
         return None
     parts = result.stdout.strip().split()
@@ -622,6 +649,9 @@ def _apply_branch_removal_result(
         payload["error"] = code
         payload["exitCode"] = WORKTREE_ERROR_EXIT_CODE
         payload["branchRemovalError"] = result.error
+        if payload.get("pathRemoved") is True:
+            payload["partialSuccess"] = True
+            payload["nextActions"] = [f"delegate worktree remove {alias} --force-branch"]
 
 
 def _normalize_remove_options(
@@ -1003,11 +1033,11 @@ def remove_worktree(
         return payload
 
 
-def _older_than(record: JsonObject, days: int) -> bool:
+def _older_than(record: JsonObject, days: int) -> bool | None:
     timestamp = record.get("lastActivityAt")
     dt = run_registry.parse_utc_timestamp(timestamp if isinstance(timestamp, str) else None)
     if dt is None:
-        return False
+        return None
     return dt < datetime.now(UTC) - timedelta(days=days)
 
 
@@ -1078,9 +1108,14 @@ def prune_worktrees(
                     reason = "merge_check_failed" if merged_value is None else "unmerged_branch"
                     skipped.append({"alias": alias, "runId": record.get("runId"), "reason": reason})
                     continue
-        if older_than_days is not None and not _older_than(record, older_than_days):
-            skipped.append({"alias": alias, "runId": record.get("runId"), "reason": "not_yet_old_enough"})
-            continue
+        if older_than_days is not None:
+            old_enough = _older_than(record, older_than_days)
+            if old_enough is None:
+                skipped.append({"alias": alias, "runId": record.get("runId"), "reason": "invalid_last_activity"})
+                continue
+            if not old_enough:
+                skipped.append({"alias": alias, "runId": record.get("runId"), "reason": "not_yet_old_enough"})
+                continue
         candidate = {
             "alias": alias,
             "runId": record.get("runId"),
@@ -1122,7 +1157,11 @@ def prune_worktrees(
 
 
 def _worktree_list_paths_with_warning(source_git_root: str) -> tuple[set[str] | None, str | None]:
-    result = _run_git(source_git_root, ["worktree", "list", "--porcelain"])
+    result = _run_git(
+        source_git_root,
+        ["worktree", "list", "--porcelain"],
+        timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
+    )
     if result.returncode != 0:
         detail = result.stderr.strip() or f"git worktree list failed with exit {result.returncode}"
         return None, detail
@@ -1227,7 +1266,6 @@ def gc_worktrees(registry_root: Path, *, dry_run: bool = False) -> JsonObject:
                         registry_root,
                         str(fresh["runId"]),
                         "missing",
-                        removed_at=_utc_now_iso(),
                     )
                     prune_roots.add(fresh_source)
                     append_missing(fresh, fresh_execution)

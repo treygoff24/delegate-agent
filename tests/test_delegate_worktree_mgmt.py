@@ -580,6 +580,7 @@ class WorktreeMgmtTests(unittest.TestCase):
             self.assertGreaterEqual(payload["reconciled"], 1)
             state = self.delegate.run_registry.load_run_state(self._registry_root(path), run_id)
             self.assertEqual(state["worktreeStatus"], "missing")
+            self.assertNotIn("worktreeRemovedAt", state)
 
     def test_worktree_gc_existing_orphan_path_is_not_deleted_and_marked_unknown(self):
         _repo, path = self._make_repo()
@@ -907,8 +908,13 @@ class WorktreeMgmtTests(unittest.TestCase):
             self.assertEqual(result["code"], "branch_remove_failed")
             self.assertTrue(result["removed"])
             self.assertTrue(result["pathRemoved"])
+            self.assertTrue(result["partialSuccess"])
             self.assertFalse(result["branchRemoved"])
             self.assertEqual(result["branchRemovalError"], "fatal: cannot delete branch")
+            self.assertEqual(
+                result["nextActions"],
+                ["delegate worktree remove cursor-partial-branch-error --force-branch"],
+            )
             self.assertFalse(Path(wt_path).exists())
             state = self.delegate.run_registry.load_run_state(self._registry_root(path), run_id)
             self.assertIsNotNone(state)
@@ -1159,6 +1165,31 @@ class WorktreeMgmtTests(unittest.TestCase):
             skipped_aliases = {e["alias"]: e["reason"] for e in result.get("skipped", [])}
             self.assertIn("cursor-old", planned_aliases)
             self.assertEqual(skipped_aliases.get("cursor-recent"), "not_yet_old_enough")
+
+    def test_prune_older_than_reports_invalid_last_activity(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            branch = "delegate/cursor-invalid-activity"
+            wt_path = str(Path(fake_home) / "wt" / "cursor-invalid-activity")
+            self._seed_persistent_run(
+                path,
+                alias="cursor-invalid-activity",
+                branch=branch,
+                execution_cwd=wt_path,
+                last_activity_at="not-a-timestamp",
+            )
+            self._create_worktree_at(path, branch, wt_path)
+
+            result = self.delegate.worktree_mgmt.prune_worktrees(
+                self._registry_root(path),
+                merged=True,
+                older_than_days=7,
+                dry_run=True,
+            )
+
+            self.assertEqual(result["planned"], [])
+            skipped_aliases = {entry["alias"]: entry["reason"] for entry in result["skipped"]}
+            self.assertEqual(skipped_aliases["cursor-invalid-activity"], "invalid_last_activity")
 
     def test_maybe_auto_prune_runs_when_enabled(self):
         _repo, path = self._make_repo()
@@ -1676,6 +1707,7 @@ class WorktreeMgmtTests(unittest.TestCase):
         run_git.assert_called_once_with(
             "/repo",
             ["merge-base", "--is-ancestor", "refs/heads/delegate/cursor-demo", "HEAD"],
+            timeout_seconds=self.delegate.worktree_mgmt.GIT_QUICK_TIMEOUT_SECONDS,
         )
 
     def test_run_git_timeout_returns_structured_failure(self):
@@ -1688,6 +1720,21 @@ class WorktreeMgmtTests(unittest.TestCase):
             result = self.delegate.worktree_mgmt._run_git(path, ["status"])
         self.assertEqual(result.returncode, 124)
         self.assertIn("git command timed out", result.stderr)
+
+    def test_porcelain_status_uses_quick_git_timeout(self):
+        _repo, path = self._make_repo()
+        completed = subprocess.CompletedProcess(["git"], 0, "", "")
+        with mock.patch.object(
+            self.delegate.worktree_mgmt.subprocess,
+            "run",
+            return_value=completed,
+        ) as run:
+            self.delegate.worktree_mgmt.porcelain_status(path)
+
+        self.assertEqual(
+            run.call_args.kwargs["timeout"],
+            self.delegate.worktree_mgmt.GIT_QUICK_TIMEOUT_SECONDS,
+        )
 
     def test_merged_into_source_returns_null_when_git_unavailable(self):
         _repo, path = self._make_repo()

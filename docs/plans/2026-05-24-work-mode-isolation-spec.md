@@ -653,7 +653,7 @@ Default flow (no override flags):
 
 `--force-branch` flow: same as default but skips the step 6 refusal and step 8 uses `git branch -D`.
 
-JSON schema: `delegate.worktree-remove.v1`. Fields: `ok`, `alias`, `runId`, `branch`, `executionCwd`, `sourceGitRoot`, `removed`, `pathRemoved`, `branchRemoved`, `branchKept`, `worktreeStatus`, `discardedDirtyPaths` (when `--discard-uncommitted` was used), `noop`.
+JSON schema: `delegate.worktree-remove.v1`. Fields: `ok`, `alias`, `runId`, `branch`, `executionCwd`, `sourceGitRoot`, `removed`, `pathRemoved`, `branchRemoved`, `branchKept`, `branchRemovalError`, `partialSuccess`, `nextActions`, `worktreeStatus`, `discardedDirtyPaths` (when `--discard-uncommitted` was used), `noop`. `partialSuccess: true` means the worktree path was removed but branch cleanup failed; follow `nextActions` before treating the cleanup as fully complete.
 
 ### `delegate worktree prune`
 
@@ -665,8 +665,8 @@ delegate [--cwd PATH] [--json] worktree prune [--merged] [--older-than DAYS]
 
 Bulk removal. At least one of `--merged` or `--older-than` must be passed (else `prune_filter_required`); passing both narrows the set to entries matching **both** filters. Selection rules:
 
-- `--merged`: only `present` worktrees whose branch is reachable from current source `HEAD`. Entries whose `creationContext.sourceHeadRef` is null are skipped unless `--include-detached` is passed.
-- `--older-than DAYS`: only `present` worktrees whose `lastActivityAt` is older than `DAYS` days.
+- `--merged`: run the source-HEAD merge-safety pass. Fully merged clean worktrees remove both the path and branch; clean unmerged worktrees may still remove the path while keeping the branch (`branchKept: "unmerged"`); entries whose `creationContext.sourceHeadRef` is null are skipped unless `--include-detached` is passed.
+- `--older-than DAYS`: only `present` worktrees whose `lastActivityAt` is older than `DAYS` days. Entries with missing or unparseable activity timestamps are skipped with `invalid_last_activity`.
 - `--harness HARNESS`: filter to one harness.
 - Dirty worktrees are skipped unless `--discard-uncommitted` is passed.
 - Unmerged branches in clean worktrees are removed at the path level but the branch is kept (`branchKept: "unmerged"`) unless `--force-branch` is passed.
@@ -674,7 +674,7 @@ Bulk removal. At least one of `--merged` or `--older-than` must be passed (else 
 
 `--dry-run` prints what would be removed and exits without mutating. Without `--dry-run`, removal runs the same lock-protected per-entry logic as `delegate worktree remove`. Each entry is atomic; one failure does not block the rest.
 
-JSON schema: `delegate.worktree-prune.v1`. Returns `planned` (array), `removed` (array), `skipped` (array with per-entry `reason`), and `errors` (array with per-entry error envelopes). Recognized skip reasons: `dirty`, `unmerged_branch`, `path_missing`, `detached_source`, `not_yet_old_enough`, `not_merged`, `harness_filter`.
+JSON schema: `delegate.worktree-prune.v1`. Returns `planned` (array), `removed` (array), `skipped` (array with per-entry `reason`), and `errors` (array with per-entry error envelopes). Recognized skip reasons: `dirty`, `dirty_check_failed`, `unmerged_branch`, `merge_check_failed`, `path_missing`, `detached_source`, `not_yet_old_enough`, `invalid_last_activity`, `not_merged`, `harness_filter`.
 
 ### `delegate worktree gc`
 
@@ -685,9 +685,10 @@ delegate [--cwd PATH] [--json] worktree gc [--dry-run]
 Reconcile registry vs disk reality. For every persistent-worktree run in the registry whose `worktreeStatus` is `present` or `unknown`:
 
 1. Run `git -C <sourceGitRoot> worktree list --porcelain` once per distinct `sourceGitRoot` and parse the output into a set of known worktree paths.
-2. If `executionCwd` does not exist on disk: run `git -C <sourceGitRoot> worktree prune` once per source root (idempotent), then set the registry entry's `worktreeStatus = missing` and record `worktreeRemovedAt = utc_now_iso()`. The registry treats this as an external-cleanup acknowledgement, not a Delegate-driven removal.
-3. If `executionCwd` exists but is not in the `git worktree list --porcelain` set (orphaned after manual deletion of `.git/worktrees/<id>` administrative metadata), set `worktreeStatus = unknown` and surface the path in the `orphans` array. Do not delete the path.
-4. If `executionCwd` and the path appear in `git worktree list --porcelain` but the branch (`creationContext.branch`) no longer resolves via `git rev-parse --verify <branch>`, surface in `orphans` with reason `branch_missing`. Do not delete the path.
+2. If `executionCwd` does not exist on disk: run `git -C <sourceGitRoot> worktree prune` once per source root (idempotent), then set the registry entry's `worktreeStatus = missing` without setting `worktreeRemovedAt`. The registry treats this as an external-cleanup acknowledgement, not a Delegate-driven removal.
+3. If `git worktree list --porcelain` fails for a source root while `executionCwd` still exists, set `worktreeStatus = unknown` and surface the path in the `orphans` array with reason `worktree_list_failed`. Do not delete the path.
+4. If `executionCwd` exists but is not in the `git worktree list --porcelain` set (orphaned after manual deletion of `.git/worktrees/<id>` administrative metadata), set `worktreeStatus = unknown` and surface the path in the `orphans` array. Do not delete the path.
+5. If `executionCwd` and the path appear in `git worktree list --porcelain` but the branch (`creationContext.branch`) no longer resolves via `git rev-parse --verify <branch>`, surface in `orphans` with reason `branch_missing`. Do not delete the path.
 
 `gc` never deletes a worktree path; only `remove` / `prune` do. `--dry-run` prints findings without writing registry changes.
 

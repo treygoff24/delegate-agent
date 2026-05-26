@@ -213,7 +213,7 @@ delegate worktree gc
 
 #### Exit codes
 
-Worktree management commands exit 0 only when the top-level payload reports `ok: true`. Safety refusals and operational failures exit 2 and still emit the structured JSON payload when `--json` is set. Some cleanup failures are intentionally partial: for example, `delegate worktree remove` can return `ok: false` with `removed: true` and `pathRemoved: true` when the worktree path was removed but branch deletion failed. In that case inspect `branchRemoved`, `branchKept`, and `branchRemovalError` before retrying branch cleanup.
+Worktree management commands exit 0 only when the top-level payload reports `ok: true`. Safety refusals and operational failures exit 2 and still emit the structured JSON payload when `--json` is set. Some cleanup failures are intentionally partial: for example, `delegate worktree remove` can return `ok: false` with `partialSuccess: true`, `removed: true`, and `pathRemoved: true` when the worktree path was removed but branch deletion failed. In that case inspect `branchRemoved`, `branchKept`, `branchRemovalError`, and `nextActions` before retrying branch cleanup.
 
 #### `delegate worktree list`
 
@@ -243,7 +243,7 @@ Remove one persistent worktree and optionally delete its branch.
 - `--force-branch`: delete an unmerged branch.
 - `--force`: shorthand for both `--discard-uncommitted --force-branch`.
 - `--keep-branch`: remove the worktree path but keep the branch.
-- If branch deletion fails after the path has been removed, the command reports `ok: false` but preserves the successful path cleanup in `pathRemoved: true`; retry or manually inspect the branch named in `branchRemovalError`.
+- If branch deletion fails after the path has been removed, the command reports `ok: false` and `partialSuccess: true` but preserves the successful path cleanup in `pathRemoved: true`; retry with the emitted `nextActions` or manually inspect the branch named in `branchRemovalError`.
 
 ```bash
 delegate worktree remove cursor-4                    # refuses if dirty or unmerged
