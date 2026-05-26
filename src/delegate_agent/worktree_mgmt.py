@@ -387,7 +387,7 @@ def _ahead_behind(source_git_root: str, branch: str, base: str) -> JsonObject | 
 
 
 def ahead_behind(record: JsonObject, status: str) -> JsonObject | None:
-    if status != STATUS_PRESENT:
+    if status not in (STATUS_PRESENT, STATUS_UNKNOWN):
         return None
     source_git_root = record.get("sourceGitRoot")
     branch = record.get("branch")
@@ -419,7 +419,7 @@ def suggested_commands(record: JsonObject, status: str) -> JsonObject:
     review_diff_base = None
     merge = None
     cherry = None
-    if isinstance(execution_cwd, str) and status == STATUS_PRESENT:
+    if isinstance(execution_cwd, str) and status in (STATUS_PRESENT, STATUS_UNKNOWN):
         review_diff = _shell(["git", "-C", execution_cwd, "diff", "--stat", "HEAD"])
         if isinstance(base, str) and base:
             review_diff_base = _shell(["git", "-C", execution_cwd, "diff", "--stat", base])
@@ -584,7 +584,7 @@ def show_worktree(
     porcelain: list[str] | None = None
     porcelain_total = 0
     porcelain_truncated = False
-    if entry.get("worktreeStatus") == STATUS_PRESENT and isinstance(execution_cwd, str):
+    if entry.get("worktreeStatus") in (STATUS_PRESENT, STATUS_UNKNOWN) and isinstance(execution_cwd, str):
         lines, total, warnings = porcelain_status(execution_cwd, limit=50)
         if lines is not None:
             porcelain = lines

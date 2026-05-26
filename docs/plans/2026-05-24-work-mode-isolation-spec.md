@@ -583,8 +583,8 @@ For each entry, compute lazily (without taking the registry lock — see "Concur
 
 - `alias`, `runId`, `harness`, `branch`, `executionCwd`, `sourceGitRoot`, `createdAt`, `lastActivityAt`, `computedAt`
 - `worktreeStatus`: `present` (path + branch both exist), `removed` (registry says removed), `missing` (registry says present but path no longer exists on disk), or `unknown`
-- `dirty`: tri-state — `true`, `false`, or `null`. Only attempted for `present` entries; result of `git -C <executionCwd> status --porcelain=v1 --untracked-files=normal --ignore-submodules=none`. `null` when git is unavailable or the command errors; the underlying error is recorded in the entry's `warnings` list.
-- `mergedIntoSource`: tri-state — `true`, `false`, or `null`. Only attempted for `present` entries; computed via `git -C <sourceGitRoot> merge-base --is-ancestor <branch> HEAD`. `null` when git errors or when `creationContext.sourceHeadRef` is null and `--include-detached` was not passed.
+- `dirty`: tri-state — `true`, `false`, or `null`. Attempted for `present` entries and for `unknown` entries whose path still exists so operators can inspect uncertain worktrees; result of `git -C <executionCwd> status --porcelain=v1 --untracked-files=normal --ignore-submodules=none`. `null` when git is unavailable or the command errors; the underlying error is recorded in the entry's `warnings` list.
+- `mergedIntoSource`: tri-state — `true`, `false`, or `null`. Attempted for `present` entries and for inspectable `unknown` entries; computed via `git -C <sourceGitRoot> merge-base --is-ancestor <branch> HEAD`. `null` when git errors or when `creationContext.sourceHeadRef` is null and `--include-detached` was not passed.
 
 `lastActivityAt` is the run's last state-file write timestamp (set by the runner during execution and frozen at child exit). Management commands never update `lastActivityAt`; it is immutable after the child exits.
 
@@ -614,8 +614,8 @@ Fields returned (JSON schema `delegate.worktree-show.v1`):
 
 - All fields from `worktree list` plus:
 - `creationContext`: `{ sourceHeadOid, sourceHeadRef, sourceBranch, sourceGitCommonDir }` captured at run launch.
-- `porcelainStatus`: first 50 lines of `git status --porcelain=v1` inside the worktree, plus `porcelainStatusTruncated: bool` and `porcelainStatusTotalLines: int`. `null` if the path is missing.
-- `aheadBehind`: object with two sub-objects: `vsCreationBase: { ahead, behind, baseOid }` and `vsCurrentHead: { ahead, behind, baseOid }` where `baseOid` is the comparison reference. Either sub-object is `null` when uncomputable (path missing, git error, detached creation without `--include-detached`).
+- `porcelainStatus`: first 50 lines of `git status --porcelain=v1` inside the worktree, plus `porcelainStatusTruncated: bool` and `porcelainStatusTotalLines: int`. Computed for `present` and inspectable `unknown` entries; `null` if the path is missing or not a Git worktree.
+- `aheadBehind`: object with two sub-objects: `vsCreationBase: { ahead, behind, baseOid }` and `vsCurrentHead: { ahead, behind, baseOid }` where `baseOid` is the comparison reference. Computed for `present` and inspectable `unknown` entries. Either sub-object is `null` when uncomputable (path missing, git error, detached creation without `--include-detached`).
 - `suggestedCommands`: object with `reviewDiff`, `reviewDiffVsCreationBase`, `mergeIntoSource`, `cherryPickRange`, `safeRemove`, `discardAndRemove` shell strings (or `null` for any that don't apply). Each value is a self-contained shell-safe string.
 
 Text output renders alias, status, creation context line (e.g., `created from main@abc1234; source now at main@def5678`), dirty/merged flags, both ahead/behind pairs, the porcelain block (with truncation indicator), and the suggested-commands block.

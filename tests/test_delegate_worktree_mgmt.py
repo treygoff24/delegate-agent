@@ -244,6 +244,40 @@ class WorktreeMgmtTests(unittest.TestCase):
             self.assertIn("?? scratch.txt", payload["porcelainStatus"])
             self.assertIn("safeRemove", payload["suggestedCommands"])
 
+    def test_worktree_show_unknown_status_still_includes_inspection_data(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            base_oid = git("rev-parse", "HEAD", cwd=path).stdout.strip()
+            branch = "delegate/cursor-show-unknown"
+            wt_path = str(Path(fake_home) / "wt" / "cursor-show-unknown")
+            self._seed_persistent_run(
+                path,
+                alias="cursor-show-unknown",
+                branch=branch,
+                execution_cwd=wt_path,
+                creation_oid=base_oid,
+            )
+            self._create_worktree_at(path, branch, wt_path)
+            (Path(wt_path) / "feature.txt").write_text("feature\n", encoding="utf-8")
+            git("add", "feature.txt", cwd=wt_path)
+            git("commit", "-m", "feature", cwd=wt_path)
+            (Path(wt_path) / "scratch.txt").write_text("scratch\n", encoding="utf-8")
+
+            with mock.patch.object(
+                self.delegate.worktree_mgmt,
+                "detect_worktree_status",
+                return_value=("unknown", ["forced unknown for inspection"]),
+            ):
+                payload = self.delegate.worktree_mgmt.show_worktree(
+                    self._registry_root(path),
+                    handle="cursor-show-unknown",
+                )
+
+            self.assertEqual(payload["worktreeStatus"], "unknown")
+            self.assertGreaterEqual(payload["aheadBehind"]["vsCreationBase"]["ahead"], 1)
+            self.assertIn("?? scratch.txt", payload["porcelainStatus"])
+            self.assertIn("reviewDiff", payload["suggestedCommands"])
+
     def test_worktree_remove_dirty_fails_with_envelope(self):
         _repo, path = self._make_repo()
         with tempfile.TemporaryDirectory() as fake_home:
@@ -1285,7 +1319,6 @@ class WorktreeMgmtTests(unittest.TestCase):
                 "code": "branch_remove_failed",
                 "error": "branch_remove_failed",
                 "message": "branch cleanup failed",
-                "exitCode": self.delegate.EXIT_USAGE,
             }
             with mock.patch.object(
                 self.delegate.worktree_mgmt,
@@ -1300,8 +1333,9 @@ class WorktreeMgmtTests(unittest.TestCase):
             payload = json.loads(out)
             self.assertEqual(code, self.delegate.EXIT_USAGE)
             self.assertFalse(payload["ok"])
-            self.assertEqual(payload["exitCode"], self.delegate.EXIT_USAGE)
+            self.assertEqual(payload["exitCode"], self.delegate.worktree_mgmt.WORKTREE_ERROR_EXIT_CODE)
             self.assertEqual(payload["autoPrune"]["code"], "branch_remove_failed")
+            self.assertNotIn("exitCode", payload["autoPrune"])
 
     def test_worktree_prune_include_detached_cli_plans_detached_worktree(self):
         _repo, path = self._make_repo()

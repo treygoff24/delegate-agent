@@ -1170,7 +1170,11 @@ def _worktree_list_payload(
         if auto_prune.get("ok") is False and auto_prune.get("skipped") is not True:
             payload["ok"] = False
             exit_code = auto_prune.get("exitCode")
-            payload["exitCode"] = exit_code if isinstance(exit_code, int) else EXIT_USAGE
+            payload["exitCode"] = (
+                exit_code
+                if isinstance(exit_code, int)
+                else worktree_mgmt.WORKTREE_ERROR_EXIT_CODE
+            )
     return payload
 
 
