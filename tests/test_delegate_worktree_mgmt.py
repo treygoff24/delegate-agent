@@ -1434,6 +1434,106 @@ class WorktreeMgmtTests(unittest.TestCase):
             self.assertTrue(len(warnings) > 0)
             self.assertTrue(warnings[0].startswith("git status failed:"))
 
+    def test_dirty_info_checks_unknown_status_when_path_exists(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            branch = "delegate/cursor-unknown-dirty"
+            wt_path = str(Path(fake_home) / "wt" / "cursor-unknown-dirty")
+            run_id, _alias = self._seed_persistent_run(path, branch=branch, execution_cwd=wt_path)
+            self._create_worktree_at(path, branch, wt_path, dirty_file="scratch.txt")
+            record = self.delegate.worktree_mgmt._record_for_run(
+                self._registry_root(path), run_id, {}
+            )
+
+            dirty, paths, total, warnings = self.delegate.worktree_mgmt.dirty_info(
+                record,
+                "unknown",
+            )
+
+            self.assertTrue(dirty)
+            self.assertEqual(total, 1)
+            self.assertEqual(warnings, [])
+            self.assertIn("scratch.txt", paths[0])
+
+    def test_worktree_remove_unknown_dirty_status_refuses_without_discard(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            branch = "delegate/cursor-unknown-remove-dirty"
+            wt_path = str(Path(fake_home) / "wt" / "cursor-unknown-remove-dirty")
+            self._seed_persistent_run(
+                path,
+                alias="cursor-unknown-remove-dirty",
+                branch=branch,
+                execution_cwd=wt_path,
+            )
+            self._create_worktree_at(path, branch, wt_path, dirty_file="scratch.txt")
+
+            with (
+                mock.patch.object(
+                    self.delegate.worktree_mgmt,
+                    "detect_worktree_status",
+                    return_value=("unknown", ["forced unknown"]),
+                ),
+                self.assertRaises(self.delegate.worktree_mgmt.WorktreeManagementError) as ctx,
+            ):
+                self.delegate.worktree_mgmt.remove_worktree(
+                    self._registry_root(path),
+                    handle="cursor-unknown-remove-dirty",
+                )
+
+            self.assertEqual(ctx.exception.code, "dirty_worktree")
+
+    def test_worktree_remove_unknown_status_still_checks_unmerged_branch(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            branch = "delegate/cursor-unknown-unmerged"
+            wt_path = str(Path(fake_home) / "wt" / "cursor-unknown-unmerged")
+            self._seed_persistent_run(
+                path,
+                alias="cursor-unknown-unmerged",
+                branch=branch,
+                execution_cwd=wt_path,
+            )
+            self._create_worktree_at(path, branch, wt_path)
+
+            with (
+                mock.patch.object(
+                    self.delegate.worktree_mgmt,
+                    "detect_worktree_status",
+                    return_value=("unknown", ["forced unknown"]),
+                ),
+                mock.patch.object(
+                    self.delegate.worktree_mgmt,
+                    "merged_into_source",
+                    return_value=(False, []),
+                ),
+                self.assertRaises(self.delegate.worktree_mgmt.WorktreeManagementError) as ctx,
+            ):
+                self.delegate.worktree_mgmt.remove_worktree(
+                    self._registry_root(path),
+                    handle="cursor-unknown-unmerged",
+                )
+
+            self.assertEqual(ctx.exception.code, "unmerged_branch")
+
+    def test_merge_base_checks_qualified_branch_ref(self):
+        completed = subprocess.CompletedProcess(["git"], 0, "", "")
+        with mock.patch.object(
+            self.delegate.worktree_mgmt,
+            "_run_git",
+            return_value=completed,
+        ) as run_git:
+            result = self.delegate.worktree_mgmt._merge_base_is_ancestor(
+                "/repo",
+                "delegate/cursor-demo",
+            )
+
+        self.assertTrue(result)
+        run_git.assert_called_once_with(
+            "/repo",
+            ["merge-base", "--is-ancestor", "refs/heads/delegate/cursor-demo", "HEAD"],
+        )
+
     def test_run_git_timeout_returns_structured_failure(self):
         _repo, path = self._make_repo()
         with mock.patch.object(

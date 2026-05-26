@@ -233,8 +233,12 @@ def _reload_record(registry_root: Path, run_id: str) -> JsonObject | None:
     return _record_for_run(registry_root, run_id, index_entry if isinstance(index_entry, dict) else {})
 
 
+def _branch_ref(branch: str) -> str:
+    return branch if branch.startswith("refs/heads/") else f"refs/heads/{branch}"
+
+
 def _branch_exists(source_git_root: str, branch: str) -> bool | None:
-    result = _run_git(source_git_root, ["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"])
+    result = _run_git(source_git_root, ["rev-parse", "--verify", "--quiet", _branch_ref(branch)])
     if result.returncode == 0:
         return True
     if result.returncode == 1:
@@ -284,7 +288,7 @@ def porcelain_status(
 
 
 def dirty_info(record: JsonObject, status: str) -> tuple[bool | None, list[str], int | None, list[str]]:
-    if status != STATUS_PRESENT:
+    if status not in (STATUS_PRESENT, STATUS_UNKNOWN):
         return None, [], None, []
     execution_cwd = record.get("executionCwd")
     if not isinstance(execution_cwd, str) or not execution_cwd:
@@ -296,7 +300,7 @@ def dirty_info(record: JsonObject, status: str) -> tuple[bool | None, list[str],
 
 
 def _merge_base_is_ancestor(source_git_root: str, branch: str) -> bool | None:
-    result = _run_git(source_git_root, ["merge-base", "--is-ancestor", branch, "HEAD"])
+    result = _run_git(source_git_root, ["merge-base", "--is-ancestor", _branch_ref(branch), "HEAD"])
     if result.returncode == 0:
         return True
     if result.returncode == 1:
@@ -310,7 +314,7 @@ def merged_into_source(
     *,
     include_detached: bool = False,
 ) -> tuple[bool | None, list[str]]:
-    if status != STATUS_PRESENT:
+    if status not in (STATUS_PRESENT, STATUS_UNKNOWN):
         return None, []
     creation = record.get("creationContext")
     if isinstance(creation, dict) and creation.get("sourceHeadRef") is None and not include_detached:
@@ -684,7 +688,7 @@ def _raise_if_unmerged_without_override(
 ) -> None:
     """Raise ``unmerged_branch`` when the branch is not merged into source
     and the caller did not request ``--keep-branch`` or ``--force-branch``."""
-    if status != STATUS_PRESENT:
+    if status not in (STATUS_PRESENT, STATUS_UNKNOWN):
         return
     if not isinstance(branch, str) or not branch:
         return

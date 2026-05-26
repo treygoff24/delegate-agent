@@ -1261,6 +1261,7 @@ class ExecutionTests(unittest.TestCase):
 
         self.assertGreater(worktree_idx, skill_idx)
         self.assertGreater(user_idx, worktree_idx)
+        self.assertIn("delegate worktree remove <alias> --force", PERSISTENT_WORKTREE_CONTEXT_NOTE)
 
     # -- worktreeStatus is set to "present" after run -------------------------
 

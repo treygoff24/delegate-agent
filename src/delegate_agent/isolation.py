@@ -389,6 +389,8 @@ PERSISTENT_WORKTREE_CONTEXT_NOTE = (
     "(allow unmerged-branch deletion), "
     "`delegate worktree remove <alias> --discard-uncommitted` "
     "(DISCARDS uncommitted edits), "
+    "`delegate worktree remove <alias> --force` "
+    "(shorthand for both destructive overrides), "
     "or `delegate worktree prune --merged` for bulk integrated entries."
     "\n\n"
 )
