@@ -655,12 +655,25 @@ def _raise_if_dirty_without_discard(
     *,
     dirty: bool | None,
     dirty_paths: list[str],
+    dirty_warnings: list[str] | None = None,
     discard_uncommitted: bool,
     record: JsonObject,
     alias: str,
 ) -> None:
-    """Raise ``dirty_worktree`` when the worktree has uncommitted changes and
-    the caller did not request ``--discard-uncommitted``."""
+    """Fail closed when dirty state is unsafe to discard implicitly."""
+    if dirty is None and not discard_uncommitted:
+        raise WorktreeManagementError(
+            _error_payload(
+                "dirty_check_failed",
+                "Could not determine whether the worktree has uncommitted changes; inspect it or pass --discard-uncommitted to remove anyway.",
+                record=record,
+                warnings=dirty_warnings or None,
+                next_actions=[
+                    f"delegate worktree show {alias}",
+                    f"delegate worktree remove {alias} --discard-uncommitted",
+                ],
+            )
+        )
     if dirty is True and not discard_uncommitted:
         raise WorktreeManagementError(
             _error_payload(
@@ -879,13 +892,15 @@ def remove_worktree(
         # Dirty guard: refuse to remove uncommitted work unless explicitly asked.
         dirty, dirty_paths, _dirty_total, dirty_warnings = dirty_info(record, status)
         all_warnings = [*warnings, *dirty_warnings]
-        _raise_if_dirty_without_discard(
-            dirty=dirty,
-            dirty_paths=dirty_paths,
-            discard_uncommitted=discard_uncommitted,
-            record=record,
-            alias=alias,
-        )
+        if status in (STATUS_PRESENT, STATUS_UNKNOWN):
+            _raise_if_dirty_without_discard(
+                dirty=dirty,
+                dirty_paths=dirty_paths,
+                dirty_warnings=dirty_warnings,
+                discard_uncommitted=discard_uncommitted,
+                record=record,
+                alias=alias,
+            )
 
         # Metadata validation.
         source_git_root, execution_cwd = _require_removal_metadata(record)
@@ -1041,6 +1056,12 @@ def prune_worktrees(
         # Compute dirty before the merged check so the merged branch path
         # can test dirty state without rebinding a later assignment.
         dirty, _dirty_paths, _dirty_total, _dirty_warnings = dirty_info(record, status)
+        if dirty is None and not discard_uncommitted:
+            skipped.append({"alias": alias, "runId": record.get("runId"), "reason": "dirty_check_failed"})
+            continue
+        if dirty is True and not discard_uncommitted:
+            skipped.append({"alias": alias, "runId": record.get("runId"), "reason": "dirty"})
+            continue
         keep_branch_for_prune = False
         merged_check_already_passed = False
         if merged:
@@ -1059,9 +1080,6 @@ def prune_worktrees(
                     continue
         if older_than_days is not None and not _older_than(record, older_than_days):
             skipped.append({"alias": alias, "runId": record.get("runId"), "reason": "not_yet_old_enough"})
-            continue
-        if dirty is True and not discard_uncommitted:
-            skipped.append({"alias": alias, "runId": record.get("runId"), "reason": "dirty"})
             continue
         candidate = {
             "alias": alias,
@@ -1153,14 +1171,22 @@ def gc_worktrees(registry_root: Path, *, dry_run: bool = False) -> JsonObject:
             "worktreeStatus": STATUS_MISSING,
         })
 
-    def append_orphan(record: JsonObject, execution: str, reason: str) -> None:
-        orphans.append({
+    def append_orphan(
+        record: JsonObject,
+        execution: str,
+        reason: str,
+        message: str | None = None,
+    ) -> None:
+        entry = {
             "alias": record.get("alias"),
             "runId": record.get("runId"),
             "executionCwd": execution,
             "branch": record.get("branch"),
             "reason": reason,
-        })
+        }
+        if message:
+            entry["message"] = message
+        orphans.append(entry)
 
     for record in records:
         current = record.get("registryWorktreeStatus")
@@ -1177,6 +1203,14 @@ def gc_worktrees(registry_root: Path, *, dry_run: bool = False) -> JsonObject:
             if warning is not None:
                 warnings.append({"sourceGitRoot": source, "message": warning})
         listed_paths = paths_by_root[source]
+        list_warning = next(
+            (
+                str(warning.get("message"))
+                for warning in warnings
+                if warning.get("sourceGitRoot") == source and isinstance(warning.get("message"), str)
+            ),
+            None,
+        )
         path_exists = Path(execution).exists()
         if not path_exists:
             if dry_run:
@@ -1197,6 +1231,23 @@ def gc_worktrees(registry_root: Path, *, dry_run: bool = False) -> JsonObject:
                     )
                     prune_roots.add(fresh_source)
                     append_missing(fresh, fresh_execution)
+            continue
+        if listed_paths is None:
+            if dry_run:
+                append_orphan(record, execution, "worktree_list_failed", list_warning)
+            else:
+                with run_registry.registry_lock(registry_root):
+                    fresh_candidate = _reload_gc_candidate(registry_root, record)
+                    if fresh_candidate is None:
+                        continue
+                    fresh, _fresh_source, fresh_execution = fresh_candidate
+                    if Path(fresh_execution).exists():
+                        run_registry.set_worktree_status_locked(
+                            registry_root,
+                            str(fresh["runId"]),
+                            "unknown",
+                        )
+                        append_orphan(fresh, fresh_execution, "worktree_list_failed", list_warning)
             continue
         if listed_paths is not None and execution not in listed_paths:
             if dry_run:

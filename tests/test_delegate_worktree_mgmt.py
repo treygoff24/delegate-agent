@@ -983,6 +983,65 @@ class WorktreeMgmtTests(unittest.TestCase):
             self.assertEqual(payload["error"], "git_timeout")
             self.assertEqual(payload["exitCode"], self.delegate.EXIT_USAGE)
 
+    def test_worktree_remove_refuses_when_dirty_check_fails_without_discard(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            branch = "delegate/cursor-dirty-check-failed"
+            wt_path = str(Path(fake_home) / "wt" / "cursor-dirty-check-failed")
+            self._seed_persistent_run(
+                path,
+                alias="cursor-dirty-check-failed",
+                branch=branch,
+                execution_cwd=wt_path,
+            )
+            self._create_worktree_at(path, branch, wt_path)
+
+            with (
+                mock.patch.object(
+                    self.delegate.worktree_mgmt,
+                    "porcelain_status",
+                    return_value=(None, None, ["git status failed: boom"]),
+                ),
+                self.assertRaises(self.delegate.worktree_mgmt.WorktreeManagementError) as ctx,
+            ):
+                self.delegate.worktree_mgmt.remove_worktree(
+                    self._registry_root(path),
+                    handle="cursor-dirty-check-failed",
+                )
+
+            self.assertEqual(ctx.exception.code, "dirty_check_failed")
+            self.assertIn("git status failed: boom", ctx.exception.payload["warnings"])
+            self.assertTrue(Path(wt_path).exists())
+
+    def test_worktree_prune_skips_when_dirty_check_fails(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            branch = "delegate/cursor-prune-dirty-check-failed"
+            wt_path = str(Path(fake_home) / "wt" / "cursor-prune-dirty-check-failed")
+            self._seed_persistent_run(
+                path,
+                alias="cursor-prune-dirty-check-failed",
+                branch=branch,
+                execution_cwd=wt_path,
+            )
+            self._create_worktree_at(path, branch, wt_path)
+
+            with mock.patch.object(
+                self.delegate.worktree_mgmt,
+                "porcelain_status",
+                return_value=(None, None, ["git status failed: boom"]),
+            ):
+                result = self.delegate.worktree_mgmt.prune_worktrees(
+                    self._registry_root(path),
+                    merged=True,
+                    dry_run=True,
+                )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["planned"], [])
+            skipped = {entry["alias"]: entry["reason"] for entry in result["skipped"]}
+            self.assertEqual(skipped["cursor-prune-dirty-check-failed"], "dirty_check_failed")
+
     def test_worktree_prune_reports_nested_remove_payload_failure(self):
         _repo, path = self._make_repo()
         with tempfile.TemporaryDirectory() as fake_home:
@@ -1434,7 +1493,7 @@ class WorktreeMgmtTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as fake_home:
             branch = "delegate/cursor-gc-warning"
             wt_path = str(Path(fake_home) / "wt" / "cursor-gc-warning")
-            self._seed_persistent_run(path, branch=branch, execution_cwd=wt_path)
+            run_id, _alias = self._seed_persistent_run(path, branch=branch, execution_cwd=wt_path)
             self._create_worktree_at(path, branch, wt_path)
 
             with mock.patch.object(
@@ -1447,6 +1506,10 @@ class WorktreeMgmtTests(unittest.TestCase):
             self.assertTrue(result["warnings"])
             self.assertEqual(result["warnings"][0]["sourceGitRoot"], path)
             self.assertIn("worktree list failed", result["warnings"][0]["message"])
+            self.assertEqual(result["orphans"][0]["reason"], "worktree_list_failed")
+            self.assertIn("worktree list failed", result["orphans"][0]["message"])
+            state = self.delegate.run_registry.load_run_state(self._registry_root(path), run_id)
+            self.assertEqual(state["worktreeStatus"], "unknown")
 
     def test_double_remove_noop_under_5s(self):
         _repo, path = self._make_repo()

@@ -4,6 +4,15 @@ Logged 2026-05-25, after landing the bug/test cleanup pass on top of `44586a1`.
 
 This doc captures everything the consolidated review identified that was **not** fixed in the cleanup pass — deferred refactors, latent code-quality smells, partial test coverage, and non-code TODOs. Anything not listed here is either resolved on `main` or out of scope for the worktree-isolation feature.
 
+> Historical note (2026-05-26): this file records the state immediately after
+> commit `6113a21`, not the current `codex/worktree-followups-autonomous`
+> branch. The follow-up branch has since addressed many items below, and the
+> live source of truth is the runtime/docs/tests themselves: `README.md`,
+> `AGENTS.md`, `docs/live-runtime.md`,
+> `docs/plans/2026-05-24-work-mode-isolation-spec.md`, and
+> `tests/test_delegate_worktree_mgmt.py`. The current full test gate is 384
+> tests, not the historical 344-test count below.
+
 ## Cleanup pass summary
 
 9 commits landed on top of `44586a1`, taking main to `6113a21`. Suite at 344 tests green (was 324 before housekeeping deletions; net +22 new tests, -2 dead tests).
@@ -166,12 +175,14 @@ For clarity on what was *not* changed during the cleanup pass:
 
 ---
 
-## Ship recommendation
+## Historical ship recommendation
 
-The bug+coverage scope is resolved through Wave 4. Codex's read came back as "minor findings, no blockers" — all three real findings (pre-launch snapshot semantics, `worktree show` text ordering, `maybe_auto_prune` lock-probe theatre) plus four of his five test-proof gaps landed. The remaining bullets:
+This recommendation applied to the Wave 4 cleanup at `6113a21`; it is retained only as provenance and should not be used as the current branch merge recommendation.
+
+The bug+coverage scope was resolved through Wave 4. Codex's read came back as "minor findings, no blockers" — all three real findings (pre-launch snapshot semantics, `worktree show` text ordering, `maybe_auto_prune` lock-probe theatre) plus four of his five test-proof gaps landed. At that point, the remaining bullets were:
 
 - **Section 1** deferred refactors (`_execute_persistent_worktree`, `remove_worktree`, `parse_worktree`/`emit_worktree`) — meaningful next-pass work; none of them block ship.
 - **Section 2** gaps — L837 stays a gap until §3.6 is fixed; `--no-auto-prune` CLI plumbing untested; detached `prune --include-detached` happy path untested; tri-state warning text shape unpinned.
 - **Section 3** latent smells — all real, none ship-blocking. §3.6 is the most load-bearing because it gates §2.1; §3.9 (`_run_git` no timeout) is the most operationally risky because `gc_worktrees` can park the registry lock indefinitely under network-filesystem flake.
 
-Ship.
+Historical recommendation at that point: ship.

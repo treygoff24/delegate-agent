@@ -188,7 +188,7 @@ Set isolation defaults in `.delegate/config.json` (per-repo) or `~/.delegate/con
 
 - `isolation.safe` / `isolation.work`: one of `auto`, `none`, or `worktree`.
 - `worktrees.dataHome`: override the persistent worktree root (`~/.delegate/worktrees` by default). Must be an absolute or `~/`-prefixed path, or `null`.
-- `worktrees.autoPrune.enabled`: when `true`, `delegate worktree list` runs an opportunistic prune pass that removes clean, fully-merged worktrees older than `mergedOlderThanDays`. If that prune pass fails, JSON output includes `autoPrune.ok: false` and the command exits non-zero even when the list entries were rendered successfully.
+- `worktrees.autoPrune.enabled`: when `true`, `delegate worktree list` runs an opportunistic prune pass that removes clean, fully-merged worktrees older than `mergedOlderThanDays`. Auto-prune intentionally excludes worktrees created from a detached source HEAD; use `delegate worktree prune --merged --include-detached` when you want that explicit cleanup. If that prune pass fails, JSON output includes `autoPrune.ok: false` and the command exits non-zero even when the list entries were rendered successfully.
 - The embedded default for `isolation.work` is `none` for backward compatibility. Repos can set `isolation.work = "worktree"` to dogfood the feature.
 
 ## Persistent worktree lifecycle
