@@ -956,6 +956,7 @@ class ExecutionTests(unittest.TestCase):
                 source_workspace=workspace, stdout=io.StringIO(), stderr=io.StringIO(),
             )
         self.assertEqual(ctx.exception.error, "pass_through_with_persistent_isolation")
+        self.assertIn("persistent worktree runs", ctx.exception.message)
 
     # -- Persistent worktree: cursor work runs in isolated worktree -----------
 

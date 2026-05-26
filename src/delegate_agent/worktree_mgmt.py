@@ -819,6 +819,7 @@ def remove_worktree(
     keep_branch: bool = False,
     force: bool = False,
     _skip_lock: bool = False,
+    _merged_check_already_passed: bool = False,
 ) -> JsonObject:
     discard_uncommitted, force_branch, keep_branch = _normalize_remove_options(
         discard_uncommitted=discard_uncommitted,
@@ -881,14 +882,15 @@ def remove_worktree(
         branch = record.get("branch")
 
         # Unmerged-branch guard.
-        _raise_if_unmerged_without_override(
-            record=record,
-            status=status,
-            branch=branch,
-            keep_branch=keep_branch,
-            force_branch=force_branch,
-            alias=alias,
-        )
+        if not _merged_check_already_passed:
+            _raise_if_unmerged_without_override(
+                record=record,
+                status=status,
+                branch=branch,
+                keep_branch=keep_branch,
+                force_branch=force_branch,
+                alias=alias,
+            )
 
         discarded_paths = dirty_paths if discard_uncommitted and dirty_paths else None
 
@@ -1031,12 +1033,14 @@ def prune_worktrees(
         # can test dirty state without rebinding a later assignment.
         dirty, _dirty_paths, _dirty_total, _dirty_warnings = dirty_info(record, status)
         keep_branch_for_prune = False
+        merged_check_already_passed = False
         if merged:
             merged_value, _merge_warnings = merged_into_source(
                 record,
                 status,
                 include_detached=include_detached,
             )
+            merged_check_already_passed = merged_value is True
             if merged_value is not True:
                 if merged_value is False and not force_branch and dirty is not True:
                     keep_branch_for_prune = True
@@ -1070,6 +1074,7 @@ def prune_worktrees(
                         force_branch=force_branch,
                         keep_branch=candidate.get("keep_branch", False),
                         _skip_lock=_skip_lock,
+                        _merged_check_already_passed=merged_check_already_passed,
                     )
                 )
                 if removed[-1].get("ok") is False:

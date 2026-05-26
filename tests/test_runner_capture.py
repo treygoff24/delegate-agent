@@ -358,3 +358,8 @@ class RunnerCaptureTests(unittest.TestCase):
                 output,
             )
             self.assertIn("raw git equivalent:", output)
+            self.assertIn(f"git -C {workspace} worktree remove {Path(workspace) / 'wt'}", output)
+            self.assertIn("git -C", output)
+            self.assertIn("branch -d delegate/cursor-demo", output)
+            self.assertNotIn("worktree remove --force", output)
+            self.assertNotIn("branch -D", output)

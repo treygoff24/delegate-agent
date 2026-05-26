@@ -1176,6 +1176,45 @@ class WorktreeMgmtTests(unittest.TestCase):
             planned_aliases = {entry["alias"] for entry in payload["planned"]}
             self.assertIn("cursor-detached-cli", planned_aliases)
 
+    def test_worktree_prune_include_detached_cli_removes_detached_worktree(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            branch = "delegate/cursor-detached-cli-remove"
+            wt_path = str(Path(fake_home) / "wt" / "cursor-detached-cli-remove")
+            run_id, _alias = self._seed_persistent_run(
+                path,
+                alias="cursor-detached-cli-remove",
+                branch=branch,
+                execution_cwd=wt_path,
+                source_head_ref=None,
+            )
+            self._create_worktree_at(path, branch, wt_path)
+
+            code, out, _err = self._run_cli(
+                [
+                    "--cwd",
+                    path,
+                    "--json",
+                    "worktree",
+                    "prune",
+                    "--merged",
+                    "--include-detached",
+                ],
+                home=fake_home,
+            )
+
+            self.assertEqual(code, 0)
+            payload = json.loads(out)
+            self.assertTrue(payload["ok"])
+            self.assertEqual([entry["alias"] for entry in payload["removed"]], ["cursor-detached-cli-remove"])
+            self.assertFalse(Path(wt_path).exists())
+            self.assertNotEqual(
+                git("rev-parse", "--verify", branch, cwd=path, check=False).returncode,
+                0,
+            )
+            state = self.delegate.run_registry.load_run_state(self._registry_root(path), run_id)
+            self.assertEqual(state["worktreeStatus"], "removed")
+
     def test_worktree_prune_harness_filter_limits_candidates(self):
         _repo, path = self._make_repo()
         with tempfile.TemporaryDirectory() as fake_home:
@@ -1368,7 +1407,7 @@ class WorktreeMgmtTests(unittest.TestCase):
                 "safe": "delegate worktree remove cursor-cleanup",
                 "forceBranch": "delegate worktree remove cursor-cleanup --force-branch",
                 "discardUncommitted": "delegate worktree remove cursor-cleanup --discard-uncommitted",
-                "rawGit": "git -C /src worktree remove --force /wt/cursor-cleanup && git -C /src branch -D delegate/cursor-cleanup",
+                "rawGit": "git -C /src worktree remove /wt/cursor-cleanup && git -C /src branch -d delegate/cursor-cleanup",
             }
             self.delegate.run_registry.write_json_atomic(run_path / "manifest.json", manifest)
 

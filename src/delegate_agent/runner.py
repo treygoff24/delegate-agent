@@ -201,8 +201,8 @@ def _worktree_cleanup_commands(ctx: RunContext) -> JsonObject | None:
     source_git = ctx.source_git_root or ""
     exec_cwd = ctx.execution_cwd
     branch = ctx.branch
-    remove_argv = ["git", "-C", source_git, "worktree", "remove", "--force", exec_cwd]
-    branch_argv = ["git", "-C", source_git, "branch", "-D", branch]
+    remove_argv = ["git", "-C", source_git, "worktree", "remove", exec_cwd]
+    branch_argv = ["git", "-C", source_git, "branch", "-d", branch]
     return {
         "safe": f"delegate worktree remove {alias_str}",
         "forceBranch": f"delegate worktree remove {alias_str} --force-branch",
@@ -268,8 +268,6 @@ def build_snapshot(
             "path": report_path,
             "command": run_registry.run_output_command(ctx.alias, completion_report=True),
         }
-    if ctx.creation_context is not None:
-        snapshot["creationContext"] = ctx.creation_context
     return snapshot
 
 

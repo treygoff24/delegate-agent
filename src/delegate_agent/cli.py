@@ -2188,7 +2188,7 @@ def _validate_persistent_worktree_request(
     if pass_through:
         raise DelegateError(
             "pass_through_with_persistent_isolation",
-            "--pass-through is not supported with --isolation worktree in work mode.",
+            "--pass-through is not supported with persistent worktree runs (work mode + effective worktree isolation).",
         )
 
     registry_root = run_registry.ensure_registry(

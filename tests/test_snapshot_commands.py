@@ -438,7 +438,7 @@ class SnapshotCommandTests(unittest.TestCase):
             "safe": "delegate worktree remove demo",
             "forceBranch": "delegate worktree remove demo --force-branch",
             "discardUncommitted": "delegate worktree remove demo --discard-uncommitted",
-            "rawGit": "git -C /repo worktree remove --force /wt && git -C /repo branch -D demo",
+            "rawGit": "git -C /repo worktree remove /wt && git -C /repo branch -d demo",
         }
         stdout = io.StringIO()
         self.rendering.render_worktree_cleanup_commands(cleanup, stdout)
@@ -449,7 +449,7 @@ class SnapshotCommandTests(unittest.TestCase):
                 "cleanup (refuses dirty / unmerged):       delegate worktree remove demo\n"
                 "cleanup (allow unmerged branch deletion): delegate worktree remove demo --force-branch\n"
                 "cleanup (DISCARD uncommitted edits):      delegate worktree remove demo --discard-uncommitted\n"
-                "raw git equivalent:                       git -C /repo worktree remove --force /wt && git -C /repo branch -D demo\n"
+                "raw git equivalent:                       git -C /repo worktree remove /wt && git -C /repo branch -d demo\n"
             ),
         )
 
@@ -463,14 +463,14 @@ class SnapshotCommandTests(unittest.TestCase):
                     "safe": "delegate worktree remove demo",
                     "forceBranch": "delegate worktree remove demo --force-branch",
                     "discardUncommitted": "delegate worktree remove demo --discard-uncommitted",
-                    "rawGit": "git -C /repo worktree remove --force /wt",
+                    "rawGit": "git -C /repo worktree remove /wt",
                 },
             },
             stdout,
         )
         output = stdout.getvalue()
         self.assertIn("cleanup (refuses dirty / unmerged):       delegate worktree remove demo", output)
-        self.assertIn("raw git equivalent:                       git -C /repo worktree remove --force /wt", output)
+        self.assertIn("raw git equivalent:                       git -C /repo worktree remove /wt", output)
 
 
 if __name__ == "__main__":
