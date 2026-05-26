@@ -33,5 +33,16 @@
     "workSandbox": "workspace-write",
     "ephemeral": true,
     "ignoreUserConfig": false
+  },
+  "isolation": {
+    "safe": "auto",
+    "work": "none"
+  },
+  "worktrees": {
+    "dataHome": null,
+    "autoPrune": {
+      "enabled": false,
+      "mergedOlderThanDays": 7
+    }
   }
 }

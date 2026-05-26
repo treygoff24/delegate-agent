@@ -237,6 +237,40 @@ class RunnerCaptureTests(unittest.TestCase):
         )
         self.assertEqual(payload["exitCode"], 0)
 
+    def test_persistent_worktree_completion_payload_includes_force_cleanup_command(self):
+        ctx = self.runner.RunContext(
+            registry_root=Path("/tmp"),
+            run_id="run-1",
+            alias="cursor-1",
+            harness="cursor",
+            engine="cursor",
+            mode="work",
+            model="composer-2.5",
+            source_cwd="/repo",
+            execution_cwd="/wt",
+            workspace_kind="git",
+            isolated_workspace=True,
+            started_at="2026-05-20T21:42:33Z",
+            source_git_root="/repo",
+            isolation_mode="worktree",
+            effective_isolation="worktree",
+            isolation_lifecycle="persistent",
+            preserved_workspace=True,
+            branch="delegate/cursor-1",
+            worktree_status="present",
+        )
+        payload = self.runner.completion_json_payload(
+            ctx,
+            ok=True,
+            status="succeeded",
+            exit_code=0,
+            duration_ms=100,
+            stdout_bytes=0,
+            stderr_bytes=0,
+        )
+        cleanup = payload["worktreeCleanupCommands"]
+        self.assertEqual(cleanup["force"], "delegate worktree remove cursor-1 --force")
+
     def test_join_drain_thread_completes_after_pipe_drained(self):
         reader, writer = os.pipe()
         os.write(writer, b"line\n")
@@ -319,3 +353,47 @@ class RunnerCaptureTests(unittest.TestCase):
         maybe_persist_running()
         maybe_persist_running()
         self.assertEqual(outcomes, ["persisted", "skipped"])
+
+    def test_emit_bounded_text_summary_uses_shared_cleanup_renderer(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="git")
+            run_id, alias = self.registry.register_run(root, harness="cursor")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="cursor",
+                engine="cursor",
+                mode="work",
+                model="composer-2.5",
+                source_cwd=workspace,
+                execution_cwd=str(Path(workspace) / "wt"),
+                workspace_kind="git",
+                isolated_workspace=True,
+                started_at="2026-05-20T21:42:33Z",
+                source_git_root=workspace,
+                isolation_lifecycle="persistent",
+                branch="delegate/cursor-demo",
+            )
+            stdout = io.StringIO()
+            self.runner.emit_bounded_text_summary(
+                ctx,
+                status="completed",
+                duration_ms=1200,
+                stdout=stdout,
+            )
+            output = stdout.getvalue()
+            self.assertIn(
+                f"cleanup (refuses dirty / unmerged):       delegate worktree remove {alias}",
+                output,
+            )
+            self.assertIn(
+                f"cleanup (DISCARD uncommitted edits):      delegate worktree remove {alias} --discard-uncommitted",
+                output,
+            )
+            self.assertIn("raw git equivalent:", output)
+            self.assertIn(f"git -C {workspace} worktree remove {Path(workspace) / 'wt'}", output)
+            self.assertIn("git -C", output)
+            self.assertIn("branch -d delegate/cursor-demo", output)
+            self.assertNotIn("worktree remove --force", output)
+            self.assertNotIn("branch -D", output)

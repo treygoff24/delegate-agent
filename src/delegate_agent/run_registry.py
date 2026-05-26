@@ -493,6 +493,21 @@ def build_run_summary(
         summary["current"] = state["current"]
     if isinstance(alias, str):
         summary["snapshotCommand"] = snapshot_command(alias)
+
+    # Isolation metadata: detect persistent worktree runs.
+    worktree_status = None
+    if state and isinstance(state.get("worktreeStatus"), str):
+        worktree_status = state["worktreeStatus"]
+        summary["worktreeStatus"] = worktree_status
+        summary["isolationLifecycle"] = "persistent"
+    if manifest:
+        execution_cwd = manifest.get("executionCwd")
+        if isinstance(execution_cwd, str) and execution_cwd:
+            summary["executionCwd"] = execution_cwd
+        source_git_root = manifest.get("sourceGitRoot")
+        if isinstance(source_git_root, str) and source_git_root:
+            summary["sourceGitRoot"] = source_git_root
+
     return summary
 
 
@@ -528,6 +543,66 @@ def timestamp_from_run_id(run_id: str) -> str:
         return ""
     raw = match.group(1)
     return f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}T{raw[9:11]}:{raw[11:13]}:{raw[13:15]}Z"
+
+
+def set_worktree_status(
+    registry_root: Path,
+    run_id: str,
+    status: str,
+    *,
+    removed_at: str | None = None,
+    discarded_dirty_paths: list[str] | None = None,
+    _skip_lock: bool = False,
+) -> JsonObject:
+    """Set the worktreeStatus field on a run's state, and optionally worktreeRemovedAt.
+
+    Acquires the registry lock, loads the run's state, updates fields,
+    persists via write_json_atomic, and returns the updated state.
+
+    Status must be one of: 'present', 'removed', 'missing', 'unknown'.
+    _skip_lock is for internal use when the caller already holds the registry lock.
+    """
+    valid_statuses = {"present", "removed", "missing", "unknown"}
+    if status not in valid_statuses:
+        raise ValueError(f"worktree status must be one of: {', '.join(sorted(valid_statuses))}")
+
+    def _write():
+        run_path = run_directory(registry_root, run_id)
+        state_path = run_path / STATE_FILE
+        if not state_path.exists():
+            raise FileNotFoundError(f"State file not found for run {run_id}")
+        state: JsonObject = json.loads(state_path.read_text(encoding="utf-8"))
+        state["worktreeStatus"] = status
+        if removed_at is not None:
+            state["worktreeRemovedAt"] = removed_at
+        if discarded_dirty_paths is not None:
+            state["discardedDirtyPaths"] = discarded_dirty_paths
+        write_json_atomic(state_path, state)
+        return state
+
+    if _skip_lock:
+        return _write()
+    with registry_lock(registry_root):
+        return _write()
+
+
+def set_worktree_status_locked(
+    registry_root: Path,
+    run_id: str,
+    status: str,
+    *,
+    removed_at: str | None = None,
+    discarded_dirty_paths: list[str] | None = None,
+) -> JsonObject:
+    """Set worktree status when the caller already holds the registry lock."""
+    return set_worktree_status(
+        registry_root,
+        run_id,
+        status,
+        removed_at=removed_at,
+        discarded_dirty_paths=discarded_dirty_paths,
+        _skip_lock=True,
+    )
 
 
 def latest_run_id_for_harness(registry_root: Path, index: JsonObject, harness: str) -> str | None:

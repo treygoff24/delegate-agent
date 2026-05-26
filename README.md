@@ -115,24 +115,172 @@ delegate run-output cursor --completion-report
 delegate run-output cursor --stderr --tail 100
 ```
 
-## Safe mode and work mode
+## Mode, isolation, and policy
 
-Delegate has two modes.
+Delegate separates three concepts that are often confused in agent runtimes:
 
-`safe` is for review and investigation. Cursor safe and Codex safe run against a temporary isolated workspace, not your source tree. Droid safe uses Droid's default read-only behavior in the real workspace.
+| Concept | Meaning |
+| --- | --- |
+| **Mode** | `safe` (review/investigation) vs `work` (edit-capable) |
+| **Isolation** | Where the child agent runs: source workspace, temporary copy, or a persistent Git worktree |
+| **Policy / Sandbox** | Additional runtime-level confinement applied inside the execution workspace (e.g. Codex `--sandbox read-only`, Cursor `-p --trust` only) |
 
-`work` is for file edits. It runs in the real workspace and uses the agent runtime's edit-capable flags. Treat it like giving another developer access to your checkout. Keep the prompt narrow and review the diff afterward.
+### Default behavior
 
-| Command | Where it runs | What it can do |
-| --- | --- | --- |
-| `delegate cursor safe` | isolated temporary copy | read-only review intent |
-| `delegate codex safe` | isolated temporary copy plus Codex read-only sandbox | read-only review intent |
-| `delegate droid MODEL safe` | real workspace | Droid default read-only posture |
-| `delegate cursor work` | real workspace | can edit files |
-| `delegate codex work` | real workspace with Codex workspace-write sandbox | can edit files |
-| `delegate droid MODEL work` | real workspace | can edit files |
+With no `--isolation` flag, Delegate uses its legacy defaults:
+
+| Command | Where it runs | Additional confinement | What it can do |
+| --- | --- | --- | --- |
+| `delegate cursor safe` | isolated temporary copy | `-p --trust` only; no plan/ask/force | read-only review intent |
+| `delegate codex safe` | isolated temporary copy plus Codex read-only sandbox | `--ask-for-approval never exec --sandbox read-only` | read-only review intent |
+| `delegate droid MODEL safe` | real workspace | Droid default read-only; no auto/spec/unsafe | read-only review intent |
+| `delegate cursor work` | real workspace | `--approve-mcps --force` | can edit files |
+| `delegate codex work` | real workspace with Codex workspace-write sandbox | `--ask-for-approval never exec --sandbox workspace-write` + network access | can edit files |
+| `delegate droid MODEL work` | real workspace | `--skip-permissions-unsafe` | can edit files |
 
 Delegate may write its own local run metadata under `.delegate/` in the source workspace for tracked runs. That metadata is ignored by Git. The child agent in Cursor safe or Codex safe still receives the isolated copy, not your source tree.
+
+### Isolation override
+
+The `--isolation` flag lets you control where the child runs, independently of mode:
+
+| Value | Effect |
+| --- | --- |
+| `auto` | Legacy defaults per the table above (explicit way to say "current behavior") |
+| `none` | Force the real source workspace; disables temporary isolation for safe mode |
+| `worktree` | Create a separate Git worktree; safe mode gets a temporary worktree, work mode gets a **persistent** worktree retained after the run |
+
+Examples:
+
+```bash
+delegate --isolation worktree cursor work "Implement the fix and run the test."
+delegate --isolation worktree codex safe "Review in an isolated temp worktree."
+delegate --isolation none cursor safe "Review in the real workspace (use sparingly)."
+```
+
+`--isolation worktree` for work mode creates a persistent Git worktree under `~/.delegate/worktrees/` and a local branch. The source checkout is not modified by the child agent's relative-path edits.
+
+**Important**: worktree isolation protects the source checkout from ordinary relative-path edits. It does not prevent the child runtime from running commands, using credentials available to the process, accessing the network according to its runtime and Delegate policy, or intentionally writing to absolute paths outside the execution workspace.
+
+#### Pass-through restriction
+
+`--pass-through` is unsupported for any persistent worktree run (work mode + effective `worktree` isolation), including Droid. The combination fails before any artifacts are created. `--pass-through` is still allowed with temporary safe-mode worktree isolation.
+
+### Configurable defaults
+
+Set isolation defaults in `.delegate/config.json` (per-repo) or `~/.delegate/config.json` (per-user):
+
+```json
+{
+  "isolation": {
+    "safe": "auto",
+    "work": "none"
+  },
+  "worktrees": {
+    "dataHome": null,
+    "autoPrune": {
+      "enabled": false,
+      "mergedOlderThanDays": 7
+    }
+  }
+}
+```
+
+- `isolation.safe` / `isolation.work`: one of `auto`, `none`, or `worktree`.
+- `worktrees.dataHome`: override the persistent worktree root (`~/.delegate/worktrees` by default). Must be an absolute or `~/`-prefixed path, or `null`.
+- `worktrees.autoPrune.enabled`: when `true`, `delegate worktree list` runs an opportunistic prune pass that removes clean, fully-merged worktrees older than `mergedOlderThanDays`. Auto-prune intentionally excludes worktrees created from a detached source HEAD; use `delegate worktree prune --merged --include-detached` when you want that explicit cleanup. If that prune pass fails, JSON output includes `autoPrune.ok: false` and the command exits non-zero even when the list entries were rendered successfully.
+- The embedded default for `isolation.work` is `none` for backward compatibility. Repos can set `isolation.work = "worktree"` to dogfood the feature.
+
+## Persistent worktree lifecycle
+
+When `--isolation worktree` and `work` mode are combined:
+
+1. Delegate verifies the source is a Git workspace with at least one commit and a clean working tree (no staged, unstaged, or untracked changes).
+2. It creates a persistent Git worktree at `~/.delegate/worktrees/<repo-fingerprint>/<label>-<run-id>/` with a local branch named `delegate/<label>-<short-run-id>`.
+3. The child agent runs inside the worktree and receives a prompt note explaining the isolation contract.
+4. After the child exits (success or failure), the worktree and branch are preserved. Delegate does **not** auto-merge, auto-commit, or auto-push.
+5. Inspect, merge, or discard the work using the management commands below.
+
+### Worktree management commands
+
+```bash
+delegate worktree list
+delegate worktree show <alias-or-runId>
+delegate worktree remove <alias-or-runId>
+delegate worktree prune --merged --dry-run
+delegate worktree gc
+```
+
+#### Exit codes
+
+Worktree management commands exit 0 only when the top-level payload reports `ok: true`. Safety refusals and operational failures exit 2 and still emit the structured JSON payload when `--json` is set. Some cleanup failures are intentionally partial: for example, `delegate worktree remove` can return `ok: false` with `partialSuccess: true`, `removed: true`, and `pathRemoved: true` when the worktree path was removed but branch deletion failed. In that case inspect `branchRemoved`, `branchKept`, `branchRemovalError`, and `nextActions` before retrying branch cleanup.
+
+#### `delegate worktree list`
+
+List persistent-worktree runs from the current workspace registry. Shows alias, status (present / missing / removed / unknown), harness, age, branch, dirty flag, and whether changes are merged into the source. `unknown` means Delegate could not fully reconcile the worktree metadata, such as a path that still exists but is missing Git metadata or whose branch no longer resolves; inspect with `delegate worktree show` before cleanup.
+
+```bash
+delegate worktree list
+delegate worktree list --harness cursor --status present --limit 10
+delegate worktree list --no-auto-prune
+```
+
+#### `delegate worktree show`
+
+Deep view of a single persistent worktree. Shows porcelain status, ahead/behind counts (vs creation base and vs current source HEAD), and structured suggested-commands including review-diff and merge/cherry-pick instructions.
+
+```bash
+delegate worktree show cursor-4
+delegate worktree show --latest cursor
+```
+
+#### `delegate worktree remove`
+
+Remove one persistent worktree and optionally delete its branch.
+
+- Default (no flags): refuses if the worktree has uncommitted changes or the branch is unmerged.
+- `--discard-uncommitted`: override the dirty-worktree refusal (data-loss — uncommitted edits are lost).
+- `--force-branch`: delete an unmerged branch.
+- `--force`: shorthand for both `--discard-uncommitted --force-branch`.
+- `--keep-branch`: remove the worktree path but keep the branch.
+- If branch deletion fails after the path has been removed, the command reports `ok: false` and `partialSuccess: true` but preserves the successful path cleanup in `pathRemoved: true`; retry with the emitted `nextActions` or manually inspect the branch named in `branchRemovalError`.
+
+```bash
+delegate worktree remove cursor-4                    # refuses if dirty or unmerged
+delegate worktree remove cursor-4 --discard-uncommitted  # discard uncommitted edits
+delegate worktree remove cursor-4 --force-branch         # delete unmerged branch
+```
+
+#### `delegate worktree prune`
+
+Bulk removal. Requires at least one of `--merged` (run the source-HEAD merge-safety pass) or `--older-than DAYS` (filtered by last activity). With `--merged`, fully merged clean worktrees remove both the path and branch; clean unmerged worktrees can still have the path removed while Delegate keeps the branch (`branchKept: "unmerged"`), and dirty, detached-source, missing, or merge-check-failed entries are skipped unless explicit override flags apply. Options: `--dry-run` to preview, `--harness` to filter by engine, `--include-detached` to include worktrees created from a detached source HEAD, and `--discard-uncommitted` / `--force-branch` for destructive overrides. `prune` skips `unknown` worktrees; inspect and remove those by alias so safety decisions stay explicit.
+
+```bash
+delegate worktree prune --merged --older-than 7 --dry-run
+delegate worktree prune --merged --include-detached --dry-run
+delegate worktree prune --merged --discard-uncommitted
+```
+
+#### `delegate worktree gc`
+
+Reconcile registry entries with on-disk reality. Never deletes worktree paths itself — reports orphans for manual review.
+
+```bash
+delegate worktree gc
+delegate worktree gc --dry-run
+```
+
+### Cleanup contract for agents
+
+When an orchestrator agent spawns a persistent worktree run, it must **not** delete or rename `~/.delegate/worktrees/` paths directly. Instead, use:
+
+```bash
+delegate worktree show <alias>
+delegate worktree remove <alias> [options]
+delegate worktree prune --merged
+```
+
+This ensures registry metadata stays consistent and prevents orphaned branches.
 
 ## Configuration
 

@@ -375,3 +375,252 @@ class ValidationTests(unittest.TestCase):
         droid_policy = config_mod.effective_policy(loaded, engine="droid", mode="work")
         self.assertTrue(droid_policy["networkAccess"])
         self.assertFalse(droid_policy["bypassHookTrust"])
+
+    # -- Wave 1 isolation / worktrees config validation --------------------------------
+
+    def test_isolation_config_non_object_raises(self):
+        config_mod = load_config_module()
+        with self.assertRaises(config_mod.ConfigError) as ctx:
+            config_mod.validate_config(
+                config_mod.deep_merge(config_mod.DEFAULT_CONFIG, {"isolation": "bananas"})
+            )
+        self.assertEqual(ctx.exception.error, "invalid_isolation_config")
+
+    def test_isolation_safe_unknown_value_raises(self):
+        config_mod = load_config_module()
+        with self.assertRaises(config_mod.ConfigError) as ctx:
+            config_mod.validate_config(
+                config_mod.deep_merge(
+                    config_mod.DEFAULT_CONFIG,
+                    {"isolation": {"safe": "bananas"}},
+                )
+            )
+        self.assertEqual(ctx.exception.error, "invalid_isolation_config")
+
+    def test_worktrees_config_non_object_raises(self):
+        config_mod = load_config_module()
+        with self.assertRaises(config_mod.ConfigError) as ctx:
+            config_mod.validate_config(
+                config_mod.deep_merge(config_mod.DEFAULT_CONFIG, {"worktrees": "nope"})
+            )
+        self.assertEqual(ctx.exception.error, "invalid_worktrees_config")
+
+    def test_worktrees_data_home_empty_string_raises(self):
+        config_mod = load_config_module()
+        with self.assertRaises(config_mod.ConfigError) as ctx:
+            config_mod.validate_config(
+                config_mod.deep_merge(
+                    config_mod.DEFAULT_CONFIG,
+                    {"worktrees": {"dataHome": ""}},
+                )
+            )
+        self.assertEqual(ctx.exception.error, "invalid_worktrees_config")
+
+    def test_worktrees_data_home_relative_path_raises(self):
+        config_mod = load_config_module()
+        for value in ("relative/path", "./relative"):
+            with self.subTest(value=value):
+                with self.assertRaises(config_mod.ConfigError) as ctx:
+                    config_mod.validate_config(
+                        config_mod.deep_merge(
+                            config_mod.DEFAULT_CONFIG,
+                            {"worktrees": {"dataHome": value}},
+                        )
+                    )
+                self.assertEqual(ctx.exception.error, "invalid_worktrees_config")
+                self.assertIn("absolute path", ctx.exception.message)
+
+    def test_worktrees_auto_prune_enabled_not_bool_raises(self):
+        config_mod = load_config_module()
+        with self.assertRaises(config_mod.ConfigError) as ctx:
+            config_mod.validate_config(
+                config_mod.deep_merge(
+                    config_mod.DEFAULT_CONFIG,
+                    {"worktrees": {"autoPrune": {"enabled": "yes"}}},
+                )
+            )
+        self.assertEqual(ctx.exception.error, "invalid_worktrees_config")
+        self.assertIn("enabled", ctx.exception.message)
+
+    def test_worktrees_auto_prune_merged_negative_raises(self):
+        config_mod = load_config_module()
+        with self.assertRaises(config_mod.ConfigError) as ctx:
+            config_mod.validate_config(
+                config_mod.deep_merge(
+                    config_mod.DEFAULT_CONFIG,
+                    {"worktrees": {"autoPrune": {"mergedOlderThanDays": -1}}},
+                )
+            )
+        self.assertEqual(ctx.exception.error, "invalid_worktrees_config")
+        self.assertIn("mergedOlderThanDays", ctx.exception.message)
+
+    def test_isolation_and_worktrees_valid_does_not_raise(self):
+        config_mod = load_config_module()
+        config_mod.validate_config(
+            config_mod.deep_merge(
+                config_mod.DEFAULT_CONFIG,
+                {
+                    "isolation": {"safe": "worktree", "work": "auto"},
+                    "worktrees": {
+                        "dataHome": "/custom/path",
+                        "autoPrune": {"enabled": True, "mergedOlderThanDays": 30},
+                    },
+                },
+            )
+        )
+
+    def test_isolation_missing_uses_embedded_defaults(self):
+        config_mod = load_config_module()
+        cfg = config_mod.deep_merge(config_mod.DEFAULT_CONFIG, {})
+        self.assertEqual(cfg["isolation"]["safe"], "auto")
+        self.assertEqual(cfg["isolation"]["work"], "none")
+
+    # -- Missing coverage: explicit null rejection + string types --
+
+    def test_isolation_work_unknown_value_raises(self):
+        config_mod = load_config_module()
+        with self.assertRaises(config_mod.ConfigError) as ctx:
+            config_mod.validate_config(
+                config_mod.deep_merge(
+                    config_mod.DEFAULT_CONFIG,
+                    {"isolation": {"work": "bananas"}},
+                )
+            )
+        self.assertEqual(ctx.exception.error, "invalid_isolation_config")
+
+    def test_isolation_safe_explicit_null_raises(self):
+        config_mod = load_config_module()
+        with self.assertRaises(config_mod.ConfigError) as ctx:
+            config_mod.validate_config(
+                config_mod.deep_merge(
+                    config_mod.DEFAULT_CONFIG,
+                    {"isolation": {"safe": None}},
+                )
+            )
+        self.assertEqual(ctx.exception.error, "invalid_isolation_config")
+        self.assertIn("null", ctx.exception.message)
+
+    def test_isolation_work_explicit_null_raises(self):
+        config_mod = load_config_module()
+        with self.assertRaises(config_mod.ConfigError) as ctx:
+            config_mod.validate_config(
+                config_mod.deep_merge(
+                    config_mod.DEFAULT_CONFIG,
+                    {"isolation": {"work": None}},
+                )
+            )
+        self.assertEqual(ctx.exception.error, "invalid_isolation_config")
+        self.assertIn("null", ctx.exception.message)
+
+    def test_worktrees_auto_prune_enabled_explicit_null_raises(self):
+        config_mod = load_config_module()
+        with self.assertRaises(config_mod.ConfigError) as ctx:
+            config_mod.validate_config(
+                config_mod.deep_merge(
+                    config_mod.DEFAULT_CONFIG,
+                    {"worktrees": {"autoPrune": {"enabled": None}}},
+                )
+            )
+        self.assertEqual(ctx.exception.error, "invalid_worktrees_config")
+        self.assertIn("enabled", ctx.exception.message)
+        self.assertIn("null", ctx.exception.message)
+
+    def test_worktrees_auto_prune_merged_days_explicit_null_raises(self):
+        config_mod = load_config_module()
+        with self.assertRaises(config_mod.ConfigError) as ctx:
+            config_mod.validate_config(
+                config_mod.deep_merge(
+                    config_mod.DEFAULT_CONFIG,
+                    {"worktrees": {"autoPrune": {"mergedOlderThanDays": None}}},
+                )
+            )
+        self.assertEqual(ctx.exception.error, "invalid_worktrees_config")
+        self.assertIn("mergedOlderThanDays", ctx.exception.message)
+        self.assertIn("null", ctx.exception.message)
+
+    def test_worktrees_auto_prune_merged_days_string_raises(self):
+        config_mod = load_config_module()
+        with self.assertRaises(config_mod.ConfigError) as ctx:
+            config_mod.validate_config(
+                config_mod.deep_merge(
+                    config_mod.DEFAULT_CONFIG,
+                    {"worktrees": {"autoPrune": {"mergedOlderThanDays": "7"}}},
+                )
+            )
+        self.assertEqual(ctx.exception.error, "invalid_worktrees_config")
+        self.assertIn("mergedOlderThanDays", ctx.exception.message)
+
+    def test_worktrees_data_home_explicit_null_accepted(self):
+        """dataHome: null is the valid explicit default sentinel."""
+        config_mod = load_config_module()
+        # Should not raise
+        config_mod.validate_config(
+            config_mod.deep_merge(
+                config_mod.DEFAULT_CONFIG,
+                {"worktrees": {"dataHome": None}},
+            )
+        )
+
+    # -- Finding #4: resolve_isolation loaded-config validation (defense in depth) -----
+
+    def test_resolve_isolation_loaded_config_isolation_not_dict_raises(self):
+        """resolve_isolation raises when loaded_config isolation is a string, not dict."""
+        config_mod = load_config_module()
+        with self.assertRaises(config_mod.InvalidIsolationError) as ctx:
+            config_mod.resolve_isolation(
+                cli_value=None,
+                input_json_value=None,
+                loaded_config={"isolation": "bad"},
+                engine="cursor",
+                mode="work",
+            )
+        self.assertIn("must be an object", str(ctx.exception).lower())
+
+    def test_resolve_isolation_loaded_config_isolation_mode_none_raises(self):
+        """resolve_isolation raises when loaded_config isolation.work is explicit null."""
+        config_mod = load_config_module()
+        with self.assertRaises(config_mod.InvalidIsolationError) as ctx:
+            config_mod.resolve_isolation(
+                cli_value=None,
+                input_json_value=None,
+                loaded_config={"isolation": {"work": None}},
+                engine="cursor",
+                mode="work",
+            )
+        self.assertIn("must not be null", str(ctx.exception).lower())
+
+    def test_resolve_isolation_loaded_config_isolation_mode_invalid_raises(self):
+        """resolve_isolation raises when loaded_config isolation.work is invalid string."""
+        config_mod = load_config_module()
+        with self.assertRaises(config_mod.InvalidIsolationError) as ctx:
+            config_mod.resolve_isolation(
+                cli_value=None,
+                input_json_value=None,
+                loaded_config={"isolation": {"work": "bananas"}},
+                engine="cursor",
+                mode="work",
+            )
+        self.assertIn("must be one of", str(ctx.exception).lower())
+
+    # -- Finding #3: request_from_input_json explicit null isolation -------------------
+
+    def test_request_from_input_json_explicit_null_isolation_raises(self):
+        """Direct call to request_from_input_json with isolation: null raises."""
+        delegate = load_delegate()
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "task.json"
+            task.write_text(
+                json.dumps({
+                    "engine": "droid",
+                    "mode": "safe",
+                    "model": "minimax",
+                    "cwd": tmp,
+                    "prompt": "hello",
+                    "isolation": None,
+                })
+            )
+            parsed = delegate.ParsedCommand("run", json_mode=True, input_json=str(task))
+            with self.assertRaises(delegate.DelegateError) as ctx:
+                delegate.request_from_input_json(parsed, droid_test_config(delegate))
+            self.assertEqual(ctx.exception.error, "invalid_isolation")
+            self.assertIn("null", ctx.exception.message.lower())

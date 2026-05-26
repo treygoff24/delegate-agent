@@ -1,6 +1,6 @@
 ---
 name: delegate-agent
-description: Use the local delegate CLI to hand bounded execution tasks to Cursor Composer 2.5, Droid BYOK models, or OpenAI Codex CLI. Cursor/Codex safe run isolated read-only review in a detached workspace copy; work mode can edit. Git repos or ordinary workspaces.
+description: Use the local delegate CLI to hand bounded execution tasks to Cursor Composer 2.5, Droid BYOK models, or OpenAI Codex CLI. Cursor/Codex safe run isolated read-only review in a detached workspace copy; work mode can edit. Git repos or ordinary workspaces. Worktree isolation keeps edit-capable agent runs separate from the source checkout.
 ---
 
 # Delegate Agent
@@ -128,6 +128,42 @@ Both run in the real workspace. Safe avoids auto/spec/unsafe flags so prompts st
 `delegate codex work` runs in the real workspace and defaults to `--sandbox workspace-write` with `sandbox_workspace_write.network_access=true` when effective policy enables `networkAccess` (the default for work). Policy profiles can enable hook-trust bypass (`trusted-hooks`) or full dangerous bypass (`external-sandbox`), but treat `external-sandbox` as high risk and only use it when Delegate is already externally sandboxed.
 
 Codex policy controls are visible with `delegate --json describe`; dry-run a launch with `delegate --json dry-run codex work "..."`.
+
+## Isolation override
+
+Add `--isolation worktree` to keep edit-capable agent runs separate from the
+source checkout. Creates a persistent Git worktree under the Delegate data home.
+
+```bash
+delegate --isolation worktree cursor work "Implement the fix."
+delegate --isolation worktree codex safe "Review in a temp worktree."
+```
+
+When a run is worktree-isolated, it returns `branch` + `executionCwd` in its
+completion output. The child agent receives a prompt note explaining that it must
+work in the isolated worktree and must not touch the source checkout.
+
+See the README and AGENTS.md for the full isolation matrix, worktree lifecycle,
+and management command reference.
+
+## Worktree lifecycle for orchestrators
+
+When you spawn a persistent worktree run (`--isolation worktree` + `work` mode):
+
+1. The run returns `branch` and `executionCwd` in completion output.
+2. The child agent works inside an isolated worktree. Changes to the source
+   checkout are prevented by Git worktree isolation.
+3. After the child exits, the worktree and branch are preserved.
+4. Use `delegate worktree show <alias>` to inspect state (porcelain status,
+   ahead/behind counts).
+5. Use `delegate worktree remove <alias>` to clean up. The default refuses
+   dirty worktrees and unmerged branches — pass `--discard-uncommitted`
+   (data-loss) or `--force-branch` explicitly.
+6. Use `delegate worktree prune --merged` for bulk cleanup of merged worktrees.
+7. Do **not** delete `~/.delegate/worktrees/` paths directly — this orphans
+   registry entries and breaks snapshot/inspection commands.
+8. Do **not** manually run `git worktree remove` or `git branch -D` on
+   Delegate-managed worktrees.
 
 ## Rules
 

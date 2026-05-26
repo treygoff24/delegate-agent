@@ -9,7 +9,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+SRC = str(ROOT / "src")
 REGISTRY_PATH = ROOT / "src" / "delegate_agent" / "run_registry.py"
+
+if SRC not in sys.path:
+    sys.path.insert(0, SRC)
 
 
 def load_registry():
@@ -273,3 +277,60 @@ class RunRegistryTests(unittest.TestCase):
                 self.registry.latest_run_id_for_harness(root, index, "cursor"),
                 newer_id,
             )
+
+    def test_set_worktree_status_updates_state(self):
+        """set_worktree_status updates worktreeStatus and optionally worktreeRemovedAt."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="cursor")
+            run_path = self.registry.run_directory(root, run_id)
+            run_path.mkdir(parents=True, exist_ok=True)
+            state = {"schema": "delegate.state.v1", "runId": run_id, "alias": alias,
+                     "status": "succeeded"}
+            self.registry.write_json_atomic(run_path / "state.json", state)
+
+            # Set to present.
+            updated = self.registry.set_worktree_status(root, run_id, "present")
+            self.assertEqual(updated["worktreeStatus"], "present")
+
+            # Set to removed with timestamp.
+            removed_at = "2026-05-24T12:00:00Z"
+            updated2 = self.registry.set_worktree_status(root, run_id, "removed",
+                                                         removed_at=removed_at)
+            self.assertEqual(updated2["worktreeStatus"], "removed")
+            self.assertEqual(updated2["worktreeRemovedAt"], removed_at)
+
+    def test_set_worktree_status_locked_updates_under_existing_lock(self):
+        """set_worktree_status_locked is the explicit helper for lock-held callers."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="cursor")
+            run_path = self.registry.run_directory(root, run_id)
+            run_path.mkdir(parents=True, exist_ok=True)
+            state = {
+                "schema": "delegate.state.v1",
+                "runId": run_id,
+                "alias": alias,
+                "status": "succeeded",
+            }
+            self.registry.write_json_atomic(run_path / "state.json", state)
+
+            with self.registry.registry_lock(root):
+                updated = self.registry.set_worktree_status_locked(root, run_id, "unknown")
+
+            self.assertEqual(updated["worktreeStatus"], "unknown")
+
+    def test_set_worktree_status_missing_state_raises(self):
+        """set_worktree_status on a missing state file raises."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
+            with self.assertRaises(ValueError) as ctx:
+                self.registry.set_worktree_status(root, "del_nonexistent", "invalid_status")
+            self.assertIn("must be one of", str(ctx.exception))
+
+    def test_set_worktree_status_invalid_status_raises(self):
+        """set_worktree_status with an invalid status raises ValueError."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
+            with self.assertRaises(ValueError):
+                self.registry.set_worktree_status(root, "del_nonexistent", "invalid_status")

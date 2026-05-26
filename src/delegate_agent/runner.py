@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import shlex
 import subprocess
 import threading
 import time
@@ -11,7 +12,7 @@ from pathlib import Path
 from typing import BinaryIO, TextIO
 
 from delegate_agent import config as delegate_config
-from delegate_agent import harness_events, run_registry
+from delegate_agent import harness_events, rendering, run_registry
 from delegate_agent.json_types import JsonObject
 
 STDOUT_LOG = run_registry.STDOUT_LOG
@@ -63,6 +64,14 @@ class RunContext:
     workspace_kind: str
     isolated_workspace: bool
     started_at: str
+    creation_context: JsonObject | None = None
+    source_git_root: str | None = None
+    isolation_mode: str = "none"
+    effective_isolation: str = "none"
+    isolation_lifecycle: str = "none"
+    preserved_workspace: bool = False
+    branch: str | None = None
+    worktree_status: str | None = None
 
 
 def prepend_skill_review_instructions(prompt: str) -> str:
@@ -132,8 +141,19 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
         "startedAt": ctx.started_at,
         "argv": argv,
     }
-    if ctx.isolated_workspace:
-        payload["isolatedWorkspace"] = True
+    payload["isolatedWorkspace"] = ctx.isolated_workspace
+    payload["isolationMode"] = ctx.isolation_mode
+    payload["effectiveIsolation"] = ctx.effective_isolation
+    payload["isolationLifecycle"] = ctx.isolation_lifecycle
+    payload["preservedWorkspace"] = ctx.preserved_workspace
+    if ctx.source_git_root is not None:
+        payload["sourceGitRoot"] = ctx.source_git_root
+    if ctx.branch is not None:
+        payload["branch"] = ctx.branch
+    if ctx.creation_context is not None:
+        payload["creationContext"] = ctx.creation_context
+    if ctx.worktree_status is not None:
+        payload["worktreeStatus"] = ctx.worktree_status
     return payload
 
 
@@ -146,6 +166,7 @@ def build_state(
     stderr_bytes: int = 0,
     current: str | None = None,
     pid: int | None = None,
+    extra: JsonObject | None = None,
 ) -> JsonObject:
     now = run_registry.utc_now_iso()
     state: JsonObject = {
@@ -164,7 +185,31 @@ def build_state(
         state["current"] = current
     if pid is not None:
         state["pid"] = pid
+    if extra is not None:
+        state.update(extra)
     return state
+
+
+def _worktree_cleanup_commands(ctx: RunContext) -> JsonObject | None:
+    """Build the worktreeCleanupCommands object for persistent worktree runs.
+
+    Returns None if the run is not a persistent worktree run.
+    """
+    if ctx.isolation_lifecycle != "persistent" or ctx.branch is None:
+        return None
+    alias_str = ctx.alias
+    source_git = ctx.source_git_root or ""
+    exec_cwd = ctx.execution_cwd
+    branch = ctx.branch
+    remove_argv = ["git", "-C", source_git, "worktree", "remove", exec_cwd]
+    branch_argv = ["git", "-C", source_git, "branch", "-d", branch]
+    return {
+        "safe": f"delegate worktree remove {alias_str}",
+        "forceBranch": f"delegate worktree remove {alias_str} --force-branch",
+        "discardUncommitted": f"delegate worktree remove {alias_str} --discard-uncommitted",
+        "force": f"delegate worktree remove {alias_str} --force",
+        "rawGit": f"{shlex.join(remove_argv)} && {shlex.join(branch_argv)}",
+    }
 
 
 def build_snapshot(
@@ -192,8 +237,30 @@ def build_snapshot(
         **assistant_meta,
         **events_meta,
     }
-    if ctx.isolated_workspace:
-        snapshot["isolatedWorkspace"] = True
+    # Always emit isolatedWorkspace as explicit boolean.
+    snapshot["isolatedWorkspace"] = ctx.isolated_workspace
+
+    # Always emit isolation metadata.
+    snapshot["isolationMode"] = ctx.isolation_mode
+    snapshot["effectiveIsolation"] = ctx.effective_isolation
+    snapshot["isolationLifecycle"] = ctx.isolation_lifecycle
+    snapshot["preservedWorkspace"] = ctx.preserved_workspace
+
+    # Surface persistent-worktree fields.
+    if ctx.source_git_root is not None:
+        snapshot["sourceGitRoot"] = ctx.source_git_root
+    if ctx.branch is not None:
+        snapshot["branch"] = ctx.branch
+    if ctx.creation_context is not None:
+        snapshot["creationContext"] = ctx.creation_context
+    if ctx.worktree_status is not None:
+        snapshot["worktreeStatus"] = ctx.worktree_status
+
+    # Worktree cleanup commands for persistent worktrees.
+    cleanup = _worktree_cleanup_commands(ctx)
+    if cleanup is not None:
+        snapshot["worktreeCleanupCommands"] = cleanup
+
     if exit_code is not None:
         snapshot["exitCode"] = exit_code
     if completion_report_written:
@@ -263,11 +330,35 @@ def emit_bounded_text_summary(
     )
     print(f"alias: {ctx.alias}", file=stdout)
     print(f"status: {status}", file=stdout)
+    print(f"source: {ctx.source_cwd}", file=stdout)
+    print(f"execution: {ctx.execution_cwd}", file=stdout)
+    if ctx.branch:
+        print(f"branch: {ctx.branch}", file=stdout)
+    lifecycle = ctx.isolation_lifecycle
+    if lifecycle == "persistent":
+        print("isolation: worktree persistent", file=stdout)
+    elif lifecycle == "temporary":
+        print("isolation: worktree temporary", file=stdout)
+    else:
+        print(f"isolation: {lifecycle}", file=stdout)
     print(f"snapshot: {run_registry.snapshot_command(ctx.alias)}", file=stdout)
     print(
         f"completion report: {run_registry.run_output_command(ctx.alias, completion_report=True)}",
         file=stdout,
     )
+    if ctx.execution_cwd and (lifecycle == "temporary" or lifecycle == "persistent"):
+        print(
+            f"inspect: {shlex.join(['git', '-C', ctx.execution_cwd, 'status', '--short'])}",
+            file=stdout,
+        )
+        print(
+            f"review diff: {shlex.join(['git', '-C', ctx.execution_cwd, 'diff', '--stat', 'HEAD'])}",
+            file=stdout,
+        )
+    if lifecycle == "persistent" and ctx.branch and ctx.source_git_root:
+        cleanup = _worktree_cleanup_commands(ctx)
+        if cleanup is not None:
+            rendering.render_worktree_cleanup_commands(cleanup, stdout)
 
 
 def completion_json_payload(
@@ -301,8 +392,30 @@ def completion_json_payload(
         "stdoutBytes": stdout_bytes,
         "stderrBytes": stderr_bytes,
     }
-    if ctx.isolated_workspace:
-        payload["isolatedWorkspace"] = True
+    # Always emit isolatedWorkspace as explicit boolean.
+    payload["isolatedWorkspace"] = ctx.isolated_workspace
+
+    # Always emit isolation metadata.
+    payload["isolationMode"] = ctx.isolation_mode
+    payload["effectiveIsolation"] = ctx.effective_isolation
+    payload["isolationLifecycle"] = ctx.isolation_lifecycle
+    payload["preservedWorkspace"] = ctx.preserved_workspace
+
+    # Surface persistent-worktree fields.
+    if ctx.source_git_root is not None:
+        payload["sourceGitRoot"] = ctx.source_git_root
+    if ctx.branch is not None:
+        payload["branch"] = ctx.branch
+    if ctx.creation_context is not None:
+        payload["creationContext"] = ctx.creation_context
+    if ctx.worktree_status is not None:
+        payload["worktreeStatus"] = ctx.worktree_status
+
+    # Worktree cleanup commands for persistent worktrees.
+    cleanup = _worktree_cleanup_commands(ctx)
+    if cleanup is not None:
+        payload["worktreeCleanupCommands"] = cleanup
+
     if not ok:
         payload["error"] = "child_failed"
         payload["message"] = "Child command failed."
