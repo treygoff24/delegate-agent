@@ -1144,6 +1144,38 @@ class WorktreeMgmtTests(unittest.TestCase):
             self.assertEqual(state.get("worktreeStatus"), "present")
             self.assertTrue(Path(wt_path).exists())
 
+    def test_worktree_list_json_exits_nonzero_when_auto_prune_fails(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            self._seed_persistent_run(path, alias="cursor-auto-prune-fails")
+            config_path = self._registry_root(path) / "config.json"
+            config_path.write_text(
+                json.dumps({"worktrees": {"autoPrune": {"enabled": True, "mergedOlderThanDays": 1}}}),
+                encoding="utf-8",
+            )
+            failed_auto_prune = {
+                "ok": False,
+                "code": "branch_remove_failed",
+                "error": "branch_remove_failed",
+                "message": "branch cleanup failed",
+                "exitCode": self.delegate.EXIT_USAGE,
+            }
+            with mock.patch.object(
+                self.delegate.worktree_mgmt,
+                "maybe_auto_prune",
+                return_value=failed_auto_prune,
+            ):
+                code, out, _err = self._run_cli(
+                    ["--cwd", path, "--json", "worktree", "list"],
+                    home=fake_home,
+                )
+
+            payload = json.loads(out)
+            self.assertEqual(code, self.delegate.EXIT_USAGE)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["exitCode"], self.delegate.EXIT_USAGE)
+            self.assertEqual(payload["autoPrune"]["code"], "branch_remove_failed")
+
     def test_worktree_prune_include_detached_cli_plans_detached_worktree(self):
         _repo, path = self._make_repo()
         with tempfile.TemporaryDirectory() as fake_home:
@@ -1316,8 +1348,53 @@ class WorktreeMgmtTests(unittest.TestCase):
             # Result should indicate skip/unavailable (lock contention).
             self.assertIsNotNone(result)
             self.assertTrue(result.get("skipped") or not result.get("ok"))
+            self.assertEqual(result.get("reason"), "lock_contended")
             # Should return within 1s (not block for the 30s default lock timeout).
             self.assertLess(elapsed, 3.0, msg="maybe_auto_prune blocked on lock contention")
+
+    def test_maybe_auto_prune_preserves_management_error_payload(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory():
+            registry_root = self.delegate.run_registry.ensure_registry(Path(path), workspace_kind="git")
+            config = {"worktrees": {"autoPrune": {"enabled": True, "mergedOlderThanDays": 1}}}
+            error = self.delegate.worktree_mgmt.WorktreeManagementError(
+                {
+                    "ok": False,
+                    "code": "bad_auto_prune",
+                    "message": "auto-prune failed",
+                    "exitCode": self.delegate.EXIT_USAGE,
+                }
+            )
+            with mock.patch.object(
+                self.delegate.worktree_mgmt,
+                "prune_worktrees",
+                side_effect=error,
+            ):
+                result = self.delegate.worktree_mgmt.maybe_auto_prune(registry_root, config)
+
+            self.assertIsNotNone(result)
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["code"], "bad_auto_prune")
+            self.assertNotEqual(result.get("reason"), "auto_prune_unavailable")
+
+    def test_worktree_gc_warns_when_git_worktree_list_fails(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            branch = "delegate/cursor-gc-warning"
+            wt_path = str(Path(fake_home) / "wt" / "cursor-gc-warning")
+            self._seed_persistent_run(path, branch=branch, execution_cwd=wt_path)
+            self._create_worktree_at(path, branch, wt_path)
+
+            with mock.patch.object(
+                self.delegate.worktree_mgmt,
+                "_worktree_list_paths_with_warning",
+                return_value=(None, "fatal: worktree list failed"),
+            ):
+                result = self.delegate.worktree_mgmt.gc_worktrees(self._registry_root(path))
+
+            self.assertTrue(result["warnings"])
+            self.assertEqual(result["warnings"][0]["sourceGitRoot"], path)
+            self.assertIn("worktree list failed", result["warnings"][0]["message"])
 
     def test_double_remove_noop_under_5s(self):
         _repo, path = self._make_repo()

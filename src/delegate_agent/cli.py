@@ -1167,6 +1167,10 @@ def _worktree_list_payload(
     )
     if auto_prune is not None:
         payload["autoPrune"] = auto_prune
+        if auto_prune.get("ok") is False and auto_prune.get("skipped") is not True:
+            payload["ok"] = False
+            exit_code = auto_prune.get("exitCode")
+            payload["exitCode"] = exit_code if isinstance(exit_code, int) else EXIT_USAGE
     return payload
 
 
@@ -3085,7 +3089,8 @@ def main(
             delegate_rendering.print_json(exc.payload, stdout)
         else:
             print(f"{exc.code}: {exc.message}", file=stderr)
-        return EXIT_USAGE
+        exit_code = exc.payload.get("exitCode")
+        return exit_code if isinstance(exit_code, int) else EXIT_USAGE
     except DelegateError as exc:
         return emit_error(exc, json_mode, stdout, stderr)
 

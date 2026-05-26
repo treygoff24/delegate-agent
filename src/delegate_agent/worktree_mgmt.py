@@ -1095,14 +1095,20 @@ def prune_worktrees(
     return payload
 
 
-def _worktree_list_paths(source_git_root: str) -> set[str] | None:
+def _worktree_list_paths_with_warning(source_git_root: str) -> tuple[set[str] | None, str | None]:
     result = _run_git(source_git_root, ["worktree", "list", "--porcelain"])
     if result.returncode != 0:
-        return None
+        detail = result.stderr.strip() or f"git worktree list failed with exit {result.returncode}"
+        return None, detail
     paths: set[str] = set()
     for line in result.stdout.splitlines():
         if line.startswith("worktree "):
             paths.add(line[len("worktree "):])
+    return paths, None
+
+
+def _worktree_list_paths(source_git_root: str) -> set[str] | None:
+    paths, _warning = _worktree_list_paths_with_warning(source_git_root)
     return paths
 
 
@@ -1129,6 +1135,7 @@ def gc_worktrees(registry_root: Path, *, dry_run: bool = False) -> JsonObject:
     prune_roots: set[str] = set()
     reconciled: list[JsonObject] = []
     orphans: list[JsonObject] = []
+    warnings: list[JsonObject] = []
 
     def append_missing(record: JsonObject, execution: str) -> None:
         reconciled.append({
@@ -1157,7 +1164,10 @@ def gc_worktrees(registry_root: Path, *, dry_run: bool = False) -> JsonObject:
         if not isinstance(source, str) or not isinstance(execution, str):
             continue
         if source not in paths_by_root:
-            paths_by_root[source] = _worktree_list_paths(source)
+            listed, warning = _worktree_list_paths_with_warning(source)
+            paths_by_root[source] = listed
+            if warning is not None:
+                warnings.append({"sourceGitRoot": source, "message": warning})
         listed_paths = paths_by_root[source]
         path_exists = Path(execution).exists()
         if not path_exists:
@@ -1189,7 +1199,9 @@ def gc_worktrees(registry_root: Path, *, dry_run: bool = False) -> JsonObject:
                     if fresh_candidate is None:
                         continue
                     fresh, fresh_source, fresh_execution = fresh_candidate
-                    fresh_paths = _worktree_list_paths(fresh_source)
+                    fresh_paths, warning = _worktree_list_paths_with_warning(fresh_source)
+                    if warning is not None:
+                        warnings.append({"sourceGitRoot": fresh_source, "message": warning})
                     if (
                         Path(fresh_execution).exists()
                         and fresh_paths is not None
@@ -1234,6 +1246,7 @@ def gc_worktrees(registry_root: Path, *, dry_run: bool = False) -> JsonObject:
         "reconciled": len(reconciled),
         "reconciledEntries": reconciled,
         "orphans": orphans,
+        "warnings": warnings,
     }
 
 
@@ -1266,5 +1279,7 @@ def maybe_auto_prune(
                 dry_run=False,
                 _skip_lock=True,
             )
-    except (TimeoutError, WorktreeManagementError):
-        return {"ok": False, "skipped": True, "reason": "auto_prune_unavailable"}
+    except TimeoutError:
+        return {"ok": False, "skipped": True, "reason": "lock_contended"}
+    except WorktreeManagementError as exc:
+        return dict(exc.payload)
