@@ -1377,6 +1377,21 @@ class WorktreeMgmtTests(unittest.TestCase):
             self.assertEqual(result["code"], "bad_auto_prune")
             self.assertNotEqual(result.get("reason"), "auto_prune_unavailable")
 
+    def test_maybe_auto_prune_uses_normal_per_entry_locks_after_probe(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory():
+            registry_root = self.delegate.run_registry.ensure_registry(Path(path), workspace_kind="git")
+            config = {"worktrees": {"autoPrune": {"enabled": True, "mergedOlderThanDays": 1}}}
+            with mock.patch.object(
+                self.delegate.worktree_mgmt,
+                "prune_worktrees",
+                return_value={"ok": True, "removed": [], "skipped": [], "errors": []},
+            ) as prune:
+                result = self.delegate.worktree_mgmt.maybe_auto_prune(registry_root, config)
+
+            self.assertTrue(result["ok"])
+            self.assertNotEqual(prune.call_args.kwargs.get("_skip_lock"), True)
+
     def test_worktree_gc_warns_when_git_worktree_list_fails(self):
         _repo, path = self._make_repo()
         with tempfile.TemporaryDirectory() as fake_home:
@@ -1515,6 +1530,35 @@ class WorktreeMgmtTests(unittest.TestCase):
                 )
 
             self.assertEqual(ctx.exception.code, "unmerged_branch")
+
+    def test_worktree_remove_reports_merge_check_failed_when_merge_unknown(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            branch = "delegate/cursor-merge-check-unknown"
+            wt_path = str(Path(fake_home) / "wt" / "cursor-merge-check-unknown")
+            self._seed_persistent_run(
+                path,
+                alias="cursor-merge-check-unknown",
+                branch=branch,
+                execution_cwd=wt_path,
+            )
+            self._create_worktree_at(path, branch, wt_path)
+
+            with (
+                mock.patch.object(
+                    self.delegate.worktree_mgmt,
+                    "merged_into_source",
+                    return_value=(None, ["could not determine whether branch is merged"]),
+                ),
+                self.assertRaises(self.delegate.worktree_mgmt.WorktreeManagementError) as ctx,
+            ):
+                self.delegate.worktree_mgmt.remove_worktree(
+                    self._registry_root(path),
+                    handle="cursor-merge-check-unknown",
+                )
+
+            self.assertEqual(ctx.exception.code, "merge_check_failed")
+            self.assertIn("could not determine whether branch is merged", ctx.exception.payload["warnings"])
 
     def test_merge_base_checks_qualified_branch_ref(self):
         completed = subprocess.CompletedProcess(["git"], 0, "", "")

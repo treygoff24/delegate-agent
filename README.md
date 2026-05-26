@@ -188,7 +188,7 @@ Set isolation defaults in `.delegate/config.json` (per-repo) or `~/.delegate/con
 
 - `isolation.safe` / `isolation.work`: one of `auto`, `none`, or `worktree`.
 - `worktrees.dataHome`: override the persistent worktree root (`~/.delegate/worktrees` by default). Must be an absolute or `~/`-prefixed path, or `null`.
-- `worktrees.autoPrune.enabled`: when `true`, `delegate worktree list` runs an opportunistic prune pass that removes clean, fully-merged worktrees older than `mergedOlderThanDays`.
+- `worktrees.autoPrune.enabled`: when `true`, `delegate worktree list` runs an opportunistic prune pass that removes clean, fully-merged worktrees older than `mergedOlderThanDays`. If that prune pass fails, JSON output includes `autoPrune.ok: false` and the command exits non-zero even when the list entries were rendered successfully.
 - The embedded default for `isolation.work` is `none` for backward compatibility. Repos can set `isolation.work = "worktree"` to dogfood the feature.
 
 ## Persistent worktree lifecycle
@@ -213,7 +213,7 @@ delegate worktree gc
 
 #### `delegate worktree list`
 
-List persistent-worktree runs from the current workspace registry. Shows alias, status (present / missing / removed), harness, age, branch, dirty flag, and whether changes are merged into the source.
+List persistent-worktree runs from the current workspace registry. Shows alias, status (present / missing / removed / unknown), harness, age, branch, dirty flag, and whether changes are merged into the source. `unknown` means Delegate could not fully reconcile the worktree metadata, such as a path that still exists but is missing Git metadata or whose branch no longer resolves; inspect with `delegate worktree show` before cleanup.
 
 ```bash
 delegate worktree list
@@ -248,7 +248,7 @@ delegate worktree remove cursor-4 --force-branch         # delete unmerged branc
 
 #### `delegate worktree prune`
 
-Bulk removal. Requires at least one of `--merged` (only branches reachable from source HEAD) or `--older-than DAYS` (filtered by last activity). Options: `--dry-run` to preview, `--harness` to filter by engine, `--include-detached` to include worktrees created from a detached source HEAD, and `--discard-uncommitted` / `--force-branch` for destructive overrides.
+Bulk removal. Requires at least one of `--merged` (only branches reachable from source HEAD) or `--older-than DAYS` (filtered by last activity). Options: `--dry-run` to preview, `--harness` to filter by engine, `--include-detached` to include worktrees created from a detached source HEAD, and `--discard-uncommitted` / `--force-branch` for destructive overrides. `prune` skips `unknown` worktrees; inspect and remove those by alias so safety decisions stay explicit.
 
 ```bash
 delegate worktree prune --merged --older-than 7 --dry-run

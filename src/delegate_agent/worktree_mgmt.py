@@ -695,7 +695,21 @@ def _raise_if_unmerged_without_override(
     if keep_branch or force_branch:
         return
     merged, merge_warnings = merged_into_source(record, status)
-    if merged is not True:
+    if merged is None:
+        raise WorktreeManagementError(
+            _error_payload(
+                "merge_check_failed",
+                "Could not determine whether the worktree branch is merged into current source HEAD; inspect it, merge it, or pass --keep-branch/--force-branch explicitly.",
+                record=record,
+                next_actions=[
+                    f"delegate worktree show {alias}",
+                    f"delegate worktree remove {alias} --keep-branch",
+                    f"delegate worktree remove {alias} --force-branch",
+                ],
+                warnings=merge_warnings or None,
+            )
+        )
+    if merged is False:
         raise WorktreeManagementError(
             _error_payload(
                 "unmerged_branch",
@@ -1272,18 +1286,19 @@ def maybe_auto_prune(
     if not isinstance(days, int):
         days = 7
     try:
-        # Hold the lock briefly (timeout=0) to probe availability, then keep it
-        # held while pruning so remove_worktree calls don't re-acquire and block
-        # on contention (spec L700: skip-and-report when lock is contended).
+        # Probe lock availability without blocking. The actual prune uses
+        # normal per-entry mutation locks so list doesn't monopolize the
+        # registry across a large cleanup pass.
         with run_registry.registry_lock(registry_root, timeout_seconds=0.0):
-            return prune_worktrees(
-                registry_root,
-                merged=True,
-                older_than_days=days,
-                dry_run=False,
-                _skip_lock=True,
-            )
+            pass
     except TimeoutError:
         return {"ok": False, "skipped": True, "reason": "lock_contended"}
+    try:
+        return prune_worktrees(
+            registry_root,
+            merged=True,
+            older_than_days=days,
+            dry_run=False,
+        )
     except WorktreeManagementError as exc:
         return dict(exc.payload)

@@ -71,7 +71,9 @@ The `worktrees` config section controls persistent worktree behavior:
   tilde expansion uses `Path.expanduser()`.
 - `worktrees.autoPrune.enabled` — when `true`, `delegate worktree list` runs a
   single opportunistic prune pass before producing output (only clean, fully-merged
-  worktrees older than `mergedOlderThanDays` qualify). Disabled by default.
+  worktrees older than `mergedOlderThanDays` qualify). Disabled by default. If
+  the opportunistic prune fails, JSON output includes `autoPrune.ok: false` and
+  the list command exits non-zero even though the list payload is still included.
 - `worktrees.autoPrune.mergedOlderThanDays` — non-negative integer, default 7.
 
 ### Worktree management
