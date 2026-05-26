@@ -2415,6 +2415,7 @@ def _launch_child_in_persistent_worktree(
     """Rewrite the child request into the worktree and execute it as tracked."""
     try:
         execution_argv = replace_workspace_arg(request, registration.worktree_path)
+        ensure_binary(execution_argv)
         execution_prompt = prepend_persistent_worktree_context(request.prompt)
         execution_argv[-1] = execution_prompt
 
@@ -2585,8 +2586,6 @@ def execute_request(
     stdout: TextIO,
     stderr: TextIO,
 ) -> tuple[int, JsonObject | None]:
-    ensure_binary(request.argv)
-
     ctx = request.isolation_context
 
     # --- Persistent worktree path (work + worktree) ---
@@ -2603,6 +2602,7 @@ def execute_request(
         )
 
     with safe_isolated_request(request) as isolated_request:
+        ensure_binary(isolated_request.argv)
         if pass_through:
             if json_mode:
                 raise DelegateError(

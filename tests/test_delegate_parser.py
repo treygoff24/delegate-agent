@@ -597,10 +597,11 @@ class ParserTests(unittest.TestCase):
                 stdout=stdout,
                 stderr=stderr,
             )
-            # Should fail at missing_binary (not at invalid_isolation), confirming
+            # Should fail at persistent-worktree semantic validation before
+            # attempting to launch the configured child binary. That confirms
             # config was loaded from the JSON-resolved workspace and isolation
             # resolved to "worktree" correctly.
-            self.assertEqual(code, self.delegate.EXIT_MISSING_BINARY)
+            self.assertEqual(code, self.delegate.EXIT_USAGE)
             err = stderr.getvalue()
-            self.assertIn("missing_binary", err)
+            self.assertIn("worktree_requires_git", err)
             self.assertNotIn("invalid_isolation", err)

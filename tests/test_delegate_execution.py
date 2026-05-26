@@ -1456,6 +1456,13 @@ class ExecutionTests(unittest.TestCase):
                 request = self._make_persistent_worktree_request(
                     "cursor", "work", repo.name, self.delegate.DEFAULT_CONFIG,
                 )
+                request = self.delegate.Request(
+                    request.engine, request.mode, request.workspace, request.prompt,
+                    ["/definitely/missing/delegate-child-binary", "--workspace", repo.name, "hello"],
+                    request.model, model_alias=request.model_alias, dry_run=request.dry_run,
+                    workspace_kind=request.workspace_kind,
+                    isolation_context=request.isolation_context,
+                )
                 # Force create_persistent_worktree to fail.
                 original_create = self.delegate.create_persistent_worktree
                 def failing_create(*args, **kwargs):
@@ -1507,6 +1514,13 @@ class ExecutionTests(unittest.TestCase):
                 workspace = self.delegate.resolve_workspace(repo.name)
                 request = self._make_persistent_worktree_request(
                     "cursor", "work", repo.name, self.delegate.DEFAULT_CONFIG,
+                )
+                request = self.delegate.Request(
+                    request.engine, request.mode, request.workspace, request.prompt,
+                    ["/definitely/missing/delegate-child-binary", "--workspace", repo.name, "hello"],
+                    request.model, model_alias=request.model_alias, dry_run=request.dry_run,
+                    workspace_kind=request.workspace_kind,
+                    isolation_context=request.isolation_context,
                 )
                 original_create = self.delegate.create_persistent_worktree
                 def failing_create(*args, **kwargs):
