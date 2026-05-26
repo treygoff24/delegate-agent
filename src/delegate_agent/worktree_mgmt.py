@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import shlex
 import subprocess
-from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -836,7 +835,6 @@ def remove_worktree(
     force_branch: bool = False,
     keep_branch: bool = False,
     force: bool = False,
-    _skip_lock: bool = False,
     _merged_check_already_passed: bool = False,
 ) -> JsonObject:
     discard_uncommitted, force_branch, keep_branch = _normalize_remove_options(
@@ -846,13 +844,7 @@ def remove_worktree(
         force=force,
         handle=handle,
     )
-    # _skip_lock is set by callers that already hold the registry lock
-    # (e.g. prune_worktrees when called from maybe_auto_prune while holding the lock).
-    if _skip_lock:
-        lock_ctx: AbstractContextManager = nullcontext()
-    else:
-        lock_ctx = run_registry.registry_lock(registry_root)
-    with lock_ctx:
+    with run_registry.registry_lock(registry_root):
         record = resolve_record(registry_root, handle=handle)
         status, warnings = detect_worktree_status(record)
         alias = str(record.get("alias") or handle)
@@ -1015,7 +1007,6 @@ def prune_worktrees(
     discard_uncommitted: bool = False,
     force_branch: bool = False,
     force: bool = False,
-    _skip_lock: bool = False,
 ) -> JsonObject:
     if not merged and older_than_days is None:
         raise WorktreeManagementError(
@@ -1091,7 +1082,6 @@ def prune_worktrees(
                         discard_uncommitted=discard_uncommitted,
                         force_branch=force_branch,
                         keep_branch=candidate.get("keep_branch", False),
-                        _skip_lock=_skip_lock,
                         _merged_check_already_passed=merged_check_already_passed,
                     )
                 )

@@ -211,6 +211,10 @@ delegate worktree prune --merged --dry-run
 delegate worktree gc
 ```
 
+#### Exit codes
+
+Worktree management commands exit 0 only when the top-level payload reports `ok: true`. Safety refusals and operational failures exit 2 and still emit the structured JSON payload when `--json` is set. Some cleanup failures are intentionally partial: for example, `delegate worktree remove` can return `ok: false` with `removed: true` and `pathRemoved: true` when the worktree path was removed but branch deletion failed. In that case inspect `branchRemoved`, `branchKept`, and `branchRemovalError` before retrying branch cleanup.
+
 #### `delegate worktree list`
 
 List persistent-worktree runs from the current workspace registry. Shows alias, status (present / missing / removed / unknown), harness, age, branch, dirty flag, and whether changes are merged into the source. `unknown` means Delegate could not fully reconcile the worktree metadata, such as a path that still exists but is missing Git metadata or whose branch no longer resolves; inspect with `delegate worktree show` before cleanup.
@@ -239,6 +243,7 @@ Remove one persistent worktree and optionally delete its branch.
 - `--force-branch`: delete an unmerged branch.
 - `--force`: shorthand for both `--discard-uncommitted --force-branch`.
 - `--keep-branch`: remove the worktree path but keep the branch.
+- If branch deletion fails after the path has been removed, the command reports `ok: false` but preserves the successful path cleanup in `pathRemoved: true`; retry or manually inspect the branch named in `branchRemovalError`.
 
 ```bash
 delegate worktree remove cursor-4                    # refuses if dirty or unmerged

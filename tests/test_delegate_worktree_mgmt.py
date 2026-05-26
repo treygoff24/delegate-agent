@@ -877,6 +877,43 @@ class WorktreeMgmtTests(unittest.TestCase):
             self.assertEqual(result["branchRemovalError"], "fatal: cannot delete branch")
             self.assertNotIn("branchKept", result)
 
+    def test_worktree_remove_present_path_branch_delete_error_reports_partial_success(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            branch = "delegate/cursor-partial-branch-error"
+            wt_path = str(Path(fake_home) / "wt" / "cursor-partial-branch-error")
+            run_id, _alias = self._seed_persistent_run(
+                path,
+                alias="cursor-partial-branch-error",
+                branch=branch,
+                execution_cwd=wt_path,
+            )
+            self._create_worktree_at(path, branch, wt_path)
+            branch_failure = self.delegate.worktree_mgmt.BranchRemovalResult(
+                removed=False,
+                error="fatal: cannot delete branch",
+            )
+            with mock.patch.object(
+                self.delegate.worktree_mgmt,
+                "_remove_branch",
+                return_value=branch_failure,
+            ):
+                result = self.delegate.worktree_mgmt.remove_worktree(
+                    self._registry_root(path),
+                    handle="cursor-partial-branch-error",
+                )
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["code"], "branch_remove_failed")
+            self.assertTrue(result["removed"])
+            self.assertTrue(result["pathRemoved"])
+            self.assertFalse(result["branchRemoved"])
+            self.assertEqual(result["branchRemovalError"], "fatal: cannot delete branch")
+            self.assertFalse(Path(wt_path).exists())
+            state = self.delegate.run_registry.load_run_state(self._registry_root(path), run_id)
+            self.assertIsNotNone(state)
+            self.assertEqual(state.get("worktreeStatus"), "removed")
+
     def test_worktree_remove_branch_delete_error_exits_nonzero(self):
         _repo, path = self._make_repo()
         with tempfile.TemporaryDirectory() as fake_home:
@@ -1390,7 +1427,7 @@ class WorktreeMgmtTests(unittest.TestCase):
                 result = self.delegate.worktree_mgmt.maybe_auto_prune(registry_root, config)
 
             self.assertTrue(result["ok"])
-            self.assertNotEqual(prune.call_args.kwargs.get("_skip_lock"), True)
+            self.assertNotIn("_skip_lock", prune.call_args.kwargs)
 
     def test_worktree_gc_warns_when_git_worktree_list_fails(self):
         _repo, path = self._make_repo()
