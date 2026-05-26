@@ -77,10 +77,10 @@ Things the spec lists as acceptance criteria but our tests cover incompletely or
 
 Identified by the consolidated review but deliberately not addressed in the cleanup pass. None are bugs; all are technical-debt items.
 
-### 3.1 `prune` merged-check imprecision (preserved from pre-existing code)
-- **Where**: `src/delegate_agent/worktree_mgmt.py` around L815 in `prune_worktrees`.
-- **Smell**: `if not merged_value:` catches both `False` (correctly: branch is not merged) and `None` (git error or detached without `--include-detached`). The detached case is filtered earlier, but git errors slip through and get treated as unmerged → routed to `keep_branch_for_prune = True` → path removed, branch silently kept.
-- **Why not fixed**: pre-existing imprecision; Wave 2 preserved it rather than changing behavior in an already-substantive commit. Fix: change to `if merged_value is False:` so git errors fall through to a different path (likely a `skipped` entry with reason `merge_check_failed` if we add that reason).
+### 3.1 `prune` merged-check imprecision (resolved in autonomous follow-up)
+- **Where**: `src/delegate_agent/worktree_mgmt.py` in `prune_worktrees`.
+- **Status**: Resolved by the autonomous follow-up branch. `False` now means "branch is not merged" and can keep/remove according to the caller's branch flags; `None` now skips the entry with `reason: "merge_check_failed"` instead of removing the path and silently keeping the branch.
+- **Remaining note**: Detached-source worktrees still require the explicit `--include-detached` flag for merged-prune eligibility.
 
 ### 3.2 `gc_worktrees` has three near-identical reload-and-write blocks
 - **Where**: `src/delegate_agent/worktree_mgmt.py` L894-975.

@@ -1542,6 +1542,30 @@ class ExecutionTests(unittest.TestCase):
                 finally:
                     self.delegate.create_persistent_worktree = original_create
 
+    def test_partial_worktree_cleanup_uses_git_timeouts(self):
+        """Failure-path cleanup must not run unbounded git subprocesses."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            worktree_path = Path(temp_dir) / "partial-worktree"
+            worktree_path.mkdir()
+            run_path = Path(temp_dir) / "run"
+            run_path.mkdir()
+            completed = subprocess.CompletedProcess(["git"], 0, "", "")
+            with mock.patch.object(self.delegate.subprocess, "run", return_value=completed) as run_mock:
+                self.delegate._cleanup_partial_worktree(
+                    "/repo",
+                    str(worktree_path),
+                    "delegate/cursor-partial",
+                    run_path,
+                    remove_branch=True,
+                )
+
+            self.assertEqual(run_mock.call_count, 2)
+            for call in run_mock.call_args_list:
+                self.assertEqual(
+                    call.kwargs.get("timeout"),
+                    self.delegate.GIT_MUTATION_TIMEOUT_SECONDS,
+                )
+
     # -- Finding 4: Popen-launch failure after git worktree add succeeds --------
 
     def test_popen_failure_after_worktree_create_preserves_worktree(self):

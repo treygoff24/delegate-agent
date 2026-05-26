@@ -1081,7 +1081,7 @@ def prune_worktrees(
                     errors.append(removed[-1])
             except WorktreeManagementError as exc:
                 errors.append(exc.payload)
-    return {
+    payload = {
         "schema": SCHEMA_PRUNE,
         "ok": not errors,
         "planned": planned,
@@ -1090,6 +1090,9 @@ def prune_worktrees(
         "errors": errors,
         "dryRun": dry_run,
     }
+    if errors:
+        payload["exitCode"] = WORKTREE_ERROR_EXIT_CODE
+    return payload
 
 
 def _worktree_list_paths(source_git_root: str) -> set[str] | None:

@@ -21,6 +21,7 @@ try:
     from delegate_agent import rendering as delegate_rendering
     from delegate_agent import retention as delegate_retention
     from delegate_agent import runner as delegate_runner
+    from delegate_agent.git_utils import GIT_MUTATION_TIMEOUT_SECONDS
     from delegate_agent.isolation import (
         IsolationContext,
         IsolationExecutionError,
@@ -46,6 +47,7 @@ except ModuleNotFoundError:  # pragma: no cover - direct cli.py invocation in te
     from delegate_agent import rendering as delegate_rendering
     from delegate_agent import retention as delegate_retention
     from delegate_agent import runner as delegate_runner
+    from delegate_agent.git_utils import GIT_MUTATION_TIMEOUT_SECONDS
     from delegate_agent.isolation import (
         IsolationContext,
         IsolationExecutionError,
@@ -2115,6 +2117,7 @@ def _cleanup_partial_worktree(
             result = subprocess.run(
                 ["git", "-C", source_git_root, "worktree", "remove", "--force", worktree_path],
                 text=True, capture_output=True, check=False,
+                timeout=GIT_MUTATION_TIMEOUT_SECONDS,
             )
             if result.returncode != 0:
                 cleanup_failed = True
@@ -2128,6 +2131,7 @@ def _cleanup_partial_worktree(
             subprocess.run(
                 ["git", "-C", source_git_root, "branch", "-D", branch],
                 text=True, capture_output=True, check=False,
+                timeout=GIT_MUTATION_TIMEOUT_SECONDS,
             )
         except (OSError, subprocess.SubprocessError):
             cleanup_failed = True

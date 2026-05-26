@@ -248,10 +248,11 @@ delegate worktree remove cursor-4 --force-branch         # delete unmerged branc
 
 #### `delegate worktree prune`
 
-Bulk removal. Requires at least one of `--merged` (only branches reachable from source HEAD) or `--older-than DAYS` (filtered by last activity). Options: `--dry-run` to preview, `--harness` to filter by engine, `--discard-uncommitted` / `--force-branch` for destructive overrides.
+Bulk removal. Requires at least one of `--merged` (only branches reachable from source HEAD) or `--older-than DAYS` (filtered by last activity). Options: `--dry-run` to preview, `--harness` to filter by engine, `--include-detached` to include worktrees created from a detached source HEAD, and `--discard-uncommitted` / `--force-branch` for destructive overrides.
 
 ```bash
 delegate worktree prune --merged --older-than 7 --dry-run
+delegate worktree prune --merged --include-detached --dry-run
 delegate worktree prune --merged --discard-uncommitted
 ```
 

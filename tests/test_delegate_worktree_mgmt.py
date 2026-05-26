@@ -972,6 +972,7 @@ class WorktreeMgmtTests(unittest.TestCase):
                     merged=True,
                 )
             self.assertFalse(result["ok"])
+            self.assertEqual(result["exitCode"], self.delegate.EXIT_USAGE)
             self.assertEqual(len(result["errors"]), 1)
             self.assertEqual(result["errors"][0]["code"], "branch_remove_failed")
             self.assertEqual(result["removed"][0]["code"], "branch_remove_failed")
