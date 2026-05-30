@@ -550,6 +550,30 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(ctx.exception.error, "invalid_worktrees_config")
         self.assertIn("mergedOlderThanDays", ctx.exception.message)
 
+    def test_worktrees_auto_prune_merged_days_bool_raises(self):
+        config_mod = load_config_module()
+        with self.assertRaises(config_mod.ConfigError) as ctx:
+            config_mod.validate_config(
+                config_mod.deep_merge(
+                    config_mod.DEFAULT_CONFIG,
+                    {"worktrees": {"autoPrune": {"mergedOlderThanDays": True}}},
+                )
+            )
+        self.assertEqual(ctx.exception.error, "invalid_worktrees_config")
+        self.assertIn("mergedOlderThanDays", ctx.exception.message)
+
+    def test_tracking_retention_raw_log_days_bool_raises(self):
+        config_mod = load_config_module()
+        with self.assertRaises(config_mod.ConfigError) as ctx:
+            config_mod.validate_config(
+                config_mod.deep_merge(
+                    config_mod.DEFAULT_CONFIG,
+                    {"tracking": {"retention": {"rawLogDays": False}}},
+                )
+            )
+        self.assertEqual(ctx.exception.error, "invalid_tracking_config")
+        self.assertIn("rawLogDays", ctx.exception.message)
+
     def test_worktrees_data_home_explicit_null_accepted(self):
         """dataHome: null is the valid explicit default sentinel."""
         config_mod = load_config_module()

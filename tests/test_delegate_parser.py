@@ -191,6 +191,43 @@ class ParserTests(unittest.TestCase):
             self.delegate.parse_cli(["runs", "--limit", "0"])
         self.assertEqual(ctx.exception.error, "invalid_limit")
 
+    def test_has_misplaced_global_option_detects_exact_tokens(self):
+        self.assertFalse(self.delegate.has_misplaced_global_option([]))
+        self.assertFalse(self.delegate.has_misplaced_global_option(["--jsonish"]))
+        self.assertTrue(self.delegate.has_misplaced_global_option(["prompt", "--json"]))
+
+    def test_parse_required_positive_int_option(self):
+        parsed, next_index = self.delegate.parse_required_positive_int_option(
+            ["--limit", "3"],
+            0,
+            option_label="runs --limit",
+            missing_error="missing_limit",
+            invalid_error="invalid_limit",
+        )
+        self.assertEqual(parsed, 3)
+        self.assertEqual(next_index, 2)
+
+    def test_parse_required_positive_int_option_errors(self):
+        with self.assertRaises(self.delegate.DelegateError) as missing:
+            self.delegate.parse_required_positive_int_option(
+                ["--limit"],
+                0,
+                option_label="runs --limit",
+                missing_error="missing_limit",
+                invalid_error="invalid_limit",
+            )
+        self.assertEqual(missing.exception.error, "missing_limit")
+
+        with self.assertRaises(self.delegate.DelegateError) as invalid:
+            self.delegate.parse_required_positive_int_option(
+                ["--limit", "nope"],
+                0,
+                option_label="runs --limit",
+                missing_error="missing_limit",
+                invalid_error="invalid_limit",
+            )
+        self.assertEqual(invalid.exception.error, "invalid_limit")
+
     def test_runs_active_and_recent_are_mutually_exclusive(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:
             self.delegate.parse_cli(["runs", "--active", "--recent"])

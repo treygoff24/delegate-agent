@@ -252,6 +252,16 @@ class RunRegistryTests(unittest.TestCase):
         status = self.registry.effective_status({"status": "running", "pid": "not-a-pid"})
         self.assertEqual(status, self.registry.STATUS_STALE)
 
+    def test_effective_status_stale_when_running_with_bool_pid(self):
+        status = self.registry.effective_status({"status": "running", "pid": True})
+        self.assertEqual(status, self.registry.STATUS_STALE)
+
+    def test_effective_status_stale_when_running_with_non_positive_pid(self):
+        for pid in (0, -1):
+            with self.subTest(pid=pid):
+                status = self.registry.effective_status({"status": "running", "pid": pid})
+                self.assertEqual(status, self.registry.STATUS_STALE)
+
     def test_latest_run_id_uses_run_id_timestamp_when_activity_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")

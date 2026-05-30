@@ -78,6 +78,7 @@ MODE_SAFE = "safe"
 MODE_WORK = "work"
 VALID_MODES = {MODE_SAFE, MODE_WORK}
 RUN_INPUT_KEYS = {"engine", "mode", "model", "cwd", "prompt", "isolation"}
+MISPLACED_GLOBAL_OPTIONS = frozenset({"--json", "--cwd", "--isolation"})
 CURSOR_SAFE_REVIEW_PREFIX = (
     "Delegate review mode (code review/investigation only): "
     "Do not edit, create, or delete files. "
@@ -443,12 +444,18 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
     raise DelegateError("unknown_subcommand", f"Unknown subcommand: {subcommand}")
 
 
+def has_misplaced_global_option(tokens: list[str]) -> bool:
+    return any(token in MISPLACED_GLOBAL_OPTIONS for token in tokens)
+
+
+def raise_misplaced_global_option(message: str) -> NoReturn:
+    raise DelegateError("misplaced_global_option", message)
+
+
 def require_no_extra(rest: list[str], name: str) -> None:
     if rest:
-        if any(tok in ("--json", "--cwd", "--isolation") for tok in rest):
-            raise DelegateError(
-                "misplaced_global_option", "Global options must appear before the subcommand."
-            )
+        if has_misplaced_global_option(rest):
+            raise_misplaced_global_option("Global options must appear before the subcommand.")
         raise DelegateError(
             "unexpected_argument", f"{name} does not accept arguments: {' '.join(rest)}"
         )
@@ -463,10 +470,8 @@ def parse_run(
     isolation: str | None,
 ) -> ParsedCommand:
     if len(rest) != 2 or rest[0] != "--input-json":
-        if any(tok in ("--json", "--cwd", "--isolation") for tok in rest):
-            raise DelegateError(
-                "misplaced_global_option", "Global options must appear before the subcommand."
-            )
+        if has_misplaced_global_option(rest):
+            raise_misplaced_global_option("Global options must appear before the subcommand.")
         raise DelegateError("invalid_run_args", "run requires: --input-json FILE")
     return ParsedCommand(
         "run",
@@ -617,9 +622,8 @@ def parse_prompt_tail(rest: list[str]) -> tuple[str | None, list[str]]:
         raise DelegateError(
             "ambiguous_prompt_source", "--prompt-file must appear before direct prompt text."
         )
-    if any(tok in ("--json", "--cwd", "--isolation") for tok in prompt_parts):
-        raise DelegateError(
-            "misplaced_global_option",
+    if has_misplaced_global_option(prompt_parts):
+        raise_misplaced_global_option(
             "Global options must appear before the subcommand; use --prompt-file for literal flag text.",
         )
     return prompt_file, prompt_parts
@@ -705,17 +709,13 @@ def parse_runs(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedComma
             i += 2
             continue
         if token == "--limit":
-            if i + 1 >= len(rest):
-                raise DelegateError("missing_limit", "runs --limit requires a positive integer.")
-            try:
-                limit = int(rest[i + 1])
-            except ValueError as exc:
-                raise DelegateError(
-                    "invalid_limit", "runs --limit must be a positive integer."
-                ) from exc
-            if limit < 1:
-                raise DelegateError("invalid_limit", "runs --limit must be at least 1.")
-            i += 2
+            limit, i = parse_required_positive_int_option(
+                rest,
+                i,
+                option_label="runs --limit",
+                missing_error="missing_limit",
+                invalid_error="invalid_limit",
+            )
             continue
         raise DelegateError("unknown_option", f"runs does not support option: {token}")
     if active and recent:
@@ -767,17 +767,14 @@ def parse_run_output(rest: list[str], json_mode: bool, cwd: str | None) -> Parse
             i += 1
             continue
         if token == "--tail":
-            if i + 1 >= len(rest):
-                raise DelegateError("missing_tail", "run-output --tail requires a line count.")
-            try:
-                tail = int(rest[i + 1])
-            except ValueError as exc:
-                raise DelegateError(
-                    "invalid_tail", "run-output --tail must be a positive integer."
-                ) from exc
-            if tail < 1:
-                raise DelegateError("invalid_tail", "run-output --tail must be at least 1.")
-            i += 2
+            tail, i = parse_required_positive_int_option(
+                rest,
+                i,
+                option_label="run-output --tail",
+                missing_error="missing_tail",
+                invalid_error="invalid_tail",
+                missing_value_description="a line count",
+            )
             continue
         raise DelegateError("unknown_option", f"run-output does not support option: {token}")
     if not (completion_report or stdout_flag or stderr_flag or raw):
@@ -824,6 +821,29 @@ def parse_positive_int(value: str, *, option: str) -> int:
     if parsed < 1:
         raise DelegateError("invalid_option_value", f"{option} must be at least 1.")
     return parsed
+
+
+def parse_required_positive_int_option(
+    rest: list[str],
+    index: int,
+    *,
+    option_label: str,
+    missing_error: str,
+    invalid_error: str,
+    missing_value_description: str = "a positive integer",
+) -> tuple[int, int]:
+    if index + 1 >= len(rest):
+        raise DelegateError(
+            missing_error,
+            f"{option_label} requires {missing_value_description}.",
+        )
+    try:
+        parsed = int(rest[index + 1])
+    except ValueError as exc:
+        raise DelegateError(invalid_error, f"{option_label} must be a positive integer.") from exc
+    if parsed < 1:
+        raise DelegateError(invalid_error, f"{option_label} must be at least 1.")
+    return parsed, index + 2
 
 
 def _require_option_value(rest: list[str], index: int, option: str) -> str:
@@ -915,11 +935,8 @@ def parse_worktree(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedC
     action_specs = WORKTREE_OPTION_SPECS[action]
     while i < len(args):
         token = args[i]
-        if token in {"--json", "--cwd", "--isolation"}:
-            raise DelegateError(
-                "misplaced_global_option",
-                f"{token} must appear before the subcommand.",
-            )
+        if token in MISPLACED_GLOBAL_OPTIONS:
+            raise_misplaced_global_option(f"{token} must appear before the subcommand.")
         spec = action_specs.get(token)
         if spec is not None:
             i = _apply_worktree_option(parsed, args, i, token, spec)
@@ -1341,7 +1358,7 @@ def resolve_prompt(
         assert prompt_file is not None
         path = Path(prompt_file).expanduser()
         try:
-            return validate_prompt(path.read_text())
+            return validate_prompt(path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             raise DelegateError("prompt_file_not_found", f"Prompt file not found: {path}") from None
     if has_stdin:
@@ -1463,7 +1480,7 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
     assert parsed.input_json is not None
     path = Path(parsed.input_json).expanduser()
     try:
-        raw: JsonValue = json.loads(path.read_text())
+        raw: JsonValue = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         raise DelegateError("input_json_not_found", f"Input JSON file not found: {path}") from None
     except json.JSONDecodeError as exc:
@@ -1731,7 +1748,10 @@ def capture_git_metadata(workspace_path: str) -> tuple[str | None, str | None, s
 def write_cursor_safe_project_config(workspace: Path) -> None:
     config_dir = workspace / ".cursor"
     config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "cli.json").write_text(json.dumps(CURSOR_SAFE_CLI_CONFIG, indent=2) + "\n")
+    (config_dir / "cli.json").write_text(
+        json.dumps(CURSOR_SAFE_CLI_CONFIG, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
 
 def read_git_tracked_diff(git_root: str) -> bytes:
@@ -2954,7 +2974,7 @@ def pre_read_run_json_for_config(
     load config from that workspace, validate config. Returns (workspace, config, source)."""
     path = Path(input_json_path).expanduser()
     try:
-        raw: JsonValue = json.loads(path.read_text())
+        raw: JsonValue = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         raise DelegateError("input_json_not_found", f"Input JSON file not found: {path}") from None
     except json.JSONDecodeError as exc:

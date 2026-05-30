@@ -14,7 +14,7 @@ from delegate_agent.git_utils import (
     GIT_TIMEOUT_RETURN_CODE,
     timeout_completed_process,
 )
-from delegate_agent.json_types import JsonObject
+from delegate_agent.json_types import JsonObject, is_non_negative_int
 
 SCHEMA_LIST = "delegate.worktree-list.v1"
 SCHEMA_SHOW = "delegate.worktree-show.v1"
@@ -545,7 +545,12 @@ def _error_payload(
     return payload
 
 
-def resolve_record(registry_root: Path, *, handle: str | None, latest_harness: str | None = None) -> JsonObject:
+def resolve_record(
+    registry_root: Path,
+    *,
+    handle: str | None,
+    latest_harness: str | None = None,
+) -> JsonObject:
     index = run_registry.load_index(registry_root)
     if latest_harness is not None:
         run_id = run_registry.latest_run_id_for_harness(registry_root, index, latest_harness)
@@ -562,17 +567,28 @@ def resolve_record(registry_root: Path, *, handle: str | None, latest_harness: s
         resolved = run_registry.resolve_handle(index, handle)
         if resolved.run_id is None:
             suggestions = list(resolved.suggestions)
-            next_actions = [f"delegate worktree show {suggestions[0]}"] if suggestions else ["delegate worktree list"]
+            next_actions = (
+                [f"delegate worktree show {suggestions[0]}"]
+                if suggestions
+                else ["delegate worktree list"]
+            )
             raise WorktreeManagementError(
                 _error_payload(
                     "unknown_handle",
-                    f"Unknown run handle: {handle}. Suggestions: {', '.join(suggestions) if suggestions else '(none)'}",
+                    (
+                        f"Unknown run handle: {handle}. Suggestions: "
+                        f"{', '.join(suggestions) if suggestions else '(none)'}"
+                    ),
                     next_actions=next_actions,
                 )
             )
         run_id = resolved.run_id
     index_entry = index.get("runs", {}).get(run_id)
-    record = _record_for_run(registry_root, run_id, index_entry if isinstance(index_entry, dict) else {})
+    record = _record_for_run(
+        registry_root,
+        run_id,
+        index_entry if isinstance(index_entry, dict) else {},
+    )
     if record is None:
         alias = run_registry.alias_for_run(index, run_id)
         raise WorktreeManagementError(
@@ -599,7 +615,9 @@ def show_worktree(
     porcelain: list[str] | None = None
     porcelain_total = 0
     porcelain_truncated = False
-    if entry.get("worktreeStatus") in (STATUS_PRESENT, STATUS_UNKNOWN) and isinstance(execution_cwd, str):
+    if entry.get("worktreeStatus") in (STATUS_PRESENT, STATUS_UNKNOWN) and isinstance(
+        execution_cwd, str
+    ):
         lines, total, warnings = porcelain_status(execution_cwd, limit=50)
         if lines is not None:
             porcelain = lines
@@ -627,9 +645,6 @@ def show_worktree(
             warnings.append(warning)
         entry["warnings"] = warnings
     return entry
-
-
-
 
 
 def _remove_branch(source_git_root: str, branch: str, *, force: bool) -> BranchRemovalResult:
@@ -1056,6 +1071,13 @@ def _older_than(record: JsonObject, days: int) -> bool | None:
     return dt < datetime.now(UTC) - timedelta(days=days)
 
 
+def _entry_ref(record: JsonObject, *, reason: str | None = None) -> JsonObject:
+    entry: JsonObject = {"alias": record.get("alias"), "runId": record.get("runId")}
+    if reason is not None:
+        entry["reason"] = reason
+    return entry
+
+
 def prune_worktrees(
     registry_root: Path,
     *,
@@ -1085,27 +1107,27 @@ def prune_worktrees(
     for record in load_persistent_records(registry_root):
         alias = record.get("alias")
         if harness is not None and record.get("harness") != harness:
-            skipped.append({"alias": alias, "runId": record.get("runId"), "reason": "harness_filter"})
+            skipped.append(_entry_ref(record, reason="harness_filter"))
             continue
         status, _warnings = detect_worktree_status(record)
         if status in (STATUS_REMOVED, STATUS_UNKNOWN):
             # Not candidates — filter silently (spec L678).
             continue
         if status == STATUS_MISSING:
-            skipped.append({"alias": alias, "runId": record.get("runId"), "reason": "path_missing"})
+            skipped.append(_entry_ref(record, reason="path_missing"))
             continue
         creation = record.get("creationContext")
         if merged and isinstance(creation, dict) and creation.get("sourceHeadRef") is None and not include_detached:
-            skipped.append({"alias": alias, "runId": record.get("runId"), "reason": "detached_source"})
+            skipped.append(_entry_ref(record, reason="detached_source"))
             continue
         # Compute dirty before the merged check so the merged branch path
         # can test dirty state without rebinding a later assignment.
         dirty, _dirty_paths, _dirty_total, _dirty_warnings = dirty_info(record, status)
         if dirty is None and not discard_uncommitted:
-            skipped.append({"alias": alias, "runId": record.get("runId"), "reason": "dirty_check_failed"})
+            skipped.append(_entry_ref(record, reason="dirty_check_failed"))
             continue
         if dirty is True and not discard_uncommitted:
-            skipped.append({"alias": alias, "runId": record.get("runId"), "reason": "dirty"})
+            skipped.append(_entry_ref(record, reason="dirty"))
             continue
         keep_branch_for_prune = False
         merged_check_already_passed = False
@@ -1121,15 +1143,15 @@ def prune_worktrees(
                     keep_branch_for_prune = True
                 else:
                     reason = "merge_check_failed" if merged_value is None else "unmerged_branch"
-                    skipped.append({"alias": alias, "runId": record.get("runId"), "reason": reason})
+                    skipped.append(_entry_ref(record, reason=reason))
                     continue
         if older_than_days is not None:
             old_enough = _older_than(record, older_than_days)
             if old_enough is None:
-                skipped.append({"alias": alias, "runId": record.get("runId"), "reason": "invalid_last_activity"})
+                skipped.append(_entry_ref(record, reason="invalid_last_activity"))
                 continue
             if not old_enough:
-                skipped.append({"alias": alias, "runId": record.get("runId"), "reason": "not_yet_old_enough"})
+                skipped.append(_entry_ref(record, reason="not_yet_old_enough"))
                 continue
         candidate = {
             "alias": alias,
@@ -1380,7 +1402,7 @@ def maybe_auto_prune(
     if not isinstance(auto, dict) or auto.get("enabled") is not True:
         return None
     days = auto.get("mergedOlderThanDays", 7)
-    if not isinstance(days, int):
+    if not is_non_negative_int(days):
         days = 7
     try:
         # Probe lock availability without blocking. The actual prune uses

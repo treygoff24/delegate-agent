@@ -49,6 +49,17 @@ class RetentionTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_raw_log_retention_days_rejects_bool(self):
+        config = {"tracking": {"retention": {"rawLogDays": True}}}
+        self.assertEqual(
+            self.retention.raw_log_retention_days(config),
+            self.retention.DEFAULT_RAW_LOG_RETENTION_DAYS,
+        )
+
+    def test_retention_enabled_ignores_non_bool_values(self):
+        config = {"tracking": {"retention": {"enabled": "false"}}}
+        self.assertTrue(self.retention.retention_enabled(config))
+
     def write_completed_run(
         self,
         *,

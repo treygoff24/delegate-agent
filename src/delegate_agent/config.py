@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 
-from delegate_agent.json_types import JsonObject, JsonValue
+from delegate_agent.json_types import JsonObject, JsonValue, is_non_negative_int
 
 DEFAULT_CONFIG_PATH = Path.home() / ".delegate" / "config.json"
 WORKSPACE_CONFIG_RELATIVE = Path(".delegate") / "config.json"
@@ -206,6 +206,18 @@ def _validate_isolation_section(isolation: JsonValue) -> None:
             )
 
 
+def _validate_required_non_negative_int(
+    value: JsonValue,
+    *,
+    path: str,
+    error: str,
+) -> None:
+    if value is None:
+        raise ConfigError(error, f"{path} must not be null.")
+    if not is_non_negative_int(value):
+        raise ConfigError(error, f"{path} must be a non-negative integer.")
+
+
 def _validate_worktrees_section(worktrees: JsonValue) -> None:
     if worktrees is None:
         return
@@ -247,17 +259,11 @@ def _validate_worktrees_section(worktrees: JsonValue) -> None:
                     "worktrees.autoPrune.enabled must be a boolean.",
                 )
         if "mergedOlderThanDays" in auto_prune:
-            merged_days = auto_prune["mergedOlderThanDays"]
-            if merged_days is None:
-                raise ConfigError(
-                    "invalid_worktrees_config",
-                    "worktrees.autoPrune.mergedOlderThanDays must not be null.",
-                )
-            if not isinstance(merged_days, int) or isinstance(merged_days, bool) or merged_days < 0:
-                raise ConfigError(
-                    "invalid_worktrees_config",
-                    "worktrees.autoPrune.mergedOlderThanDays must be a non-negative integer.",
-                )
+            _validate_required_non_negative_int(
+                auto_prune["mergedOlderThanDays"],
+                path="worktrees.autoPrune.mergedOlderThanDays",
+                error="invalid_worktrees_config",
+            )
 
 
 def _validate_codex_section(codex: JsonValue) -> None:
@@ -374,7 +380,7 @@ def workspace_config_path(workspace: Path) -> Path:
 
 def read_config_file(path: Path) -> JsonObject:
     try:
-        loaded: JsonValue = json.loads(path.read_text())
+        loaded: JsonValue = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise ConfigError("invalid_config_json", f"Invalid JSON in {path}: {exc}") from exc
     if not isinstance(loaded, dict):
@@ -492,10 +498,11 @@ def validate_config(config: JsonObject) -> None:
                     "invalid_tracking_config", "tracking.retention.enabled must be a boolean."
                 )
             raw_log_days = retention.get("rawLogDays")
-            if raw_log_days is not None and (not isinstance(raw_log_days, int) or raw_log_days < 0):
-                raise ConfigError(
-                    "invalid_tracking_config",
-                    "tracking.retention.rawLogDays must be a non-negative integer.",
+            if raw_log_days is not None:
+                _validate_required_non_negative_int(
+                    raw_log_days,
+                    path="tracking.retention.rawLogDays",
+                    error="invalid_tracking_config",
                 )
     _validate_policy_section(config.get("policy"))
     _validate_codex_section(config.get("codex"))

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import BinaryIO
 
 from delegate_agent import archived_logs, run_registry
-from delegate_agent.json_types import JsonObject
+from delegate_agent.json_types import JsonObject, is_non_negative_int
 
 ARCHIVE_MEMBER_NAMES = (
     run_registry.STDOUT_LOG,
@@ -35,13 +35,14 @@ def retention_settings(config: JsonObject) -> JsonObject:
 
 
 def retention_enabled(config: JsonObject) -> bool:
-    return bool(retention_settings(config).get("enabled", True))
+    enabled = retention_settings(config).get("enabled", True)
+    return enabled if isinstance(enabled, bool) else True
 
 
 def raw_log_retention_days(config: JsonObject) -> int:
     settings = retention_settings(config)
     days = settings.get("rawLogDays", DEFAULT_RAW_LOG_RETENTION_DAYS)
-    if not isinstance(days, int) or days < 0:
+    if not is_non_negative_int(days):
         return DEFAULT_RAW_LOG_RETENTION_DAYS
     return days
 
@@ -303,7 +304,7 @@ def log_file_byte_size(registry_root: Path, run_id: str, log_name: str) -> int:
     if state is not None:
         key = "stdoutBytes" if log_name == run_registry.STDOUT_LOG else "stderrBytes"
         value = state.get(key)
-        if isinstance(value, int):
+        if isinstance(value, int) and not isinstance(value, bool):
             return value
     archive_file = archive_path(registry_root, run_id)
     try:

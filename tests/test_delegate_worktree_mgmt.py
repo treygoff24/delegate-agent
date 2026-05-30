@@ -1264,6 +1264,20 @@ class WorktreeMgmtTests(unittest.TestCase):
             )
             self.assertIsNone(result)
 
+    def test_maybe_auto_prune_bool_days_falls_back_to_default(self):
+        _repo, path = self._make_repo()
+        config = {"worktrees": {"autoPrune": {"enabled": True, "mergedOlderThanDays": True}}}
+        with mock.patch.object(
+            self.delegate.worktree_mgmt,
+            "prune_worktrees",
+            return_value={"ok": True},
+        ) as prune:
+            result = self.delegate.worktree_mgmt.maybe_auto_prune(
+                self._registry_root(path), config
+            )
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(prune.call_args.kwargs["older_than_days"], 7)
+
     def test_worktree_list_no_auto_prune_skips_opportunistic_pass(self):
         _repo, path = self._make_repo()
         with tempfile.TemporaryDirectory() as fake_home:

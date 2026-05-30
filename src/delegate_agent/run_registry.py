@@ -98,7 +98,7 @@ def load_index(registry_root: Path) -> JsonObject:
     path = index_path(registry_root)
     if not path.exists():
         return empty_index()
-    data: JsonValue = json.loads(path.read_text())
+    data: JsonValue = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError("index.json root must be an object")
     aliases = data.get("aliases")
@@ -115,7 +115,10 @@ def load_index(registry_root: Path) -> JsonObject:
 def write_json_atomic(path: Path, payload: JsonObject) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(path.suffix + ".tmp")
-    temp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    temp.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     os.replace(temp, path)
 
 
@@ -127,7 +130,7 @@ def ensure_git_delegate_exclude(git_root: Path) -> None:
     exclude_file = git_info_exclude_path(git_root)
     if exclude_file is None or not exclude_file.parent.exists():
         return
-    existing = exclude_file.read_text() if exclude_file.exists() else ""
+    existing = exclude_file.read_text(encoding="utf-8") if exclude_file.exists() else ""
     lines = existing.splitlines()
     if any(
         line.strip() == GIT_EXCLUDE_ENTRY.rstrip("/") or line.strip() == GIT_EXCLUDE_ENTRY
@@ -136,7 +139,7 @@ def ensure_git_delegate_exclude(git_root: Path) -> None:
         return
     if existing and not existing.endswith("\n"):
         existing += "\n"
-    exclude_file.write_text(existing + GIT_EXCLUDE_ENTRY + "\n")
+    exclude_file.write_text(existing + GIT_EXCLUDE_ENTRY + "\n", encoding="utf-8")
 
 
 def ensure_registry(workspace: Path, *, workspace_kind: str) -> Path:
@@ -327,7 +330,7 @@ def effective_status(state: JsonObject | None) -> str:
     if status != STATUS_RUNNING:
         return status
     pid = state.get("pid")
-    if not isinstance(pid, int):
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid < 1:
         return STATUS_STALE
     alive = process_alive(pid)
     if alive is False:
@@ -395,27 +398,19 @@ def log_byte_sizes(registry_root: Path, run_id: str) -> tuple[int, int]:
     return stdout_bytes, stderr_bytes
 
 
-def _state_archived_log_byte_sizes(state: JsonObject | None) -> tuple[int, int] | None:
-    return archived_logs.state_log_byte_sizes(state)
-
-
-def _archive_path(registry_root: Path, run_id: str) -> Path:
-    return archived_logs.archive_path(registry_root, run_id)
-
-
 def _archived_log_byte_sizes(registry_root: Path, run_id: str) -> tuple[int, int]:
-    state_sizes = _state_archived_log_byte_sizes(load_run_state(registry_root, run_id))
+    state_sizes = archived_logs.state_log_byte_sizes(load_run_state(registry_root, run_id))
     if state_sizes is not None:
         return state_sizes
     return archived_logs.archive_log_byte_sizes(
-        _archive_path(registry_root, run_id),
+        archived_logs.archive_path(registry_root, run_id),
         stdout_log=STDOUT_LOG,
         stderr_log=STDERR_LOG,
     )
 
 
 def raw_logs_archived(registry_root: Path, run_id: str) -> bool:
-    return _archive_path(registry_root, run_id).exists()
+    return archived_logs.archive_path(registry_root, run_id).exists()
 
 
 def effective_log_byte_sizes(registry_root: Path, run_id: str) -> tuple[int, int]:
