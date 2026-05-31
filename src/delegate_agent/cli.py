@@ -2073,9 +2073,10 @@ def dry_run_payload(request: Request) -> JsonObject:
         payload["isolationLifecycle"] = ctx.isolation_lifecycle
         payload["preservedWorkspace"] = ctx.preserved_workspace
 
-        # For worktree isolation, add planned placeholders with real
-        # computed paths when available.
-        if ctx.effective_isolation == "worktree":
+        # Only persistent worktree isolation has a planned Delegate-managed
+        # branch/path. Temporary safe-mode isolation is created ephemerally at
+        # execution time and must not claim a persistent worktree plan.
+        if ctx.isolation_lifecycle == "persistent":
             planned_cwd = ctx.planned_execution_cwd or "<planned-worktree-path>"
             planned_branch = ctx.planned_branch or "<planned-branch>"
             payload["plannedExecutionCwd"] = planned_cwd
@@ -2156,11 +2157,16 @@ def _cleanup_partial_worktree(
         # must only set remove_branch when this run actually created the
         # branch; branch-collision cleanup must not delete pre-existing refs.
         try:
-            subprocess.run(
+            result = subprocess.run(
                 ["git", "-C", source_git_root, "branch", "-D", branch],
                 text=True, capture_output=True, check=False,
                 timeout=GIT_MUTATION_TIMEOUT_SECONDS,
             )
+            if result.returncode != 0 and _branch_delete_still_needs_cleanup(
+                source_git_root,
+                branch,
+            ):
+                cleanup_failed = True
         except (OSError, subprocess.SubprocessError):
             cleanup_failed = True
     if cleanup_failed:
@@ -2184,6 +2190,29 @@ def _cleanup_partial_worktree(
             f"warning: partial worktree cleanup failed; manual cleanup required: {manual}",
             file=sys.stderr,
         )
+
+
+def _branch_delete_still_needs_cleanup(source_git_root: str, branch: str) -> bool:
+    """Return True when a failed branch delete left cleanup work behind.
+
+    `git branch -D` can fail harmlessly if a previous cleanup step or Git itself
+    already removed the branch. Avoid parsing localized stderr text; ask Git
+    whether the ref still exists. If that verification command itself fails in
+    an unexpected way, prefer safe manual cleanup instructions.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", source_git_root, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=GIT_MUTATION_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return True
+    if result.returncode == 0:
+        return True
+    return result.returncode != 1
 
 
 def _validate_persistent_worktree_request(
@@ -2222,6 +2251,8 @@ def _validate_persistent_worktree_request(
             "pass_through_with_persistent_isolation",
             "--pass-through is not supported with persistent worktree runs (work mode + effective worktree isolation).",
         )
+
+    ensure_binary(request.argv)
 
     registry_root = run_registry.ensure_registry(
         Path(source_workspace.path),

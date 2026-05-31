@@ -747,6 +747,49 @@ class ExecutionTests(unittest.TestCase):
         self.assertNotEqual(payload["plannedBranch"], "<planned-branch>")
         self.assertRegex(payload["plannedBranch"], r"^delegate/cursor-")
 
+    def _assert_safe_dry_run_does_not_report_persistent_worktree_plan(
+        self,
+        *,
+        engine: str,
+        branch_prefix: str,
+    ) -> None:
+        repo, _git_cd = self._make_git_repo_with_commit()
+        parsed = self.delegate.ParsedCommand(
+            engine,
+            json_mode=True,
+            cwd=repo.name,
+            engine=engine,
+            mode="safe",
+            prompt_parts=["review"],
+            dry_run=True,
+        )
+        request = self.delegate.request_from_parsed(
+            parsed,
+            self.delegate.DEFAULT_CONFIG,
+            io.StringIO(),
+        )
+
+        payload = self.delegate.dry_run_payload(request)
+
+        self.assertEqual(payload["isolationLifecycle"], "temporary")
+        self.assertTrue(payload["isolatedWorkspace"])
+        self.assertIsNone(payload["plannedExecutionCwd"])
+        self.assertIsNone(payload["plannedBranch"])
+        self.assertNotIn(branch_prefix, " ".join(payload["argv"]))
+        self.assertNotIn("/worktrees/", " ".join(payload["argv"]))
+
+    def test_dry_run_cursor_safe_does_not_report_persistent_worktree_plan(self):
+        self._assert_safe_dry_run_does_not_report_persistent_worktree_plan(
+            engine="cursor",
+            branch_prefix="delegate/cursor-",
+        )
+
+    def test_dry_run_codex_safe_does_not_report_persistent_worktree_plan(self):
+        self._assert_safe_dry_run_does_not_report_persistent_worktree_plan(
+            engine="codex",
+            branch_prefix="delegate/codex-",
+        )
+
     def test_dry_run_worktree_planned_paths_not_placeholders_codex(self):
         """Codex work --isolation worktree dry-run yields concrete planned paths."""
         repo, _git_cd = self._make_git_repo_with_commit()
@@ -860,6 +903,42 @@ class ExecutionTests(unittest.TestCase):
             engine, mode, model_alias, workspace, "hello", config, dry_run=False,
             isolation_context=isolation_context,
         )
+
+    def test_persistent_worktree_missing_binary_fails_before_artifacts(self):
+        with tempfile.TemporaryDirectory() as fake_home, mock.patch.dict(
+            os.environ,
+            {"HOME": fake_home},
+        ):
+            repo, _git_cd = self._make_git_repo_with_commit()
+            config_dir = Path(repo.name) / ".delegate"
+            config_dir.mkdir()
+            (config_dir / "config.json").write_text(json.dumps({
+                "cursor": {
+                    "argvPrefix": ["delegate-definitely-missing-agent"],
+                    "defaultModel": "composer-2.5",
+                },
+                "isolation": {"work": "worktree"},
+            }))
+            stdout_buf = io.StringIO()
+
+            code = self.delegate.main(
+                ["--cwd", repo.name, "--json", "cursor", "work", "hello"],
+                stdout=stdout_buf,
+            )
+
+            payload = json.loads(stdout_buf.getvalue())
+            self.assertEqual(code, self.delegate.EXIT_MISSING_BINARY)
+            self.assertEqual(payload["exitCode"], self.delegate.EXIT_MISSING_BINARY)
+            self.assertEqual(payload["error"], "missing_binary")
+            self.assertFalse((Path(fake_home) / ".delegate" / "worktrees").exists())
+            branches = subprocess.run(
+                ["git", "-C", repo.name, "branch", "--list", "delegate/*"],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(branches.stdout.strip(), "")
+            self.assertFalse((config_dir / "runs").exists())
 
     # -- Non-Git workspace fails clearly --------------------------------------
 
@@ -1456,9 +1535,10 @@ class ExecutionTests(unittest.TestCase):
                 request = self._make_persistent_worktree_request(
                     "cursor", "work", repo.name, self.delegate.DEFAULT_CONFIG,
                 )
+                fake_bin = self.make_fake_bin()
                 request = self.delegate.Request(
                     request.engine, request.mode, request.workspace, request.prompt,
-                    ["/definitely/missing/delegate-child-binary", "--workspace", repo.name, "hello"],
+                    [str(fake_bin / "agent"), "--workspace", repo.name, "hello"],
                     request.model, model_alias=request.model_alias, dry_run=request.dry_run,
                     workspace_kind=request.workspace_kind,
                     isolation_context=request.isolation_context,
@@ -1515,9 +1595,10 @@ class ExecutionTests(unittest.TestCase):
                 request = self._make_persistent_worktree_request(
                     "cursor", "work", repo.name, self.delegate.DEFAULT_CONFIG,
                 )
+                fake_bin = self.make_fake_bin()
                 request = self.delegate.Request(
                     request.engine, request.mode, request.workspace, request.prompt,
-                    ["/definitely/missing/delegate-child-binary", "--workspace", repo.name, "hello"],
+                    [str(fake_bin / "agent"), "--workspace", repo.name, "hello"],
                     request.model, model_alias=request.model_alias, dry_run=request.dry_run,
                     workspace_kind=request.workspace_kind,
                     isolation_context=request.isolation_context,
@@ -1580,6 +1661,82 @@ class ExecutionTests(unittest.TestCase):
                     call.kwargs.get("timeout"),
                     self.delegate.GIT_MUTATION_TIMEOUT_SECONDS,
                 )
+
+    def test_partial_worktree_cleanup_records_branch_delete_failure(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            worktree_path = Path(temp_dir) / "partial-worktree"
+            worktree_path.mkdir()
+            run_path = Path(temp_dir) / "run"
+            run_path.mkdir()
+            snapshot_path = run_path / self.delegate.run_registry.SNAPSHOT_FILE
+            self.delegate.run_registry.write_json_atomic(snapshot_path, {"ok": False})
+            worktree_removed = subprocess.CompletedProcess(["git"], 0, "", "")
+            branch_failed = subprocess.CompletedProcess(
+                ["git"],
+                1,
+                "",
+                "fatal: branch deletion failed\n",
+            )
+            branch_still_exists = subprocess.CompletedProcess(["git"], 0, "", "")
+
+            with (
+                mock.patch.object(
+                    self.delegate.subprocess,
+                    "run",
+                    side_effect=[worktree_removed, branch_failed, branch_still_exists],
+                ),
+                mock.patch.object(self.delegate.sys, "stderr", io.StringIO()) as stderr,
+            ):
+                self.delegate._cleanup_partial_worktree(
+                    "/repo",
+                    str(worktree_path),
+                    "delegate/cursor-partial",
+                    run_path,
+                    remove_branch=True,
+                )
+
+            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            self.assertTrue(snapshot["cleanupFailed"])
+            self.assertIn("branch -D delegate/cursor-partial", snapshot["manualCleanup"])
+            self.assertIn("manual cleanup required", stderr.getvalue())
+
+    def test_partial_worktree_cleanup_ignores_already_missing_branch(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            worktree_path = Path(temp_dir) / "partial-worktree"
+            worktree_path.mkdir()
+            run_path = Path(temp_dir) / "run"
+            run_path.mkdir()
+            snapshot_path = run_path / self.delegate.run_registry.SNAPSHOT_FILE
+            self.delegate.run_registry.write_json_atomic(snapshot_path, {"ok": False})
+            worktree_removed = subprocess.CompletedProcess(["git"], 0, "", "")
+            branch_delete_failed = subprocess.CompletedProcess(
+                ["git"],
+                1,
+                "",
+                "error: branch 'delegate/cursor-partial' not found.\n",
+            )
+            branch_absent = subprocess.CompletedProcess(["git"], 1, "", "")
+
+            with (
+                mock.patch.object(
+                    self.delegate.subprocess,
+                    "run",
+                    side_effect=[worktree_removed, branch_delete_failed, branch_absent],
+                ),
+                mock.patch.object(self.delegate.sys, "stderr", io.StringIO()) as stderr,
+            ):
+                self.delegate._cleanup_partial_worktree(
+                    "/repo",
+                    str(worktree_path),
+                    "delegate/cursor-partial",
+                    run_path,
+                    remove_branch=True,
+                )
+
+            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            self.assertNotIn("cleanupFailed", snapshot)
+            self.assertNotIn("manualCleanup", snapshot)
+            self.assertEqual(stderr.getvalue(), "")
 
     # -- Finding 4: Popen-launch failure after git worktree add succeeds --------
 

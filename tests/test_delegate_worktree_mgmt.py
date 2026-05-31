@@ -1491,6 +1491,44 @@ class WorktreeMgmtTests(unittest.TestCase):
             state = self.delegate.run_registry.load_run_state(self._registry_root(path), run_id)
             self.assertIn("discardedDirtyPaths", state)
 
+    def test_worktree_prune_force_branch_removes_clean_unmerged_branch(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            branch = "delegate/cursor-prune-force-branch"
+            wt_path = str(Path(fake_home) / "wt" / "cursor-prune-force-branch")
+            run_id, _alias = self._seed_persistent_run(
+                path,
+                alias="cursor-prune-force-branch",
+                branch=branch,
+                execution_cwd=wt_path,
+            )
+            self._create_worktree_at(path, branch, wt_path)
+            (Path(wt_path) / "feature.txt").write_text("feature\n", encoding="utf-8")
+            git("add", "feature.txt", cwd=wt_path)
+            git("commit", "-m", "feature", cwd=wt_path)
+
+            result = self.delegate.worktree_mgmt.prune_worktrees(
+                self._registry_root(path),
+                merged=True,
+                force_branch=True,
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(
+                [entry["alias"] for entry in result["removed"]],
+                ["cursor-prune-force-branch"],
+            )
+            removed = result["removed"][0]
+            self.assertTrue(removed["pathRemoved"])
+            self.assertTrue(removed["branchRemoved"])
+            self.assertFalse(Path(wt_path).exists())
+            self.assertNotEqual(
+                git("rev-parse", "--verify", branch, cwd=path, check=False).returncode,
+                0,
+            )
+            state = self.delegate.run_registry.load_run_state(self._registry_root(path), run_id)
+            self.assertEqual(state["worktreeStatus"], "removed")
+
     def test_maybe_auto_prune_skips_when_lock_contended(self):
         """maybe_auto_prune returns within ~1s when registry lock is contended."""
         _repo, path = self._make_repo()

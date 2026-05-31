@@ -243,10 +243,12 @@ def build_isolation_context(
     lifecycle = _isolation_lifecycle(effective, mode)
     preserved = lifecycle == "persistent"
 
-    # Compute planned paths when effective isolation is worktree.
+    # Compute named paths only for persistent worktree runs. Temporary safe-mode
+    # isolation uses an ephemeral detached worktree or directory copy, not a
+    # Delegate-managed branch under the persistent worktree data home.
     planned_branch: str | None = None
     planned_execution_cwd: str | None = None
-    if effective == ISOLATION_WORKTREE and source_git_common_dir is not None:
+    if lifecycle == "persistent" and source_git_common_dir is not None:
         try:
             fp = compute_repo_fingerprint_from_common_dir(source_git_common_dir)
         except (FileNotFoundError, OSError):

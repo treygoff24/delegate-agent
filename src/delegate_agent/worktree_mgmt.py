@@ -1138,12 +1138,14 @@ def prune_worktrees(
                 include_detached=include_detached,
             )
             merged_check_already_passed = merged_value is True
-            if merged_value is not True:
-                if merged_value is False and not force_branch and dirty is not True:
+            if merged_value is None:
+                skipped.append(_entry_ref(record, reason="merge_check_failed"))
+                continue
+            if merged_value is False and not force_branch:
+                if dirty is not True:
                     keep_branch_for_prune = True
                 else:
-                    reason = "merge_check_failed" if merged_value is None else "unmerged_branch"
-                    skipped.append(_entry_ref(record, reason=reason))
+                    skipped.append(_entry_ref(record, reason="unmerged_branch"))
                     continue
         if older_than_days is not None:
             old_enough = _older_than(record, older_than_days)
