@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import NoReturn, TextIO
 
 try:
-    from delegate_agent import VERSION, harness_events, run_registry, worktree_mgmt
+    from delegate_agent import VERSION, command_help, harness_events, run_registry, worktree_mgmt
     from delegate_agent import config as delegate_config
     from delegate_agent import rendering as delegate_rendering
     from delegate_agent import retention as delegate_retention
@@ -42,7 +42,7 @@ except ModuleNotFoundError:  # pragma: no cover - direct cli.py invocation in te
     _src_root = Path(__file__).resolve().parent.parent
     if str(_src_root) not in sys.path:
         sys.path.insert(0, str(_src_root))
-    from delegate_agent import VERSION, harness_events, run_registry, worktree_mgmt
+    from delegate_agent import VERSION, command_help, harness_events, run_registry, worktree_mgmt
     from delegate_agent import config as delegate_config
     from delegate_agent import rendering as delegate_rendering
     from delegate_agent import retention as delegate_retention
@@ -141,6 +141,7 @@ class DelegateError(Exception):
 class ParsedCommand:
     subcommand: str
     json_mode: bool = False
+    help_topic: str | None = None
     cwd: str | None = None
     pass_through: bool = False
     completion_report: str | None = None
@@ -225,39 +226,7 @@ class PersistentWorktreeRegistration:
     pre_ctx: delegate_runner.RunContext
 
 
-HELP = f"""delegate {VERSION}
-
-Usage:
-  delegate [--cwd PATH] [--json] [--isolation auto|none|worktree] cursor {{safe,work}} [--prompt-file PATH] [prompt...]
-  delegate [--cwd PATH] [--json] [--isolation auto|none|worktree] droid MODEL_ALIAS {{safe,work}} [--prompt-file PATH] [prompt...]
-  delegate [--cwd PATH] [--json] [--isolation auto|none|worktree] codex {{safe,work}} [--prompt-file PATH] [prompt...]
-  delegate [--cwd PATH] [--json] [--isolation auto|none|worktree] dry-run cursor {{safe,work}} [--prompt-file PATH] [prompt...]
-  delegate [--cwd PATH] [--json] [--isolation auto|none|worktree] dry-run droid MODEL_ALIAS {{safe,work}} [--prompt-file PATH] [prompt...]
-  delegate [--cwd PATH] [--json] [--isolation auto|none|worktree] dry-run codex {{safe,work}} [--prompt-file PATH] [prompt...]
-  delegate [--cwd PATH] [--json] [--isolation auto|none|worktree] run --input-json FILE
-  delegate [--cwd PATH] [--json] snapshot [--latest HARNESS] [--no-redact] <alias-or-runId>
-  delegate [--cwd PATH] [--json] runs [--active] [--recent] [--harness HARNESS] [--limit N]
-  delegate [--cwd PATH] [--json] run-output <alias-or-runId> [--completion-report] [--stdout] [--stderr] [--tail N] [--raw] [--no-redact]
-  delegate [--cwd PATH] [--json] worktree list [--harness HARNESS] [--status STATUS] [--limit N] [--no-auto-prune]
-  delegate [--cwd PATH] [--json] worktree show <alias-or-runId>
-  delegate [--cwd PATH] [--json] worktree show --latest HARNESS
-  delegate [--cwd PATH] [--json] worktree remove <alias-or-runId> [--discard-uncommitted] [--force-branch] [--force] [--keep-branch]
-  delegate [--cwd PATH] [--json] worktree prune [--merged] [--older-than DAYS] [--harness HARNESS] [--include-detached] [--dry-run] [--discard-uncommitted] [--force-branch] [--force]
-  delegate [--cwd PATH] [--json] worktree gc [--dry-run]
-  delegate [--json] models
-  delegate [--json] describe
-  delegate agent-help
-
-Global options must appear before the subcommand.
-
-Run output options (before subcommand):
-  --pass-through              Stream raw child stdout/stderr (incompatible with --json)
-  --completion-report MODE    markdown (default) or none
-  --no-completion-report      Disable completion-report prompt injection
-
-Tracked runs return bounded summaries by default. Avoid piping launches through tail;
-inspect runs with delegate snapshot, delegate runs, and delegate run-output.
-"""
+HELP = command_help.render_overview_text()
 
 
 def config_path() -> Path:
@@ -303,6 +272,63 @@ def infer_global_json(argv: list[str]) -> bool:
             return False
         break
     return False
+
+
+def canonical_help_topic(path: str | None) -> str | None:
+    """Resolve a detected command path to its nearest valid COMMAND_SPECS key.
+
+    Returns the path unchanged when it is empty/None (overview) or an exact spec
+    key. Otherwise it falls back to the nearest valid prefix (e.g. an unknown
+    worktree action maps to ``worktree``); a leftover with no spec is returned
+    as-is so emit_command_help can surface unknown_help_topic.
+    """
+
+    if not path:
+        return path
+    if path in command_help.COMMAND_SPECS:
+        return path
+    parts = path.split()
+    while len(parts) > 1:
+        parts.pop()
+        candidate = " ".join(parts)
+        if candidate in command_help.COMMAND_SPECS:
+            return candidate
+    return path
+
+
+def help_command(json_mode: bool, topic: str | None) -> ParsedCommand:
+    """Build a help ParsedCommand, mapping topic to a canonical spec key."""
+
+    return ParsedCommand("help", json_mode=json_mode, help_topic=canonical_help_topic(topic))
+
+
+def parse_help_subcommand(rest: list[str], json_mode: bool) -> ParsedCommand:
+    """Parse ``help [<command> [<subcommand>]]`` (D3).
+
+    ``--json`` and help tokens are honored from anywhere in ``rest``; remaining
+    tokens name the topic. An empty topic yields the overview, unless a help
+    token was present, in which case ``delegate help --help`` describes the help
+    command itself.
+    """
+
+    help_requested = False
+    topic_parts: list[str] = []
+    for token in rest:
+        if token == "--json":
+            json_mode = True
+            continue
+        if command_help.is_help_token(token):
+            help_requested = True
+            continue
+        topic_parts.append(token)
+
+    if topic_parts:
+        topic = " ".join(topic_parts)
+    elif help_requested:
+        topic = "help"
+    else:
+        topic = None
+    return help_command(json_mode, topic)
 
 
 def parse_cli(argv: list[str]) -> ParsedCommand:
@@ -381,7 +407,12 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             "unknown_option", f"Unknown global option before subcommand: {subcommand}"
         )
 
+    if subcommand == "help":
+        return parse_help_subcommand(rest, json_mode)
+
     if subcommand == "models":
+        if any(command_help.is_help_token(token) for token in rest):
+            return help_command(json_mode, "models")
         require_no_extra(rest, "models")
         return ParsedCommand(
             "models",
@@ -392,6 +423,8 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             isolation=isolation,
         )
     if subcommand == "describe":
+        if any(command_help.is_help_token(token) for token in rest):
+            return help_command(json_mode, "describe")
         require_no_extra(rest, "describe")
         return ParsedCommand(
             "describe",
@@ -402,6 +435,8 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             isolation=isolation,
         )
     if subcommand == "agent-help":
+        if any(command_help.is_help_token(token) for token in rest):
+            return help_command(json_mode, "agent-help")
         require_no_extra(rest, "agent-help")
         return ParsedCommand(
             "agent-help",
@@ -478,6 +513,9 @@ def parse_run(
     completion_report: str | None,
     isolation: str | None,
 ) -> ParsedCommand:
+    # Help wins before required-arg validation: `run --help` needs no --input-json.
+    if any(command_help.is_help_token(token) for token in rest):
+        return help_command(json_mode, "run")
     if len(rest) != 2 or rest[0] != "--input-json":
         if has_misplaced_global_option(rest):
             raise_misplaced_global_option("Global options must appear before the subcommand.")
@@ -502,8 +540,14 @@ def parse_modeless_engine(
     pass_through: bool,
     completion_report: str | None,
     isolation: str | None,
+    *,
+    help_topic: str | None = None,
 ) -> ParsedCommand:
     """Parse the shared cursor/codex grammar: <mode> [--prompt-file PATH] [prompt...]."""
+    topic = help_topic if help_topic is not None else engine
+    # Help wins before a mode is consumed: `cursor --help` needs no mode.
+    if rest and command_help.is_help_token(rest[0]):
+        return help_command(json_mode, topic)
     if not rest:
         raise DelegateError("missing_mode", f"{engine} requires mode: safe or work.")
     mode = rest[0]
@@ -512,6 +556,11 @@ def parse_modeless_engine(
             "misplaced_global_option", "Global options must appear before the subcommand."
         )
     validate_mode(mode)
+    # Help wins immediately after the mode, before prompt capture begins:
+    # `cursor safe --help`. Once a prompt positional begins, a later --help is
+    # prompt text (`cursor work explain --help`).
+    if len(rest) >= 2 and command_help.is_help_token(rest[1]):
+        return help_command(json_mode, topic)
     prompt_file, prompt_parts = parse_prompt_tail(rest[1:])
     return ParsedCommand(
         engine,
@@ -536,7 +585,13 @@ def parse_droid(
     pass_through: bool,
     completion_report: str | None,
     isolation: str | None,
+    *,
+    help_topic: str | None = None,
 ) -> ParsedCommand:
+    topic = help_topic if help_topic is not None else "droid"
+    # Help wins before the alias is consumed: `droid --help` needs no alias.
+    if rest and command_help.is_help_token(rest[0]):
+        return help_command(json_mode, topic)
     if len(rest) < 2:
         raise DelegateError("missing_droid_args", "droid requires MODEL_ALIAS and mode.")
     model_alias = rest[0]
@@ -544,12 +599,18 @@ def parse_droid(
         raise DelegateError(
             "misplaced_global_option", "Global options must appear before the subcommand."
         )
+    # Help wins after the alias, before the mode: `droid x --help`.
+    if command_help.is_help_token(rest[1]):
+        return help_command(json_mode, topic)
     mode = rest[1]
     if mode.startswith("-"):
         raise DelegateError(
             "misplaced_global_option", "Global options must appear before the subcommand."
         )
     validate_mode(mode)
+    # Help wins after the mode, before prompt capture: `droid x safe --help`.
+    if len(rest) >= 3 and command_help.is_help_token(rest[2]):
+        return help_command(json_mode, topic)
     prompt_file, prompt_parts = parse_prompt_tail(rest[2:])
     return ParsedCommand(
         "droid",
@@ -575,6 +636,9 @@ def parse_dry_run(
     completion_report: str | None,
     isolation: str | None,
 ) -> ParsedCommand:
+    # Help wins before the engine is consumed: `dry-run --help`.
+    if rest and command_help.is_help_token(rest[0]):
+        return help_command(json_mode, "dry-run")
     if not rest:
         raise DelegateError("missing_engine", "dry-run requires cursor, droid, or codex.")
     engine = rest[0]
@@ -592,6 +656,7 @@ def parse_dry_run(
             pass_through=pass_through,
             completion_report=completion_report,
             isolation=isolation,
+            help_topic="dry-run",
         )
     if engine == "droid":
         return parse_droid(
@@ -602,6 +667,7 @@ def parse_dry_run(
             pass_through=pass_through,
             completion_report=completion_report,
             isolation=isolation,
+            help_topic="dry-run",
         )
     raise DelegateError("invalid_engine", "dry-run engine must be cursor, droid, or codex.")
 
@@ -644,6 +710,9 @@ def validate_mode(mode: str) -> None:
 
 
 def parse_snapshot(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
+    # Help wins over the optional handle/flags: a help token anywhere is help.
+    if any(command_help.is_help_token(token) for token in rest):
+        return help_command(json_mode, "snapshot")
     latest_harness: str | None = None
     no_redact = False
     handle: str | None = None
@@ -691,6 +760,9 @@ KNOWN_HARNESSES = ("cursor", "droid", "codex")
 
 
 def parse_runs(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
+    # Help wins over flags: a help token anywhere is help.
+    if any(command_help.is_help_token(token) for token in rest):
+        return help_command(json_mode, "runs")
     active = False
     recent = False
     harness: str | None = None
@@ -743,6 +815,9 @@ def parse_runs(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedComma
 
 
 def parse_run_output(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
+    # Help wins over the required handle/selectors: a help token anywhere is help.
+    if any(command_help.is_help_token(token) for token in rest):
+        return help_command(json_mode, "run-output")
     if not rest:
         raise DelegateError("missing_handle", "run-output requires <alias-or-runId>.")
     handle = rest[0]
@@ -927,10 +1002,19 @@ def _apply_worktree_option(
 
 
 def parse_worktree(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
+    # Help wins before an action is consumed: `worktree --help`.
+    if rest and command_help.is_help_token(rest[0]):
+        return help_command(json_mode, "worktree")
     if not rest:
         raise DelegateError("missing_worktree_action", "worktree requires list, show, remove, prune, or gc.")
     action = rest[0]
     args = rest[1:]
+    # Destructive safety: a help token anywhere in an action's args makes help
+    # win, so no removal/prune ever fires when the user asked for help. An
+    # unknown action with a help token falls back to the worktree overview.
+    if any(command_help.is_help_token(token) for token in args):
+        topic = f"worktree {action}" if action in WORKTREE_OPTION_SPECS else "worktree"
+        return help_command(json_mode, topic)
     if action not in WORKTREE_OPTION_SPECS:
         raise DelegateError("unknown_worktree_action", f"Unknown worktree action: {action}")
     parsed = ParsedCommand(
@@ -3105,6 +3189,10 @@ def describe_payload(config: JsonObject, config_source: str) -> JsonObject:
                 ],
             },
         },
+        "commands": [
+            {"command": spec.name, "summary": spec.summary}
+            for spec in command_help.COMMAND_SPECS.values()
+        ],
     }
 
 
@@ -3144,6 +3232,28 @@ def emit_describe(config: JsonObject, config_source: str, json_mode: bool, stdou
     print("modes: safe, work", file=stdout)
     print("prompt sources: direct, --prompt-file, stdin", file=stdout)
     print("global options must appear before the subcommand", file=stdout)
+    return EXIT_OK
+
+
+def emit_command_help(topic: str | None, json_mode: bool, stdout: TextIO) -> int:
+    """Render help: overview when topic is empty, else focused help for one command."""
+
+    if not topic:
+        if json_mode:
+            delegate_rendering.print_json(command_help.help_index_payload(), stdout)
+        else:
+            print(command_help.render_overview_text(), file=stdout, end="")
+        return EXIT_OK
+    spec = command_help.COMMAND_SPECS.get(topic)
+    if spec is None:
+        raise DelegateError(
+            "unknown_help_topic",
+            f"Unknown help topic: {topic}. Run delegate help for the command list.",
+        )
+    if json_mode:
+        delegate_rendering.print_json(command_help.command_help_payload(spec), stdout)
+    else:
+        print(command_help.render_command_help_text(spec), file=stdout, end="")
     return EXIT_OK
 
 
@@ -3277,8 +3387,7 @@ def main(
         parsed = parse_cli(argv)
         json_mode = parsed.json_mode
         if parsed.subcommand == "help":
-            print(HELP, file=stdout)
-            return EXIT_OK
+            return emit_command_help(parsed.help_topic, parsed.json_mode, stdout)
         if parsed.subcommand == "version":
             print(VERSION, file=stdout)
             return EXIT_OK

@@ -62,6 +62,8 @@ delegate --json describe
 delegate --json models
 ```
 
+Discover commands as you go: `delegate <command> --help` prints focused help for any command path, and `delegate --json <command> --help` returns an agent-friendly spec of its usage, arguments, and options. `delegate --json describe` includes a `commands` catalog of the whole surface.
+
 From this development checkout, use `python3 bin/delegate.py ...` instead of an installed `delegate` shim.
 
 ## Quickstart

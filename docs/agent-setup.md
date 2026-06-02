@@ -55,6 +55,13 @@ This guide covers both human setup and non-interactive setup for agents or CI jo
    delegate --json models
    ```
 
+   `delegate --json describe` also returns a `commands` catalog (each entry has `command` and `summary`), so one call lists the entire command surface. To learn how to invoke any specific command, introspect it with `delegate --json <command> --help`, which returns a structured spec of its usage, arguments, options, and examples:
+
+   ```bash
+   delegate --json cursor --help
+   delegate --json worktree remove --help
+   ```
+
 6. Run a dry-run smoke test. Dry-run does not require the real child binary and does not launch the runtime:
 
    ```bash

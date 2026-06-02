@@ -1,0 +1,303 @@
+"""End-to-end CLI behavior tests for per-subcommand ``--help`` (Task 3b).
+
+These tests drive the CLI through ``main()`` (capturing stdout/stderr and the
+exit code) and through ``parse_cli`` (for routing/boundary assertions). They are
+distinct from ``tests/test_command_help.py``, which unit-tests the pure
+``command_help`` registry/renderers. The focus here is the wiring in ``cli.py``:
+help detection at each parser's decision points, the ``help`` positional
+subcommand, JSON help envelopes, destructive-safety, and prompt-boundary
+correctness.
+"""
+
+import importlib.util
+import io
+import json
+import sys
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = str(ROOT / "src")
+MODULE_PATH = ROOT / "src" / "delegate_agent" / "cli.py"
+
+if SRC not in sys.path:
+    sys.path.insert(0, SRC)
+
+
+def load_delegate():
+    spec = importlib.util.spec_from_file_location("delegate_cli_help_test", MODULE_PATH)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+# Top-level commands that must support `<cmd> --help`.
+TOP_LEVEL_COMMANDS = (
+    "cursor",
+    "codex",
+    "droid",
+    "dry-run",
+    "run",
+    "snapshot",
+    "runs",
+    "run-output",
+    "worktree",
+    "models",
+    "describe",
+    "agent-help",
+    "help",
+)
+
+
+class HelpCliTestBase(unittest.TestCase):
+    def setUp(self):
+        self.delegate = load_delegate()
+
+    def run_main(self, argv):
+        """Drive main() and return (exit_code, stdout_text, stderr_text)."""
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        code = self.delegate.main(argv, stdout=stdout, stderr=stderr)
+        return code, stdout.getvalue(), stderr.getvalue()
+
+
+class TopLevelHelpTests(HelpCliTestBase):
+    """`<cmd> --help` exits 0 and prints non-empty help naming the command."""
+
+    def test_every_top_level_command_help(self):
+        for command in TOP_LEVEL_COMMANDS:
+            with self.subTest(command=command):
+                code, out, _err = self.run_main([command, "--help"])
+                self.assertEqual(code, self.delegate.EXIT_OK)
+                self.assertTrue(out.strip(), f"{command} --help printed nothing")
+                self.assertIn(command, out, f"{command} --help missing command name")
+
+
+class MultiLevelHelpTests(HelpCliTestBase):
+    """Multi-level help paths exit 0 with focused, non-empty help."""
+
+    CASES = (
+        (["cursor", "safe", "--help"], "cursor"),
+        (["droid", "x", "--help"], "droid"),
+        (["droid", "x", "safe", "--help"], "droid"),
+        (["dry-run", "cursor", "--help"], "dry-run"),
+        (["dry-run", "droid", "--help"], "dry-run"),
+        (["worktree", "remove", "--help"], "worktree remove"),
+        (["worktree", "prune", "--help"], "worktree prune"),
+        (["worktree", "list", "--help"], "worktree list"),
+        (["worktree", "show", "--help"], "worktree show"),
+        (["worktree", "gc", "--help"], "worktree gc"),
+    )
+
+    def test_multi_level_help_paths(self):
+        for argv, topic in self.CASES:
+            with self.subTest(argv=argv):
+                code, out, _err = self.run_main(argv)
+                self.assertEqual(code, self.delegate.EXIT_OK)
+                self.assertTrue(out.strip(), f"{argv} printed nothing")
+                self.assertIn(topic, out, f"{argv} help missing topic {topic!r}")
+
+
+class DashHAliasTests(HelpCliTestBase):
+    """`-h` is an alias for `--help` everywhere."""
+
+    CASES = (
+        (["cursor", "-h"], "cursor"),
+        (["worktree", "remove", "-h"], "worktree remove"),
+        (["droid", "-h"], "droid"),
+        (["dry-run", "-h"], "dry-run"),
+    )
+
+    def test_dash_h_alias(self):
+        for argv, topic in self.CASES:
+            with self.subTest(argv=argv):
+                code, out, _err = self.run_main(argv)
+                self.assertEqual(code, self.delegate.EXIT_OK)
+                self.assertIn(topic, out, f"{argv} help missing topic {topic!r}")
+
+
+class JsonCommandHelpTests(HelpCliTestBase):
+    """`--json <cmd> --help` returns valid JSON with ok=true and command==topic."""
+
+    CASES = (
+        (["--json", "cursor", "--help"], "cursor"),
+        (["--json", "codex", "--help"], "codex"),
+        (["--json", "droid", "--help"], "droid"),
+        (["--json", "dry-run", "--help"], "dry-run"),
+        (["--json", "run", "--help"], "run"),
+        (["--json", "snapshot", "--help"], "snapshot"),
+        (["--json", "runs", "--help"], "runs"),
+        (["--json", "run-output", "--help"], "run-output"),
+        (["--json", "worktree", "--help"], "worktree"),
+        (["--json", "models", "--help"], "models"),
+        (["--json", "describe", "--help"], "describe"),
+        (["--json", "agent-help", "--help"], "agent-help"),
+        (["--json", "help", "--help"], "help"),
+        (["--json", "worktree", "remove", "--help"], "worktree remove"),
+        (["--json", "cursor", "safe", "--help"], "cursor"),
+    )
+
+    def test_json_command_help(self):
+        for argv, topic in self.CASES:
+            with self.subTest(argv=argv):
+                code, out, _err = self.run_main(argv)
+                self.assertEqual(code, self.delegate.EXIT_OK)
+                payload = json.loads(out)
+                self.assertIs(payload["ok"], True)
+                self.assertEqual(payload["command"], topic)
+
+
+class HelpSubcommandTests(HelpCliTestBase):
+    """The `help` positional subcommand: overview, focused, and JSON index."""
+
+    def test_help_overview(self):
+        code, out, _err = self.run_main(["help"])
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertTrue(out.strip())
+        # Overview enumerates the worktree actions on their own lines (I1).
+        self.assertIn("worktree prune", out)
+
+    def test_help_focused_topic(self):
+        code, out, _err = self.run_main(["help", "worktree", "remove"])
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertIn("worktree remove", out)
+
+    def test_json_help_index(self):
+        code, out, _err = self.run_main(["--json", "help"])
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        payload = json.loads(out)
+        self.assertIn("ok", payload)
+        self.assertIs(payload["ok"], True)
+        self.assertIn("commands", payload)
+        self.assertIsInstance(payload["commands"], list)
+        self.assertTrue(payload["commands"])
+
+
+class JsonPositionIndependenceTests(HelpCliTestBase):
+    """`--json` anywhere in a help invocation yields the same focused help (D3)."""
+
+    def test_json_position_independent_for_worktree(self):
+        variants = (
+            ["help", "--json", "worktree"],
+            ["help", "worktree", "--json"],
+            ["--json", "help", "worktree"],
+        )
+        payloads = []
+        for argv in variants:
+            with self.subTest(argv=argv):
+                code, out, _err = self.run_main(argv)
+                self.assertEqual(code, self.delegate.EXIT_OK)
+                payload = json.loads(out)
+                self.assertIs(payload["ok"], True)
+                self.assertEqual(payload["command"], "worktree")
+                payloads.append(payload)
+        # All three must be byte-for-byte identical help for "worktree".
+        self.assertEqual(payloads[0], payloads[1])
+        self.assertEqual(payloads[1], payloads[2])
+
+
+class HelpShortCircuitsValidationTests(HelpCliTestBase):
+    """Help wins before required-arg validation (no alias/mode/--input-json)."""
+
+    def test_droid_help_without_alias(self):
+        code, out, _err = self.run_main(["droid", "--help"])
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertIn("droid", out)
+
+    def test_cursor_help_without_mode(self):
+        code, out, _err = self.run_main(["cursor", "--help"])
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertIn("cursor", out)
+
+    def test_run_help_without_input_json(self):
+        code, out, _err = self.run_main(["run", "--help"])
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertIn("run", out)
+
+
+class DestructiveSafetyTests(HelpCliTestBase):
+    """A help token in a worktree action prints help and removes nothing (M2)."""
+
+    def test_worktree_remove_with_help_builds_no_removal(self):
+        parsed = self.delegate.parse_cli(["worktree", "remove", "cursor", "--help"])
+        self.assertEqual(parsed.subcommand, "help")
+        self.assertEqual(parsed.help_topic, "worktree remove")
+        # No removal path is constructed: the worktree action is never set, so
+        # emit_worktree's removal branch is unreachable.
+        self.assertIsNone(parsed.worktree_action)
+        self.assertIsNone(parsed.worktree_handle)
+
+    def test_worktree_remove_with_help_main_prints_help(self):
+        code, out, _err = self.run_main(["worktree", "remove", "cursor", "--help"])
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertIn("worktree remove", out)
+
+
+class PromptBoundaryTests(HelpCliTestBase):
+    """`cursor work explain --help` is a RUN; --help is captured prompt text (M4)."""
+
+    def test_help_after_prompt_positional_is_prompt_text(self):
+        parsed = self.delegate.parse_cli(["cursor", "work", "explain", "--help"])
+        # This is a run, NOT help. A naive "grep argv for --help" impl fails here.
+        self.assertEqual(parsed.subcommand, "cursor")
+        self.assertIsNone(parsed.help_topic)
+        self.assertEqual(parsed.engine, "cursor")
+        self.assertEqual(parsed.mode, "work")
+        self.assertEqual(parsed.prompt_parts, ["explain", "--help"])
+
+
+class RegressionGuardTests(HelpCliTestBase):
+    """Help wiring must not disturb existing parse outcomes (I4/I5)."""
+
+    def test_prompt_file_still_parses_as_run(self):
+        parsed = self.delegate.parse_cli(["cursor", "safe", "--prompt-file", "task.md"])
+        self.assertEqual(parsed.subcommand, "cursor")
+        self.assertIsNone(parsed.help_topic)
+        self.assertEqual(parsed.prompt_file, "task.md")
+        self.assertEqual(parsed.prompt_parts, [])
+
+    def test_trailing_json_after_prompt_is_rejected(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(
+                ["dry-run", "droid", "minimax", "work", "hello", "--json"]
+            )
+        self.assertEqual(ctx.exception.error, "misplaced_global_option")
+
+
+class UnknownTopicTests(HelpCliTestBase):
+    """Unknown help topics error cleanly with exit 2 (m3)."""
+
+    def test_unknown_topic_text(self):
+        code, _out, err = self.run_main(["help", "bogus"])
+        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        self.assertIn("unknown_help_topic", err)
+
+    def test_unknown_topic_json_envelope(self):
+        code, out, _err = self.run_main(["--json", "help", "bogus"])
+        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        payload = json.loads(out)
+        self.assertIs(payload["ok"], False)
+        self.assertEqual(payload["error"], "unknown_help_topic")
+
+
+class SparseArgsNoIndexErrorTests(HelpCliTestBase):
+    """Sparse args raise a clean DelegateError, never a stray exception."""
+
+    CASES = (
+        ["droid"],
+        ["droid", "grok"],
+        ["dry-run", "droid"],
+        ["worktree"],
+        ["run-output"],
+    )
+
+    def test_sparse_args_raise_delegate_error(self):
+        for argv in self.CASES:
+            with self.subTest(argv=argv), self.assertRaises(self.delegate.DelegateError):
+                self.delegate.parse_cli(argv)
+
+
+if __name__ == "__main__":
+    unittest.main()

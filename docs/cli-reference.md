@@ -103,7 +103,55 @@ delegate --json models
 delegate agent-help
 ```
 
-`describe` reports version, engines, modes, supported isolation values, prompt transforms, effective policy, and representative argv shapes. `models` reports configured Cursor, Droid, and Codex model settings.
+`describe` reports version, engines, modes, supported isolation values, prompt transforms, effective policy, and representative argv shapes. It also includes a `commands` catalog (each entry has `command` and `summary`) so an agent can enumerate the whole command surface in one call. `models` reports configured Cursor, Droid, and Codex model settings.
+
+### Help and discovery
+
+Every command and subcommand supports `--help` (and the `-h` alias). It prints focused help for that command path and exits 0:
+
+```bash
+delegate cursor --help
+delegate cursor safe --help
+delegate droid --help
+delegate worktree remove --help
+```
+
+`delegate help` accepts the same paths positionally. With no arguments it prints the overview:
+
+```bash
+delegate help
+delegate help worktree remove
+delegate help cursor safe
+```
+
+For agents, add `--json` to get a machine-readable spec instead of prose. This is the recommended way to learn how to invoke a command without trial and error. The two forms are equivalent:
+
+```bash
+delegate --json cursor --help
+delegate --json help worktree remove
+```
+
+The JSON spec uses these keys:
+
+```json
+{
+  "ok": true,
+  "command": "worktree remove",
+  "summary": "Remove one persistent worktree and, by default, its branch.",
+  "usage": ["delegate [--cwd PATH] [--json] worktree remove <alias-or-runId> [--discard-uncommitted] [--force-branch] [--force] [--keep-branch]"],
+  "arguments": [{"name": "<alias-or-runId>", "required": true, "description": "Worktree handle to remove."}],
+  "options": [{"flag": "--keep-branch", "argument": null, "description": "Remove the worktree but keep its branch."}],
+  "examples": ["delegate worktree remove cursor"],
+  "notes": ["A --help token anywhere in the args prints help and removes nothing."],
+  "seeAlso": ["worktree list", "worktree prune", "worktree gc"]
+}
+```
+
+The overview JSON (`delegate --json help`) returns `{ok, commands, globalOptions}`, where `commands` is the same `{command, summary}` catalog that `describe` includes.
+
+A `--help` token triggers help only before any prompt free-text is consumed, so help works without supplying a mode, alias, or required argument (`delegate cursor --help`, `delegate droid --help`, `delegate run --help`). Once prompt capture begins, a later `--help` is prompt text: `delegate cursor work explain --help` parses as a run whose prompt is `explain --help`. To send a literal prompt that begins with `--help`, pass it through `--prompt-file` or stdin rather than as a trailing argument.
+
+For worktree actions, a `--help` token anywhere in the args wins and performs no action — `delegate worktree remove cursor --help` prints help and removes nothing.
 
 ### Run registry inspection
 
