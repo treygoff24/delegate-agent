@@ -40,7 +40,7 @@ CI currently validates on Linux with Python 3.11, 3.12, 3.13, and 3.14. Windows 
 Delegate wraps other CLIs. Install and authenticate only the runtimes you plan to call:
 
 ```bash
-command -v agent   # Cursor Agent CLI, used by delegate cursor ...
+command -v agent   # Cursor Agent CLI (default model: Cursor Composer), used by delegate cursor ...
 command -v droid   # Factory Droid CLI, used by delegate droid ...
 command -v codex   # OpenAI Codex CLI, used by delegate codex ...
 ```
@@ -58,6 +58,7 @@ $EDITOR ~/.delegate/config.json
 Inspect what Delegate sees:
 
 ```bash
+delegate --version       # installed version — include this in bug reports
 delegate --json describe
 delegate --json models
 ```

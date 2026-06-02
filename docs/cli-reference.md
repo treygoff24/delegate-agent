@@ -35,7 +35,7 @@ Prompt sources are direct arguments, `--prompt-file`, or stdin.
 ```bash
 delegate --json dry-run codex safe "Review only."
 delegate --json dry-run cursor work --prompt-file task.md
-delegate --json dry-run droid reviewer safe "Investigate only."
+delegate --json dry-run droid reviewer safe "Investigate only."  # needs a configured 'reviewer' alias
 ```
 
 Dry-run builds the request and child argv but does not launch a child runtime, create a registry run, create a branch, or create a worktree. It does not require the real child binary. It does validate config shape and model aliases, so the Droid example above only succeeds once `reviewer` maps to a real model ID — the shipped `config.example.json` uses `replace-with-` placeholders that dry-run rejects with `unconfigured_model`. For temporary safe isolation, the dry-run argv is the planned command shape and may still show the source workspace because the temporary isolated workspace is not materialized until a real run.

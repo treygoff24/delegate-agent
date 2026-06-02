@@ -26,7 +26,7 @@ What happened instead? Include sanitized JSON/error output if useful.
 
 ## Environment
 
-- Delegate version or commit:
+- Delegate version or commit: (run `delegate --version`)
 - Entry point: `delegate` or `python3 bin/delegate.py`
 - OS:
 - Python version:
