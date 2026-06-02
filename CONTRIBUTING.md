@@ -7,7 +7,7 @@ Thanks for your interest in Delegate Agent. The project is early, so small, well
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install -e .
+python -m pip install -e ".[dev]"
 python3 bin/delegate.py --json describe
 python3 -m unittest discover -s tests
 ```
@@ -36,9 +36,11 @@ Run the narrowest useful checks for your change, then the full suite before prop
 python3 -m compileall -q src tests bin
 git diff --check
 python3 -m unittest discover -s tests
+ruff check .
+ruff format --check .
 ```
 
-Required CI does not need real Cursor, Droid, or Codex binaries.
+`ruff` ships in the `dev` optional-dependencies group; run `ruff format .` to apply formatting. Required CI does not need real Cursor, Droid, or Codex binaries.
 
 ## Reporting issues
 

@@ -23,7 +23,11 @@ then the full local unit suite when practical:
 python3 -m unittest discover -s tests
 python3 -m compileall -q src tests bin
 ruff check .
+ruff format --check .
 ```
+
+Lint and format use `ruff`, declared in the `dev` optional-dependencies group
+(`python3 -m pip install -e ".[dev]"`). Run `ruff format .` to apply formatting.
 
 Packaging changes should also build and install a wheel in a clean virtual
 environment:

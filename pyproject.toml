@@ -37,6 +37,15 @@ Security = "https://github.com/treygoff24/delegate-agent/security/policy"
 [project.scripts]
 delegate = "delegate_agent.cli:main"
 
+[project.optional-dependencies]
+# Dev tooling only — the runtime stays stdlib-only (dependencies = []).
+# ruff is pinned so lint/format results are identical locally and in CI.
+dev = [
+  "ruff==0.15.15",
+  "build>=1.0",
+  "twine>=5.0",
+]
+
 [tool.setuptools]
 package-dir = {"" = "src"}
 
