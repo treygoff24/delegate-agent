@@ -153,6 +153,8 @@ Profiles:
 
 Supported boolean policy keys: `networkAccess`, `webSearch`, `bypassApprovalsAndSandbox`, and `bypassHookTrust`. Only Codex currently consumes all of these fields. Cursor and Droid ignore unsupported policy fields rather than translating them to runtime flags.
 
+`bypassApprovalsAndSandbox` and `bypassHookTrust` are work-mode escalations. Setting either to `true` under a safe-mode policy block (`policy.safe` or `policy.harness.<engine>.safe`) is rejected at config load with `invalid_policy_config`, because safe mode is read-only by contract.
+
 ### `isolation`
 
 ```json
