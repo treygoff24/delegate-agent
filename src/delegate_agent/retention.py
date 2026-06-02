@@ -193,7 +193,7 @@ def archive_run_raw_logs(registry_root: Path, run_id: str) -> bool:
             members=members,
         )
     expected_sizes = _expected_member_sizes(run_path, members)
-    archive_dir(registry_root).mkdir(parents=True, exist_ok=True)
+    run_registry.ensure_private_dir(archive_dir(registry_root))
     temp_destination = destination.with_name(f"{destination.name}.tmp")
     if temp_destination.exists():
         temp_destination.unlink()
@@ -201,9 +201,11 @@ def archive_run_raw_logs(registry_root: Path, run_id: str) -> bool:
         with tarfile.open(temp_destination, "w:gz") as archive:
             for name in members:
                 archive.add(run_path / name, arcname=name)
+        run_registry.ensure_private_file(temp_destination)
         if not _verify_archive_members(temp_destination, expected_sizes):
             return False
         os.replace(temp_destination, destination)
+        run_registry.ensure_private_file(destination)
     finally:
         if temp_destination.exists():
             temp_destination.unlink()

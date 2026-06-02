@@ -587,9 +587,9 @@ class WorktreeMgmtTests(unittest.TestCase):
             self.assertNotIn("unmerged", skipped)
             self.assertEqual(skipped["detached"], "detached_source")
 
-            clean_branch, clean_wt = cases["clean-merged"]
+            _clean_branch, clean_wt = cases["clean-merged"]
             dirty_branch, dirty_wt = cases["dirty-merged"]
-            detached_branch, detached_wt = cases["detached"]
+            detached_branch, _detached_wt = cases["detached"]
             self.assertFalse(Path(clean_wt).exists())
             self.assertTrue(Path(dirty_wt).exists())
             self.assertTrue((Path(dirty_wt) / "scratch.txt").exists())
@@ -674,9 +674,8 @@ class WorktreeMgmtTests(unittest.TestCase):
             git("branch", branch, cwd=path)
             before = git("rev-parse", branch, cwd=path).stdout.strip()
             marker = Path(fake_home) / "child-launched"
-            registry = Path(path) / ".delegate"
-            registry.mkdir(parents=True, exist_ok=True)
-            (registry / "config.json").write_text(
+            config_path = Path(fake_home) / "delegate-config.json"
+            config_path.write_text(
                 json.dumps(
                     {
                         "cursor": {
@@ -697,8 +696,16 @@ class WorktreeMgmtTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with (
-                mock.patch.dict(os.environ, {"HOME": fake_home}, clear=False),
-                mock.patch.object(self.delegate.run_registry, "generate_run_id", return_value=fixed_run_id),
+                mock.patch.dict(
+                    os.environ,
+                    {"HOME": fake_home, "DELEGATE_CONFIG": str(config_path)},
+                    clear=False,
+                ),
+                mock.patch.object(
+                    self.delegate.run_registry,
+                    "generate_run_id",
+                    return_value=fixed_run_id,
+                ),
             ):
                 stdout = io.StringIO()
                 stderr = io.StringIO()
@@ -751,7 +758,7 @@ class WorktreeMgmtTests(unittest.TestCase):
 
     def test_worktree_list_harness_filter(self):
         _repo, path = self._make_repo()
-        with tempfile.TemporaryDirectory() as fake_home:
+        with tempfile.TemporaryDirectory():
             self._seed_persistent_run(path, alias="cursor-a", harness="cursor")
             self._seed_persistent_run(path, alias="cursor-b", harness="cursor")
             self._seed_persistent_run(path, alias="droid-c", harness="droid")
@@ -814,7 +821,7 @@ class WorktreeMgmtTests(unittest.TestCase):
 
     def test_worktree_show_latest_harness(self):
         _repo, path = self._make_repo()
-        with tempfile.TemporaryDirectory() as fake_home:
+        with tempfile.TemporaryDirectory():
             from datetime import UTC, datetime, timedelta
             old_ts = (datetime.now(UTC) - timedelta(days=2)).strftime(
                 self.delegate.run_registry.UTC_TIMESTAMP_FORMAT
@@ -1256,7 +1263,7 @@ class WorktreeMgmtTests(unittest.TestCase):
 
     def test_maybe_auto_prune_skipped_when_disabled(self):
         _repo, path = self._make_repo()
-        with tempfile.TemporaryDirectory() as fake_home:
+        with tempfile.TemporaryDirectory():
             self._seed_persistent_run(path, alias="cursor-ap-off")
             config = {"worktrees": {"autoPrune": {"enabled": False}}}
             result = self.delegate.worktree_mgmt.maybe_auto_prune(
@@ -1663,7 +1670,7 @@ class WorktreeMgmtTests(unittest.TestCase):
             record = self.delegate.worktree_mgmt._record_for_run(
                 self._registry_root(path), run_id, {}
             )
-            result, paths, total, warnings = self.delegate.worktree_mgmt.dirty_info(
+            result, _paths, _total, warnings = self.delegate.worktree_mgmt.dirty_info(
                 record, "present"
             )
             self.assertIsNone(result)
@@ -1945,7 +1952,6 @@ class WorktreeMgmtTests(unittest.TestCase):
                 creation_oid=base_oid,
             )
             self._create_worktree_at(path, branch, wt_path)
-            registry_root = self._registry_root(path)
             # Build a payload with all fields populated.
             from delegate_agent import rendering as delegate_rendering
             payload = {

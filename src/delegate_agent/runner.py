@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import shlex
 import subprocess
 import threading
@@ -72,6 +73,8 @@ class RunContext:
     preserved_workspace: bool = False
     branch: str | None = None
     worktree_status: str | None = None
+    safe_workspace_method: str | None = None
+    warnings: tuple[str, ...] = ()
 
 
 def prepend_skill_review_instructions(prompt: str) -> str:
@@ -99,8 +102,13 @@ def write_snapshot(run_path: Path, snapshot: JsonObject) -> None:
 
 
 def open_events_log(run_path: Path) -> TextIO:
-    run_path.mkdir(parents=True, exist_ok=True)
-    return (run_path / EVENTS_JSONL).open("a", encoding="utf-8")
+    run_registry.ensure_private_dir(run_path)
+    fd = os.open(
+        run_path / EVENTS_JSONL,
+        os.O_CREAT | os.O_APPEND | os.O_WRONLY,
+        run_registry.PRIVATE_FILE_MODE,
+    )
+    return os.fdopen(fd, "a", encoding="utf-8")
 
 
 def append_event(handle: TextIO, event: JsonObject) -> None:
@@ -154,6 +162,10 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
         payload["creationContext"] = ctx.creation_context
     if ctx.worktree_status is not None:
         payload["worktreeStatus"] = ctx.worktree_status
+    if ctx.safe_workspace_method is not None:
+        payload["safeWorkspaceMethod"] = ctx.safe_workspace_method
+    if ctx.warnings:
+        payload["warnings"] = list(ctx.warnings)
     return payload
 
 
@@ -255,6 +267,10 @@ def build_snapshot(
         snapshot["creationContext"] = ctx.creation_context
     if ctx.worktree_status is not None:
         snapshot["worktreeStatus"] = ctx.worktree_status
+    if ctx.safe_workspace_method is not None:
+        snapshot["safeWorkspaceMethod"] = ctx.safe_workspace_method
+    if ctx.warnings:
+        snapshot["warnings"] = list(ctx.warnings)
 
     # Worktree cleanup commands for persistent worktrees.
     cleanup = _worktree_cleanup_commands(ctx)
@@ -312,7 +328,7 @@ def write_completion_report(run_path: Path, text: str) -> bool:
     if not cleaned:
         return False
     path = run_path / COMPLETION_REPORT_FILE
-    path.write_text(cleaned + "\n", encoding="utf-8")
+    run_registry.write_private_text(path, cleaned + "\n")
     return True
 
 
@@ -341,6 +357,10 @@ def emit_bounded_text_summary(
         print("isolation: worktree temporary", file=stdout)
     else:
         print(f"isolation: {lifecycle}", file=stdout)
+    if ctx.safe_workspace_method:
+        print(f"safe workspace method: {ctx.safe_workspace_method}", file=stdout)
+    for warning in ctx.warnings:
+        print(f"warning: {warning}", file=stdout)
     print(f"snapshot: {run_registry.snapshot_command(ctx.alias)}", file=stdout)
     print(
         f"completion report: {run_registry.run_output_command(ctx.alias, completion_report=True)}",
@@ -410,6 +430,10 @@ def completion_json_payload(
         payload["creationContext"] = ctx.creation_context
     if ctx.worktree_status is not None:
         payload["worktreeStatus"] = ctx.worktree_status
+    if ctx.safe_workspace_method is not None:
+        payload["safeWorkspaceMethod"] = ctx.safe_workspace_method
+    if ctx.warnings:
+        payload["warnings"] = list(ctx.warnings)
 
     # Worktree cleanup commands for persistent worktrees.
     cleanup = _worktree_cleanup_commands(ctx)
@@ -459,13 +483,13 @@ def execute_tracked(
     completion_report_mode: str = delegate_config.COMPLETION_REPORT_MODE_MARKDOWN,
 ) -> tuple[int, JsonObject | None]:
     run_path = run_registry.run_directory(ctx.registry_root, ctx.run_id)
-    run_path.mkdir(parents=True, exist_ok=True)
+    run_registry.ensure_private_dir(run_path)
     write_manifest(run_path, build_manifest(ctx, argv))
 
     stdout_log = run_path / STDOUT_LOG
     stderr_log = run_path / STDERR_LOG
-    stdout_log.write_bytes(b"")
-    stderr_log.write_bytes(b"")
+    run_registry.write_private_bytes(stdout_log, b"")
+    run_registry.write_private_bytes(stderr_log, b"")
 
     accumulator = harness_events.StreamAccumulator()
 

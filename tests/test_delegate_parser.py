@@ -454,7 +454,7 @@ class ParserTests(unittest.TestCase):
             }))
             parsed = self.delegate.ParsedCommand("run", json_mode=True, input_json=str(task))
             # pre_read_run_json_for_config loads workspace-local config
-            ws, cfg, src = self.delegate.pre_read_run_json_for_config(str(task), None)
+            _ws, cfg, _src = self.delegate.pre_read_run_json_for_config(str(task), None)
             request = self.delegate.request_from_input_json(parsed, cfg)
             self.assertEqual(request.engine, "droid")
             self.assertEqual(request.mode, "work")
@@ -559,7 +559,7 @@ class ParserTests(unittest.TestCase):
                 }))
                 # The pre-read should load config from the workspace (with work = worktree)
                 # and validate successfully.
-                ws, cfg, src = self.delegate.pre_read_run_json_for_config(
+                _ws, cfg, _src = self.delegate.pre_read_run_json_for_config(
                     str(task), None
                 )
                 self.assertEqual(

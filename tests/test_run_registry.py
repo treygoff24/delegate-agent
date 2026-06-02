@@ -1,5 +1,7 @@
 import importlib.util
 import json
+import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -81,6 +83,38 @@ class RunRegistryTests(unittest.TestCase):
             run_id, alias = self.registry.register_run(root, harness="cursor")
             self.assertEqual(alias, "cursor")
             self.assertRegex(run_id, self.registry.RUN_ID_RE)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX mode bits only")
+    def test_registry_dirs_and_files_are_private_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="cursor")
+            run_path = self.registry.run_directory(root, run_id)
+            self.registry.write_json_atomic(run_path / "state.json", {"status": "running"})
+
+            private_dirs = [
+                root,
+                self.registry.aliases_dir(root),
+                self.registry.runs_dir(root),
+                run_path,
+            ]
+            private_files = [
+                self.registry.index_path(root),
+                self.registry.aliases_dir(root) / alias,
+                self.registry.registry_lock_path(root),
+                run_path / "state.json",
+            ]
+
+            # Force lock creation.
+            with self.registry.registry_lock(root):
+                pass
+
+            for path in private_dirs:
+                with self.subTest(path=path):
+                    self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o700)
+            for path in private_files:
+                with self.subTest(path=path):
+                    self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
 
     def test_second_cursor_alias_is_cursor_2(self):
         with tempfile.TemporaryDirectory() as tmp:

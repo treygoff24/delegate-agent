@@ -16,18 +16,22 @@ classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",
   "Intended Audience :: Developers",
+  "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
   "Programming Language :: Python :: 3.14",
   "Topic :: Software Development",
+  "Topic :: Utilities",
 ]
 
 [project.urls]
 Homepage = "https://github.com/treygoff24/delegate-agent"
 Repository = "https://github.com/treygoff24/delegate-agent"
 Issues = "https://github.com/treygoff24/delegate-agent/issues"
+Documentation = "https://github.com/treygoff24/delegate-agent/tree/main/docs"
+Security = "https://github.com/treygoff24/delegate-agent/security/policy"
 
 [project.scripts]
 delegate = "delegate_agent.cli:main"

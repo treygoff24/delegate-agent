@@ -32,4 +32,12 @@ codex/
 
 # Personal Claude Code state
 CLAUDE.local.md
-.claude/settings.local.json
+.claude/
+
+# Local-only planning/context notes
+CONTEXT.md
+WIP_SPEC.md
+cursor-prereq.example.json
+
+# Local planning artifacts
+internal/

@@ -50,6 +50,9 @@ class IsolationContext:
         source_head_oid: Full SHA of HEAD in source workspace (None if unavailable).
         source_head_ref: Symbolic ref of HEAD, e.g. "refs/heads/main" (None if detached).
         source_branch: Short branch name (None if detached or unavailable).
+        safe_workspace_method: For temporary safe isolation, "git-worktree" or
+            "directory-copy" when known.
+        warnings: Parent-facing safety/isolation warnings to surface in run metadata.
     """
 
     source_workspace: str
@@ -64,6 +67,8 @@ class IsolationContext:
     source_head_oid: str | None = None
     source_head_ref: str | None = None
     source_branch: str | None = None
+    safe_workspace_method: str | None = None
+    warnings: tuple[str, ...] = ()
 
 
 def compute_repo_fingerprint_from_common_dir(git_common_dir: str) -> str:

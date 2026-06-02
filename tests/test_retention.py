@@ -1,5 +1,7 @@
 import importlib.util
 import json
+import os
+import stat
 import sys
 import tarfile
 import tempfile
@@ -164,6 +166,27 @@ class RetentionTests(unittest.TestCase):
         with tarfile.open(archive_file, "r:gz") as archive:
             names = {member.name for member in archive.getmembers()}
         self.assertEqual(names, {"stdout.log", "stderr.log", "events.jsonl"})
+
+    @unittest.skipUnless(os.name == "posix", "POSIX file modes only")
+    def test_archived_raw_logs_are_owner_only(self):
+        run_id, _alias = self.write_completed_run()
+        old = (datetime.now(UTC) - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        state = json.loads((run_path / "state.json").read_text(encoding="utf-8"))
+        state["finishedAt"] = old
+        state["lastActivityAt"] = old
+        self.registry.write_json_atomic(run_path / "state.json", state)
+
+        result = self.retention.run_retention_pass(
+            self.registry_root,
+            {"tracking": {"retention": {"enabled": True, "rawLogDays": 0}}},
+        )
+
+        self.assertEqual(result["archived"], 1)
+        archive_root = self.retention.archive_dir(self.registry_root)
+        archive_file = self.retention.archive_path(self.registry_root, run_id)
+        self.assertEqual(stat.S_IMODE(archive_root.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(archive_file.stat().st_mode), 0o600)
 
     def test_snapshot_works_after_archival(self):
         run_id, alias = self.write_completed_run()

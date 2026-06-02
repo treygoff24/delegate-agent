@@ -3,7 +3,19 @@ include README.md
 include CONTRIBUTING.md
 include SECURITY.md
 include config.example.json
-include cursor-prereq.example.json
-recursive-include docs *.md
+include docs/agent-setup.md
+include docs/cli-reference.md
+include docs/configuration.md
+include docs/development.md
+include docs/live-runtime.md
+include docs/publishing-checklist.md
+include docs/security-model.md
+include docs/troubleshooting.md
+include docs/worktrees.md
 recursive-include docs/assets *.png
 recursive-include examples *.json
+prune docs/plans
+prune internal
+exclude CONTEXT.md
+exclude WIP_SPEC.md
+exclude cursor-prereq.example.json

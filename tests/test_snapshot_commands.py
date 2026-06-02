@@ -185,6 +185,29 @@ class SnapshotCommandTests(unittest.TestCase):
         self.assertIn(":", self.rendering.redact_string("API_KEY: secret-value"))
         self.assertIn("=", self.rendering.redact_string("token=secret-value"))
 
+    def test_redact_string_covers_common_credential_shapes(self):
+        jwt_like = (
+            "eyJhbGciOiJIUzI1NiJ9."
+            "eyJzdWIiOiIxMjM0NTY3ODkwIn0."
+            "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+        )
+        cases = [
+            ("Authorization: Bearer bearer-token-12345", "bearer-token-12345"),
+            ("Authorization: Basic dXNlcjpwYXNzd29yZA==", "dXNlcjpwYXNzd29yZA=="),
+            ("Authorization: ApiKey api-key-token-12345", "api-key-token-12345"),
+            ("Authorization: opaque-authorization-token-12345", "opaque-authorization-token-12345"),
+            ("Bearer whitespace-token-12345", "whitespace-token-12345"),
+            ("token=secret-token-value", "secret-token-value"),
+            ("api_key=secret-api-key", "secret-api-key"),
+            ("password: super-secret", "super-secret"),
+            (f"jwt {jwt_like}", jwt_like),
+        ]
+        for raw, secret in cases:
+            with self.subTest(raw=raw):
+                redacted = self.rendering.redact_string(raw)
+                self.assertIn("***", redacted)
+                self.assertNotIn(secret, redacted)
+
     def test_snapshot_redacts_secrets_by_default(self):
         _, alias = self.write_run(  # pragma: allowlist secret
             assistant_text="export API_KEY=sk-abcdefghijklmnopqrstuvwxyz"
@@ -399,6 +422,24 @@ class SnapshotCommandTests(unittest.TestCase):
         )
         output = stdout.getvalue()
         self.assertIn("***", output)
+        self.assertNotIn(secret, output)
+
+    def test_run_output_redacts_authorization_header_by_default(self):
+        run_id, alias = self.write_run()
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        secret = "bearer-output-token-12345"
+        (run_path / "stdout.log").write_text(
+            f"Authorization: Bearer {secret}\n",
+            encoding="utf-8",
+        )
+        stdout = io.StringIO()
+        self.delegate.main(
+            ["--cwd", str(self.workspace), "run-output", alias, "--stdout", "--tail", "1"],
+            stdout=stdout,
+        )
+        output = stdout.getvalue()
+        self.assertIn("Authorization: ***", output)
+        self.assertNotIn("Bearer", output)
         self.assertNotIn(secret, output)
 
     def test_run_output_no_redact_preserves_completion_report_secrets(self):

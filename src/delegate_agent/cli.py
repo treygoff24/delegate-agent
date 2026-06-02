@@ -118,6 +118,15 @@ CURSOR_SAFE_CLI_CONFIG: JsonObject = {
         ],
     },
 }
+SAFE_UNBORN_GIT_WARNING = (
+    "Git repository has no commits; safe isolation used a directory copy instead "
+    "of a detached git worktree."
+)
+SAFE_EXTERNAL_SYMLINK_WARNING_PREFIX = (
+    "Safe isolation blocked external symlink(s); placeholder files were used "
+    "inside the isolated workspace"
+)
+SAFE_BLOCKED_SYMLINK_PLACEHOLDER = "External symlink blocked by Delegate safe isolation.\n"
 
 
 class DelegateError(Exception):
@@ -1678,11 +1687,29 @@ def replace_argv_after_flag(argv: list[str], flag: str, value: str) -> list[str]
     return updated
 
 
-def replace_safe_workspace_arg(request: Request, isolated_workspace: str) -> list[str]:
+def _ensure_codex_skip_git_repo_check(argv: list[str]) -> list[str]:
+    if "--skip-git-repo-check" in argv:
+        return argv
+    updated = list(argv)
+    # Codex exec options belong before the final prompt argument.
+    insert_at = max(len(updated) - 1, 0)
+    updated.insert(insert_at, "--skip-git-repo-check")
+    return updated
+
+
+def replace_safe_workspace_arg(
+    request: Request,
+    isolated_workspace: str,
+    *,
+    workspace_kind: str | None = None,
+) -> list[str]:
     if request.engine == "cursor":
         return replace_argv_after_flag(request.argv, "--workspace", isolated_workspace)
     if request.engine == "codex":
-        return replace_argv_after_flag(request.argv, "--cd", isolated_workspace)
+        argv = replace_argv_after_flag(request.argv, "--cd", isolated_workspace)
+        if workspace_kind == "directory":
+            argv = _ensure_codex_skip_git_repo_check(argv)
+        return argv
     if request.engine == "droid":
         return replace_argv_after_flag(request.argv, "--cwd", isolated_workspace)
     return list(request.argv)
@@ -1783,17 +1810,160 @@ def apply_git_tracked_diff(worktree_path: str, diff: bytes) -> None:
         )
 
 
-def mirror_path_preserving_symlinks(source: Path, destination: Path) -> None:
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def symlink_target_resolves_outside(path: Path, source_root: Path) -> bool:
+    """Return true when ``path`` is a symlink whose target leaves ``source_root``."""
+    if not path.is_symlink():
+        return False
+    try:
+        root_resolved = source_root.resolve(strict=True)
+        target = (path.parent / os.readlink(path)).resolve(strict=False)
+    except OSError:
+        return False
+    return not _is_relative_to(target, root_resolved)
+
+
+def write_blocked_symlink_placeholder(path: Path) -> None:
+    if path.exists() or path.is_symlink():
+        path.unlink()
+    path.write_text(SAFE_BLOCKED_SYMLINK_PLACEHOLDER, encoding="utf-8")
+
+
+def block_external_symlinks(
+    isolated_workspace: str | Path,
+    source_workspace: str | Path,
+    *,
+    containment_root: str | Path | None = None,
+    limit: int = 5,
+) -> tuple[str, ...]:
+    """Replace external symlinks in a safe workspace with inert placeholders.
+
+    The isolated tree mirrors the source layout, so each isolated symlink can be
+    evaluated against its matching source path. Internal symlinks stay intact;
+    links whose source target resolves outside the source workspace are replaced
+    with a small placeholder file that does not disclose the external target.
+    """
+    isolated_root = Path(isolated_workspace)
+    source_root = Path(source_workspace)
+    root_for_containment = Path(containment_root) if containment_root is not None else source_root
+    blocked: list[str] = []
+    try:
+        for current, dirnames, filenames in os.walk(isolated_root):
+            current_path = Path(current)
+            original_symlink_dirnames = {
+                name for name in dirnames if (current_path / name).is_symlink()
+            }
+            names = list(dirnames) + list(filenames)
+            for name in names:
+                path = current_path / name
+                if not path.is_symlink():
+                    continue
+                try:
+                    relative = path.relative_to(isolated_root)
+                except ValueError:
+                    continue
+                source_path = source_root / relative
+                if symlink_target_resolves_outside(source_path, root_for_containment):
+                    write_blocked_symlink_placeholder(path)
+                    blocked.append(relative.as_posix())
+            dirnames[:] = [
+                name
+                for name in dirnames
+                if name not in {".git", ".delegate"} and name not in original_symlink_dirnames
+            ]
+    except OSError:
+        return ()
+    if not blocked:
+        return ()
+    blocked.sort()
+    preview = ", ".join(blocked[:limit])
+    remaining = len(blocked) - limit
+    if remaining > 0:
+        preview = f"{preview}, ... (+{remaining} more)"
+    return (f"{SAFE_EXTERNAL_SYMLINK_WARNING_PREFIX}: {preview}.",)
+
+
+def mirror_path_preserving_symlinks(
+    source: Path,
+    destination: Path,
+    *,
+    source_root: Path | None = None,
+) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     if source.is_symlink():
-        if destination.exists() or destination.is_symlink():
-            destination.unlink()
-        os.symlink(os.readlink(source), destination)
+        if source_root is not None and symlink_target_resolves_outside(source, source_root):
+            write_blocked_symlink_placeholder(destination)
+        else:
+            if destination.exists() or destination.is_symlink():
+                destination.unlink()
+            os.symlink(os.readlink(source), destination)
         return
     if source.is_dir():
-        shutil.copytree(source, destination, dirs_exist_ok=True, symlinks=True)
+        shutil.copytree(
+            source,
+            destination,
+            dirs_exist_ok=True,
+            symlinks=True,
+            ignore=shutil.ignore_patterns(".git", ".delegate"),
+        )
+        if source_root is not None:
+            block_external_symlinks(
+                destination,
+                source,
+                containment_root=source_root,
+            )
         return
     shutil.copy2(source, destination)
+
+
+def external_symlink_warnings(source_workspace: str, *, limit: int = 5) -> tuple[str, ...]:
+    """Return a bounded warning when a source tree contains external symlinks."""
+    root = Path(source_workspace)
+    try:
+        root_resolved = root.resolve(strict=True)
+    except OSError:
+        return ()
+    external_links: list[str] = []
+    try:
+        for current, dirnames, filenames in os.walk(root):
+            current_path = Path(current)
+            names = list(dirnames) + list(filenames)
+            for name in names:
+                path = current_path / name
+                if not path.is_symlink():
+                    continue
+                try:
+                    target = (path.parent / os.readlink(path)).resolve(strict=False)
+                    target.relative_to(root_resolved)
+                except ValueError:
+                    try:
+                        external_links.append(path.relative_to(root).as_posix())
+                    except ValueError:
+                        external_links.append(path.name)
+                except OSError:
+                    continue
+            dirnames[:] = [
+                name
+                for name in dirnames
+                if name not in {".git", ".delegate"} and not (current_path / name).is_symlink()
+            ]
+    except OSError:
+        return ()
+    if not external_links:
+        return ()
+    external_links.sort()
+    preview = ", ".join(external_links[:limit])
+    remaining = len(external_links) - limit
+    if remaining > 0:
+        preview = f"{preview}, ... (+{remaining} more)"
+    return (f"{SAFE_EXTERNAL_SYMLINK_WARNING_PREFIX}: {preview}.",)
 
 
 def sync_git_workspace_snapshot(git_root: str, worktree_path: str) -> None:
@@ -1812,7 +1982,22 @@ def sync_git_workspace_snapshot(git_root: str, worktree_path: str) -> None:
     for relative in untracked.stdout.splitlines():
         if not relative:
             continue
-        mirror_path_preserving_symlinks(Path(git_root) / relative, Path(worktree_path) / relative)
+        mirror_path_preserving_symlinks(
+            Path(git_root) / relative,
+            Path(worktree_path) / relative,
+            source_root=Path(git_root),
+        )
+    block_external_symlinks(worktree_path, git_root)
+
+
+def git_head_exists(git_root: str) -> bool:
+    result = subprocess.run(
+        ["git", "-C", git_root, "rev-parse", "--verify", "HEAD"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return result.returncode == 0
 
 
 def discard_git_safe_workspace(
@@ -1856,10 +2041,11 @@ def create_directory_safe_workspace(source_workspace: str) -> tuple[str, str]:
         shutil.copytree(
             source_workspace,
             copy_path,
-            ignore=shutil.ignore_patterns(".git"),
+            ignore=shutil.ignore_patterns(".git", ".delegate"),
             dirs_exist_ok=True,
             symlinks=True,
         )
+        block_external_symlinks(copy_path, source_workspace)
     except Exception:
         shutil.rmtree(temp_base, ignore_errors=True)
         raise
@@ -1906,18 +2092,32 @@ def safe_isolated_request(request: Request) -> Iterator[Request]:
 
     # Isolation is worktree — create temp workspace.
     isolation_mode = ctx.isolation_mode if ctx is not None else "auto"
-    git_root = request.workspace if request.workspace_kind == "git" else None
+    source_git_root = request.workspace if request.workspace_kind == "git" else None
+    cleanup_git_root: str | None = None
+    workspace_kind = request.workspace_kind
+    safe_workspace_method: str | None = None
+    warnings_list: list[str] = []
 
-    if git_root is not None:
-        isolated_workspace, temp_base = create_git_safe_workspace(git_root)
+    if source_git_root is not None and git_head_exists(source_git_root):
+        isolated_workspace, temp_base = create_git_safe_workspace(source_git_root)
+        cleanup_git_root = source_git_root
+        safe_workspace_method = "git-worktree"
+    elif source_git_root is not None:
+        isolated_workspace, temp_base = create_directory_safe_workspace(source_git_root)
+        workspace_kind = "directory"
+        safe_workspace_method = "directory-copy"
+        warnings_list.append(SAFE_UNBORN_GIT_WARNING)
     elif isolation_mode == "auto":
         # Legacy auto fallback for non-git cursor/codex safe: directory copy.
         isolated_workspace, temp_base = create_directory_safe_workspace(request.workspace)
+        workspace_kind = "directory"
+        safe_workspace_method = "directory-copy"
     else:
         raise DelegateError(
             "worktree_requires_git",
             "--isolation worktree requires a Git workspace for safe mode.",
         )
+    warnings_list.extend(external_symlink_warnings(request.workspace))
 
     isolation = IsolationContext(
         source_workspace=request.workspace,
@@ -1925,7 +2125,9 @@ def safe_isolated_request(request: Request) -> Iterator[Request]:
         isolation_mode=isolation_mode,
         isolation_lifecycle="temporary",
         preserved_workspace=False,
-        source_git_root=git_root,
+        source_git_root=source_git_root,
+        safe_workspace_method=safe_workspace_method,
+        warnings=tuple(warnings_list),
     )
     try:
         if request.engine == "cursor":
@@ -1935,16 +2137,20 @@ def safe_isolated_request(request: Request) -> Iterator[Request]:
             mode=request.mode,
             workspace=isolated_workspace,
             prompt=request.prompt,
-            argv=replace_safe_workspace_arg(request, isolated_workspace),
+            argv=replace_safe_workspace_arg(
+                request,
+                isolated_workspace,
+                workspace_kind=workspace_kind,
+            ),
             model=request.model,
             model_alias=request.model_alias,
             dry_run=request.dry_run,
-            workspace_kind=request.workspace_kind,
+            workspace_kind=workspace_kind,
             isolation_context=isolation,
         )
     finally:
         cleanup_safe_isolated_workspace(
-            git_root=git_root,
+            git_root=cleanup_git_root,
             isolated_workspace=isolated_workspace,
             temp_base=temp_base,
         )
@@ -2252,6 +2458,11 @@ def _validate_persistent_worktree_request(
             "--pass-through is not supported with persistent worktree runs (work mode + effective worktree isolation).",
         )
 
+    try:
+        require_clean_source(source_git_root)
+    except IsolationExecutionError as exc:
+        raise DelegateError(exc.error, exc.message) from exc
+
     ensure_binary(request.argv)
 
     registry_root = run_registry.ensure_registry(
@@ -2259,11 +2470,6 @@ def _validate_persistent_worktree_request(
         workspace_kind=source_workspace.kind,
     )
     maybe_run_retention_pass(registry_root, config)
-
-    try:
-        require_clean_source(source_git_root)
-    except IsolationExecutionError as exc:
-        raise DelegateError(exc.error, exc.message) from exc
 
     return PersistentWorktreePreflight(
         iso_ctx=iso_ctx,
@@ -2595,6 +2801,8 @@ def make_run_context(
         preserved_workspace = iso_ctx.preserved_workspace
         branch = iso_ctx.planned_branch
         source_git_root = iso_ctx.source_git_root
+        safe_workspace_method = iso_ctx.safe_workspace_method
+        warnings = iso_ctx.warnings
     else:
         isolation_mode = "none"
         effective_isolation = "none"
@@ -2602,6 +2810,8 @@ def make_run_context(
         preserved_workspace = False
         branch = None
         source_git_root = None
+        safe_workspace_method = None
+        warnings = ()
 
     return delegate_runner.RunContext(
         registry_root=registry_root,
@@ -2623,6 +2833,8 @@ def make_run_context(
         isolation_lifecycle=isolation_lifecycle,
         preserved_workspace=preserved_workspace,
         branch=branch,
+        safe_workspace_method=safe_workspace_method,
+        warnings=warnings,
     )
 
 

@@ -12,9 +12,43 @@ from delegate_agent.json_types import JsonObject, JsonValue
 from delegate_agent.run_registry import parse_utc_timestamp as parse_timestamp
 
 REDACT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"(?i)(api[_-]?key|apikey)(\s*[:=]\s*)\S+"), r"\1\2***"),
-    (re.compile(r"(?i)(authorization|bearer)(\s*[:=]\s*)\S+"), r"\1\2***"),
-    (re.compile(r"(?i)(password|passwd|secret|token)(\s*[:=]\s*)\S+"), r"\1\2***"),
+    (
+        re.compile(r"(?im)\b(authorization\s*[:=]\s*)[^\r\n]+"),
+        r"\1***",
+    ),
+    (
+        re.compile(
+            r"(?i)\b(authorization\s*[:=]\s*(?:bearer|basic)\s+)"
+            r"[A-Za-z0-9._~+/=-]{8,}"
+        ),
+        r"\1***",
+    ),
+    (
+        re.compile(
+            r"(?i)\b(authorization\s+(?:bearer|basic)\s+)"
+            r"[A-Za-z0-9._~+/=-]{8,}"
+        ),
+        r"\1***",
+    ),
+    (
+        re.compile(
+            r"(?i)\b((?:bearer|basic)\s+)[A-Za-z0-9._~+/=-]{8,}"
+        ),
+        r"\1***",
+    ),
+    (
+        re.compile(
+            r"(?i)\b("
+            r"api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|"
+            r"password|passwd|secret|token"
+            r")(\s*[:=]\s*)(\"[^\"]+\"|'[^']+'|[^\s&;]+)"
+        ),
+        r"\1\2***",
+    ),
+    (
+        re.compile(r"\b[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"),
+        "***",
+    ),
     (re.compile(r"sk-[A-Za-z0-9]{8,}"), "sk-***"),
     (re.compile(r"ghp_[A-Za-z0-9]{20,}"), "ghp_***"),
     (re.compile(r"gho_[A-Za-z0-9]{20,}"), "gho_***"),
@@ -90,7 +124,7 @@ def merge_snapshot_view(
                 if key in state and key not in view:
                     view[key] = state[key]
         # Surface isolation metadata from state when present.
-        for key in ("worktreeStatus",):
+        for key in ("worktreeStatus", "safeWorkspaceMethod"):
             if key in state and key not in view:
                 view[key] = state[key]
     if manifest:
@@ -99,10 +133,18 @@ def merge_snapshot_view(
                 view[key] = manifest[key]
         for key in ("isolationMode", "effectiveIsolation", "isolationLifecycle",
                      "preservedWorkspace", "sourceGitRoot", "branch", "worktreeStatus",
-                     "worktreeCleanupCommands"):
+                     "worktreeCleanupCommands", "safeWorkspaceMethod"):
             if key in manifest and key not in view:
                 view[key] = manifest[key]
     warnings = list(view.get("warnings") or [])
+    for source in (state, manifest):
+        if not source:
+            continue
+        source_warnings = source.get("warnings")
+        if isinstance(source_warnings, list):
+            for warning in source_warnings:
+                if isinstance(warning, str) and warning not in warnings:
+                    warnings.append(warning)
     for warning in run_registry.large_log_warnings(stdout_bytes, stderr_bytes):
         if warning not in warnings:
             warnings.append(warning)
@@ -164,6 +206,9 @@ def render_snapshot_text(view: JsonObject, stdout: TextIO) -> None:
     worktree_status = view.get("worktreeStatus")
     if isinstance(worktree_status, str):
         print(f"worktree status: {worktree_status}", file=stdout)
+    safe_method = view.get("safeWorkspaceMethod")
+    if isinstance(safe_method, str) and safe_method:
+        print(f"safe workspace method: {safe_method}", file=stdout)
 
     current = view.get("current")
     if isinstance(current, str) and current:

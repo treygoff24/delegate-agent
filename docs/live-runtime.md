@@ -1,109 +1,43 @@
-# Live runtime separation
+# Development and installed runtime separation
 
-This repository can be used as a development checkout while an already-installed
-`delegate` command continues to run from a separate local runtime:
+A development checkout and an installed `delegate` command can coexist. They may not have the same code or config.
 
-- shim: `~/.local/bin/delegate`
-- runtime implementation: `~/.delegate/bin/delegate.py`
-- runtime config: `~/.delegate/config.json`
+## Development checkout
 
-Keep those paths unchanged while doing development here. Promote changes to a
-live runtime only through an explicit install/update step after review and tests.
-
-## Development vs installed runtime
-
-Features added in this checkout are available through the development entry
-point before they are available through the installed `delegate` command:
+When working inside this repository, use the repo-local entrypoint:
 
 ```bash
-python3 bin/delegate.py --isolation worktree cursor work "task"
-python3 bin/delegate.py worktree list
+python3 bin/delegate.py --json describe
+python3 bin/delegate.py --json dry-run codex safe "Review only."
 ```
 
-Users running bare `delegate` from `PATH` get the installed runtime, which may
-lag behind this checkout. Do not assume installed-runtime worktree support until
-promotion occurs.
+This avoids accidentally calling an older installed shim from `PATH`.
 
-The development checkout may add workspace-local `.delegate/` registries, bounded
-default output, `snapshot` / `runs` / `run-output` commands, and archive-only
-retention. None of that affects the live runtime until promotion. Orchestrating
-agents should launch Delegate normally and use `delegate snapshot` plus related
-commands instead of piping launches through `tail` or tailing raw log files under
-`.delegate/runs/`.
+## Installed runtime
 
-## Worktree isolation
+When Delegate is installed, `delegate` resolves through your shell `PATH`:
 
-When `--isolation worktree` is used with `work` mode, Delegate creates persistent
-Git worktrees under the Delegate data home (`~/.delegate/worktrees/<repo-fingerprint>/`)
-that survive after the child agent exits. The persistent worktree is the
-**execution workspace** — the source checkout is not modified by the child agent's
-relative-path edits.
-
-### Pass-through restriction
-
-`--pass-through` is rejected with persistent worktree runs (work mode +
-`--isolation worktree`). The combination would skip the registry-centered output
-path, but persistent worktrees need a run id, branch name, metadata, and cleanup
-instructions. Fail fast avoids orphaning worktrees without aliases or snapshots.
-
-`--pass-through` is still allowed with:
-- Default work mode (isolation `none` or `auto` legacy).
-- Temporary safe-mode isolation (including `--isolation worktree cursor safe`).
-
-### Config block
-
-The `worktrees` config section controls persistent worktree behavior:
-
-```json
-{
-  "worktrees": {
-    "dataHome": null,
-    "autoPrune": {
-      "enabled": false,
-      "mergedOlderThanDays": 7
-    }
-  }
-}
+```bash
+command -v delegate
+delegate --json describe
 ```
 
-- `worktrees.dataHome` — override the persistent-worktree root. Defaults to
-  `~/.delegate/worktrees`. When set, must be an absolute or `~/`-prefixed path;
-  tilde expansion uses `Path.expanduser()`.
-- `worktrees.autoPrune.enabled` — when `true`, `delegate worktree list` runs a
-  single opportunistic prune pass before producing output (only clean, fully-merged
-  worktrees older than `mergedOlderThanDays` qualify). Auto-prune intentionally
-  excludes worktrees created from a detached source HEAD; run
-  `delegate worktree prune --merged --include-detached` for that explicit cleanup.
-  Disabled by default. If the opportunistic prune fails, JSON output includes
-  `autoPrune.ok: false` and the list command exits non-zero even though the list
-  payload is still included.
-- `worktrees.autoPrune.mergedOlderThanDays` — non-negative integer, default 7.
+The installed command may use user config from `~/.delegate/config.json` unless `DELEGATE_CONFIG` points elsewhere. `describe` reports the active `configSource`.
 
-### Worktree management
+## Do not promote implicitly
 
-Use `delegate worktree {list,show,remove,prune,gc}` from the workspace that
-spawned the run. Do not manually delete paths under `~/.delegate/worktrees/` —
-this orphans registry entries. See the README for full command reference.
+Repository development should not overwrite an installed runtime, user config, or local worktree store as a side effect. Promote a checkout to an installed command only through an explicit install/update step after review and tests.
 
-### Test/runtime separation
+## Run metadata
 
-Tests that exercise worktree creation or management must set `HOME` to a
-`TemporaryDirectory` and assert the produced worktree path is under that
-temporary home. They must not write to the real `~/.delegate/worktrees/`
-directory or use the installed `delegate` shim. Use `python3 bin/delegate.py`
-from the repo root for development instead.
+Tracked runs may write workspace-local metadata under `.delegate/`. That metadata is for inspection commands such as:
 
-## Harness behavior
+```bash
+delegate runs
+delegate snapshot <alias-or-runId>
+delegate run-output <alias-or-runId> --completion-report
+```
 
-The development checkout uses the harness contracts below. After explicit
-promotion, the installed runtime gains the same contracts:
+Do not commit `.delegate/` run state. Do not tail raw logs as the normal integration path; use Delegate's bounded inspection commands.
 
-| Harness | Safe | Work |
-| --- | --- | --- |
-| `cursor` | Isolated workspace copy; `-p --trust` only | Real workspace; `--approve-mcps --force` |
-| `droid` | Real workspace; default read-only | Real workspace; `--skip-permissions-unsafe` |
-| `codex` | Isolated workspace copy; `codex --ask-for-approval never exec --sandbox read-only` | Real workspace; `codex --ask-for-approval never exec --sandbox workspace-write` plus network config when policy allows |
-
-`delegate codex safe` reports `isolatedWorkspace: true` in JSON/dry-run metadata, same isolation guarantee as `cursor safe`: the source tree is not passed as `--cd` and is not modified by the child process. Tracked runs may still write Delegate metadata under `.delegate/` in the source workspace.
-
-Policy profiles (`safe`, `trusted-hooks`, `external-sandbox`, `custom`) and per-mode overrides apply system-wide; only fields a harness supports affect its argv. See README policy controls and `delegate --json describe` on the promoted runtime.
+For persistent worktree behavior, see [Worktrees](worktrees.md).

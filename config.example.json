@@ -17,7 +17,8 @@
   "droid": {
     "binary": "droid",
     "models": {
-      "my-model": "replace-with-your-droid-model-id"
+      "reviewer": "replace-with-read-only-model-id",
+      "implementer": "replace-with-edit-capable-model-id"
     }
   },
   "policy": {

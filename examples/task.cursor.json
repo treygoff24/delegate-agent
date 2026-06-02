@@ -1,6 +1,7 @@
 {
   "engine": "cursor",
-  "mode": "work",
+  "mode": "safe",
   "cwd": "/path/to/workspace",
-  "prompt": "Implement the scoped task. Verify with the named checks. Report changed files."
+  "isolation": "auto",
+  "prompt": "Review the current diff for bugs and regressions. Do not edit files."
 }

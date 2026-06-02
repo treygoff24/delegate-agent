@@ -5,8 +5,6 @@ Tests pure functions only; no filesystem mutations.
 
 from __future__ import annotations
 
-import hashlib
-import os
 import subprocess
 import sys
 import tempfile
@@ -412,9 +410,8 @@ class GitTimeoutTests(unittest.TestCase):
             iso.subprocess,
             "run",
             side_effect=subprocess.TimeoutExpired(["git", "status"], 30),
-        ):
-            with self.assertRaises(iso.IsolationExecutionError) as ctx:
-                iso.require_clean_source("/repo")
+        ), self.assertRaises(iso.IsolationExecutionError) as ctx:
+            iso.require_clean_source("/repo")
         self.assertEqual(ctx.exception.error, "git_timeout")
         self.assertIn("git status timed out", ctx.exception.message)
 
@@ -424,14 +421,13 @@ class GitTimeoutTests(unittest.TestCase):
             iso.subprocess,
             "run",
             side_effect=subprocess.TimeoutExpired(["git", "show-ref"], 30),
-        ):
-            with self.assertRaises(iso.IsolationExecutionError) as ctx:
-                iso.create_persistent_worktree(
-                    "/repo",
-                    "delegate/cursor-timeout",
-                    "/tmp/delegate-timeout",
-                    "HEAD",
-                )
+        ), self.assertRaises(iso.IsolationExecutionError) as ctx:
+            iso.create_persistent_worktree(
+                "/repo",
+                "delegate/cursor-timeout",
+                "/tmp/delegate-timeout",
+                "HEAD",
+            )
         self.assertEqual(ctx.exception.error, "git_timeout")
         self.assertIn("branch availability check timed out", ctx.exception.message)
 
@@ -459,7 +455,7 @@ class LazyImportCycleTests(unittest.TestCase):
         # not at module load time, which avoids a potential import cycle.
         code = "\n".join([
             "import sys",
-            "sys.path.insert(0, %r)" % SRC,
+            f"sys.path.insert(0, {SRC!r})",
             "from delegate_agent import isolation",
             # Call a function that triggers the lazy import of SKILL_REVIEW_PREFIX
             "result = isolation.prepend_persistent_worktree_context('hi')",
