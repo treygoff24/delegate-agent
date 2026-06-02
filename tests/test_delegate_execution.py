@@ -330,6 +330,28 @@ class ExecutionTests(unittest.TestCase):
         self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", argv)
         self.assertNotIn("--dangerously-bypass-hook-trust", argv)
 
+    def test_codex_safe_argv_never_emits_bypass_flags_even_if_policy_sets_them(self):
+        # Config validation rejects bypass flags under safe mode, but the argv
+        # builder must also refuse to emit them structurally — safe mode stays
+        # read-only no matter what a policy dict carries.
+        argv = self.delegate.build_codex_argv(
+            self.delegate.DEFAULT_CONFIG["codex"],
+            "safe",
+            "/repo",
+            None,
+            "review only",
+            {
+                "bypassApprovalsAndSandbox": True,
+                "bypassHookTrust": True,
+            },
+            workspace_kind="git",
+        )
+        self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", argv)
+        self.assertNotIn("--dangerously-bypass-hook-trust", argv)
+        self.assertIn("--ask-for-approval", argv)
+        self.assertIn("--sandbox", argv)
+        self.assertIn("read-only", argv)
+
     def test_codex_safe_git_execution_does_not_mutate_original_workspace(self):
         repo = make_git_repo()
         self.addCleanup(repo.cleanup)

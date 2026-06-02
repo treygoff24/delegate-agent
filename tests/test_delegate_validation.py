@@ -376,6 +376,55 @@ class ValidationTests(unittest.TestCase):
         self.assertTrue(droid_policy["networkAccess"])
         self.assertFalse(droid_policy["bypassHookTrust"])
 
+    def test_policy_safe_rejects_bypass_approvals_and_sandbox(self):
+        config_mod = load_config_module()
+        with self.assertRaises(config_mod.ConfigError) as ctx:
+            config_mod.validate_config(
+                config_mod.deep_merge(
+                    config_mod.DEFAULT_CONFIG,
+                    {"policy": {"safe": {"bypassApprovalsAndSandbox": True}}},
+                )
+            )
+        self.assertEqual(ctx.exception.error, "invalid_policy_config")
+
+    def test_policy_safe_rejects_bypass_hook_trust(self):
+        config_mod = load_config_module()
+        with self.assertRaises(config_mod.ConfigError) as ctx:
+            config_mod.validate_config(
+                config_mod.deep_merge(
+                    config_mod.DEFAULT_CONFIG,
+                    {"policy": {"safe": {"bypassHookTrust": True}}},
+                )
+            )
+        self.assertEqual(ctx.exception.error, "invalid_policy_config")
+
+    def test_policy_harness_safe_rejects_bypass(self):
+        config_mod = load_config_module()
+        with self.assertRaises(config_mod.ConfigError) as ctx:
+            config_mod.validate_config(
+                config_mod.deep_merge(
+                    config_mod.DEFAULT_CONFIG,
+                    {
+                        "policy": {
+                            "harness": {
+                                "codex": {"safe": {"bypassApprovalsAndSandbox": True}}
+                            }
+                        }
+                    },
+                )
+            )
+        self.assertEqual(ctx.exception.error, "invalid_policy_config")
+
+    def test_policy_safe_allows_bypass_false(self):
+        config_mod = load_config_module()
+        # Explicitly disabling a bypass under safe mode is fine — only enabling is rejected.
+        config_mod.validate_config(
+            config_mod.deep_merge(
+                config_mod.DEFAULT_CONFIG,
+                {"policy": {"safe": {"bypassApprovalsAndSandbox": False}}},
+            )
+        )
+
     # -- Wave 1 isolation / worktrees config validation --------------------------------
 
     def test_isolation_config_non_object_raises(self):

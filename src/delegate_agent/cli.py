@@ -2300,9 +2300,15 @@ def build_codex_argv(
 ) -> list[str]:
     binary = str(codex["binary"])
     argv = [binary]
+    # Safe mode is read-only by contract: never emit the dangerous bypass flags,
+    # even if a policy block somehow carries them. Config validation rejects such
+    # configs up front, but enforce the invariant structurally here too.
+    elevated = mode == MODE_WORK
+    bypass_sandbox = elevated and policy.get("bypassApprovalsAndSandbox") is True
+    bypass_hook_trust = elevated and policy.get("bypassHookTrust") is True
     if policy.get("webSearch") is True:
         argv.append("--search")
-    if policy.get("bypassApprovalsAndSandbox") is not True:
+    if not bypass_sandbox:
         argv.extend(["--ask-for-approval", "never"])
     if codex.get("profile"):
         argv.extend(["--profile", str(codex["profile"])])
@@ -2314,7 +2320,7 @@ def build_codex_argv(
         argv.append("--ignore-user-config")
     if workspace_kind != "git":
         argv.append("--skip-git-repo-check")
-    if policy.get("bypassApprovalsAndSandbox") is True:
+    if bypass_sandbox:
         argv.append("--dangerously-bypass-approvals-and-sandbox")
     else:
         sandbox = codex["workSandbox"] if mode == MODE_WORK else "read-only"
@@ -2325,7 +2331,7 @@ def build_codex_argv(
             and policy.get("networkAccess") is True
         ):
             argv.extend(["-c", "sandbox_workspace_write.network_access=true"])
-    if policy.get("bypassHookTrust") is True:
+    if bypass_hook_trust:
         argv.append("--dangerously-bypass-hook-trust")
     if stream_capture:
         argv.extend(["--color", "never", "--json"])

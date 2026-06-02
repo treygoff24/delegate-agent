@@ -31,6 +31,9 @@ POLICY_MODE_KEYS = frozenset(
         "bypassHookTrust",
     }
 )
+# Bypass flags are escalations that only make sense for edit-capable work runs.
+# Safe mode is read-only by promise, so reject them in any safe-mode policy block.
+SAFE_FORBIDDEN_BYPASS_KEYS = ("bypassApprovalsAndSandbox", "bypassHookTrust")
 CODEX_WORK_SANDBOX_VALUES = ("read-only", "workspace-write", "danger-full-access")
 
 DEFAULT_MODE_POLICY: JsonObject = {
@@ -123,7 +126,7 @@ def effective_policy(config: JsonObject, *, engine: str, mode: str) -> JsonObjec
     return mode_policy
 
 
-def _validate_policy_mode_policy(mode_policy: JsonObject, path: str) -> None:
+def _validate_policy_mode_policy(mode_policy: JsonObject, path: str, *, mode: str) -> None:
     if not isinstance(mode_policy, dict):
         raise ConfigError("invalid_policy_config", f"{path} must be an object.")
     unknown = set(mode_policy) - POLICY_MODE_KEYS
@@ -139,6 +142,13 @@ def _validate_policy_mode_policy(mode_policy: JsonObject, path: str) -> None:
                 "invalid_policy_config",
                 f"{path}.{key} must be a boolean.",
             )
+    if mode == "safe":
+        for key in SAFE_FORBIDDEN_BYPASS_KEYS:
+            if mode_policy.get(key) is True:
+                raise ConfigError(
+                    "invalid_policy_config",
+                    f"{path}.{key} cannot be enabled in safe mode; safe mode is read-only.",
+                )
 
 
 def _validate_policy_section(policy: JsonValue, *, path: str = "policy") -> None:
@@ -155,7 +165,7 @@ def _validate_policy_section(policy: JsonValue, *, path: str = "policy") -> None
     for mode in ("safe", "work"):
         mode_policy = policy.get(mode)
         if mode_policy is not None:
-            _validate_policy_mode_policy(mode_policy, f"{path}.{mode}")
+            _validate_policy_mode_policy(mode_policy, f"{path}.{mode}", mode=mode)
     harness = policy.get("harness")
     if harness is not None:
         if not isinstance(harness, dict):
@@ -177,6 +187,7 @@ def _validate_policy_section(policy: JsonValue, *, path: str = "policy") -> None
                     _validate_policy_mode_policy(
                         mode_policy,
                         f"{path}.harness.{engine}.{mode}",
+                        mode=mode,
                     )
 
 
