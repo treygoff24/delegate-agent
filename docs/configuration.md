@@ -106,7 +106,7 @@ Controls local run recording.
 ```
 
 - `binary`: child executable for Droid.
-- `models`: required non-empty map of local aliases to real Droid model IDs.
+- `models`: map of local aliases to real Droid model IDs. May be empty if you do not use Droid; running a Droid alias that is not present fails with `invalid_alias`.
 - Placeholder IDs that start with `replace-with-` are rejected for real runs.
 
 ### `codex`

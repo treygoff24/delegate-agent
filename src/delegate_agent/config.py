@@ -56,9 +56,7 @@ DEFAULT_CONFIG: JsonObject = {
     },
     "droid": {
         "binary": "droid",
-        "models": {
-            "my-model": "replace-with-your-droid-model-id",
-        },
+        "models": {},
     },
     "policy": {
         "profile": "safe",
@@ -463,8 +461,8 @@ def validate_config(config: JsonObject) -> None:
     if not isinstance(droid.get("binary"), str) or not droid["binary"].strip():
         raise ConfigError("invalid_droid_config", "droid.binary must be a non-empty string.")
     models = droid.get("models")
-    if not isinstance(models, dict) or not models:
-        raise ConfigError("invalid_droid_config", "droid.models must be a non-empty object.")
+    if not isinstance(models, dict):
+        raise ConfigError("invalid_droid_config", "droid.models must be an object.")
     for alias, model_id in models.items():
         if not isinstance(alias, str) or not isinstance(model_id, str) or not alias or not model_id:
             raise ConfigError(

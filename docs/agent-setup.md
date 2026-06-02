@@ -63,6 +63,8 @@ This guide covers both human setup and non-interactive setup for agents or CI jo
    delegate --json dry-run droid reviewer safe "Review only. Do not edit files."
    ```
 
+   The Codex and Cursor dry-runs succeed with the unedited example config. The Droid dry-run validates the alias, so it returns `unconfigured_model` until you replace the `reviewer` placeholder in `config.json` with a real model ID.
+
 ## Non-interactive agent setup
 
 For an orchestrating agent, script, or CI job:

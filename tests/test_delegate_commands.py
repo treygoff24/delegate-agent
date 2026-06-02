@@ -168,14 +168,13 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(ctx.exception.error, "invalid_alias")
 
     def test_placeholder_droid_model_rejected_before_argv(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["droid"]["models"] = {"my-model": "replace-with-your-droid-model-id"}
         with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.build_request(
-                "droid", "safe", "my-model", "/repo", "hello", self.delegate.DEFAULT_CONFIG, True
-            )
+            self.delegate.build_request("droid", "safe", "my-model", "/repo", "hello", config, True)
         self.assertEqual(ctx.exception.error, "unconfigured_model")
         self.assertIn("placeholder", ctx.exception.message)
 
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
         config["droid"]["models"] = {"my-model": "your-droid-model-id"}
         with self.assertRaises(self.delegate.DelegateError) as ctx:
             self.delegate.build_request("droid", "safe", "my-model", "/repo", "hello", config, True)

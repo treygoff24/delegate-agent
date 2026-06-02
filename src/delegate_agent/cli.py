@@ -1854,32 +1854,35 @@ def block_external_symlinks(
     source_root = Path(source_workspace)
     root_for_containment = Path(containment_root) if containment_root is not None else source_root
     blocked: list[str] = []
-    try:
-        for current, dirnames, filenames in os.walk(isolated_root):
-            current_path = Path(current)
-            original_symlink_dirnames = {
-                name for name in dirnames if (current_path / name).is_symlink()
-            }
-            names = list(dirnames) + list(filenames)
-            for name in names:
-                path = current_path / name
+    # Each filesystem touch is guarded individually so a single unreadable or
+    # racing entry skips only itself rather than aborting the whole sweep and
+    # silently leaving the remaining external symlinks unblocked.
+    for current, dirnames, filenames in os.walk(isolated_root):
+        current_path = Path(current)
+        original_symlink_dirnames = set()
+        for name in dirnames:
+            try:
+                if (current_path / name).is_symlink():
+                    original_symlink_dirnames.add(name)
+            except OSError:
+                continue
+        for name in list(dirnames) + list(filenames):
+            path = current_path / name
+            try:
                 if not path.is_symlink():
                     continue
-                try:
-                    relative = path.relative_to(isolated_root)
-                except ValueError:
-                    continue
+                relative = path.relative_to(isolated_root)
                 source_path = source_root / relative
                 if symlink_target_resolves_outside(source_path, root_for_containment):
                     write_blocked_symlink_placeholder(path)
                     blocked.append(relative.as_posix())
-            dirnames[:] = [
-                name
-                for name in dirnames
-                if name not in {".git", ".delegate"} and name not in original_symlink_dirnames
-            ]
-    except OSError:
-        return ()
+            except (OSError, ValueError):
+                continue
+        dirnames[:] = [
+            name
+            for name in dirnames
+            if name not in {".git", ".delegate"} and name not in original_symlink_dirnames
+        ]
     if not blocked:
         return ()
     blocked.sort()

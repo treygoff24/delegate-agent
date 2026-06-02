@@ -23,7 +23,7 @@ delegate --isolation worktree droid implementer work "Implement the scoped chang
 For work mode, `--isolation worktree` creates a persistent worktree under the Delegate data home. The default is:
 
 ```text
-~/.delegate/worktrees/<repo-fingerprint>/<label>-<run-id>/
+~/.delegate/worktrees/<repo-fingerprint>/<label>-<short-run-id>/
 ```
 
 Delegate also creates a local branch named like:

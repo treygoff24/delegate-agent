@@ -38,7 +38,7 @@ delegate --json dry-run cursor work --prompt-file task.md
 delegate --json dry-run droid reviewer safe "Investigate only."
 ```
 
-Dry-run builds the request and child argv but does not launch a child runtime, create a registry run, create a branch, or create a worktree. It does not require the real child binary. It does validate config shape and model aliases. For temporary safe isolation, the dry-run argv is the planned command shape and may still show the source workspace because the temporary isolated workspace is not materialized until a real run.
+Dry-run builds the request and child argv but does not launch a child runtime, create a registry run, create a branch, or create a worktree. It does not require the real child binary. It does validate config shape and model aliases, so the Droid example above only succeeds once `reviewer` maps to a real model ID — the shipped `config.example.json` uses `replace-with-` placeholders that dry-run rejects with `unconfigured_model`. For temporary safe isolation, the dry-run argv is the planned command shape and may still show the source workspace because the temporary isolated workspace is not materialized until a real run.
 
 Typical dry-run JSON fields:
 
@@ -56,9 +56,12 @@ Typical dry-run JSON fields:
   "isolationMode": "auto",
   "effectiveIsolation": "worktree",
   "isolationLifecycle": "temporary",
+  "isolation": "worktree temporary",
   "preservedWorkspace": false
 }
 ```
+
+`isolation` is a human-readable summary combining `effectiveIsolation` and `isolationLifecycle` (e.g. `"worktree temporary"`, `"worktree persistent"`, `"none"`). Depend on the structured fields rather than parsing it.
 
 Persistent worktree dry-runs may also include `plannedBranch` and `plannedExecutionCwd`; those are plans, not created resources. Temporary safe dry-runs usually keep `plannedExecutionCwd` unset because no temporary worktree or directory copy has been created.
 
@@ -67,6 +70,8 @@ Persistent worktree dry-runs may also include `plannedBranch` and `plannedExecut
 ```bash
 delegate --json run --input-json examples/task.codex.json
 ```
+
+The shipped example files use a placeholder `cwd` (`/path/to/workspace`); copy one and set a real `cwd` first, otherwise the run fails with `invalid_cwd`.
 
 Supported input keys:
 
