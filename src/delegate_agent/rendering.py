@@ -12,47 +12,54 @@ from delegate_agent.json_types import JsonObject, JsonValue
 from delegate_agent.run_registry import parse_utc_timestamp as parse_timestamp
 
 REDACT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    (
-        re.compile(r"(?im)\b(authorization\s*[:=]\s*)[^\r\n]+"),
-        r"\1***",
-    ),
+    # Authorization header value, quoted or bare. The optional quote after the key
+    # tolerates JSON ({"Authorization": "..."}); the value is bounded on the right
+    # so we don't swallow trailing structure (closing quote/brace/&/,).
     (
         re.compile(
-            r"(?i)\b(authorization\s*[:=]\s*(?:bearer|basic)\s+)"
-            r"[A-Za-z0-9._~+/=-]{8,}"
+            r"(?i)\b(authorization[\"']?\s*[:=]\s*)"
+            r"(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,&}\"'\r\n][^\r\n,&}]*)"
         ),
         r"\1***",
     ),
+    # Bare scheme token not behind an Authorization key (e.g. "Bearer eyJ...").
     (
-        re.compile(
-            r"(?i)\b(authorization\s+(?:bearer|basic)\s+)"
-            r"[A-Za-z0-9._~+/=-]{8,}"
-        ),
+        re.compile(r"(?i)\b((?:bearer|basic)\s+)[A-Za-z0-9._~+/=-]{8,}"),
         r"\1***",
     ),
-    (
-        re.compile(
-            r"(?i)\b((?:bearer|basic)\s+)[A-Za-z0-9._~+/=-]{8,}"
-        ),
-        r"\1***",
-    ),
+    # Named credential keys with the value quoted, bare, or JSON-quoted. Separator
+    # is preserved so the shape stays readable.
     (
         re.compile(
             r"(?i)\b("
             r"api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|"
-            r"password|passwd|secret|token"
-            r")(\s*[:=]\s*)(\"[^\"]+\"|'[^']+'|[^\s&;]+)"
+            r"client[_-]?secret|password|passwd|secret|token"
+            r")([\"']?\s*[:=]\s*)"
+            r"(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,&};\"'\r\n][^\r\n,&};]*)"
         ),
         r"\1\2***",
     ),
+    # Password embedded in a connection string: scheme://[user]:PASS@host. The
+    # scheme length is bounded so a long dotted string cannot backtrack quadratically.
     (
-        re.compile(r"\b[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"),
+        re.compile(r"(?i)\b([a-z][a-z0-9+.-]{1,40}://[^\s:/@]*:)[^\s:/@]+(@)"),
+        r"\1***\2",
+    ),
+    # JWTs are anchored on the eyJ header (base64url of '{"') so this does not shred
+    # ordinary dotted identifiers and tracebacks the parent agent needs to read.
+    (
+        re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"),
         "***",
     ),
-    (re.compile(r"sk-[A-Za-z0-9]{8,}"), "sk-***"),
-    (re.compile(r"ghp_[A-Za-z0-9]{20,}"), "ghp_***"),
-    (re.compile(r"gho_[A-Za-z0-9]{20,}"), "gho_***"),
-    (re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"), "xox***"),
+    # Provider token shapes are prefix-anchored; we deliberately avoid a blanket
+    # high-entropy matcher, which would redact legitimate hashes/IDs/output.
+    (re.compile(r"\bsk-(?:proj|ant|svcacct)-[A-Za-z0-9_-]{8,}"), "sk-***"),
+    (re.compile(r"\bsk-[A-Za-z0-9]{8,}"), "sk-***"),
+    (re.compile(r"\bgh[opusr]_[A-Za-z0-9]{20,}\b"), "gh***"),
+    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"), "github_pat_***"),
+    (re.compile(r"\b(AKIA|ASIA)[0-9A-Z]{16}\b"), r"\1***"),
+    (re.compile(r"\bAIza[0-9A-Za-z_-]{32,}\b"), "AIza***"),
+    (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}"), "xox***"),
 ]
 
 

@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
@@ -201,12 +202,52 @@ class SnapshotCommandTests(unittest.TestCase):
             ("api_key=secret-api-key", "secret-api-key"),
             ("password: super-secret", "super-secret"),
             (f"jwt {jwt_like}", jwt_like),
+            # JSON-quoted keys (the value sits after a closing quote on the key).
+            ('{"secret": "topsecretvalue123456"}', "topsecretvalue123456"),
+            ('"password": "hunter2hunter2"', "hunter2hunter2"),
+            ('{"Authorization": "Bearer abcdef123456"}', "abcdef123456"),
+            # Provider token shapes.
+            ("sk-proj-aBcD1234efGH5678ijKL", "aBcD1234efGH5678ijKL"),
+            ("sk-ant-api03-abcdefgh12345678", "abcdefgh12345678"),
+            ("ghs_1234567890abcdefghijklmnopqrstuvwx", "1234567890abcdefghijklmnopqrstuvwx"),
+            (
+                "github_pat_11ABCDEFG0abcdefghijkl_mnopqrstuvwxyz",
+                "11ABCDEFG0abcdefghijkl_mnopqrstuvwxyz",
+            ),
+            ("AKIAIOSFODNN7EXAMPLE", "IOSFODNN7EXAMPLE"),
+            ("AIzaSyDaGmWKa4JsXZ-HjGw7ISLn_3namBGewQe", "SyDaGmWKa4JsXZ-HjGw7ISLn_3namBGewQe"),
+            # Connection-string passwords (with and without a username).
+            ("postgres://admin:supersecret@db.example.com/x", "supersecret"),
+            ("redis://:redacted-pass-9999@localhost:6379", "redacted-pass-9999"),
         ]
         for raw, secret in cases:
             with self.subTest(raw=raw):
                 redacted = self.rendering.redact_string(raw)
                 self.assertIn("***", redacted)
                 self.assertNotIn(secret, redacted)
+
+    def test_redact_string_preserves_ordinary_dotted_identifiers(self):
+        # The JWT matcher is anchored on the eyJ header so it must not shred
+        # tracebacks, module paths, or dotted filenames the parent agent reads.
+        survivors = [
+            "No module named delegate_agent.run_registry.parser_helper",
+            "see file_one_long.module_two_long.module_three_x",
+            "2026-06-02.error_log_file.backup_archive_v2",
+            "the secret to success is hard work",
+            "git@github.com:user/repo.git",
+        ]
+        for text in survivors:
+            with self.subTest(text=text):
+                self.assertEqual(self.rendering.redact_string(text), text)
+
+    def test_redact_string_is_linear_on_pathological_input(self):
+        # Regression guard: a long dotted string previously triggered quadratic
+        # backtracking in the connection-string scheme matcher (~12s). Linear now.
+        payload = ("a" * 10 + ".") * 20000
+        start = time.perf_counter()
+        self.rendering.redact_string(payload)
+        elapsed = time.perf_counter() - start
+        self.assertLess(elapsed, 5.0, f"redaction took {elapsed:.2f}s on pathological input")
 
     def test_snapshot_redacts_secrets_by_default(self):
         _, alias = self.write_run(  # pragma: allowlist secret
