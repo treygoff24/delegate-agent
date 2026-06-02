@@ -138,9 +138,17 @@ def merge_snapshot_view(
         for key in ("alias", "harness", "cwd", "executionCwd", "mode", "model", "startedAt"):
             if key in manifest and key not in view:
                 view[key] = manifest[key]
-        for key in ("isolationMode", "effectiveIsolation", "isolationLifecycle",
-                     "preservedWorkspace", "sourceGitRoot", "branch", "worktreeStatus",
-                     "worktreeCleanupCommands", "safeWorkspaceMethod"):
+        for key in (
+            "isolationMode",
+            "effectiveIsolation",
+            "isolationLifecycle",
+            "preservedWorkspace",
+            "sourceGitRoot",
+            "branch",
+            "worktreeStatus",
+            "worktreeCleanupCommands",
+            "safeWorkspaceMethod",
+        ):
             if key in manifest and key not in view:
                 view[key] = manifest[key]
     warnings = list(view.get("warnings") or [])
@@ -291,7 +299,9 @@ def render_runs_text(summaries: list[JsonObject], stdout: TextIO, *, mode: str) 
         current = summary.get("current", "")
         if isinstance(current, str) and len(current) > 40:
             current = current[:37] + "..."
-        print(f"{alias:<10} {status:<9} {harness:<8} {age:<8} {iso_label:<11} {current}", file=stdout)
+        print(
+            f"{alias:<10} {status:<9} {harness:<8} {age:<8} {iso_label:<11} {current}", file=stdout
+        )
 
 
 def run_output_json_payload(
@@ -340,7 +350,10 @@ def render_run_output_text(sections: dict[str, str], stdout: TextIO) -> None:
 
 def render_worktree_list_text(payload: JsonObject, stdout: TextIO) -> None:
     entries = payload.get("entries")
-    print("alias        status   harness  age      branch                                      dirty merged", file=stdout)
+    print(
+        "alias        status   harness  age      branch                                      dirty merged",
+        file=stdout,
+    )
     if isinstance(entries, list):
         for entry in entries:
             if not isinstance(entry, dict):
@@ -348,7 +361,11 @@ def render_worktree_list_text(payload: JsonObject, stdout: TextIO) -> None:
             alias = entry.get("alias") or entry.get("runId") or "?"
             status = entry.get("worktreeStatus") or "unknown"
             harness = entry.get("harness") or "?"
-            age = format_age(entry.get("lastActivityAt") if isinstance(entry.get("lastActivityAt"), str) else None)
+            age = format_age(
+                entry.get("lastActivityAt")
+                if isinstance(entry.get("lastActivityAt"), str)
+                else None
+            )
             branch = entry.get("branch") or "-"
             branch_label = str(branch)
             if len(branch_label) > 42:
@@ -389,7 +406,7 @@ def _short_ref(ref: str | None) -> str:
     if ref is None:
         return "(detached)"
     if ref.startswith("refs/heads/"):
-        return ref[len("refs/heads/"):]
+        return ref[len("refs/heads/") :]
     return ref
 
 
@@ -446,7 +463,10 @@ def render_worktree_show_text(payload: JsonObject, stdout: TextIO) -> None:
 
     ahead = payload.get("aheadBehind")
     if isinstance(ahead, dict):
-        for key, label in (("vsCreationBase", "vs creation base"), ("vsCurrentHead", "vs current HEAD")):
+        for key, label in (
+            ("vsCreationBase", "vs creation base"),
+            ("vsCurrentHead", "vs current HEAD"),
+        ):
             pair = ahead.get(key)
             if isinstance(pair, dict):
                 print(
@@ -490,7 +510,10 @@ def render_worktree_show_text(payload: JsonObject, stdout: TextIO) -> None:
 
 def render_worktree_remove_text(payload: JsonObject, stdout: TextIO) -> None:
     alias = payload.get("alias") or payload.get("runId") or "?"
-    print(f"{alias}: removed={payload.get('removed')} pathRemoved={payload.get('pathRemoved')} branchRemoved={payload.get('branchRemoved')}", file=stdout)
+    print(
+        f"{alias}: removed={payload.get('removed')} pathRemoved={payload.get('pathRemoved')} branchRemoved={payload.get('branchRemoved')}",
+        file=stdout,
+    )
     if payload.get("ok") is False or payload.get("branchRemovalError"):
         error = payload.get("branchRemovalError") or payload.get("message") or payload.get("code")
         if error:
@@ -515,7 +538,9 @@ def render_worktree_prune_text(payload: JsonObject, stdout: TextIO) -> None:
             for item in items[:20]:
                 if isinstance(item, dict):
                     label = item.get("alias") or item.get("runId") or "?"
-                    detail = item.get("reason") or item.get("code") or item.get("worktreeStatus") or ""
+                    detail = (
+                        item.get("reason") or item.get("code") or item.get("worktreeStatus") or ""
+                    )
                     print(f"  - {label} {detail}", file=stdout)
 
 
@@ -535,7 +560,10 @@ def render_worktree_gc_text(payload: JsonObject, stdout: TextIO) -> None:
         print("orphans:", file=stdout)
         for orphan in orphans:
             if isinstance(orphan, dict):
-                print(f"  - {orphan.get('alias') or orphan.get('runId')} {orphan.get('reason')}", file=stdout)
+                print(
+                    f"  - {orphan.get('alias') or orphan.get('runId')} {orphan.get('reason')}",
+                    file=stdout,
+                )
 
 
 def print_json(payload: JsonObject, stdout: TextIO) -> None:

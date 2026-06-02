@@ -554,9 +554,16 @@ class SnapshotCommandTests(unittest.TestCase):
             stdout,
         )
         output = stdout.getvalue()
-        self.assertIn("cleanup (refuses dirty / unmerged):       delegate worktree remove demo", output)
-        self.assertIn("cleanup (DISCARD edits + delete branch):  delegate worktree remove demo --force", output)
-        self.assertIn("raw git equivalent:                       git -C /repo worktree remove /wt", output)
+        self.assertIn(
+            "cleanup (refuses dirty / unmerged):       delegate worktree remove demo", output
+        )
+        self.assertIn(
+            "cleanup (DISCARD edits + delete branch):  delegate worktree remove demo --force",
+            output,
+        )
+        self.assertIn(
+            "raw git equivalent:                       git -C /repo worktree remove /wt", output
+        )
 
     def test_render_worktree_list_text_includes_auto_prune_footer(self):
         stdout = io.StringIO()
@@ -577,7 +584,10 @@ class SnapshotCommandTests(unittest.TestCase):
     def test_render_worktree_list_text_includes_auto_prune_skip_and_failure(self):
         skipped = io.StringIO()
         self.rendering.render_worktree_list_text(
-            {"entries": [], "autoPrune": {"ok": False, "skipped": True, "reason": "lock_contended"}},
+            {
+                "entries": [],
+                "autoPrune": {"ok": False, "skipped": True, "reason": "lock_contended"},
+            },
             skipped,
         )
         self.assertIn("auto-prune: skipped (lock_contended)", skipped.getvalue())

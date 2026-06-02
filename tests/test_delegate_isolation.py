@@ -21,6 +21,7 @@ if SRC not in sys.path:
 
 def load_isolation():
     from delegate_agent import isolation
+
     return isolation
 
 
@@ -326,19 +327,27 @@ class BuildIsolationContextTests(unittest.TestCase):
             )
             subprocess.run(
                 ["git", "-C", tmp, "config", "user.name", "Test"],
-                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
             subprocess.run(
                 ["git", "-C", tmp, "config", "user.email", "test@example.com"],
-                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
             subprocess.run(
                 ["git", "-C", tmp, "commit", "--allow-empty", "-m", "init"],
-                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
             gd = subprocess.run(
                 ["git", "-C", tmp, "rev-parse", "--git-common-dir"],
-                text=True, capture_output=True, check=True,
+                text=True,
+                capture_output=True,
+                check=True,
             )
             git_common_dir = gd.stdout.strip()
             if not git_common_dir.startswith("/"):
@@ -346,7 +355,9 @@ class BuildIsolationContextTests(unittest.TestCase):
 
             oid = subprocess.run(
                 ["git", "-C", tmp, "rev-parse", "HEAD"],
-                text=True, capture_output=True, check=True,
+                text=True,
+                capture_output=True,
+                check=True,
             ).stdout.strip()
 
             ctx = iso.build_isolation_context(
@@ -406,22 +417,28 @@ class BuildIsolationContextTests(unittest.TestCase):
 class GitTimeoutTests(unittest.TestCase):
     def test_require_clean_source_raises_git_timeout(self):
         iso = load_isolation()
-        with mock.patch.object(
-            iso.subprocess,
-            "run",
-            side_effect=subprocess.TimeoutExpired(["git", "status"], 30),
-        ), self.assertRaises(iso.IsolationExecutionError) as ctx:
+        with (
+            mock.patch.object(
+                iso.subprocess,
+                "run",
+                side_effect=subprocess.TimeoutExpired(["git", "status"], 30),
+            ),
+            self.assertRaises(iso.IsolationExecutionError) as ctx,
+        ):
             iso.require_clean_source("/repo")
         self.assertEqual(ctx.exception.error, "git_timeout")
         self.assertIn("git status timed out", ctx.exception.message)
 
     def test_create_persistent_worktree_branch_probe_timeout_is_structured(self):
         iso = load_isolation()
-        with mock.patch.object(
-            iso.subprocess,
-            "run",
-            side_effect=subprocess.TimeoutExpired(["git", "show-ref"], 30),
-        ), self.assertRaises(iso.IsolationExecutionError) as ctx:
+        with (
+            mock.patch.object(
+                iso.subprocess,
+                "run",
+                side_effect=subprocess.TimeoutExpired(["git", "show-ref"], 30),
+            ),
+            self.assertRaises(iso.IsolationExecutionError) as ctx,
+        ):
             iso.create_persistent_worktree(
                 "/repo",
                 "delegate/cursor-timeout",
@@ -453,14 +470,16 @@ class LazyImportCycleTests(unittest.TestCase):
         # Run in a clean subprocess to get a guaranteed fresh import order.
         # isolation.py lazy-imports SKILL_REVIEW_PREFIX from runner.py at call time,
         # not at module load time, which avoids a potential import cycle.
-        code = "\n".join([
-            "import sys",
-            f"sys.path.insert(0, {SRC!r})",
-            "from delegate_agent import isolation",
-            # Call a function that triggers the lazy import of SKILL_REVIEW_PREFIX
-            "result = isolation.prepend_persistent_worktree_context('hi')",
-            "print('ok')",
-        ])
+        code = "\n".join(
+            [
+                "import sys",
+                f"sys.path.insert(0, {SRC!r})",
+                "from delegate_agent import isolation",
+                # Call a function that triggers the lazy import of SKILL_REVIEW_PREFIX
+                "result = isolation.prepend_persistent_worktree_context('hi')",
+                "print('ok')",
+            ]
+        )
         proc = subprocess.run(
             [sys.executable, "-c", code],
             capture_output=True,

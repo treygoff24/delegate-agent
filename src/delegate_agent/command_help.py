@@ -213,9 +213,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
     "snapshot": CommandSpec(
         name="snapshot",
         summary="Print a bounded snapshot of a tracked run.",
-        usage=(
-            "delegate [--json] snapshot [--latest HARNESS] [--no-redact] <alias-or-runId>",
-        ),
+        usage=("delegate [--json] snapshot [--latest HARNESS] [--no-redact] <alias-or-runId>",),
         arguments=(
             ArgSpec(
                 "<alias-or-runId>",
@@ -241,9 +239,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
     "runs": CommandSpec(
         name="runs",
         summary="List tracked runs, optionally filtered by activity, recency, or harness.",
-        usage=(
-            "delegate [--json] runs [--active] [--recent] [--harness HARNESS] [--limit N]",
-        ),
+        usage=("delegate [--json] runs [--active] [--recent] [--harness HARNESS] [--limit N]",),
         options=(
             OptionSpec("--active", None, "Show only currently active runs."),
             OptionSpec("--recent", None, "Show only recent runs."),
@@ -268,15 +264,15 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "delegate [--json] run-output <alias-or-runId> "
             "[--completion-report] [--stdout] [--stderr] [--tail N] [--raw] [--no-redact]",
         ),
-        arguments=(
-            ArgSpec("<alias-or-runId>", True, "Run handle to inspect."),
-        ),
+        arguments=(ArgSpec("<alias-or-runId>", True, "Run handle to inspect."),),
         options=(
             OptionSpec("--completion-report", None, "Print the run's completion report."),
             OptionSpec("--stdout", None, "Print captured stdout (requires --tail N or --raw)."),
             OptionSpec("--stderr", None, "Print captured stderr (requires --tail N or --raw)."),
             OptionSpec("--tail", "N", "Print only the last N lines of the selected stream."),
-            OptionSpec("--raw", None, "Print the full stream unbounded (incompatible with --tail)."),
+            OptionSpec(
+                "--raw", None, "Print the full stream unbounded (incompatible with --tail)."
+            ),
             OptionSpec("--no-redact", None, "Do not redact secrets in the output."),
         ),
         examples=(
@@ -383,9 +379,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "delegate [--cwd PATH] [--json] worktree remove <alias-or-runId> "
             "[--discard-uncommitted] [--force-branch] [--force] [--keep-branch]",
         ),
-        arguments=(
-            ArgSpec("<alias-or-runId>", True, "Worktree handle to remove."),
-        ),
+        arguments=(ArgSpec("<alias-or-runId>", True, "Worktree handle to remove."),),
         options=(
             OptionSpec(
                 "--discard-uncommitted",
@@ -426,7 +420,9 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
                 "DAYS",
                 "Prune only worktrees older than DAYS (non-negative integer).",
             ),
-            OptionSpec("--harness", "HARNESS", "Prune only the given harness (cursor, droid, codex)."),
+            OptionSpec(
+                "--harness", "HARNESS", "Prune only the given harness (cursor, droid, codex)."
+            ),
             OptionSpec(
                 "--include-detached",
                 None,
@@ -458,7 +454,9 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         summary="Garbage-collect orphaned worktree metadata and stale registry entries.",
         usage=("delegate [--cwd PATH] [--json] worktree gc [--dry-run]",),
         options=(
-            OptionSpec("--dry-run", None, "Report what would be collected without changing anything."),
+            OptionSpec(
+                "--dry-run", None, "Report what would be collected without changing anything."
+            ),
         ),
         examples=(
             "delegate worktree gc",
@@ -668,9 +666,7 @@ def render_overview_text() -> str:
     lines.append(
         "Tracked runs return bounded summaries by default. Avoid piping launches through tail;"
     )
-    lines.append(
-        "inspect runs with delegate snapshot, delegate runs, and delegate run-output."
-    )
+    lines.append("inspect runs with delegate snapshot, delegate runs, and delegate run-output.")
 
     return "\n".join(lines) + "\n"
 
@@ -710,8 +706,7 @@ def help_index_payload() -> JsonObject:
     return {
         "ok": True,
         "commands": [
-            {"command": spec.name, "summary": spec.summary}
-            for spec in COMMAND_SPECS.values()
+            {"command": spec.name, "summary": spec.summary} for spec in COMMAND_SPECS.values()
         ],
         "globalOptions": [_option_payload(opt) for opt in GLOBAL_OPTIONS],
     }

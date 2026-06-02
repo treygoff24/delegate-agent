@@ -54,7 +54,9 @@ class WorktreeManagementError(Exception):
         normalized["error"] = str(normalized.get("error") or code)
         normalized["message"] = message
         exit_code = normalized.get("exitCode")
-        normalized["exitCode"] = exit_code if isinstance(exit_code, int) else WORKTREE_ERROR_EXIT_CODE
+        normalized["exitCode"] = (
+            exit_code if isinstance(exit_code, int) else WORKTREE_ERROR_EXIT_CODE
+        )
         super().__init__(message)
         self.payload = normalized
         self.code = code
@@ -245,7 +247,9 @@ def load_persistent_records(registry_root: Path) -> list[JsonObject]:
 def _reload_record(registry_root: Path, run_id: str) -> JsonObject | None:
     index = run_registry.load_index(registry_root)
     index_entry = index.get("runs", {}).get(run_id)
-    return _record_for_run(registry_root, run_id, index_entry if isinstance(index_entry, dict) else {})
+    return _record_for_run(
+        registry_root, run_id, index_entry if isinstance(index_entry, dict) else {}
+    )
 
 
 def _branch_ref(branch: str) -> str:
@@ -312,7 +316,9 @@ def porcelain_status(
     return lines[:limit], len(lines), []
 
 
-def dirty_info(record: JsonObject, status: str) -> tuple[bool | None, list[str], int | None, list[str]]:
+def dirty_info(
+    record: JsonObject, status: str
+) -> tuple[bool | None, list[str], int | None, list[str]]:
     if status not in (STATUS_PRESENT, STATUS_UNKNOWN):
         return None, [], None, []
     execution_cwd = record.get("executionCwd")
@@ -346,7 +352,11 @@ def merged_into_source(
     if status not in (STATUS_PRESENT, STATUS_UNKNOWN):
         return None, []
     creation = record.get("creationContext")
-    if isinstance(creation, dict) and creation.get("sourceHeadRef") is None and not include_detached:
+    if (
+        isinstance(creation, dict)
+        and creation.get("sourceHeadRef") is None
+        and not include_detached
+    ):
         return None, ["source was detached at creation; integration target unknown"]
     source_git_root = record.get("sourceGitRoot")
     branch = record.get("branch")
@@ -407,7 +417,11 @@ def ahead_behind(record: JsonObject, status: str) -> JsonObject | None:
     source_git_root = record.get("sourceGitRoot")
     branch = record.get("branch")
     creation = record.get("creationContext")
-    if not isinstance(source_git_root, str) or not isinstance(branch, str) or not isinstance(creation, dict):
+    if (
+        not isinstance(source_git_root, str)
+        or not isinstance(branch, str)
+        or not isinstance(creation, dict)
+    ):
         return None
     creation_base = creation.get("sourceHeadOid")
     vs_creation = (
@@ -870,12 +884,7 @@ def _remove_branch_if_requested(
         return BranchRemovalResult(removed=False, kept_reason="requested")
     if status == STATUS_REMOVED and not force_branch:
         return BranchRemovalResult(removed=False)
-    if (
-        force_branch
-        and isinstance(source_git_root, str)
-        and isinstance(branch, str)
-        and branch
-    ):
+    if force_branch and isinstance(source_git_root, str) and isinstance(branch, str) and branch:
         return _remove_branch(source_git_root, branch, force=True)
     if status == STATUS_MISSING:
         return BranchRemovalResult(removed=False, kept_reason="path_missing")
@@ -1117,7 +1126,12 @@ def prune_worktrees(
             skipped.append(_entry_ref(record, reason="path_missing"))
             continue
         creation = record.get("creationContext")
-        if merged and isinstance(creation, dict) and creation.get("sourceHeadRef") is None and not include_detached:
+        if (
+            merged
+            and isinstance(creation, dict)
+            and creation.get("sourceHeadRef") is None
+            and not include_detached
+        ):
             skipped.append(_entry_ref(record, reason="detached_source"))
             continue
         # Compute dirty before the merged check so the merged branch path
@@ -1207,7 +1221,7 @@ def _worktree_list_paths_with_warning(source_git_root: str) -> tuple[set[str] | 
     paths: set[str] = set()
     for line in result.stdout.splitlines():
         if line.startswith("worktree "):
-            path = line[len("worktree "):]
+            path = line[len("worktree ") :]
             paths.add(path)
             with suppress(OSError):
                 paths.add(str(Path(path).resolve()))
@@ -1245,12 +1259,14 @@ def gc_worktrees(registry_root: Path, *, dry_run: bool = False) -> JsonObject:
     warnings: list[JsonObject] = []
 
     def append_missing(record: JsonObject, execution: str) -> None:
-        reconciled.append({
-            "alias": record.get("alias"),
-            "runId": record.get("runId"),
-            "executionCwd": execution,
-            "worktreeStatus": STATUS_MISSING,
-        })
+        reconciled.append(
+            {
+                "alias": record.get("alias"),
+                "runId": record.get("runId"),
+                "executionCwd": execution,
+                "worktreeStatus": STATUS_MISSING,
+            }
+        )
 
     def append_orphan(
         record: JsonObject,
@@ -1288,7 +1304,8 @@ def gc_worktrees(registry_root: Path, *, dry_run: bool = False) -> JsonObject:
             (
                 str(warning.get("message"))
                 for warning in warnings
-                if warning.get("sourceGitRoot") == source and isinstance(warning.get("message"), str)
+                if warning.get("sourceGitRoot") == source
+                and isinstance(warning.get("message"), str)
             ),
             None,
         )
@@ -1329,7 +1346,9 @@ def gc_worktrees(registry_root: Path, *, dry_run: bool = False) -> JsonObject:
                         )
                         append_orphan(fresh, fresh_execution, "worktree_list_failed", list_warning)
             continue
-        if listed_paths is not None and not _registered_worktree_path_matches(listed_paths, execution):
+        if listed_paths is not None and not _registered_worktree_path_matches(
+            listed_paths, execution
+        ):
             if dry_run:
                 append_orphan(record, execution, "worktree_metadata_missing")
             else:

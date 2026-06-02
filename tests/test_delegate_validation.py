@@ -406,9 +406,7 @@ class ValidationTests(unittest.TestCase):
                     config_mod.DEFAULT_CONFIG,
                     {
                         "policy": {
-                            "harness": {
-                                "codex": {"safe": {"bypassApprovalsAndSandbox": True}}
-                            }
+                            "harness": {"codex": {"safe": {"bypassApprovalsAndSandbox": True}}}
                         }
                     },
                 )
@@ -683,14 +681,16 @@ class ValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             task = Path(tmp) / "task.json"
             task.write_text(
-                json.dumps({
-                    "engine": "droid",
-                    "mode": "safe",
-                    "model": "minimax",
-                    "cwd": tmp,
-                    "prompt": "hello",
-                    "isolation": None,
-                })
+                json.dumps(
+                    {
+                        "engine": "droid",
+                        "mode": "safe",
+                        "model": "minimax",
+                        "cwd": tmp,
+                        "prompt": "hello",
+                        "isolation": None,
+                    }
+                )
             )
             parsed = delegate.ParsedCommand("run", json_mode=True, input_json=str(task))
             with self.assertRaises(delegate.DelegateError) as ctx:

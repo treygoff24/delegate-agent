@@ -378,9 +378,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             continue
         if token == "--isolation":
             if i + 1 >= len(argv):
-                raise DelegateError(
-                    "missing_isolation_value", "--isolation requires a value."
-                )
+                raise DelegateError("missing_isolation_value", "--isolation requires a value.")
             isolation = argv[i + 1]
             if isolation not in delegate_config.VALID_ISOLATION_VALUES:
                 raise DelegateError(
@@ -1006,7 +1004,9 @@ def parse_worktree(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedC
     if rest and command_help.is_help_token(rest[0]):
         return help_command(json_mode, "worktree")
     if not rest:
-        raise DelegateError("missing_worktree_action", "worktree requires list, show, remove, prune, or gc.")
+        raise DelegateError(
+            "missing_worktree_action", "worktree requires list, show, remove, prune, or gc."
+        )
     action = rest[0]
     args = rest[1:]
     # Destructive safety: a help token anywhere in an action's args makes help
@@ -1035,12 +1035,16 @@ def parse_worktree(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedC
             i = _apply_worktree_option(parsed, args, i, token, spec)
             continue
         if token.startswith("--"):
-            raise DelegateError("unknown_option", f"worktree {action} does not support option: {token}")
+            raise DelegateError(
+                "unknown_option", f"worktree {action} does not support option: {token}"
+            )
         positional.append(token)
         i += 1
 
     if action in {"list", "prune", "gc"} and positional:
-        raise DelegateError("unexpected_argument", f"worktree {action} does not accept positional arguments.")
+        raise DelegateError(
+            "unexpected_argument", f"worktree {action} does not accept positional arguments."
+        )
     if action == "show":
         if parsed.worktree_latest_harness is not None:
             if positional:
@@ -1281,9 +1285,7 @@ def _worktree_list_payload(
             payload["ok"] = False
             exit_code = auto_prune.get("exitCode")
             payload["exitCode"] = (
-                exit_code
-                if isinstance(exit_code, int)
-                else worktree_mgmt.WORKTREE_ERROR_EXIT_CODE
+                exit_code if isinstance(exit_code, int) else worktree_mgmt.WORKTREE_ERROR_EXIT_CODE
             )
     return payload
 
@@ -1521,7 +1523,9 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
     prompt = resolve_prompt(parsed.prompt_parts, parsed.prompt_file, stdin)
 
     # Capture git metadata for isolation planning (read-only, safe in dry-run too).
-    git_root, git_common_dir, git_head_oid, git_head_ref, git_branch = capture_git_metadata(workspace.path)
+    git_root, git_common_dir, git_head_oid, git_head_ref, git_branch = capture_git_metadata(
+        workspace.path
+    )
 
     # Resolve effective isolation and build isolation context.
     try:
@@ -1638,7 +1642,9 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
     workspace = resolve_workspace(parsed.cwd, json_cwd)
 
     # Capture git metadata for isolation planning (read-only).
-    git_root, git_common_dir, git_head_oid, git_head_ref, git_branch = capture_git_metadata(workspace.path)
+    git_root, git_common_dir, git_head_oid, git_head_ref, git_branch = capture_git_metadata(
+        workspace.path
+    )
 
     # Resolve effective isolation and build isolation context.
     try:
@@ -1710,7 +1716,18 @@ def build_request(
         argv = build_cursor_argv(
             cursor["argvPrefix"], mode, resolved.path, model, prompt, stream_capture=stream_capture
         )
-        return Request(engine, mode, resolved.path, prompt, argv, model, model_alias=None, dry_run=dry_run, workspace_kind=resolved.kind, isolation_context=isolation_context)
+        return Request(
+            engine,
+            mode,
+            resolved.path,
+            prompt,
+            argv,
+            model,
+            model_alias=None,
+            dry_run=dry_run,
+            workspace_kind=resolved.kind,
+            isolation_context=isolation_context,
+        )
     if engine == "droid":
         droid = config["droid"]
         models = droid["models"]
@@ -1732,7 +1749,18 @@ def build_request(
         argv = build_droid_argv(
             droid["binary"], mode, resolved.path, model, prompt, stream_capture=stream_capture
         )
-        return Request(engine, mode, resolved.path, prompt, argv, model, model_alias=model_alias, dry_run=dry_run, workspace_kind=resolved.kind, isolation_context=isolation_context)
+        return Request(
+            engine,
+            mode,
+            resolved.path,
+            prompt,
+            argv,
+            model,
+            model_alias=model_alias,
+            dry_run=dry_run,
+            workspace_kind=resolved.kind,
+            isolation_context=isolation_context,
+        )
     if engine == "codex":
         codex = config["codex"]
         model: str | None
@@ -1752,7 +1780,18 @@ def build_request(
             workspace_kind=resolved.kind,
             stream_capture=stream_capture,
         )
-        return Request(engine, mode, resolved.path, prompt, argv, model, model_alias=model_alias, dry_run=dry_run, workspace_kind=resolved.kind, isolation_context=isolation_context)
+        return Request(
+            engine,
+            mode,
+            resolved.path,
+            prompt,
+            argv,
+            model,
+            model_alias=model_alias,
+            dry_run=dry_run,
+            workspace_kind=resolved.kind,
+            isolation_context=isolation_context,
+        )
     raise DelegateError("invalid_engine", "engine must be cursor, droid, or codex.")
 
 
@@ -1810,7 +1849,9 @@ def replace_workspace_arg(request: Request, execution_workspace: str) -> list[st
     return list(request.argv)
 
 
-def capture_git_metadata(workspace_path: str) -> tuple[str | None, str | None, str | None, str | None, str | None]:
+def capture_git_metadata(
+    workspace_path: str,
+) -> tuple[str | None, str | None, str | None, str | None, str | None]:
     """Capture git metadata from a workspace path for isolation planning.
 
     Returns (git_root, git_common_dir, head_oid, head_ref, branch_name).
@@ -1820,7 +1861,9 @@ def capture_git_metadata(workspace_path: str) -> tuple[str | None, str | None, s
     try:
         root_result = subprocess.run(
             ["git", "-C", workspace_path, "rev-parse", "--show-toplevel"],
-            text=True, capture_output=True, check=False,
+            text=True,
+            capture_output=True,
+            check=False,
         )
         if root_result.returncode != 0:
             return None, None, None, None, None
@@ -1828,7 +1871,9 @@ def capture_git_metadata(workspace_path: str) -> tuple[str | None, str | None, s
 
         common_result = subprocess.run(
             ["git", "-C", workspace_path, "rev-parse", "--git-common-dir"],
-            text=True, capture_output=True, check=False,
+            text=True,
+            capture_output=True,
+            check=False,
         )
         git_common_dir = common_result.stdout.strip() if common_result.returncode == 0 else None
         # If common dir is relative, make it absolute relative to git root
@@ -1837,13 +1882,17 @@ def capture_git_metadata(workspace_path: str) -> tuple[str | None, str | None, s
 
         oid_result = subprocess.run(
             ["git", "-C", workspace_path, "rev-parse", "HEAD"],
-            text=True, capture_output=True, check=False,
+            text=True,
+            capture_output=True,
+            check=False,
         )
         head_oid = oid_result.stdout.strip() if oid_result.returncode == 0 else None
 
         ref_result = subprocess.run(
             ["git", "-C", workspace_path, "symbolic-ref", "--quiet", "HEAD"],
-            text=True, capture_output=True, check=False,
+            text=True,
+            capture_output=True,
+            check=False,
         )
         head_ref = ref_result.stdout.strip() if ref_result.returncode == 0 else None
 
@@ -2386,13 +2435,9 @@ def dry_run_payload(request: Request) -> JsonObject:
                     payload["argv"], "--workspace", planned_cwd
                 )
             elif request.engine == "codex":
-                payload["argv"] = replace_argv_after_flag(
-                    payload["argv"], "--cd", planned_cwd
-                )
+                payload["argv"] = replace_argv_after_flag(payload["argv"], "--cd", planned_cwd)
             elif request.engine == "droid":
-                payload["argv"] = replace_argv_after_flag(
-                    payload["argv"], "--cwd", planned_cwd
-                )
+                payload["argv"] = replace_argv_after_flag(payload["argv"], "--cwd", planned_cwd)
         else:
             payload["plannedExecutionCwd"] = None
             payload["plannedBranch"] = None
@@ -2444,7 +2489,9 @@ def _cleanup_partial_worktree(
         try:
             result = subprocess.run(
                 ["git", "-C", source_git_root, "worktree", "remove", "--force", worktree_path],
-                text=True, capture_output=True, check=False,
+                text=True,
+                capture_output=True,
+                check=False,
                 timeout=GIT_MUTATION_TIMEOUT_SECONDS,
             )
             if result.returncode != 0:
@@ -2458,7 +2505,9 @@ def _cleanup_partial_worktree(
         try:
             result = subprocess.run(
                 ["git", "-C", source_git_root, "branch", "-D", branch],
-                text=True, capture_output=True, check=False,
+                text=True,
+                capture_output=True,
+                check=False,
                 timeout=GIT_MUTATION_TIMEOUT_SECONDS,
             )
             if result.returncode != 0 and _branch_delete_still_needs_cleanup(
@@ -2470,7 +2519,9 @@ def _cleanup_partial_worktree(
             cleanup_failed = True
     if cleanup_failed:
         commands = [
-            shlex.join(["git", "-C", source_git_root, "worktree", "remove", "--force", worktree_path])
+            shlex.join(
+                ["git", "-C", source_git_root, "worktree", "remove", "--force", worktree_path]
+            )
         ]
         if remove_branch:
             commands.append(shlex.join(["git", "-C", source_git_root, "branch", "-D", branch]))
@@ -2501,7 +2552,15 @@ def _branch_delete_still_needs_cleanup(source_git_root: str, branch: str) -> boo
     """
     try:
         result = subprocess.run(
-            ["git", "-C", source_git_root, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+            [
+                "git",
+                "-C",
+                source_git_root,
+                "show-ref",
+                "--verify",
+                "--quiet",
+                f"refs/heads/{branch}",
+            ],
             text=True,
             capture_output=True,
             check=False,
@@ -2670,9 +2729,7 @@ def _register_persistent_worktree_run(
     )
     run_path = run_registry.run_directory(preflight.registry_root, run_id)
     run_path.mkdir(parents=True, exist_ok=True)
-    delegate_runner.write_manifest(
-        run_path, delegate_runner.build_manifest(pre_ctx, request.argv)
-    )
+    delegate_runner.write_manifest(run_path, delegate_runner.build_manifest(pre_ctx, request.argv))
 
     delegate_runner.write_state(
         run_path,
@@ -3402,9 +3459,7 @@ def main(
         # JSON-resolved workspace before loading/finalizing config.
         if parsed.subcommand == "run":
             assert parsed.input_json is not None
-            workspace, config, source = pre_read_run_json_for_config(
-                parsed.input_json, parsed.cwd
-            )
+            workspace, config, source = pre_read_run_json_for_config(parsed.input_json, parsed.cwd)
         else:
             config, source = load_config(workspace=workspace_path_for_config(parsed.cwd))
             validate_config(config)

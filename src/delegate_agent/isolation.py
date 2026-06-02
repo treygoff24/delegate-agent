@@ -263,9 +263,7 @@ def build_isolation_context(
             label = branch_label(engine, model_alias)
             planned_branch = plan_branch_name(label, short_id)
             dh = worktrees_data_home(config or {})
-            planned_execution_cwd = str(
-                plan_worktree_path(dh, fp, label, short_id)
-            )
+            planned_execution_cwd = str(plan_worktree_path(dh, fp, label, short_id))
 
     return IsolationContext(
         source_workspace=source_workspace,

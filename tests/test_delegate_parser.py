@@ -295,17 +295,13 @@ class ParserTests(unittest.TestCase):
     # -- Wave 1 isolation parser tests ------------------------------------------------
 
     def test_isolation_worktree_cursor_work_parses(self):
-        parsed = self.delegate.parse_cli(
-            ["--isolation", "worktree", "cursor", "work", "fix this"]
-        )
+        parsed = self.delegate.parse_cli(["--isolation", "worktree", "cursor", "work", "fix this"])
         self.assertEqual(parsed.isolation, "worktree")
         self.assertEqual(parsed.engine, "cursor")
         self.assertEqual(parsed.mode, "work")
 
     def test_isolation_none_codex_work_parses(self):
-        parsed = self.delegate.parse_cli(
-            ["--isolation", "none", "codex", "work", "implement"]
-        )
+        parsed = self.delegate.parse_cli(["--isolation", "none", "codex", "work", "implement"])
         self.assertEqual(parsed.isolation, "none")
         self.assertEqual(parsed.engine, "codex")
         self.assertEqual(parsed.mode, "work")
@@ -320,9 +316,7 @@ class ParserTests(unittest.TestCase):
 
     def test_isolation_unknown_value_raises(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.parse_cli(
-                ["--isolation", "bananas", "cursor", "work", "fix"]
-            )
+            self.delegate.parse_cli(["--isolation", "bananas", "cursor", "work", "fix"])
         self.assertEqual(ctx.exception.error, "invalid_isolation")
 
     def test_isolation_missing_value_raises(self):
@@ -332,9 +326,7 @@ class ParserTests(unittest.TestCase):
 
     def test_isolation_after_subcommand_is_misplaced(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.parse_cli(
-                ["cursor", "work", "--isolation", "worktree", "fix"]
-            )
+            self.delegate.parse_cli(["cursor", "work", "--isolation", "worktree", "fix"])
         self.assertEqual(ctx.exception.error, "misplaced_global_option")
 
     def test_run_input_keys_contains_isolation(self):
@@ -343,15 +335,19 @@ class ParserTests(unittest.TestCase):
     def test_run_input_json_unknown_key_still_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             task = Path(tmp) / "task.json"
-            task.write_text(json.dumps({
-                "engine": "droid",
-                "mode": "safe",
-                "model": "minimax",
-                "cwd": tmp,
-                "prompt": "hello",
-                "isolation": "worktree",
-                "bogus": "should-fail",
-            }))
+            task.write_text(
+                json.dumps(
+                    {
+                        "engine": "droid",
+                        "mode": "safe",
+                        "model": "minimax",
+                        "cwd": tmp,
+                        "prompt": "hello",
+                        "isolation": "worktree",
+                        "bogus": "should-fail",
+                    }
+                )
+            )
             parsed = self.delegate.ParsedCommand("run", json_mode=True, input_json=str(task))
             with self.assertRaises(self.delegate.DelegateError) as ctx:
                 self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
@@ -421,14 +417,18 @@ class ParserTests(unittest.TestCase):
     def test_run_input_json_isolation_invalid_value_raises(self):
         with tempfile.TemporaryDirectory() as tmp:
             task = Path(tmp) / "task.json"
-            task.write_text(json.dumps({
-                "engine": "droid",
-                "mode": "safe",
-                "model": "minimax",
-                "cwd": tmp,
-                "prompt": "hello",
-                "isolation": "bananas",
-            }))
+            task.write_text(
+                json.dumps(
+                    {
+                        "engine": "droid",
+                        "mode": "safe",
+                        "model": "minimax",
+                        "cwd": tmp,
+                        "prompt": "hello",
+                        "isolation": "bananas",
+                    }
+                )
+            )
             parsed = self.delegate.ParsedCommand("run", json_mode=True, input_json=str(task))
             with self.assertRaises(self.delegate.DelegateError) as ctx:
                 self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
@@ -439,19 +439,27 @@ class ParserTests(unittest.TestCase):
             workspace = Path(tmp)
             local_delegate = workspace / ".delegate"
             local_delegate.mkdir()
-            (local_delegate / "config.json").write_text(json.dumps({
-                "isolation": {"work": "worktree"},
-                "cursor": {"argvPrefix": ["agent"], "defaultModel": "test"},
-                "droid": {"binary": "droid", "models": {"minimax": "model-id"}},
-            }))
+            (local_delegate / "config.json").write_text(
+                json.dumps(
+                    {
+                        "isolation": {"work": "worktree"},
+                        "cursor": {"argvPrefix": ["agent"], "defaultModel": "test"},
+                        "droid": {"binary": "droid", "models": {"minimax": "model-id"}},
+                    }
+                )
+            )
             task = workspace / "task.json"
-            task.write_text(json.dumps({
-                "engine": "droid",
-                "mode": "work",
-                "model": "minimax",
-                "cwd": tmp,
-                "prompt": "hello",
-            }))
+            task.write_text(
+                json.dumps(
+                    {
+                        "engine": "droid",
+                        "mode": "work",
+                        "model": "minimax",
+                        "cwd": tmp,
+                        "prompt": "hello",
+                    }
+                )
+            )
             parsed = self.delegate.ParsedCommand("run", json_mode=True, input_json=str(task))
             # pre_read_run_json_for_config loads workspace-local config
             _ws, cfg, _src = self.delegate.pre_read_run_json_for_config(str(task), None)
@@ -465,14 +473,18 @@ class ParserTests(unittest.TestCase):
         self.addCleanup(repo1.cleanup)
         self.addCleanup(repo2.cleanup)
         task = Path(repo1.name) / "task.json"
-        task.write_text(json.dumps({
-            "engine": "droid",
-            "mode": "safe",
-            "model": "minimax",
-            "cwd": repo1.name,
-            "prompt": "hello",
-            "isolation": "none",
-        }))
+        task.write_text(
+            json.dumps(
+                {
+                    "engine": "droid",
+                    "mode": "safe",
+                    "model": "minimax",
+                    "cwd": repo1.name,
+                    "prompt": "hello",
+                    "isolation": "none",
+                }
+            )
+        )
         parsed = self.delegate.ParsedCommand(
             "run", json_mode=True, cwd=repo2.name, input_json=str(task)
         )
@@ -489,16 +501,12 @@ class ParserTests(unittest.TestCase):
 
     def test_isolation_after_subcommand_droid_work_is_misplaced(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.parse_cli(
-                ["droid", "minimax", "work", "--isolation", "worktree", "fix"]
-            )
+            self.delegate.parse_cli(["droid", "minimax", "work", "--isolation", "worktree", "fix"])
         self.assertEqual(ctx.exception.error, "misplaced_global_option")
 
     def test_isolation_after_subcommand_dry_run_cursor_is_misplaced(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.parse_cli(
-                ["dry-run", "--isolation", "worktree", "cursor", "work", "fix"]
-            )
+            self.delegate.parse_cli(["dry-run", "--isolation", "worktree", "cursor", "work", "fix"])
         self.assertEqual(ctx.exception.error, "misplaced_global_option")
 
     # -- Missing coverage: isolation.work unknown value --
@@ -513,14 +521,18 @@ class ParserTests(unittest.TestCase):
     def test_run_input_json_isolation_null_raises(self):
         with tempfile.TemporaryDirectory() as tmp:
             task = Path(tmp) / "task.json"
-            task.write_text(json.dumps({
-                "engine": "droid",
-                "mode": "safe",
-                "model": "minimax",
-                "cwd": tmp,
-                "prompt": "hello",
-                "isolation": None,
-            }))
+            task.write_text(
+                json.dumps(
+                    {
+                        "engine": "droid",
+                        "mode": "safe",
+                        "model": "minimax",
+                        "cwd": tmp,
+                        "prompt": "hello",
+                        "isolation": None,
+                    }
+                )
+            )
             with self.assertRaises(self.delegate.DelegateError) as ctx:
                 self.delegate.pre_read_run_json_for_config(str(task), None)
             self.assertEqual(ctx.exception.error, "invalid_isolation")
@@ -534,36 +546,47 @@ class ParserTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as global_tmp:
             # Create a "global" config with isolation.work = none (the default)
             global_config = Path(global_tmp) / "global_config.json"
-            global_config.write_text(json.dumps({
-                "cursor": {"argvPrefix": ["agent"], "defaultModel": "global-model"},
-                "droid": {"binary": "droid", "models": {"minimax": "model-id"}},
-                "isolation": {"work": "none"},
-            }))
+            global_config.write_text(
+                json.dumps(
+                    {
+                        "cursor": {"argvPrefix": ["agent"], "defaultModel": "global-model"},
+                        "droid": {"binary": "droid", "models": {"minimax": "model-id"}},
+                        "isolation": {"work": "none"},
+                    }
+                )
+            )
             with tempfile.TemporaryDirectory() as workspace_tmp:
                 # Create a workspace with local config that has isolation.work = worktree
                 workspace = Path(workspace_tmp)
                 local_delegate = workspace / ".delegate"
                 local_delegate.mkdir()
-                (local_delegate / "config.json").write_text(json.dumps({
-                    "cursor": {"argvPrefix": ["agent"], "defaultModel": "ws-model"},
-                    "droid": {"binary": "droid", "models": {"minimax": "model-id"}},
-                    "isolation": {"work": "worktree"},
-                }))
+                (local_delegate / "config.json").write_text(
+                    json.dumps(
+                        {
+                            "cursor": {"argvPrefix": ["agent"], "defaultModel": "ws-model"},
+                            "droid": {"binary": "droid", "models": {"minimax": "model-id"}},
+                            "isolation": {"work": "worktree"},
+                        }
+                    )
+                )
                 # Create a task.json pointing at the workspace with local config
                 task = workspace / "task.json"
-                task.write_text(json.dumps({
-                    "engine": "cursor",
-                    "mode": "work",
-                    "cwd": str(workspace),
-                    "prompt": "hello",
-                }))
+                task.write_text(
+                    json.dumps(
+                        {
+                            "engine": "cursor",
+                            "mode": "work",
+                            "cwd": str(workspace),
+                            "prompt": "hello",
+                        }
+                    )
+                )
                 # The pre-read should load config from the workspace (with work = worktree)
                 # and validate successfully.
-                _ws, cfg, _src = self.delegate.pre_read_run_json_for_config(
-                    str(task), None
-                )
+                _ws, cfg, _src = self.delegate.pre_read_run_json_for_config(str(task), None)
                 self.assertEqual(
-                    cfg["isolation"]["work"], "worktree",
+                    cfg["isolation"]["work"],
+                    "worktree",
                     "Config loaded from JSON-resolved workspace should have isolation.work = worktree",
                 )
 
@@ -598,9 +621,7 @@ class ParserTests(unittest.TestCase):
                 self.assertEqual(result, "none")
 
                 # Build a full request from the JSON and verify it uses the resolved config
-                parsed = self.delegate.ParsedCommand(
-                    "run", json_mode=False, input_json=str(task)
-                )
+                parsed = self.delegate.ParsedCommand("run", json_mode=False, input_json=str(task))
                 request = self.delegate.request_from_input_json(parsed, cfg)
                 self.assertEqual(request.engine, "cursor")
                 self.assertEqual(request.mode, "work")
@@ -614,19 +635,30 @@ class ParserTests(unittest.TestCase):
             workspace = Path(tmp)
             local_delegate = workspace / ".delegate"
             local_delegate.mkdir()
-            (local_delegate / "config.json").write_text(json.dumps({
-                "cursor": {"argvPrefix": ["agent"], "defaultModel": "ws-model"},
-                "droid": {"binary": "/nonexistent/droid", "models": {"minimax": "model-id"}},
-                "isolation": {"work": "worktree"},
-            }))
+            (local_delegate / "config.json").write_text(
+                json.dumps(
+                    {
+                        "cursor": {"argvPrefix": ["agent"], "defaultModel": "ws-model"},
+                        "droid": {
+                            "binary": "/nonexistent/droid",
+                            "models": {"minimax": "model-id"},
+                        },
+                        "isolation": {"work": "worktree"},
+                    }
+                )
+            )
             task = workspace / "task.json"
-            task.write_text(json.dumps({
-                "engine": "droid",
-                "mode": "work",
-                "model": "minimax",
-                "cwd": str(workspace),
-                "prompt": "hello",
-            }))
+            task.write_text(
+                json.dumps(
+                    {
+                        "engine": "droid",
+                        "mode": "work",
+                        "model": "minimax",
+                        "cwd": str(workspace),
+                        "prompt": "hello",
+                    }
+                )
+            )
             stdout = io.StringIO()
             stderr = io.StringIO()
             code = self.delegate.main(

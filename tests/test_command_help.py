@@ -122,13 +122,9 @@ class CommandPayloadShapeTests(unittest.TestCase):
                 ):
                     self.assertIsInstance(payload[list_key], list)
                 for arg in payload["arguments"]:
-                    self.assertEqual(
-                        set(arg.keys()), {"name", "required", "description"}
-                    )
+                    self.assertEqual(set(arg.keys()), {"name", "required", "description"})
                 for opt in payload["options"]:
-                    self.assertEqual(
-                        set(opt.keys()), {"flag", "argument", "description"}
-                    )
+                    self.assertEqual(set(opt.keys()), {"flag", "argument", "description"})
                 # Must survive a JSON round-trip without raising.
                 json.dumps(payload)
 
@@ -199,9 +195,7 @@ class OverviewTests(unittest.TestCase):
                 self.assertIn(command, self.overview)
 
     def test_top_level_commands_match_registry(self):
-        registry_top_level = {
-            name for name in command_help.COMMAND_SPECS if " " not in name
-        }
+        registry_top_level = {name for name in command_help.COMMAND_SPECS if " " not in name}
         # 'help' is a registry top-level key too; the overview-completeness set
         # in the plan excludes it from the literal-presence check, but it must
         # still be a registry top-level command.
@@ -234,9 +228,7 @@ class FocusedGlobalOptionsTests(unittest.TestCase):
 
     def test_non_worktree_help_keeps_isolation_global(self):
         text = command_help.render_command_help_text(command_help.COMMAND_SPECS["cursor"])
-        self.assertTrue(
-            any("--isolation" in line for line in self._global_option_lines(text))
-        )
+        self.assertTrue(any("--isolation" in line for line in self._global_option_lines(text)))
 
 
 class HelpIndexPayloadTests(unittest.TestCase):

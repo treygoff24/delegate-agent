@@ -340,9 +340,7 @@ def resolve_isolation(
     if isinstance(loaded_config, dict):
         isolation_cfg = loaded_config.get("isolation")
         if "isolation" in loaded_config and not isinstance(isolation_cfg, dict):
-            raise InvalidIsolationError(
-                "config isolation must be an object when present."
-            )
+            raise InvalidIsolationError("config isolation must be an object when present.")
         if isinstance(isolation_cfg, dict):
             if mode in isolation_cfg and isolation_cfg[mode] is None:
                 raise InvalidIsolationError(

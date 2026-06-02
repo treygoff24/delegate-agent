@@ -260,9 +260,7 @@ class RegressionGuardTests(HelpCliTestBase):
 
     def test_trailing_json_after_prompt_is_rejected(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.parse_cli(
-                ["dry-run", "droid", "minimax", "work", "hello", "--json"]
-            )
+            self.delegate.parse_cli(["dry-run", "droid", "minimax", "work", "hello", "--json"])
         self.assertEqual(ctx.exception.error, "misplaced_global_option")
 
 

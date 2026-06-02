@@ -513,7 +513,10 @@ class CommandTests(unittest.TestCase):
                 warnings = isolated.isolation_context.warnings
                 self.assertEqual(isolated.isolation_context.safe_workspace_method, "git-worktree")
                 self.assertTrue(
-                    any(self.delegate.SAFE_EXTERNAL_SYMLINK_WARNING_PREFIX in item for item in warnings)
+                    any(
+                        self.delegate.SAFE_EXTERNAL_SYMLINK_WARNING_PREFIX in item
+                        for item in warnings
+                    )
                 )
 
     def test_unborn_git_safe_isolation_falls_back_to_directory_copy(self):

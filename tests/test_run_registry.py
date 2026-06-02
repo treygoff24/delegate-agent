@@ -329,8 +329,12 @@ class RunRegistryTests(unittest.TestCase):
             run_id, alias = self.registry.register_run(root, harness="cursor")
             run_path = self.registry.run_directory(root, run_id)
             run_path.mkdir(parents=True, exist_ok=True)
-            state = {"schema": "delegate.state.v1", "runId": run_id, "alias": alias,
-                     "status": "succeeded"}
+            state = {
+                "schema": "delegate.state.v1",
+                "runId": run_id,
+                "alias": alias,
+                "status": "succeeded",
+            }
             self.registry.write_json_atomic(run_path / "state.json", state)
 
             # Set to present.
@@ -339,8 +343,9 @@ class RunRegistryTests(unittest.TestCase):
 
             # Set to removed with timestamp.
             removed_at = "2026-05-24T12:00:00Z"
-            updated2 = self.registry.set_worktree_status(root, run_id, "removed",
-                                                         removed_at=removed_at)
+            updated2 = self.registry.set_worktree_status(
+                root, run_id, "removed", removed_at=removed_at
+            )
             self.assertEqual(updated2["worktreeStatus"], "removed")
             self.assertEqual(updated2["worktreeRemovedAt"], removed_at)
 
