@@ -205,6 +205,60 @@ class HarnessEventsTests(unittest.TestCase):
         )
         self.assertEqual(acc.completion_text, "answer one")
 
+    def test_codex_completion_survives_trailing_command_before_turn_completed(self):
+        # Regression: a command_execution emitted after the turn's closing
+        # agent_message (e.g. a final `git status`) must not erase the answer.
+        acc = self.events.StreamAccumulator()
+        for payload in [
+            {
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": "Done. All tests pass."},
+            },
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "command_execution",
+                    "command": "git status",
+                    "status": "completed",
+                },
+            },
+            {"type": "turn.completed"},
+        ]:
+            acc.ingest_line(json.dumps(payload))
+        self.assertEqual(acc.completion_text, "Done. All tests pass.")
+
+    def test_real_codex_stream_fixture_matches_parser_assumptions(self):
+        # Guards against Codex changing its event schema: the other codex tests
+        # use hand-authored JSON, so they would stay green even if the real
+        # wire format drifted. This fixture is a sanitized capture of an actual
+        # `codex` run (command output blanked, host paths scrubbed); if Codex
+        # renames event types or fields, this test fails where synthetic ones
+        # would not.
+        fixture = ROOT / "tests" / "fixtures" / "codex_real_stream.jsonl"
+        acc = self.events.StreamAccumulator()
+        for line in fixture.read_text(encoding="utf-8").splitlines():
+            acc.ingest_line(line)
+
+        # Final agent_message becomes the completion; the intro message and the
+        # hidden reasoning item do not.
+        self.assertIsNotNone(acc.completion_text)
+        self.assertTrue(acc.completion_text.startswith("Verdict:"))
+        self.assertIn("skill pass", acc.assistant_text.lower())
+        self.assertNotIn("reasoning", acc.assistant_text.lower())
+
+        # command_execution items normalize to tool events, and a real failed
+        # command stays "failed" (only "completed" maps to "success").
+        tool_events = [(e.kind, e.status) for e in acc.events if e.tool]
+        self.assertEqual(
+            tool_events,
+            [
+                ("tool.started", "in_progress"),
+                ("tool.completed", "success"),
+                ("tool.started", "in_progress"),
+                ("tool.completed", "failed"),
+            ],
+        )
+
     def test_invalid_json_falls_back_to_bounded_text_event(self):
         acc = self.events.StreamAccumulator()
         acc.ingest_line("not json at all")

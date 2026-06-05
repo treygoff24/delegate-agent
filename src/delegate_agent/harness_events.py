@@ -160,7 +160,11 @@ class StreamAccumulator:
         command = _string_field(item, "command")
         status = _codex_command_status(_string_field(item, "status"), completed=completed)
         kind = "tool.completed" if completed else "tool.started"
-        self._codex_completion_candidate = None
+        # Deliberately does not clear the completion candidate: a turn can emit a
+        # trailing command (e.g. a final `git status`) after its closing
+        # agent_message, and that message is still the turn's answer. The
+        # candidate is cleared only on turn.started, and overwritten by a later
+        # agent_message.
         self.events.append(
             NormalizedEvent(
                 kind=kind,

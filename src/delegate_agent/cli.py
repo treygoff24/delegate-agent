@@ -1198,8 +1198,14 @@ def _recover_completion_report_from_stdout(registry_root: Path, run_id: str) -> 
     if not stdout_text:
         return ""
     accumulator = harness_events.StreamAccumulator()
-    for line in stdout_text.splitlines():
+    # Mirror the live tracker's line handling exactly (runner.handle_stdout_line):
+    # split on "\n" only, and ingest the trailing fragment only when non-blank.
+    lines = stdout_text.split("\n")
+    trailing = lines.pop() if lines else ""
+    for line in lines:
         accumulator.ingest_line(line)
+    if trailing.strip():
+        accumulator.ingest_line(trailing)
     if accumulator.completion_text:
         return accumulator.completion_text.strip()
     return ""

@@ -426,6 +426,35 @@ class SnapshotCommandTests(unittest.TestCase):
         self.assertEqual(report["source"], "stdout.log")
         self.assertIn("json fallback", report["content"])
 
+    def test_run_output_recovers_completion_from_real_codex_fixture(self):
+        # End-to-end recovery against a sanitized capture of a real `codex` run
+        # (see tests/fixtures/codex_real_stream.jsonl). Synthetic fixtures could
+        # drift from Codex's actual wire format without this catching it.
+        fixture = ROOT / "tests" / "fixtures" / "codex_real_stream.jsonl"
+        run_id, alias = self.write_run(harness="codex", status="succeeded", pid=None)
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        (run_path / "stdout.log").write_text(fixture.read_text(encoding="utf-8"), encoding="utf-8")
+        stdout = io.StringIO()
+        code = self.delegate.main(
+            [
+                "--json",
+                "--cwd",
+                str(self.workspace),
+                "run-output",
+                alias,
+                "--completion-report",
+            ],
+            stdout=stdout,
+        )
+        self.assertEqual(code, 0)
+        report = json.loads(stdout.getvalue())["sections"]["completionReport"]
+        self.assertTrue(report["synthetic"])
+        self.assertEqual(report["source"], "stdout.log")
+        self.assertTrue(report["content"].startswith("Verdict:"))
+        # Intermediate progress and hidden reasoning must not leak into the report.
+        self.assertNotIn("skill pass", report["content"].lower())
+        self.assertNotIn("reasoning", report["content"].lower())
+
     def test_run_output_completion_report_recovery_skipped_for_running_run(self):
         run_id, alias = self.write_run(status="running", pid=os.getpid())
         run_path = self.registry.run_directory(self.registry_root, run_id)
