@@ -192,6 +192,15 @@ Snapshot JSON uses schema `delegate.snapshot.v1` and includes fields such as `al
 
 Run-output JSON uses schema `delegate.run-output.v1` and returns selected completion report, stdout, and/or stderr content. By default, secret-like strings are redacted unless `--no-redact` is supplied.
 
+When `completion-report.md` is absent, `run-output --completion-report` attempts
+to recover an explicit final response from the recorded child stdout stream using
+the same event parser used during live tracking. Codex recovery
+only promotes an `agent_message` after the stream reaches `turn.completed`, so
+progress messages are not treated as final reports. JSON output marks recovered
+reports with `synthetic: true` and `source: "stdout.log"`. If recovery fails,
+use bounded log selectors (`--stdout --tail N`, `--stderr --tail N`) before
+reading raw `.delegate/` files directly.
+
 ### Worktree management
 
 ```bash

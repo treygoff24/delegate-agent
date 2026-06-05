@@ -83,6 +83,128 @@ class HarnessEventsTests(unittest.TestCase):
         )
         self.assertEqual(acc.completion_text, "Status: completed\n- did work")
 
+    def test_codex_item_completed_agent_message_is_latest_completion(self):
+        acc = self.events.StreamAccumulator()
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "I am checking the repo."},
+                }
+            )
+        )
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "reasoning", "text": "hidden reasoning"},
+                }
+            )
+        )
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "agent_message",
+                        "text": "Status: completed\n- final answer",
+                    },
+                }
+            )
+        )
+        acc.ingest_line(json.dumps({"type": "turn.completed"}))
+        self.assertIn("I am checking the repo.", acc.assistant_text)
+        self.assertNotIn("hidden reasoning", acc.assistant_text)
+        self.assertEqual(acc.completion_text, "Status: completed\n- final answer")
+
+    def test_codex_command_execution_items_are_normalized(self):
+        acc = self.events.StreamAccumulator()
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "I am checking the repo."},
+                }
+            )
+        )
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "item.started",
+                    "item": {
+                        "type": "command_execution",
+                        "command": "python3 -m unittest",
+                        "status": "in_progress",
+                    },
+                }
+            )
+        )
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "command_execution",
+                        "command": "python3 -m unittest",
+                        "status": "completed",
+                    },
+                }
+            )
+        )
+        self.assertIsNone(acc.completion_text)
+        self.assertEqual(acc.events[0].kind, "tool.started")
+        self.assertEqual(acc.events[0].status, "in_progress")
+        self.assertEqual(acc.events[1].kind, "tool.completed")
+        self.assertEqual(acc.events[1].status, "success")
+
+    def test_codex_agent_message_started_does_not_record_text(self):
+        acc = self.events.StreamAccumulator()
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "item.started",
+                    "item": {"type": "agent_message", "text": "partial"},
+                }
+            )
+        )
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "partial"},
+                }
+            )
+        )
+        acc.ingest_line(json.dumps({"type": "turn.completed"}))
+        self.assertEqual(acc.assistant_text, "partial")
+        self.assertEqual(acc.completion_text, "partial")
+
+    def test_codex_completion_text_survives_turn_start_and_command_only_turn(self):
+        acc = self.events.StreamAccumulator()
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "answer one"},
+                }
+            )
+        )
+        acc.ingest_line(json.dumps({"type": "turn.completed"}))
+        acc.ingest_line(json.dumps({"type": "turn.started"}))
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "item.started",
+                    "item": {
+                        "type": "command_execution",
+                        "command": "ls",
+                        "status": "in_progress",
+                    },
+                }
+            )
+        )
+        self.assertEqual(acc.completion_text, "answer one")
+
     def test_invalid_json_falls_back_to_bounded_text_event(self):
         acc = self.events.StreamAccumulator()
         acc.ingest_line("not json at all")

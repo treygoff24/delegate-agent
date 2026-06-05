@@ -330,6 +330,239 @@ class SnapshotCommandTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("# done", stdout.getvalue())
 
+    def test_run_output_completion_report_falls_back_to_codex_stdout(self):
+        run_id, alias = self.write_run(status="succeeded", pid=None)
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        (run_path / "stdout.log").write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "item.completed",
+                            "item": {
+                                "type": "agent_message",
+                                "text": "I am checking the repo.",
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "item.completed",
+                            "item": {
+                                "type": "reasoning",
+                                "text": "hidden reasoning",
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "item.completed",
+                            "item": {
+                                "type": "agent_message",
+                                "text": "Status: completed\n- final from stdout",
+                            },
+                        }
+                    ),
+                    json.dumps({"type": "turn.completed"}),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        stdout = io.StringIO()
+        code = self.delegate.main(
+            [
+                "--cwd",
+                str(self.workspace),
+                "run-output",
+                alias,
+                "--completion-report",
+            ],
+            stdout=stdout,
+        )
+        self.assertEqual(code, 0)
+        output = stdout.getvalue()
+        self.assertIn("final from stdout", output)
+        self.assertNotIn("I am checking the repo.", output)
+        self.assertNotIn("hidden reasoning", output)
+
+    def test_run_output_json_marks_synthetic_completion_report(self):
+        run_id, alias = self.write_run(status="succeeded", pid=None)
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        (run_path / "stdout.log").write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "item.completed",
+                            "item": {
+                                "type": "agent_message",
+                                "text": "Status: completed\n- json fallback",
+                            },
+                        }
+                    ),
+                    json.dumps({"type": "turn.completed"}),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        stdout = io.StringIO()
+        code = self.delegate.main(
+            [
+                "--json",
+                "--cwd",
+                str(self.workspace),
+                "run-output",
+                alias,
+                "--completion-report",
+            ],
+            stdout=stdout,
+        )
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        report = payload["sections"]["completionReport"]
+        self.assertTrue(report["synthetic"])
+        self.assertEqual(report["source"], "stdout.log")
+        self.assertIn("json fallback", report["content"])
+
+    def test_run_output_completion_report_recovery_skipped_for_running_run(self):
+        run_id, alias = self.write_run(status="running", pid=os.getpid())
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        (run_path / "stdout.log").write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "item.completed",
+                            "item": {
+                                "type": "agent_message",
+                                "text": "Status: completed\n- final from stdout",
+                            },
+                        }
+                    ),
+                    json.dumps({"type": "turn.completed"}),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        stderr = io.StringIO()
+        code = self.delegate.main(
+            [
+                "--cwd",
+                str(self.workspace),
+                "run-output",
+                alias,
+                "--completion-report",
+            ],
+            stderr=stderr,
+        )
+        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        self.assertIn("missing_completion_report", stderr.getvalue())
+
+    def test_run_output_completion_report_recovery_requires_final_text(self):
+        run_id, alias = self.write_run(status="succeeded", pid=None)
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        (run_path / "stdout.log").write_text(
+            json.dumps(
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": "I am still investigating.",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        stderr = io.StringIO()
+        code = self.delegate.main(
+            [
+                "--cwd",
+                str(self.workspace),
+                "run-output",
+                alias,
+                "--completion-report",
+            ],
+            stderr=stderr,
+        )
+        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        self.assertIn("missing_completion_report", stderr.getvalue())
+
+    def test_run_output_completion_report_ignores_superseded_codex_progress(self):
+        run_id, alias = self.write_run(status="succeeded", pid=None)
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        (run_path / "stdout.log").write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "item.completed",
+                            "item": {
+                                "type": "agent_message",
+                                "text": "I am still investigating.",
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "item.started",
+                            "item": {
+                                "type": "command_execution",
+                                "command": "python3 -m unittest",
+                                "status": "in_progress",
+                            },
+                        }
+                    ),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        stderr = io.StringIO()
+        code = self.delegate.main(
+            [
+                "--cwd",
+                str(self.workspace),
+                "run-output",
+                alias,
+                "--completion-report",
+            ],
+            stderr=stderr,
+        )
+        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        self.assertIn("missing_completion_report", stderr.getvalue())
+
+    def test_run_output_completion_report_requires_codex_turn_completion(self):
+        run_id, alias = self.write_run(status="succeeded", pid=None)
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        (run_path / "stdout.log").write_text(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "agent_message",
+                        "text": "I am still investigating.",
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        stderr = io.StringIO()
+        code = self.delegate.main(
+            [
+                "--cwd",
+                str(self.workspace),
+                "run-output",
+                alias,
+                "--completion-report",
+            ],
+            stderr=stderr,
+        )
+        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        self.assertIn("missing_completion_report", stderr.getvalue())
+
     def test_run_output_stdout_tail_only(self):
         run_id, alias = self.write_run()
         run_path = self.registry.run_directory(self.registry_root, run_id)

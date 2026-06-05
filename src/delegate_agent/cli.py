@@ -1187,6 +1187,24 @@ def _add_log_output_section(
     text_sections[section_name] = content
 
 
+def _recover_completion_report_from_stdout(registry_root: Path, run_id: str) -> str:
+    stdout_text, _ = delegate_retention.read_log_output(
+        registry_root,
+        run_id,
+        run_registry.STDOUT_LOG,
+        tail=None,
+        raw=True,
+    )
+    if not stdout_text:
+        return ""
+    accumulator = harness_events.StreamAccumulator()
+    for line in stdout_text.splitlines():
+        accumulator.ingest_line(line)
+    if accumulator.completion_text:
+        return accumulator.completion_text.strip()
+    return ""
+
+
 def emit_run_output(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout: TextIO) -> int:
     registry_root = run_registry.registry_root_if_exists(Path(workspace.path))
     if registry_root is None:
@@ -1206,14 +1224,29 @@ def emit_run_output(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout:
     text_sections: dict[str, str] = {}
     if parsed.run_output_completion_report:
         report_path = run_path / run_registry.COMPLETION_REPORT_FILE
-        if not report_path.exists():
-            raise DelegateError(
-                "missing_completion_report",
-                f"Completion report not found for run: {alias or run_id}",
+        if report_path.exists():
+            text = report_path.read_text(encoding="utf-8", errors="replace")
+            sections["completionReport"] = {"bytes": len(text.encode("utf-8"))}
+            text_sections["completionReport"] = text
+        else:
+            status = run_registry.effective_status(
+                run_registry.load_run_state(registry_root, run_id)
             )
-        text = report_path.read_text(encoding="utf-8", errors="replace")
-        sections["completionReport"] = {"bytes": len(text.encode("utf-8"))}
-        text_sections["completionReport"] = text
+            text = ""
+            if status != run_registry.STATUS_RUNNING:
+                text = _recover_completion_report_from_stdout(registry_root, run_id)
+            if text:
+                sections["completionReport"] = {
+                    "bytes": len(text.encode("utf-8")),
+                    "source": run_registry.STDOUT_LOG,
+                    "synthetic": True,
+                }
+                text_sections["completionReport"] = text
+            else:
+                raise DelegateError(
+                    "missing_completion_report",
+                    f"Completion report not found for run: {alias or run_id}",
+                )
     log_flags = parsed.run_output_stdout or parsed.run_output_stderr or parsed.run_output_raw
     if log_flags:
         try:

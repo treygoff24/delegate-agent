@@ -121,6 +121,12 @@ For an orchestrating agent, script, or CI job:
    delegate runs --active
    ```
 
+   Agent loop: save the returned `alias` or `runId`, poll `delegate snapshot`
+   until the run is no longer `running` or `stale`, then read
+   `delegate run-output <alias-or-runId> --completion-report`. If no completion
+   report is available, inspect bounded tails with `--stdout --tail N` and
+   `--stderr --tail N`; raw `.delegate/` files are a last resort.
+
 ## CI expectations
 
 The required test suite does not need real Cursor, Droid, or Codex binaries. Tests use dry-run paths and fake binaries where needed:

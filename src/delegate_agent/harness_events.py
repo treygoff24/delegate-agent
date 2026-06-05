@@ -44,6 +44,7 @@ class StreamAccumulator:
     completion_text: str | None = None
     current: str | None = None
     _assistant_text_cache: str | None = field(default=None, repr=False)
+    _codex_completion_candidate: str | None = field(default=None, repr=False)
 
     def _invalidate_assistant_text_cache(self) -> None:
         self._assistant_text_cache = None
@@ -96,6 +97,16 @@ class StreamAccumulator:
             return
         if event_type == "result":
             self._ingest_cursor_result(payload)
+            return
+        if event_type in ("item.started", "item.completed"):
+            self._ingest_codex_item(payload, completed=event_type == "item.completed")
+            return
+        if event_type == "turn.completed":
+            self._ingest_codex_turn_completed()
+            return
+        if event_type == "turn.started":
+            self._codex_completion_candidate = None
+            return
 
     def _ingest_system(self, payload: JsonObject) -> None:
         cwd = payload.get("cwd")
@@ -108,36 +119,61 @@ class StreamAccumulator:
             return
         text = _extract_text(payload.get("content"))
         if text:
-            self.assistant_chunks.append(text)
-            self._invalidate_assistant_text_cache()
-            self.current = _current_from_text(text)
+            self._record_assistant_text(text)
 
     def _ingest_cursor_assistant(self, payload: JsonObject) -> None:
         message = payload.get("message")
         if isinstance(message, dict):
             text = _extract_text(message.get("content"))
             if text:
-                self.assistant_chunks.append(text)
-                self._invalidate_assistant_text_cache()
-                self.current = _current_from_text(text)
+                self._record_assistant_text(text)
 
     def _ingest_completion(self, payload: JsonObject) -> None:
         final_text = payload.get("finalText")
         if isinstance(final_text, str) and final_text.strip():
-            self.completion_text = final_text.strip()
-            self.assistant_chunks.append(final_text)
-            self._invalidate_assistant_text_cache()
-            self.current = _current_from_text(final_text)
+            self._record_assistant_text(final_text, completion=True)
             self.events.append(NormalizedEvent(kind="run.completed", status="succeeded"))
 
     def _ingest_cursor_result(self, payload: JsonObject) -> None:
         result = payload.get("result")
         if isinstance(result, str) and result.strip():
-            self.completion_text = result.strip()
-            self.assistant_chunks.append(result)
-            self._invalidate_assistant_text_cache()
-            self.current = _current_from_text(result)
+            self._record_assistant_text(result, completion=True)
             self.events.append(NormalizedEvent(kind="run.completed", status="succeeded"))
+
+    def _ingest_codex_item(self, payload: JsonObject, *, completed: bool) -> None:
+        item = payload.get("item")
+        if not isinstance(item, dict):
+            return
+        item_type = item.get("type")
+        if item_type == "agent_message":
+            if not completed:
+                return
+            text = _extract_text(item.get("text")) or _extract_text(item.get("content"))
+            if text:
+                stripped = self._record_assistant_text(text)
+                self._codex_completion_candidate = stripped
+            return
+        if item_type == "command_execution":
+            self._ingest_codex_command_execution(item, completed=completed)
+
+    def _ingest_codex_command_execution(self, item: JsonObject, *, completed: bool) -> None:
+        command = _string_field(item, "command")
+        status = _codex_command_status(_string_field(item, "status"), completed=completed)
+        kind = "tool.completed" if completed else "tool.started"
+        self._codex_completion_candidate = None
+        self.events.append(
+            NormalizedEvent(
+                kind=kind,
+                tool="command_execution",
+                target=command,
+                status=status,
+            )
+        )
+        self.current = _tool_current("command_execution", command)
+
+    def _ingest_codex_turn_completed(self) -> None:
+        if self._codex_completion_candidate:
+            self.completion_text = self._codex_completion_candidate
 
     def _ingest_tool_call(self, payload: JsonObject) -> None:
         tool = _string_field(payload, "tool", "name", "toolName") or "tool"
@@ -160,6 +196,17 @@ class StreamAccumulator:
             NormalizedEvent(kind=kind, tool=tool, target=target, path=target, status=status),
         )
         self.current = _tool_current(tool, target)
+
+    def _record_assistant_text(self, text: str, *, completion: bool = False) -> str | None:
+        stripped = text.strip()
+        if not stripped:
+            return None
+        if completion:
+            self.completion_text = stripped
+        self.assistant_chunks.append(stripped)
+        self._invalidate_assistant_text_cache()
+        self.current = _current_from_text(stripped)
+        return stripped
 
     @property
     def assistant_text(self) -> str:
@@ -239,6 +286,14 @@ def _string_field(payload: JsonObject, *keys: str) -> str | None:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return None
+
+
+def _codex_command_status(status: str | None, *, completed: bool) -> str | None:
+    if not completed:
+        return status
+    if status == "completed":
+        return "success"
+    return status
 
 
 def _tool_target(payload: JsonObject) -> str | None:
