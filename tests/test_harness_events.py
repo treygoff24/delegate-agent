@@ -205,14 +205,15 @@ class HarnessEventsTests(unittest.TestCase):
         )
         self.assertEqual(acc.completion_text, "answer one")
 
-    def test_codex_completion_survives_trailing_command_before_turn_completed(self):
-        # Regression: a command_execution emitted after the turn's closing
-        # agent_message (e.g. a final `git status`) must not erase the answer.
+    def test_codex_progress_message_before_command_is_not_promoted(self):
+        # A turn that ends on a command (intro agent_message -> command ->
+        # turn.completed) has no closing answer, so nothing is promoted. Promoting
+        # the pre-command message would surface an intro line as the final report.
         acc = self.events.StreamAccumulator()
         for payload in [
             {
                 "type": "item.completed",
-                "item": {"type": "agent_message", "text": "Done. All tests pass."},
+                "item": {"type": "agent_message", "text": "I'll start by checking the repo."},
             },
             {
                 "type": "item.completed",
@@ -225,7 +226,7 @@ class HarnessEventsTests(unittest.TestCase):
             {"type": "turn.completed"},
         ]:
             acc.ingest_line(json.dumps(payload))
-        self.assertEqual(acc.completion_text, "Done. All tests pass.")
+        self.assertIsNone(acc.completion_text)
 
     def test_real_codex_stream_fixture_matches_parser_assumptions(self):
         # Guards against Codex changing its event schema: the other codex tests

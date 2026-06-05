@@ -455,6 +455,36 @@ class SnapshotCommandTests(unittest.TestCase):
         self.assertNotIn("skill pass", report["content"].lower())
         self.assertNotIn("reasoning", report["content"].lower())
 
+    def test_run_output_recovers_completion_from_long_stdout(self):
+        # Recovery reads a bounded tail, not the whole log. A completion at the end
+        # of a stream longer than the tail window must still be recovered.
+        run_id, alias = self.write_run(harness="codex", status="succeeded", pid=None)
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        filler = json.dumps(
+            {
+                "type": "item.completed",
+                "item": {"type": "command_execution", "command": "noise", "status": "completed"},
+            }
+        )
+        final = [
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "Status: completed\n- final answer"},
+                }
+            ),
+            json.dumps({"type": "turn.completed"}),
+        ]
+        lines = [filler] * (self.delegate.RECOVERY_STDOUT_TAIL_LINES + 500) + final
+        (run_path / "stdout.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        stdout = io.StringIO()
+        code = self.delegate.main(
+            ["--cwd", str(self.workspace), "run-output", alias, "--completion-report"],
+            stdout=stdout,
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("final answer", stdout.getvalue())
+
     def test_run_output_completion_report_recovery_skipped_for_running_run(self):
         run_id, alias = self.write_run(status="running", pid=os.getpid())
         run_path = self.registry.run_directory(self.registry_root, run_id)

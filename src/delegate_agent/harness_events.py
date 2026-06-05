@@ -160,11 +160,12 @@ class StreamAccumulator:
         command = _string_field(item, "command")
         status = _codex_command_status(_string_field(item, "status"), completed=completed)
         kind = "tool.completed" if completed else "tool.started"
-        # Deliberately does not clear the completion candidate: a turn can emit a
-        # trailing command (e.g. a final `git status`) after its closing
-        # agent_message, and that message is still the turn's answer. The
-        # candidate is cleared only on turn.started, and overwritten by a later
-        # agent_message.
+        # Clear the completion candidate: an agent_message followed by a command is
+        # preamble/progress, not the turn's final answer. Only a message emitted
+        # after the last tool activity (then sealed by turn.completed) is promoted,
+        # which is the shape real Codex runs produce. Promoting a pre-command
+        # message would surface an intro line ("I'll start by…") as the report.
+        self._codex_completion_candidate = None
         self.events.append(
             NormalizedEvent(
                 kind=kind,

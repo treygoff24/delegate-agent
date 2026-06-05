@@ -1187,25 +1187,29 @@ def _add_log_output_section(
     text_sections[section_name] = content
 
 
+# Recovery only needs the final turn (closing agent_message + turn.completed),
+# which sits at the very end of the stream. This bound keeps a routine
+# run-output call from reading a multi-gigabyte stdout.log into memory.
+RECOVERY_STDOUT_TAIL_LINES = 2000
+
+
 def _recover_completion_report_from_stdout(registry_root: Path, run_id: str) -> str:
+    # The completion is the final turn's closing message, which lives at the end of
+    # the stream, so a bounded tail is sufficient and avoids loading a possibly
+    # huge stdout.log into memory on a routine run-output call. tail_file_lines
+    # block-reads from the end, so this stays cheap regardless of total log size.
     stdout_text, _ = delegate_retention.read_log_output(
         registry_root,
         run_id,
         run_registry.STDOUT_LOG,
-        tail=None,
-        raw=True,
+        tail=RECOVERY_STDOUT_TAIL_LINES,
+        raw=False,
     )
     if not stdout_text:
         return ""
     accumulator = harness_events.StreamAccumulator()
-    # Mirror the live tracker's line handling exactly (runner.handle_stdout_line):
-    # split on "\n" only, and ingest the trailing fragment only when non-blank.
-    lines = stdout_text.split("\n")
-    trailing = lines.pop() if lines else ""
-    for line in lines:
+    for line in stdout_text.split("\n"):
         accumulator.ingest_line(line)
-    if trailing.strip():
-        accumulator.ingest_line(trailing)
     if accumulator.completion_text:
         return accumulator.completion_text.strip()
     return ""
