@@ -8,12 +8,13 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import NoReturn, TextIO
+from typing import BinaryIO, NoReturn, TextIO
 
 try:
     from delegate_agent import VERSION, command_help, harness_events, run_registry, worktree_mgmt
@@ -1191,28 +1192,82 @@ def _add_log_output_section(
 # which sits at the very end of the stream. This bound keeps a routine
 # run-output call from reading a multi-gigabyte stdout.log into memory.
 RECOVERY_STDOUT_TAIL_LINES = 2000
+RECOVERY_STDOUT_TAIL_BYTES = 1_000_000
 
 
-def _recover_completion_report_from_stdout(registry_root: Path, run_id: str) -> str:
+def _decode_recovery_tail(data: bytes, *, truncated: bool) -> tuple[str, bool]:
+    if truncated:
+        newline = data.find(b"\n")
+        if newline < 0:
+            return "", True
+        data = data[newline + 1 :]
+    text = data.decode("utf-8", errors="replace")
+    lines = text.splitlines()
+    if not lines:
+        return "", truncated
+    trimmed = lines[-RECOVERY_STDOUT_TAIL_LINES:]
+    return "\n".join(trimmed) + "\n", truncated or len(lines) > len(trimmed)
+
+
+def _read_stream_tail_bytes(stream: BinaryIO, byte_limit: int) -> bytes:
+    buffer = bytearray()
+    while True:
+        chunk = stream.read(64 * 1024)
+        if not chunk:
+            break
+        buffer.extend(chunk)
+        if len(buffer) > byte_limit:
+            del buffer[: len(buffer) - byte_limit]
+    return bytes(buffer)
+
+
+def _read_archived_recovery_stdout_tail(registry_root: Path, run_id: str) -> tuple[str, bool]:
+    archive_file = delegate_retention.archive_path(registry_root, run_id)
+    if not archive_file.exists():
+        return "", False
+    with tarfile.open(archive_file, "r:gz") as archive:
+        try:
+            member = archive.getmember(run_registry.STDOUT_LOG)
+        except KeyError:
+            return "", False
+        extracted = archive.extractfile(member)
+        if extracted is None:
+            return "", False
+        data = _read_stream_tail_bytes(extracted, RECOVERY_STDOUT_TAIL_BYTES)
+    return _decode_recovery_tail(data, truncated=member.size > len(data))
+
+
+def _read_recovery_stdout_tail(registry_root: Path, run_id: str) -> tuple[str, bool]:
+    run_path = run_registry.run_directory(registry_root, run_id)
+    log_path = run_path / run_registry.STDOUT_LOG
+    if not log_path.exists():
+        return _read_archived_recovery_stdout_tail(registry_root, run_id)
+    with log_path.open("rb") as handle:
+        handle.seek(0, 2)
+        end = handle.tell()
+        if end == 0:
+            return "", False
+        start = max(0, end - RECOVERY_STDOUT_TAIL_BYTES)
+        handle.seek(start)
+        data = handle.read(end - start)
+    return _decode_recovery_tail(data, truncated=start > 0)
+
+
+def _recover_completion_report_from_stdout(registry_root: Path, run_id: str) -> tuple[str, bool]:
     # The completion is the final turn's closing message, which lives at the end of
     # the stream, so a bounded tail is sufficient and avoids loading a possibly
-    # huge stdout.log into memory on a routine run-output call. tail_file_lines
-    # block-reads from the end, so this stays cheap regardless of total log size.
-    stdout_text, _ = delegate_retention.read_log_output(
-        registry_root,
-        run_id,
-        run_registry.STDOUT_LOG,
-        tail=RECOVERY_STDOUT_TAIL_LINES,
-        raw=False,
-    )
+    # huge stdout.log into memory on a routine run-output call. The byte bound is
+    # as important as the line bound because Codex JSONL can encode large command
+    # output inside a single physical line.
+    stdout_text, truncated = _read_recovery_stdout_tail(registry_root, run_id)
     if not stdout_text:
-        return ""
+        return "", truncated
     accumulator = harness_events.StreamAccumulator()
     for line in stdout_text.split("\n"):
         accumulator.ingest_line(line)
     if accumulator.completion_text:
-        return accumulator.completion_text.strip()
-    return ""
+        return accumulator.completion_text.strip(), truncated
+    return "", truncated
 
 
 def emit_run_output(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout: TextIO) -> int:
@@ -1243,13 +1298,19 @@ def emit_run_output(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout:
                 run_registry.load_run_state(registry_root, run_id)
             )
             text = ""
+            recovery_truncated = False
             if status != run_registry.STATUS_RUNNING:
-                text = _recover_completion_report_from_stdout(registry_root, run_id)
+                text, recovery_truncated = _recover_completion_report_from_stdout(
+                    registry_root, run_id
+                )
             if text:
                 sections["completionReport"] = {
                     "bytes": len(text.encode("utf-8")),
                     "source": run_registry.STDOUT_LOG,
                     "synthetic": True,
+                    "tailLines": RECOVERY_STDOUT_TAIL_LINES,
+                    "tailBytes": RECOVERY_STDOUT_TAIL_BYTES,
+                    "truncated": recovery_truncated,
                 }
                 text_sections["completionReport"] = text
             else:
@@ -1483,7 +1544,7 @@ def resolve_prompt(
     direct = " ".join(prompt_parts or [])
     has_direct = bool(direct)
     has_prompt_file = prompt_file is not None
-    stdin_text = read_stdin_source(stdin)
+    stdin_text = read_stdin_source(stdin, block=not (has_direct or has_prompt_file))
     has_stdin = stdin_text is not None
     if sum(1 for present in (has_direct, has_prompt_file, has_stdin) if present) > 1:
         raise DelegateError(
@@ -1507,15 +1568,16 @@ def resolve_prompt(
     )
 
 
-def read_stdin_source(stdin: TextIO) -> str | None:
+def read_stdin_source(stdin: TextIO, *, block: bool = False) -> str | None:
     if stdin.isatty():
         return None
-    try:
-        ready, _, _ = select.select([stdin], [], [], 0)
-        if not ready:
-            return None
-    except (AttributeError, OSError, ValueError):
-        pass
+    if not block:
+        try:
+            ready, _, _ = select.select([stdin], [], [], 0)
+            if not ready:
+                return None
+        except (AttributeError, OSError, ValueError):
+            pass
     data = stdin.read()
     return data if data else None
 

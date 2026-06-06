@@ -34,7 +34,7 @@ class SnapshotCommandTests(unittest.TestCase):
         self.registry = load_module(REGISTRY_PATH, "delegate_registry_snapshot_test")
         self.rendering = load_module(RENDERING_PATH, "delegate_rendering_snapshot_test")
         self.temp = tempfile.TemporaryDirectory()
-        self.workspace = Path(self.temp.name)
+        self.workspace = Path(self.temp.name).resolve()
         self.registry_root = self.registry.ensure_registry(
             self.workspace, workspace_kind="directory"
         )
@@ -192,6 +192,22 @@ class SnapshotCommandTests(unittest.TestCase):
             "eyJzdWIiOiIxMjM0NTY3ODkwIn0."
             "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
         )
+        anthropic_sample = "sk-ant-api03-" + "abcdefgh12345678"
+        google_sample = "AIza" + "SyDaGmWKa4JsXZ-HjGw7ISLn_3namBGewQe"
+        aws_sample = "wJalr" + "XUtnFEMI/K7MDENG/bPxRf"
+        pem_private_key = (
+            "-----BEGIN RSA " + "PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\n-----END RSA PRIVATE KEY-----"
+        )
+        keyed_pem_private_key = (
+            "SECRET_KEY=-----BEGIN " + "PRIVATE KEY-----\nABCDEFSECRETBODY\n"
+            "-----END PRIVATE KEY-----"
+        )
+        stripe_sample = "sk_live_" + "abcdef1234567890XYZ"
+        npm_sample = "npm_" + "aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789"
+        slack_webhook = "https://hooks.slack.com/services/T00000000/B11111111/" + "abcdEFGH1234"
+        slack_gov_webhook = (
+            "https://hooks.slack-gov.com/services/T00000000/B11111111/" + "abcdEFGH1234"
+        )
         cases = [
             ("Authorization: Bearer bearer-token-12345", "bearer-token-12345"),
             ("Authorization: Basic dXNlcjpwYXNzd29yZA==", "dXNlcjpwYXNzd29yZA=="),
@@ -208,17 +224,74 @@ class SnapshotCommandTests(unittest.TestCase):
             ('{"Authorization": "Bearer abcdef123456"}', "abcdef123456"),
             # Provider token shapes.
             ("sk-proj-aBcD1234efGH5678ijKL", "aBcD1234efGH5678ijKL"),
-            ("sk-ant-api03-abcdefgh12345678", "abcdefgh12345678"),
+            (anthropic_sample, "abcdefgh12345678"),
             ("ghs_1234567890abcdefghijklmnopqrstuvwx", "1234567890abcdefghijklmnopqrstuvwx"),
             (
                 "github_pat_11ABCDEFG0abcdefghijkl_mnopqrstuvwxyz",
                 "11ABCDEFG0abcdefghijkl_mnopqrstuvwxyz",
             ),
             ("AKIAIOSFODNN7EXAMPLE", "IOSFODNN7EXAMPLE"),
-            ("AIzaSyDaGmWKa4JsXZ-HjGw7ISLn_3namBGewQe", "SyDaGmWKa4JsXZ-HjGw7ISLn_3namBGewQe"),
+            (google_sample, "SyDaGmWKa4JsXZ-HjGw7ISLn_3namBGewQe"),
             # Connection-string passwords (with and without a username).
             ("postgres://admin:supersecret@db.example.com/x", "supersecret"),
             ("redis://:redacted-pass-9999@localhost:6379", "redacted-pass-9999"),
+            # Env-style credential keys joined to a prefix by "_" (\b misses these).
+            ("OPENAI_API_KEY=plainvalue1234567890", "plainvalue1234567890"),
+            ("DB_PASSWORD=hunter2hunter2", "hunter2hunter2"),
+            ("export GITHUB_TOKEN=ghxxxxplainsecretvalue", "ghxxxxplainsecretvalue"),
+            ("MY_SECRET=topsecretpayload", "topsecretpayload"),
+            ("aws_secret_access_key=" + aws_sample, "wJalrXUtnFEMI"),
+            ("SECRET_KEY=django-insecure-abcdef123456", "django-insecure-abcdef123456"),
+            # Private-key env names can hold base64 or escaped key material without
+            # literal PEM markers, so the key name itself must trigger redaction.
+            ("PRIVATE_KEY=base64privatekeypayload123456", "base64privatekeypayload123456"),
+            (
+                "JWT_PRIVATE_KEY=base64jwtprivatekeypayload123456",
+                "base64jwtprivatekeypayload123456",
+            ),
+            (
+                'GOOGLE_PRIVATE_KEY="base64googleprivatekeypayload123456"',
+                "base64googleprivatekeypayload123456",
+            ),
+            (
+                "SSH_PRIVATE_KEY=base64sshprivatekeypayload123456",
+                "base64sshprivatekeypayload123456",
+            ),
+            # Bracketed env assignment forms.
+            (
+                'os.environ["OPENAI_API_KEY"] = "openai-secret-from-python"',
+                "openai-secret-from-python",
+            ),
+            ("env['DB_PASSWORD']='db-secret-from-python'", "db-secret-from-python"),
+            # PEM private key block.
+            (
+                pem_private_key,
+                "MIIEpAIBAAKCAQEA",
+            ),
+            # A PEM block assigned to a named key must not leak its body past the
+            # first line (the key matcher stops at the newline; PEM redaction runs
+            # first to catch the whole block).
+            (
+                keyed_pem_private_key,
+                "ABCDEFSECRETBODY",
+            ),
+            # Additional provider prefixes.
+            ("stripe " + stripe_sample, "abcdef1234567890XYZ"),
+            ("whsec_aBcDeF1234567890ghIJKL", "aBcDeF1234567890ghIJKL"),
+            (npm_sample, "aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789"),
+            ("SG.aBcDeFgHiJkLmNoP.qRsTuVwXyZ0123456789abcd", "qRsTuVwXyZ0123456789abcd"),
+            (
+                "//registry.npmjs.org/:_authToken=deadbeefdeadbeefdeadbeefdeadbeef",
+                "deadbeefdeadbeefdeadbeefdeadbeef",
+            ),
+            (
+                slack_webhook,
+                "abcdEFGH1234",
+            ),
+            (
+                slack_gov_webhook,
+                "abcdEFGH1234",
+            ),
         ]
         for raw, secret in cases:
             with self.subTest(raw=raw):
@@ -235,6 +308,11 @@ class SnapshotCommandTests(unittest.TestCase):
             "2026-06-02.error_log_file.backup_archive_v2",
             "the secret to success is hard work",
             "git@github.com:user/repo.git",
+            # Credential-shaped words without an assignment separator are prose.
+            "mytokenfield holds the parsed value",
+            "the access token grants entry to the room",
+            # Stripe publishable keys are public by design; never redacted.
+            "pk_live_publishable000000key is shown in the client bundle",
         ]
         for text in survivors:
             with self.subTest(text=text):
@@ -248,6 +326,15 @@ class SnapshotCommandTests(unittest.TestCase):
         self.rendering.redact_string(payload)
         elapsed = time.perf_counter() - start
         self.assertLess(elapsed, 5.0, f"redaction took {elapsed:.2f}s on pathological input")
+
+    def test_redact_string_is_linear_on_pem_near_misses(self):
+        # Regression guard: many unterminated PEM BEGIN markers must not trigger
+        # quadratic scanning.
+        payload = "-----BEGIN PRIVATE KEY-----\n" * 8000
+        start = time.perf_counter()
+        self.rendering.redact_string(payload)
+        elapsed = time.perf_counter() - start
+        self.assertLess(elapsed, 5.0, f"PEM redaction took {elapsed:.2f}s on near-miss input")
 
     def test_snapshot_redacts_secrets_by_default(self):
         _, alias = self.write_run(  # pragma: allowlist secret
@@ -426,6 +513,73 @@ class SnapshotCommandTests(unittest.TestCase):
         self.assertEqual(report["source"], "stdout.log")
         self.assertIn("json fallback", report["content"])
 
+    def test_synthetic_completion_report_redacts_by_default_and_can_be_disabled(self):
+        run_id, alias = self.write_run(harness="codex", status="succeeded", pid=None)
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        api_secret = "sk-abcdefghijklmnopqrstuvwxyz"  # pragma: allowlist secret
+        private_secret = "base64privatekeypayload123456"
+        bracket_secret = "openai-secret-from-python"
+        final_text = (
+            "Status: completed\n"
+            f"- env OPENAI_API_KEY={api_secret}\n"
+            f"- private PRIVATE_KEY={private_secret}\n"
+            f'- bracket os.environ["OPENAI_API_KEY"] = "{bracket_secret}"'
+        )
+        (run_path / "stdout.log").write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "item.completed",
+                            "item": {"type": "agent_message", "text": final_text},
+                        }
+                    ),
+                    json.dumps({"type": "turn.completed"}),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        redacted_stdout = io.StringIO()
+        code = self.delegate.main(
+            [
+                "--json",
+                "--cwd",
+                str(self.workspace),
+                "run-output",
+                alias,
+                "--completion-report",
+            ],
+            stdout=redacted_stdout,
+        )
+        self.assertEqual(code, 0)
+        redacted_report = json.loads(redacted_stdout.getvalue())["sections"]["completionReport"]
+        self.assertTrue(redacted_report["synthetic"])
+        self.assertIn("***", redacted_report["content"])
+        self.assertNotIn(api_secret, redacted_report["content"])
+        self.assertNotIn(private_secret, redacted_report["content"])
+        self.assertNotIn(bracket_secret, redacted_report["content"])
+
+        unredacted_stdout = io.StringIO()
+        code = self.delegate.main(
+            [
+                "--json",
+                "--cwd",
+                str(self.workspace),
+                "run-output",
+                alias,
+                "--completion-report",
+                "--no-redact",
+            ],
+            stdout=unredacted_stdout,
+        )
+        self.assertEqual(code, 0)
+        unredacted_report = json.loads(unredacted_stdout.getvalue())["sections"]["completionReport"]
+        self.assertIn(api_secret, unredacted_report["content"])
+        self.assertIn(private_secret, unredacted_report["content"])
+        self.assertIn(bracket_secret, unredacted_report["content"])
+
     def test_run_output_recovers_completion_from_real_codex_fixture(self):
         # End-to-end recovery against a sanitized capture of a real `codex` run
         # (see tests/fixtures/codex_real_stream.jsonl). Synthetic fixtures could
@@ -484,6 +638,88 @@ class SnapshotCommandTests(unittest.TestCase):
         )
         self.assertEqual(code, 0)
         self.assertIn("final answer", stdout.getvalue())
+
+    def test_run_output_completion_report_recovery_is_byte_bounded(self):
+        run_id, alias = self.write_run(harness="codex", status="succeeded", pid=None)
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        stale = [
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "Status: completed\n- stale"},
+                }
+            ),
+            json.dumps({"type": "turn.completed"}),
+        ]
+        oversized = json.dumps(
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "command_execution",
+                    "command": "noise",
+                    "status": "completed",
+                    "aggregated_output": "x" * (self.delegate.RECOVERY_STDOUT_TAIL_BYTES + 1000),
+                },
+            }
+        )
+        final = [
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "Status: completed\n- final"},
+                }
+            ),
+            json.dumps({"type": "turn.completed"}),
+        ]
+        (run_path / "stdout.log").write_text(
+            "\n".join([*stale, oversized, *final]) + "\n",
+            encoding="utf-8",
+        )
+        stdout = io.StringIO()
+        code = self.delegate.main(
+            ["--json", "--cwd", str(self.workspace), "run-output", alias, "--completion-report"],
+            stdout=stdout,
+        )
+        self.assertEqual(code, 0)
+        report = json.loads(stdout.getvalue())["sections"]["completionReport"]
+        self.assertTrue(report["truncated"])
+        self.assertEqual(report["tailBytes"], self.delegate.RECOVERY_STDOUT_TAIL_BYTES)
+        self.assertIn("final", report["content"])
+        self.assertNotIn("stale", report["content"])
+
+    def test_run_output_completion_report_recovery_fails_when_final_outside_byte_bound(self):
+        run_id, alias = self.write_run(harness="codex", status="succeeded", pid=None)
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        stale = [
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "Status: completed\n- stale"},
+                }
+            ),
+            json.dumps({"type": "turn.completed"}),
+        ]
+        oversized = json.dumps(
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "command_execution",
+                    "command": "noise",
+                    "status": "completed",
+                    "aggregated_output": "x" * (self.delegate.RECOVERY_STDOUT_TAIL_BYTES + 1000),
+                },
+            }
+        )
+        (run_path / "stdout.log").write_text(
+            "\n".join([*stale, oversized]) + "\n", encoding="utf-8"
+        )
+        stderr = io.StringIO()
+        code = self.delegate.main(
+            ["--cwd", str(self.workspace), "run-output", alias, "--completion-report"],
+            stderr=stderr,
+        )
+        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        self.assertIn("missing_completion_report", stderr.getvalue())
 
     def test_run_output_completion_report_recovery_skipped_for_running_run(self):
         run_id, alias = self.write_run(status="running", pid=os.getpid())

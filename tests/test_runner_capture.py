@@ -144,6 +144,54 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertIn("I am working", snapshot["assistantText"])
             self.assertNotIn("hidden reasoning", snapshot["assistantText"])
 
+    def test_tracked_codex_progress_message_before_command_does_not_write_report(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        script = Path(temp.name) / "codex"
+        script.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "printf '%s\n' '{\"type\":\"turn.started\"}'\n"
+            'printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"I will inspect the repo first"}}\'\n'
+            'printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"command_execution","command":"pwd","status":"completed"}}\'\n'
+            "printf '%s\n' '{\"type\":\"turn.completed\"}'\n"
+        )
+        script.chmod(0o755)
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-05-20T21:42:33Z",
+            )
+            code, payload = self.runner.execute_tracked(
+                [str(script)],
+                workspace,
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+            self.assertEqual(code, 0)
+            assert payload is not None
+            self.assertNotIn("completionReportCommand", payload)
+            self.assertNotIn("completionReportPath", payload)
+            run_path = self.registry.run_directory(root, run_id)
+            self.assertFalse((run_path / "completion-report.md").exists())
+            snapshot = json.loads((run_path / "snapshot.json").read_text(encoding="utf-8"))
+            self.assertNotIn("completionReport", snapshot)
+            self.assertIn("I will inspect the repo first", snapshot["assistantText"])
+
     def test_tracked_text_output_omits_raw_streams(self):
         temp, bin_dir = make_streaming_fake_bin()
         self.addCleanup(temp.cleanup)

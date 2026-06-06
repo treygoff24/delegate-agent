@@ -5,6 +5,8 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -93,6 +95,24 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(
             self.delegate.resolve_prompt([], None, NonTtyStdin("from stdin")), "from stdin"
         )
+
+    def test_delayed_stdin_pipe_works(self):
+        read_fd, write_fd = os.pipe()
+
+        def delayed_write():
+            time.sleep(0.05)
+            with os.fdopen(write_fd, "w", encoding="utf-8") as writer:
+                writer.write("from delayed stdin")
+
+        thread = threading.Thread(target=delayed_write)
+        thread.start()
+        try:
+            with os.fdopen(read_fd, "r", encoding="utf-8") as reader:
+                self.assertEqual(
+                    self.delegate.resolve_prompt([], None, reader), "from delayed stdin"
+                )
+        finally:
+            thread.join(timeout=5)
 
     def test_direct_plus_prompt_file_fails(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:

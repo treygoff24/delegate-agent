@@ -390,6 +390,7 @@ def completion_json_payload(
     duration_ms: int,
     stdout_bytes: int,
     stderr_bytes: int,
+    completion_report_written: bool = False,
 ) -> JsonObject:
     payload: JsonObject = {
         "ok": ok,
@@ -405,13 +406,14 @@ def completion_json_payload(
         "workspaceKind": ctx.workspace_kind,
         "durationMs": duration_ms,
         "snapshotCommand": run_registry.snapshot_command(ctx.alias),
-        "completionReportCommand": run_registry.run_output_command(
-            ctx.alias, completion_report=True
-        ),
-        "completionReportPath": completion_report_path(ctx.run_id),
         "stdoutBytes": stdout_bytes,
         "stderrBytes": stderr_bytes,
     }
+    if completion_report_written:
+        payload["completionReportCommand"] = run_registry.run_output_command(
+            ctx.alias, completion_report=True
+        )
+        payload["completionReportPath"] = completion_report_path(ctx.run_id)
     # Always emit isolatedWorkspace as explicit boolean.
     payload["isolatedWorkspace"] = ctx.isolated_workspace
 
@@ -578,7 +580,11 @@ def execute_tracked(
     status = status_from_exit(exit_code)
     if accumulator.completion_text:
         report_source = accumulator.completion_text
-    elif completion_report_mode == delegate_config.COMPLETION_REPORT_MODE_MARKDOWN:
+    elif (
+        completion_report_mode == delegate_config.COMPLETION_REPORT_MODE_MARKDOWN
+        and ctx.harness != "codex"
+        and ctx.engine != "codex"
+    ):
         report_source = accumulator.assistant_text
     else:
         report_source = ""
@@ -604,6 +610,7 @@ def execute_tracked(
             duration_ms=duration_ms,
             stdout_bytes=stdout_bytes,
             stderr_bytes=stderr_bytes,
+            completion_report_written=report_written,
         )
         return exit_code, payload
 

@@ -125,8 +125,10 @@ For an orchestrating agent, script, or CI job:
    until the run leaves `running`. A `stale` status means the child process is
    gone and will not resume, so stop polling and inspect the snapshot. Once the
    run is finished, read
-   `delegate run-output <alias-or-runId> --completion-report`. If no completion
-   report is available, inspect bounded tails with `--stdout --tail N` and
+   `delegate run-output <alias-or-runId> --completion-report`. If the original
+   report is missing, Delegate may synthesize one from completed stdout events,
+   but that recovery is bounded and best-effort. If no completion report is
+   available, inspect bounded tails with `--stdout --tail N` and
    `--stderr --tail N`; raw `.delegate/` files are a last resort.
 
 ## CI expectations
