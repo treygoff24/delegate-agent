@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "delegate-agent"
-version = "0.1.3"
+version = "0.1.4"
 description = "A tiny CLI for delegating bounded agent tasks to Cursor, Droid, or OpenAI Codex runtimes."
 readme = "README.md"
 requires-python = ">=3.11"

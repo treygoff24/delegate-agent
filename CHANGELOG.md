@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-06-08
+
 ### Fixed
 
 - Child agent processes now receive EOF on stdin instead of inheriting Delegate's own
@@ -31,5 +33,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Releases before 0.1.3 predate this changelog.
 
-[Unreleased]: https://github.com/treygoff24/delegate-agent/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/treygoff24/delegate-agent/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/treygoff24/delegate-agent/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/treygoff24/delegate-agent/releases/tag/v0.1.3
