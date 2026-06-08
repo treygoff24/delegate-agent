@@ -1,3 +1,4 @@
+import contextlib
 import importlib.util
 import io
 import json
@@ -42,6 +43,40 @@ def make_streaming_fake_bin():
     )
     script.chmod(0o755)
     return temp, script.parent
+
+
+@contextlib.contextmanager
+def open_pipe_as_process_stdin():
+    saved_stdin = os.dup(0)
+    read_fd, write_fd = os.pipe()
+    try:
+        os.dup2(read_fd, 0)
+        os.close(read_fd)
+        yield
+    finally:
+        os.dup2(saved_stdin, 0)
+        for fd in (saved_stdin, write_fd):
+            with contextlib.suppress(OSError):
+                os.close(fd)
+
+
+def write_stdin_probe_script(path: Path) -> None:
+    path.write_text(
+        "import select\n"
+        "import sys\n"
+        "from pathlib import Path\n"
+        "ready, _, _ = select.select([sys.stdin], [], [], 0)\n"
+        "if ready:\n"
+        "    data = sys.stdin.read(1)\n"
+        "    status = 'stdin:eof' if data == '' else 'stdin:data'\n"
+        "else:\n"
+        "    status = 'stdin:blocked'\n"
+        "if len(sys.argv) > 1:\n"
+        "    Path(sys.argv[1]).write_text(status, encoding='utf-8')\n"
+        "else:\n"
+        "    print(status)\n",
+        encoding="utf-8",
+    )
 
 
 class RunnerCaptureTests(unittest.TestCase):
@@ -96,6 +131,43 @@ class RunnerCaptureTests(unittest.TestCase):
             stdout_text = (run_path / "stdout.log").read_text()
             self.assertIn("HELLO", stdout_text)
             self.assertNotIn("OUT:", stdout_text)
+
+    def test_tracked_run_gives_child_eof_stdin(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        script = Path(temp.name) / "stdin_probe.py"
+        write_stdin_probe_script(script)
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-05-20T21:42:33Z",
+            )
+            with open_pipe_as_process_stdin():
+                code, _payload = self.runner.execute_tracked(
+                    [sys.executable, str(script)],
+                    workspace,
+                    ctx,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+            self.assertEqual(code, 0)
+            run_path = self.registry.run_directory(root, run_id)
+            stdout_text = (run_path / "stdout.log").read_text(encoding="utf-8")
+            self.assertIn("stdin:eof", stdout_text)
+            self.assertNotIn("stdin:blocked", stdout_text)
 
     def test_tracked_codex_item_completed_writes_completion_report(self):
         temp = tempfile.TemporaryDirectory()
@@ -305,6 +377,21 @@ class RunnerCaptureTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0)
         self.assertIn("OUT:raw", completed.stdout)
         self.assertIn("ERR:raw", completed.stderr)
+
+    def test_passthrough_run_gives_child_eof_stdin(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        script = Path(temp.name) / "stdin_probe.py"
+        write_stdin_probe_script(script)
+        with tempfile.TemporaryDirectory() as workspace:
+            marker = Path(workspace) / "stdin-state.txt"
+            with open_pipe_as_process_stdin():
+                code = self.runner.execute_passthrough(
+                    [sys.executable, str(script), str(marker)],
+                    workspace,
+                )
+            self.assertEqual(code, 0)
+            self.assertEqual(marker.read_text(encoding="utf-8"), "stdin:eof")
 
     def test_completion_json_payload_always_includes_exit_code(self):
         ctx = self.runner.RunContext(

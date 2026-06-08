@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Child agent processes now receive EOF on stdin instead of inheriting Delegate's own
+  stdin. This prevents Codex runs launched from orchestrators with open stdin pipes
+  from hanging before they emit output.
+
 ## [0.1.3] - 2026-06-05
 
 ### Added

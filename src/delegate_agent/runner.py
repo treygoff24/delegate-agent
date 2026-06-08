@@ -499,6 +499,7 @@ def execute_tracked(
     process = subprocess.Popen(
         argv,
         cwd=cwd,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
@@ -620,5 +621,5 @@ def execute_tracked(
 
 def execute_passthrough(argv: list[str], cwd: str) -> int:
     """Stream child stdout/stderr to the caller. JSON mode is not supported."""
-    completed = subprocess.run(argv, cwd=cwd, text=True, check=False)
+    completed = subprocess.run(argv, cwd=cwd, stdin=subprocess.DEVNULL, text=True, check=False)
     return completed.returncode

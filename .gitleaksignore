@@ -1,0 +1,7 @@
+# Historical redaction-test fixtures that were fake tokens but matched default
+# Gitleaks rules in old commits. The current tree constructs these samples at
+# runtime so release-surface scans remain clean.
+f50b9d15300a288443e70a3082ccc4fc05e0beb4:tests/test_snapshot_commands.py:generic-api-key:227
+f50b9d15300a288443e70a3082ccc4fc05e0beb4:tests/test_snapshot_commands.py:stripe-access-token:235
+56700caa2f8ac691ef94122cc72d6c144c30d736:tests/test_snapshot_commands.py:generic-api-key:211
+56700caa2f8ac691ef94122cc72d6c144c30d736:tests/test_snapshot_commands.py:gcp-api-key:218
