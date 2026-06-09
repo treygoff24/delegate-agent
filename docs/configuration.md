@@ -108,7 +108,7 @@ Controls local run recording.
 
 - `argvPrefix`: command prefix for Cursor Agent. Use an array so wrappers are possible.
 - `defaultModel`: non-empty model name passed to Cursor.
-- `defaultReasoningEffort`: optional non-empty effort string. If set, it requires a matching `reasoningEffortModels` entry.
+- `defaultReasoningEffort`: optional non-empty effort string. If set, it requires a matching `reasoningEffortModels` entry. When no mapping exists, the run proceeds without reasoning effort and records a warning (an explicit `--reasoning-effort` flag still fails closed).
 - `reasoningEffortModels`: map from effort strings to Cursor model names. Cursor currently has no standalone reasoning-effort flag, so Delegate implements Cursor effort by selecting the configured model for that effort.
 - `cursor.binary` is not supported; use `argvPrefix`.
 
@@ -129,7 +129,7 @@ Controls local run recording.
 
 - `binary`: child executable for Droid.
 - `models`: map of local aliases to real Droid model IDs. May be empty if you do not use Droid; running a Droid alias that is not present fails with `invalid_alias`.
-- `defaultReasoningEffort`: optional non-empty effort string validated against the resolved Droid model before launch.
+- `defaultReasoningEffort`: optional non-empty effort string validated against the resolved Droid model before launch. When the model has no matching capability declaration, the run proceeds without reasoning effort and records a warning (an explicit `--reasoning-effort` flag still fails closed).
 - Placeholder IDs that start with `replace-with-` are rejected for real runs.
 
 ### `codex`
@@ -149,7 +149,7 @@ Controls local run recording.
 ```
 
 - `defaultModel`: optional model string. `null` lets Codex choose its own default.
-- `defaultReasoningEffort`: optional non-empty effort string. If set, Delegate requires a resolved Codex model from the run input or `codex.defaultModel`, validates support, and emits a Codex config override.
+- `defaultReasoningEffort`: optional non-empty effort string. When a Codex model resolves (run input or `codex.defaultModel`) and supports the level, Delegate emits a Codex config override; otherwise the run proceeds without reasoning effort and records a warning. An explicit `--reasoning-effort` flag still fails closed and requires a resolved model.
 - `profile`: optional Codex profile name. It is config-only; JSON run input cannot set it.
 - `workSandbox`: `read-only`, `workspace-write`, or `danger-full-access` for Codex work mode when full bypass is not enabled.
 - `ephemeral`: include Codex `--ephemeral` in JSON-streaming runs.
@@ -179,11 +179,12 @@ Controls local run recording.
 }
 ```
 
-- `capabilities`: optional map of harness name to model capability declarations.
+- `capabilities`: optional map of harness name (`codex` or `droid` only; cursor uses `cursor.reasoningEffortModels`) to model capability declarations.
 - `supported`: non-empty array of exact effort strings. Delegate treats these literally; it does not translate `xhigh` to another provider spelling.
-- `default`: optional effort string that must be present in `supported`.
+- `default`: optional effort string that must be present in `supported`. It is informational only (shown by `delegate capabilities`); launches apply `<engine>.defaultReasoningEffort`, not per-model defaults.
+- Effort strings may not contain whitespace, double quotes, or backslashes.
 
-Capability precedence is config, then workspace cache, then bundled fallback. Use config for private or newly released models. Use `delegate --json capabilities` to inspect the merged view and `delegate --json capabilities refresh` to refresh the workspace-local cache at `.delegate/capabilities/reasoning.json`.
+Capability precedence is config, then workspace cache, then bundled fallback. Use config for private or newly released models. A malformed workspace cache is ignored (treated as absent) and is overwritten by the next `capabilities refresh`. Use `delegate --json capabilities` to inspect the merged view and `delegate --json capabilities refresh` to refresh the workspace-local cache at `.delegate/capabilities/reasoning.json`.
 
 ### `policy`
 

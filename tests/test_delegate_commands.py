@@ -60,15 +60,22 @@ def make_git_repo(*, with_commit: bool = False):
 class CommandTests(unittest.TestCase):
     def setUp(self):
         self.delegate = load_delegate()
+        # Hermetic config: main() must never read the developer's real
+        # ~/.delegate/config.json (its codex.binary would bypass the PATH-prefixed
+        # fake executables and shell out to the real CLI).
+        config_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(config_dir.cleanup)
+        config_path = Path(config_dir.name) / "config.json"
+        config_path.write_text("{}", encoding="utf-8")
+        self._config_env = {"DELEGATE_CONFIG": str(config_path)}
 
     def run_main(self, argv, *, path_prefix: Path | None = None):
         stdout = io.StringIO()
         stderr = io.StringIO()
-        if path_prefix is None:
-            code = self.delegate.main(argv, stdout=stdout, stderr=stderr)
-            return code, stdout.getvalue(), stderr.getvalue()
-        env_path = str(path_prefix) + os.pathsep + os.environ.get("PATH", "")
-        with mock.patch.dict(os.environ, {"PATH": env_path}, clear=False):
+        env = dict(self._config_env)
+        if path_prefix is not None:
+            env["PATH"] = str(path_prefix) + os.pathsep + os.environ.get("PATH", "")
+        with mock.patch.dict(os.environ, env, clear=False):
             code = self.delegate.main(argv, stdout=stdout, stderr=stderr)
         return code, stdout.getvalue(), stderr.getvalue()
 
@@ -519,6 +526,116 @@ class CommandTests(unittest.TestCase):
         )
         self.assertEqual(request.reasoning_effort_source, "config")
         self.assertIn('model_reasoning_effort="medium"', request.argv)
+
+    def test_codex_config_default_effort_degrades_to_warning_without_model(self):
+        # A config defaultReasoningEffort must not brick the engine when no
+        # model resolves; the run proceeds without effort and carries a warning.
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["codex"]["defaultReasoningEffort"] = "medium"
+        self.assertIsNone(config["codex"]["defaultModel"])
+        request = self.delegate.build_request(
+            "codex",
+            "safe",
+            None,
+            "/repo",
+            "hello",
+            config,
+            True,
+        )
+        self.assertIsNone(request.reasoning_effort)
+        self.assertNotIn("model_reasoning_effort", " ".join(request.argv))
+        self.assertEqual(len(request.warnings), 1)
+        self.assertIn("defaultReasoningEffort", request.warnings[0])
+        payload = self.delegate.dry_run_payload(request)
+        self.assertNotIn("requestedReasoningEffort", payload)
+        self.assertIn("warnings", payload)
+
+    def test_cursor_config_default_effort_degrades_to_warning_without_mapping(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["cursor"]["defaultReasoningEffort"] = "high"
+        request = self.delegate.build_request(
+            "cursor",
+            "safe",
+            None,
+            "/repo",
+            "hello",
+            config,
+            True,
+        )
+        self.assertIsNone(request.reasoning_effort)
+        self.assertEqual(request.model, config["cursor"]["defaultModel"])
+        self.assertEqual(len(request.warnings), 1)
+        self.assertIn("defaultReasoningEffort", request.warnings[0])
+
+    def test_explicit_effort_still_fails_closed_without_model(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        self.assertIsNone(config["codex"]["defaultModel"])
+        with self.assertRaises(self.delegate.DelegateError) as caught:
+            self.delegate.build_request(
+                "codex",
+                "safe",
+                None,
+                "/repo",
+                "hello",
+                config,
+                True,
+                reasoning_effort="high",
+            )
+        self.assertEqual(caught.exception.error, "unsupported_reasoning_effort")
+
+    def test_corrupt_capability_cache_does_not_block_bundled_resolution(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["codex"]["defaultModel"] = "gpt-5.5"
+        with tempfile.TemporaryDirectory() as workspace:
+            cache_path = Path(workspace) / ".delegate" / "capabilities" / "reasoning.json"
+            cache_path.parent.mkdir(parents=True)
+            cache_path.write_text(
+                json.dumps(
+                    {"harnesses": {"codex": {"models": {"gpt-5.5": {"supported": "high"}}}}}
+                ),
+                encoding="utf-8",
+            )
+            request = self.delegate.build_request(
+                "codex",
+                "safe",
+                None,
+                workspace,
+                "hello",
+                config,
+                True,
+                reasoning_effort="high",
+            )
+        self.assertIn('model_reasoning_effort="high"', request.argv)
+        self.assertEqual(request.reasoning_capability_source, "bundled")
+
+    def test_capabilities_refresh_overwrites_corrupt_cache(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            cache_path = Path(workspace) / ".delegate" / "capabilities" / "reasoning.json"
+            cache_path.parent.mkdir(parents=True)
+            cache_path.write_text('{"not": "a cache"}', encoding="utf-8")
+            fake_bin = self.write_fake_executable(
+                "codex",
+                stdout=json.dumps(
+                    {
+                        "models": [
+                            {
+                                "slug": "gpt-refresh",
+                                "default_reasoning_level": "medium",
+                                "supported_reasoning_levels": [{"effort": "medium"}],
+                            }
+                        ]
+                    }
+                ),
+            )
+            code, _out, err = self.run_main(
+                ["--cwd", workspace, "--json", "capabilities", "refresh"],
+                path_prefix=fake_bin,
+            )
+            self.assertEqual(code, 0, err)
+            cache = json.loads(cache_path.read_text(encoding="utf-8"))
+            self.assertIn("gpt-refresh", cache["harnesses"]["codex"]["models"])
+            if os.name == "posix":
+                self.assertEqual(cache_path.stat().st_mode & 0o777, 0o600)
 
     def test_request_from_parsed_threads_cli_reasoning_effort(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))

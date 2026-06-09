@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import copy
 import json
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from delegate_agent import run_registry
 from delegate_agent.json_types import JsonObject, JsonValue
 
 # Bundled capabilities are a conservative fallback only. User config and a
@@ -52,10 +52,17 @@ BUNDLED_REASONING_CAPABILITIES: dict[str, dict[str, JsonObject]] = {
     },
 }
 
+# Argv builders compare a capability's transport against these constants, so
+# they must stay in lockstep with the table below — hence named constants, not
+# re-typed string literals at the emission sites.
+TRANSPORT_CODEX_CONFIG = "codex-config"
+TRANSPORT_DROID_FLAG = "droid-flag"
+TRANSPORT_CURSOR_MODEL_SELECTION = "cursor-model-selection"
+
 TRANSPORT_BY_HARNESS = {
-    "codex": "codex-config",
-    "droid": "droid-flag",
-    "cursor": "cursor-model-selection",
+    "codex": TRANSPORT_CODEX_CONFIG,
+    "droid": TRANSPORT_DROID_FLAG,
+    "cursor": TRANSPORT_CURSOR_MODEL_SELECTION,
 }
 
 
@@ -63,8 +70,7 @@ TRANSPORT_BY_HARNESS = {
 class ReasoningCapability:
     harness: str
     model: str
-    requested_effort: str
-    resolved_effort: str
+    effort: str
     supported_efforts: tuple[str, ...]
     default_effort: str | None
     transport: str
@@ -78,17 +84,27 @@ class ReasoningCapabilityError(Exception):
         self.message = message
 
 
+def is_valid_effort_string(value: object) -> bool:
+    # Effort values land in child argv and inside a quoted Codex TOML override
+    # (model_reasoning_effort="…"), so quoting hazards are banned alongside
+    # whitespace.
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and not any(ch.isspace() for ch in value)
+        and '"' not in value
+        and "\\" not in value
+    )
+
+
 def normalize_effort(value: object) -> str:
-    if not isinstance(value, str):
+    if not is_valid_effort_string(value):
         raise ReasoningCapabilityError(
             "invalid_reasoning_effort",
-            "reasoning effort must be a non-empty string.",
+            "reasoning effort must be a non-empty string without whitespace, "
+            "double quotes, or backslashes.",
         )
-    if not value or value != value.strip() or any(ch.isspace() for ch in value):
-        raise ReasoningCapabilityError(
-            "invalid_reasoning_effort",
-            "reasoning effort must be a non-empty string without whitespace.",
-        )
+    assert isinstance(value, str)  # narrowed by is_valid_effort_string
     return value
 
 
@@ -209,8 +225,7 @@ def resolve_reasoning_capability(
     return ReasoningCapability(
         harness=harness,
         model=model,
-        requested_effort=effort,
-        resolved_effort=effort,
+        effort=effort,
         supported_efforts=supported,
         default_effort=_default_effort(declaration, supported),
         transport=TRANSPORT_BY_HARNESS[harness],
@@ -218,17 +233,45 @@ def resolve_reasoning_capability(
     )
 
 
+def add_reasoning_payload_fields(payload: JsonObject, carrier: object) -> None:
+    """Emit the reasoning JSON fields from any carrier with the shared attribute names.
+
+    Used for both the CLI Request and the runner RunContext so dry-run payloads,
+    manifests, and snapshots cannot drift. The documented schema exposes both
+    requestedReasoningEffort and resolvedReasoningEffort; resolution never
+    rewrites the value today, so both keys carry the single internal effort.
+    """
+    effort = getattr(carrier, "reasoning_effort")
+    if effort is not None:
+        payload["requestedReasoningEffort"] = effort
+        payload["resolvedReasoningEffort"] = effort
+    for attr, key in (
+        ("reasoning_effort_source", "reasoningEffortSource"),
+        ("reasoning_capability_source", "reasoningCapabilitySource"),
+        ("reasoning_transport", "reasoningTransport"),
+    ):
+        value = getattr(carrier, attr)
+        if value is not None:
+            payload[key] = value
+
+
 def reasoning_capability_cache_path(workspace: str | Path) -> Path:
     return Path(workspace) / ".delegate" / "capabilities" / "reasoning.json"
 
 
 def load_reasoning_capability_cache(workspace: str | Path) -> JsonObject | None:
-    path = reasoning_capability_cache_path(workspace)
-    try:
-        loaded: JsonValue = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+    """Load the workspace capability cache, treating malformed payloads as absent.
+
+    The disk read is the trust boundary: a corrupt cache must not block runs
+    (config/bundled declarations may still resolve the model) and must not stop
+    `capabilities refresh` from overwriting it with fresh data.
+    """
+    loaded = run_registry.read_json_object(reasoning_capability_cache_path(workspace))
+    if loaded is None:
         return None
-    if not isinstance(loaded, dict):
+    try:
+        validate_cache_payload(loaded)
+    except ReasoningCapabilityError:
         return None
     return loaded
 
@@ -426,30 +469,27 @@ def merge_reasoning_capability_cache(
     existing: JsonObject | None,
     refreshed: JsonObject,
 ) -> JsonObject:
-    validate_cache_payload(refreshed)
-    if existing is None:
-        merged: JsonObject = {"schema": 1, "harnesses": {}}
-    else:
-        validate_cache_payload(existing)
-        merged = copy.deepcopy(existing)
-        if not isinstance(merged.get("harnesses"), dict):
-            merged["harnesses"] = {}
+    """Overlay refreshed harness declarations on the existing cache.
 
-    harnesses = merged["harnesses"]
+    Inputs are already validated at their boundaries (parse_codex_models_payload
+    for refreshed data, load_reasoning_capability_cache for the existing file),
+    and write_reasoning_capability_cache validates the merged result.
+    """
+    harnesses: JsonObject = {}
+    if existing is not None:
+        existing_harnesses = existing.get("harnesses")
+        if isinstance(existing_harnesses, dict):
+            harnesses.update(existing_harnesses)
     refreshed_harnesses = refreshed["harnesses"]
-    assert isinstance(harnesses, dict)
     assert isinstance(refreshed_harnesses, dict)
-    for harness, declaration in refreshed_harnesses.items():
-        harnesses[harness] = copy.deepcopy(declaration)
-    validate_cache_payload(merged)
-    return merged
+    harnesses.update(refreshed_harnesses)
+    return {"schema": 1, "harnesses": harnesses}
 
 
 def write_reasoning_capability_cache(workspace: str | Path, cache: JsonObject) -> Path:
     validate_cache_payload(cache)
     path = reasoning_capability_cache_path(workspace)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(cache, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    # write_json_atomic applies the registry's owner-only file/dir modes, keeping
+    # this .delegate artifact as private as run manifests and logs.
+    run_registry.write_json_atomic(path, cache)
     return path

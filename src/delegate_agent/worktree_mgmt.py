@@ -532,7 +532,9 @@ def list_worktrees(
 ) -> JsonObject:
     entries: list[JsonObject] = []
     all_status_counts: dict[str, int] = {status_key: 0 for status_key in sorted(VALID_STATUSES)}
-    for record in load_persistent_records(registry_root):
+    records = load_persistent_records(registry_root)
+    total_persistent = len(records)
+    for record in records:
         if harness is not None and record.get("harness") != harness:
             continue
         unfiltered_entry = decorate_record(record, include_detached=include_detached)
@@ -562,10 +564,13 @@ def list_worktrees(
         "entries": entries[:limit],
         "limit": limit,
         "summary": {
-            "totalPersistentWorktrees": sum(all_status_counts.values()),
+            # Registry-wide count, independent of --harness/--status filters.
+            "totalPersistentWorktrees": total_persistent,
             "visible": min(len(entries), limit),
             "matched": len(entries),
             "statusCounts": visible_status_counts,
+            # Pre-status-filter counts within the --harness scope (contrast
+            # with statusCounts, which reflects the visible filtered entries).
             "allStatusCounts": all_status_counts,
             "warningCount": warning_count,
             "registryStatusDriftCount": registry_drift_count,

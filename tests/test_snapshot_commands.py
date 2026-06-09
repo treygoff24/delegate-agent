@@ -923,8 +923,8 @@ class SnapshotCommandTests(unittest.TestCase):
         self.assertEqual(code, self.delegate.EXIT_USAGE)
         self.assertIn("missing_completion_report", stderr.getvalue())
 
-    def test_run_output_completion_report_recovery_requires_final_text(self):
-        run_id, alias = self.write_run(status="succeeded", pid=None)
+    def test_run_output_completion_report_recovers_droid_interim_message(self):
+        run_id, alias = self.write_run(harness="droid", status="succeeded", pid=None)
         run_path = self.registry.run_directory(self.registry_root, run_id)
         (run_path / "stdout.log").write_text(
             json.dumps(
@@ -932,6 +932,37 @@ class SnapshotCommandTests(unittest.TestCase):
                     "type": "message",
                     "role": "assistant",
                     "content": "I am still investigating.",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        stdout = io.StringIO()
+        code = self.delegate.main(
+            [
+                "--cwd",
+                str(self.workspace),
+                "run-output",
+                alias,
+                "--completion-report",
+            ],
+            stdout=stdout,
+        )
+        self.assertEqual(code, 0)
+        output = stdout.getvalue()
+        self.assertIn("I am still investigating.", output)
+        # Text mode must carry an in-band cue that this is a recovered message,
+        # not a child-written completion report.
+        self.assertIn("synthetic", output)
+
+    def test_run_output_completion_report_codex_never_recovers_interim_message(self):
+        run_id, alias = self.write_run(harness="codex", status="succeeded", pid=None)
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        (run_path / "stdout.log").write_text(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "I'll start by reading files."},
                 }
             )
             + "\n",
@@ -1051,7 +1082,7 @@ class SnapshotCommandTests(unittest.TestCase):
         )
         self.assertEqual(code, 0)
         output = stdout.getvalue()
-        self.assertIn("=== stdout ===", output)
+        self.assertIn("=== stdout (last 80 lines;", output)
         self.assertNotIn("line0", output)
         self.assertIn("line84", output)
         self.assertIn("=== diagnostics ===", output)

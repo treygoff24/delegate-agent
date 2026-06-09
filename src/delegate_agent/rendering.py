@@ -430,12 +430,31 @@ def render_worktree_cleanup_commands(cleanup: JsonObject, stdout: TextIO) -> Non
         print(f"raw git equivalent:                       {raw_git}", file=stdout)
 
 
-def render_run_output_text(sections: dict[str, str], stdout: TextIO) -> None:
+def _run_output_section_header(name: str, meta: JsonObject) -> str:
+    # Text mode needs in-band cues for anything JSON mode flags in section
+    # metadata: a recovered (synthetic) completion report is not a child-written
+    # report, and a tailed log is not the whole log.
+    if meta.get("synthetic") is True:
+        return f"{name} (synthetic: recovered from stdout.log tail)"
+    tail_lines = meta.get("tailLines")
+    if meta.get("truncated") is True and isinstance(tail_lines, int):
+        return f"{name} (last {tail_lines} lines; full log {meta.get('bytes', '?')} bytes)"
+    return name
+
+
+def render_run_output_text(
+    sections: dict[str, str],
+    stdout: TextIO,
+    *,
+    section_meta: JsonObject | None = None,
+) -> None:
     for name in ("completionReport", "stdout", "stderr", "diagnostics"):
         content = sections.get(name)
         if not content:
             continue
-        print(f"=== {name} ===", file=stdout)
+        meta = (section_meta or {}).get(name)
+        header = _run_output_section_header(name, meta if isinstance(meta, dict) else {})
+        print(f"=== {header} ===", file=stdout)
         print(content, end="" if content.endswith("\n") else "\n", file=stdout)
 
 
