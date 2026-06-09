@@ -204,6 +204,11 @@ def merge_snapshot_view(
             "worktreeStatus",
             "worktreeCleanupCommands",
             "safeWorkspaceMethod",
+            "requestedReasoningEffort",
+            "resolvedReasoningEffort",
+            "reasoningEffortSource",
+            "reasoningCapabilitySource",
+            "reasoningTransport",
         ):
             if key in manifest and key not in view:
                 view[key] = manifest[key]
@@ -280,6 +285,17 @@ def render_snapshot_text(view: JsonObject, stdout: TextIO) -> None:
     safe_method = view.get("safeWorkspaceMethod")
     if isinstance(safe_method, str) and safe_method:
         print(f"safe workspace method: {safe_method}", file=stdout)
+    resolved_reasoning = view.get("resolvedReasoningEffort")
+    if isinstance(resolved_reasoning, str) and resolved_reasoning:
+        transport = view.get("reasoningTransport")
+        source = view.get("reasoningCapabilitySource")
+        detail = []
+        if isinstance(transport, str) and transport:
+            detail.append(transport)
+        if isinstance(source, str) and source:
+            detail.append(f"capability={source}")
+        suffix = f" ({', '.join(detail)})" if detail else ""
+        print(f"reasoning effort: {resolved_reasoning}{suffix}", file=stdout)
 
     current = view.get("current")
     if isinstance(current, str) and current:

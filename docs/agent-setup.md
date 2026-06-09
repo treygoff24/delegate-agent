@@ -53,6 +53,7 @@ This guide covers both human setup and non-interactive setup for agents or CI jo
    ```bash
    delegate --json describe
    delegate --json models
+   delegate --json capabilities
    ```
 
    `delegate --json describe` also returns a `commands` catalog (each entry has `command` and `summary`), so one call lists the entire command surface. To learn how to invoke any specific command, introspect it with `delegate --json <command> --help`, which returns a structured spec of its usage, arguments, options, and examples:
@@ -62,15 +63,18 @@ This guide covers both human setup and non-interactive setup for agents or CI jo
    delegate --json worktree remove --help
    ```
 
+   `delegate --json capabilities` reports reasoning-effort support from config, workspace cache, and bundled fallback data without launching a child runtime. Run `delegate --json capabilities refresh` only when you explicitly want Delegate to call child CLIs and update the workspace-local `.delegate/capabilities/reasoning.json` cache.
+
 6. Run a dry-run smoke test. Dry-run does not require the real child binary and does not launch the runtime:
 
    ```bash
    delegate --json dry-run codex safe "Review only. Do not edit files."
+   delegate --json dry-run codex safe --reasoning-effort high "Review only. Do not edit files."
    delegate --json dry-run cursor safe "Review only. Do not edit files."
    delegate --json dry-run droid reviewer safe "Review only. Do not edit files."
    ```
 
-   The Codex and Cursor dry-runs succeed with the unedited example config. The Droid dry-run validates the alias, so it returns `unconfigured_model` until you replace the `reviewer` placeholder in `config.json` with a real model ID.
+   The Codex and Cursor dry-runs succeed with the unedited example config when no reasoning effort is requested. The Codex reasoning-effort dry-run requires a resolved Codex model from config or JSON input. The Droid dry-run validates the alias, so it returns `unconfigured_model` until you replace the `reviewer` placeholder in `config.json` with a real model ID.
 
 ## Non-interactive agent setup
 
@@ -101,6 +105,7 @@ For an orchestrating agent, script, or CI job:
 
    ```bash
    HOME="$clean_home" DELEGATE_CONFIG="$PWD/config.example.json" python3 bin/delegate.py --json dry-run codex safe "Review only."
+   HOME="$clean_home" DELEGATE_CONFIG="$PWD/config.example.json" python3 bin/delegate.py --json capabilities
    ```
 
    Dry-runs do not create Delegate runs, do not create branches or worktrees, and do not require the real child binary. They still validate config shape and requested aliases.

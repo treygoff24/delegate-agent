@@ -84,6 +84,50 @@ class ParserTests(unittest.TestCase):
             self.delegate.parse_cli(["cursor", "safe", "hello", "--prompt-file", "task.md"])
         self.assertEqual(ctx.exception.error, "ambiguous_prompt_source")
 
+    def test_codex_reasoning_effort_before_prompt(self):
+        parsed = self.delegate.parse_cli(["codex", "safe", "--reasoning-effort", "high", "review"])
+        self.assertEqual(parsed.reasoning_effort, "high")
+        self.assertEqual(parsed.prompt_parts, ["review"])
+
+    def test_droid_reasoning_effort_after_alias_and_mode(self):
+        parsed = self.delegate.parse_cli(
+            ["droid", "reviewer", "safe", "--reasoning-effort", "high", "review"]
+        )
+        self.assertEqual(parsed.engine, "droid")
+        self.assertEqual(parsed.model_alias, "reviewer")
+        self.assertEqual(parsed.reasoning_effort, "high")
+        self.assertEqual(parsed.prompt_parts, ["review"])
+
+    def test_dry_run_droid_reasoning_effort(self):
+        parsed = self.delegate.parse_cli(
+            ["dry-run", "droid", "reviewer", "safe", "--reasoning-effort", "high", "review"]
+        )
+        self.assertTrue(parsed.dry_run)
+        self.assertEqual(parsed.engine, "droid")
+        self.assertEqual(parsed.reasoning_effort, "high")
+
+    def test_reasoning_effort_after_prompt_is_prompt_text(self):
+        parsed = self.delegate.parse_cli(["codex", "safe", "review", "--reasoning-effort", "high"])
+        self.assertIsNone(parsed.reasoning_effort)
+        self.assertEqual(parsed.prompt_parts, ["review", "--reasoning-effort", "high"])
+
+    def test_reasoning_effort_requires_value(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(["codex", "safe", "--reasoning-effort"])
+        self.assertEqual(ctx.exception.error, "missing_reasoning_effort")
+
+    def test_reasoning_effort_rejects_option_looking_value(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(
+                ["codex", "safe", "--reasoning-effort", "--prompt-file", "task.md"]
+            )
+        self.assertEqual(ctx.exception.error, "missing_reasoning_effort")
+
+    def test_reasoning_effort_rejects_help_token_as_value(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(["codex", "safe", "--reasoning-effort", "--help"])
+        self.assertEqual(ctx.exception.error, "missing_reasoning_effort")
+
     def test_invalid_mode_rejected(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:
             self.delegate.parse_cli(["cursor", "agent", "hello"])

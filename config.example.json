@@ -12,14 +12,20 @@
     "argvPrefix": [
       "agent"
     ],
-    "defaultModel": "composer-2.5"
+    "defaultModel": "composer-2.5",
+    "defaultReasoningEffort": null,
+    "reasoningEffortModels": {}
   },
   "droid": {
     "binary": "droid",
+    "defaultReasoningEffort": null,
     "models": {
       "reviewer": "replace-with-read-only-model-id",
       "implementer": "replace-with-edit-capable-model-id"
     }
+  },
+  "reasoning": {
+    "capabilities": {}
   },
   "policy": {
     "profile": "safe",
@@ -30,6 +36,7 @@
   "codex": {
     "binary": "codex",
     "defaultModel": null,
+    "defaultReasoningEffort": null,
     "profile": null,
     "workSandbox": "workspace-write",
     "ephemeral": true,

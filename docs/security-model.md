@@ -8,6 +8,7 @@ Delegate controls:
 
 - Which child argv is built for Cursor, Droid, or Codex.
 - Whether the child is launched in `safe` or `work` mode.
+- Whether a requested reasoning effort is translated into the supported child-runtime mechanism for the resolved harness/model.
 - Whether the execution workspace is the source checkout, a temporary isolated workspace, or a persistent Git worktree.
 - Prompt framing that tells sub-agents to review available skills and, in safe mode, avoid edits.
 - Local run metadata under `.delegate/` for tracked runs.
@@ -17,6 +18,7 @@ Delegate does not control:
 - The child runtime's implementation.
 - The credentials, files, or network access available to the child process outside Delegate's execution workspace.
 - Provider-side model behavior.
+- Whether a provider interprets a reasoning-effort label as faster, slower, cheaper, or more expensive than expected.
 - Absolute-path writes, shell commands, or external side effects a child runtime is allowed to perform by its own policy.
 
 ## Mode boundaries
@@ -41,6 +43,19 @@ Work mode is edit-capable. Use it only for bounded tasks in workspaces you trust
 - Codex work uses the configured Codex policy and sandbox settings.
 
 Delegate never auto-commits, pushes, merges, deploys, or publishes work-mode changes.
+
+## Reasoning-effort boundary
+
+`--reasoning-effort LEVEL` and JSON `reasoningEffort` request model thinking depth only. They do not change:
+
+- Delegate `safe` or `work` mode.
+- Temporary or persistent workspace isolation.
+- Codex sandbox or approval policy.
+- Droid unsafe/edit flags.
+- Cursor force or MCP approval flags.
+- Network access, credentials, or edit capability.
+
+Unsupported effort/model combinations fail before launch. Treat higher effort as a possible latency/cost change, not as a safety control.
 
 ## Isolation boundaries
 

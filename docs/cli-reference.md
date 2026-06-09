@@ -18,22 +18,24 @@ Use `delegate --help` for the exact command list from the installed version. Glo
 ### Direct runtime commands
 
 ```bash
-delegate cursor safe [--prompt-file PATH] [prompt...]
-delegate cursor work [--prompt-file PATH] [prompt...]
+delegate cursor safe [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+delegate cursor work [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 
-delegate droid MODEL_ALIAS safe [--prompt-file PATH] [prompt...]
-delegate droid MODEL_ALIAS work [--prompt-file PATH] [prompt...]
+delegate droid MODEL_ALIAS safe [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+delegate droid MODEL_ALIAS work [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 
-delegate codex safe [--prompt-file PATH] [prompt...]
-delegate codex work [--prompt-file PATH] [prompt...]
+delegate codex safe [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+delegate codex work [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 ```
 
 Prompt sources are direct arguments, `--prompt-file`, or stdin.
 
+`--reasoning-effort LEVEL` is optional and parsed only before prompt text begins. Unsupported model/effort pairs fail closed before launch with `unsupported_reasoning_effort`. It affects only model reasoning depth, cost, or latency; it does not change `safe`/`work` permissions, sandboxing, approvals, network policy, or edit capability. Cursor effort is model-selection based and requires `cursor.reasoningEffortModels`; Droid emits `--reasoning-effort LEVEL`; Codex emits a `model_reasoning_effort` config override after the model is resolved.
+
 ### Dry-run
 
 ```bash
-delegate --json dry-run codex safe "Review only."
+delegate --json dry-run codex safe --reasoning-effort high "Review only."  # requires codex.defaultModel
 delegate --json dry-run cursor work --prompt-file task.md
 delegate --json dry-run droid reviewer safe "Investigate only."  # needs a configured 'reviewer' alias
 ```
@@ -52,6 +54,11 @@ Typical dry-run JSON fields:
   "cwd": "/path/to/workspace",
   "workspaceKind": "git",
   "argv": ["codex", "--ask-for-approval", "never", "exec", "..."],
+  "requestedReasoningEffort": "high",
+  "resolvedReasoningEffort": "high",
+  "reasoningEffortSource": "cli",
+  "reasoningCapabilitySource": "bundled",
+  "reasoningTransport": "codex-config",
   "isolatedWorkspace": true,
   "isolationMode": "auto",
   "effectiveIsolation": "worktree",
@@ -82,6 +89,7 @@ Supported input keys:
   "model": null,
   "cwd": "/path/to/workspace",
   "isolation": "worktree",
+  "reasoningEffort": "high",
   "prompt": "Implement the scoped task and report changed files."
 }
 ```
@@ -91,6 +99,7 @@ Supported input keys:
 - `model`: Droid requires a configured local alias; Codex treats a non-empty string as a model override; Cursor does not accept per-run model aliases in v1.
 - `cwd`: optional workspace path. Git directories resolve to the repo root.
 - `isolation`: optional `auto`, `none`, or `worktree`. `null` is invalid.
+- `reasoningEffort`: optional non-empty effort string. It overrides provider `defaultReasoningEffort` for that JSON run.
 - `prompt`: required task prompt.
 
 `profile` is not accepted in run input JSON. Configure Codex profile in `codex.profile` instead.
@@ -100,10 +109,14 @@ Supported input keys:
 ```bash
 delegate --json describe
 delegate --json models
+delegate --json capabilities
+delegate --json capabilities refresh
 delegate agent-help
 ```
 
 `describe` reports version, engines, modes, supported isolation values, prompt transforms, effective policy, and representative argv shapes. It also includes a `commands` catalog (each entry has `command` and `summary`) so an agent can enumerate the whole command surface in one call. `models` reports configured Cursor, Droid, and Codex model settings.
+
+`capabilities` reports reasoning-effort support from config, the workspace cache, and bundled fallback data without invoking child binaries. `capabilities refresh` may invoke child CLIs, validates the discovered data, and writes `.delegate/capabilities/reasoning.json` in the resolved workspace only after a successful refresh. The cache is runtime state and should not be committed.
 
 ### Help and discovery
 
@@ -178,6 +191,11 @@ Common JSON fields for tracked run completion:
   "cwd": "/path/to/source",
   "executionCwd": "/path/to/execution-workspace",
   "workspaceKind": "git",
+  "requestedReasoningEffort": "high",
+  "resolvedReasoningEffort": "high",
+  "reasoningEffortSource": "cli",
+  "reasoningCapabilitySource": "bundled",
+  "reasoningTransport": "codex-config",
   "isolatedWorkspace": true,
   "isolationMode": "auto",
   "effectiveIsolation": "worktree",
@@ -188,7 +206,7 @@ Common JSON fields for tracked run completion:
 }
 ```
 
-Snapshot JSON uses schema `delegate.snapshot.v1` and includes fields such as `alias`, `runId`, `harness`, `status`, `cwd`, `executionCwd`, `assistantText`, `recentEvents`, `warnings`, `exitCode`, and isolation/worktree metadata when applicable.
+Snapshot JSON uses schema `delegate.snapshot.v1` and includes fields such as `alias`, `runId`, `harness`, `status`, `cwd`, `executionCwd`, `assistantText`, `recentEvents`, `warnings`, `exitCode`, reasoning metadata, and isolation/worktree metadata when applicable.
 
 Run-output JSON uses schema `delegate.run-output.v1` and returns selected completion report, stdout, and/or stderr content. By default, secret-like strings are redacted unless `--no-redact` is supplied.
 

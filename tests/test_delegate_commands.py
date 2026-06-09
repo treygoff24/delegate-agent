@@ -2,12 +2,14 @@ import importlib.util
 import io
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = str(ROOT / "src")
@@ -58,6 +60,39 @@ def make_git_repo(*, with_commit: bool = False):
 class CommandTests(unittest.TestCase):
     def setUp(self):
         self.delegate = load_delegate()
+
+    def run_main(self, argv, *, path_prefix: Path | None = None):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        if path_prefix is None:
+            code = self.delegate.main(argv, stdout=stdout, stderr=stderr)
+            return code, stdout.getvalue(), stderr.getvalue()
+        env_path = str(path_prefix) + os.pathsep + os.environ.get("PATH", "")
+        with mock.patch.dict(os.environ, {"PATH": env_path}, clear=False):
+            code = self.delegate.main(argv, stdout=stdout, stderr=stderr)
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def write_fake_executable(
+        self,
+        name: str,
+        *,
+        stdout: str = "",
+        stderr: str = "",
+        exit_code: int = 0,
+    ) -> Path:
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        bin_dir = Path(temp.name)
+        path = bin_dir / name
+        path.write_text(
+            "#!/usr/bin/env bash\n"
+            f"printf '%s' {shlex.quote(stdout)}\n"
+            f"printf '%s' {shlex.quote(stderr)} >&2\n"
+            f"exit {exit_code}\n",
+            encoding="utf-8",
+        )
+        path.chmod(0o755)
+        return bin_dir
 
     def test_cursor_safe_argv_agent_prefix(self):
         argv = self.delegate.build_cursor_argv(["agent"], "safe", "/repo", "composer-2.5", "hello")
@@ -284,6 +319,352 @@ class CommandTests(unittest.TestCase):
         payload = self.delegate.dry_run_payload(request)
         self.assertIsNone(payload["model"])
         self.assertNotIn("--model", payload["argv"])
+
+    def test_codex_reasoning_effort_argv_uses_config_override(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["codex"]["defaultModel"] = "gpt-5.5"
+        request = self.delegate.build_request(
+            "codex",
+            "safe",
+            None,
+            "/repo",
+            "hello",
+            config,
+            True,
+            reasoning_effort="high",
+        )
+        exec_index = request.argv.index("exec")
+        self.assertIn("-c", request.argv[:exec_index])
+        self.assertIn('model_reasoning_effort="high"', request.argv[:exec_index])
+        self.assertEqual(request.reasoning_transport, "codex-config")
+
+    def test_codex_reasoning_effort_fails_without_model(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.build_request(
+                "codex",
+                "safe",
+                None,
+                "/repo",
+                "hello",
+                self.delegate.DEFAULT_CONFIG,
+                True,
+                reasoning_effort="high",
+            )
+        self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
+
+    def test_droid_reasoning_effort_argv_uses_flag(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["droid"]["models"] = {"reviewer": "gpt-5.5"}
+        request = self.delegate.build_request(
+            "droid",
+            "safe",
+            "reviewer",
+            "/repo",
+            "hello",
+            config,
+            True,
+            reasoning_effort="xhigh",
+        )
+        self.assertIn("--reasoning-effort", request.argv)
+        self.assertIn("xhigh", request.argv)
+        self.assertNotIn("--skip-permissions-unsafe", request.argv)
+
+    def test_build_request_uses_cache_declared_custom_model_capability(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["droid"]["models"] = {"reviewer": "custom:cached"}
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_path = Path(tmp) / ".delegate" / "capabilities" / "reasoning.json"
+            cache_path.parent.mkdir(parents=True)
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        "schema": 1,
+                        "harnesses": {
+                            "droid": {
+                                "models": {
+                                    "custom:cached": {
+                                        "supported": ["high"],
+                                        "default": "high",
+                                    }
+                                }
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            request = self.delegate.build_request(
+                "droid",
+                "safe",
+                "reviewer",
+                tmp,
+                "hello",
+                config,
+                True,
+                reasoning_effort="high",
+            )
+        self.assertIn("--reasoning-effort", request.argv)
+        self.assertEqual(request.reasoning_capability_source, "cache")
+
+    def test_cursor_reasoning_effort_requires_mapping(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.build_request(
+                "cursor",
+                "safe",
+                None,
+                "/repo",
+                "hello",
+                self.delegate.DEFAULT_CONFIG,
+                True,
+                reasoning_effort="high",
+            )
+        self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
+
+    def test_cursor_reasoning_effort_uses_configured_model_mapping(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["cursor"]["reasoningEffortModels"] = {"high": "sonnet-4-thinking"}
+        request = self.delegate.build_request(
+            "cursor",
+            "safe",
+            None,
+            "/repo",
+            "hello",
+            config,
+            True,
+            reasoning_effort="high",
+        )
+        self.assertEqual(request.model, "sonnet-4-thinking")
+        self.assertIn("--model", request.argv)
+        self.assertIn("sonnet-4-thinking", request.argv)
+        self.assertEqual(request.reasoning_transport, "cursor-model-selection")
+
+    def test_codex_default_reasoning_effort_is_used_when_request_omits_effort(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["codex"]["defaultModel"] = "gpt-5.5"
+        config["codex"]["defaultReasoningEffort"] = "medium"
+        request = self.delegate.build_request(
+            "codex",
+            "safe",
+            None,
+            "/repo",
+            "hello",
+            config,
+            True,
+        )
+        self.assertEqual(request.reasoning_effort_source, "config")
+        self.assertIn('model_reasoning_effort="medium"', request.argv)
+
+    def test_request_from_parsed_threads_cli_reasoning_effort(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["codex"]["defaultModel"] = "gpt-5.5"
+        with tempfile.TemporaryDirectory() as tmp:
+            parsed = self.delegate.parse_cli(
+                ["--cwd", tmp, "codex", "safe", "--reasoning-effort", "high", "review"]
+            )
+            request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+            payload = self.delegate.dry_run_payload(request)
+        self.assertEqual(payload["requestedReasoningEffort"], "high")
+        self.assertEqual(payload["reasoningEffortSource"], "cli")
+        self.assertIn('model_reasoning_effort="high"', payload["argv"])
+
+    def test_request_from_input_json_threads_reasoning_effort(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "task.json"
+            task.write_text(
+                json.dumps(
+                    {
+                        "engine": "codex",
+                        "mode": "safe",
+                        "model": "gpt-5.5",
+                        "cwd": tmp,
+                        "reasoningEffort": "high",
+                        "prompt": "review",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            parsed = self.delegate.ParsedCommand("run", json_mode=True, input_json=str(task))
+            request = self.delegate.request_from_input_json(parsed, config)
+        self.assertEqual(request.reasoning_effort_source, "input-json")
+        self.assertIn('model_reasoning_effort="high"', request.argv)
+
+    def test_input_json_effort_overrides_provider_default(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["codex"]["defaultReasoningEffort"] = "medium"
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "task.json"
+            task.write_text(
+                json.dumps(
+                    {
+                        "engine": "codex",
+                        "mode": "safe",
+                        "model": "gpt-5.5",
+                        "cwd": tmp,
+                        "reasoningEffort": "high",
+                        "prompt": "review",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            parsed = self.delegate.ParsedCommand("run", json_mode=True, input_json=str(task))
+            request = self.delegate.request_from_input_json(parsed, config)
+        self.assertIn('model_reasoning_effort="high"', request.argv)
+        self.assertNotIn('model_reasoning_effort="medium"', request.argv)
+
+    def test_per_run_effort_overrides_provider_default(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["codex"]["defaultModel"] = "gpt-5.5"
+        config["codex"]["defaultReasoningEffort"] = "medium"
+        with tempfile.TemporaryDirectory() as tmp:
+            parsed = self.delegate.parse_cli(
+                ["--cwd", tmp, "codex", "safe", "--reasoning-effort", "high", "review"]
+            )
+            request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+        self.assertIn('model_reasoning_effort="high"', request.argv)
+        self.assertNotIn('model_reasoning_effort="medium"', request.argv)
+
+    def test_capabilities_json_reports_reasoning_matrix(self):
+        code, out, err = self.run_main(["--json", "capabilities"])
+        self.assertEqual(code, 0, err)
+        payload = json.loads(out)
+        self.assertTrue(payload["ok"])
+        self.assertIn("reasoning", payload)
+        self.assertIn("codex", payload["reasoning"]["harnesses"])
+
+    def test_capabilities_json_reports_cache_source_when_cache_exists(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            cache_path = Path(workspace) / ".delegate" / "capabilities" / "reasoning.json"
+            cache_path.parent.mkdir(parents=True)
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        "schema": 1,
+                        "harnesses": {
+                            "codex": {
+                                "models": {
+                                    "gpt-test": {
+                                        "supported": ["low"],
+                                        "default": "low",
+                                    }
+                                }
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            code, out, err = self.run_main(["--cwd", workspace, "--json", "capabilities"])
+        self.assertEqual(code, 0, err)
+        payload = json.loads(out)
+        self.assertEqual(
+            payload["reasoning"]["harnesses"]["codex"]["models"]["gpt-test"]["source"],
+            "cache",
+        )
+
+    def test_capabilities_refresh_writes_valid_cache_from_fake_codex(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            fake_bin = self.write_fake_executable(
+                "codex",
+                stdout=json.dumps(
+                    {
+                        "models": [
+                            {
+                                "slug": "gpt-refresh",
+                                "default_reasoning_level": "medium",
+                                "supported_reasoning_levels": [
+                                    {"effort": "low"},
+                                    {"effort": "medium"},
+                                ],
+                            }
+                        ]
+                    }
+                ),
+            )
+            code, _out, err = self.run_main(
+                ["--cwd", workspace, "--json", "capabilities", "refresh"],
+                path_prefix=fake_bin,
+            )
+            self.assertEqual(code, 0, err)
+            cache = json.loads(
+                (Path(workspace) / ".delegate" / "capabilities" / "reasoning.json").read_text()
+            )
+        self.assertIn("gpt-refresh", cache["harnesses"]["codex"]["models"])
+
+    def test_capabilities_refresh_preserves_non_codex_cache_entries(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            cache_path = Path(workspace) / ".delegate" / "capabilities" / "reasoning.json"
+            cache_path.parent.mkdir(parents=True)
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        "schema": 1,
+                        "harnesses": {
+                            "droid": {
+                                "models": {
+                                    "custom:cached": {
+                                        "supported": ["high"],
+                                        "default": "high",
+                                    }
+                                }
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            fake_bin = self.write_fake_executable(
+                "codex",
+                stdout=json.dumps(
+                    {
+                        "models": [
+                            {
+                                "slug": "gpt-refresh",
+                                "default_reasoning_level": "medium",
+                                "supported_reasoning_levels": [{"effort": "medium"}],
+                            }
+                        ]
+                    }
+                ),
+            )
+            code, _out, err = self.run_main(
+                ["--cwd", workspace, "--json", "capabilities", "refresh"],
+                path_prefix=fake_bin,
+            )
+            self.assertEqual(code, 0, err)
+            cache = json.loads(cache_path.read_text(encoding="utf-8"))
+        self.assertIn("gpt-refresh", cache["harnesses"]["codex"]["models"])
+        self.assertIn("custom:cached", cache["harnesses"]["droid"]["models"])
+
+    def test_capabilities_refresh_invalid_data_does_not_mutate_existing_cache(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            cache_path = Path(workspace) / ".delegate" / "capabilities" / "reasoning.json"
+            cache_path.parent.mkdir(parents=True)
+            cache_path.write_text(
+                '{"schema":1,"harnesses":{"codex":{"models":{"old":{"supported":["low"],"default":"low"}}}}}',
+                encoding="utf-8",
+            )
+            fake_bin = self.write_fake_executable("codex", stdout='{"models":[{"slug":"bad"}]}')
+            code, out, _err = self.run_main(
+                ["--cwd", workspace, "--json", "capabilities", "refresh"],
+                path_prefix=fake_bin,
+            )
+            self.assertEqual(code, 2)
+            self.assertEqual(json.loads(out)["error"], "capability_refresh_failed")
+            cache = json.loads(cache_path.read_text(encoding="utf-8"))
+        self.assertIn("old", cache["harnesses"]["codex"]["models"])
+
+    def test_capabilities_refresh_subprocess_failure_reports_error(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            fake_bin = self.write_fake_executable("codex", stderr="boom", exit_code=1)
+            code, out, _err = self.run_main(
+                ["--cwd", workspace, "--json", "capabilities", "refresh"],
+                path_prefix=fake_bin,
+            )
+        payload = json.loads(out)
+        self.assertEqual(code, 2)
+        self.assertEqual(payload["error"], "capability_refresh_failed")
+        self.assertIn("boom", payload["message"])
 
     def test_run_input_json_codex_allows_omitted_model(self):
         with tempfile.TemporaryDirectory() as tmp:

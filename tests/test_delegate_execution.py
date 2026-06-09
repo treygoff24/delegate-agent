@@ -412,6 +412,33 @@ class ExecutionTests(unittest.TestCase):
         self.assertIn("isolation", payload)
         self.assertIn("temporary detached git worktree", payload["isolation"])
 
+    def test_dry_run_reports_reasoning_fields(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["codex"] = dict(config["codex"])
+        config["codex"]["defaultModel"] = "gpt-5.5"
+        with tempfile.TemporaryDirectory() as tmp:
+            parsed = self.delegate.parse_cli(
+                [
+                    "--cwd",
+                    tmp,
+                    "--json",
+                    "dry-run",
+                    "codex",
+                    "safe",
+                    "--reasoning-effort",
+                    "high",
+                    "review",
+                ]
+            )
+            request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+            payload = self.delegate.dry_run_payload(request)
+        self.assertEqual(payload["requestedReasoningEffort"], "high")
+        self.assertEqual(payload["resolvedReasoningEffort"], "high")
+        self.assertEqual(payload["reasoningTransport"], "codex-config")
+        self.assertEqual(payload["reasoningEffortSource"], "cli")
+        self.assertEqual(payload["reasoningCapabilitySource"], "bundled")
+        self.assertIn('model_reasoning_effort="high"', payload["argv"])
+
     def test_effective_prompt_codex_safe_order(self):
         user = "review the diff"
         p = self.delegate.effective_prompt(

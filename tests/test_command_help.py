@@ -38,6 +38,7 @@ TOP_LEVEL_COMMANDS = (
     "models",
     "describe",
     "agent-help",
+    "capabilities",
 )
 
 # Payload key set the agent-facing JSON contract must expose (D4).

@@ -56,10 +56,16 @@ DEFAULT_CONFIG: JsonObject = {
     "cursor": {
         "argvPrefix": ["agent"],
         "defaultModel": "composer-2.5",
+        "defaultReasoningEffort": None,
+        "reasoningEffortModels": {},
     },
     "droid": {
         "binary": "droid",
         "models": {},
+        "defaultReasoningEffort": None,
+    },
+    "reasoning": {
+        "capabilities": {},
     },
     "policy": {
         "profile": "safe",
@@ -70,6 +76,7 @@ DEFAULT_CONFIG: JsonObject = {
     "codex": {
         "binary": "codex",
         "defaultModel": None,
+        "defaultReasoningEffort": None,
         "profile": None,
         "workSandbox": "workspace-write",
         "ephemeral": True,
@@ -286,6 +293,11 @@ def _validate_codex_section(codex: JsonValue) -> None:
             "invalid_codex_config",
             "codex.defaultModel must be a string or null.",
         )
+    _validate_provider_default_reasoning_effort(
+        codex.get("defaultReasoningEffort"),
+        path="codex.defaultReasoningEffort",
+        error="invalid_codex_config",
+    )
     profile = codex.get("profile")
     if profile is not None and not isinstance(profile, str):
         raise ConfigError("invalid_codex_config", "codex.profile must be a string or null.")
@@ -309,6 +321,118 @@ def _validate_codex_section(codex: JsonValue) -> None:
             "invalid_codex_config",
             "codex.ignoreUserConfig must be a boolean.",
         )
+
+
+def _validate_provider_default_reasoning_effort(
+    value: JsonValue,
+    *,
+    path: str,
+    error: str,
+) -> None:
+    if value is None:
+        return
+    if not _is_reasoning_effort_string(value):
+        raise ConfigError(error, f"{path} must be a non-empty string without whitespace or null.")
+
+
+def _validate_reasoning_effort_value(value: JsonValue, *, path: str) -> str:
+    if not _is_reasoning_effort_string(value):
+        raise ConfigError(
+            "invalid_reasoning_config",
+            f"{path} must be a non-empty string without whitespace.",
+        )
+    return value
+
+
+def _is_reasoning_effort_string(value: JsonValue) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and value == value.strip()
+        and not any(ch.isspace() for ch in value)
+    )
+
+
+def _validate_cursor_reasoning_models(value: JsonValue) -> None:
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        raise ConfigError(
+            "invalid_cursor_config",
+            "cursor.reasoningEffortModels must be an object.",
+        )
+    for effort, model in value.items():
+        if not _is_reasoning_effort_string(effort):
+            raise ConfigError(
+                "invalid_cursor_config",
+                "cursor.reasoningEffortModels effort keys must be non-empty strings without whitespace.",
+            )
+        if not isinstance(model, str) or not model:
+            raise ConfigError(
+                "invalid_cursor_config",
+                "cursor.reasoningEffortModels values must be non-empty strings.",
+            )
+
+
+def _validate_reasoning_section(reasoning: JsonValue) -> None:
+    if reasoning is None:
+        return
+    if not isinstance(reasoning, dict):
+        raise ConfigError("invalid_reasoning_config", "reasoning config must be an object.")
+    capabilities = reasoning.get("capabilities")
+    if capabilities is None:
+        return
+    if not isinstance(capabilities, dict):
+        raise ConfigError(
+            "invalid_reasoning_config",
+            "reasoning.capabilities must be an object.",
+        )
+    for harness, models in capabilities.items():
+        if not isinstance(harness, str) or not harness:
+            raise ConfigError(
+                "invalid_reasoning_config",
+                "reasoning.capabilities harness names must be non-empty strings.",
+            )
+        if not isinstance(models, dict):
+            raise ConfigError(
+                "invalid_reasoning_config",
+                f"reasoning.capabilities.{harness} must be an object.",
+            )
+        for model, declaration in models.items():
+            if not isinstance(model, str) or not model:
+                raise ConfigError(
+                    "invalid_reasoning_config",
+                    f"reasoning.capabilities.{harness} model names must be non-empty strings.",
+                )
+            if not isinstance(declaration, dict):
+                raise ConfigError(
+                    "invalid_reasoning_config",
+                    f"reasoning.capabilities.{harness}.{model} must be an object.",
+                )
+            supported = declaration.get("supported")
+            if not isinstance(supported, list) or not supported:
+                raise ConfigError(
+                    "invalid_reasoning_config",
+                    f"reasoning.capabilities.{harness}.{model}.supported must be a non-empty array.",
+                )
+            supported_values = [
+                _validate_reasoning_effort_value(
+                    item,
+                    path=f"reasoning.capabilities.{harness}.{model}.supported[]",
+                )
+                for item in supported
+            ]
+            default = declaration.get("default")
+            if default is not None:
+                default_value = _validate_reasoning_effort_value(
+                    default,
+                    path=f"reasoning.capabilities.{harness}.{model}.default",
+                )
+                if default_value not in supported_values:
+                    raise ConfigError(
+                        "invalid_reasoning_config",
+                        f"reasoning.capabilities.{harness}.{model}.default must be in supported.",
+                    )
 
 
 class InvalidIsolationError(Exception):
@@ -465,10 +589,21 @@ def validate_config(config: JsonObject) -> None:
         raise ConfigError(
             "invalid_cursor_config", "cursor.defaultModel must be a non-empty string."
         )
+    _validate_provider_default_reasoning_effort(
+        cursor.get("defaultReasoningEffort"),
+        path="cursor.defaultReasoningEffort",
+        error="invalid_cursor_config",
+    )
+    _validate_cursor_reasoning_models(cursor.get("reasoningEffortModels"))
     if not isinstance(droid, dict):
         raise ConfigError("invalid_droid_config", "droid config must be an object.")
     if not isinstance(droid.get("binary"), str) or not droid["binary"].strip():
         raise ConfigError("invalid_droid_config", "droid.binary must be a non-empty string.")
+    _validate_provider_default_reasoning_effort(
+        droid.get("defaultReasoningEffort"),
+        path="droid.defaultReasoningEffort",
+        error="invalid_droid_config",
+    )
     models = droid.get("models")
     if not isinstance(models, dict):
         raise ConfigError("invalid_droid_config", "droid.models must be an object.")
@@ -513,6 +648,7 @@ def validate_config(config: JsonObject) -> None:
                 )
     _validate_policy_section(config.get("policy"))
     _validate_codex_section(config.get("codex"))
+    _validate_reasoning_section(config.get("reasoning"))
     _validate_isolation_section(config.get("isolation"))
     _validate_worktrees_section(config.get("worktrees"))
 
