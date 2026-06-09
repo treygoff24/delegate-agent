@@ -355,6 +355,21 @@ class ValidationTests(unittest.TestCase):
             config_mod.validate_config(config)
         self.assertEqual(ctx.exception.error, "invalid_reasoning_config")
 
+    def test_reasoning_capabilities_reject_unknown_harness_keys(self):
+        # Declarations for harnesses that never consult the table (cursor,
+        # typos) must fail loudly instead of validating and being ignored.
+        config_mod = load_config_module()
+        config = copy.deepcopy(config_mod.DEFAULT_CONFIG)
+        config["reasoning"] = {
+            "capabilities": {
+                "cursor": {"sonnet-thinking": {"supported": ["high"]}},
+            }
+        }
+        with self.assertRaises(config_mod.ConfigError) as ctx:
+            config_mod.validate_config(config)
+        self.assertEqual(ctx.exception.error, "invalid_reasoning_config")
+        self.assertIn("cursor.reasoningEffortModels", ctx.exception.message)
+
     def test_cursor_reasoning_effort_models_must_be_strings(self):
         config_mod = load_config_module()
         config = copy.deepcopy(config_mod.DEFAULT_CONFIG)

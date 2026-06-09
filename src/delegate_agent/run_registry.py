@@ -392,27 +392,23 @@ def raw_status(state: JsonObject | None) -> str:
     return status
 
 
-def stale_reason(state: JsonObject | None) -> str | None:
-    if raw_status(state) != STATUS_RUNNING:
-        return None
-    pid = state.get("pid") if state else None
-    if not isinstance(pid, int) or isinstance(pid, bool) or pid < 1:
-        return "missing_pid"
-    alive = process_alive(pid)
-    if alive is False:
-        return "dead_pid"
-    return None
-
-
 def status_fields(state: JsonObject | None) -> JsonObject:
+    # Probe pid liveness once so effectiveStatus and staleReason cannot disagree
+    # when the process exits between two separate probes.
     raw = raw_status(state)
-    effective = effective_status(state)
+    effective = raw
+    reason: str | None = None
+    if raw == STATUS_RUNNING:
+        pid = state.get("pid") if state else None
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid < 1:
+            effective, reason = STATUS_STALE, "missing_pid"
+        elif process_alive(pid) is False:
+            effective, reason = STATUS_STALE, "dead_pid"
     fields: JsonObject = {
         "rawStatus": raw,
         "effectiveStatus": effective,
         "status": effective,
     }
-    reason = stale_reason(state)
     if reason is not None:
         fields["staleReason"] = reason
     return fields

@@ -54,13 +54,15 @@ Common causes:
 - Droid or Codex model support is not in config, the workspace cache, or bundled fallback data.
 - The effort string is misspelled. Delegate treats labels literally and does not translate between provider naming schemes.
 
+These failures apply to explicit per-run effort (`--reasoning-effort` or JSON run input). A config `defaultReasoningEffort` that cannot be satisfied does not fail the run; the run proceeds without reasoning effort and records a warning in the dry-run payload, manifest, and snapshot.
+
 For private or newly released models, declare support in `reasoning.capabilities` in config. To refresh workspace-local discovered data, run:
 
 ```bash
 delegate --json capabilities refresh
 ```
 
-Refresh may invoke child CLIs and writes `.delegate/capabilities/reasoning.json` only after the refreshed schema validates. That file is runtime state; do not commit it.
+Refresh may invoke child CLIs and writes `.delegate/capabilities/reasoning.json` only after the refreshed schema validates. A malformed cache file is ignored at run time and overwritten by the next refresh. That file is runtime state; do not commit it.
 
 ## Unexpected config source
 

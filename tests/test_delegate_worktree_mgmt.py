@@ -819,6 +819,12 @@ class WorktreeMgmtTests(unittest.TestCase):
             self.assertEqual(len(entries), 2)
             for e in entries:
                 self.assertEqual(e.get("harness"), "cursor")
+            summary = result["summary"]
+            # totalPersistentWorktrees is registry-wide; allStatusCounts is
+            # scoped to the harness filter (pre-status-filter).
+            self.assertEqual(summary["totalPersistentWorktrees"], 3)
+            self.assertEqual(sum(summary["allStatusCounts"].values()), 2)
+            self.assertEqual(summary["matched"], 2)
 
     def test_worktree_list_status_filter(self):
         _repo, path = self._make_repo()

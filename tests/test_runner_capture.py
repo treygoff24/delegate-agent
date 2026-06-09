@@ -84,6 +84,61 @@ class RunnerCaptureTests(unittest.TestCase):
         self.runner = load_module(RUNNER_PATH, "delegate_runner_under_test")
         self.registry = load_module(REGISTRY_PATH, "delegate_registry_runner_test")
 
+    def test_write_stdin_records_delivery_failure(self):
+        read_fd, write_fd = os.pipe()
+        os.close(read_fd)
+        pipe = os.fdopen(write_fd, "wb")
+        failures: list[str] = []
+        self.runner._write_stdin(pipe, "x" * 65536, failures)
+        self.assertEqual(len(failures), 1)
+        self.assertIn("stdin prompt delivery", failures[0])
+
+    def test_tracked_run_surfaces_stdin_delivery_failure(self):
+        # Child closes stdin without reading the prompt: the run must warn
+        # instead of silently proceeding as if delivery succeeded.
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        script = Path(temp.name) / "closer"
+        script.write_text(
+            "#!/usr/bin/env bash\nexec 0<&-\nsleep 0.2\nexit 0\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model="model-id",
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-05-20T21:42:33Z",
+            )
+            stderr = io.StringIO()
+            code, _payload = self.runner.execute_tracked(
+                [str(script)],
+                workspace,
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=stderr,
+                stdin_text="x" * (1 << 20),
+            )
+            self.assertEqual(code, 0)
+            self.assertIn("stdin prompt delivery", stderr.getvalue())
+            snapshot = json.loads(
+                (root / "runs" / run_id / "snapshot.json").read_text(encoding="utf-8")
+            )
+            warnings = snapshot.get("warnings", [])
+            self.assertTrue(any("stdin prompt delivery" in w for w in warnings))
+
     def test_tracked_run_writes_logs_and_bounded_json(self):
         temp, bin_dir = make_streaming_fake_bin()
         self.addCleanup(temp.cleanup)

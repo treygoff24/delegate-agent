@@ -8,12 +8,65 @@
 
 ---
 
+## Post-implementation amendments (2026-06-09)
+
+A recall-focused review after the initial implementation surfaced several places
+where the plan's letter produced bad operational outcomes. The code now deviates
+from the original text as follows; where this section conflicts with the body
+below, this section wins.
+
+1. **Config defaults degrade softly; only explicit requests fail closed.** The
+   plan applied fail-closed validation uniformly to the precedence chain. In
+   practice that meant one config line (`codex.defaultReasoningEffort` with the
+   shipped `defaultModel: null`, or `cursor.defaultReasoningEffort` without a
+   `reasoningEffortModels` mapping) hard-failed *every* run of that engine with
+   no per-run escape — config validation is shape-only, so nothing caught it
+   before launch. A default is a preference, not a contract: an unsatisfiable
+   config default now skips effort, records a warning in the dry-run payload /
+   manifest / snapshot, and the run proceeds. An explicit `--reasoning-effort`
+   or run-input `reasoningEffort` still fails closed exactly as planned.
+2. **The workspace cache is validated at the disk-read boundary, not at every
+   internal step.** The plan validated the cache payload inside merge and write
+   (up to five times per refresh) but never at load. Consequence: one malformed
+   cache entry shadowed valid bundled data and failed runs, and `capabilities
+   refresh` raised on the corrupt *existing* file, so the only recovery was
+   manual deletion. `load_reasoning_capability_cache` now validates and treats
+   malformed payloads as absent; refresh therefore self-heals by overwriting.
+   Validation runs once per real boundary: external `codex debug models` output
+   at parse, the cache file at load, and the merged payload at write.
+3. **`requested_effort`/`resolved_effort` collapsed to a single `effort`.**
+   No code path ever resolved to a different value, so the pair was threaded
+   through `ReasoningCapability`, `Request`, and `RunContext` for a distinction
+   that could not occur. The JSON schema is unchanged — payloads still emit both
+   `requestedReasoningEffort` and `resolvedReasoningEffort` (from one field) via
+   a single shared helper (`reasoning.add_reasoning_payload_fields`) used by
+   dry-run, manifest, and snapshot emission so they cannot drift.
+4. **`reasoning.capabilities` harness keys are restricted to `codex`/`droid`.**
+   The plan's validator accepted any harness key, but only codex and droid ever
+   consult the table — a declared `cursor` entry (or a typo) validated cleanly
+   and was silently inert. Unknown keys now fail validation with a pointer to
+   `cursor.reasoningEffortModels`.
+5. **Effort strings additionally reject `"` and `\`.** The resolved effort is
+   interpolated into a quoted Codex TOML override; the plan's
+   whitespace-only rule let a quote-bearing declared value produce malformed
+   `-c model_reasoning_effort="…"` argv.
+6. **Per-model `default` in capability declarations is informational only.**
+   The plan validated and displayed it but (deliberately) excluded it from the
+   effort precedence chain; that exclusion is now documented rather than left
+   implicit, since the field otherwise reads as a third default mechanism.
+7. **Codex stdin prompt delivery failures are surfaced.** The prompt moved from
+   argv to stdin during implementation; the writer thread originally swallowed
+   `BrokenPipeError`/`OSError`, which could silently launch a work-mode run with
+   an undelivered prompt. Failures now append a run warning and print to stderr.
+
+---
+
 ## Design decisions
 
 1. `--reasoning-effort LEVEL` is literal. Delegate must not silently coerce `xhigh` to `max`, `medium` to `high`, `none` to `off`, or `minimal` to `low`.
 2. Reasoning effort changes only model thinking depth, cost, or latency. It must not change Delegate `safe`/`work` mode, sandboxing, approvals, Droid autonomy, Cursor force flags, or Codex policy.
 3. Validation happens against the effective `(harness, model, transport)` tuple, not against a global enum.
-4. Unknown or custom models fail closed unless user config or a refreshed capability cache declares supported effort levels for that exact model.
+4. Unknown or custom models fail closed for explicitly requested effort unless user config or a refreshed capability cache declares supported effort levels for that exact model. (Amended: config-sourced defaults degrade to a warning instead — see amendments above.)
 5. Dry-run must expose the resolved effort plan and must never require child binaries.
 6. Ordinary dry-runs and launches never invoke child binaries for capability discovery. Explicit `delegate capabilities refresh` may invoke child CLIs, validate the discovered data, and write a workspace-scoped cache under `.delegate/capabilities/reasoning.json`.
 7. Capability source precedence is `config exact override > refreshed workspace cache > bundled fallback`. Config wins because users need a local escape hatch for private/custom models and stale bundled data.
@@ -109,6 +162,9 @@ Effective effort precedence:
 per-run request value > provider config default > child runtime default
 ```
 
+(Amended: a per-run request value fails closed when unsupported; an
+unsatisfiable provider config default is skipped with a warning.)
+
 Direct engine CLI requests and `run --input-json` requests are separate invocation shapes in v1. A direct engine command gets its per-run value from `--reasoning-effort`; JSON-run gets its per-run value from `reasoningEffort`. If effort is omitted at every Delegate layer, emit no effort-related argv and preserve current behavior.
 
 ## New error codes
@@ -140,7 +196,7 @@ For Cursor model-selection, also preserve the normal `model` field so the chosen
 **Parallel:** no
 **Blocked by:** none
 **Owned files:** `src/delegate_agent/reasoning.py`, `tests/test_reasoning_capabilities.py`
-**Invariants:** Capability resolution must not run child binaries during ordinary dry-run tests. Unknown models fail closed unless config or a refreshed cache declares them.
+**Invariants:** Capability resolution must not run child binaries during ordinary dry-run tests. Unknown models fail closed for explicit effort requests unless config or a refreshed cache declares them; config defaults degrade to a warning.
 **Out of scope:** Child argv construction, CLI parser changes, docs.
 
 **Files:**
@@ -307,7 +363,7 @@ def resolve_reasoning_capability(
     ...
 ```
 
-The function returns `None` when `requested_effort` is `None`. Provider defaults are resolved before this function is called. If an effort is requested for Codex or Droid and `model` is `None`, raise `unsupported_reasoning_effort` because the plan cannot validate the provider/model/harness tuple.
+The function returns `None` when `requested_effort` is `None`. Provider defaults are resolved before this function is called. If an effort is requested for Codex or Droid and `model` is `None`, raise `unsupported_reasoning_effort` because the plan cannot validate the provider/model/harness tuple. (Amended: the caller catches this for config-sourced defaults and downgrades it to a run warning.)
 
 **Step 4: Add bundled static fallback**
 
@@ -1204,7 +1260,7 @@ Expected: PASS.
 **Parallel:** no
 **Blocked by:** Tasks 3, 4, 5
 **Owned files:** `README.md`, `docs/cli-reference.md`, `docs/configuration.md`, `docs/agent-setup.md`, `docs/troubleshooting.md`, `docs/security-model.md`, `src/delegate_agent/command_help.py`, `tests/test_command_help.py`, `tests/test_delegate_help_cli.py`
-**Invariants:** Docs must say effort is model-specific and fail-closed. Do not imply PyPI publication or private model availability.
+**Invariants:** Docs must say effort is model-specific and fail-closed for explicit requests (config defaults warn and skip). Do not imply PyPI publication or private model availability.
 **Out of scope:** Code behavior changes.
 
 **Files:**
@@ -1225,7 +1281,7 @@ Add `--reasoning-effort LEVEL` to `cursor`, `codex`, `droid`, and `dry-run` spec
 Add notes:
 
 ```text
-Reasoning effort is validated against the resolved harness and model. Unsupported values fail closed.
+Reasoning effort is validated against the resolved harness and model. Unsupported explicit values fail closed; unsatisfiable config defaults warn and are skipped.
 ```
 
 **Step 2: Update CLI reference**

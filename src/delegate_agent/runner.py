@@ -10,12 +10,12 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import BinaryIO, TextIO
 
 from delegate_agent import config as delegate_config
-from delegate_agent import harness_events, rendering, run_registry
+from delegate_agent import harness_events, reasoning, rendering, run_registry
 from delegate_agent.json_types import JsonObject
 
 STDOUT_LOG = run_registry.STDOUT_LOG
@@ -77,8 +77,7 @@ class RunContext:
     worktree_status: str | None = None
     safe_workspace_method: str | None = None
     warnings: tuple[str, ...] = ()
-    requested_reasoning_effort: str | None = None
-    resolved_reasoning_effort: str | None = None
+    reasoning_effort: str | None = None
     reasoning_effort_source: str | None = None
     reasoning_capability_source: str | None = None
     reasoning_transport: str | None = None
@@ -175,21 +174,8 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
         payload["safeWorkspaceMethod"] = ctx.safe_workspace_method
     if ctx.warnings:
         payload["warnings"] = list(ctx.warnings)
-    add_reasoning_context_fields(payload, ctx)
+    reasoning.add_reasoning_payload_fields(payload, ctx)
     return payload
-
-
-def add_reasoning_context_fields(payload: JsonObject, ctx: RunContext) -> None:
-    if ctx.requested_reasoning_effort is not None:
-        payload["requestedReasoningEffort"] = ctx.requested_reasoning_effort
-    if ctx.resolved_reasoning_effort is not None:
-        payload["resolvedReasoningEffort"] = ctx.resolved_reasoning_effort
-    if ctx.reasoning_effort_source is not None:
-        payload["reasoningEffortSource"] = ctx.reasoning_effort_source
-    if ctx.reasoning_capability_source is not None:
-        payload["reasoningCapabilitySource"] = ctx.reasoning_capability_source
-    if ctx.reasoning_transport is not None:
-        payload["reasoningTransport"] = ctx.reasoning_transport
 
 
 def build_state(
@@ -280,7 +266,7 @@ def build_snapshot(
     snapshot["effectiveIsolation"] = ctx.effective_isolation
     snapshot["isolationLifecycle"] = ctx.isolation_lifecycle
     snapshot["preservedWorkspace"] = ctx.preserved_workspace
-    add_reasoning_context_fields(snapshot, ctx)
+    reasoning.add_reasoning_payload_fields(snapshot, ctx)
 
     # Surface persistent-worktree fields.
     if ctx.source_git_root is not None:
@@ -460,7 +446,7 @@ def completion_json_payload(
         payload["safeWorkspaceMethod"] = ctx.safe_workspace_method
     if ctx.warnings:
         payload["warnings"] = list(ctx.warnings)
-    add_reasoning_context_fields(payload, ctx)
+    reasoning.add_reasoning_payload_fields(payload, ctx)
 
     # Worktree cleanup commands for persistent worktrees.
     cleanup = _worktree_cleanup_commands(ctx)
@@ -499,27 +485,25 @@ def _join_drain_thread(thread: threading.Thread, pipe: BinaryIO | None) -> None:
         thread.join(timeout=1.0)
 
 
-def _write_stdin(pipe: BinaryIO | None, stdin_text: str) -> None:
+def _write_stdin(pipe: BinaryIO | None, stdin_text: str, failures: list[str]) -> None:
     if pipe is None:
         return
     try:
         pipe.write(stdin_text.encode("utf-8"))
         pipe.flush()
-    except (BrokenPipeError, OSError):
-        pass
+    except (BrokenPipeError, OSError) as exc:
+        # The child may have exited or closed stdin before reading the prompt.
+        # Record it so the run can report possibly-undelivered prompt text
+        # instead of silently proceeding as if delivery succeeded.
+        failures.append(f"stdin prompt delivery may have failed: {exc}")
     finally:
         with contextlib.suppress(OSError):
             pipe.close()
 
 
 def _join_stdin_thread(thread: threading.Thread | None, pipe: BinaryIO | None) -> None:
-    if thread is None:
-        return
-    thread.join(timeout=DRAIN_JOIN_TIMEOUT_SEC)
-    if thread.is_alive() and pipe is not None:
-        with contextlib.suppress(OSError):
-            pipe.close()
-        thread.join(timeout=1.0)
+    if thread is not None:
+        _join_drain_thread(thread, pipe)
 
 
 def _materialize_prompt_file_argv(
@@ -660,10 +644,11 @@ def execute_tracked(
             stdout_thread.start()
             stderr_thread.start()
             stdin_thread: threading.Thread | None = None
+            stdin_failures: list[str] = []
             if stdin_text is not None:
                 stdin_thread = threading.Thread(
                     target=_write_stdin,
-                    args=(process.stdin, stdin_text),
+                    args=(process.stdin, stdin_text, stdin_failures),
                     daemon=True,
                 )
                 stdin_thread.start()
@@ -680,6 +665,11 @@ def execute_tracked(
             duration_ms = int((time.monotonic() - started) * 1000)
     finally:
         _cleanup_prompt_file_dir(prompt_temp_dir)
+
+    if stdin_failures:
+        ctx = replace(ctx, warnings=(*ctx.warnings, *stdin_failures))
+        for failure in stdin_failures:
+            print(f"warning: {failure}", file=stderr)
 
     stdout_bytes = stdout_bytes_counter[0]
     stderr_bytes = stderr_bytes_counter[0]

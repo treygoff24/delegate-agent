@@ -11,6 +11,7 @@ if SRC not in sys.path:
 from delegate_agent.reasoning import (  # noqa: E402
     ReasoningCapabilityError,
     build_reasoning_capabilities_payload,
+    normalize_effort,
     resolve_reasoning_capability,
 )
 
@@ -171,6 +172,14 @@ class ReasoningCapabilityTests(unittest.TestCase):
                 config={},
             )
         self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
+
+    def test_effort_strings_reject_toml_quoting_hazards(self):
+        # Effort values are interpolated into a quoted Codex TOML override, so
+        # quote/backslash characters must be rejected at the input boundary.
+        for bad in ('hi"gh', "hi\\gh", "hi gh", "", None, 3):
+            with self.assertRaises(ReasoningCapabilityError):
+                normalize_effort(bad)
+        self.assertEqual(normalize_effort("xhigh"), "xhigh")
 
     def test_cursor_capabilities_aggregate_efforts_by_model(self):
         payload = build_reasoning_capabilities_payload(

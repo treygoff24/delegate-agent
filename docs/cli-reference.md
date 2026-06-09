@@ -236,7 +236,10 @@ recorded child stdout stream using the same event parser used during live
 tracking. Codex recovery only promotes an `agent_message` after the stream
 reaches `turn.completed`, so progress messages are not treated as final reports.
 JSON output marks recovered reports with `synthetic: true` and
-`source: "stdout.log"`. Synthetic recovery may fail when the stdout stream is
+`source: "stdout.log"`; text output flags them in the section header
+(`=== completionReport (synthetic: recovered from stdout.log tail) ===`), and
+tailed log sections carry a `(last N lines; full log B bytes)` header cue.
+Synthetic recovery may fail when the stdout stream is
 truncated, malformed, or lacks a completed final message. JSON failures for
 explicit `--completion-report` include `diagnostics` (run status and stdout /
 stderr presence and byte counts) plus `nextActions` with bounded fallback
@@ -253,7 +256,7 @@ delegate worktree prune [--merged] [--older-than DAYS] [--harness HARNESS] [--in
 delegate worktree gc [--dry-run]
 ```
 
-`worktree show --latest HARNESS` selects the latest persistent worktree for the harness, not merely the latest run overall. `worktree list` JSON includes a `summary` with status counts, registry drift counts, warning counts, `autoPruneMode`, and whether the returned operation was read-only. `worktree gc` JSON includes `mode`, `effects`, per-entry `action`, and orphan `safeAction` fields to distinguish dry-run inspection from registry reconciliation; `gc` never deletes worktree directories.
+`worktree show --latest HARNESS` selects the latest persistent worktree for the harness, not merely the latest run overall. `worktree list` JSON includes a `summary` with status counts, registry drift counts, warning counts, `autoPruneMode`, and whether the returned operation was read-only; `summary.totalPersistentWorktrees` is always registry-wide, while `allStatusCounts` is scoped to the `--harness` filter (pre-status-filter) and `statusCounts` to the visible entries. `worktree gc` JSON includes `mode`, `effects`, per-entry `action`, and orphan `safeAction` fields to distinguish dry-run inspection from registry reconciliation; `gc` never deletes worktree directories.
 
 Worktree JSON schemas:
 

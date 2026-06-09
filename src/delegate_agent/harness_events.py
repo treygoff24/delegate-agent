@@ -12,6 +12,13 @@ EVENT_LIMIT = 500
 EVENT_HEAD = 100
 EVENT_TAIL = 400
 
+# Harnesses whose streams emit interim assistant messages that are safe to
+# surface as a recovered completion report when a run dies before its final
+# completion event. Codex is excluded on purpose: its interim agent_message
+# events are preamble ("I'll start by..."), and only a message sealed by
+# turn.completed is the real answer.
+ASSISTANT_RECOVERY_HARNESSES = frozenset({"cursor", "droid"})
+
 
 @dataclass
 class NormalizedEvent:
@@ -45,7 +52,7 @@ class StreamAccumulator:
     current: str | None = None
     _assistant_text_cache: str | None = field(default=None, repr=False)
     _codex_completion_candidate: str | None = field(default=None, repr=False)
-    _recoverable_assistant_candidates: list[str] = field(default_factory=list, repr=False)
+    _last_recoverable_assistant_text: str | None = field(default=None, repr=False)
 
     def _invalidate_assistant_text_cache(self) -> None:
         self._assistant_text_cache = None
@@ -120,16 +127,19 @@ class StreamAccumulator:
             return
         text = _extract_text(payload.get("content"))
         if text:
-            self._record_assistant_text(text)
+            self._record_recoverable_assistant_text(text)
 
     def _ingest_cursor_assistant(self, payload: JsonObject) -> None:
         message = payload.get("message")
         if isinstance(message, dict):
             text = _extract_text(message.get("content"))
             if text:
-                stripped = self._record_assistant_text(text)
-                if stripped:
-                    self._recoverable_assistant_candidates.append(stripped)
+                self._record_recoverable_assistant_text(text)
+
+    def _record_recoverable_assistant_text(self, text: str) -> None:
+        stripped = self._record_assistant_text(text)
+        if stripped:
+            self._last_recoverable_assistant_text = stripped
 
     def _ingest_completion(self, payload: JsonObject) -> None:
         final_text = payload.get("finalText")
@@ -250,9 +260,7 @@ class StreamAccumulator:
 
     @property
     def recoverable_assistant_text(self) -> str | None:
-        if not self._recoverable_assistant_candidates:
-            return None
-        return self._recoverable_assistant_candidates[-1]
+        return self._last_recoverable_assistant_text
 
     def bounded_recent_events(self) -> tuple[list[JsonObject], JsonObject]:
         serialized = [event.to_dict() for event in self.events]

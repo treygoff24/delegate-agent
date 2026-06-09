@@ -140,13 +140,16 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         options=(_REASONING_EFFORT_OPTION, _PROMPT_FILE_OPTION),
         examples=(
             'delegate codex safe "Review this workspace. Do not edit files."',
-            'delegate codex safe --reasoning-effort high "Review this workspace."',
+            'delegate codex safe --reasoning-effort high "Review this workspace."'
+            "  # requires codex.defaultModel",
             'delegate codex work "Implement the scoped fix, run the named check, report changes."',
         ),
         notes=(
             "Model selection uses codex.defaultModel in config or the run-input JSON model; "
             "there is no CLI model alias.",
-            "Reasoning effort is validated against the resolved model and emitted as a Codex config override.",
+            "Reasoning effort is validated against the resolved model and emitted as a Codex "
+            "config override; --reasoning-effort therefore requires codex.defaultModel "
+            "(or a run-input model) to be set.",
             "Codex profile (codex.profile) is config-only.",
         ),
         see_also=("cursor", "droid", "models", "agent-help"),

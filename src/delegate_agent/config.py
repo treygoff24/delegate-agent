@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 
+from delegate_agent import reasoning
 from delegate_agent.json_types import JsonObject, JsonValue, is_non_negative_int
 
 DEFAULT_CONFIG_PATH = Path.home() / ".delegate" / "config.json"
@@ -331,26 +332,17 @@ def _validate_provider_default_reasoning_effort(
 ) -> None:
     if value is None:
         return
-    if not _is_reasoning_effort_string(value):
+    if not reasoning.is_valid_effort_string(value):
         raise ConfigError(error, f"{path} must be a non-empty string without whitespace or null.")
 
 
 def _validate_reasoning_effort_value(value: JsonValue, *, path: str) -> str:
-    if not _is_reasoning_effort_string(value):
+    if not reasoning.is_valid_effort_string(value):
         raise ConfigError(
             "invalid_reasoning_config",
             f"{path} must be a non-empty string without whitespace.",
         )
     return value
-
-
-def _is_reasoning_effort_string(value: JsonValue) -> bool:
-    return (
-        isinstance(value, str)
-        and bool(value)
-        and value == value.strip()
-        and not any(ch.isspace() for ch in value)
-    )
 
 
 def _validate_cursor_reasoning_models(value: JsonValue) -> None:
@@ -362,7 +354,7 @@ def _validate_cursor_reasoning_models(value: JsonValue) -> None:
             "cursor.reasoningEffortModels must be an object.",
         )
     for effort, model in value.items():
-        if not _is_reasoning_effort_string(effort):
+        if not reasoning.is_valid_effort_string(effort):
             raise ConfigError(
                 "invalid_cursor_config",
                 "cursor.reasoningEffortModels effort keys must be non-empty strings without whitespace.",
@@ -374,12 +366,12 @@ def _validate_cursor_reasoning_models(value: JsonValue) -> None:
             )
 
 
-def _validate_reasoning_section(reasoning: JsonValue) -> None:
-    if reasoning is None:
+def _validate_reasoning_section(section: JsonValue) -> None:
+    if section is None:
         return
-    if not isinstance(reasoning, dict):
+    if not isinstance(section, dict):
         raise ConfigError("invalid_reasoning_config", "reasoning config must be an object.")
-    capabilities = reasoning.get("capabilities")
+    capabilities = section.get("capabilities")
     if capabilities is None:
         return
     if not isinstance(capabilities, dict):
@@ -388,10 +380,15 @@ def _validate_reasoning_section(reasoning: JsonValue) -> None:
             "reasoning.capabilities must be an object.",
         )
     for harness, models in capabilities.items():
-        if not isinstance(harness, str) or not harness:
+        # Only codex and droid consult this table at launch. Accepting other
+        # keys (e.g. cursor, or a typo) would validate cleanly and then be
+        # silently ignored; cursor reasoning lives in cursor.reasoningEffortModels.
+        if harness not in ("codex", "droid"):
             raise ConfigError(
                 "invalid_reasoning_config",
-                "reasoning.capabilities harness names must be non-empty strings.",
+                f"reasoning.capabilities.{harness} is not supported; capability "
+                "declarations apply to codex and droid only (cursor uses "
+                "cursor.reasoningEffortModels).",
             )
         if not isinstance(models, dict):
             raise ConfigError(
