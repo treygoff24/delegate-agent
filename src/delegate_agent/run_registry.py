@@ -288,6 +288,10 @@ DEFAULT_RUNS_LIMIT = 20
 STATUS_RUNNING = "running"
 STATUS_STALE = "stale"
 STATUS_UNKNOWN = "unknown"
+STATUS_FILTER_ACTIVE = "active"
+STATUS_FILTER_RECENT = "recent"
+STATUS_FILTER_RUNNING = "running"
+STATUS_FILTER_STALE = "stale"
 
 UTC_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
@@ -377,6 +381,49 @@ def effective_status(state: JsonObject | None) -> str:
     if alive is False:
         return STATUS_STALE
     return STATUS_RUNNING
+
+
+def raw_status(state: JsonObject | None) -> str:
+    if not state:
+        return STATUS_UNKNOWN
+    status = state.get("status")
+    if not isinstance(status, str) or not status:
+        return STATUS_UNKNOWN
+    return status
+
+
+def stale_reason(state: JsonObject | None) -> str | None:
+    if raw_status(state) != STATUS_RUNNING:
+        return None
+    pid = state.get("pid") if state else None
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid < 1:
+        return "missing_pid"
+    alive = process_alive(pid)
+    if alive is False:
+        return "dead_pid"
+    return None
+
+
+def status_fields(state: JsonObject | None) -> JsonObject:
+    raw = raw_status(state)
+    effective = effective_status(state)
+    fields: JsonObject = {
+        "rawStatus": raw,
+        "effectiveStatus": effective,
+        "status": effective,
+    }
+    reason = stale_reason(state)
+    if reason is not None:
+        fields["staleReason"] = reason
+    return fields
+
+
+def stale_next_actions(alias_or_run_id: str) -> list[str]:
+    return [
+        f"delegate snapshot {alias_or_run_id}",
+        f"delegate run-output {alias_or_run_id} --completion-report",
+        f"delegate run-output {alias_or_run_id} --stderr --tail 100",
+    ]
 
 
 def suggest_handles(index: JsonObject, handle: str, *, limit: int = 8) -> list[str]:
@@ -515,16 +562,19 @@ def build_run_summary(
     stdout_bytes, stderr_bytes = effective_log_byte_sizes(registry_root, run_id)
     alias = index_entry.get("alias")
     harness = index_entry.get("harness")
+    handle = alias if isinstance(alias, str) else run_id
     summary: JsonObject = {
         "runId": run_id,
         "alias": alias if isinstance(alias, str) else None,
         "harness": harness if isinstance(harness, str) else None,
-        "status": effective_status(state),
         "stdoutBytes": stdout_bytes,
         "stderrBytes": stderr_bytes,
         "warnings": large_log_warnings(stdout_bytes, stderr_bytes),
         "activityAt": activity_timestamp(state, manifest),
     }
+    summary.update(status_fields(state))
+    if summary.get("effectiveStatus") == STATUS_STALE:
+        summary["nextActions"] = stale_next_actions(handle)
     if state and isinstance(state.get("current"), str):
         summary["current"] = state["current"]
     if isinstance(alias, str):
@@ -552,6 +602,7 @@ def list_run_summaries(
     index: JsonObject,
     *,
     active: bool = False,
+    status_filter: str | None = None,
     harness: str | None = None,
     limit: int = DEFAULT_RUNS_LIMIT,
 ) -> list[JsonObject]:
@@ -567,6 +618,10 @@ def list_run_summaries(
         summary = build_run_summary(registry_root, run_id, entry)
         status = summary.get("status")
         if active and status not in (STATUS_RUNNING, STATUS_STALE):
+            continue
+        if status_filter == STATUS_FILTER_RUNNING and status != STATUS_RUNNING:
+            continue
+        if status_filter == STATUS_FILTER_STALE and status != STATUS_STALE:
             continue
         summaries.append(summary)
     summaries.sort(key=lambda item: item.get("activityAt", ""), reverse=True)

@@ -14,6 +14,13 @@ Use it when you want a predictable wrapper around prompts like:
 
 Delegate does **not** commit, push, merge, deploy, publish, or run a background service. It builds the child command, adds safety framing, launches the selected runtime, and records local run metadata for later inspection.
 
+Prompt handling is provider-specific: Codex prompts are delivered to the child
+runtime over stdin; Droid prompts are delivered through a private temporary
+prompt file using Droid's `--file` option; Cursor Agent currently requires
+positional prompt argv. Delegate redacts Cursor prompt argv in dry-run output
+and run manifests, but true process-argv hiding for Cursor depends on Cursor
+exposing a stdin or prompt-file transport.
+
 ## Install from source
 
 Delegate requires Python 3.11 or newer. It is currently documented as a GitHub-source install, not a PyPI package.
@@ -108,8 +115,13 @@ Inspect tracked output by alias:
 ```bash
 delegate runs --recent
 delegate snapshot <alias-or-runId>
-delegate run-output <alias-or-runId> --completion-report
+delegate run-output <alias-or-runId>
 ```
+
+`run-output` defaults to the best available parent-facing output: a completion
+report when present, a recovered final assistant message when possible, or
+bounded stdout/stderr diagnostics. Use `--completion-report` when you want that
+selector explicitly.
 
 ## Safe mode, work mode, and worktree isolation
 

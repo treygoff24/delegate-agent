@@ -262,6 +262,21 @@ class RegressionGuardTests(HelpCliTestBase):
         with self.assertRaises(self.delegate.DelegateError) as ctx:
             self.delegate.parse_cli(["dry-run", "droid", "minimax", "work", "hello", "--json"])
         self.assertEqual(ctx.exception.error, "misplaced_global_option")
+        self.assertIn("delegate --json", ctx.exception.message)
+
+    def test_trailing_json_is_accepted_for_inspection_commands(self):
+        cases = (
+            ["describe", "--json"],
+            ["models", "--json"],
+            ["capabilities", "--json"],
+            ["snapshot", "cursor", "--json"],
+            ["runs", "--stale", "--json"],
+            ["run-output", "cursor", "--completion-report", "--json"],
+        )
+        for argv in cases:
+            with self.subTest(argv=argv):
+                parsed = self.delegate.parse_cli(argv)
+                self.assertTrue(parsed.json_mode)
 
 
 class UnknownTopicTests(HelpCliTestBase):

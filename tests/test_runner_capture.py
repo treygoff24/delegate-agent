@@ -169,6 +169,108 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertIn("stdin:eof", stdout_text)
             self.assertNotIn("stdin:blocked", stdout_text)
 
+    def test_tracked_run_can_deliver_prompt_via_stdin_without_manifest_leak(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        script = Path(temp.name) / "stdin_echo.py"
+        script.write_text(
+            "import sys\ndata = sys.stdin.read()\nprint('STDIN:' + data)\n",
+            encoding="utf-8",
+        )
+        secret_prompt = "TOP-SECRET-STDIN-PROMPT"
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-05-20T21:42:33Z",
+                prompt_transport="stdin",
+            )
+            code, _payload = self.runner.execute_tracked(
+                [sys.executable, str(script), "-"],
+                workspace,
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+                stdin_text=secret_prompt,
+                manifest_argv=[sys.executable, str(script), "<prompt via stdin>"],
+            )
+            self.assertEqual(code, 0)
+            run_path = self.registry.run_directory(root, run_id)
+            stdout_text = (run_path / "stdout.log").read_text(encoding="utf-8")
+            self.assertIn(secret_prompt, stdout_text)
+            manifest = json.loads((run_path / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["promptTransport"], "stdin")
+            self.assertNotIn(secret_prompt, json.dumps(manifest["argv"]))
+
+    def test_tracked_run_can_deliver_prompt_via_private_file_without_manifest_leak(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        script = Path(temp.name) / "prompt_file_reader.py"
+        script.write_text(
+            "import sys\n"
+            "from pathlib import Path\n"
+            "prompt_path = Path(sys.argv[sys.argv.index('--file') + 1])\n"
+            "print('PROMPT_FILE:' + str(prompt_path))\n"
+            "print('PROMPT:' + prompt_path.read_text(encoding='utf-8'))\n",
+            encoding="utf-8",
+        )
+        secret_prompt = "TOP-SECRET-FILE-PROMPT"
+        placeholder = "<delegate-prompt-file>"
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="droid")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="droid",
+                engine="droid",
+                mode="safe",
+                model="model-id",
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-05-20T21:42:33Z",
+                prompt_transport="file",
+            )
+            code, _payload = self.runner.execute_tracked(
+                [sys.executable, str(script), "--file", placeholder],
+                workspace,
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+                prompt_file_text=secret_prompt,
+                prompt_file_placeholder=placeholder,
+                manifest_argv=[sys.executable, str(script), "--file", "<prompt file>"],
+            )
+            self.assertEqual(code, 0)
+            run_path = self.registry.run_directory(root, run_id)
+            stdout_text = (run_path / "stdout.log").read_text(encoding="utf-8")
+            self.assertIn(secret_prompt, stdout_text)
+            prompt_file_line = next(
+                line.removeprefix("PROMPT_FILE:")
+                for line in stdout_text.splitlines()
+                if line.startswith("PROMPT_FILE:")
+            )
+            self.assertFalse(Path(prompt_file_line).exists())
+            manifest = json.loads((run_path / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["promptTransport"], "file")
+            self.assertNotIn(secret_prompt, json.dumps(manifest["argv"]))
+
     def test_tracked_codex_item_completed_writes_completion_report(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
@@ -392,6 +494,26 @@ class RunnerCaptureTests(unittest.TestCase):
                 )
             self.assertEqual(code, 0)
             self.assertEqual(marker.read_text(encoding="utf-8"), "stdin:eof")
+
+    def test_passthrough_run_can_deliver_prompt_via_stdin(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        script = Path(temp.name) / "stdin_writer.py"
+        script.write_text(
+            "import sys\n"
+            "from pathlib import Path\n"
+            "Path(sys.argv[1]).write_text(sys.stdin.read(), encoding='utf-8')\n",
+            encoding="utf-8",
+        )
+        with tempfile.TemporaryDirectory() as workspace:
+            marker = Path(workspace) / "stdin-prompt.txt"
+            code = self.runner.execute_passthrough(
+                [sys.executable, str(script), str(marker)],
+                workspace,
+                stdin_text="PROMPT-VIA-STDIN",
+            )
+            self.assertEqual(code, 0)
+            self.assertEqual(marker.read_text(encoding="utf-8"), "PROMPT-VIA-STDIN")
 
     def test_completion_json_payload_always_includes_exit_code(self):
         ctx = self.runner.RunContext(

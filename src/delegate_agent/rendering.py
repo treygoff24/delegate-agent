@@ -174,7 +174,7 @@ def merge_snapshot_view(
         }
     view.setdefault("ok", True)
     view["runId"] = run_id
-    view["status"] = run_registry.effective_status(state)
+    view.update(run_registry.status_fields(state))
     view["stdoutBytes"] = stdout_bytes
     view["stderrBytes"] = stderr_bytes
     if state:
@@ -236,6 +236,8 @@ def merge_snapshot_view(
         view["warnings"] = warnings
     if isinstance(alias, str):
         view.setdefault("snapshotCommand", run_registry.snapshot_command(alias))
+        if view.get("effectiveStatus") == run_registry.STATUS_STALE:
+            view.setdefault("nextActions", run_registry.stale_next_actions(alias))
         if "completionReport" in view and isinstance(view["completionReport"], dict):
             view["completionReport"].setdefault(
                 "command",
@@ -256,6 +258,17 @@ def render_snapshot_text(view: JsonObject, stdout: TextIO) -> None:
     started_at = view.get("startedAt")
     age = format_age(started_at if isinstance(started_at, str) else None)
     print(f"{alias} · {status} · {age} elapsed", file=stdout)
+    raw_status = view.get("rawStatus")
+    effective_status = view.get("effectiveStatus")
+    stale_reason = view.get("staleReason")
+    if (
+        raw_status != effective_status
+        and isinstance(raw_status, str)
+        and isinstance(effective_status, str)
+    ):
+        print(f"status detail: raw={raw_status} effective={effective_status}", file=stdout)
+    if isinstance(stale_reason, str) and stale_reason:
+        print(f"stale reason: {stale_reason}", file=stdout)
     for key, label in (
         ("cwd", "cwd"),
         ("executionCwd", "execution cwd"),
@@ -330,6 +343,12 @@ def render_snapshot_text(view: JsonObject, stdout: TextIO) -> None:
         for warning in warnings:
             if isinstance(warning, str):
                 print(f"  - {warning}", file=stdout)
+    next_actions = view.get("nextActions")
+    if isinstance(next_actions, list) and next_actions:
+        print("next actions:", file=stdout)
+        for action in next_actions:
+            if isinstance(action, str):
+                print(f"  - {action}", file=stdout)
     completion = view.get("completionReport")
     if isinstance(completion, dict):
         command = completion.get("command")
@@ -412,7 +431,7 @@ def render_worktree_cleanup_commands(cleanup: JsonObject, stdout: TextIO) -> Non
 
 
 def render_run_output_text(sections: dict[str, str], stdout: TextIO) -> None:
-    for name in ("completionReport", "stdout", "stderr"):
+    for name in ("completionReport", "stdout", "stderr", "diagnostics"):
         content = sections.get(name)
         if not content:
             continue

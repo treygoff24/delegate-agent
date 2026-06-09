@@ -244,6 +244,27 @@ def load_persistent_records(registry_root: Path) -> list[JsonObject]:
     return records
 
 
+def latest_persistent_record_for_harness(
+    registry_root: Path,
+    harness: str,
+) -> JsonObject | None:
+    matches = [
+        record
+        for record in load_persistent_records(registry_root)
+        if record.get("harness") == harness
+    ]
+    if not matches:
+        return None
+    matches.sort(
+        key=lambda record: (
+            str(record.get("lastActivityAt") or ""),
+            str(record.get("runId") or ""),
+        ),
+        reverse=True,
+    )
+    return matches[0]
+
+
 def _reload_record(registry_root: Path, run_id: str) -> JsonObject | None:
     index = run_registry.load_index(registry_root)
     index_entry = index.get("runs", {}).get(run_id)
@@ -484,10 +505,14 @@ def decorate_record(record: JsonObject, *, include_detached: bool = False) -> Js
         "createdAt": record.get("createdAt"),
         "lastActivityAt": record.get("lastActivityAt"),
         "computedAt": _utc_now_iso(),
+        "registryWorktreeStatus": record.get("registryWorktreeStatus"),
         "worktreeStatus": status,
         "dirty": dirty,
         "mergedIntoSource": merged,
     }
+    registry_status = record.get("registryWorktreeStatus")
+    if isinstance(registry_status, str) and registry_status != status:
+        output["registryStatusDiffers"] = True
     all_warnings = [*warnings, *dirty_warnings, *merged_warnings]
     if all_warnings:
         output["warnings"] = all_warnings
@@ -506,19 +531,46 @@ def list_worktrees(
     include_detached: bool = False,
 ) -> JsonObject:
     entries: list[JsonObject] = []
+    all_status_counts: dict[str, int] = {status_key: 0 for status_key in sorted(VALID_STATUSES)}
     for record in load_persistent_records(registry_root):
         if harness is not None and record.get("harness") != harness:
             continue
-        entry = decorate_record(record, include_detached=include_detached)
+        unfiltered_entry = decorate_record(record, include_detached=include_detached)
+        unfiltered_status = unfiltered_entry.get("worktreeStatus")
+        if isinstance(unfiltered_status, str):
+            all_status_counts[unfiltered_status] = all_status_counts.get(unfiltered_status, 0) + 1
+        entry = unfiltered_entry
         if status is not None and entry.get("worktreeStatus") != status:
             continue
         entries.append(entry)
     entries.sort(key=lambda item: str(item.get("lastActivityAt", "")), reverse=True)
+    visible_status_counts: dict[str, int] = {}
+    warning_count = 0
+    registry_drift_count = 0
+    for entry in entries:
+        entry_status = entry.get("worktreeStatus")
+        if isinstance(entry_status, str):
+            visible_status_counts[entry_status] = visible_status_counts.get(entry_status, 0) + 1
+        entry_warnings = entry.get("warnings")
+        if isinstance(entry_warnings, list):
+            warning_count += len(entry_warnings)
+        if entry.get("registryStatusDiffers") is True:
+            registry_drift_count += 1
     return {
         "schema": SCHEMA_LIST,
         "ok": True,
         "entries": entries[:limit],
         "limit": limit,
+        "summary": {
+            "totalPersistentWorktrees": sum(all_status_counts.values()),
+            "visible": min(len(entries), limit),
+            "matched": len(entries),
+            "statusCounts": visible_status_counts,
+            "allStatusCounts": all_status_counts,
+            "warningCount": warning_count,
+            "registryStatusDriftCount": registry_drift_count,
+            "readOnly": True,
+        },
     }
 
 
@@ -567,15 +619,16 @@ def resolve_record(
 ) -> JsonObject:
     index = run_registry.load_index(registry_root)
     if latest_harness is not None:
-        run_id = run_registry.latest_run_id_for_harness(registry_root, index, latest_harness)
-        if run_id is None:
+        latest_record = latest_persistent_record_for_harness(registry_root, latest_harness)
+        if latest_record is None:
             raise WorktreeManagementError(
                 _error_payload(
                     "unknown_handle",
-                    f"No runs found for harness: {latest_harness}",
+                    f"No persistent worktree runs found for harness: {latest_harness}",
                     next_actions=["delegate worktree list"],
                 )
             )
+        return latest_record
     else:
         assert handle is not None
         resolved = run_registry.resolve_handle(index, handle)
@@ -1265,6 +1318,8 @@ def gc_worktrees(registry_root: Path, *, dry_run: bool = False) -> JsonObject:
                 "runId": record.get("runId"),
                 "executionCwd": execution,
                 "worktreeStatus": STATUS_MISSING,
+                "reason": "path_missing",
+                "action": "would_mark_missing" if dry_run else "marked_missing",
             }
         )
 
@@ -1283,6 +1338,12 @@ def gc_worktrees(registry_root: Path, *, dry_run: bool = False) -> JsonObject:
         }
         if message:
             entry["message"] = message
+        if reason == "worktree_metadata_missing":
+            entry["safeAction"] = "inspect_path_before_manual_cleanup"
+        elif reason == "branch_missing":
+            entry["safeAction"] = "inspect_branch_metadata_before_manual_cleanup"
+        elif reason == "worktree_list_failed":
+            entry["safeAction"] = "retry_after_git_worktree_list_succeeds"
         orphans.append(entry)
 
     for record in records:
@@ -1400,6 +1461,12 @@ def gc_worktrees(registry_root: Path, *, dry_run: bool = False) -> JsonObject:
         "schema": SCHEMA_GC,
         "ok": True,
         "dryRun": dry_run,
+        "mode": "dry-run" if dry_run else "reconcile-registry",
+        "effects": {
+            "registryWrites": not dry_run,
+            "deletesWorktreePaths": False,
+            "runsGitWorktreePrune": (not dry_run and bool(prune_roots)),
+        },
         "prunedSourceRoots": 0 if dry_run else len(prune_roots),
         "reconciled": len(reconciled),
         "reconciledEntries": reconciled,

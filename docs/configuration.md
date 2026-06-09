@@ -28,8 +28,14 @@ Check the active source:
 
 ```bash
 delegate --json describe | jq .configSource
+delegate --json describe | jq .configResolution
 delegate --json models
 ```
+
+`describe` and `models` include `configResolution.layers`, an ordered view of
+the embedded defaults plus discoverable user, workspace, and `DELEGATE_CONFIG`
+layers. This is read-only observability; inspecting it does not modify
+`~/.delegate` or workspace config files.
 
 ## Example
 

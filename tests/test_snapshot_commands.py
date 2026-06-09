@@ -387,6 +387,36 @@ class SnapshotCommandTests(unittest.TestCase):
         self.assertEqual(len(lines), 1)
         self.assertIn(active_alias, lines[0])
 
+    def test_runs_running_and_stale_filters_split_effective_status(self):
+        self.write_run(status="succeeded", pid=None)
+        _, running_alias = self.write_run()
+        _, stale_alias = self.write_run(pid=999999999)
+
+        running_stdout = io.StringIO()
+        self.delegate.main(
+            ["--json", "--cwd", str(self.workspace), "runs", "--running"],
+            stdout=running_stdout,
+        )
+        running_payload = json.loads(running_stdout.getvalue())
+        self.assertEqual(running_payload["mode"], "running")
+        self.assertEqual([run["alias"] for run in running_payload["runs"]], [running_alias])
+        self.assertEqual(running_payload["runs"][0]["rawStatus"], "running")
+        self.assertEqual(running_payload["runs"][0]["effectiveStatus"], "running")
+
+        stale_stdout = io.StringIO()
+        self.delegate.main(
+            ["--json", "--cwd", str(self.workspace), "runs", "--stale"],
+            stdout=stale_stdout,
+        )
+        stale_payload = json.loads(stale_stdout.getvalue())
+        self.assertEqual(stale_payload["mode"], "stale")
+        self.assertEqual([run["alias"] for run in stale_payload["runs"]], [stale_alias])
+        stale_run = stale_payload["runs"][0]
+        self.assertEqual(stale_run["rawStatus"], "running")
+        self.assertEqual(stale_run["effectiveStatus"], "stale")
+        self.assertEqual(stale_run["staleReason"], "dead_pid")
+        self.assertIn(f"delegate snapshot {stale_alias}", stale_run["nextActions"])
+
     def test_runs_json_shape(self):
         self.write_run()
         stdout = io.StringIO()
@@ -416,6 +446,18 @@ class SnapshotCommandTests(unittest.TestCase):
         )
         self.assertEqual(code, 0)
         self.assertIn("# done", stdout.getvalue())
+
+    def test_run_output_defaults_to_completion_report(self):
+        run_id, alias = self.write_run()
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        (run_path / "completion-report.md").write_text("# default done\n", encoding="utf-8")
+        stdout = io.StringIO()
+        code = self.delegate.main(
+            ["--cwd", str(self.workspace), "run-output", alias],
+            stdout=stdout,
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("# default done", stdout.getvalue())
 
     def test_run_output_completion_report_falls_back_to_codex_stdout(self):
         run_id, alias = self.write_run(status="succeeded", pid=None)
@@ -472,6 +514,100 @@ class SnapshotCommandTests(unittest.TestCase):
         self.assertIn("final from stdout", output)
         self.assertNotIn("I am checking the repo.", output)
         self.assertNotIn("hidden reasoning", output)
+
+    def test_run_output_default_recovers_codex_final_agent_message(self):
+        run_id, alias = self.write_run(harness="codex", status="succeeded", pid=None)
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        (run_path / "stdout.log").write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "item.completed",
+                            "item": {
+                                "type": "agent_message",
+                                "text": "I am checking the repo.",
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "item.completed",
+                            "item": {
+                                "type": "command_execution",
+                                "command": "rg run-output",
+                                "status": "completed",
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "item.completed",
+                            "item": {
+                                "type": "agent_message",
+                                "text": "Status: completed\n- recovered bare default",
+                            },
+                        }
+                    ),
+                    json.dumps({"type": "turn.completed"}),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        stdout = io.StringIO()
+        code = self.delegate.main(
+            ["--cwd", str(self.workspace), "run-output", alias],
+            stdout=stdout,
+        )
+        self.assertEqual(code, 0)
+        output = stdout.getvalue()
+        self.assertIn("recovered bare default", output)
+        self.assertNotIn("I am checking the repo.", output)
+
+    def test_run_output_completion_report_recovers_cursor_assistant_message(self):
+        run_id, alias = self.write_run(harness="cursor", status="succeeded", pid=None)
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        (run_path / "stdout.log").write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "assistant",
+                            "message": {
+                                "role": "assistant",
+                                "content": [{"type": "text", "text": "Working..."}],
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "assistant",
+                            "message": {
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": "Status: completed\n- cursor final",
+                                    }
+                                ],
+                            },
+                        }
+                    ),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        stdout = io.StringIO()
+        code = self.delegate.main(
+            ["--cwd", str(self.workspace), "run-output", alias, "--completion-report"],
+            stdout=stdout,
+        )
+        self.assertEqual(code, 0)
+        output = stdout.getvalue()
+        self.assertIn("cursor final", output)
+        self.assertNotIn("Working...", output)
 
     def test_run_output_json_marks_synthetic_completion_report(self):
         run_id, alias = self.write_run(status="succeeded", pid=None)
@@ -721,6 +857,37 @@ class SnapshotCommandTests(unittest.TestCase):
         self.assertEqual(code, self.delegate.EXIT_USAGE)
         self.assertIn("missing_completion_report", stderr.getvalue())
 
+    def test_run_output_completion_report_json_failure_includes_diagnostics(self):
+        run_id, alias = self.write_run(harness="codex", status="succeeded", pid=None)
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        (run_path / "stdout.log").write_text("partial stdout\n", encoding="utf-8")
+        (run_path / "stderr.log").write_text("warning\n", encoding="utf-8")
+        stdout = io.StringIO()
+        code = self.delegate.main(
+            [
+                "--json",
+                "--cwd",
+                str(self.workspace),
+                "run-output",
+                alias,
+                "--completion-report",
+            ],
+            stdout=stdout,
+        )
+        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        payload = json.loads(stdout.getvalue())
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"], "missing_completion_report")
+        self.assertEqual(payload["diagnostics"]["status"], "succeeded")
+        self.assertTrue(payload["diagnostics"]["stdout"]["present"])
+        self.assertGreater(payload["diagnostics"]["stdout"]["bytes"], 0)
+        self.assertTrue(payload["diagnostics"]["stderr"]["present"])
+        self.assertIn(
+            f"--stdout --tail {self.delegate.RUN_OUTPUT_DEFAULT_TAIL_LINES}",
+            payload["nextActions"][0],
+        )
+        self.assertIn("--stderr", payload["nextActions"][1])
+
     def test_run_output_completion_report_recovery_skipped_for_running_run(self):
         run_id, alias = self.write_run(status="running", pid=os.getpid())
         run_path = self.registry.run_directory(self.registry_root, run_id)
@@ -872,21 +1039,46 @@ class SnapshotCommandTests(unittest.TestCase):
         self.assertIn("line3", output)
         self.assertNotIn("line1", output)
 
-    def test_run_output_requires_output_selector(self):
-        _, alias = self.write_run()
-        stderr = io.StringIO()
+    def test_run_output_default_falls_back_to_bounded_diagnostics(self):
+        run_id, alias = self.write_run(status="succeeded", pid=None)
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        lines = [f"line{i}" for i in range(self.delegate.RUN_OUTPUT_DEFAULT_TAIL_LINES + 5)]
+        (run_path / "stdout.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        stdout = io.StringIO()
         code = self.delegate.main(
             ["--cwd", str(self.workspace), "run-output", alias],
-            stderr=stderr,
+            stdout=stdout,
         )
-        self.assertEqual(code, self.delegate.EXIT_USAGE)
-        self.assertIn("missing_output_selector", stderr.getvalue())
+        self.assertEqual(code, 0)
+        output = stdout.getvalue()
+        self.assertIn("=== stdout ===", output)
+        self.assertNotIn("line0", output)
+        self.assertIn("line84", output)
+        self.assertIn("=== diagnostics ===", output)
+        self.assertIn("--stdout --tail 80", output)
 
     def test_stale_status_when_pid_dead(self):
         _, alias = self.write_run(pid=999999999)
         stdout = io.StringIO()
         self.delegate.main(["--cwd", str(self.workspace), "snapshot", alias], stdout=stdout)
-        self.assertIn("stale", stdout.getvalue())
+        output = stdout.getvalue()
+        self.assertIn("stale", output)
+        self.assertIn("status detail: raw=running effective=stale", output)
+        self.assertIn("stale reason: dead_pid", output)
+        self.assertIn(f"delegate snapshot {alias}", output)
+
+    def test_snapshot_json_includes_stale_diagnostics(self):
+        _, alias = self.write_run(pid=999999999)
+        stdout = io.StringIO()
+        self.delegate.main(
+            ["--cwd", str(self.workspace), "snapshot", alias, "--json"], stdout=stdout
+        )
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["status"], "stale")
+        self.assertEqual(payload["rawStatus"], "running")
+        self.assertEqual(payload["effectiveStatus"], "stale")
+        self.assertEqual(payload["staleReason"], "dead_pid")
+        self.assertIn(f"delegate run-output {alias} --completion-report", payload["nextActions"])
 
     def test_stale_status_when_pid_missing(self):
         run_id, alias = self.write_run()
@@ -1030,18 +1222,20 @@ class SnapshotCommandTests(unittest.TestCase):
         )
         self.assertIn(secret, stdout.getvalue())
 
-    def test_run_output_stdout_without_tail_or_raw_errors_clearly(self):
-        _, alias = self.write_run()
-        stderr = io.StringIO()
+    def test_run_output_stdout_without_tail_or_raw_defaults_to_bounded_tail(self):
+        run_id, alias = self.write_run()
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        lines = [f"line{i}" for i in range(self.delegate.RUN_OUTPUT_DEFAULT_TAIL_LINES + 1)]
+        (run_path / "stdout.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        stdout = io.StringIO()
         code = self.delegate.main(
             ["--cwd", str(self.workspace), "run-output", alias, "--stdout"],
-            stderr=stderr,
+            stdout=stdout,
         )
-        self.assertEqual(code, self.delegate.EXIT_USAGE)
-        message = stderr.getvalue()
-        self.assertIn("missing_tail", message)
-        self.assertIn("--tail", message)
-        self.assertIn("--raw", message)
+        self.assertEqual(code, 0)
+        output = stdout.getvalue()
+        self.assertNotIn("line0", output)
+        self.assertIn("line80", output)
 
     def test_render_worktree_cleanup_commands_formats_all_lines(self):
         cleanup = {
