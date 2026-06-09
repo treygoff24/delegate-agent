@@ -241,7 +241,7 @@ def add_reasoning_payload_fields(payload: JsonObject, carrier: object) -> None:
     requestedReasoningEffort and resolvedReasoningEffort; resolution never
     rewrites the value today, so both keys carry the single internal effort.
     """
-    effort = getattr(carrier, "reasoning_effort")
+    effort = carrier.reasoning_effort
     if effort is not None:
         payload["requestedReasoningEffort"] = effort
         payload["resolvedReasoningEffort"] = effort
