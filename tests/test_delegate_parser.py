@@ -225,10 +225,12 @@ class ParserTests(unittest.TestCase):
             self.delegate.parse_cli(["snapshot", "--latest", "cursor", "cursor"])
         self.assertEqual(ctx.exception.error, "ambiguous_snapshot_target")
 
-    def test_run_output_requires_selector(self):
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.parse_cli(["run-output", "cursor"])
-        self.assertEqual(ctx.exception.error, "missing_output_selector")
+    def test_run_output_without_selector_defaults_to_completion_report(self):
+        parsed = self.delegate.parse_cli(["run-output", "cursor"])
+        self.assertEqual(parsed.subcommand, "run-output")
+        self.assertEqual(parsed.run_output_handle, "cursor")
+        self.assertTrue(parsed.run_output_completion_report)
+        self.assertTrue(parsed.run_output_default)
 
     def test_runs_limit_must_be_positive(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:
@@ -282,12 +284,10 @@ class ParserTests(unittest.TestCase):
             self.delegate.parse_cli(["run-output", "cursor", "--stdout", "--raw", "--tail", "5"])
         self.assertEqual(ctx.exception.error, "invalid_option_combination")
 
-    def test_run_output_stdout_requires_tail_or_raw(self):
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.parse_cli(["run-output", "cursor", "--stdout"])
-        self.assertEqual(ctx.exception.error, "missing_tail")
-        self.assertIn("--tail", ctx.exception.message)
-        self.assertIn("--raw", ctx.exception.message)
+    def test_run_output_stdout_without_tail_defaults_to_bounded_tail(self):
+        parsed = self.delegate.parse_cli(["run-output", "cursor", "--stdout"])
+        self.assertTrue(parsed.run_output_stdout)
+        self.assertEqual(parsed.run_output_tail, self.delegate.RUN_OUTPUT_DEFAULT_TAIL_LINES)
 
     def test_worktree_misplaced_global_option_is_rejected(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:

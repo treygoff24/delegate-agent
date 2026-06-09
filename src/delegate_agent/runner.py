@@ -4,7 +4,9 @@ import contextlib
 import json
 import os
 import shlex
+import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from collections.abc import Callable
@@ -80,6 +82,7 @@ class RunContext:
     reasoning_effort_source: str | None = None
     reasoning_capability_source: str | None = None
     reasoning_transport: str | None = None
+    prompt_transport: str = "argv"
 
 
 def prepend_skill_review_instructions(prompt: str) -> str:
@@ -153,6 +156,7 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
         "workspaceKind": ctx.workspace_kind,
         "startedAt": ctx.started_at,
         "argv": argv,
+        "promptTransport": ctx.prompt_transport,
     }
     payload["isolatedWorkspace"] = ctx.isolated_workspace
     payload["isolationMode"] = ctx.isolation_mode
@@ -495,6 +499,59 @@ def _join_drain_thread(thread: threading.Thread, pipe: BinaryIO | None) -> None:
         thread.join(timeout=1.0)
 
 
+def _write_stdin(pipe: BinaryIO | None, stdin_text: str) -> None:
+    if pipe is None:
+        return
+    try:
+        pipe.write(stdin_text.encode("utf-8"))
+        pipe.flush()
+    except (BrokenPipeError, OSError):
+        pass
+    finally:
+        with contextlib.suppress(OSError):
+            pipe.close()
+
+
+def _join_stdin_thread(thread: threading.Thread | None, pipe: BinaryIO | None) -> None:
+    if thread is None:
+        return
+    thread.join(timeout=DRAIN_JOIN_TIMEOUT_SEC)
+    if thread.is_alive() and pipe is not None:
+        with contextlib.suppress(OSError):
+            pipe.close()
+        thread.join(timeout=1.0)
+
+
+def _materialize_prompt_file_argv(
+    argv: list[str],
+    *,
+    prompt_file_text: str | None,
+    prompt_file_placeholder: str | None,
+) -> tuple[list[str], Path | None]:
+    if prompt_file_text is None:
+        return list(argv), None
+    if prompt_file_placeholder is None or prompt_file_placeholder not in argv:
+        raise ValueError("prompt_file_placeholder must be present in argv")
+    temp_dir = Path(tempfile.mkdtemp(prefix="delegate-prompt-"))
+    os.chmod(temp_dir, run_registry.PRIVATE_DIR_MODE)
+    prompt_path = temp_dir / "prompt.txt"
+    fd = os.open(
+        prompt_path,
+        os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+        run_registry.PRIVATE_FILE_MODE,
+    )
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(prompt_file_text)
+    return [
+        str(prompt_path) if item == prompt_file_placeholder else item for item in argv
+    ], temp_dir
+
+
+def _cleanup_prompt_file_dir(temp_dir: Path | None) -> None:
+    if temp_dir is not None:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 def execute_tracked(
     argv: list[str],
     cwd: str,
@@ -504,10 +561,16 @@ def execute_tracked(
     stdout: TextIO,
     stderr: TextIO,
     completion_report_mode: str = delegate_config.COMPLETION_REPORT_MODE_MARKDOWN,
+    stdin_text: str | None = None,
+    prompt_file_text: str | None = None,
+    prompt_file_placeholder: str | None = None,
+    manifest_argv: list[str] | None = None,
 ) -> tuple[int, JsonObject | None]:
+    if stdin_text is not None and prompt_file_text is not None:
+        raise ValueError("stdin_text and prompt_file_text are mutually exclusive")
     run_path = run_registry.run_directory(ctx.registry_root, ctx.run_id)
     run_registry.ensure_private_dir(run_path)
-    write_manifest(run_path, build_manifest(ctx, argv))
+    write_manifest(run_path, build_manifest(ctx, manifest_argv or argv))
 
     stdout_log = run_path / STDOUT_LOG
     stderr_log = run_path / STDERR_LOG
@@ -517,85 +580,106 @@ def execute_tracked(
     accumulator = harness_events.StreamAccumulator()
 
     started = time.monotonic()
-    process = subprocess.Popen(
+    launch_argv, prompt_temp_dir = _materialize_prompt_file_argv(
         argv,
-        cwd=cwd,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        prompt_file_text=prompt_file_text,
+        prompt_file_placeholder=prompt_file_placeholder,
     )
-    persist_progress(run_path, ctx, accumulator, status="running", pid=process.pid)
+    try:
+        process = subprocess.Popen(
+            launch_argv,
+            cwd=cwd,
+            stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except Exception:
+        _cleanup_prompt_file_dir(prompt_temp_dir)
+        raise
+    try:
+        persist_progress(run_path, ctx, accumulator, status="running", pid=process.pid)
 
-    line_buffer = ""
-    stdout_bytes_counter = [0]
-    stderr_bytes_counter = [0]
-    lines_since_persist = 0
-    last_persist_at = time.monotonic()
-    progress_dirty = False
-
-    def maybe_persist_running() -> None:
-        nonlocal lines_since_persist, last_persist_at, progress_dirty
-        if not progress_dirty:
-            return
-        progress_dirty = False
+        line_buffer = ""
+        stdout_bytes_counter = [0]
+        stderr_bytes_counter = [0]
         lines_since_persist = 0
         last_persist_at = time.monotonic()
-        persist_progress(
-            run_path,
-            ctx,
-            accumulator,
-            status="running",
-            pid=process.pid,
-            stdout_bytes=stdout_bytes_counter[0],
-            stderr_bytes=stderr_bytes_counter[0],
-        )
+        progress_dirty = False
 
-    with open_events_log(run_path) as events_handle:
+        def maybe_persist_running() -> None:
+            nonlocal lines_since_persist, last_persist_at, progress_dirty
+            if not progress_dirty:
+                return
+            progress_dirty = False
+            lines_since_persist = 0
+            last_persist_at = time.monotonic()
+            persist_progress(
+                run_path,
+                ctx,
+                accumulator,
+                status="running",
+                pid=process.pid,
+                stdout_bytes=stdout_bytes_counter[0],
+                stderr_bytes=stderr_bytes_counter[0],
+            )
 
-        def handle_stdout_line(chunk_text: str) -> None:
-            nonlocal line_buffer, lines_since_persist, last_persist_at, progress_dirty
-            line_buffer += chunk_text
-            while "\n" in line_buffer:
-                line, line_buffer = line_buffer.split("\n", 1)
-                accumulator.ingest_line(line)
-                progress_dirty = True
-                append_event(
-                    events_handle,
-                    {"kind": "stream.line", "stream": "stdout", "text": line[:500]},
+        with open_events_log(run_path) as events_handle:
+
+            def handle_stdout_line(chunk_text: str) -> None:
+                nonlocal line_buffer, lines_since_persist, last_persist_at, progress_dirty
+                line_buffer += chunk_text
+                while "\n" in line_buffer:
+                    line, line_buffer = line_buffer.split("\n", 1)
+                    accumulator.ingest_line(line)
+                    progress_dirty = True
+                    append_event(
+                        events_handle,
+                        {"kind": "stream.line", "stream": "stdout", "text": line[:500]},
+                    )
+                    lines_since_persist += 1
+                    elapsed = time.monotonic() - last_persist_at
+                    if (
+                        lines_since_persist >= PROGRESS_PERSIST_LINE_INTERVAL
+                        or elapsed >= PROGRESS_PERSIST_TIME_INTERVAL_SEC
+                    ):
+                        events_handle.flush()
+                        maybe_persist_running()
+
+            stdout_thread = threading.Thread(
+                target=_drain_stream,
+                args=(process.stdout, stdout_log, stdout_bytes_counter),
+                kwargs={"on_line": handle_stdout_line},
+                daemon=True,
+            )
+            stderr_thread = threading.Thread(
+                target=_drain_stream,
+                args=(process.stderr, stderr_log, stderr_bytes_counter),
+                kwargs={"on_line": None},
+                daemon=True,
+            )
+            stdout_thread.start()
+            stderr_thread.start()
+            stdin_thread: threading.Thread | None = None
+            if stdin_text is not None:
+                stdin_thread = threading.Thread(
+                    target=_write_stdin,
+                    args=(process.stdin, stdin_text),
+                    daemon=True,
                 )
-                lines_since_persist += 1
-                elapsed = time.monotonic() - last_persist_at
-                if (
-                    lines_since_persist >= PROGRESS_PERSIST_LINE_INTERVAL
-                    or elapsed >= PROGRESS_PERSIST_TIME_INTERVAL_SEC
-                ):
-                    events_handle.flush()
-                    maybe_persist_running()
-
-        stdout_thread = threading.Thread(
-            target=_drain_stream,
-            args=(process.stdout, stdout_log, stdout_bytes_counter),
-            kwargs={"on_line": handle_stdout_line},
-            daemon=True,
-        )
-        stderr_thread = threading.Thread(
-            target=_drain_stream,
-            args=(process.stderr, stderr_log, stderr_bytes_counter),
-            kwargs={"on_line": None},
-            daemon=True,
-        )
-        stdout_thread.start()
-        stderr_thread.start()
-        exit_code = process.wait()
-        _join_drain_thread(stdout_thread, process.stdout)
-        _join_drain_thread(stderr_thread, process.stderr)
-        if process.stdout is not None:
-            process.stdout.close()
-        if process.stderr is not None:
-            process.stderr.close()
-        if line_buffer.strip():
-            accumulator.ingest_line(line_buffer)
-        duration_ms = int((time.monotonic() - started) * 1000)
+                stdin_thread.start()
+            exit_code = process.wait()
+            _join_stdin_thread(stdin_thread, process.stdin)
+            _join_drain_thread(stdout_thread, process.stdout)
+            _join_drain_thread(stderr_thread, process.stderr)
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.stderr is not None:
+                process.stderr.close()
+            if line_buffer.strip():
+                accumulator.ingest_line(line_buffer)
+            duration_ms = int((time.monotonic() - started) * 1000)
+    finally:
+        _cleanup_prompt_file_dir(prompt_temp_dir)
 
     stdout_bytes = stdout_bytes_counter[0]
     stderr_bytes = stderr_bytes_counter[0]
@@ -640,7 +724,39 @@ def execute_tracked(
     return exit_code, None
 
 
-def execute_passthrough(argv: list[str], cwd: str) -> int:
+def execute_passthrough(
+    argv: list[str],
+    cwd: str,
+    *,
+    stdin_text: str | None = None,
+    prompt_file_text: str | None = None,
+    prompt_file_placeholder: str | None = None,
+) -> int:
     """Stream child stdout/stderr to the caller. JSON mode is not supported."""
-    completed = subprocess.run(argv, cwd=cwd, stdin=subprocess.DEVNULL, text=True, check=False)
-    return completed.returncode
+    if stdin_text is not None and prompt_file_text is not None:
+        raise ValueError("stdin_text and prompt_file_text are mutually exclusive")
+    launch_argv, prompt_temp_dir = _materialize_prompt_file_argv(
+        argv,
+        prompt_file_text=prompt_file_text,
+        prompt_file_placeholder=prompt_file_placeholder,
+    )
+    try:
+        if stdin_text is None:
+            completed = subprocess.run(
+                launch_argv,
+                cwd=cwd,
+                stdin=subprocess.DEVNULL,
+                text=True,
+                check=False,
+            )
+        else:
+            completed = subprocess.run(
+                launch_argv,
+                cwd=cwd,
+                input=stdin_text,
+                text=True,
+                check=False,
+            )
+        return completed.returncode
+    finally:
+        _cleanup_prompt_file_dir(prompt_temp_dir)

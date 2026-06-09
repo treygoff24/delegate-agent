@@ -45,6 +45,7 @@ class StreamAccumulator:
     current: str | None = None
     _assistant_text_cache: str | None = field(default=None, repr=False)
     _codex_completion_candidate: str | None = field(default=None, repr=False)
+    _recoverable_assistant_candidates: list[str] = field(default_factory=list, repr=False)
 
     def _invalidate_assistant_text_cache(self) -> None:
         self._assistant_text_cache = None
@@ -126,7 +127,9 @@ class StreamAccumulator:
         if isinstance(message, dict):
             text = _extract_text(message.get("content"))
             if text:
-                self._record_assistant_text(text)
+                stripped = self._record_assistant_text(text)
+                if stripped:
+                    self._recoverable_assistant_candidates.append(stripped)
 
     def _ingest_completion(self, payload: JsonObject) -> None:
         final_text = payload.get("finalText")
@@ -244,6 +247,12 @@ class StreamAccumulator:
             }
         )
         return bounded, meta
+
+    @property
+    def recoverable_assistant_text(self) -> str | None:
+        if not self._recoverable_assistant_candidates:
+            return None
+        return self._recoverable_assistant_candidates[-1]
 
     def bounded_recent_events(self) -> tuple[list[JsonObject], JsonObject]:
         serialized = [event.to_dict() for event in self.events]

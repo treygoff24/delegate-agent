@@ -252,9 +252,18 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
     "runs": CommandSpec(
         name="runs",
         summary="List tracked runs, optionally filtered by activity, recency, or harness.",
-        usage=("delegate [--json] runs [--active] [--recent] [--harness HARNESS] [--limit N]",),
+        usage=(
+            "delegate [--json] runs [--active|--running|--stale|--recent] "
+            "[--harness HARNESS] [--limit N]",
+        ),
         options=(
-            OptionSpec("--active", None, "Show only currently active runs."),
+            OptionSpec(
+                "--active",
+                None,
+                "Show effective running and stale runs (back-compatible active view).",
+            ),
+            OptionSpec("--running", None, "Show only runs whose tracked process is still alive."),
+            OptionSpec("--stale", None, "Show only runs recorded as running but no longer live."),
             OptionSpec("--recent", None, "Show only recent runs."),
             OptionSpec(
                 "--harness",
@@ -265,9 +274,11 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         examples=(
             "delegate runs --active",
+            "delegate runs --running",
+            "delegate runs --stale",
             "delegate runs --harness cursor --limit 5",
         ),
-        notes=("--active and --recent cannot be combined.",),
+        notes=("--active, --running, --stale, and --recent are mutually exclusive.",),
         see_also=("snapshot", "run-output"),
     ),
     "run-output": CommandSpec(
@@ -280,8 +291,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         arguments=(ArgSpec("<alias-or-runId>", True, "Run handle to inspect."),),
         options=(
             OptionSpec("--completion-report", None, "Print the run's completion report."),
-            OptionSpec("--stdout", None, "Print captured stdout (requires --tail N or --raw)."),
-            OptionSpec("--stderr", None, "Print captured stderr (requires --tail N or --raw)."),
+            OptionSpec("--stdout", None, "Print captured stdout (defaults to --tail 80)."),
+            OptionSpec("--stderr", None, "Print captured stderr (defaults to --tail 80)."),
             OptionSpec("--tail", "N", "Print only the last N lines of the selected stream."),
             OptionSpec(
                 "--raw", None, "Print the full stream unbounded (incompatible with --tail)."
@@ -289,11 +300,12 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             OptionSpec("--no-redact", None, "Do not redact secrets in the output."),
         ),
         examples=(
+            "delegate run-output cursor",
             "delegate run-output cursor --completion-report",
             "delegate run-output cursor --stderr --tail 100",
         ),
         notes=(
-            "Select at least one of --completion-report, --stdout, --stderr, or --raw.",
+            "With no selector, prints the best available parent-facing output.",
             "Prefer this over piping launch output through tail.",
         ),
         see_also=("snapshot", "runs"),

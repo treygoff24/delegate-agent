@@ -173,6 +173,47 @@ class WorktreeMgmtTests(unittest.TestCase):
             self.delegate.run_registry.save_index(registry_root, index)
         return run_id, alias
 
+    def _seed_plain_run(
+        self,
+        repo_path: str,
+        *,
+        harness: str = "cursor",
+        last_activity_at: str | None = None,
+    ) -> tuple[str, str]:
+        registry_root = self.delegate.run_registry.ensure_registry(
+            Path(repo_path),
+            workspace_kind="git",
+        )
+        run_id, alias = self.delegate.run_registry.register_run(
+            registry_root,
+            harness=harness,
+            metadata={"mode": "work", "cwd": repo_path},
+        )
+        run_path = self.delegate.run_registry.run_directory(registry_root, run_id)
+        manifest = {
+            "schema": self.delegate.run_registry.MANIFEST_SCHEMA,
+            "runId": run_id,
+            "alias": alias,
+            "harness": harness,
+            "engine": harness,
+            "mode": "work",
+            "model": "composer-2.5",
+            "cwd": repo_path,
+            "startedAt": self.delegate.run_registry.utc_now_iso(),
+        }
+        if last_activity_at is None:
+            last_activity_at = self.delegate.run_registry.utc_now_iso()
+        state = {
+            "schema": self.delegate.run_registry.STATE_SCHEMA,
+            "runId": run_id,
+            "alias": alias,
+            "status": "succeeded",
+            "lastActivityAt": last_activity_at,
+        }
+        self.delegate.run_registry.write_json_atomic(run_path / "manifest.json", manifest)
+        self.delegate.run_registry.write_json_atomic(run_path / "state.json", state)
+        return run_id, alias
+
     def _create_worktree_at(
         self,
         repo_path: str,
@@ -614,6 +655,10 @@ class WorktreeMgmtTests(unittest.TestCase):
             self.assertEqual(code, 0)
             payload = json.loads(out)
             self.assertGreaterEqual(payload["reconciled"], 1)
+            self.assertEqual(payload["mode"], "reconcile-registry")
+            self.assertFalse(payload["effects"]["deletesWorktreePaths"])
+            self.assertEqual(payload["reconciledEntries"][0]["reason"], "path_missing")
+            self.assertEqual(payload["reconciledEntries"][0]["action"], "marked_missing")
             state = self.delegate.run_registry.load_run_state(self._registry_root(path), run_id)
             self.assertEqual(state["worktreeStatus"], "missing")
             self.assertNotIn("worktreeRemovedAt", state)
@@ -641,6 +686,9 @@ class WorktreeMgmtTests(unittest.TestCase):
             self.assertTrue(orphan_path.exists())
             self.assertTrue(sentinel.exists())
             self.assertEqual(payload["orphans"][0]["reason"], "worktree_metadata_missing")
+            self.assertEqual(
+                payload["orphans"][0]["safeAction"], "inspect_path_before_manual_cleanup"
+            )
             state = self.delegate.run_registry.load_run_state(self._registry_root(path), run_id)
             self.assertEqual(state["worktreeStatus"], "unknown")
             listed = self.delegate.worktree_mgmt.list_worktrees(self._registry_root(path))
@@ -807,6 +855,29 @@ class WorktreeMgmtTests(unittest.TestCase):
             )
             self.assertEqual(len(removed_result["entries"]), 1)
             self.assertEqual(removed_result["entries"][0]["alias"], "cursor-removed")
+            self.assertEqual(removed_result["summary"]["allStatusCounts"]["present"], 1)
+            self.assertEqual(removed_result["summary"]["allStatusCounts"]["removed"], 1)
+            self.assertEqual(removed_result["summary"]["statusCounts"], {"removed": 1})
+
+    def test_worktree_list_summary_reports_registry_status_drift(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            missing_path = str(Path(fake_home) / "wt" / "missing-list")
+            self._seed_persistent_run(
+                path,
+                alias="cursor-missing-list",
+                execution_cwd=missing_path,
+                worktree_status="present",
+            )
+
+            result = self.delegate.worktree_mgmt.list_worktrees(self._registry_root(path))
+
+            entry = result["entries"][0]
+            self.assertEqual(entry["registryWorktreeStatus"], "present")
+            self.assertEqual(entry["worktreeStatus"], "missing")
+            self.assertTrue(entry["registryStatusDiffers"])
+            self.assertEqual(result["summary"]["registryStatusDriftCount"], 1)
+            self.assertEqual(result["summary"]["statusCounts"], {"missing": 1})
 
     def test_worktree_public_payloads_do_not_expose_private_record_keys(self):
         _repo, path = self._make_repo()
@@ -851,6 +922,33 @@ class WorktreeMgmtTests(unittest.TestCase):
                 latest_harness="droid",
             )
             self.assertEqual(result.get("alias"), "droid-recent")
+
+    def test_worktree_show_latest_harness_ignores_newer_non_worktree_run(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory():
+            from datetime import UTC, datetime, timedelta
+
+            worktree_ts = (datetime.now(UTC) - timedelta(hours=2)).strftime(
+                self.delegate.run_registry.UTC_TIMESTAMP_FORMAT
+            )
+            self._seed_persistent_run(
+                path,
+                alias="droid-worktree",
+                harness="droid",
+                last_activity_at=worktree_ts,
+            )
+            plain_ts = (datetime.now(UTC) - timedelta(minutes=5)).strftime(
+                self.delegate.run_registry.UTC_TIMESTAMP_FORMAT
+            )
+            self._seed_plain_run(path, harness="droid", last_activity_at=plain_ts)
+
+            result = self.delegate.worktree_mgmt.show_worktree(
+                self._registry_root(path),
+                handle=None,
+                latest_harness="droid",
+            )
+
+            self.assertEqual(result.get("alias"), "droid-worktree")
 
     def test_worktree_remove_missing_path(self):
         _repo, path = self._make_repo()
@@ -1351,6 +1449,8 @@ class WorktreeMgmtTests(unittest.TestCase):
             self.assertEqual(code, 0)
             payload = json.loads(out)
             self.assertNotIn("autoPrune", payload)
+            self.assertEqual(payload["summary"]["autoPruneMode"], "suppressed")
+            self.assertTrue(payload["summary"]["readOnly"])
             state = self.delegate.run_registry.load_run_state(self._registry_root(path), run_id)
             self.assertEqual(state.get("worktreeStatus"), "present")
             self.assertTrue(Path(wt_path).exists())

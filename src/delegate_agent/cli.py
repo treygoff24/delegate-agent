@@ -142,14 +142,30 @@ SAFE_EXTERNAL_SYMLINK_WARNING_PREFIX = (
     "inside the isolated workspace"
 )
 SAFE_BLOCKED_SYMLINK_PLACEHOLDER = "External symlink blocked by Delegate safe isolation.\n"
+CURSOR_PROMPT_REDACTION = "<prompt redacted: cursor argv transport>"
+DROID_PROMPT_FILE_ARG_PLACEHOLDER = "<delegate-prompt-file>"
+DROID_PROMPT_FILE_DISPLAY = "<prompt file>"
+PROMPT_TRANSPORT_ARGV = "argv"
+PROMPT_TRANSPORT_FILE = "file"
+PROMPT_TRANSPORT_STDIN = "stdin"
 
 
 class DelegateError(Exception):
-    def __init__(self, error: str, message: str, exit_code: int = EXIT_USAGE) -> None:
+    def __init__(
+        self,
+        error: str,
+        message: str,
+        exit_code: int = EXIT_USAGE,
+        *,
+        diagnostics: JsonObject | None = None,
+        next_actions: list[str] | None = None,
+    ) -> None:
         super().__init__(message)
         self.error = error
         self.message = message
         self.exit_code = exit_code
+        self.diagnostics = diagnostics
+        self.next_actions = next_actions
 
 
 @dataclass
@@ -172,6 +188,8 @@ class ParsedCommand:
     snapshot_latest_harness: str | None = None
     snapshot_no_redact: bool = False
     runs_active: bool = False
+    runs_running: bool = False
+    runs_stale: bool = False
     runs_harness: str | None = None
     runs_limit: int | None = None
     run_output_handle: str | None = None
@@ -181,6 +199,7 @@ class ParsedCommand:
     run_output_tail: int | None = None
     run_output_raw: bool = False
     run_output_no_redact: bool = False
+    run_output_default: bool = False
     isolation: str | None = None
     worktree_action: str | None = None
     worktree_handle: str | None = None
@@ -223,6 +242,10 @@ class Request:
     reasoning_effort_source: str | None = None
     reasoning_capability_source: str | None = None
     reasoning_transport: str | None = None
+    stdin_text: str | None = None
+    prompt_file_text: str | None = None
+    prompt_transport: str = PROMPT_TRANSPORT_ARGV
+    display_argv: list[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -431,6 +454,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
         return parse_help_subcommand(rest, json_mode)
 
     if subcommand == "models":
+        rest, json_mode = consume_json_option(rest, json_mode)
         if any(command_help.is_help_token(token) for token in rest):
             return help_command(json_mode, "models")
         require_no_extra(rest, "models")
@@ -443,6 +467,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             isolation=isolation,
         )
     if subcommand == "describe":
+        rest, json_mode = consume_json_option(rest, json_mode)
         if any(command_help.is_help_token(token) for token in rest):
             return help_command(json_mode, "describe")
         require_no_extra(rest, "describe")
@@ -455,6 +480,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             isolation=isolation,
         )
     if subcommand == "agent-help":
+        rest, json_mode = consume_json_option(rest, json_mode)
         if any(command_help.is_help_token(token) for token in rest):
             return help_command(json_mode, "agent-help")
         require_no_extra(rest, "agent-help")
@@ -467,6 +493,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             isolation=isolation,
         )
     if subcommand == "capabilities":
+        rest, json_mode = consume_json_option(rest, json_mode)
         if any(command_help.is_help_token(token) for token in rest):
             return help_command(json_mode, "capabilities")
         refresh = False
@@ -530,7 +557,29 @@ def has_misplaced_global_option(tokens: list[str]) -> bool:
 
 
 def raise_misplaced_global_option(message: str) -> NoReturn:
-    raise DelegateError("misplaced_global_option", message)
+    guidance = (
+        "Move global options before the subcommand "
+        "(for example: delegate --json --cwd PATH <subcommand> ...)."
+    )
+    raise DelegateError("misplaced_global_option", f"{message} {guidance}")
+
+
+def consume_json_option(rest: list[str], json_mode: bool) -> tuple[list[str], bool]:
+    """Accept `--json` after contained inspection commands.
+
+    Launching commands still require global options before the subcommand so
+    prompt boundaries stay unambiguous. For no-launch inspection commands,
+    accepting `delegate describe --json` and friends removes a common operator
+    foot-gun without changing child-runtime invocation semantics.
+    """
+
+    normalized: list[str] = []
+    for token in rest:
+        if token == "--json":
+            json_mode = True
+            continue
+        normalized.append(token)
+    return normalized, json_mode
 
 
 def require_no_extra(rest: list[str], name: str) -> None:
@@ -777,6 +826,7 @@ def validate_mode(mode: str) -> None:
 
 def parse_snapshot(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
     # Help wins over the optional handle/flags: a help token anywhere is help.
+    rest, json_mode = consume_json_option(rest, json_mode)
     if any(command_help.is_help_token(token) for token in rest):
         return help_command(json_mode, "snapshot")
     latest_harness: str | None = None
@@ -827,10 +877,13 @@ KNOWN_HARNESSES = ("cursor", "droid", "codex")
 
 def parse_runs(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
     # Help wins over flags: a help token anywhere is help.
+    rest, json_mode = consume_json_option(rest, json_mode)
     if any(command_help.is_help_token(token) for token in rest):
         return help_command(json_mode, "runs")
     active = False
     recent = False
+    running = False
+    stale = False
     harness: str | None = None
     limit: int | None = None
     i = 0
@@ -838,6 +891,14 @@ def parse_runs(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedComma
         token = rest[i]
         if token == "--active":
             active = True
+            i += 1
+            continue
+        if token == "--running":
+            running = True
+            i += 1
+            continue
+        if token == "--stale":
+            stale = True
             i += 1
             continue
         if token == "--recent":
@@ -865,16 +926,28 @@ def parse_runs(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedComma
             )
             continue
         raise DelegateError("unknown_option", f"runs does not support option: {token}")
-    if active and recent:
+    selected_modes = [
+        label
+        for label, selected in (
+            ("--active", active),
+            ("--running", running),
+            ("--stale", stale),
+            ("--recent", recent),
+        )
+        if selected
+    ]
+    if len(selected_modes) > 1:
         raise DelegateError(
             "invalid_option_combination",
-            "runs --active and --recent cannot be combined.",
+            f"runs filters are mutually exclusive: {', '.join(selected_modes)}.",
         )
     return ParsedCommand(
         "runs",
         json_mode=json_mode,
         cwd=cwd,
         runs_active=active,
+        runs_running=running,
+        runs_stale=stale,
         runs_harness=harness,
         runs_limit=limit,
     )
@@ -882,6 +955,7 @@ def parse_runs(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedComma
 
 def parse_run_output(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
     # Help wins over the required handle/selectors: a help token anywhere is help.
+    rest, json_mode = consume_json_option(rest, json_mode)
     if any(command_help.is_help_token(token) for token in rest):
         return help_command(json_mode, "run-output")
     if not rest:
@@ -927,21 +1001,16 @@ def parse_run_output(rest: list[str], json_mode: bool, cwd: str | None) -> Parse
             )
             continue
         raise DelegateError("unknown_option", f"run-output does not support option: {token}")
-    if not (completion_report or stdout_flag or stderr_flag or raw):
-        raise DelegateError(
-            "missing_output_selector",
-            "run-output requires --completion-report, --stdout, --stderr, or --raw.",
-        )
+    default_output = not (completion_report or stdout_flag or stderr_flag or raw)
+    if default_output:
+        completion_report = True
     if raw and tail is not None:
         raise DelegateError(
             "invalid_option_combination",
             "run-output --raw cannot be combined with --tail.",
         )
     if (stdout_flag or stderr_flag) and not raw and tail is None:
-        raise DelegateError(
-            "missing_tail",
-            "run-output --stdout/--stderr require --tail N or --raw.",
-        )
+        tail = RUN_OUTPUT_DEFAULT_TAIL_LINES
     return ParsedCommand(
         "run-output",
         json_mode=json_mode,
@@ -953,6 +1022,7 @@ def parse_run_output(rest: list[str], json_mode: bool, cwd: str | None) -> Parse
         run_output_tail=tail,
         run_output_raw=raw,
         run_output_no_redact=no_redact,
+        run_output_default=default_output,
     )
 
 
@@ -1206,7 +1276,18 @@ def emit_snapshot(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout: T
 def emit_runs(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout: TextIO) -> int:
     registry_root = run_registry.registry_root_if_exists(Path(workspace.path))
     limit = parsed.runs_limit or run_registry.DEFAULT_RUNS_LIMIT
-    mode = "active" if parsed.runs_active else "recent"
+    if parsed.runs_running:
+        mode = "running"
+        status_filter = run_registry.STATUS_FILTER_RUNNING
+    elif parsed.runs_stale:
+        mode = "stale"
+        status_filter = run_registry.STATUS_FILTER_STALE
+    elif parsed.runs_active:
+        mode = "active"
+        status_filter = None
+    else:
+        mode = "recent"
+        status_filter = None
     if registry_root is None:
         summaries: list[JsonObject] = []
     else:
@@ -1215,6 +1296,7 @@ def emit_runs(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout: TextI
             registry_root,
             index,
             active=parsed.runs_active,
+            status_filter=status_filter,
             harness=parsed.runs_harness,
             limit=limit,
         )
@@ -1260,6 +1342,7 @@ def _add_log_output_section(
 # run-output call from reading a multi-gigabyte stdout.log into memory.
 RECOVERY_STDOUT_TAIL_LINES = 2000
 RECOVERY_STDOUT_TAIL_BYTES = 1_000_000
+RUN_OUTPUT_DEFAULT_TAIL_LINES = 80
 
 
 def _decode_recovery_tail(data: bytes, *, truncated: bool) -> tuple[str, bool]:
@@ -1320,7 +1403,12 @@ def _read_recovery_stdout_tail(registry_root: Path, run_id: str) -> tuple[str, b
     return _decode_recovery_tail(data, truncated=start > 0)
 
 
-def _recover_completion_report_from_stdout(registry_root: Path, run_id: str) -> tuple[str, bool]:
+def _recover_completion_report_from_stdout(
+    registry_root: Path,
+    run_id: str,
+    *,
+    allow_last_assistant: bool = False,
+) -> tuple[str, bool]:
     # The completion is the final turn's closing message, which lives at the end of
     # the stream, so a bounded tail is sufficient and avoids loading a possibly
     # huge stdout.log into memory on a routine run-output call. The byte bound is
@@ -1334,7 +1422,127 @@ def _recover_completion_report_from_stdout(registry_root: Path, run_id: str) -> 
         accumulator.ingest_line(line)
     if accumulator.completion_text:
         return accumulator.completion_text.strip(), truncated
+    if allow_last_assistant and accumulator.recoverable_assistant_text:
+        return accumulator.recoverable_assistant_text.strip(), truncated
     return "", truncated
+
+
+def _run_output_next_actions(handle: str) -> list[str]:
+    quoted = shlex.quote(handle)
+    return [
+        f"delegate run-output {quoted} --stdout --tail {RUN_OUTPUT_DEFAULT_TAIL_LINES}",
+        f"delegate run-output {quoted} --stderr --tail {RUN_OUTPUT_DEFAULT_TAIL_LINES}",
+        f"delegate run-output {quoted} --raw",
+    ]
+
+
+def _log_present(registry_root: Path, run_id: str, log_name: str) -> bool:
+    run_path = run_registry.run_directory(registry_root, run_id)
+    if (run_path / log_name).exists():
+        return True
+    return delegate_retention.log_file_byte_size(registry_root, run_id, log_name) > 0
+
+
+def _run_output_diagnostics(
+    registry_root: Path,
+    run_id: str,
+    *,
+    recovery_attempted: bool = False,
+    recovery_truncated: bool = False,
+) -> JsonObject:
+    run_path = run_registry.run_directory(registry_root, run_id)
+    state = run_registry.load_run_state(registry_root, run_id)
+    report_path = run_path / run_registry.COMPLETION_REPORT_FILE
+    diagnostics: JsonObject = {
+        "status": run_registry.effective_status(state),
+        "rawLogsArchived": delegate_retention.raw_logs_archived(registry_root, run_id),
+        "completionReport": {
+            "present": report_path.exists(),
+            "bytes": report_path.stat().st_size if report_path.exists() else 0,
+        },
+        "stdout": {
+            "present": _log_present(registry_root, run_id, run_registry.STDOUT_LOG),
+            "bytes": delegate_retention.log_file_byte_size(
+                registry_root,
+                run_id,
+                run_registry.STDOUT_LOG,
+            ),
+        },
+        "stderr": {
+            "present": _log_present(registry_root, run_id, run_registry.STDERR_LOG),
+            "bytes": delegate_retention.log_file_byte_size(
+                registry_root,
+                run_id,
+                run_registry.STDERR_LOG,
+            ),
+        },
+    }
+    if recovery_attempted:
+        diagnostics["recovery"] = {
+            "attempted": True,
+            "source": run_registry.STDOUT_LOG,
+            "tailLines": RECOVERY_STDOUT_TAIL_LINES,
+            "tailBytes": RECOVERY_STDOUT_TAIL_BYTES,
+            "truncated": recovery_truncated,
+        }
+    return diagnostics
+
+
+def _format_run_output_diagnostics(diagnostics: JsonObject, next_actions: list[str]) -> str:
+    stdout_info = diagnostics.get("stdout") if isinstance(diagnostics.get("stdout"), dict) else {}
+    stderr_info = diagnostics.get("stderr") if isinstance(diagnostics.get("stderr"), dict) else {}
+    recovery = diagnostics.get("recovery") if isinstance(diagnostics.get("recovery"), dict) else {}
+    lines = [
+        "No completion report or recoverable final message found.",
+        f"status: {diagnostics.get('status', 'unknown')}",
+        f"stdout: present={stdout_info.get('present', False)} bytes={stdout_info.get('bytes', 0)}",
+        f"stderr: present={stderr_info.get('present', False)} bytes={stderr_info.get('bytes', 0)}",
+    ]
+    if recovery:
+        lines.append(f"recovery: truncated={recovery.get('truncated', False)}")
+    lines.append("next actions:")
+    lines.extend(f"  - {action}" for action in next_actions)
+    return "\n".join(lines) + "\n"
+
+
+def _add_default_run_output_fallback(
+    *,
+    registry_root: Path,
+    run_id: str,
+    alias: str | None,
+    sections: JsonObject,
+    text_sections: dict[str, str],
+    recovery_attempted: bool,
+    recovery_truncated: bool,
+) -> None:
+    for log_name, section_name in (
+        (run_registry.STDOUT_LOG, "stdout"),
+        (run_registry.STDERR_LOG, "stderr"),
+    ):
+        if not _log_present(registry_root, run_id, log_name):
+            continue
+        _add_log_output_section(
+            registry_root=registry_root,
+            run_id=run_id,
+            log_name=log_name,
+            section_name=section_name,
+            tail=RUN_OUTPUT_DEFAULT_TAIL_LINES,
+            raw=False,
+            sections=sections,
+            text_sections=text_sections,
+        )
+    handle = alias or run_id
+    next_actions = _run_output_next_actions(handle)
+    diagnostics = _run_output_diagnostics(
+        registry_root,
+        run_id,
+        recovery_attempted=recovery_attempted,
+        recovery_truncated=recovery_truncated,
+    )
+    diagnostics["nextActions"] = next_actions
+    content = _format_run_output_diagnostics(diagnostics, next_actions)
+    sections["diagnostics"] = {"bytes": len(content.encode("utf-8"))}
+    text_sections["diagnostics"] = content
 
 
 def emit_run_output(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout: TextIO) -> int:
@@ -1366,9 +1574,16 @@ def emit_run_output(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout:
             )
             text = ""
             recovery_truncated = False
+            recovery_attempted = False
             if status != run_registry.STATUS_RUNNING:
+                manifest = run_registry.load_run_manifest(registry_root, run_id)
+                harness = manifest.get("harness") if isinstance(manifest, dict) else None
+                allow_last_assistant = harness != "codex"
+                recovery_attempted = True
                 text, recovery_truncated = _recover_completion_report_from_stdout(
-                    registry_root, run_id
+                    registry_root,
+                    run_id,
+                    allow_last_assistant=allow_last_assistant,
                 )
             if text:
                 sections["completionReport"] = {
@@ -1381,10 +1596,40 @@ def emit_run_output(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout:
                 }
                 text_sections["completionReport"] = text
             else:
-                raise DelegateError(
-                    "missing_completion_report",
-                    f"Completion report not found for run: {alias or run_id}",
-                )
+                if parsed.run_output_default:
+                    _add_default_run_output_fallback(
+                        registry_root=registry_root,
+                        run_id=run_id,
+                        alias=alias,
+                        sections=sections,
+                        text_sections=text_sections,
+                        recovery_attempted=recovery_attempted,
+                        recovery_truncated=recovery_truncated,
+                    )
+                else:
+                    handle = alias or run_id
+                    diagnostics = _run_output_diagnostics(
+                        registry_root,
+                        run_id,
+                        recovery_attempted=recovery_attempted,
+                        recovery_truncated=recovery_truncated,
+                    )
+                    raise DelegateError(
+                        "missing_completion_report",
+                        f"Completion report not found for run: {handle}",
+                        diagnostics=diagnostics,
+                        next_actions=_run_output_next_actions(handle),
+                    )
+    if parsed.run_output_default and not sections:
+        _add_default_run_output_fallback(
+            registry_root=registry_root,
+            run_id=run_id,
+            alias=alias,
+            sections=sections,
+            text_sections=text_sections,
+            recovery_attempted=False,
+            recovery_truncated=False,
+        )
     log_flags = parsed.run_output_stdout or parsed.run_output_stderr or parsed.run_output_raw
     if log_flags:
         try:
@@ -1450,6 +1695,17 @@ def _worktree_list_payload(
         status=parsed.worktree_status,
         limit=parsed.worktree_limit or run_registry.DEFAULT_RUNS_LIMIT,
     )
+    summary = payload.get("summary")
+    if isinstance(summary, dict):
+        summary["autoPruneMode"] = (
+            "suppressed"
+            if parsed.worktree_no_auto_prune
+            else "attempted"
+            if auto_prune is not None
+            else "disabled"
+        )
+        if auto_prune is not None and auto_prune.get("skipped") is not True:
+            summary["readOnly"] = False
     if auto_prune is not None:
         payload["autoPrune"] = auto_prune
         if auto_prune.get("ok") is False and auto_prune.get("skipped") is not True:
@@ -1877,6 +2133,18 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
     )
 
 
+def redacted_prompt_argv(argv: list[str], replacement: str = CURSOR_PROMPT_REDACTION) -> list[str]:
+    if not argv:
+        return []
+    redacted = list(argv)
+    redacted[-1] = replacement
+    return redacted
+
+
+def public_argv(request: Request) -> list[str]:
+    return list(request.display_argv if request.display_argv is not None else request.argv)
+
+
 def build_request(
     engine: str,
     mode: str,
@@ -1914,6 +2182,7 @@ def build_request(
         argv = build_cursor_argv(
             cursor["argvPrefix"], mode, resolved.path, model, prompt, stream_capture=stream_capture
         )
+        display_argv = redacted_prompt_argv(argv)
         request_kwargs = reasoning_request_kwargs(capability, effort_source)
         return Request(
             engine,
@@ -1926,6 +2195,8 @@ def build_request(
             dry_run=dry_run,
             workspace_kind=resolved.kind,
             isolation_context=isolation_context,
+            prompt_transport=PROMPT_TRANSPORT_ARGV,
+            display_argv=display_argv,
             **request_kwargs,
         )
     if engine == "droid":
@@ -1961,7 +2232,12 @@ def build_request(
             prompt,
             stream_capture=stream_capture,
             reasoning_capability=capability,
+            prompt_transport=PROMPT_TRANSPORT_FILE,
         )
+        display_argv = [
+            DROID_PROMPT_FILE_DISPLAY if item == DROID_PROMPT_FILE_ARG_PLACEHOLDER else item
+            for item in argv
+        ]
         request_kwargs = reasoning_request_kwargs(capability, effort_source)
         return Request(
             engine,
@@ -1974,6 +2250,9 @@ def build_request(
             dry_run=dry_run,
             workspace_kind=resolved.kind,
             isolation_context=isolation_context,
+            prompt_file_text=prompt,
+            prompt_transport=PROMPT_TRANSPORT_FILE,
+            display_argv=display_argv,
             **request_kwargs,
         )
     if engine == "codex":
@@ -2002,6 +2281,7 @@ def build_request(
             workspace_kind=resolved.kind,
             stream_capture=stream_capture,
             reasoning_capability=capability,
+            prompt_transport=PROMPT_TRANSPORT_STDIN,
         )
         request_kwargs = reasoning_request_kwargs(capability, effort_source)
         return Request(
@@ -2015,6 +2295,9 @@ def build_request(
             dry_run=dry_run,
             workspace_kind=resolved.kind,
             isolation_context=isolation_context,
+            stdin_text=prompt,
+            prompt_transport=PROMPT_TRANSPORT_STDIN,
+            display_argv=list(argv),
             **request_kwargs,
         )
     raise DelegateError("invalid_engine", "engine must be cursor, droid, or codex.")
@@ -2133,33 +2416,56 @@ def _ensure_codex_skip_git_repo_check(argv: list[str]) -> list[str]:
     return updated
 
 
+def replace_safe_workspace_arg_in_argv(
+    request: Request,
+    argv: list[str],
+    isolated_workspace: str,
+    *,
+    workspace_kind: str | None = None,
+) -> list[str]:
+    if request.engine == "cursor":
+        return replace_argv_after_flag(argv, "--workspace", isolated_workspace)
+    if request.engine == "codex":
+        argv = replace_argv_after_flag(argv, "--cd", isolated_workspace)
+        if workspace_kind == "directory":
+            argv = _ensure_codex_skip_git_repo_check(argv)
+        return argv
+    if request.engine == "droid":
+        return replace_argv_after_flag(argv, "--cwd", isolated_workspace)
+    return list(argv)
+
+
 def replace_safe_workspace_arg(
     request: Request,
     isolated_workspace: str,
     *,
     workspace_kind: str | None = None,
 ) -> list[str]:
+    return replace_safe_workspace_arg_in_argv(
+        request,
+        request.argv,
+        isolated_workspace,
+        workspace_kind=workspace_kind,
+    )
+
+
+def replace_workspace_arg_in_argv(
+    request: Request,
+    argv: list[str],
+    execution_workspace: str,
+) -> list[str]:
+    """Rewrite the workspace/--cwd argument for all engines."""
     if request.engine == "cursor":
-        return replace_argv_after_flag(request.argv, "--workspace", isolated_workspace)
+        return replace_argv_after_flag(argv, "--workspace", execution_workspace)
     if request.engine == "codex":
-        argv = replace_argv_after_flag(request.argv, "--cd", isolated_workspace)
-        if workspace_kind == "directory":
-            argv = _ensure_codex_skip_git_repo_check(argv)
-        return argv
+        return replace_argv_after_flag(argv, "--cd", execution_workspace)
     if request.engine == "droid":
-        return replace_argv_after_flag(request.argv, "--cwd", isolated_workspace)
-    return list(request.argv)
+        return replace_argv_after_flag(argv, "--cwd", execution_workspace)
+    return list(argv)
 
 
 def replace_workspace_arg(request: Request, execution_workspace: str) -> list[str]:
-    """Rewrite the workspace/--cwd argument for all engines."""
-    if request.engine == "cursor":
-        return replace_argv_after_flag(request.argv, "--workspace", execution_workspace)
-    if request.engine == "codex":
-        return replace_argv_after_flag(request.argv, "--cd", execution_workspace)
-    if request.engine == "droid":
-        return replace_argv_after_flag(request.argv, "--cwd", execution_workspace)
-    return list(request.argv)
+    return replace_workspace_arg_in_argv(request, request.argv, execution_workspace)
 
 
 def capture_git_metadata(
@@ -2581,16 +2887,23 @@ def safe_isolated_request(request: Request) -> Iterator[Request]:
     try:
         if request.engine == "cursor":
             write_cursor_safe_project_config(Path(isolated_workspace))
+        isolated_argv = replace_safe_workspace_arg(
+            request,
+            isolated_workspace,
+            workspace_kind=workspace_kind,
+        )
+        isolated_display_argv = replace_safe_workspace_arg_in_argv(
+            request,
+            public_argv(request),
+            isolated_workspace,
+            workspace_kind=workspace_kind,
+        )
         yield Request(
             engine=request.engine,
             mode=request.mode,
             workspace=isolated_workspace,
             prompt=request.prompt,
-            argv=replace_safe_workspace_arg(
-                request,
-                isolated_workspace,
-                workspace_kind=workspace_kind,
-            ),
+            argv=isolated_argv,
             model=request.model,
             model_alias=request.model_alias,
             dry_run=request.dry_run,
@@ -2601,6 +2914,10 @@ def safe_isolated_request(request: Request) -> Iterator[Request]:
             reasoning_effort_source=request.reasoning_effort_source,
             reasoning_capability_source=request.reasoning_capability_source,
             reasoning_transport=request.reasoning_transport,
+            stdin_text=request.stdin_text,
+            prompt_file_text=request.prompt_file_text,
+            prompt_transport=request.prompt_transport,
+            display_argv=isolated_display_argv,
         )
     finally:
         cleanup_safe_isolated_workspace(
@@ -2644,6 +2961,7 @@ def build_droid_argv(
     *,
     stream_capture: bool = True,
     reasoning_capability: reasoning.ReasoningCapability | None = None,
+    prompt_transport: str = PROMPT_TRANSPORT_ARGV,
 ) -> list[str]:
     argv = [binary, "exec", "--cwd", workspace]
     if mode == MODE_WORK:
@@ -2653,9 +2971,18 @@ def build_droid_argv(
     if reasoning_capability is not None and reasoning_capability.transport == "droid-flag":
         argv.extend(["--reasoning-effort", reasoning_capability.resolved_effort])
     if stream_capture:
-        argv.extend(["--model", model, "--output-format", "stream-json", prompt])
+        argv.extend(["--model", model, "--output-format", "stream-json"])
     else:
-        argv.extend(["--model", model, prompt])
+        argv.extend(["--model", model])
+    if prompt_transport == PROMPT_TRANSPORT_ARGV:
+        argv.append(prompt)
+    elif prompt_transport == PROMPT_TRANSPORT_FILE:
+        argv.extend(["--file", DROID_PROMPT_FILE_ARG_PLACEHOLDER])
+    elif prompt_transport != PROMPT_TRANSPORT_STDIN:
+        raise DelegateError(
+            "invalid_prompt_transport",
+            f"Unsupported Droid prompt transport: {prompt_transport}",
+        )
     return argv
 
 
@@ -2670,6 +2997,7 @@ def build_codex_argv(
     workspace_kind: str,
     stream_capture: bool = True,
     reasoning_capability: reasoning.ReasoningCapability | None = None,
+    prompt_transport: str = PROMPT_TRANSPORT_ARGV,
 ) -> list[str]:
     binary = str(codex["binary"])
     argv = [binary]
@@ -2717,7 +3045,15 @@ def build_codex_argv(
         argv.extend(["--color", "never", "--json"])
         if codex.get("ephemeral", True) is True:
             argv.append("--ephemeral")
-    argv.append(prompt)
+    if prompt_transport == PROMPT_TRANSPORT_ARGV:
+        argv.append(prompt)
+    elif prompt_transport == PROMPT_TRANSPORT_STDIN:
+        argv.append("-")
+    else:
+        raise DelegateError(
+            "invalid_prompt_transport",
+            f"Unsupported Codex prompt transport: {prompt_transport}",
+        )
     return argv
 
 
@@ -2730,7 +3066,8 @@ def dry_run_payload(request: Request) -> JsonObject:
         "engine": request.engine,
         "mode": request.mode,
         "model": request.model,
-        "argv": list(request.argv),
+        "argv": public_argv(request),
+        "promptTransport": request.prompt_transport,
     }
     add_reasoning_payload_fields(payload, request)
 
@@ -3018,6 +3355,7 @@ def _build_persistent_worktree_run_context(
         reasoning_effort_source=request.reasoning_effort_source,
         reasoning_capability_source=request.reasoning_capability_source,
         reasoning_transport=request.reasoning_transport,
+        prompt_transport=request.prompt_transport,
     )
 
 
@@ -3079,7 +3417,10 @@ def _register_persistent_worktree_run(
     )
     run_path = run_registry.run_directory(preflight.registry_root, run_id)
     run_path.mkdir(parents=True, exist_ok=True)
-    delegate_runner.write_manifest(run_path, delegate_runner.build_manifest(pre_ctx, request.argv))
+    delegate_runner.write_manifest(
+        run_path,
+        delegate_runner.build_manifest(pre_ctx, public_argv(request)),
+    )
 
     delegate_runner.write_state(
         run_path,
@@ -3174,7 +3515,23 @@ def _launch_child_in_persistent_worktree(
         execution_argv = replace_workspace_arg(request, registration.worktree_path)
         ensure_binary(execution_argv)
         execution_prompt = prepend_persistent_worktree_context(request.prompt)
-        execution_argv[-1] = execution_prompt
+        execution_stdin_text = request.stdin_text
+        execution_prompt_file_text = request.prompt_file_text
+        if request.prompt_transport == PROMPT_TRANSPORT_STDIN:
+            execution_stdin_text = prepend_persistent_worktree_context(
+                execution_stdin_text or request.prompt
+            )
+        elif request.prompt_transport == PROMPT_TRANSPORT_FILE:
+            execution_prompt_file_text = prepend_persistent_worktree_context(
+                execution_prompt_file_text or request.prompt
+            )
+        else:
+            execution_argv[-1] = execution_prompt
+        execution_display_argv = replace_workspace_arg_in_argv(
+            request,
+            public_argv(request),
+            registration.worktree_path,
+        )
 
         exec_ctx = _build_persistent_worktree_run_context(
             request,
@@ -3187,7 +3544,8 @@ def _launch_child_in_persistent_worktree(
             creation_context=registration.creation_context,
         )
         delegate_runner.write_manifest(
-            registration.run_path, delegate_runner.build_manifest(exec_ctx, execution_argv)
+            registration.run_path,
+            delegate_runner.build_manifest(exec_ctx, execution_display_argv),
         )
         exit_code, payload = delegate_runner.execute_tracked(
             execution_argv,
@@ -3197,6 +3555,10 @@ def _launch_child_in_persistent_worktree(
             stdout=stdout,
             stderr=stderr,
             completion_report_mode=completion_report_mode,
+            stdin_text=execution_stdin_text,
+            prompt_file_text=execution_prompt_file_text,
+            prompt_file_placeholder=DROID_PROMPT_FILE_ARG_PLACEHOLDER,
+            manifest_argv=execution_display_argv,
         )
     except Exception as exc:
         error_msg = str(exc)
@@ -3340,6 +3702,7 @@ def make_run_context(
         reasoning_effort_source=request.reasoning_effort_source,
         reasoning_capability_source=request.reasoning_capability_source,
         reasoning_transport=request.reasoning_transport,
+        prompt_transport=request.prompt_transport,
     )
 
 
@@ -3380,6 +3743,9 @@ def execute_request(
             exit_code = delegate_runner.execute_passthrough(
                 isolated_request.argv,
                 isolated_request.workspace,
+                stdin_text=isolated_request.stdin_text,
+                prompt_file_text=isolated_request.prompt_file_text,
+                prompt_file_placeholder=DROID_PROMPT_FILE_ARG_PLACEHOLDER,
             )
             return exit_code, None
         registry_root = run_registry.ensure_registry(
@@ -3415,13 +3781,77 @@ def execute_request(
             stdout=stdout,
             stderr=stderr,
             completion_report_mode=completion_report_mode,
+            stdin_text=isolated_request.stdin_text,
+            prompt_file_text=isolated_request.prompt_file_text,
+            prompt_file_placeholder=DROID_PROMPT_FILE_ARG_PLACEHOLDER,
+            manifest_argv=public_argv(isolated_request),
         )
 
 
-def models_payload(config: JsonObject, config_source: str) -> JsonObject:
+def runtime_payload() -> JsonObject:
+    module_path = Path(__file__).resolve()
+    return {
+        "version": VERSION,
+        "modulePath": str(module_path),
+        "packageRoot": str(module_path.parents[1]),
+        "executable": sys.argv[0],
+        "pythonExecutable": sys.executable,
+    }
+
+
+def config_resolution_payload(config_source: str, workspace: Path | None = None) -> JsonObject:
+    layers: list[JsonObject] = [{"name": "embedded-default", "applied": True}]
+    global_path = delegate_config.DEFAULT_CONFIG_PATH.expanduser()
+    global_exists = global_path.exists()
+    layers.append(
+        {
+            "name": "user",
+            "path": str(global_path),
+            "exists": global_exists,
+            "applied": global_exists,
+        }
+    )
+    if workspace is not None:
+        workspace_path = delegate_config.workspace_config_path(workspace)
+        workspace_exists = workspace_path.exists()
+        layers.append(
+            {
+                "name": "workspace",
+                "path": str(workspace_path),
+                "exists": workspace_exists,
+                "applied": workspace_exists,
+            }
+        )
+    explicit = os.environ.get(CONFIG_ENV)
+    if explicit:
+        explicit_path = Path(explicit).expanduser()
+        explicit_exists = explicit_path.exists()
+        layers.append(
+            {
+                "name": CONFIG_ENV,
+                "path": str(explicit_path),
+                "exists": explicit_exists,
+                "applied": explicit_exists,
+            }
+        )
+    return {
+        "source": config_source,
+        "effectiveConfigPath": str(config_path()),
+        "workspace": str(workspace) if workspace is not None else None,
+        "layers": layers,
+    }
+
+
+def models_payload(
+    config: JsonObject,
+    config_source: str,
+    workspace: Path | None = None,
+) -> JsonObject:
     return {
         "ok": True,
         "configSource": config_source,
+        "configResolution": config_resolution_payload(config_source, workspace),
+        "runtime": runtime_payload(),
         "cursor": {
             "defaultModel": config["cursor"]["defaultModel"],
             "argvPrefix": config["cursor"]["argvPrefix"],
@@ -3477,10 +3907,15 @@ def _codex_describe_argv(
         prompt,
         policy,
         workspace_kind="git",
+        prompt_transport=PROMPT_TRANSPORT_STDIN,
     )
 
 
-def describe_payload(config: JsonObject, config_source: str) -> JsonObject:
+def describe_payload(
+    config: JsonObject,
+    config_source: str,
+    workspace: Path | None = None,
+) -> JsonObject:
     codex = config["codex"]
     codex_safe_policy = delegate_config.effective_policy(config, engine="codex", mode=MODE_SAFE)
     codex_work_policy = delegate_config.effective_policy(config, engine="codex", mode=MODE_WORK)
@@ -3501,8 +3936,10 @@ def describe_payload(config: JsonObject, config_source: str) -> JsonObject:
     return {
         "ok": True,
         "version": VERSION,
+        "runtime": runtime_payload(),
         "configPath": str(config_path()),
         "configSource": config_source,
+        "configResolution": config_resolution_payload(config_source, workspace),
         "engines": ["cursor", "droid", "codex"],
         "policyProfiles": list(delegate_config.POLICY_PROFILES),
         "policyFieldSupport": _policy_field_support_matrix(),
@@ -3514,6 +3951,11 @@ def describe_payload(config: JsonObject, config_source: str) -> JsonObject:
         },
         "modes": [MODE_SAFE, MODE_WORK],
         "promptSources": ["direct", "prompt-file", "stdin"],
+        "promptTransports": {
+            "cursor": PROMPT_TRANSPORT_ARGV,
+            "droid": PROMPT_TRANSPORT_FILE,
+            "codex": PROMPT_TRANSPORT_STDIN,
+        },
         "globalOptions": [
             "--cwd",
             "--json",
@@ -3583,7 +4025,8 @@ def describe_payload(config: JsonObject, config_source: str) -> JsonObject:
                     "<model-id>",
                     "--output-format",
                     "stream-json",
-                    "<skill-review-prompt>",
+                    "--file",
+                    DROID_PROMPT_FILE_DISPLAY,
                 ],
                 "work": [
                     config["droid"]["binary"],
@@ -3595,7 +4038,8 @@ def describe_payload(config: JsonObject, config_source: str) -> JsonObject:
                     "<model-id>",
                     "--output-format",
                     "stream-json",
-                    "<skill-review-prompt>",
+                    "--file",
+                    DROID_PROMPT_FILE_DISPLAY,
                 ],
             },
             "codex": {
@@ -3620,9 +4064,16 @@ def describe_payload(config: JsonObject, config_source: str) -> JsonObject:
     }
 
 
-def emit_models(config: JsonObject, config_source: str, json_mode: bool, stdout: TextIO) -> int:
+def emit_models(
+    config: JsonObject,
+    config_source: str,
+    json_mode: bool,
+    stdout: TextIO,
+    *,
+    workspace: Path | None = None,
+) -> int:
     if json_mode:
-        delegate_rendering.print_json(models_payload(config, config_source), stdout)
+        delegate_rendering.print_json(models_payload(config, config_source, workspace), stdout)
         return EXIT_OK
     if config_source == "embedded-default":
         print("warning: using embedded default config", file=stdout)
@@ -3642,6 +4093,7 @@ def emit_models(config: JsonObject, config_source: str, json_mode: bool, stdout:
         f"codex: binary={codex['binary']} defaultModel={model_label} profile={profile_label}",
         file=stdout,
     )
+    print(f"runtime: {runtime_payload()['modulePath']}", file=stdout)
     return EXIT_OK
 
 
@@ -3702,13 +4154,21 @@ def emit_capabilities(
     return EXIT_OK
 
 
-def emit_describe(config: JsonObject, config_source: str, json_mode: bool, stdout: TextIO) -> int:
-    payload = describe_payload(config, config_source)
+def emit_describe(
+    config: JsonObject,
+    config_source: str,
+    json_mode: bool,
+    stdout: TextIO,
+    *,
+    workspace: Path | None = None,
+) -> int:
+    payload = describe_payload(config, config_source, workspace)
     if json_mode:
         delegate_rendering.print_json(payload, stdout)
         return EXIT_OK
     print(f"delegate {VERSION}", file=stdout)
     print(f"config: {payload['configPath']} ({payload['configSource']})", file=stdout)
+    print(f"runtime: {payload['runtime']['modulePath']}", file=stdout)
     print("engines: cursor, droid, codex", file=stdout)
     print("modes: safe, work", file=stdout)
     print("prompt sources: direct, --prompt-file, stdin", file=stdout)
@@ -3839,13 +4299,18 @@ def pre_read_run_json_for_config(
 
 def emit_error(error: DelegateError, json_mode: bool, stdout: TextIO, stderr: TextIO) -> int:
     if json_mode:
+        payload: JsonObject = {
+            "ok": False,
+            "error": error.error,
+            "message": error.message,
+            "exitCode": error.exit_code,
+        }
+        if error.diagnostics is not None:
+            payload["diagnostics"] = error.diagnostics
+        if error.next_actions:
+            payload["nextActions"] = error.next_actions
         delegate_rendering.print_json(
-            {
-                "ok": False,
-                "error": error.error,
-                "message": error.message,
-                "exitCode": error.exit_code,
-            },
+            payload,
             stdout,
         )
     else:
@@ -3878,14 +4343,18 @@ def main(
         if parsed.subcommand == "run":
             assert parsed.input_json is not None
             workspace, config, source = pre_read_run_json_for_config(parsed.input_json, parsed.cwd)
+            config_workspace = Path(workspace.path)
         else:
-            config, source = load_config(workspace=workspace_path_for_config(parsed.cwd))
+            config_workspace = workspace_path_for_config(parsed.cwd)
+            config, source = load_config(workspace=config_workspace)
             validate_config(config)
 
         if parsed.subcommand == "models":
-            return emit_models(config, source, parsed.json_mode, stdout)
+            return emit_models(config, source, parsed.json_mode, stdout, workspace=config_workspace)
         if parsed.subcommand == "describe":
-            return emit_describe(config, source, parsed.json_mode, stdout)
+            return emit_describe(
+                config, source, parsed.json_mode, stdout, workspace=config_workspace
+            )
         if parsed.subcommand == "agent-help":
             return emit_agent_help(stdout)
 

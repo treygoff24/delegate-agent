@@ -369,6 +369,72 @@ class CommandTests(unittest.TestCase):
         self.assertIn("xhigh", request.argv)
         self.assertNotIn("--skip-permissions-unsafe", request.argv)
 
+    def test_codex_and_droid_requests_keep_prompt_out_of_argv(self):
+        secret_prompt = "TOP-SECRET-PROMPT"
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["codex"]["defaultModel"] = "gpt-5.5"
+        config["droid"]["models"] = {"reviewer": "gpt-5.5"}
+
+        codex = self.delegate.build_request(
+            "codex",
+            "work",
+            None,
+            "/repo",
+            secret_prompt,
+            config,
+            True,
+        )
+        self.assertEqual(codex.prompt_transport, "stdin")
+        self.assertIsNotNone(codex.stdin_text)
+        self.assertIn(secret_prompt, codex.stdin_text)
+        self.assertEqual(codex.argv[-1], "-")
+        self.assertNotIn(secret_prompt, json.dumps(codex.argv))
+        codex_payload = self.delegate.dry_run_payload(codex)
+        self.assertEqual(codex_payload["promptTransport"], "stdin")
+        self.assertNotIn(secret_prompt, json.dumps(codex_payload["argv"]))
+
+        droid = self.delegate.build_request(
+            "droid",
+            "safe",
+            "reviewer",
+            "/repo",
+            secret_prompt,
+            config,
+            True,
+        )
+        self.assertEqual(droid.prompt_transport, "file")
+        self.assertIsNone(droid.stdin_text)
+        self.assertIsNotNone(droid.prompt_file_text)
+        self.assertIn(secret_prompt, droid.prompt_file_text)
+        self.assertIn("--file", droid.argv)
+        self.assertIn(self.delegate.DROID_PROMPT_FILE_ARG_PLACEHOLDER, droid.argv)
+        self.assertNotIn(secret_prompt, json.dumps(droid.argv))
+        droid_payload = self.delegate.dry_run_payload(droid)
+        self.assertEqual(droid_payload["promptTransport"], "file")
+        self.assertIn("--file", droid_payload["argv"])
+        self.assertIn(self.delegate.DROID_PROMPT_FILE_DISPLAY, droid_payload["argv"])
+        self.assertNotIn(secret_prompt, json.dumps(droid_payload["argv"]))
+
+    def test_cursor_dry_run_redacts_prompt_argv_tail(self):
+        secret_prompt = "TOP-SECRET-CURSOR-PROMPT"
+        request = self.delegate.build_request(
+            "cursor",
+            "work",
+            None,
+            "/repo",
+            secret_prompt,
+            self.delegate.DEFAULT_CONFIG,
+            True,
+        )
+        self.assertEqual(request.prompt_transport, "argv")
+        self.assertIn(secret_prompt, request.argv[-1])
+
+        payload = self.delegate.dry_run_payload(request)
+
+        self.assertEqual(payload["promptTransport"], "argv")
+        self.assertEqual(payload["argv"][-1], self.delegate.CURSOR_PROMPT_REDACTION)
+        self.assertNotIn(secret_prompt, json.dumps(payload["argv"]))
+
     def test_build_request_uses_cache_declared_custom_model_capability(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
         config["droid"]["models"] = {"reviewer": "custom:cached"}
@@ -720,9 +786,37 @@ class CommandTests(unittest.TestCase):
         self.assertIn("read-only", codex_safe)
         self.assertIn("safeNotes", payload["modeMapping"]["codex"])
         self.assertIn("isolated", payload["modeMapping"]["codex"]["safeNotes"][0].lower())
+        self.assertEqual(payload["promptTransports"]["droid"], "file")
+        self.assertIn("--file", payload["modeMapping"]["droid"]["safe"])
+        self.assertIn(
+            self.delegate.DROID_PROMPT_FILE_DISPLAY, payload["modeMapping"]["droid"]["safe"]
+        )
         self.assertNotIn("--auto", payload["modeMapping"]["droid"]["safe"])
         self.assertNotIn("--use-spec", payload["modeMapping"]["droid"]["safe"])
         self.assertNotIn("--skip-permissions-unsafe", payload["modeMapping"]["droid"]["safe"])
+
+    def test_describe_and_models_include_runtime_and_config_provenance(self):
+        workspace = Path("/tmp/delegate-provenance-test")
+        describe = self.delegate.describe_payload(
+            self.delegate.DEFAULT_CONFIG,
+            "embedded-default",
+            workspace,
+        )
+        models = self.delegate.models_payload(
+            self.delegate.DEFAULT_CONFIG,
+            "embedded-default",
+            workspace,
+        )
+        for payload in (describe, models):
+            self.assertIn("runtime", payload)
+            self.assertEqual(payload["runtime"]["version"], self.delegate.VERSION)
+            self.assertTrue(payload["runtime"]["modulePath"].endswith("cli.py"))
+            self.assertIn("configResolution", payload)
+            resolution = payload["configResolution"]
+            self.assertEqual(resolution["source"], "embedded-default")
+            self.assertEqual(resolution["workspace"], str(workspace))
+            self.assertEqual(resolution["layers"][0]["name"], "embedded-default")
+            self.assertTrue(any(layer.get("name") == "workspace" for layer in resolution["layers"]))
 
     def test_describe_codex_work_argv_matches_effective_network_policy(self):
         config = self.delegate.delegate_config.deep_merge(

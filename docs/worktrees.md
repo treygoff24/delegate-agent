@@ -59,7 +59,9 @@ delegate worktree show <alias-or-runId>
 delegate worktree show --latest cursor
 ```
 
-`worktree show` reports status, path, branch, dirty state, ahead/behind counts, and suggested review or cleanup commands.
+`worktree show --latest HARNESS` resolves the most recent persistent worktree for that harness. It intentionally ignores newer non-worktree runs from the same harness.
+
+`worktree show` reports status, path, branch, dirty state, ahead/behind counts, and suggested review or cleanup commands. `worktree list` is read-only unless an enabled auto-prune pass runs before listing; JSON output includes `summary.autoPruneMode` (`disabled`, `attempted`, or `suppressed`) and `summary.readOnly`.
 
 Common statuses:
 
@@ -120,6 +122,8 @@ delegate worktree gc
 ```
 
 `gc` reconciles registry metadata with the filesystem and Git worktree list. It does not delete paths by itself.
+
+In dry-run mode, `gc` only reports what it would mark. Without `--dry-run`, it may update Delegate registry status (for example, marking missing paths as `missing` or inconsistent metadata as `unknown`) and may run `git worktree prune` to clean Git administrative metadata for already-missing paths, but it does not delete worktree directories. JSON output includes an `effects` object that makes those mutation boundaries explicit.
 
 ## Security boundary
 

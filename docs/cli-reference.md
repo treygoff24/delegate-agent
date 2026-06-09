@@ -28,7 +28,12 @@ delegate codex safe [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 delegate codex work [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 ```
 
-Prompt sources are direct arguments, `--prompt-file`, or stdin.
+Prompt sources are direct arguments, `--prompt-file`, or Delegate stdin. After
+Delegate resolves the prompt, Codex prompts are passed to the child runtime over
+stdin. Droid prompts are written to a private temporary prompt file and passed
+with Droid's documented `--file` option. Cursor Agent currently only exposes
+positional prompt input, so Cursor launches still use argv transport; Delegate
+redacts Cursor prompt argv in dry-run output and run manifests.
 
 `--reasoning-effort LEVEL` is optional and parsed only before prompt text begins. Unsupported model/effort pairs fail closed before launch with `unsupported_reasoning_effort`. It affects only model reasoning depth, cost, or latency; it does not change `safe`/`work` permissions, sandboxing, approvals, network policy, or edit capability. Cursor effort is model-selection based and requires `cursor.reasoningEffortModels`; Droid emits `--reasoning-effort LEVEL`; Codex emits a `model_reasoning_effort` config override after the model is resolved.
 
@@ -53,6 +58,7 @@ Typical dry-run JSON fields:
   "model": null,
   "cwd": "/path/to/workspace",
   "workspaceKind": "git",
+  "promptTransport": "stdin",
   "argv": ["codex", "--ask-for-approval", "never", "exec", "..."],
   "requestedReasoningEffort": "high",
   "resolvedReasoningEffort": "high",
@@ -116,6 +122,11 @@ delegate agent-help
 
 `describe` reports version, engines, modes, supported isolation values, prompt transforms, effective policy, and representative argv shapes. It also includes a `commands` catalog (each entry has `command` and `summary`) so an agent can enumerate the whole command surface in one call. `models` reports configured Cursor, Droid, and Codex model settings.
 
+Both `describe` and `models` include provenance fields useful for detecting installed-runtime drift:
+
+- `runtime.version`, `runtime.modulePath`, `runtime.packageRoot`, `runtime.executable`, and `runtime.pythonExecutable`.
+- `configResolution.source`, `configResolution.effectiveConfigPath`, and ordered `configResolution.layers` showing embedded, user, workspace, and `DELEGATE_CONFIG` layers when discoverable.
+
 `capabilities` reports reasoning-effort support from config, the workspace cache, and bundled fallback data without invoking child binaries. `capabilities refresh` may invoke child CLIs, validates the discovered data, and writes `.delegate/capabilities/reasoning.json` in the resolved workspace only after a successful refresh. The cache is runtime state and should not be committed.
 
 ### Help and discovery
@@ -171,10 +182,12 @@ For worktree actions, a `--help` token anywhere in the args wins and performs no
 Tracked runs return bounded parent-facing output and store local metadata under `.delegate/` in the source workspace.
 
 ```bash
-delegate runs [--active] [--recent] [--harness HARNESS] [--limit N]
+delegate runs [--active|--running|--stale|--recent] [--harness HARNESS] [--limit N]
 delegate snapshot [--latest HARNESS] [--no-redact] <alias-or-runId>
 delegate run-output <alias-or-runId> [--completion-report] [--stdout] [--stderr] [--tail N] [--raw] [--no-redact]
 ```
+
+`delegate runs` defaults to recent runs. `--active` preserves the legacy active view and includes both live `running` runs and `stale` runs. Use `--running` for only live tracked processes and `--stale` for runs recorded as running whose PID is missing or dead. `--active`, `--running`, `--stale`, and `--recent` are mutually exclusive.
 
 Common JSON fields for tracked run completion:
 
@@ -206,9 +219,16 @@ Common JSON fields for tracked run completion:
 }
 ```
 
-Snapshot JSON uses schema `delegate.snapshot.v1` and includes fields such as `alias`, `runId`, `harness`, `status`, `cwd`, `executionCwd`, `assistantText`, `recentEvents`, `warnings`, `exitCode`, reasoning metadata, and isolation/worktree metadata when applicable.
+Snapshot JSON uses schema `delegate.snapshot.v1` and includes fields such as `alias`, `runId`, `harness`, `status`, `rawStatus`, `effectiveStatus`, `staleReason`, `nextActions`, `cwd`, `executionCwd`, `assistantText`, `recentEvents`, `warnings`, `exitCode`, reasoning metadata, and isolation/worktree metadata when applicable. Inspection commands do not rewrite a stale run's recorded state; they expose the raw recorded status plus the effective status computed from the current PID check.
 
 Run-output JSON uses schema `delegate.run-output.v1` and returns selected completion report, stdout, and/or stderr content. By default, secret-like strings are redacted unless `--no-redact` is supplied.
+
+With no selector, `run-output` prints the best available parent-facing output:
+`completion-report.md` when present, a recovered final assistant message when
+possible, otherwise bounded stdout/stderr tails plus diagnostics. Explicit
+selectors are preserved. `--stdout` or `--stderr` without `--tail` or `--raw`
+defaults to a bounded `--tail 80`; use `--raw` only when you intentionally need
+the full stream.
 
 When `completion-report.md` is absent, `run-output --completion-report` makes a
 bounded best-effort attempt to recover an explicit final response from the
@@ -217,9 +237,10 @@ tracking. Codex recovery only promotes an `agent_message` after the stream
 reaches `turn.completed`, so progress messages are not treated as final reports.
 JSON output marks recovered reports with `synthetic: true` and
 `source: "stdout.log"`. Synthetic recovery may fail when the stdout stream is
-truncated, malformed, or lacks a completed final message; in that case, inspect
-bounded log selectors (`--stdout --tail N`, `--stderr --tail N`) before reading
-raw `.delegate/` files directly.
+truncated, malformed, or lacks a completed final message. JSON failures for
+explicit `--completion-report` include `diagnostics` (run status and stdout /
+stderr presence and byte counts) plus `nextActions` with bounded fallback
+commands before you read raw `.delegate/` files directly.
 
 ### Worktree management
 
@@ -231,6 +252,8 @@ delegate worktree remove <alias-or-runId> [--discard-uncommitted] [--force-branc
 delegate worktree prune [--merged] [--older-than DAYS] [--harness HARNESS] [--include-detached] [--dry-run] [--discard-uncommitted] [--force-branch] [--force]
 delegate worktree gc [--dry-run]
 ```
+
+`worktree show --latest HARNESS` selects the latest persistent worktree for the harness, not merely the latest run overall. `worktree list` JSON includes a `summary` with status counts, registry drift counts, warning counts, `autoPruneMode`, and whether the returned operation was read-only. `worktree gc` JSON includes `mode`, `effects`, per-entry `action`, and orphan `safeAction` fields to distinguish dry-run inspection from registry reconciliation; `gc` never deletes worktree directories.
 
 Worktree JSON schemas:
 
