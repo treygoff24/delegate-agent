@@ -39,23 +39,32 @@ Copy `config.example.json` and replace placeholders before real Droid runs:
 {
   "cursor": {
     "argvPrefix": ["agent"],
-    "defaultModel": "composer-2.5"
+    "defaultModel": "composer-2.5",
+    "defaultReasoningEffort": null,
+    "reasoningEffortModels": {}
   },
   "droid": {
     "binary": "droid",
+    "defaultReasoningEffort": null,
     "models": {
       "reviewer": "replace-with-read-only-model-id",
       "implementer": "replace-with-edit-capable-model-id"
     }
   },
+  "reasoning": {
+    "capabilities": {}
+  },
   "codex": {
     "binary": "codex",
-    "defaultModel": null
+    "defaultModel": null,
+    "defaultReasoningEffort": null
   }
 }
 ```
 
 `reviewer` and `implementer` are local aliases. They are intentionally provider-neutral. Put the real provider/model IDs in your private config, not in public docs or shared examples.
+
+Reasoning-effort settings are optional. A per-run `--reasoning-effort LEVEL` or JSON `reasoningEffort` overrides provider defaults. If no effort is requested or defaulted, Delegate emits no reasoning-effort argv and preserves current runtime behavior.
 
 ## Sections
 
@@ -82,13 +91,19 @@ Controls local run recording.
 {
   "cursor": {
     "argvPrefix": ["agent"],
-    "defaultModel": "composer-2.5"
+    "defaultModel": "composer-2.5",
+    "defaultReasoningEffort": null,
+    "reasoningEffortModels": {
+      "high": "replace-with-thinking-cursor-model"
+    }
   }
 }
 ```
 
 - `argvPrefix`: command prefix for Cursor Agent. Use an array so wrappers are possible.
 - `defaultModel`: non-empty model name passed to Cursor.
+- `defaultReasoningEffort`: optional non-empty effort string. If set, it requires a matching `reasoningEffortModels` entry.
+- `reasoningEffortModels`: map from effort strings to Cursor model names. Cursor currently has no standalone reasoning-effort flag, so Delegate implements Cursor effort by selecting the configured model for that effort.
 - `cursor.binary` is not supported; use `argvPrefix`.
 
 ### `droid`
@@ -97,6 +112,7 @@ Controls local run recording.
 {
   "droid": {
     "binary": "droid",
+    "defaultReasoningEffort": null,
     "models": {
       "reviewer": "replace-with-read-only-model-id",
       "implementer": "replace-with-edit-capable-model-id"
@@ -107,6 +123,7 @@ Controls local run recording.
 
 - `binary`: child executable for Droid.
 - `models`: map of local aliases to real Droid model IDs. May be empty if you do not use Droid; running a Droid alias that is not present fails with `invalid_alias`.
+- `defaultReasoningEffort`: optional non-empty effort string validated against the resolved Droid model before launch.
 - Placeholder IDs that start with `replace-with-` are rejected for real runs.
 
 ### `codex`
@@ -116,6 +133,7 @@ Controls local run recording.
   "codex": {
     "binary": "codex",
     "defaultModel": null,
+    "defaultReasoningEffort": null,
     "profile": null,
     "workSandbox": "workspace-write",
     "ephemeral": true,
@@ -125,11 +143,41 @@ Controls local run recording.
 ```
 
 - `defaultModel`: optional model string. `null` lets Codex choose its own default.
+- `defaultReasoningEffort`: optional non-empty effort string. If set, Delegate requires a resolved Codex model from the run input or `codex.defaultModel`, validates support, and emits a Codex config override.
 - `profile`: optional Codex profile name. It is config-only; JSON run input cannot set it.
 - `workSandbox`: `read-only`, `workspace-write`, or `danger-full-access` for Codex work mode when full bypass is not enabled.
 - `ephemeral`: include Codex `--ephemeral` in JSON-streaming runs.
 - `ignoreUserConfig`: include Codex `--ignore-user-config`.
 - Codex safe mode always uses `--sandbox read-only` in v1; `codex.safeSandbox` is rejected.
+
+### `reasoning`
+
+```json
+{
+  "reasoning": {
+    "capabilities": {
+      "codex": {
+        "custom-model": {
+          "supported": ["low", "medium", "high"],
+          "default": "medium"
+        }
+      },
+      "droid": {
+        "provider/custom-model": {
+          "supported": ["high", "xhigh"],
+          "default": "high"
+        }
+      }
+    }
+  }
+}
+```
+
+- `capabilities`: optional map of harness name to model capability declarations.
+- `supported`: non-empty array of exact effort strings. Delegate treats these literally; it does not translate `xhigh` to another provider spelling.
+- `default`: optional effort string that must be present in `supported`.
+
+Capability precedence is config, then workspace cache, then bundled fallback. Use config for private or newly released models. Use `delegate --json capabilities` to inspect the merged view and `delegate --json capabilities refresh` to refresh the workspace-local cache at `.delegate/capabilities/reasoning.json`.
 
 ### `policy`
 

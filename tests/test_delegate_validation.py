@@ -1,3 +1,4 @@
+import copy
 import importlib.util
 import io
 import json
@@ -336,6 +337,65 @@ class ValidationTests(unittest.TestCase):
                 )
             )
         self.assertEqual(ctx.exception.error, "invalid_codex_config")
+
+    def test_reasoning_config_rejects_empty_effort_level(self):
+        config_mod = load_config_module()
+        config = copy.deepcopy(config_mod.DEFAULT_CONFIG)
+        config["reasoning"] = {
+            "capabilities": {
+                "droid": {
+                    "custom:x": {
+                        "supported": [""],
+                        "default": "",
+                    }
+                }
+            }
+        }
+        with self.assertRaises(config_mod.ConfigError) as ctx:
+            config_mod.validate_config(config)
+        self.assertEqual(ctx.exception.error, "invalid_reasoning_config")
+
+    def test_cursor_reasoning_effort_models_must_be_strings(self):
+        config_mod = load_config_module()
+        config = copy.deepcopy(config_mod.DEFAULT_CONFIG)
+        config["cursor"]["reasoningEffortModels"] = {"high": 123}
+        with self.assertRaises(config_mod.ConfigError) as ctx:
+            config_mod.validate_config(config)
+        self.assertEqual(ctx.exception.error, "invalid_cursor_config")
+
+    def test_provider_default_reasoning_effort_must_be_string_or_null(self):
+        config_mod = load_config_module()
+        config = copy.deepcopy(config_mod.DEFAULT_CONFIG)
+        config["codex"]["defaultReasoningEffort"] = 1
+        with self.assertRaises(config_mod.ConfigError) as ctx:
+            config_mod.validate_config(config)
+        self.assertEqual(ctx.exception.error, "invalid_codex_config")
+
+    def test_provider_default_reasoning_effort_rejects_whitespace(self):
+        config_mod = load_config_module()
+        config = copy.deepcopy(config_mod.DEFAULT_CONFIG)
+        config["droid"]["defaultReasoningEffort"] = "high effort"
+        with self.assertRaises(config_mod.ConfigError) as ctx:
+            config_mod.validate_config(config)
+        self.assertEqual(ctx.exception.error, "invalid_droid_config")
+
+    def test_cursor_reasoning_effort_model_keys_reject_whitespace(self):
+        config_mod = load_config_module()
+        config = copy.deepcopy(config_mod.DEFAULT_CONFIG)
+        config["cursor"]["reasoningEffortModels"] = {" high": "sonnet-thinking"}
+        with self.assertRaises(config_mod.ConfigError) as ctx:
+            config_mod.validate_config(config)
+        self.assertEqual(ctx.exception.error, "invalid_cursor_config")
+
+    def test_existing_config_without_reasoning_fields_still_validates(self):
+        config_mod = load_config_module()
+        config = copy.deepcopy(config_mod.DEFAULT_CONFIG)
+        config.pop("reasoning", None)
+        config["codex"].pop("defaultReasoningEffort", None)
+        config["droid"].pop("defaultReasoningEffort", None)
+        config["cursor"].pop("defaultReasoningEffort", None)
+        config["cursor"].pop("reasoningEffortModels", None)
+        config_mod.validate_config(config)
 
     def test_policy_trusted_hooks_profile_enables_codex_work_hook_bypass(self):
         config_mod = load_config_module()

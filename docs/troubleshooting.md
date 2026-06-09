@@ -38,6 +38,30 @@ Use aliases like `reviewer` or `implementer` in commands:
 delegate droid reviewer safe "Investigate only. Do not edit."
 ```
 
+## `unsupported_reasoning_effort`
+
+Delegate validates requested reasoning effort against the resolved harness and model before launch:
+
+```bash
+delegate --json dry-run codex safe --reasoning-effort high "Review only."
+delegate --json capabilities
+```
+
+Common causes:
+
+- Codex effort was requested but no Codex model was resolved. Set `codex.defaultModel` or pass a Codex model in JSON run input.
+- Cursor effort was requested but `cursor.reasoningEffortModels.<level>` is missing. Cursor effort uses model selection rather than a standalone effort flag.
+- Droid or Codex model support is not in config, the workspace cache, or bundled fallback data.
+- The effort string is misspelled. Delegate treats labels literally and does not translate between provider naming schemes.
+
+For private or newly released models, declare support in `reasoning.capabilities` in config. To refresh workspace-local discovered data, run:
+
+```bash
+delegate --json capabilities refresh
+```
+
+Refresh may invoke child CLIs and writes `.delegate/capabilities/reasoning.json` only after the refreshed schema validates. That file is runtime state; do not commit it.
+
 ## Unexpected config source
 
 `delegate --json describe` reports `configSource`. If it points somewhere unexpected, check:

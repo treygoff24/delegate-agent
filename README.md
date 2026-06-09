@@ -61,9 +61,10 @@ Inspect what Delegate sees:
 delegate --version       # installed version — include this in bug reports
 delegate --json describe
 delegate --json models
+delegate --json capabilities
 ```
 
-Discover commands as you go: `delegate <command> --help` prints focused help for any command path, and `delegate --json <command> --help` returns an agent-friendly spec of its usage, arguments, and options. `delegate --json describe` includes a `commands` catalog of the whole surface.
+Discover commands as you go: `delegate <command> --help` prints focused help for any command path, and `delegate --json <command> --help` returns an agent-friendly spec of its usage, arguments, and options. `delegate --json describe` includes a `commands` catalog of the whole surface. `delegate --json capabilities` reports reasoning-effort support without launching a child runtime.
 
 From this development checkout, use `python3 bin/delegate.py ...` instead of an installed `delegate` shim.
 
@@ -94,6 +95,12 @@ Run through JSON input for agent callers after copying an example and setting a 
 cp examples/task.codex.json /tmp/delegate-task.json
 $EDITOR /tmp/delegate-task.json
 delegate --json run --input-json /tmp/delegate-task.json
+```
+
+Reasoning effort is provider-aware and model-specific. Unsupported combinations fail before launch. It changes only the requested model thinking depth/cost/latency; it does not change safe/work mode, sandboxing, approvals, or edit capability. For example, after configuring `codex.defaultModel`:
+
+```bash
+delegate --json dry-run codex safe --reasoning-effort high "Review this repository. Do not edit files."
 ```
 
 Inspect tracked output by alias:

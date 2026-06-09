@@ -17,7 +17,14 @@ from pathlib import Path
 from typing import BinaryIO, NoReturn, TextIO
 
 try:
-    from delegate_agent import VERSION, command_help, harness_events, run_registry, worktree_mgmt
+    from delegate_agent import (
+        VERSION,
+        command_help,
+        harness_events,
+        reasoning,
+        run_registry,
+        worktree_mgmt,
+    )
     from delegate_agent import config as delegate_config
     from delegate_agent import rendering as delegate_rendering
     from delegate_agent import retention as delegate_retention
@@ -43,7 +50,14 @@ except ModuleNotFoundError:  # pragma: no cover - direct cli.py invocation in te
     _src_root = Path(__file__).resolve().parent.parent
     if str(_src_root) not in sys.path:
         sys.path.insert(0, str(_src_root))
-    from delegate_agent import VERSION, command_help, harness_events, run_registry, worktree_mgmt
+    from delegate_agent import (
+        VERSION,
+        command_help,
+        harness_events,
+        reasoning,
+        run_registry,
+        worktree_mgmt,
+    )
     from delegate_agent import config as delegate_config
     from delegate_agent import rendering as delegate_rendering
     from delegate_agent import retention as delegate_retention
@@ -78,7 +92,7 @@ EXIT_MISSING_BINARY = 3
 MODE_SAFE = "safe"
 MODE_WORK = "work"
 VALID_MODES = {MODE_SAFE, MODE_WORK}
-RUN_INPUT_KEYS = {"engine", "mode", "model", "cwd", "prompt", "isolation"}
+RUN_INPUT_KEYS = {"engine", "mode", "model", "cwd", "prompt", "isolation", "reasoningEffort"}
 MISPLACED_GLOBAL_OPTIONS = frozenset({"--json", "--cwd", "--isolation"})
 CURSOR_SAFE_REVIEW_PREFIX = (
     "Delegate review mode (code review/investigation only): "
@@ -151,6 +165,7 @@ class ParsedCommand:
     model_alias: str | None = None
     prompt_parts: list[str] | None = None
     prompt_file: str | None = None
+    reasoning_effort: str | None = None
     input_json: str | None = None
     dry_run: bool = False
     snapshot_handle: str | None = None
@@ -182,6 +197,7 @@ class ParsedCommand:
     worktree_older_than: int | None = None
     worktree_include_detached: bool = False
     worktree_dry_run: bool = False
+    capabilities_refresh: bool = False
 
 
 @dataclass(frozen=True)
@@ -202,6 +218,11 @@ class Request:
     dry_run: bool = False
     workspace_kind: str = "git"
     isolation_context: IsolationContext | None = None
+    requested_reasoning_effort: str | None = None
+    resolved_reasoning_effort: str | None = None
+    reasoning_effort_source: str | None = None
+    reasoning_capability_source: str | None = None
+    reasoning_transport: str | None = None
 
 
 @dataclass(frozen=True)
@@ -445,6 +466,23 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             completion_report=completion_report,
             isolation=isolation,
         )
+    if subcommand == "capabilities":
+        if any(command_help.is_help_token(token) for token in rest):
+            return help_command(json_mode, "capabilities")
+        refresh = False
+        if rest == ["refresh"]:
+            refresh = True
+        elif rest:
+            require_no_extra(rest, "capabilities")
+        return ParsedCommand(
+            "capabilities",
+            json_mode=json_mode,
+            cwd=cwd,
+            pass_through=pass_through,
+            completion_report=completion_report,
+            isolation=isolation,
+            capabilities_refresh=refresh,
+        )
     if subcommand == "run":
         return parse_run(rest, json_mode, cwd, pass_through, completion_report, isolation)
     if subcommand in ("cursor", "codex"):
@@ -560,7 +598,7 @@ def parse_modeless_engine(
     # prompt text (`cursor work explain --help`).
     if len(rest) >= 2 and command_help.is_help_token(rest[1]):
         return help_command(json_mode, topic)
-    prompt_file, prompt_parts = parse_prompt_tail(rest[1:])
+    prompt_file, reasoning_effort, prompt_parts = parse_prompt_tail(rest[1:])
     return ParsedCommand(
         engine,
         json_mode=json_mode,
@@ -568,6 +606,7 @@ def parse_modeless_engine(
         engine=engine,
         mode=mode,
         prompt_file=prompt_file,
+        reasoning_effort=reasoning_effort,
         prompt_parts=prompt_parts,
         dry_run=dry_run,
         pass_through=pass_through,
@@ -610,7 +649,7 @@ def parse_droid(
     # Help wins after the mode, before prompt capture: `droid x safe --help`.
     if len(rest) >= 3 and command_help.is_help_token(rest[2]):
         return help_command(json_mode, topic)
-    prompt_file, prompt_parts = parse_prompt_tail(rest[2:])
+    prompt_file, reasoning_effort, prompt_parts = parse_prompt_tail(rest[2:])
     return ParsedCommand(
         "droid",
         json_mode=json_mode,
@@ -619,6 +658,7 @@ def parse_droid(
         mode=mode,
         model_alias=model_alias,
         prompt_file=prompt_file,
+        reasoning_effort=reasoning_effort,
         prompt_parts=prompt_parts,
         dry_run=dry_run,
         pass_through=pass_through,
@@ -671,8 +711,9 @@ def parse_dry_run(
     raise DelegateError("invalid_engine", "dry-run engine must be cursor, droid, or codex.")
 
 
-def parse_prompt_tail(rest: list[str]) -> tuple[str | None, list[str]]:
+def parse_prompt_tail(rest: list[str]) -> tuple[str | None, str | None, list[str]]:
     prompt_file: str | None = None
+    reasoning_effort: str | None = None
     prompt_parts: list[str] = []
     i = 0
     while i < len(rest):
@@ -690,6 +731,32 @@ def parse_prompt_tail(rest: list[str]) -> tuple[str | None, list[str]]:
             prompt_file = rest[i + 1]
             i += 2
             continue
+        if token == "--reasoning-effort":
+            if prompt_parts:
+                prompt_parts = rest[i:]
+                break
+            if reasoning_effort is not None:
+                raise DelegateError(
+                    "invalid_reasoning_effort",
+                    "Only one --reasoning-effort is allowed.",
+                )
+            if i + 1 >= len(rest):
+                raise DelegateError(
+                    "missing_reasoning_effort",
+                    "--reasoning-effort requires a value.",
+                )
+            value = rest[i + 1]
+            if value.startswith("-") or command_help.is_help_token(value):
+                raise DelegateError(
+                    "missing_reasoning_effort",
+                    "--reasoning-effort requires a value.",
+                )
+            try:
+                reasoning_effort = reasoning.normalize_effort(value)
+            except reasoning.ReasoningCapabilityError as exc:
+                raise DelegateError(exc.error, exc.message) from exc
+            i += 2
+            continue
         prompt_parts = rest[i:]
         break
     if "--prompt-file" in prompt_parts:
@@ -700,7 +767,7 @@ def parse_prompt_tail(rest: list[str]) -> tuple[str | None, list[str]]:
         raise_misplaced_global_option(
             "Global options must appear before the subcommand; use --prompt-file for literal flag text.",
         )
-    return prompt_file, prompt_parts
+    return prompt_file, reasoning_effort, prompt_parts
 
 
 def validate_mode(mode: str) -> None:
@@ -1675,6 +1742,8 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         parsed.dry_run,
         stream_capture=not parsed.pass_through,
         isolation_context=isolation_context,
+        reasoning_effort=parsed.reasoning_effort,
+        reasoning_effort_source="cli" if parsed.reasoning_effort is not None else None,
     )
 
 
@@ -1709,6 +1778,14 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
     if not isinstance(prompt, str):
         raise DelegateError("invalid_prompt", "prompt must be a string.")
     model_alias = raw.get("model")
+    raw_reasoning_effort = raw.get("reasoningEffort")
+    if raw_reasoning_effort is not None:
+        try:
+            reasoning_effort = reasoning.normalize_effort(raw_reasoning_effort)
+        except reasoning.ReasoningCapabilityError as exc:
+            raise DelegateError(exc.error, "reasoningEffort must be a non-empty string.") from exc
+    else:
+        reasoning_effort = None
     if engine == "droid":
         if not isinstance(model_alias, str) or not model_alias:
             raise DelegateError("missing_model", "droid run input requires model alias.")
@@ -1795,6 +1872,8 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         dry_run=False,
         stream_capture=not parsed.pass_through,
         isolation_context=isolation_context,
+        reasoning_effort=reasoning_effort,
+        reasoning_effort_source="input-json" if reasoning_effort is not None else None,
     )
 
 
@@ -1809,18 +1888,33 @@ def build_request(
     *,
     stream_capture: bool = True,
     isolation_context: IsolationContext | None = None,
+    reasoning_effort: str | None = None,
+    reasoning_effort_source: str | None = None,
 ) -> Request:
     resolved = (
         workspace
         if isinstance(workspace, ResolvedWorkspace)
         else ResolvedWorkspace(workspace, "git")
     )
+    requested_effort, effort_source = resolve_effective_reasoning_effort(
+        config,
+        engine,
+        reasoning_effort,
+        reasoning_effort_source=reasoning_effort_source,
+    )
+    cache = reasoning.load_reasoning_capability_cache(resolved.path)
+
     if engine == "cursor":
         cursor = config["cursor"]
-        model = cursor["defaultModel"]
+        capability = resolve_cursor_reasoning_capability(
+            cursor,
+            requested_effort,
+        )
+        model = capability.model if capability is not None else cursor["defaultModel"]
         argv = build_cursor_argv(
             cursor["argvPrefix"], mode, resolved.path, model, prompt, stream_capture=stream_capture
         )
+        request_kwargs = reasoning_request_kwargs(capability, effort_source)
         return Request(
             engine,
             mode,
@@ -1832,6 +1926,7 @@ def build_request(
             dry_run=dry_run,
             workspace_kind=resolved.kind,
             isolation_context=isolation_context,
+            **request_kwargs,
         )
     if engine == "droid":
         droid = config["droid"]
@@ -1851,9 +1946,23 @@ def build_request(
                     "Copy config.example.json to ~/.delegate/config.json and set a real Droid model ID."
                 ),
             )
-        argv = build_droid_argv(
-            droid["binary"], mode, resolved.path, model, prompt, stream_capture=stream_capture
+        capability = resolve_requested_reasoning_capability(
+            engine,
+            model,
+            requested_effort,
+            config=config,
+            cache=cache,
         )
+        argv = build_droid_argv(
+            droid["binary"],
+            mode,
+            resolved.path,
+            model,
+            prompt,
+            stream_capture=stream_capture,
+            reasoning_capability=capability,
+        )
+        request_kwargs = reasoning_request_kwargs(capability, effort_source)
         return Request(
             engine,
             mode,
@@ -1865,6 +1974,7 @@ def build_request(
             dry_run=dry_run,
             workspace_kind=resolved.kind,
             isolation_context=isolation_context,
+            **request_kwargs,
         )
     if engine == "codex":
         codex = config["codex"]
@@ -1875,6 +1985,13 @@ def build_request(
             default_model = codex.get("defaultModel")
             model = default_model if isinstance(default_model, str) and default_model else None
         policy = delegate_config.effective_policy(config, engine="codex", mode=mode)
+        capability = resolve_requested_reasoning_capability(
+            engine,
+            model,
+            requested_effort,
+            config=config,
+            cache=cache,
+        )
         argv = build_codex_argv(
             codex,
             mode,
@@ -1884,7 +2001,9 @@ def build_request(
             policy,
             workspace_kind=resolved.kind,
             stream_capture=stream_capture,
+            reasoning_capability=capability,
         )
+        request_kwargs = reasoning_request_kwargs(capability, effort_source)
         return Request(
             engine,
             mode,
@@ -1896,8 +2015,97 @@ def build_request(
             dry_run=dry_run,
             workspace_kind=resolved.kind,
             isolation_context=isolation_context,
+            **request_kwargs,
         )
     raise DelegateError("invalid_engine", "engine must be cursor, droid, or codex.")
+
+
+def resolve_effective_reasoning_effort(
+    config: JsonObject,
+    engine: str,
+    requested: str | None,
+    *,
+    reasoning_effort_source: str | None,
+) -> tuple[str | None, str | None]:
+    if requested is not None:
+        try:
+            return reasoning.normalize_effort(requested), reasoning_effort_source or "cli"
+        except reasoning.ReasoningCapabilityError as exc:
+            raise DelegateError(exc.error, exc.message) from exc
+    section = config.get(engine)
+    if isinstance(section, dict):
+        default = section.get("defaultReasoningEffort")
+        if default is not None:
+            try:
+                return reasoning.normalize_effort(default), "config"
+            except reasoning.ReasoningCapabilityError as exc:
+                raise DelegateError(exc.error, exc.message) from exc
+    return None, None
+
+
+def resolve_requested_reasoning_capability(
+    engine: str,
+    model: str | None,
+    requested_effort: str | None,
+    *,
+    config: JsonObject,
+    cache: JsonObject | None,
+) -> reasoning.ReasoningCapability | None:
+    try:
+        return reasoning.resolve_reasoning_capability(
+            harness=engine,
+            model=model,
+            requested_effort=requested_effort,
+            config=config,
+            cache=cache,
+        )
+    except reasoning.ReasoningCapabilityError as exc:
+        raise DelegateError(exc.error, exc.message) from exc
+
+
+def resolve_cursor_reasoning_capability(
+    cursor_config: JsonObject,
+    requested_effort: str | None,
+) -> reasoning.ReasoningCapability | None:
+    if requested_effort is None:
+        return None
+    mappings = cursor_config.get("reasoningEffortModels")
+    if not isinstance(mappings, dict):
+        raise DelegateError(
+            "unsupported_reasoning_effort",
+            "Cursor reasoning effort requires cursor.reasoningEffortModels.",
+        )
+    model = mappings.get(requested_effort)
+    if not isinstance(model, str) or not model:
+        raise DelegateError(
+            "unsupported_reasoning_effort",
+            f"Cursor reasoning effort {requested_effort!r} requires a configured model mapping.",
+        )
+    return reasoning.ReasoningCapability(
+        harness="cursor",
+        model=model,
+        requested_effort=requested_effort,
+        resolved_effort=requested_effort,
+        supported_efforts=(requested_effort,),
+        default_effort=None,
+        transport="cursor-model-selection",
+        source="config",
+    )
+
+
+def reasoning_request_kwargs(
+    capability: reasoning.ReasoningCapability | None,
+    source: str | None,
+) -> JsonObject:
+    if capability is None:
+        return {}
+    return {
+        "requested_reasoning_effort": capability.requested_effort,
+        "resolved_reasoning_effort": capability.resolved_effort,
+        "reasoning_effort_source": source or "cli",
+        "reasoning_capability_source": capability.source,
+        "reasoning_transport": capability.transport,
+    }
 
 
 def prefix_cursor_safe_prompt(prompt: str) -> str:
@@ -2388,6 +2596,11 @@ def safe_isolated_request(request: Request) -> Iterator[Request]:
             dry_run=request.dry_run,
             workspace_kind=workspace_kind,
             isolation_context=isolation,
+            requested_reasoning_effort=request.requested_reasoning_effort,
+            resolved_reasoning_effort=request.resolved_reasoning_effort,
+            reasoning_effort_source=request.reasoning_effort_source,
+            reasoning_capability_source=request.reasoning_capability_source,
+            reasoning_transport=request.reasoning_transport,
         )
     finally:
         cleanup_safe_isolated_workspace(
@@ -2405,7 +2618,9 @@ def build_cursor_argv(
     prompt: str,
     *,
     stream_capture: bool = True,
+    reasoning_capability: reasoning.ReasoningCapability | None = None,
 ) -> list[str]:
+    del reasoning_capability
     argv = [*prefix, "--workspace", workspace, "-p", "--trust"]
     if mode == MODE_WORK:
         argv.extend(["--approve-mcps", "--force"])
@@ -2428,12 +2643,15 @@ def build_droid_argv(
     prompt: str,
     *,
     stream_capture: bool = True,
+    reasoning_capability: reasoning.ReasoningCapability | None = None,
 ) -> list[str]:
     argv = [binary, "exec", "--cwd", workspace]
     if mode == MODE_WORK:
         argv.append("--skip-permissions-unsafe")
     elif mode != MODE_SAFE:
         validate_mode(mode)
+    if reasoning_capability is not None and reasoning_capability.transport == "droid-flag":
+        argv.extend(["--reasoning-effort", reasoning_capability.resolved_effort])
     if stream_capture:
         argv.extend(["--model", model, "--output-format", "stream-json", prompt])
     else:
@@ -2451,6 +2669,7 @@ def build_codex_argv(
     *,
     workspace_kind: str,
     stream_capture: bool = True,
+    reasoning_capability: reasoning.ReasoningCapability | None = None,
 ) -> list[str]:
     binary = str(codex["binary"])
     argv = [binary]
@@ -2468,6 +2687,13 @@ def build_codex_argv(
         argv.extend(["--profile", str(codex["profile"])])
     if model:
         argv.extend(["--model", model])
+    if reasoning_capability is not None and reasoning_capability.transport == "codex-config":
+        argv.extend(
+            [
+                "-c",
+                f'model_reasoning_effort="{reasoning_capability.resolved_effort}"',
+            ]
+        )
     argv.append("exec")
     argv.extend(["--cd", workspace])
     if codex.get("ignoreUserConfig") is True:
@@ -2506,6 +2732,7 @@ def dry_run_payload(request: Request) -> JsonObject:
         "model": request.model,
         "argv": list(request.argv),
     }
+    add_reasoning_payload_fields(payload, request)
 
     # Structured isolation fields from the isolation context.
     if request.isolation_context is not None:
@@ -2573,6 +2800,19 @@ def dry_run_payload(request: Request) -> JsonObject:
         payload["plannedBranch"] = None
 
     return payload
+
+
+def add_reasoning_payload_fields(payload: JsonObject, request: Request) -> None:
+    if request.requested_reasoning_effort is not None:
+        payload["requestedReasoningEffort"] = request.requested_reasoning_effort
+    if request.resolved_reasoning_effort is not None:
+        payload["resolvedReasoningEffort"] = request.resolved_reasoning_effort
+    if request.reasoning_effort_source is not None:
+        payload["reasoningEffortSource"] = request.reasoning_effort_source
+    if request.reasoning_capability_source is not None:
+        payload["reasoningCapabilitySource"] = request.reasoning_capability_source
+    if request.reasoning_transport is not None:
+        payload["reasoningTransport"] = request.reasoning_transport
 
 
 def _cleanup_partial_worktree(
@@ -2773,6 +3013,11 @@ def _build_persistent_worktree_run_context(
         preserved_workspace=iso_ctx.preserved_workspace,
         branch=branch,
         worktree_status="present",
+        requested_reasoning_effort=request.requested_reasoning_effort,
+        resolved_reasoning_effort=request.resolved_reasoning_effort,
+        reasoning_effort_source=request.reasoning_effort_source,
+        reasoning_capability_source=request.reasoning_capability_source,
+        reasoning_transport=request.reasoning_transport,
     )
 
 
@@ -3090,6 +3335,11 @@ def make_run_context(
         branch=branch,
         safe_workspace_method=safe_workspace_method,
         warnings=warnings,
+        requested_reasoning_effort=request.requested_reasoning_effort,
+        resolved_reasoning_effort=request.resolved_reasoning_effort,
+        reasoning_effort_source=request.reasoning_effort_source,
+        reasoning_capability_source=request.reasoning_capability_source,
+        reasoning_transport=request.reasoning_transport,
     )
 
 
@@ -3175,11 +3425,17 @@ def models_payload(config: JsonObject, config_source: str) -> JsonObject:
         "cursor": {
             "defaultModel": config["cursor"]["defaultModel"],
             "argvPrefix": config["cursor"]["argvPrefix"],
+            "defaultReasoningEffort": config["cursor"].get("defaultReasoningEffort"),
+            "reasoningEffortModels": config["cursor"].get("reasoningEffortModels", {}),
         },
-        "droid": {"models": config["droid"]["models"]},
+        "droid": {
+            "models": config["droid"]["models"],
+            "defaultReasoningEffort": config["droid"].get("defaultReasoningEffort"),
+        },
         "codex": {
             "binary": config["codex"]["binary"],
             "defaultModel": config["codex"]["defaultModel"],
+            "defaultReasoningEffort": config["codex"].get("defaultReasoningEffort"),
             "profile": config["codex"]["profile"],
         },
     }
@@ -3389,6 +3645,63 @@ def emit_models(config: JsonObject, config_source: str, json_mode: bool, stdout:
     return EXIT_OK
 
 
+def capabilities_payload(config: JsonObject, config_source: str, workspace: str) -> JsonObject:
+    cache = reasoning.load_reasoning_capability_cache(workspace)
+    return {
+        "ok": True,
+        "configSource": config_source,
+        "cachePath": str(reasoning.reasoning_capability_cache_path(workspace)),
+        "reasoning": reasoning.build_reasoning_capabilities_payload(config, cache),
+    }
+
+
+def emit_capabilities(
+    parsed: ParsedCommand,
+    config: JsonObject,
+    config_source: str,
+    workspace: ResolvedWorkspace,
+    stdout: TextIO,
+) -> int:
+    if parsed.capabilities_refresh:
+        codex_cfg = config.get("codex")
+        codex_binary = "codex"
+        if isinstance(codex_cfg, dict) and isinstance(codex_cfg.get("binary"), str):
+            codex_binary = codex_cfg["binary"]
+        try:
+            existing_cache = reasoning.load_reasoning_capability_cache(workspace.path)
+            refreshed_cache = reasoning.refresh_reasoning_capabilities(
+                cwd=workspace.path,
+                codex_binary=codex_binary,
+            )
+            cache = reasoning.merge_reasoning_capability_cache(existing_cache, refreshed_cache)
+            cache_path = reasoning.write_reasoning_capability_cache(workspace.path, cache)
+        except reasoning.ReasoningCapabilityError as exc:
+            raise DelegateError(exc.error, exc.message) from exc
+        payload: JsonObject = {
+            "ok": True,
+            "refreshed": True,
+            "cachePath": str(cache_path),
+            "reasoning": reasoning.build_reasoning_capabilities_payload(config, cache),
+        }
+    else:
+        payload = capabilities_payload(config, config_source, workspace.path)
+
+    if parsed.json_mode:
+        delegate_rendering.print_json(payload, stdout)
+    else:
+        print(f"reasoning capabilities: {payload['cachePath']}", file=stdout)
+        harnesses = payload["reasoning"]["harnesses"]
+        assert isinstance(harnesses, dict)
+        for harness, harness_payload in harnesses.items():
+            if not isinstance(harness_payload, dict):
+                continue
+            models = harness_payload.get("models")
+            if not isinstance(models, dict):
+                continue
+            print(f"{harness}: {len(models)} model(s)", file=stdout)
+    return EXIT_OK
+
+
 def emit_describe(config: JsonObject, config_source: str, json_mode: bool, stdout: TextIO) -> int:
     payload = describe_payload(config, config_source)
     if json_mode:
@@ -3579,6 +3892,9 @@ def main(
         if parsed.subcommand != "run":
             workspace = resolve_workspace(parsed.cwd)
             # (non-run path uses workspace resolved above)
+
+        if parsed.subcommand == "capabilities":
+            return emit_capabilities(parsed, config, source, workspace, stdout)
 
         if parsed.subcommand in {"snapshot", "runs", "run-output", "worktree"}:
             existing_registry = run_registry.registry_root_if_exists(Path(workspace.path))
