@@ -145,7 +145,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         notes=(
             "safe mode runs in an isolated temporary copy of the workspace and uses a read-only safety prompt.",
-            "work mode uses Kimi --auto because prompt mode rejects --yolo.",
+            "work mode uses Kimi --yolo by default.",
             "Model selection uses kimi.defaultModel in config or the run-input JSON model; "
             "there is no CLI model alias.",
             "Reasoning effort is unsupported for Kimi in v1.",
@@ -377,7 +377,9 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "[--harness HARNESS] [--status STATUS] [--limit N] [--no-auto-prune]",
         ),
         options=(
-            OptionSpec("--harness", "HARNESS", "Filter by harness (cursor, droid, codex)."),
+            OptionSpec(
+                "--harness", "HARNESS", "Filter by harness (cursor, droid, codex, or kimi)."
+            ),
             OptionSpec(
                 "--status",
                 "STATUS",
@@ -523,13 +525,13 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
     ),
     "models": CommandSpec(
         name="models",
-        summary="List configured engines and droid model aliases.",
+        summary="List configured engines and model settings.",
         usage=("delegate [--json] models",),
         examples=(
             "delegate models",
             "delegate --json models",
         ),
-        see_also=("describe", "droid"),
+        see_also=("describe", "cursor", "codex", "droid", "kimi"),
     ),
     "capabilities": CommandSpec(
         name="capabilities",

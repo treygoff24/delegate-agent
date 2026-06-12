@@ -3073,7 +3073,7 @@ def build_kimi_argv(
     if mode == MODE_SAFE:
         prompt = prefix_kimi_safe_prompt(prompt)
     elif mode == MODE_WORK:
-        argv.append("--auto")
+        argv.append("--yolo")
     else:
         validate_mode(mode)
     if model:
@@ -4168,7 +4168,7 @@ def describe_payload(
                 ],
                 "work": [
                     config["kimi"]["binary"],
-                    "--auto",
+                    "--yolo",
                     "--model",
                     config["kimi"]["defaultModel"],
                     "--output-format",
@@ -4177,7 +4177,7 @@ def describe_payload(
                     "<skill-review-prompt>",
                 ],
                 "workNotes": [
-                    "Uses Kimi --auto because prompt mode rejects --yolo.",
+                    "Uses Kimi --yolo by default for work mode.",
                     "No CLI workspace flag; Delegate sets subprocess cwd.",
                 ],
             },

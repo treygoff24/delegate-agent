@@ -178,7 +178,7 @@ Controls local run recording.
 - `defaultReasoningEffort`: not supported in v1; must be `null`.
 - Kimi's thinking/effort level is configured in `~/.kimi-code/config.toml`, not through Delegate.
 - Kimi safe mode uses Delegate's read-only safety prompt and isolated workspace.
-- Kimi work mode emits `--auto`; Kimi prompt mode rejects `--yolo`.
+- Kimi work mode emits `--yolo` by default.
 
 ### `reasoning`
 
@@ -249,7 +249,7 @@ Allowed values are `auto`, `none`, and `worktree`.
 
 Embedded defaults:
 
-- `safe`: `auto`. Cursor and Codex safe use temporary workspace isolation; Droid safe remains in the real workspace.
+- `safe`: `auto`. Cursor, Codex, and Kimi safe use temporary workspace isolation; Droid safe remains in the real workspace.
 - `work`: `none`. Work mode runs in the real workspace unless you opt into worktree isolation.
 
 ### `worktrees`

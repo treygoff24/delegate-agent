@@ -34,6 +34,7 @@ This guide covers both human setup and non-interactive setup for agents or CI jo
    command -v agent || echo "Cursor Agent CLI missing"
    command -v droid || echo "Factory Droid CLI missing"
    command -v codex || echo "Codex CLI missing"
+   command -v kimi || echo "Kimi Code CLI missing"
    ```
 
    Delegate does not manage runtime login. Run each runtime's own login/status command before real launches. A missing child binary causes Delegate to fail with exit code `3` for real runs.
@@ -72,9 +73,10 @@ This guide covers both human setup and non-interactive setup for agents or CI jo
    delegate --json dry-run codex safe --reasoning-effort high "Review only. Do not edit files."
    delegate --json dry-run cursor safe "Review only. Do not edit files."
    delegate --json dry-run droid reviewer safe "Review only. Do not edit files."
+   delegate --json dry-run kimi safe "Review only. Do not edit files."
    ```
 
-   The Codex and Cursor dry-runs succeed with the unedited example config when no reasoning effort is requested. The Codex reasoning-effort dry-run requires a resolved Codex model from config or JSON input. The Droid dry-run validates the alias, so it returns `unconfigured_model` until you replace the `reviewer` placeholder in `config.json` with a real model ID.
+   The Codex, Cursor, and Kimi dry-runs succeed with the unedited example config when no reasoning effort is requested. The Codex reasoning-effort dry-run requires a resolved Codex model from config or JSON input. The Droid dry-run validates the alias, so it returns `unconfigured_model` until you replace the `reviewer` placeholder in `config.json` with a real model ID.
 
 ## Non-interactive agent setup
 
@@ -114,6 +116,7 @@ For an orchestrating agent, script, or CI job:
 
    ```bash
    command -v codex >/dev/null || exit 3
+   command -v kimi >/dev/null || exit 3
    ```
 
 6. Keep prompts bounded and machine-readable where possible. For long tasks, use `--prompt-file` or `delegate --json run --input-json FILE`.
@@ -138,7 +141,7 @@ For an orchestrating agent, script, or CI job:
 
 ## CI expectations
 
-The required test suite does not need real Cursor, Droid, or Codex binaries. Tests use dry-run paths and fake binaries where needed:
+The required test suite does not need real Cursor, Droid, Codex, or Kimi binaries. Tests use dry-run paths and fake binaries where needed:
 
 ```bash
 python3 -m compileall -q src tests bin

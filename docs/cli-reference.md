@@ -35,8 +35,9 @@ Prompt sources are direct arguments, `--prompt-file`, or Delegate stdin. After
 Delegate resolves the prompt, Codex prompts are passed to the child runtime over
 stdin. Droid prompts are written to a private temporary prompt file and passed
 with Droid's documented `--file` option. Cursor Agent currently only exposes
-positional prompt input, so Cursor launches still use argv transport; Delegate
-redacts Cursor prompt argv in dry-run output and run manifests.
+positional prompt input, and Kimi Code prompt mode currently uses `--prompt`,
+so those launches still use argv transport; Delegate redacts Cursor and Kimi
+prompt argv in dry-run output and run manifests.
 
 `--reasoning-effort LEVEL` is optional and parsed only before prompt text begins. Unsupported model/effort pairs fail closed before launch with `unsupported_reasoning_effort`. It affects only model reasoning depth, cost, or latency; it does not change `safe`/`work` permissions, sandboxing, approvals, network policy, or edit capability. Cursor effort is model-selection based and requires `cursor.reasoningEffortModels`; Droid emits `--reasoning-effort LEVEL`; Codex emits a `model_reasoning_effort` config override after the model is resolved. Kimi does not support reasoning effort in v1.
 
@@ -48,8 +49,8 @@ Usage:
 delegate [--json] [--isolation auto|none|worktree] kimi {safe,work} [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 ```
 
-- Safe mode runs in an isolated temporary copy of the workspace (under `--isolation auto`) and uses a read-only safety prompt. Kimi prompt mode rejects `--plan`.
-- Work mode emits Kimi `--auto` and runs in the real workspace unless you opt into worktree isolation. Kimi prompt mode rejects `--yolo`.
+- Safe mode runs in an isolated temporary copy of the workspace (under `--isolation auto`) and uses a read-only safety prompt. Delegate intentionally avoids Kimi `--plan` in safe mode.
+- Work mode emits Kimi `--yolo` by default and runs in the real workspace unless you opt into worktree isolation.
 - Model selection comes from `kimi.defaultModel` config or the `model` key in JSON run input; there is no CLI model alias.
 - `--reasoning-effort` is unsupported for Kimi in v1.
 - Kimi prompt text is passed via argv.

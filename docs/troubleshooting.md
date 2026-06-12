@@ -141,7 +141,7 @@ These flags can discard edits or delete unmerged branches. Use them only after r
 
 ## CI does not have child runtimes
 
-That is expected. Required tests do not need real Cursor, Droid, or Codex binaries:
+That is expected. Required tests do not need real Cursor, Droid, Codex, or Kimi binaries:
 
 ```bash
 python3 -m compileall -q src tests bin

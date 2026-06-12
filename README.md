@@ -16,10 +16,10 @@ Delegate does **not** commit, push, merge, deploy, publish, or run a background 
 
 Prompt handling is provider-specific: Codex prompts are delivered to the child
 runtime over stdin; Droid prompts are delivered through a private temporary
-prompt file using Droid's `--file` option; Cursor Agent currently requires
-positional prompt argv. Delegate redacts Cursor prompt argv in dry-run output
-and run manifests, but true process-argv hiding for Cursor depends on Cursor
-exposing a stdin or prompt-file transport.
+prompt file using Droid's `--file` option; Cursor Agent and Kimi Code currently
+require prompt argv. Delegate redacts Cursor and Kimi prompt argv in dry-run
+output and run manifests, but true process-argv hiding for those harnesses
+depends on the child CLIs exposing stdin or prompt-file transport.
 
 ## Install from source
 
@@ -153,7 +153,7 @@ delegate worktree remove <alias-or-runId>
 
 Worktree isolation protects the source checkout from ordinary relative-path edits. It is **not** a full security sandbox; the child process can still use its runtime permissions, credentials, network access, and absolute paths according to the environment and runtime policy.
 
-Temporary safe isolation preserves internal symlinks, but replaces symlinks that point outside the source workspace with inert placeholder files inside the isolated workspace. Delegate reports a warning listing the relative symlink paths it blocked. In Git repositories with no commits yet, Cursor/Codex safe isolation falls back to a directory copy because Git cannot create a detached worktree from an unborn `HEAD`.
+Temporary safe isolation preserves internal symlinks, but replaces symlinks that point outside the source workspace with inert placeholder files inside the isolated workspace. Delegate reports a warning listing the relative symlink paths it blocked. In Git repositories with no commits yet, Cursor/Codex/Kimi safe isolation falls back to a directory copy because Git cannot create a detached worktree from an unborn `HEAD`.
 
 Snapshots and `run-output` redact common credential shapes by default, including authorization headers, bearer/basic tokens, JWT-like strings, and common `token=` / `api_key=` / `password=` values. Use `--no-redact` only when exact output is necessary and safe to display.
 
