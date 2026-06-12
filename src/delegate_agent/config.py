@@ -68,6 +68,11 @@ DEFAULT_CONFIG: JsonObject = {
     "reasoning": {
         "capabilities": {},
     },
+    "kimi": {
+        "binary": "kimi",
+        "defaultModel": "kimi-code/kimi-for-coding",
+        "defaultReasoningEffort": None,
+    },
     "policy": {
         "profile": "safe",
         "work": {
@@ -321,6 +326,24 @@ def _validate_codex_section(codex: JsonValue) -> None:
         raise ConfigError(
             "invalid_codex_config",
             "codex.ignoreUserConfig must be a boolean.",
+        )
+
+
+def _validate_kimi_section(kimi: JsonValue) -> None:
+    if not isinstance(kimi, dict):
+        raise ConfigError("invalid_kimi_config", "kimi config must be an object.")
+    if not isinstance(kimi.get("binary"), str) or not kimi["binary"].strip():
+        raise ConfigError("invalid_kimi_config", "kimi.binary must be a non-empty string.")
+    default_model = kimi.get("defaultModel")
+    if default_model is not None and not isinstance(default_model, str):
+        raise ConfigError(
+            "invalid_kimi_config",
+            "kimi.defaultModel must be a string or null.",
+        )
+    if kimi.get("defaultReasoningEffort") is not None:
+        raise ConfigError(
+            "invalid_kimi_config",
+            "kimi.defaultReasoningEffort is not supported; set it to null.",
         )
 
 
@@ -645,6 +668,7 @@ def validate_config(config: JsonObject) -> None:
                 )
     _validate_policy_section(config.get("policy"))
     _validate_codex_section(config.get("codex"))
+    _validate_kimi_section(config.get("kimi"))
     _validate_reasoning_section(config.get("reasoning"))
     _validate_isolation_section(config.get("isolation"))
     _validate_worktrees_section(config.get("worktrees"))

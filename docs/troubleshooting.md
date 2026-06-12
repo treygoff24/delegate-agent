@@ -54,7 +54,7 @@ Common causes:
 - Droid or Codex model support is not in config, the workspace cache, or bundled fallback data.
 - The effort string is misspelled. Delegate treats labels literally and does not translate between provider naming schemes.
 
-These failures apply to explicit per-run effort (`--reasoning-effort` or JSON run input). A config `defaultReasoningEffort` that cannot be satisfied does not fail the run; the run proceeds without reasoning effort and records a warning in the dry-run payload, manifest, and snapshot.
+These failures apply to explicit per-run effort (`--reasoning-effort` or JSON run input). For Cursor, Droid, and Codex, a config `defaultReasoningEffort` that cannot be satisfied does not fail the run; the run proceeds without reasoning effort and records a warning in the dry-run payload, manifest, and snapshot. Kimi does not support reasoning effort, so `kimi.defaultReasoningEffort` must stay `null`.
 
 For private or newly released models, declare support in `reasoning.capabilities` in config. To refresh workspace-local discovered data, run:
 
@@ -141,7 +141,7 @@ These flags can discard edits or delete unmerged branches. Use them only after r
 
 ## CI does not have child runtimes
 
-That is expected. Required tests do not need real Cursor, Droid, or Codex binaries:
+That is expected. Required tests do not need real Cursor, Droid, Codex, or Kimi binaries:
 
 ```bash
 python3 -m compileall -q src tests bin

@@ -134,12 +134,15 @@ def branch_label(engine: str, model_alias: str | None) -> str:
 
     - cursor: "cursor"
     - codex: "codex"
+    - kimi: "kimi"
     - droid: "droid-<slug>" where slug is lowercase, non-alnum→'-', collapsed.
     """
     if engine == "cursor":
         return "cursor"
     if engine == "codex":
         return "codex"
+    if engine == "kimi":
+        return "kimi"
     if engine == "droid":
         if not model_alias:
             return "droid"
@@ -191,10 +194,10 @@ def worktrees_data_home(config: JsonObject) -> Path:
 def _map_auto_isolation(engine: str, mode: str) -> str:
     """Map 'auto' isolation to the legacy execution behavior for the engine/mode pair.
 
-    Returns 'worktree' for cursor/codex safe (temp isolated workspace),
+    Returns 'worktree' for cursor/codex/kimi safe (temp isolated workspace),
     'none' for droid safe and any work mode.
     """
-    if mode == "safe" and engine in ("cursor", "codex"):
+    if mode == "safe" and engine in ("cursor", "codex", "kimi"):
         return ISOLATION_WORKTREE
     return ISOLATION_NONE
 

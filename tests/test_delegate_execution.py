@@ -397,6 +397,62 @@ class ExecutionTests(unittest.TestCase):
         # safe-mutation test).
         self.assertEqual(safe_temp_dirs() - temp_dirs_before, set())
 
+    def make_kimi_safe_fake(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        bin_dir = Path(temp.name)
+        path = bin_dir / "kimi"
+        path.write_text(
+            "#!/usr/bin/env bash\n"
+            "touch mutated-by-kimi.txt\n"
+            "printf 'OUT:%s\\n' \"$*\"\n"
+            'exit "${FAKE_EXIT:-0}"\n'
+        )
+        path.chmod(0o755)
+        return bin_dir
+
+    def test_kimi_safe_git_execution_does_not_mutate_original_workspace(self):
+        repo = make_git_repo()
+        self.addCleanup(repo.cleanup)
+        subprocess.run(
+            ["git", "-C", repo.name, *GIT_TEST_IDENTITY, "commit", "--allow-empty", "-m", "init"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        fake_bin = self.make_kimi_safe_fake()
+        config = Path(repo.name) / "config.json"
+        config.write_text(json.dumps(self.delegate.DEFAULT_CONFIG))
+        env = os.environ.copy()
+        env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
+        env["DELEGATE_CONFIG"] = str(config)
+        temp_dirs_before = safe_temp_dirs()
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(MODULE_PATH),
+                "--cwd",
+                repo.name,
+                "--json",
+                "kimi",
+                "safe",
+                "review",
+            ],
+            text=True,
+            capture_output=True,
+            env=env,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0)
+        payload = json.loads(completed.stdout)
+        self.assertFalse((Path(repo.name) / "mutated-by-kimi.txt").exists())
+        self.assertTrue(payload.get("isolatedWorkspace"))
+        self.assertEqual(Path(payload["cwd"]).resolve(), Path(repo.name).resolve())
+        self.assertIn("executionCwd", payload)
+        self.assertNotEqual(payload["executionCwd"], payload["cwd"])
+        self.assertEqual(safe_temp_dirs() - temp_dirs_before, set())
+
     def test_codex_safe_dry_run_reports_isolated_workspace(self):
         request = self.delegate.build_request(
             "codex",

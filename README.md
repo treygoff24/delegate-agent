@@ -4,7 +4,7 @@
 
 # Delegate Agent
 
-Delegate Agent is a small CLI for handing a bounded task to another coding-agent runtime. It normalizes common calls to Cursor Agent, Factory Droid, and OpenAI Codex so humans or other agents can launch review, investigation, and implementation jobs without remembering each tool's flags.
+Delegate Agent is a small CLI for handing a bounded task to another coding-agent runtime. It normalizes common calls to Cursor Agent, Factory Droid, OpenAI Codex, and Kimi Code so humans or other agents can launch review, investigation, and implementation jobs without remembering each tool's flags.
 
 Use it when you want a predictable wrapper around prompts like:
 
@@ -16,10 +16,10 @@ Delegate does **not** commit, push, merge, deploy, publish, or run a background 
 
 Prompt handling is provider-specific: Codex prompts are delivered to the child
 runtime over stdin; Droid prompts are delivered through a private temporary
-prompt file using Droid's `--file` option; Cursor Agent currently requires
-positional prompt argv. Delegate redacts Cursor prompt argv in dry-run output
-and run manifests, but true process-argv hiding for Cursor depends on Cursor
-exposing a stdin or prompt-file transport.
+prompt file using Droid's `--file` option; Cursor Agent and Kimi Code currently
+require prompt argv. Delegate redacts Cursor and Kimi prompt argv in dry-run
+output and run manifests, but true process-argv hiding for those harnesses
+depends on the child CLIs exposing stdin or prompt-file transport.
 
 ## Install from source
 
@@ -50,6 +50,7 @@ Delegate wraps other CLIs. Install and authenticate only the runtimes you plan t
 command -v agent   # Cursor Agent CLI (default model: Cursor Composer), used by delegate cursor ...
 command -v droid   # Factory Droid CLI, used by delegate droid ...
 command -v codex   # OpenAI Codex CLI, used by delegate codex ...
+command -v kimi    # Kimi Code CLI, used by delegate kimi ...
 ```
 
 Runtime authentication is owned by each child CLI. Delegate cannot log in for you. Dry-runs and CI tests do not require the real child binaries.
@@ -88,12 +89,14 @@ Run a read-only review in an isolated temporary workspace:
 ```bash
 delegate codex safe "Review this repository for correctness risks. Do not edit files."
 delegate cursor safe "Review the current diff for regressions. Do not edit files."
+delegate kimi safe "Review this repository for regressions. Do not edit files."
 ```
 
 Run an edit-capable task in a workspace you trust:
 
 ```bash
 delegate cursor work "Fix the parser bug. Run python3 -m unittest tests.test_delegate_parser. Report changed files."
+delegate kimi work "Implement the scoped change and run the named check. Report changed files."
 ```
 
 Run through JSON input for agent callers after copying an example and setting a real `cwd`:
@@ -135,7 +138,7 @@ Delegate separates three ideas:
 
 Defaults are intentionally conservative for review paths:
 
-- `delegate cursor safe` and `delegate codex safe` run in an isolated temporary workspace.
+- `delegate cursor safe`, `delegate codex safe`, and `delegate kimi safe` run in an isolated temporary workspace.
 - `delegate droid ALIAS safe` runs in the real workspace using Droid's default read-oriented behavior.
 - `work` mode can edit. By default it runs in the real workspace for backward compatibility.
 
@@ -150,7 +153,7 @@ delegate worktree remove <alias-or-runId>
 
 Worktree isolation protects the source checkout from ordinary relative-path edits. It is **not** a full security sandbox; the child process can still use its runtime permissions, credentials, network access, and absolute paths according to the environment and runtime policy.
 
-Temporary safe isolation preserves internal symlinks, but replaces symlinks that point outside the source workspace with inert placeholder files inside the isolated workspace. Delegate reports a warning listing the relative symlink paths it blocked. In Git repositories with no commits yet, Cursor/Codex safe isolation falls back to a directory copy because Git cannot create a detached worktree from an unborn `HEAD`.
+Temporary safe isolation preserves internal symlinks, but replaces symlinks that point outside the source workspace with inert placeholder files inside the isolated workspace. Delegate reports a warning listing the relative symlink paths it blocked. In Git repositories with no commits yet, Cursor/Codex/Kimi safe isolation falls back to a directory copy because Git cannot create a detached worktree from an unborn `HEAD`.
 
 Snapshots and `run-output` redact common credential shapes by default, including authorization headers, bearer/basic tokens, JWT-like strings, and common `token=` / `api_key=` / `password=` values. Use `--no-redact` only when exact output is necessary and safe to display.
 

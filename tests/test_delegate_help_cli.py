@@ -312,5 +312,35 @@ class SparseArgsNoIndexErrorTests(HelpCliTestBase):
                 self.delegate.parse_cli(argv)
 
 
+class KimiHelpTests(HelpCliTestBase):
+    """Kimi harness surfaces in discovery commands."""
+
+    def test_kimi_in_describe_engines(self):
+        code, out, _err = self.run_main(["--json", "describe"])
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        payload = json.loads(out)
+        self.assertIn("kimi", payload["engines"])
+
+    def test_kimi_in_describe_mode_mapping(self):
+        code, out, _err = self.run_main(["--json", "describe"])
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        payload = json.loads(out)
+        self.assertIn("kimi", payload["modeMapping"])
+        self.assertIn("safe", payload["modeMapping"]["kimi"])
+        self.assertIn("work", payload["modeMapping"]["kimi"])
+
+    def test_kimi_in_agent_help(self):
+        code, out, _err = self.run_main(["agent-help"])
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertIn("kimi", out)
+
+    def test_kimi_in_models(self):
+        code, out, _err = self.run_main(["--json", "models"])
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        payload = json.loads(out)
+        self.assertIn("kimi", payload)
+        self.assertEqual(payload["kimi"]["binary"], self.delegate.DEFAULT_CONFIG["kimi"]["binary"])
+
+
 if __name__ == "__main__":
     unittest.main()

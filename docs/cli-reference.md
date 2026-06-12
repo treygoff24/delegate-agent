@@ -26,16 +26,42 @@ delegate droid MODEL_ALIAS work [--reasoning-effort LEVEL] [--prompt-file PATH] 
 
 delegate codex safe [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 delegate codex work [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+
+delegate kimi safe [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+delegate kimi work [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 ```
 
 Prompt sources are direct arguments, `--prompt-file`, or Delegate stdin. After
 Delegate resolves the prompt, Codex prompts are passed to the child runtime over
 stdin. Droid prompts are written to a private temporary prompt file and passed
 with Droid's documented `--file` option. Cursor Agent currently only exposes
-positional prompt input, so Cursor launches still use argv transport; Delegate
-redacts Cursor prompt argv in dry-run output and run manifests.
+positional prompt input, and Kimi Code prompt mode currently uses `--prompt`,
+so those launches still use argv transport; Delegate redacts Cursor and Kimi
+prompt argv in dry-run output and run manifests.
 
-`--reasoning-effort LEVEL` is optional and parsed only before prompt text begins. Unsupported model/effort pairs fail closed before launch with `unsupported_reasoning_effort`. It affects only model reasoning depth, cost, or latency; it does not change `safe`/`work` permissions, sandboxing, approvals, network policy, or edit capability. Cursor effort is model-selection based and requires `cursor.reasoningEffortModels`; Droid emits `--reasoning-effort LEVEL`; Codex emits a `model_reasoning_effort` config override after the model is resolved.
+`--reasoning-effort LEVEL` is optional and parsed only before prompt text begins. Unsupported model/effort pairs fail closed before launch with `unsupported_reasoning_effort`. It affects only model reasoning depth, cost, or latency; it does not change `safe`/`work` permissions, sandboxing, approvals, network policy, or edit capability. Cursor effort is model-selection based and requires `cursor.reasoningEffortModels`; Droid emits `--reasoning-effort LEVEL`; Codex emits a `model_reasoning_effort` config override after the model is resolved. Kimi does not support reasoning effort in v1.
+
+### `delegate kimi`
+
+Usage:
+
+```bash
+delegate [--json] [--isolation auto|none|worktree] kimi {safe,work} [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+```
+
+- Safe mode runs in an isolated temporary copy of the workspace (under `--isolation auto`) and uses a read-only safety prompt. Delegate intentionally avoids Kimi `--plan` in safe mode. Kimi prompt mode auto-approves tool actions, so the isolation is the effective write boundary; the safety prompt is advisory.
+- Work mode emits Kimi `--yolo` by default and runs in the real workspace unless you opt into worktree isolation.
+- Model selection comes from `kimi.defaultModel` config or the `model` key in JSON run input; there is no CLI model alias.
+- `--reasoning-effort` is unsupported for Kimi in v1.
+- Kimi prompt text is passed via argv.
+
+Examples:
+
+```bash
+delegate kimi safe "Review this repo for regressions; report file/line/severity."
+delegate kimi work "Implement the scoped task; report changed files and tests."
+delegate --isolation worktree kimi work "Implement the feature in a persistent worktree."
+```
 
 ### Dry-run
 
@@ -100,9 +126,9 @@ Supported input keys:
 }
 ```
 
-- `engine`: `cursor`, `droid`, or `codex`.
+- `engine`: `cursor`, `droid`, `codex`, or `kimi`.
 - `mode`: `safe` or `work`.
-- `model`: Droid requires a configured local alias; Codex treats a non-empty string as a model override; Cursor does not accept per-run model aliases in v1.
+- `model`: Droid requires a configured local alias; Codex and Kimi treat a non-empty string as a model override; Cursor does not accept per-run model aliases in v1.
 - `cwd`: optional workspace path. Git directories resolve to the repo root.
 - `isolation`: optional `auto`, `none`, or `worktree`. `null` is invalid.
 - `reasoningEffort`: optional non-empty effort string. It overrides provider `defaultReasoningEffort` for that JSON run.
@@ -120,7 +146,7 @@ delegate --json capabilities refresh
 delegate agent-help
 ```
 
-`describe` reports version, engines, modes, supported isolation values, prompt transforms, effective policy, and representative argv shapes. It also includes a `commands` catalog (each entry has `command` and `summary`) so an agent can enumerate the whole command surface in one call. `models` reports configured Cursor, Droid, and Codex model settings.
+`describe` reports version, engines, modes, supported isolation values, prompt transforms, effective policy, and representative argv shapes. It also includes a `commands` catalog (each entry has `command` and `summary`) so an agent can enumerate the whole command surface in one call. `models` reports configured Cursor, Droid, Codex, and Kimi model settings.
 
 Both `describe` and `models` include provenance fields useful for detecting installed-runtime drift:
 

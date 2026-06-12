@@ -127,7 +127,32 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "Trailing prompt text begins after the mode; a later --help is prompt text, "
             "not a help request.",
         ),
-        see_also=("codex", "droid", "dry-run", "agent-help"),
+        see_also=("codex", "droid", "kimi", "dry-run", "agent-help"),
+    ),
+    "kimi": CommandSpec(
+        name="kimi",
+        summary="Run Kimi Code CLI in safe (read-only) or work (editing) mode.",
+        usage=(
+            "delegate [--json] [--isolation auto|none|worktree] "
+            "kimi {safe,work} [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
+        ),
+        arguments=(_MODE_ARG, _PROMPT_ARG),
+        options=(_REASONING_EFFORT_OPTION, _PROMPT_FILE_OPTION),
+        examples=(
+            'delegate kimi work "Implement the scoped task; report changed files and tests."',
+            'delegate kimi safe "Review this repo for regressions; report file/line/severity."',
+            "delegate kimi work --prompt-file task.md",
+        ),
+        notes=(
+            "safe mode runs in an isolated temporary copy of the workspace and uses a read-only safety prompt.",
+            "work mode uses Kimi --yolo by default.",
+            "Model selection uses kimi.defaultModel in config or the run-input JSON model; "
+            "there is no CLI model alias.",
+            "Reasoning effort is unsupported for Kimi in v1.",
+            "Trailing prompt text begins after the mode; a later --help is prompt text, "
+            "not a help request.",
+        ),
+        see_also=("cursor", "codex", "droid", "dry-run", "agent-help"),
     ),
     "codex": CommandSpec(
         name="codex",
@@ -186,27 +211,28 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
     ),
     "dry-run": CommandSpec(
         name="dry-run",
-        summary="Resolve a cursor/codex/droid invocation and print the planned argv without running it.",
+        summary="Resolve a cursor/codex/droid/kimi invocation and print the planned argv without running it.",
         usage=(
             "delegate [--json] [--isolation auto|none|worktree] "
-            "dry-run {cursor,codex} {safe,work} [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
+            "dry-run {cursor,codex,kimi} {safe,work} [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
             "delegate [--json] [--isolation auto|none|worktree] "
             "dry-run droid MODEL_ALIAS {safe,work} [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
         ),
         arguments=(
-            ArgSpec("engine", True, "Engine to plan: cursor, codex, or droid."),
+            ArgSpec("engine", True, "Engine to plan: cursor, codex, kimi, or droid."),
             _PROMPT_ARG,
         ),
         options=(_REASONING_EFFORT_OPTION, _PROMPT_FILE_OPTION),
         examples=(
             'delegate dry-run cursor work "Refactor the parser"',
             "delegate --json dry-run droid grok safe --prompt-file task.md",
+            'delegate dry-run kimi safe "Review this repo."',
         ),
         notes=(
             "dry-run shares the full engine grammar but launches no child process.",
             "Reasoning effort is resolved from config/cache/bundled capabilities without invoking child binaries.",
         ),
-        see_also=("cursor", "codex", "droid", "describe"),
+        see_also=("cursor", "codex", "droid", "kimi", "describe"),
     ),
     "run": CommandSpec(
         name="run",
@@ -241,7 +267,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             OptionSpec(
                 "--latest",
                 "HARNESS",
-                "Snapshot the most recent run for HARNESS (cursor, droid, or codex).",
+                "Snapshot the most recent run for HARNESS (cursor, droid, codex, or kimi).",
             ),
             OptionSpec("--no-redact", None, "Do not redact secrets in the output."),
         ),
@@ -271,7 +297,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             OptionSpec(
                 "--harness",
                 "HARNESS",
-                "Filter by harness: cursor, droid, or codex.",
+                "Filter by harness: cursor, droid, codex, or kimi.",
             ),
             OptionSpec("--limit", "N", "Cap the number of runs listed (positive integer)."),
         ),
@@ -351,7 +377,9 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "[--harness HARNESS] [--status STATUS] [--limit N] [--no-auto-prune]",
         ),
         options=(
-            OptionSpec("--harness", "HARNESS", "Filter by harness (cursor, droid, codex)."),
+            OptionSpec(
+                "--harness", "HARNESS", "Filter by harness (cursor, droid, codex, or kimi)."
+            ),
             OptionSpec(
                 "--status",
                 "STATUS",
@@ -389,7 +417,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             OptionSpec(
                 "--latest",
                 "HARNESS",
-                "Show the most recent worktree for HARNESS (cursor, droid, or codex).",
+                "Show the most recent worktree for HARNESS (cursor, droid, codex, or kimi).",
             ),
         ),
         examples=(
@@ -449,7 +477,9 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
                 "Prune only worktrees older than DAYS (non-negative integer).",
             ),
             OptionSpec(
-                "--harness", "HARNESS", "Prune only the given harness (cursor, droid, codex)."
+                "--harness",
+                "HARNESS",
+                "Prune only the given harness (cursor, droid, codex, or kimi).",
             ),
             OptionSpec(
                 "--include-detached",
@@ -495,13 +525,13 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
     ),
     "models": CommandSpec(
         name="models",
-        summary="List configured engines and droid model aliases.",
+        summary="List configured engines and model settings.",
         usage=("delegate [--json] models",),
         examples=(
             "delegate models",
             "delegate --json models",
         ),
-        see_also=("describe", "droid"),
+        see_also=("describe", "cursor", "codex", "droid", "kimi"),
     ),
     "capabilities": CommandSpec(
         name="capabilities",
@@ -659,9 +689,11 @@ def render_overview_text() -> str:
         f"delegate [--cwd PATH] [--json] {iso} cursor {{safe,work}} [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} droid MODEL_ALIAS {{safe,work}} [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} codex {{safe,work}} [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} kimi {{safe,work}} [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} dry-run cursor {{safe,work}} [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} dry-run droid MODEL_ALIAS {{safe,work}} [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} dry-run codex {{safe,work}} [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} dry-run kimi {{safe,work}} [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} run --input-json FILE",
         "delegate [--cwd PATH] [--json] snapshot [--latest HARNESS] [--no-redact] <alias-or-runId>",
         "delegate [--cwd PATH] [--json] runs [--active] [--recent] [--harness HARNESS] [--limit N]",

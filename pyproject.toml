@@ -5,13 +5,13 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "delegate-agent"
 version = "0.2.0"
-description = "A tiny CLI for delegating bounded agent tasks to Cursor, Droid, or OpenAI Codex runtimes."
+description = "A tiny CLI for delegating bounded agent tasks to Cursor, Droid, OpenAI Codex, or Kimi Code runtimes."
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "Trey Goff" }]
 dependencies = []
 license = "MIT"
-keywords = ["agents", "cli", "codex", "delegation", "cursor", "droid"]
+keywords = ["agents", "cli", "codex", "delegation", "cursor", "droid", "kimi"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",

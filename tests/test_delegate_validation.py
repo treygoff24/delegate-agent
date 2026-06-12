@@ -770,6 +770,52 @@ class ValidationTests(unittest.TestCase):
 
     # -- Finding #3: request_from_input_json explicit null isolation -------------------
 
+    def test_kimi_config_section_valid(self):
+        config_mod = load_config_module()
+        config = copy.deepcopy(config_mod.DEFAULT_CONFIG)
+        config["kimi"] = {
+            "binary": "kimi",
+            "defaultModel": "kimi-code/kimi-for-coding",
+            "defaultReasoningEffort": None,
+        }
+        config_mod.validate_config(config)
+
+    def test_kimi_config_rejects_non_string_binary(self):
+        config_mod = load_config_module()
+        config = copy.deepcopy(config_mod.DEFAULT_CONFIG)
+        config["kimi"]["binary"] = 123
+        with self.assertRaises(config_mod.ConfigError) as ctx:
+            config_mod.validate_config(config)
+        self.assertEqual(ctx.exception.error, "invalid_kimi_config")
+        self.assertIn("binary", ctx.exception.message)
+
+    def test_kimi_config_rejects_empty_binary(self):
+        config_mod = load_config_module()
+        config = copy.deepcopy(config_mod.DEFAULT_CONFIG)
+        config["kimi"]["binary"] = ""
+        with self.assertRaises(config_mod.ConfigError) as ctx:
+            config_mod.validate_config(config)
+        self.assertEqual(ctx.exception.error, "invalid_kimi_config")
+        self.assertIn("binary", ctx.exception.message)
+
+    def test_kimi_config_rejects_invalid_default_model(self):
+        config_mod = load_config_module()
+        config = copy.deepcopy(config_mod.DEFAULT_CONFIG)
+        config["kimi"]["defaultModel"] = 123
+        with self.assertRaises(config_mod.ConfigError) as ctx:
+            config_mod.validate_config(config)
+        self.assertEqual(ctx.exception.error, "invalid_kimi_config")
+        self.assertIn("defaultModel", ctx.exception.message)
+
+    def test_kimi_config_rejects_non_null_default_reasoning_effort(self):
+        config_mod = load_config_module()
+        config = copy.deepcopy(config_mod.DEFAULT_CONFIG)
+        config["kimi"]["defaultReasoningEffort"] = "high"
+        with self.assertRaises(config_mod.ConfigError) as ctx:
+            config_mod.validate_config(config)
+        self.assertEqual(ctx.exception.error, "invalid_kimi_config")
+        self.assertIn("defaultReasoningEffort", ctx.exception.message)
+
     def test_request_from_input_json_explicit_null_isolation_raises(self):
         """Direct call to request_from_input_json with isolation: null raises."""
         delegate = load_delegate()

@@ -64,6 +64,11 @@ Copy `config.example.json` and replace placeholders before real Droid runs:
     "binary": "codex",
     "defaultModel": null,
     "defaultReasoningEffort": null
+  },
+  "kimi": {
+    "binary": "kimi",
+    "defaultModel": "kimi-code/kimi-for-coding",
+    "defaultReasoningEffort": null
   }
 }
 ```
@@ -156,6 +161,25 @@ Controls local run recording.
 - `ignoreUserConfig`: include Codex `--ignore-user-config`.
 - Codex safe mode always uses `--sandbox read-only` in v1; `codex.safeSandbox` is rejected.
 
+### `kimi`
+
+```json
+{
+  "kimi": {
+    "binary": "kimi",
+    "defaultModel": "kimi-code/kimi-for-coding",
+    "defaultReasoningEffort": null
+  }
+}
+```
+
+- `binary`: path to the `kimi` executable.
+- `defaultModel`: default Kimi model alias (e.g. `kimi-code/kimi-for-coding`). Set to `null` to let Kimi use its own configured default.
+- `defaultReasoningEffort`: not supported in v1; must be `null`.
+- Kimi's thinking/effort level is configured in `~/.kimi-code/config.toml`, not through Delegate.
+- Kimi safe mode uses Delegate's read-only safety prompt and isolated workspace. Kimi prompt mode auto-approves tool actions, so the isolated workspace is the effective write boundary.
+- Kimi work mode emits `--yolo` by default.
+
 ### `reasoning`
 
 ```json
@@ -225,7 +249,7 @@ Allowed values are `auto`, `none`, and `worktree`.
 
 Embedded defaults:
 
-- `safe`: `auto`. Cursor and Codex safe use temporary workspace isolation; Droid safe remains in the real workspace.
+- `safe`: `auto`. Cursor, Codex, and Kimi safe use temporary workspace isolation; Droid safe remains in the real workspace.
 - `work`: `none`. Work mode runs in the real workspace unless you opt into worktree isolation.
 
 ### `worktrees`

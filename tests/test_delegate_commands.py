@@ -911,6 +911,13 @@ class CommandTests(unittest.TestCase):
         self.assertNotIn("--auto", payload["modeMapping"]["droid"]["safe"])
         self.assertNotIn("--use-spec", payload["modeMapping"]["droid"]["safe"])
         self.assertNotIn("--skip-permissions-unsafe", payload["modeMapping"]["droid"]["safe"])
+        kimi_safe = payload["modeMapping"]["kimi"]["safe"]
+        kimi_work = payload["modeMapping"]["kimi"]["work"]
+        self.assertNotIn("--plan", kimi_safe)
+        self.assertNotIn("--yolo", kimi_safe)
+        self.assertNotIn("--auto", kimi_safe)
+        self.assertIn("--yolo", kimi_work)
+        self.assertNotIn("--auto", kimi_work)
 
     def test_describe_and_models_include_runtime_and_config_provenance(self):
         workspace = Path("/tmp/delegate-provenance-test")
@@ -1175,3 +1182,131 @@ class CommandTests(unittest.TestCase):
         output = stdout.getvalue()
         self.assertIn("mode: recent", output)
         self.assertNotIn("cursor", output)
+
+
+class KimiCommandTests(unittest.TestCase):
+    def setUp(self):
+        self.delegate = load_delegate()
+        config_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(config_dir.cleanup)
+        config_path = Path(config_dir.name) / "config.json"
+        config_path.write_text("{}", encoding="utf-8")
+        self._config_env = {"DELEGATE_CONFIG": str(config_path)}
+
+    def run_main(self, argv, *, path_prefix: Path | None = None):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        env = dict(self._config_env)
+        if path_prefix is not None:
+            env["PATH"] = str(path_prefix) + os.pathsep + os.environ.get("PATH", "")
+        with mock.patch.dict(os.environ, env, clear=False):
+            code = self.delegate.main(argv, stdout=stdout, stderr=stderr)
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_kimi_safe_argv(self):
+        request = self.delegate.build_request(
+            "kimi",
+            "safe",
+            None,
+            "/repo",
+            "hello",
+            self.delegate.DEFAULT_CONFIG,
+            dry_run=True,
+        )
+        self.assertNotIn("--plan", request.argv)
+        self.assertNotIn("--yolo", request.argv)
+        self.assertNotIn("--auto", request.argv)
+        self.assertIn("--model", request.argv)
+        self.assertIn("--output-format", request.argv)
+        self.assertIn("stream-json", request.argv)
+        self.assertIn("--prompt", request.argv)
+        prompt_arg = request.argv[request.argv.index("--prompt") + 1]
+        self.assertTrue(prompt_arg.startswith(self.delegate.KIMI_SAFE_REVIEW_PREFIX))
+        self.assertTrue(prompt_arg.endswith("hello"))
+
+    def test_kimi_work_argv(self):
+        request = self.delegate.build_request(
+            "kimi",
+            "work",
+            None,
+            "/repo",
+            "hello",
+            self.delegate.DEFAULT_CONFIG,
+            dry_run=True,
+        )
+        self.assertIn("--yolo", request.argv)
+        self.assertNotIn("--auto", request.argv)
+        self.assertNotIn("--plan", request.argv)
+        prompt_arg = request.argv[request.argv.index("--prompt") + 1]
+        self.assertFalse(prompt_arg.startswith(self.delegate.KIMI_SAFE_REVIEW_PREFIX))
+        self.assertTrue(prompt_arg.endswith("hello"))
+
+    def test_kimi_pass_through_argv(self):
+        request = self.delegate.build_request(
+            "kimi",
+            "safe",
+            None,
+            "/repo",
+            "hello",
+            self.delegate.DEFAULT_CONFIG,
+            dry_run=True,
+            stream_capture=False,
+        )
+        self.assertNotIn("--output-format", request.argv)
+        self.assertNotIn("stream-json", request.argv)
+        self.assertNotIn("--plan", request.argv)
+        self.assertNotIn("--yolo", request.argv)
+        self.assertIn("--prompt", request.argv)
+
+    def test_kimi_model_override_from_config(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["kimi"]["defaultModel"] = "kimi-code/custom-model"
+        request = self.delegate.build_request(
+            "kimi",
+            "safe",
+            None,
+            "/repo",
+            "hello",
+            config,
+            dry_run=True,
+        )
+        self.assertEqual(request.model, "kimi-code/custom-model")
+        self.assertIn("--model", request.argv)
+        self.assertIn("kimi-code/custom-model", request.argv)
+
+    def test_kimi_dry_run(self):
+        code, out, err = self.run_main(["--json", "dry-run", "kimi", "safe", "hello"])
+        self.assertEqual(code, 0, err)
+        payload = json.loads(out)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["engine"], "kimi")
+        self.assertEqual(payload["mode"], "safe")
+        self.assertIsNotNone(payload["model"])
+        self.assertNotIn("--plan", payload["argv"])
+        self.assertNotIn("--yolo", payload["argv"])
+        self.assertTrue(payload["isolatedWorkspace"])
+        self.assertEqual(payload["effectiveIsolation"], "worktree")
+
+    def test_kimi_reasoning_effort_rejected(self):
+        code, out, _err = self.run_main(
+            ["--json", "kimi", "safe", "--reasoning-effort", "high", "hello"]
+        )
+        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        payload = json.loads(out)
+        self.assertEqual(payload["error"], "unsupported_reasoning_effort")
+        self.assertIn("kimi", payload["message"])
+
+    def test_kimi_unconfigured_default_model(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["kimi"]["defaultModel"] = None
+        request = self.delegate.build_request(
+            "kimi",
+            "work",
+            None,
+            "/repo",
+            "hello",
+            config,
+            dry_run=True,
+        )
+        self.assertIsNone(request.model)
+        self.assertNotIn("--model", request.argv)

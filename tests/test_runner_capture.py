@@ -373,6 +373,51 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertIn("I am working", snapshot["assistantText"])
             self.assertNotIn("hidden reasoning", snapshot["assistantText"])
 
+    def test_tracked_kimi_role_content_stream_writes_snapshot_and_completion_report(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        script = Path(temp.name) / "kimi"
+        script.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            'printf \'%s\\n\' \'{"role":"assistant","content":"Status: completed\\\\n- final from kimi"}\'\n',
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="kimi")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="kimi",
+                engine="kimi",
+                mode="safe",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-05-20T21:42:33Z",
+            )
+            code, payload = self.runner.execute_tracked(
+                [str(script)],
+                workspace,
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+            self.assertEqual(code, 0)
+            assert payload is not None
+            self.assertIn("completionReportCommand", payload)
+            run_path = self.registry.run_directory(root, run_id)
+            report = (run_path / "completion-report.md").read_text(encoding="utf-8")
+            snapshot = json.loads((run_path / "snapshot.json").read_text(encoding="utf-8"))
+            self.assertIn("final from kimi", report)
+            self.assertIn("final from kimi", snapshot["assistantText"])
+
     def test_tracked_codex_progress_message_before_command_does_not_write_report(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
