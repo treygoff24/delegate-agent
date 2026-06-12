@@ -49,7 +49,7 @@ Usage:
 delegate [--json] [--isolation auto|none|worktree] kimi {safe,work} [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 ```
 
-- Safe mode runs in an isolated temporary copy of the workspace (under `--isolation auto`) and uses a read-only safety prompt. Delegate intentionally avoids Kimi `--plan` in safe mode.
+- Safe mode runs in an isolated temporary copy of the workspace (under `--isolation auto`) and uses a read-only safety prompt. Delegate intentionally avoids Kimi `--plan` in safe mode. Kimi prompt mode auto-approves tool actions, so the isolation is the effective write boundary; the safety prompt is advisory.
 - Work mode emits Kimi `--yolo` by default and runs in the real workspace unless you opt into worktree isolation.
 - Model selection comes from `kimi.defaultModel` config or the `model` key in JSON run input; there is no CLI model alias.
 - `--reasoning-effort` is unsupported for Kimi in v1.

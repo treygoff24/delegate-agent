@@ -177,7 +177,7 @@ Controls local run recording.
 - `defaultModel`: default Kimi model alias (e.g. `kimi-code/kimi-for-coding`). Set to `null` to let Kimi use its own configured default.
 - `defaultReasoningEffort`: not supported in v1; must be `null`.
 - Kimi's thinking/effort level is configured in `~/.kimi-code/config.toml`, not through Delegate.
-- Kimi safe mode uses Delegate's read-only safety prompt and isolated workspace.
+- Kimi safe mode uses Delegate's read-only safety prompt and isolated workspace. Kimi prompt mode auto-approves tool actions, so the isolated workspace is the effective write boundary.
 - Kimi work mode emits `--yolo` by default.
 
 ### `reasoning`

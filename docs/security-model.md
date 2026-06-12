@@ -30,7 +30,7 @@ Safe mode is for review and investigation.
 - Cursor safe, Codex safe, and Kimi safe run in an isolated temporary workspace by default.
 - Cursor safe also writes a read-oriented `.cursor/cli.json` in the isolated workspace only.
 - Codex safe uses `--ask-for-approval never exec --sandbox read-only`.
-- Kimi safe uses Delegate's read-only safety prompt and does not enable Kimi `--plan`.
+- Kimi safe uses Delegate's read-only safety prompt and does not enable Kimi `--plan`. Kimi prompt mode auto-approves tool actions even without `--yolo`, so there is no runtime read-only enforcement for Kimi safe; the isolated temporary workspace is the effective boundary and the safety prompt is advisory.
 - Droid safe runs in the real workspace using Droid defaults; Delegate does not add Droid work-mode unsafe flags.
 
 Safe mode is not a proof of zero side effects. Treat it as a defensive default plus prompt/runtime policy. A runtime could still read available files, use configured credentials, or perform actions allowed by its own permissions.

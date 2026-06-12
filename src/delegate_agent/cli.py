@@ -4164,6 +4164,7 @@ def describe_payload(
                 "safeNotes": [
                     "Runs in an isolated temporary workspace (detached git worktree or directory copy).",
                     "Prompt mode cannot be combined with Kimi --plan; Delegate uses a read-only safety prompt instead.",
+                    "Kimi prompt mode auto-approves tool actions; the isolated workspace is the effective write boundary and the safety prompt is advisory.",
                     "No CLI workspace flag; Delegate sets subprocess cwd.",
                 ],
                 "work": [
