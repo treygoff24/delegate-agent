@@ -177,6 +177,30 @@ class ParserTests(unittest.TestCase):
             self.delegate.parse_cli(["--json", "--pass-through", "cursor", "safe", "hello"])
         self.assertEqual(ctx.exception.error, "invalid_option_combination")
 
+    def test_launch_global_options_after_mode_are_rejected(self):
+        misplaced_options = [
+            ["--pass-through"],
+            ["--completion-report", "none"],
+            ["--no-completion-report"],
+        ]
+        for option_tokens in misplaced_options:
+            with self.subTest(option=option_tokens):
+                with self.assertRaises(self.delegate.DelegateError) as ctx:
+                    self.delegate.parse_cli(["codex", "safe", *option_tokens, "hello"])
+                self.assertEqual(ctx.exception.error, "misplaced_global_option")
+
+    def test_dry_run_global_options_after_subcommand_are_rejected(self):
+        misplaced_options = [
+            ["--pass-through"],
+            ["--completion-report", "none"],
+            ["--no-completion-report"],
+        ]
+        for option_tokens in misplaced_options:
+            with self.subTest(option=option_tokens):
+                with self.assertRaises(self.delegate.DelegateError) as ctx:
+                    self.delegate.parse_cli(["dry-run", *option_tokens, "codex", "safe", "hello"])
+                self.assertEqual(ctx.exception.error, "misplaced_global_option")
+
     def test_completion_report_none_flag(self):
         parsed = self.delegate.parse_cli(["--completion-report", "none", "cursor", "safe", "hello"])
         self.assertEqual(parsed.completion_report, "none")

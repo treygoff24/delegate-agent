@@ -41,7 +41,8 @@ COMPLETION_REPORT_SUFFIX = """
 
 ## Delegate completion report requirement
 
-When you finish, end with a concise completion report for the parent agent:
+When you finish, include a concise completion report for the parent agent before
+any operator-requested final payload:
 
 - Status: completed / blocked / failed
 - What you did or found
@@ -49,7 +50,9 @@ When you finish, end with a concise completion report for the parent agent:
 - Verification run and result
 - Remaining risks or follow-ups
 
-Keep it concise. Do not include raw logs unless explicitly relevant.
+Keep it concise. Do not include raw logs unless explicitly relevant. If the
+operator requested an exact final payload such as bare JSON, put that payload
+last after the report, without wrapping it in the report.
 """
 
 

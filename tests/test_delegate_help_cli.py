@@ -12,9 +12,12 @@ correctness.
 import importlib.util
 import io
 import json
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = str(ROOT / "src")
@@ -54,12 +57,18 @@ TOP_LEVEL_COMMANDS = (
 class HelpCliTestBase(unittest.TestCase):
     def setUp(self):
         self.delegate = load_delegate()
+        config_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(config_dir.cleanup)
+        config_path = Path(config_dir.name) / "config.json"
+        config_path.write_text(json.dumps(self.delegate.DEFAULT_CONFIG), encoding="utf-8")
+        self._config_env = {"DELEGATE_CONFIG": str(config_path)}
 
     def run_main(self, argv):
         """Drive main() and return (exit_code, stdout_text, stderr_text)."""
         stdout = io.StringIO()
         stderr = io.StringIO()
-        code = self.delegate.main(argv, stdout=stdout, stderr=stderr)
+        with mock.patch.dict(os.environ, self._config_env, clear=False):
+            code = self.delegate.main(argv, stdout=stdout, stderr=stderr)
         return code, stdout.getvalue(), stderr.getvalue()
 
 

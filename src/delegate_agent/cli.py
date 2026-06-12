@@ -93,7 +93,16 @@ MODE_SAFE = "safe"
 MODE_WORK = "work"
 VALID_MODES = {MODE_SAFE, MODE_WORK}
 RUN_INPUT_KEYS = {"engine", "mode", "model", "cwd", "prompt", "isolation", "reasoningEffort"}
-MISPLACED_GLOBAL_OPTIONS = frozenset({"--json", "--cwd", "--isolation"})
+MISPLACED_GLOBAL_OPTIONS = frozenset(
+    {
+        "--json",
+        "--cwd",
+        "--isolation",
+        "--pass-through",
+        "--completion-report",
+        "--no-completion-report",
+    }
+)
 CURSOR_SAFE_REVIEW_PREFIX = (
     "Delegate review mode (code review/investigation only): "
     "Do not edit, create, or delete files. "
@@ -155,6 +164,12 @@ DROID_PROMPT_FILE_DISPLAY = "<prompt file>"
 PROMPT_TRANSPORT_ARGV = "argv"
 PROMPT_TRANSPORT_FILE = "file"
 PROMPT_TRANSPORT_STDIN = "stdin"
+MISSING_BINARY_PROBE_DIRS = (
+    "~/.kimi-code/bin",
+    "~/.local/bin",
+    "~/bin",
+    "/opt/homebrew/bin",
+)
 
 
 class DelegateError(Exception):
@@ -3348,6 +3363,7 @@ def _validate_persistent_worktree_request(
     request: Request,
     *,
     config: JsonObject,
+    config_source: str | None,
     pass_through: bool,
     source_workspace: ResolvedWorkspace,
 ) -> PersistentWorktreePreflight:
@@ -3386,7 +3402,7 @@ def _validate_persistent_worktree_request(
     except IsolationExecutionError as exc:
         raise DelegateError(exc.error, exc.message) from exc
 
-    ensure_binary(request.argv)
+    ensure_binary(request.argv, engine=request.engine, config_source=config_source)
 
     registry_root = run_registry.ensure_registry(
         Path(source_workspace.path),
@@ -3592,6 +3608,7 @@ def _launch_child_in_persistent_worktree(
     request: Request,
     json_mode: bool,
     *,
+    config_source: str | None,
     completion_report_mode: str,
     source_workspace: ResolvedWorkspace,
     stdout: TextIO,
@@ -3602,7 +3619,7 @@ def _launch_child_in_persistent_worktree(
     """Rewrite the child request into the worktree and execute it as tracked."""
     try:
         execution_argv = replace_workspace_arg(request, registration.worktree_path)
-        ensure_binary(execution_argv)
+        ensure_binary(execution_argv, engine=request.engine, config_source=config_source)
         execution_prompt = prepend_persistent_worktree_context(request.prompt)
         execution_stdin_text = request.stdin_text
         execution_prompt_file_text = request.prompt_file_text
@@ -3681,6 +3698,7 @@ def _execute_persistent_worktree(
     json_mode: bool,
     *,
     config: JsonObject,
+    config_source: str | None,
     pass_through: bool,
     completion_report_mode: str,
     source_workspace: ResolvedWorkspace,
@@ -3691,6 +3709,7 @@ def _execute_persistent_worktree(
     preflight = _validate_persistent_worktree_request(
         request,
         config=config,
+        config_source=config_source,
         pass_through=pass_through,
         source_workspace=source_workspace,
     )
@@ -3704,6 +3723,7 @@ def _execute_persistent_worktree(
     return _launch_child_in_persistent_worktree(
         request,
         json_mode,
+        config_source=config_source,
         completion_report_mode=completion_report_mode,
         source_workspace=source_workspace,
         stdout=stdout,
@@ -3713,11 +3733,85 @@ def _execute_persistent_worktree(
     )
 
 
-def ensure_binary(argv: list[str]) -> None:
+def _binary_config_key(engine: str | None) -> str | None:
+    if engine == "cursor":
+        return "cursor.argvPrefix"
+    if engine in {"codex", "droid", "kimi"}:
+        return f"{engine}.binary"
+    return None
+
+
+def _binary_config_path(config_source: str | None) -> str:
+    if config_source and config_source not in {"embedded-default", "cli-overrides"}:
+        return config_source
+    return str(config_path())
+
+
+def _suggest_binary_path(binary: str) -> str | None:
+    if not binary or os.path.isabs(binary) or os.sep in binary:
+        return None
+    for directory in MISSING_BINARY_PROBE_DIRS:
+        candidate = Path(directory).expanduser() / binary
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
+
+
+def _missing_binary_error(
+    binary: str,
+    *,
+    engine: str | None = None,
+    config_source: str | None = None,
+) -> DelegateError:
+    config_key = _binary_config_key(engine)
+    config_path_hint = _binary_config_path(config_source)
+    suggested = _suggest_binary_path(binary)
+
+    parts = [
+        f"Missing binary: {binary}",
+        "(searched PATH of the delegate process, not your interactive shell).",
+    ]
+    if config_key is not None:
+        parts.append(f"Fix: set an absolute path in {config_path_hint} under {config_key!r}.")
+    else:
+        parts.append("Fix: set the configured binary to an absolute path or add it to PATH.")
+    if suggested is not None:
+        parts.append(f"Found candidate at {suggested}; set the config value to that absolute path.")
+
+    diagnostics: JsonObject = {
+        "binary": binary,
+        "configPath": config_path_hint,
+    }
+    if config_key is not None:
+        diagnostics["configKey"] = config_key
+    if suggested is not None:
+        diagnostics["suggestedBinaryPath"] = suggested
+
+    next_actions = [
+        f"command -v {shlex.quote(binary)}",
+    ]
+    if config_key is not None:
+        next_actions.append(f"set {config_key} to an absolute path in {config_path_hint}")
+
+    return DelegateError(
+        "missing_binary",
+        " ".join(parts),
+        EXIT_MISSING_BINARY,
+        diagnostics=diagnostics,
+        next_actions=next_actions,
+    )
+
+
+def ensure_binary(
+    argv: list[str],
+    *,
+    engine: str | None = None,
+    config_source: str | None = None,
+) -> None:
     if not argv:
         raise DelegateError("missing_binary", "Empty argv.", EXIT_MISSING_BINARY)
     if shutil.which(argv[0]) is None:
-        raise DelegateError("missing_binary", f"Missing binary: {argv[0]}", EXIT_MISSING_BINARY)
+        raise _missing_binary_error(argv[0], engine=engine, config_source=config_source)
 
 
 def make_run_context(
@@ -3799,6 +3893,7 @@ def execute_request(
     json_mode: bool,
     *,
     config: JsonObject,
+    config_source: str | None = None,
     pass_through: bool,
     completion_report_mode: str,
     source_workspace: ResolvedWorkspace,
@@ -3813,6 +3908,7 @@ def execute_request(
             request,
             json_mode,
             config=config,
+            config_source=config_source,
             pass_through=pass_through,
             completion_report_mode=completion_report_mode,
             source_workspace=source_workspace,
@@ -3821,7 +3917,11 @@ def execute_request(
         )
 
     with safe_isolated_request(request) as isolated_request:
-        ensure_binary(isolated_request.argv)
+        ensure_binary(
+            isolated_request.argv,
+            engine=isolated_request.engine,
+            config_source=config_source,
+        )
         if pass_through:
             if json_mode:
                 raise DelegateError(
@@ -4451,6 +4551,9 @@ def emit_error(error: DelegateError, json_mode: bool, stdout: TextIO, stderr: Te
         }
         if error.diagnostics is not None:
             payload["diagnostics"] = error.diagnostics
+            for key, value in error.diagnostics.items():
+                if key not in payload:
+                    payload[key] = value
         if error.next_actions:
             payload["nextActions"] = error.next_actions
         delegate_rendering.print_json(
@@ -4549,6 +4652,7 @@ def main(
             request,
             parsed.json_mode,
             config=config,
+            config_source=source,
             pass_through=parsed.pass_through,
             completion_report_mode=completion_report_mode,
             source_workspace=workspace,

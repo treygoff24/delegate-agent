@@ -1,5 +1,12 @@
 # Troubleshooting
 
+If you are troubleshooting from a source checkout, substitute the repo-local
+entry point for installed examples:
+
+```bash
+python3 bin/delegate.py ...
+```
+
 ## `missing_binary` / exit code 3
 
 Real runs require the selected child runtime on `PATH`:
@@ -8,6 +15,7 @@ Real runs require the selected child runtime on `PATH`:
 command -v agent
 command -v droid
 command -v codex
+command -v kimi
 ```
 
 Dry-run does not require the child binary:
@@ -15,6 +23,16 @@ Dry-run does not require the child binary:
 ```bash
 delegate --json dry-run codex safe "Review only."
 ```
+
+`missing_binary` searches the `PATH` of the process that launched Delegate, not
+your interactive shell. If an installer only updated `.zshrc`/`.bashrc`, the
+binary may work in a terminal and still be invisible to Delegate from an agent,
+cron, launchd, or another non-interactive subprocess.
+
+The durable fix is to set an absolute binary path in the active config, for
+example `codex.binary`, `droid.binary`, `kimi.binary`, or `cursor.argvPrefix`.
+JSON errors include `configPath`, `configKey`, and, when Delegate sees a likely
+user-local install, `suggestedBinaryPath`.
 
 ## `invalid_alias` or `unconfigured_model`
 
@@ -38,6 +56,16 @@ Use aliases like `reviewer` or `implementer` in commands:
 delegate droid reviewer safe "Investigate only. Do not edit."
 ```
 
+If editing `~/.delegate/config.json` does not change behavior, check the active
+config layers:
+
+```bash
+delegate --json describe
+```
+
+Inspect `configResolution.layers`; `DELEGATE_CONFIG` and workspace
+`.delegate/config.json` can override the user config.
+
 ## `unsupported_reasoning_effort`
 
 Delegate validates requested reasoning effort against the resolved harness and model before launch:
@@ -56,17 +84,21 @@ Common causes:
 
 These failures apply to explicit per-run effort (`--reasoning-effort` or JSON run input). For Cursor, Droid, and Codex, a config `defaultReasoningEffort` that cannot be satisfied does not fail the run; the run proceeds without reasoning effort and records a warning in the dry-run payload, manifest, and snapshot. Kimi does not support reasoning effort, so `kimi.defaultReasoningEffort` must stay `null`.
 
-For private or newly released models, declare support in `reasoning.capabilities` in config. To refresh workspace-local discovered data, run:
+For private or newly released models, declare support in `reasoning.capabilities` in config. Inspect first with plain `capabilities`. To refresh workspace-local discovered data, run:
 
 ```bash
 delegate --json capabilities refresh
 ```
 
-Refresh may invoke child CLIs and writes `.delegate/capabilities/reasoning.json` only after the refreshed schema validates. A malformed cache file is ignored at run time and overwritten by the next refresh. That file is runtime state; do not commit it.
+Refresh is not read-only: it may invoke child CLIs and writes
+`.delegate/capabilities/reasoning.json` only after the refreshed schema
+validates. A malformed cache file is ignored at run time and overwritten by the
+next refresh. That file is runtime state; do not commit it.
 
 ## Unexpected config source
 
-`delegate --json describe` reports `configSource`. If it points somewhere unexpected, check:
+`delegate --json describe` reports `configSource` and
+`configResolution.layers`. If the source points somewhere unexpected, check:
 
 ```bash
 echo "$DELEGATE_CONFIG"
@@ -77,7 +109,8 @@ When `DELEGATE_CONFIG` is set, the file must exist.
 
 ## Global options rejected
 
-Global options must appear before the subcommand:
+For launch commands and `dry-run`, global options must appear before the
+subcommand:
 
 ```bash
 # Correct
@@ -85,18 +118,29 @@ delegate --json --cwd /path/to/repo dry-run codex safe "Review only."
 
 # Incorrect
 delegate dry-run --json codex safe "Review only."
+delegate codex safe --pass-through "Review only."
 ```
+
+Some inspection commands accept trailing `--json` for convenience, such as
+`delegate describe --json` and `delegate run-output <alias> --json`.
 
 ## Safe-mode isolation fails
 
-Cursor safe and Codex safe create an isolated temporary workspace. In Git repositories, Delegate first tries a detached worktree. If Git metadata is invalid, dirty diff application fails, or filesystem copying fails, use dry-run to inspect the plan and then check Git state:
+Cursor, Codex, and Kimi safe create an isolated temporary workspace. Droid safe
+runs in the requested workspace. In Git repositories, Delegate first tries a
+detached worktree; for non-Git directories and some Git fallback cases, it uses
+a directory copy.
+
+Dry-run can inspect the planned argv and isolation mode, but it does not
+materialize the temporary workspace, create the detached worktree, copy files,
+or apply a dirty diff. To troubleshoot actual isolation failures, check Git
+state and then reproduce with a real run only in a disposable workspace:
 
 ```bash
 git status --short
+git rev-parse --verify HEAD
 python3 bin/delegate.py --json dry-run codex safe "Review only."
 ```
-
-For non-Git directories, Delegate uses a directory copy for temporary safe isolation.
 
 ## Persistent worktree run refused
 
@@ -104,22 +148,35 @@ Work-mode persistent worktrees require a Git repository with a valid `HEAD` and 
 
 ```bash
 git status --short
+git rev-parse --verify HEAD
 delegate --json --isolation worktree dry-run cursor work "Implement only."
 ```
 
-If the source checkout is dirty, commit, stash, or choose a different isolation mode before launching.
+Detached `HEAD` is valid; an unborn repository with no commit is not. Dry-run
+shows the planned branch/path but does not run the full launch preflight. If the
+source checkout is dirty, commit, stash, or choose a different isolation mode
+before launching.
 
 ## `--pass-through` rejected
 
-`--pass-through` is incompatible with `--json` and with persistent worktree runs. It is intended only for raw child stdout/stderr streaming. Normal tracked runs already return bounded parent-facing summaries.
+`--pass-through` is incompatible with `--json` and with persistent worktree
+launches. Dry-run may still show the planned persistent-worktree argv; the real
+launch is refused before child execution. `--pass-through` is intended only for
+raw child stdout/stderr streaming and must appear before the subcommand. Normal
+tracked runs already return bounded parent-facing summaries.
 
 Use inspection commands instead:
 
 ```bash
 delegate snapshot <alias-or-runId>
+delegate run-output <alias-or-runId>
 delegate run-output <alias-or-runId> --completion-report
 delegate run-output <alias-or-runId> --stderr --tail 100
 ```
+
+If your prompt requires an exact structured final answer such as bare JSON, use
+`--no-completion-report` today so Delegate does not inject completion-report
+instructions into the child prompt.
 
 ## Worktree cleanup refused
 
@@ -135,9 +192,13 @@ Then choose an explicit cleanup path:
 delegate worktree remove <alias-or-runId> --discard-uncommitted
 delegate worktree remove <alias-or-runId> --force-branch
 delegate worktree remove <alias-or-runId> --keep-branch
+delegate worktree remove <alias-or-runId> --force
 ```
 
-These flags can discard edits or delete unmerged branches. Use them only after reviewing the worktree.
+`--force` combines discarding uncommitted edits with removing the branch.
+`--keep-branch` leaves the branch in place and does not discard edits. These
+flags can discard edits or delete unmerged branches. Use them only after
+reviewing the worktree.
 
 ## CI does not have child runtimes
 

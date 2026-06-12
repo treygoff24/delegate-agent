@@ -558,6 +558,64 @@ class ExecutionTests(unittest.TestCase):
             self.delegate.ensure_binary(request.argv)
         self.assertEqual(ctx.exception.exit_code, 3)
 
+    def test_missing_binary_error_includes_config_fix_diagnostics(self):
+        config_path = "/tmp/delegate-config.json"
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.ensure_binary(
+                ["delegate-definitely-missing-kimi", "--prompt", "hello"],
+                engine="kimi",
+                config_source=config_path,
+            )
+        error = ctx.exception
+        self.assertEqual(error.error, "missing_binary")
+        self.assertEqual(error.exit_code, self.delegate.EXIT_MISSING_BINARY)
+        self.assertIn("searched PATH of the delegate process", error.message)
+        self.assertIn("kimi.binary", error.message)
+        self.assertEqual(error.diagnostics["configPath"], config_path)
+        self.assertEqual(error.diagnostics["configKey"], "kimi.binary")
+
+    def test_missing_binary_json_includes_candidate_path(self):
+        with tempfile.TemporaryDirectory() as home:
+            config_path = Path(home) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "kimi": {"binary": "delegate-test-kimi"},
+                        "isolation": {"safe": "none"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            candidate_dir = Path(home) / ".kimi-code" / "bin"
+            candidate_dir.mkdir(parents=True)
+            candidate = candidate_dir / "delegate-test-kimi"
+            candidate.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            candidate.chmod(0o755)
+            empty_path = Path(home) / "empty-path"
+            empty_path.mkdir()
+            stdout_buf = io.StringIO()
+
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "HOME": home,
+                    "DELEGATE_CONFIG": str(config_path),
+                    "PATH": str(empty_path),
+                },
+            ):
+                code = self.delegate.main(
+                    ["--json", "--cwd", home, "kimi", "safe", "hello"],
+                    stdout=stdout_buf,
+                )
+
+        payload = json.loads(stdout_buf.getvalue())
+        self.assertEqual(code, self.delegate.EXIT_MISSING_BINARY)
+        self.assertEqual(payload["error"], "missing_binary")
+        self.assertEqual(payload["configPath"], str(config_path))
+        self.assertEqual(payload["configKey"], "kimi.binary")
+        self.assertEqual(payload["suggestedBinaryPath"], str(candidate))
+        self.assertIn(str(candidate), payload["message"])
+
     # -- Wave 2: dry-run structured isolation fields --------------------------------
 
     def test_dry_run_cursor_safe_includes_structured_isolation_fields(self):
@@ -1144,6 +1202,8 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(code, self.delegate.EXIT_MISSING_BINARY)
             self.assertEqual(payload["exitCode"], self.delegate.EXIT_MISSING_BINARY)
             self.assertEqual(payload["error"], "missing_binary")
+            self.assertEqual(payload["configPath"], str(config_path))
+            self.assertEqual(payload["configKey"], "cursor.argvPrefix")
             self.assertFalse((Path(fake_home) / ".delegate" / "worktrees").exists())
             branches = subprocess.run(
                 ["git", "-C", repo.name, "branch", "--list", "delegate/*"],
