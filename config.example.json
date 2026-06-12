@@ -42,6 +42,11 @@
     "ephemeral": true,
     "ignoreUserConfig": false
   },
+  "kimi": {
+    "binary": "kimi",
+    "defaultModel": "kimi-code/kimi-for-coding",
+    "defaultReasoningEffort": null
+  },
   "isolation": {
     "safe": "auto",
     "work": "none"

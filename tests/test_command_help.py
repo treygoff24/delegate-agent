@@ -29,6 +29,7 @@ TOP_LEVEL_COMMANDS = (
     "cursor",
     "codex",
     "droid",
+    "kimi",
     "dry-run",
     "run",
     "snapshot",

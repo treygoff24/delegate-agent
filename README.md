@@ -4,7 +4,7 @@
 
 # Delegate Agent
 
-Delegate Agent is a small CLI for handing a bounded task to another coding-agent runtime. It normalizes common calls to Cursor Agent, Factory Droid, and OpenAI Codex so humans or other agents can launch review, investigation, and implementation jobs without remembering each tool's flags.
+Delegate Agent is a small CLI for handing a bounded task to another coding-agent runtime. It normalizes common calls to Cursor Agent, Factory Droid, OpenAI Codex, and Kimi Code so humans or other agents can launch review, investigation, and implementation jobs without remembering each tool's flags.
 
 Use it when you want a predictable wrapper around prompts like:
 
@@ -50,6 +50,7 @@ Delegate wraps other CLIs. Install and authenticate only the runtimes you plan t
 command -v agent   # Cursor Agent CLI (default model: Cursor Composer), used by delegate cursor ...
 command -v droid   # Factory Droid CLI, used by delegate droid ...
 command -v codex   # OpenAI Codex CLI, used by delegate codex ...
+command -v kimi    # Kimi Code CLI, used by delegate kimi ...
 ```
 
 Runtime authentication is owned by each child CLI. Delegate cannot log in for you. Dry-runs and CI tests do not require the real child binaries.
@@ -88,12 +89,14 @@ Run a read-only review in an isolated temporary workspace:
 ```bash
 delegate codex safe "Review this repository for correctness risks. Do not edit files."
 delegate cursor safe "Review the current diff for regressions. Do not edit files."
+delegate kimi safe "Review this repository for regressions. Do not edit files."
 ```
 
 Run an edit-capable task in a workspace you trust:
 
 ```bash
 delegate cursor work "Fix the parser bug. Run python3 -m unittest tests.test_delegate_parser. Report changed files."
+delegate kimi work "Implement the scoped change and run the named check. Report changed files."
 ```
 
 Run through JSON input for agent callers after copying an example and setting a real `cwd`:
@@ -135,7 +138,7 @@ Delegate separates three ideas:
 
 Defaults are intentionally conservative for review paths:
 
-- `delegate cursor safe` and `delegate codex safe` run in an isolated temporary workspace.
+- `delegate cursor safe`, `delegate codex safe`, and `delegate kimi safe` run in an isolated temporary workspace.
 - `delegate droid ALIAS safe` runs in the real workspace using Droid's default read-oriented behavior.
 - `work` mode can edit. By default it runs in the real workspace for backward compatibility.
 

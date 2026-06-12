@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Kimi Code harness (`delegate kimi`). Supports `safe` mode (`--plan`, isolated temporary workspace) and `work` mode (`--yolo`, edit-capable). Model selection uses `kimi.defaultModel` config or the `model` field in JSON run input. Reasoning effort is not supported for Kimi in v1.
+
 ## [0.2.0] - 2026-06-09
 
 ### Added
@@ -53,6 +59,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Releases before 0.1.3 predate this changelog.
 
-[Unreleased]: https://github.com/treygoff24/delegate-agent/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/treygoff24/delegate-agent/compare/v0.2.0...HEAD
 [0.1.4]: https://github.com/treygoff24/delegate-agent/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/treygoff24/delegate-agent/releases/tag/v0.1.3

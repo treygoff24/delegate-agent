@@ -64,6 +64,11 @@ Copy `config.example.json` and replace placeholders before real Droid runs:
     "binary": "codex",
     "defaultModel": null,
     "defaultReasoningEffort": null
+  },
+  "kimi": {
+    "binary": "kimi",
+    "defaultModel": "kimi-code/kimi-for-coding",
+    "defaultReasoningEffort": null
   }
 }
 ```
@@ -155,6 +160,24 @@ Controls local run recording.
 - `ephemeral`: include Codex `--ephemeral` in JSON-streaming runs.
 - `ignoreUserConfig`: include Codex `--ignore-user-config`.
 - Codex safe mode always uses `--sandbox read-only` in v1; `codex.safeSandbox` is rejected.
+
+### `kimi`
+
+```json
+{
+  "kimi": {
+    "binary": "kimi",
+    "defaultModel": "kimi-code/kimi-for-coding",
+    "defaultReasoningEffort": null
+  }
+}
+```
+
+- `binary`: path to the `kimi` executable.
+- `defaultModel`: default Kimi model alias (e.g. `kimi-code/kimi-for-coding`). Set to `null` to let Kimi use its own configured default.
+- `defaultReasoningEffort`: not supported in v1; keep `null`.
+- Kimi's thinking/effort level is configured in `~/.kimi-code/config.toml`, not through Delegate.
+- Kimi safe mode emits `--plan`; Kimi work mode emits `--yolo`.
 
 ### `reasoning`
 

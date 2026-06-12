@@ -305,6 +305,45 @@ class ParserTests(unittest.TestCase):
             self.delegate.parse_cli(["worktree", "show", "--latest", "cursor", "cursor-1"])
         self.assertEqual(ctx.exception.error, "invalid_option_combination")
 
+    def test_parse_kimi_safe(self):
+        parsed = self.delegate.parse_cli(["kimi", "safe", "review this"])
+        self.assertEqual(parsed.subcommand, "kimi")
+        self.assertEqual(parsed.engine, "kimi")
+        self.assertEqual(parsed.mode, "safe")
+        self.assertEqual(parsed.prompt_parts, ["review this"])
+
+    def test_parse_kimi_work(self):
+        parsed = self.delegate.parse_cli(["kimi", "work", "fix this"])
+        self.assertEqual(parsed.subcommand, "kimi")
+        self.assertEqual(parsed.engine, "kimi")
+        self.assertEqual(parsed.mode, "work")
+        self.assertEqual(parsed.prompt_parts, ["fix this"])
+
+    def test_parse_kimi_dry_run(self):
+        parsed = self.delegate.parse_cli(["dry-run", "kimi", "safe", "review"])
+        self.assertEqual(parsed.subcommand, "kimi")
+        self.assertTrue(parsed.dry_run)
+        self.assertEqual(parsed.engine, "kimi")
+        self.assertEqual(parsed.mode, "safe")
+
+    def test_parse_kimi_help(self):
+        parsed = self.delegate.parse_cli(["kimi", "--help"])
+        self.assertEqual(parsed.subcommand, "help")
+        self.assertEqual(parsed.help_topic, "kimi")
+
+    def test_parse_kimi_prompt_file(self):
+        parsed = self.delegate.parse_cli(["kimi", "safe", "--prompt-file", "task.md"])
+        self.assertEqual(parsed.subcommand, "kimi")
+        self.assertEqual(parsed.engine, "kimi")
+        self.assertEqual(parsed.mode, "safe")
+        self.assertEqual(parsed.prompt_file, "task.md")
+        self.assertEqual(parsed.prompt_parts, [])
+
+    def test_parse_kimi_unknown_mode(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(["kimi", "agent", "hello"])
+        self.assertEqual(ctx.exception.error, "invalid_mode")
+
     def test_worktree_remove_keep_branch_and_force_are_mutually_exclusive(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:
             self.delegate.parse_cli(["worktree", "remove", "cursor-1", "--keep-branch", "--force"])

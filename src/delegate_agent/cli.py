@@ -106,6 +106,12 @@ CODEX_SAFE_REVIEW_PREFIX = (
     "Report findings with file path, line reference, severity, and rationale. "
     "If a write is blocked, do not retry it.\n\n"
 )
+KIMI_SAFE_REVIEW_PREFIX = (
+    "Delegate Kimi safe mode (code review/investigation only): "
+    "Do not edit, create, or delete files. "
+    "Report findings with file path, line reference, severity, and rationale. "
+    "If a write is blocked, do not retry it.\n\n"
+)
 # Project .cursor/cli.json is permissions-only; global cli-config examples may
 # include other top-level keys such as "version", but Cursor rejects them here.
 CURSOR_SAFE_CLI_CONFIG: JsonObject = {
@@ -143,6 +149,7 @@ SAFE_EXTERNAL_SYMLINK_WARNING_PREFIX = (
 )
 SAFE_BLOCKED_SYMLINK_PLACEHOLDER = "External symlink blocked by Delegate safe isolation.\n"
 CURSOR_PROMPT_REDACTION = "<prompt redacted: cursor argv transport>"
+KIMI_PROMPT_REDACTION = "<prompt redacted: kimi argv transport>"
 DROID_PROMPT_FILE_ARG_PLACEHOLDER = "<delegate-prompt-file>"
 DROID_PROMPT_FILE_DISPLAY = "<prompt file>"
 PROMPT_TRANSPORT_ARGV = "argv"
@@ -512,7 +519,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
         )
     if subcommand == "run":
         return parse_run(rest, json_mode, cwd, pass_through, completion_report, isolation)
-    if subcommand in ("cursor", "codex"):
+    if subcommand in ("cursor", "codex", "kimi"):
         return parse_modeless_engine(
             subcommand,
             rest,
@@ -728,13 +735,13 @@ def parse_dry_run(
     if rest and command_help.is_help_token(rest[0]):
         return help_command(json_mode, "dry-run")
     if not rest:
-        raise DelegateError("missing_engine", "dry-run requires cursor, droid, or codex.")
+        raise DelegateError("missing_engine", "dry-run requires cursor, droid, codex, or kimi.")
     engine = rest[0]
     if engine.startswith("-"):
         raise DelegateError(
             "misplaced_global_option", "Global options must appear before the subcommand."
         )
-    if engine in ("cursor", "codex"):
+    if engine in ("cursor", "codex", "kimi"):
         return parse_modeless_engine(
             engine,
             rest[1:],
@@ -757,7 +764,7 @@ def parse_dry_run(
             isolation=isolation,
             help_topic="dry-run",
         )
-    raise DelegateError("invalid_engine", "dry-run engine must be cursor, droid, or codex.")
+    raise DelegateError("invalid_engine", "dry-run engine must be cursor, droid, codex, or kimi.")
 
 
 def parse_prompt_tail(rest: list[str]) -> tuple[str | None, str | None, list[str]]:
@@ -869,7 +876,7 @@ def parse_snapshot(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedC
     )
 
 
-KNOWN_HARNESSES = ("cursor", "droid", "codex")
+KNOWN_HARNESSES = ("cursor", "droid", "codex", "kimi")
 
 
 def parse_runs(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
@@ -1934,7 +1941,7 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
     validate_config(config)
     if parsed.subcommand == "run":
         return request_from_input_json(parsed, config)
-    if parsed.engine not in ("cursor", "droid", "codex") or parsed.mode is None:
+    if parsed.engine not in ("cursor", "droid", "codex", "kimi") or parsed.mode is None:
         raise DelegateError("invalid_command", "Command does not map to an execution request.")
     workspace = resolve_workspace(parsed.cwd)
     prompt = resolve_prompt(parsed.prompt_parts, parsed.prompt_file, stdin)
@@ -2015,8 +2022,8 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
     engine = raw.get("engine")
     mode = raw.get("mode")
     prompt = raw.get("prompt")
-    if engine not in ("cursor", "droid", "codex"):
-        raise DelegateError("invalid_engine", "engine must be cursor, droid, or codex.")
+    if engine not in ("cursor", "droid", "codex", "kimi"):
+        raise DelegateError("invalid_engine", "engine must be cursor, droid, codex, or kimi.")
     if not isinstance(mode, str):
         raise DelegateError("invalid_mode", "mode must be safe or work.")
     validate_mode(mode)
@@ -2034,12 +2041,12 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
     if engine == "droid":
         if not isinstance(model_alias, str) or not model_alias:
             raise DelegateError("missing_model", "droid run input requires model alias.")
-    elif engine == "codex":
+    elif engine in ("codex", "kimi"):
         if model_alias is not None and not isinstance(model_alias, str):
-            raise DelegateError("invalid_model", "model must be a string or null for codex.")
+            raise DelegateError("invalid_model", f"model must be a string or null for {engine}.")
         if model_alias == "":
             raise DelegateError(
-                "invalid_model", "model must be a non-empty string or omitted for codex."
+                "invalid_model", f"model must be a non-empty string or omitted for {engine}."
             )
     elif model_alias is not None and model_alias != config["cursor"]["defaultModel"]:
         raise DelegateError(
@@ -2305,7 +2312,41 @@ def build_request(
             warnings=reasoning_warnings,
             **request_kwargs,
         )
-    raise DelegateError("invalid_engine", "engine must be cursor, droid, or codex.")
+    if engine == "kimi":
+        if requested_effort is not None:
+            raise DelegateError(
+                "unsupported_reasoning_effort",
+                "Reasoning effort is not supported for harness: kimi.",
+            )
+        kimi = config["kimi"]
+        if isinstance(model_alias, str) and model_alias:
+            model = model_alias
+        else:
+            default_model = kimi.get("defaultModel")
+            model = default_model if isinstance(default_model, str) and default_model else None
+        argv = build_kimi_argv(
+            kimi,
+            mode,
+            resolved.path,
+            model,
+            prompt,
+            stream_capture=stream_capture,
+        )
+        return Request(
+            engine,
+            mode,
+            resolved.path,
+            prompt,
+            argv,
+            model,
+            model_alias=model_alias,
+            dry_run=dry_run,
+            workspace_kind=resolved.kind,
+            isolation_context=isolation_context,
+            prompt_transport=PROMPT_TRANSPORT_ARGV,
+            display_argv=redacted_prompt_argv(argv, replacement=KIMI_PROMPT_REDACTION),
+        )
+    raise DelegateError("invalid_engine", "engine must be cursor, droid, codex, or kimi.")
 
 
 def resolve_effective_reasoning_effort(
@@ -2422,6 +2463,12 @@ def prefix_cursor_safe_prompt(prompt: str) -> str:
     return f"{CURSOR_SAFE_REVIEW_PREFIX}{prompt}"
 
 
+def prefix_kimi_safe_prompt(prompt: str) -> str:
+    if prompt.startswith(KIMI_SAFE_REVIEW_PREFIX):
+        return prompt
+    return f"{KIMI_SAFE_REVIEW_PREFIX}{prompt}"
+
+
 def replace_argv_after_flag(argv: list[str], flag: str, value: str) -> list[str]:
     updated = list(argv)
     for index, token in enumerate(updated):
@@ -2457,6 +2504,8 @@ def replace_safe_workspace_arg_in_argv(
         return argv
     if request.engine == "droid":
         return replace_argv_after_flag(argv, "--cwd", isolated_workspace)
+    if request.engine == "kimi":
+        return list(argv)
     return list(argv)
 
 
@@ -2486,6 +2535,8 @@ def replace_workspace_arg_in_argv(
         return replace_argv_after_flag(argv, "--cd", execution_workspace)
     if request.engine == "droid":
         return replace_argv_after_flag(argv, "--cwd", execution_workspace)
+    if request.engine == "kimi":
+        return list(argv)
     return list(argv)
 
 
@@ -3009,6 +3060,31 @@ def build_droid_argv(
     return argv
 
 
+def build_kimi_argv(
+    kimi: JsonObject,
+    mode: str,
+    workspace: str,
+    model: str | None,
+    prompt: str,
+    *,
+    stream_capture: bool = True,
+) -> list[str]:
+    argv = [str(kimi["binary"])]
+    if mode == MODE_SAFE:
+        argv.append("--plan")
+        prompt = prefix_kimi_safe_prompt(prompt)
+    elif mode == MODE_WORK:
+        argv.append("--yolo")
+    else:
+        validate_mode(mode)
+    if model:
+        argv.extend(["--model", model])
+    if stream_capture:
+        argv.extend(["--output-format", "stream-json"])
+    argv.extend(["--prompt", prompt])
+    return argv
+
+
 def build_codex_argv(
     codex: JsonObject,
     mode: str,
@@ -3132,6 +3208,8 @@ def dry_run_payload(request: Request) -> JsonObject:
                 payload["argv"] = replace_argv_after_flag(payload["argv"], "--cd", planned_cwd)
             elif request.engine == "droid":
                 payload["argv"] = replace_argv_after_flag(payload["argv"], "--cwd", planned_cwd)
+            elif request.engine == "kimi":
+                pass
         else:
             payload["plannedExecutionCwd"] = None
             payload["plannedBranch"] = None
@@ -3140,8 +3218,8 @@ def dry_run_payload(request: Request) -> JsonObject:
         payload["isolatedWorkspace"] = ctx.isolation_lifecycle in ("temporary", "persistent")
     else:
         # Fallback when no isolation context is provided (e.g. direct build_request calls in tests).
-        # Use embedded-default logic: cursor/codex safe -> worktree temporary, others -> none.
-        if request.engine in ("cursor", "codex") and request.mode == MODE_SAFE:
+        # Use embedded-default logic: cursor/codex/kimi safe -> worktree temporary, others -> none.
+        if request.engine in ("cursor", "codex", "kimi") and request.mode == MODE_SAFE:
             payload["isolatedWorkspace"] = True
             payload["isolation"] = (
                 "Execution uses a temporary detached git worktree or directory copy; "
@@ -3879,6 +3957,11 @@ def models_payload(
             "defaultReasoningEffort": config["codex"].get("defaultReasoningEffort"),
             "profile": config["codex"]["profile"],
         },
+        "kimi": {
+            "binary": config["kimi"]["binary"],
+            "defaultModel": config["kimi"]["defaultModel"],
+            "defaultReasoningEffort": config["kimi"].get("defaultReasoningEffort"),
+        },
     }
 
 
@@ -3894,6 +3977,7 @@ def _policy_field_support_matrix() -> JsonObject:
         "codex": supported,
         "cursor": unsupported,
         "droid": unsupported,
+        "kimi": unsupported,
     }
 
 
@@ -3951,7 +4035,7 @@ def describe_payload(
         "configPath": str(config_path()),
         "configSource": config_source,
         "configResolution": config_resolution_payload(config_source, workspace),
-        "engines": ["cursor", "droid", "codex"],
+        "engines": ["cursor", "droid", "codex", "kimi"],
         "policyProfiles": list(delegate_config.POLICY_PROFILES),
         "policyFieldSupport": _policy_field_support_matrix(),
         "effectivePolicy": {
@@ -3966,6 +4050,7 @@ def describe_payload(
             "cursor": PROMPT_TRANSPORT_ARGV,
             "droid": PROMPT_TRANSPORT_FILE,
             "codex": PROMPT_TRANSPORT_STDIN,
+            "kimi": PROMPT_TRANSPORT_ARGV,
         },
         "globalOptions": [
             "--cwd",
@@ -4067,6 +4152,35 @@ def describe_payload(
                     "profile is config-only (codex.profile); not accepted in run input JSON.",
                 ],
             },
+            "kimi": {
+                "safe": [
+                    config["kimi"]["binary"],
+                    "--plan",
+                    "--model",
+                    config["kimi"]["defaultModel"],
+                    "--output-format",
+                    "stream-json",
+                    "--prompt",
+                    "<kimi-safe-prefixed-skill-review-prompt>",
+                ],
+                "safeNotes": [
+                    "Runs in an isolated temporary workspace (detached git worktree or directory copy).",
+                    "No CLI workspace flag; Delegate sets subprocess cwd.",
+                ],
+                "work": [
+                    config["kimi"]["binary"],
+                    "--yolo",
+                    "--model",
+                    config["kimi"]["defaultModel"],
+                    "--output-format",
+                    "stream-json",
+                    "--prompt",
+                    "<skill-review-prompt>",
+                ],
+                "workNotes": [
+                    "No CLI workspace flag; Delegate sets subprocess cwd.",
+                ],
+            },
         },
         "commands": [
             {"command": spec.name, "summary": spec.summary}
@@ -4102,6 +4216,17 @@ def emit_models(
     profile_label = profile if isinstance(profile, str) and profile else "(none)"
     print(
         f"codex: binary={codex['binary']} defaultModel={model_label} profile={profile_label}",
+        file=stdout,
+    )
+    kimi = config["kimi"]
+    kimi_default_model = kimi.get("defaultModel")
+    kimi_model_label = (
+        kimi_default_model
+        if isinstance(kimi_default_model, str) and kimi_default_model
+        else "(none)"
+    )
+    print(
+        f"kimi: binary={kimi['binary']} defaultModel={kimi_model_label}",
         file=stdout,
     )
     print(f"runtime: {runtime_payload()['modulePath']}", file=stdout)
@@ -4180,7 +4305,7 @@ def emit_describe(
     print(f"delegate {VERSION}", file=stdout)
     print(f"config: {payload['configPath']} ({payload['configSource']})", file=stdout)
     print(f"runtime: {payload['runtime']['modulePath']}", file=stdout)
-    print("engines: cursor, droid, codex", file=stdout)
+    print("engines: cursor, droid, codex, kimi", file=stdout)
     print("modes: safe, work", file=stdout)
     print("prompt sources: direct, --prompt-file, stdin", file=stdout)
     print("global options must appear before the subcommand", file=stdout)
@@ -4220,6 +4345,13 @@ Good defaults:
   delegate droid <alias> work "Implement this bounded change; run the named check."
   delegate codex safe "Review this workspace. Do not edit files."
   delegate codex work "Implement the scoped fix, run the named check, and report changed files."
+  delegate kimi safe "Review this repo for regressions; report file/line/severity."
+  delegate kimi work "Implement the scoped task; report changed files and tests."
+
+Kimi:
+  - Model selection uses kimi.defaultModel in config or optional JSON input model; no CLI model alias in v1.
+  - Reasoning effort is unsupported for Kimi in v1.
+  - No CLI workspace flag; Delegate sets subprocess cwd.
 
 Codex:
   - Model selection uses codex.defaultModel in config or optional JSON input model; no CLI model alias in v1.
