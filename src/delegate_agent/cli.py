@@ -3071,10 +3071,9 @@ def build_kimi_argv(
 ) -> list[str]:
     argv = [str(kimi["binary"])]
     if mode == MODE_SAFE:
-        argv.append("--plan")
         prompt = prefix_kimi_safe_prompt(prompt)
     elif mode == MODE_WORK:
-        argv.append("--yolo")
+        argv.append("--auto")
     else:
         validate_mode(mode)
     if model:
@@ -4155,7 +4154,6 @@ def describe_payload(
             "kimi": {
                 "safe": [
                     config["kimi"]["binary"],
-                    "--plan",
                     "--model",
                     config["kimi"]["defaultModel"],
                     "--output-format",
@@ -4165,11 +4163,12 @@ def describe_payload(
                 ],
                 "safeNotes": [
                     "Runs in an isolated temporary workspace (detached git worktree or directory copy).",
+                    "Prompt mode cannot be combined with Kimi --plan; Delegate uses a read-only safety prompt instead.",
                     "No CLI workspace flag; Delegate sets subprocess cwd.",
                 ],
                 "work": [
                     config["kimi"]["binary"],
-                    "--yolo",
+                    "--auto",
                     "--model",
                     config["kimi"]["defaultModel"],
                     "--output-format",
@@ -4178,6 +4177,7 @@ def describe_payload(
                     "<skill-review-prompt>",
                 ],
                 "workNotes": [
+                    "Uses Kimi --auto because prompt mode rejects --yolo.",
                     "No CLI workspace flag; Delegate sets subprocess cwd.",
                 ],
             },

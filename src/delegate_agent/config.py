@@ -340,11 +340,11 @@ def _validate_kimi_section(kimi: JsonValue) -> None:
             "invalid_kimi_config",
             "kimi.defaultModel must be a string or null.",
         )
-    _validate_provider_default_reasoning_effort(
-        kimi.get("defaultReasoningEffort"),
-        path="kimi.defaultReasoningEffort",
-        error="invalid_kimi_config",
-    )
+    if kimi.get("defaultReasoningEffort") is not None:
+        raise ConfigError(
+            "invalid_kimi_config",
+            "kimi.defaultReasoningEffort is not supported; set it to null.",
+        )
 
 
 def _validate_provider_default_reasoning_effort(

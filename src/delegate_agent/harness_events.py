@@ -12,12 +12,12 @@ EVENT_LIMIT = 500
 EVENT_HEAD = 100
 EVENT_TAIL = 400
 
-# Harnesses whose streams emit interim assistant messages that are safe to
+# Harnesses whose streams emit assistant messages that are safe to
 # surface as a recovered completion report when a run dies before its final
-# completion event. Codex is excluded on purpose: its interim agent_message
-# events are preamble ("I'll start by..."), and only a message sealed by
-# turn.completed is the real answer.
-ASSISTANT_RECOVERY_HARNESSES = frozenset({"cursor", "droid"})
+# completion event. Codex is excluded on purpose: its agent_message events can
+# be preamble ("I'll start by..."), and only a message sealed by turn.completed
+# is the real answer.
+ASSISTANT_RECOVERY_HARNESSES = frozenset({"cursor", "droid", "kimi"})
 
 
 @dataclass
@@ -80,6 +80,7 @@ class StreamAccumulator:
     def _ingest_object(self, payload: JsonObject) -> None:
         event_type = payload.get("type")
         if not isinstance(event_type, str):
+            self._ingest_role_content_message(payload)
             return
         if event_type == "reasoning":
             return
@@ -124,6 +125,14 @@ class StreamAccumulator:
     def _ingest_message(self, payload: JsonObject) -> None:
         role = payload.get("role")
         if role not in (None, "assistant"):
+            return
+        text = _extract_text(payload.get("content"))
+        if text:
+            self._record_recoverable_assistant_text(text)
+
+    def _ingest_role_content_message(self, payload: JsonObject) -> None:
+        role = payload.get("role")
+        if role != "assistant":
             return
         text = _extract_text(payload.get("content"))
         if text:

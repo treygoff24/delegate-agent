@@ -34,6 +34,18 @@ class HarnessEventsTests(unittest.TestCase):
         )
         self.assertIn("Hello parent", acc.assistant_text)
 
+    def test_kimi_role_content_without_type_is_captured(self):
+        acc = self.events.StreamAccumulator()
+        acc.ingest_line(json.dumps({"role": "assistant", "content": "OK from Kimi"}))
+        self.assertEqual(acc.assistant_text, "OK from Kimi")
+        self.assertEqual(acc.recoverable_assistant_text, "OK from Kimi")
+
+    def test_kimi_non_assistant_role_content_without_type_is_ignored(self):
+        acc = self.events.StreamAccumulator()
+        acc.ingest_line(json.dumps({"role": "user", "content": "prompt echo"}))
+        self.assertEqual(acc.assistant_text, "")
+        self.assertIsNone(acc.recoverable_assistant_text)
+
     def test_assistant_text_is_cached_until_chunks_change(self):
         acc = self.events.StreamAccumulator()
         acc.ingest_line(

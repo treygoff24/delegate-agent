@@ -807,10 +807,10 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(ctx.exception.error, "invalid_kimi_config")
         self.assertIn("defaultModel", ctx.exception.message)
 
-    def test_kimi_config_rejects_invalid_default_reasoning_effort(self):
+    def test_kimi_config_rejects_non_null_default_reasoning_effort(self):
         config_mod = load_config_module()
         config = copy.deepcopy(config_mod.DEFAULT_CONFIG)
-        config["kimi"]["defaultReasoningEffort"] = "high effort"
+        config["kimi"]["defaultReasoningEffort"] = "high"
         with self.assertRaises(config_mod.ConfigError) as ctx:
             config_mod.validate_config(config)
         self.assertEqual(ctx.exception.error, "invalid_kimi_config")

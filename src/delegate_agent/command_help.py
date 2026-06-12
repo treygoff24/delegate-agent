@@ -144,8 +144,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "delegate kimi work --prompt-file task.md",
         ),
         notes=(
-            "safe mode uses --plan and runs in an isolated temporary copy of the workspace.",
-            "work mode uses --yolo (auto-approve all actions; headless-required).",
+            "safe mode runs in an isolated temporary copy of the workspace and uses a read-only safety prompt.",
+            "work mode uses Kimi --auto because prompt mode rejects --yolo.",
             "Model selection uses kimi.defaultModel in config or the run-input JSON model; "
             "there is no CLI model alias.",
             "Reasoning effort is unsupported for Kimi in v1.",

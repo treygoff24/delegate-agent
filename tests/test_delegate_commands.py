@@ -911,6 +911,13 @@ class CommandTests(unittest.TestCase):
         self.assertNotIn("--auto", payload["modeMapping"]["droid"]["safe"])
         self.assertNotIn("--use-spec", payload["modeMapping"]["droid"]["safe"])
         self.assertNotIn("--skip-permissions-unsafe", payload["modeMapping"]["droid"]["safe"])
+        kimi_safe = payload["modeMapping"]["kimi"]["safe"]
+        kimi_work = payload["modeMapping"]["kimi"]["work"]
+        self.assertNotIn("--plan", kimi_safe)
+        self.assertNotIn("--yolo", kimi_safe)
+        self.assertNotIn("--auto", kimi_safe)
+        self.assertIn("--auto", kimi_work)
+        self.assertNotIn("--yolo", kimi_work)
 
     def test_describe_and_models_include_runtime_and_config_provenance(self):
         workspace = Path("/tmp/delegate-provenance-test")
@@ -1206,7 +1213,9 @@ class KimiCommandTests(unittest.TestCase):
             self.delegate.DEFAULT_CONFIG,
             dry_run=True,
         )
-        self.assertIn("--plan", request.argv)
+        self.assertNotIn("--plan", request.argv)
+        self.assertNotIn("--yolo", request.argv)
+        self.assertNotIn("--auto", request.argv)
         self.assertIn("--model", request.argv)
         self.assertIn("--output-format", request.argv)
         self.assertIn("stream-json", request.argv)
@@ -1225,7 +1234,8 @@ class KimiCommandTests(unittest.TestCase):
             self.delegate.DEFAULT_CONFIG,
             dry_run=True,
         )
-        self.assertIn("--yolo", request.argv)
+        self.assertIn("--auto", request.argv)
+        self.assertNotIn("--yolo", request.argv)
         self.assertNotIn("--plan", request.argv)
         prompt_arg = request.argv[request.argv.index("--prompt") + 1]
         self.assertFalse(prompt_arg.startswith(self.delegate.KIMI_SAFE_REVIEW_PREFIX))
@@ -1244,7 +1254,8 @@ class KimiCommandTests(unittest.TestCase):
         )
         self.assertNotIn("--output-format", request.argv)
         self.assertNotIn("stream-json", request.argv)
-        self.assertIn("--plan", request.argv)
+        self.assertNotIn("--plan", request.argv)
+        self.assertNotIn("--yolo", request.argv)
         self.assertIn("--prompt", request.argv)
 
     def test_kimi_model_override_from_config(self):
@@ -1271,7 +1282,8 @@ class KimiCommandTests(unittest.TestCase):
         self.assertEqual(payload["engine"], "kimi")
         self.assertEqual(payload["mode"], "safe")
         self.assertIsNotNone(payload["model"])
-        self.assertIn("--plan", payload["argv"])
+        self.assertNotIn("--plan", payload["argv"])
+        self.assertNotIn("--yolo", payload["argv"])
         self.assertTrue(payload["isolatedWorkspace"])
         self.assertEqual(payload["effectiveIsolation"], "worktree")
 
