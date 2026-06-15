@@ -83,30 +83,32 @@ MISPLACED_GLOBAL_OPTIONS = frozenset(
         "--no-completion-report",
     }
 )
-CURSOR_SAFE_REVIEW_PREFIX = (
-    "Delegate review mode (code review/investigation only): "
-    "Do not edit, create, or delete files. "
-    "Report findings with file path, line reference, severity, and rationale. "
-    "If a write is blocked, do not retry it.\n\n"
-)
-CODEX_SAFE_REVIEW_PREFIX = (
-    "Delegate Codex safe mode (code review/investigation only): "
-    "Do not edit, create, or delete files. "
-    "Report findings with file path, line reference, severity, and rationale. "
-    "If a write is blocked, do not retry it.\n\n"
-)
-DROID_SAFE_REVIEW_PREFIX = (
-    "Delegate Droid safe mode (code review/investigation only): "
-    "Do not edit, create, or delete files. "
-    "Report findings with file path, line reference, severity, and rationale. "
-    "If a write is blocked, do not retry it.\n\n"
-)
-KIMI_SAFE_REVIEW_PREFIX = (
-    "Delegate Kimi safe mode (code review/investigation only): "
-    "Do not edit, create, or delete files. "
-    "Report findings with file path, line reference, severity, and rationale. "
-    "If a write is blocked, do not retry it.\n\n"
-)
+SAFE_REVIEW_PREFIX_BY_ENGINE: dict[str, str] = {
+    "cursor": (
+        "Delegate review mode (code review/investigation only): "
+        "Do not edit, create, or delete files. "
+        "Report findings with file path, line reference, severity, and rationale. "
+        "If a write is blocked, do not retry it.\n\n"
+    ),
+    "codex": (
+        "Delegate Codex safe mode (code review/investigation only): "
+        "Do not edit, create, or delete files. "
+        "Report findings with file path, line reference, severity, and rationale. "
+        "If a write is blocked, do not retry it.\n\n"
+    ),
+    "droid": (
+        "Delegate Droid safe mode (code review/investigation only): "
+        "Do not edit, create, or delete files. "
+        "Report findings with file path, line reference, severity, and rationale. "
+        "If a write is blocked, do not retry it.\n\n"
+    ),
+    "kimi": (
+        "Delegate Kimi safe mode (code review/investigation only): "
+        "Do not edit, create, or delete files. "
+        "Report findings with file path, line reference, severity, and rationale. "
+        "If a write is blocked, do not retry it.\n\n"
+    ),
+}
 # Project .cursor/cli.json is permissions-only; global cli-config examples may
 # include other top-level keys such as "version", but Cursor rejects them here.
 CURSOR_SAFE_CLI_CONFIG: JsonObject = {
@@ -1558,10 +1560,7 @@ def effective_prompt(
     completion_report_mode: str,
 ) -> str:
     prompt = delegate_runner.prepend_skill_review_instructions(prompt)
-    safe_prefix = {
-        "codex": CODEX_SAFE_REVIEW_PREFIX,
-        "droid": DROID_SAFE_REVIEW_PREFIX,
-    }.get(engine)
+    safe_prefix = SAFE_REVIEW_PREFIX_BY_ENGINE.get(engine) if engine in {"codex", "droid"} else None
     if mode == MODE_SAFE and safe_prefix is not None and safe_prefix not in prompt:
         # prepend_skill_review_instructions guarantees SKILL_REVIEW_PREFIX at index 0,
         # so provider-specific safe prefixes slot in cleanly between skill-review
@@ -2157,27 +2156,30 @@ def reasoning_request_kwargs(
 
 
 def prefix_cursor_safe_prompt(prompt: str) -> str:
-    if prompt.startswith(CURSOR_SAFE_REVIEW_PREFIX):
+    safe_prefix = SAFE_REVIEW_PREFIX_BY_ENGINE["cursor"]
+    if prompt.startswith(safe_prefix):
         return prompt
-    return f"{CURSOR_SAFE_REVIEW_PREFIX}{prompt}"
+    return f"{safe_prefix}{prompt}"
 
 
 def prefix_kimi_safe_prompt(prompt: str) -> str:
-    if prompt.startswith(KIMI_SAFE_REVIEW_PREFIX):
+    safe_prefix = SAFE_REVIEW_PREFIX_BY_ENGINE["kimi"]
+    if prompt.startswith(safe_prefix):
         return prompt
-    return f"{KIMI_SAFE_REVIEW_PREFIX}{prompt}"
+    return f"{safe_prefix}{prompt}"
 
 
 def prefix_droid_safe_prompt(prompt: str) -> str:
-    if prompt.startswith(DROID_SAFE_REVIEW_PREFIX):
+    safe_prefix = SAFE_REVIEW_PREFIX_BY_ENGINE["droid"]
+    if prompt.startswith(safe_prefix):
         return prompt
     skill_prefix = delegate_runner.SKILL_REVIEW_PREFIX
     if prompt.startswith(skill_prefix):
         insert_at = len(skill_prefix)
-        if prompt[insert_at:].startswith(DROID_SAFE_REVIEW_PREFIX):
+        if prompt[insert_at:].startswith(safe_prefix):
             return prompt
-        return prompt[:insert_at] + DROID_SAFE_REVIEW_PREFIX + prompt[insert_at:]
-    return f"{DROID_SAFE_REVIEW_PREFIX}{prompt}"
+        return prompt[:insert_at] + safe_prefix + prompt[insert_at:]
+    return f"{safe_prefix}{prompt}"
 
 
 def _ensure_codex_skip_git_repo_check(argv: list[str]) -> list[str]:

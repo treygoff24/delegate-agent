@@ -134,7 +134,7 @@ class CommandTests(unittest.TestCase):
                 "stream-json",
             ],
         )
-        self.assertTrue(argv[10].startswith(self.delegate.CURSOR_SAFE_REVIEW_PREFIX))
+        self.assertTrue(argv[10].startswith(self.delegate.SAFE_REVIEW_PREFIX_BY_ENGINE["cursor"]))
         self.assertTrue(argv[10].endswith("hello"))
         self.assertNotIn("--mode=plan", argv)
         self.assertNotIn("--mode=ask", argv)
@@ -183,7 +183,7 @@ class CommandTests(unittest.TestCase):
                 "stream-json",
             ],
         )
-        self.assertTrue(argv[-1].startswith(self.delegate.DROID_SAFE_REVIEW_PREFIX))
+        self.assertTrue(argv[-1].startswith(self.delegate.SAFE_REVIEW_PREFIX_BY_ENGINE["droid"]))
         self.assertTrue(argv[-1].endswith("hello"))
         self.assertNotIn("--auto", argv)
         self.assertNotIn("--use-spec", argv)
@@ -441,7 +441,9 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(droid.prompt_transport, "file")
         self.assertIsNone(droid.stdin_text)
         self.assertIsNotNone(droid.prompt_file_text)
-        self.assertTrue(droid.prompt_file_text.startswith(self.delegate.DROID_SAFE_REVIEW_PREFIX))
+        self.assertTrue(
+            droid.prompt_file_text.startswith(self.delegate.SAFE_REVIEW_PREFIX_BY_ENGINE["droid"])
+        )
         self.assertIn(secret_prompt, droid.prompt_file_text)
         self.assertIn("--file", droid.argv)
         self.assertIn(self.delegate.DROID_PROMPT_FILE_ARG_PLACEHOLDER, droid.argv)
@@ -474,9 +476,9 @@ class CommandTests(unittest.TestCase):
         self.assertIsNotNone(prompt)
         assert prompt is not None
         self.assertTrue(prompt.startswith(self.delegate.delegate_runner.SKILL_REVIEW_PREFIX))
-        self.assertEqual(prompt.count(self.delegate.DROID_SAFE_REVIEW_PREFIX), 1)
+        self.assertEqual(prompt.count(self.delegate.SAFE_REVIEW_PREFIX_BY_ENGINE["droid"]), 1)
         self.assertGreater(
-            prompt.find(self.delegate.DROID_SAFE_REVIEW_PREFIX),
+            prompt.find(self.delegate.SAFE_REVIEW_PREFIX_BY_ENGINE["droid"]),
             prompt.find("Delegate sub-agent skill review"),
         )
         self.assertIn("review the diff", prompt)
@@ -1385,7 +1387,7 @@ class KimiCommandTests(unittest.TestCase):
         self.assertIn("stream-json", request.argv)
         self.assertIn("--prompt", request.argv)
         prompt_arg = request.argv[request.argv.index("--prompt") + 1]
-        self.assertTrue(prompt_arg.startswith(self.delegate.KIMI_SAFE_REVIEW_PREFIX))
+        self.assertTrue(prompt_arg.startswith(self.delegate.SAFE_REVIEW_PREFIX_BY_ENGINE["kimi"]))
         self.assertTrue(prompt_arg.endswith("hello"))
 
     def test_kimi_work_argv(self):
@@ -1403,7 +1405,7 @@ class KimiCommandTests(unittest.TestCase):
         self.assertNotIn("--plan", request.argv)
         self.assertIn("--prompt", request.argv)
         prompt_arg = request.argv[request.argv.index("--prompt") + 1]
-        self.assertFalse(prompt_arg.startswith(self.delegate.KIMI_SAFE_REVIEW_PREFIX))
+        self.assertFalse(prompt_arg.startswith(self.delegate.SAFE_REVIEW_PREFIX_BY_ENGINE["kimi"]))
         self.assertTrue(prompt_arg.endswith("hello"))
 
     def test_kimi_pass_through_argv(self):
