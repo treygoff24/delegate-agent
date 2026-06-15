@@ -721,6 +721,32 @@ class WorktreeMgmtTests(unittest.TestCase):
             self.assertEqual(sum(summary["allStatusCounts"].values()), 2)
             self.assertEqual(summary["matched"], 2)
 
+    def test_worktree_list_tolerates_corrupt_per_run_state_json(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory():
+            healthy_run_id, healthy_alias = self._seed_persistent_run(
+                path,
+                alias="cursor-healthy",
+            )
+            corrupt_run_id, corrupt_alias = self._seed_persistent_run(
+                path,
+                alias="cursor-corrupt",
+            )
+            corrupt_run_path = self.delegate.run_registry.run_directory(
+                self._registry_root(path),
+                corrupt_run_id,
+            )
+            (corrupt_run_path / "state.json").write_text("{garbage", encoding="utf-8")
+
+            result = self.delegate.worktree_mgmt.list_worktrees(self._registry_root(path))
+
+            self.assertEqual(result["summary"]["totalPersistentWorktrees"], 2)
+            by_alias = {entry["alias"]: entry for entry in result["entries"]}
+            self.assertIn(healthy_alias, by_alias)
+            self.assertIn(corrupt_alias, by_alias)
+            self.assertEqual(by_alias[healthy_alias]["runId"], healthy_run_id)
+            self.assertEqual(by_alias[corrupt_alias]["runId"], corrupt_run_id)
+
     def test_worktree_list_status_filter(self):
         _repo, path = self._make_repo()
         with tempfile.TemporaryDirectory() as fake_home:

@@ -571,6 +571,10 @@ def load_run_snapshot(registry_root: Path, run_id: str) -> JsonObject | None:
     return read_json_object(run_directory(registry_root, run_id) / SNAPSHOT_FILE)
 
 
+def load_run_snapshot_or_none(registry_root: Path, run_id: str) -> JsonObject | None:
+    return read_json_object_or_none(run_directory(registry_root, run_id) / SNAPSHOT_FILE)
+
+
 def load_run_manifest(registry_root: Path, run_id: str) -> JsonObject | None:
     return read_json_object(run_directory(registry_root, run_id) / MANIFEST_FILE)
 

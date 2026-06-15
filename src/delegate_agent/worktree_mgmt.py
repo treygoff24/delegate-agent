@@ -16,7 +16,7 @@ from delegate_agent.git_utils import (
 from delegate_agent.git_utils import (
     run_git as _run_git,
 )
-from delegate_agent.json_types import JsonObject, is_non_negative_int
+from delegate_agent.json_types import JsonObject, first_string, is_non_negative_int
 
 SCHEMA_LIST = "delegate.worktree-list.v1"
 SCHEMA_SHOW = "delegate.worktree-show.v1"
@@ -113,13 +113,6 @@ def _shell(args: list[str]) -> str:
     return shlex.join(args)
 
 
-def _first_string(*values: object) -> str | None:
-    for value in values:
-        if isinstance(value, str) and value:
-            return value
-    return None
-
-
 def _get_str(source: object, key: str) -> str | None:
     if not isinstance(source, dict):
         return None
@@ -144,7 +137,7 @@ def _creation_context(manifest: JsonObject | None, snapshot: JsonObject | None) 
 
 def _branch_from(manifest: JsonObject | None, snapshot: JsonObject | None) -> str | None:
     creation = _creation_context(manifest, snapshot)
-    return _first_string(
+    return first_string(
         _get_str(manifest, "branch"),
         _get_str(snapshot, "branch"),
         _get_str(creation, "branch"),
@@ -157,7 +150,7 @@ def _execution_cwd_from(
     snapshot: JsonObject | None,
     state: JsonObject | None,
 ) -> str | None:
-    return _first_string(
+    return first_string(
         _get_str(manifest, "executionCwd"),
         _get_str(snapshot, "executionCwd"),
         _get_str(state, "plannedExecutionCwd"),
@@ -165,7 +158,7 @@ def _execution_cwd_from(
 
 
 def _source_git_root_from(manifest: JsonObject | None, snapshot: JsonObject | None) -> str | None:
-    return _first_string(
+    return first_string(
         _get_str(manifest, "sourceGitRoot"),
         _get_str(snapshot, "sourceGitRoot"),
         _get_str(manifest, "cwd"),
@@ -205,25 +198,25 @@ def _record_for_run(
     run_id: str,
     index_entry: JsonObject | None,
 ) -> PersistentWorktreeRecord | None:
-    state = run_registry.load_run_state(registry_root, run_id)
-    manifest = run_registry.load_run_manifest(registry_root, run_id)
-    snapshot = run_registry.load_run_snapshot(registry_root, run_id)
+    state = run_registry.load_run_state_or_none(registry_root, run_id)
+    manifest = run_registry.load_run_manifest_or_none(registry_root, run_id)
+    snapshot = run_registry.load_run_snapshot_or_none(registry_root, run_id)
     if not _is_persistent_worktree_run(state, manifest, snapshot):
         return None
     entry = index_entry if isinstance(index_entry, dict) else {}
-    alias = _first_string(
+    alias = first_string(
         _get_str(state, "alias"),
         _get_str(manifest, "alias"),
         _get_str(snapshot, "alias"),
         _get_str(entry, "alias"),
     )
-    harness = _first_string(
+    harness = first_string(
         _get_str(entry, "harness"),
         _get_str(manifest, "harness"),
         _get_str(snapshot, "harness"),
     )
     creation = _creation_context(manifest, snapshot)
-    created_at = _first_string(
+    created_at = first_string(
         _get_str(manifest, "startedAt"),
         _get_str(snapshot, "startedAt"),
         run_registry.timestamp_from_run_id(run_id),

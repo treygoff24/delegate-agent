@@ -9,3 +9,10 @@ JsonObject: TypeAlias = dict[str, JsonValue]
 
 def is_non_negative_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def first_string(*values: object) -> str | None:
+    for value in values:
+        if isinstance(value, str) and value:
+            return value
+    return None

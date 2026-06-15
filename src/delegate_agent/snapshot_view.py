@@ -5,7 +5,7 @@ from typing import TypedDict, cast
 
 from delegate_agent import retention as delegate_retention
 from delegate_agent import run_metadata, run_registry
-from delegate_agent.json_types import JsonObject, JsonValue
+from delegate_agent.json_types import JsonObject, JsonValue, first_string
 from delegate_agent.redaction import redact_value
 
 
@@ -61,13 +61,6 @@ class SnapshotView(TypedDict, total=False):
     completionReport: JsonObject
 
 
-def _first_string(*values: object) -> str | None:
-    for value in values:
-        if isinstance(value, str) and value:
-            return value
-    return None
-
-
 def _snapshot_value(snapshot: JsonObject | None, key: str) -> object:
     if snapshot is None:
         return None
@@ -100,7 +93,7 @@ def _write_identity_contract(
     manifest: JsonObject | None,
 ) -> str | None:
     view["runId"] = run_id
-    alias = _first_string(
+    alias = first_string(
         _snapshot_value(snapshot, "alias"),
         manifest.get("alias") if manifest else None,
         state.get("alias") if state else None,

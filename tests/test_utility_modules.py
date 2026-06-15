@@ -36,6 +36,11 @@ class UtilityModuleTests(unittest.TestCase):
         self.assertFalse(json_types.is_non_negative_int(True))
         self.assertFalse(json_types.is_non_negative_int("3"))
 
+    def test_json_types_first_string_returns_first_non_empty_string(self):
+        self.assertEqual(json_types.first_string(None, "", "alpha", "beta"), "alpha")
+        self.assertIsNone(json_types.first_string(None, "", 0, False))
+        self.assertIsNone(json_types.first_string())
+
     def test_log_output_tail_and_raw_modes(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "stdout.log"
