@@ -172,58 +172,6 @@ class DelegateError(Exception):
 
 
 @dataclass
-class RunOutputOptions:
-    handle: str
-    completion_report: bool = False
-    stdout: bool = False
-    stderr: bool = False
-    tail: int | None = None
-    raw: bool = False
-    no_redact: bool = False
-    default: bool = False
-
-
-@dataclass
-class SnapshotOptions:
-    handle: str | None
-    latest_harness: str | None = None
-    no_redact: bool = False
-
-
-@dataclass
-class RunsOptions:
-    active: bool = False
-    running: bool = False
-    stale: bool = False
-    harness: str | None = None
-    limit: int | None = None
-
-
-@dataclass
-class WorktreeOptions:
-    action: str
-    handle: str | None = None
-    latest_harness: str | None = None
-    harness: str | None = None
-    status: str | None = None
-    limit: int | None = None
-    no_auto_prune: bool = False
-    discard_uncommitted: bool = False
-    force_branch: bool = False
-    force: bool = False
-    keep_branch: bool = False
-    merged: bool = False
-    older_than: int | None = None
-    include_detached: bool = False
-    dry_run: bool = False
-
-
-@dataclass
-class CapabilitiesOptions:
-    refresh: bool = False
-
-
-@dataclass
 class GlobalOptions:
     json_mode: bool = False
     cwd: str | None = None
@@ -255,11 +203,11 @@ class ParsedCommand:
     help_topic: str | None = None
     launch: LaunchOptions | None = None
     run_json: RunJsonOptions | None = None
-    snapshot: SnapshotOptions | None = None
-    runs: RunsOptions | None = None
-    run_output: RunOutputOptions | None = None
-    worktree: WorktreeOptions | None = None
-    capabilities: CapabilitiesOptions | None = None
+    snapshot: inspection_commands.SnapshotCommand | None = None
+    runs: inspection_commands.RunsCommand | None = None
+    run_output: run_output_commands.RunOutputCommand | None = None
+    worktree: worktree_commands.WorktreeCommand | None = None
+    capabilities: capability_commands.CapabilitiesCommand | None = None
 
     def __init__(
         self,
@@ -269,11 +217,11 @@ class ParsedCommand:
         global_options: GlobalOptions | None = None,
         launch: LaunchOptions | None = None,
         run_json: RunJsonOptions | None = None,
-        snapshot: SnapshotOptions | None = None,
-        runs: RunsOptions | None = None,
-        run_output: RunOutputOptions | None = None,
-        worktree: WorktreeOptions | None = None,
-        capabilities: CapabilitiesOptions | None = None,
+        snapshot: inspection_commands.SnapshotCommand | None = None,
+        runs: inspection_commands.RunsCommand | None = None,
+        run_output: run_output_commands.RunOutputCommand | None = None,
+        worktree: worktree_commands.WorktreeCommand | None = None,
+        capabilities: capability_commands.CapabilitiesCommand | None = None,
     ) -> None:
         self.subcommand = subcommand
         self.global_options = global_options or GlobalOptions()
@@ -509,7 +457,10 @@ def parse_capabilities_subcommand(
             completion_report=completion_report,
             isolation=isolation,
         ),
-        capabilities=CapabilitiesOptions(refresh=refresh),
+        capabilities=capability_commands.CapabilitiesCommand(
+            refresh=refresh,
+            json_mode=json_mode,
+        ),
     )
 
 
@@ -971,10 +922,11 @@ def parse_snapshot(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedC
     return ParsedCommand(
         "snapshot",
         global_options=GlobalOptions(json_mode=json_mode, cwd=cwd),
-        snapshot=SnapshotOptions(
+        snapshot=inspection_commands.SnapshotCommand(
             handle=handle,
             latest_harness=latest_harness,
             no_redact=no_redact,
+            json_mode=json_mode,
         ),
     )
 
@@ -1051,12 +1003,13 @@ def parse_runs(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedComma
     return ParsedCommand(
         "runs",
         global_options=GlobalOptions(json_mode=json_mode, cwd=cwd),
-        runs=RunsOptions(
+        runs=inspection_commands.RunsCommand(
             active=active,
             running=running,
             stale=stale,
             harness=harness,
             limit=limit,
+            json_mode=json_mode,
         ),
     )
 
@@ -1122,8 +1075,9 @@ def parse_run_output(rest: list[str], json_mode: bool, cwd: str | None) -> Parse
     return ParsedCommand(
         "run-output",
         global_options=GlobalOptions(json_mode=json_mode, cwd=cwd),
-        run_output=RunOutputOptions(
+        run_output=run_output_commands.RunOutputCommand(
             handle=handle,
+            json_mode=json_mode,
             completion_report=completion_report,
             stdout=stdout_flag,
             stderr=stderr_flag,
@@ -1205,7 +1159,7 @@ WORKTREE_OPTION_SPECS: dict[str, dict[str, WorktreeOptionSpec]] = {
     },
     "prune": {
         "--merged": ("flag", "merged"),
-        "--older-than": ("non_negative_int", "older_than"),
+        "--older-than": ("non_negative_int", "older_than_days"),
         "--harness": ("str", "harness"),
         "--include-detached": ("flag", "include_detached"),
         "--dry-run": ("flag", "dry_run"),
@@ -1220,7 +1174,7 @@ WORKTREE_OPTION_SPECS: dict[str, dict[str, WorktreeOptionSpec]] = {
 
 
 def _apply_worktree_option(
-    options: WorktreeOptions,
+    options: dict[str, object],
     args: list[str],
     index: int,
     option: str,
@@ -1228,22 +1182,22 @@ def _apply_worktree_option(
 ) -> int:
     kind, attr = spec
     if kind == "flag":
-        setattr(options, attr, True)
+        options[attr] = True
         return index + 1
     value = _require_option_value(args, index, option)
     if kind == "str":
-        setattr(options, attr, value)
+        options[attr] = value
     elif kind == "status":
         if value not in worktree_mgmt.VALID_STATUSES:
             raise DelegateError(
                 "invalid_option_value",
                 "--status must be present, removed, missing, or unknown.",
             )
-        setattr(options, attr, value)
+        options[attr] = value
     elif kind == "positive_int":
-        setattr(options, attr, parse_positive_int(value, option=option))
+        options[attr] = parse_positive_int(value, option=option)
     elif kind == "non_negative_int":
-        setattr(options, attr, parse_non_negative_int(value, option=option))
+        options[attr] = parse_non_negative_int(value, option=option)
     else:  # pragma: no cover - table construction bug
         raise AssertionError(f"unknown worktree option kind: {kind}")
     return index + 2
@@ -1267,7 +1221,7 @@ def parse_worktree(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedC
         return help_command(json_mode, topic)
     if action not in WORKTREE_OPTION_SPECS:
         raise DelegateError("unknown_worktree_action", f"Unknown worktree action: {action}")
-    options = WorktreeOptions(action=action)
+    options: dict[str, object] = {}
     positional: list[str] = []
     i = 0
     action_specs = WORKTREE_OPTION_SPECS[action]
@@ -1291,7 +1245,7 @@ def parse_worktree(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedC
             "unexpected_argument", f"worktree {action} does not accept positional arguments."
         )
     if action == "show":
-        if options.latest_harness is not None:
+        if options.get("latest_harness") is not None:
             if positional:
                 raise DelegateError(
                     "invalid_option_combination",
@@ -1300,12 +1254,12 @@ def parse_worktree(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedC
         elif len(positional) != 1:
             raise DelegateError("missing_handle", "worktree show requires an alias or run id.")
         else:
-            options.handle = positional[0]
+            options["handle"] = positional[0]
     if action == "remove":
         if len(positional) != 1:
             raise DelegateError("missing_handle", "worktree remove requires an alias or run id.")
-        options.handle = positional[0]
-    if options.keep_branch and (options.force_branch or options.force):
+        options["handle"] = positional[0]
+    if options.get("keep_branch") and (options.get("force_branch") or options.get("force")):
         raise DelegateError(
             "invalid_option_combination",
             "worktree remove --keep-branch is mutually exclusive with --force-branch/--force.",
@@ -1313,7 +1267,11 @@ def parse_worktree(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedC
     return ParsedCommand(
         "worktree",
         global_options=GlobalOptions(json_mode=json_mode, cwd=cwd),
-        worktree=options,
+        worktree=worktree_commands.WorktreeCommand(
+            action=action,
+            json_mode=json_mode,
+            **options,
+        ),
     )
 
 
@@ -1321,36 +1279,13 @@ def maybe_run_retention_pass(registry_root: Path, config: JsonObject) -> None:
     delegate_retention.run_retention_pass(registry_root, config)
 
 
-def snapshot_command_from_parsed(parsed: ParsedCommand) -> inspection_commands.SnapshotCommand:
-    options = parsed.snapshot
-    if options is None:
-        raise DelegateError("invalid_command", "snapshot options are required.")
-    return inspection_commands.SnapshotCommand(
-        handle=options.handle,
-        latest_harness=options.latest_harness,
-        no_redact=options.no_redact,
-        json_mode=parsed.global_options.json_mode,
-    )
-
-
-def runs_command_from_parsed(parsed: ParsedCommand) -> inspection_commands.RunsCommand:
-    options = parsed.runs
-    if options is None:
-        raise DelegateError("invalid_command", "runs options are required.")
-    return inspection_commands.RunsCommand(
-        active=options.active,
-        running=options.running,
-        stale=options.stale,
-        harness=options.harness,
-        limit=options.limit,
-        json_mode=parsed.global_options.json_mode,
-    )
-
-
 def emit_snapshot(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout: TextIO) -> int:
+    command = parsed.snapshot
+    if command is None:
+        raise DelegateError("invalid_command", "snapshot options are required.")
     try:
         return inspection_commands.emit_snapshot(
-            snapshot_command_from_parsed(parsed),
+            command,
             workspace_path=workspace.path,
             stdout=stdout,
         )
@@ -1359,8 +1294,11 @@ def emit_snapshot(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout: T
 
 
 def emit_runs(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout: TextIO) -> int:
+    command = parsed.runs
+    if command is None:
+        raise DelegateError("invalid_command", "runs options are required.")
     return inspection_commands.emit_runs(
-        runs_command_from_parsed(parsed),
+        command,
         workspace_path=workspace.path,
         stdout=stdout,
     )
@@ -1371,27 +1309,13 @@ RECOVERY_STDOUT_TAIL_BYTES = run_output_commands.RECOVERY_STDOUT_TAIL_BYTES
 RUN_OUTPUT_DEFAULT_TAIL_LINES = run_output_commands.RUN_OUTPUT_DEFAULT_TAIL_LINES
 
 
-def run_output_command_from_parsed(parsed: ParsedCommand) -> run_output_commands.RunOutputCommand:
-    options = parsed.run_output
-    if options is None:
-        raise DelegateError("invalid_command", "run-output options are required.")
-    return run_output_commands.RunOutputCommand(
-        handle=options.handle,
-        json_mode=parsed.global_options.json_mode,
-        completion_report=options.completion_report,
-        stdout=options.stdout,
-        stderr=options.stderr,
-        tail=options.tail,
-        raw=options.raw,
-        no_redact=options.no_redact,
-        default=options.default,
-    )
-
-
 def emit_run_output(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout: TextIO) -> int:
+    command = parsed.run_output
+    if command is None:
+        raise DelegateError("invalid_command", "run-output options are required.")
     try:
         return run_output_commands.emit(
-            run_output_command_from_parsed(parsed),
+            command,
             workspace_path=workspace.path,
             stdout=stdout,
         )
@@ -1404,38 +1328,17 @@ def emit_run_output(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout:
         ) from exc
 
 
-def worktree_command_from_parsed(parsed: ParsedCommand) -> worktree_commands.WorktreeCommand:
-    options = parsed.worktree
-    if options is None:
-        raise DelegateError("invalid_command", "worktree options are required.")
-    return worktree_commands.WorktreeCommand(
-        action=options.action,
-        json_mode=parsed.global_options.json_mode,
-        handle=options.handle,
-        latest_harness=options.latest_harness,
-        harness=options.harness,
-        status=options.status,
-        limit=options.limit,
-        no_auto_prune=options.no_auto_prune,
-        discard_uncommitted=options.discard_uncommitted,
-        force_branch=options.force_branch,
-        force=options.force,
-        keep_branch=options.keep_branch,
-        merged=options.merged,
-        older_than_days=options.older_than,
-        include_detached=options.include_detached,
-        dry_run=options.dry_run,
-    )
-
-
 def emit_worktree(
     parsed: ParsedCommand,
     workspace: ResolvedWorkspace,
     config: JsonObject,
     stdout: TextIO,
 ) -> int:
+    command = parsed.worktree
+    if command is None:
+        raise DelegateError("invalid_command", "worktree options are required.")
     return worktree_commands.emit(
-        worktree_command_from_parsed(parsed),
+        command,
         workspace_path=workspace.path,
         config=config,
         stdout=stdout,
@@ -3590,18 +3493,6 @@ def emit_models(
     return EXIT_OK
 
 
-def capabilities_command_from_parsed(
-    parsed: ParsedCommand,
-) -> capability_commands.CapabilitiesCommand:
-    options = parsed.capabilities
-    if options is None:
-        raise DelegateError("invalid_command", "capabilities options are required.")
-    return capability_commands.CapabilitiesCommand(
-        refresh=options.refresh,
-        json_mode=parsed.global_options.json_mode,
-    )
-
-
 def emit_describe(
     config: JsonObject,
     config_source: str,
@@ -3821,9 +3712,12 @@ def main(
             # (non-run path uses workspace resolved above)
 
         if parsed.subcommand == "capabilities":
+            command = parsed.capabilities
+            if command is None:
+                raise DelegateError("invalid_command", "capabilities options are required.")
             try:
                 return capability_commands.emit(
-                    capabilities_command_from_parsed(parsed),
+                    command,
                     config=config,
                     config_source=source,
                     workspace=workspace.path,

@@ -397,7 +397,7 @@ class ParserTests(unittest.TestCase):
         parsed = self.delegate.parse_cli(["worktree", "prune"])
         self.assertEqual(parsed.worktree.action, "prune")
         self.assertFalse(parsed.worktree.merged)
-        self.assertIsNone(parsed.worktree.older_than)
+        self.assertIsNone(parsed.worktree.older_than_days)
 
     def test_load_config_cli_overrides_win(self):
         config_path = ROOT / "src" / "delegate_agent" / "config.py"
