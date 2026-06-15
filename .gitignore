@@ -42,3 +42,7 @@ cursor-prereq.example.json
 # Local planning artifacts
 internal/
 docs/plans/
+
+# desloppify scan artifacts (local tool output)
+.desloppify/
+scorecard.png
