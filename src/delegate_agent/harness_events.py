@@ -150,17 +150,19 @@ class StreamAccumulator:
         if stripped:
             self._last_recoverable_assistant_text = stripped
 
+    def _record_successful_completion_text(self, text: str) -> None:
+        self._record_assistant_text(text, completion=True)
+        self.events.append(NormalizedEvent(kind="run.completed", status="succeeded"))
+
     def _ingest_completion(self, payload: JsonObject) -> None:
         final_text = payload.get("finalText")
         if isinstance(final_text, str) and final_text.strip():
-            self._record_assistant_text(final_text, completion=True)
-            self.events.append(NormalizedEvent(kind="run.completed", status="succeeded"))
+            self._record_successful_completion_text(final_text)
 
     def _ingest_cursor_result(self, payload: JsonObject) -> None:
         result = payload.get("result")
         if isinstance(result, str) and result.strip():
-            self._record_assistant_text(result, completion=True)
-            self.events.append(NormalizedEvent(kind="run.completed", status="succeeded"))
+            self._record_successful_completion_text(result)
 
     def _ingest_codex_item(self, payload: JsonObject, *, completed: bool) -> None:
         item = payload.get("item")
@@ -245,26 +247,26 @@ class StreamAccumulator:
 
     def bounded_assistant_text(self) -> tuple[str, JsonObject]:
         text = self.assistant_text
-        meta = {
-            "assistantTextChars": len(text),
-            "assistantTextTruncated": False,
-            "assistantTextLimitChars": ASSISTANT_TEXT_LIMIT,
-            "assistantTextOmittedMiddleChars": 0,
-        }
         if len(text) <= ASSISTANT_TEXT_LIMIT:
-            meta["assistantText"] = text
+            meta = {
+                "assistantText": text,
+                "assistantTextChars": len(text),
+                "assistantTextTruncated": False,
+                "assistantTextLimitChars": ASSISTANT_TEXT_LIMIT,
+                "assistantTextOmittedMiddleChars": 0,
+            }
             return text, meta
         head = text[:ASSISTANT_TEXT_HEAD]
         tail = text[-ASSISTANT_TEXT_TAIL:]
         omitted = len(text) - ASSISTANT_TEXT_HEAD - ASSISTANT_TEXT_TAIL
         bounded = f"{head}\n\n… [{omitted} chars omitted] …\n\n{tail}"
-        meta.update(
-            {
-                "assistantText": bounded,
-                "assistantTextTruncated": True,
-                "assistantTextOmittedMiddleChars": max(omitted, 0),
-            }
-        )
+        meta = {
+            "assistantText": bounded,
+            "assistantTextChars": len(text),
+            "assistantTextTruncated": True,
+            "assistantTextLimitChars": ASSISTANT_TEXT_LIMIT,
+            "assistantTextOmittedMiddleChars": max(omitted, 0),
+        }
         return bounded, meta
 
     @property
@@ -274,25 +276,26 @@ class StreamAccumulator:
     def bounded_recent_events(self) -> tuple[list[JsonObject], JsonObject]:
         serialized = [event.to_dict() for event in self.events]
         total = len(serialized)
-        meta = {
-            "eventsTotal": total,
-            "eventsTruncated": False,
-            "eventsLimit": EVENT_LIMIT,
-            "eventsOmittedMiddle": 0,
-        }
         if total <= EVENT_LIMIT:
+            meta = {
+                "eventsTotal": total,
+                "eventsTruncated": False,
+                "eventsLimit": EVENT_LIMIT,
+                "eventsOmittedMiddle": 0,
+            }
             return serialized, meta
         head = serialized[:EVENT_HEAD]
         tail = serialized[-EVENT_TAIL:]
         omitted = total - EVENT_HEAD - EVENT_TAIL
-        meta.update(
-            {
-                "eventsTruncated": True,
-                "eventsOmittedMiddle": max(omitted, 0),
-                "recentEvents": head + tail,
-            }
-        )
-        return head + tail, meta
+        recent_events = head + tail
+        meta = {
+            "eventsTotal": total,
+            "eventsTruncated": True,
+            "eventsLimit": EVENT_LIMIT,
+            "eventsOmittedMiddle": max(omitted, 0),
+            "recentEvents": recent_events,
+        }
+        return recent_events, meta
 
 
 def _extract_text(content: JsonValue) -> str:

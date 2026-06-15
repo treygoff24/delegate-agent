@@ -245,11 +245,15 @@ Supported boolean policy keys: `networkAccess`, `webSearch`, `bypassApprovalsAnd
 }
 ```
 
-Allowed values are `auto`, `none`, and `worktree`.
+Allowed values are `auto`, `none`, and `worktree`. For Cursor, Droid, and Kimi
+safe mode, an effective value of `none` is rejected because those safe contracts
+depend on Delegate's temporary workspace/config boundary. Use `auto` or
+`worktree` for those safe-mode harnesses. Codex safe can use `none` because the
+Codex read-only sandbox remains active.
 
 Embedded defaults:
 
-- `safe`: `auto`. Cursor, Codex, and Kimi safe use temporary workspace isolation; Droid safe remains in the real workspace.
+- `safe`: `auto`. Cursor, Droid, Codex, and Kimi safe use temporary workspace isolation by default.
 - `work`: `none`. Work mode runs in the real workspace unless you opt into worktree isolation.
 
 ### `worktrees`

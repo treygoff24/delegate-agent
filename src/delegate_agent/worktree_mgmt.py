@@ -1,18 +1,20 @@
 from __future__ import annotations
 
 import shlex
-import subprocess
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import TypedDict
 
 from delegate_agent import run_registry
 from delegate_agent.git_utils import (
-    GIT_MUTATION_TIMEOUT_SECONDS,
     GIT_QUICK_TIMEOUT_SECONDS,
     GIT_TIMEOUT_RETURN_CODE,
-    timeout_completed_process,
+)
+from delegate_agent.git_utils import (
+    run_git as _run_git,
 )
 from delegate_agent.json_types import JsonObject, is_non_negative_int
 
@@ -27,7 +29,7 @@ MAX_DIRTY_PATHS_REPORTED = 20
 STATUS_PRESENT = "present"
 STATUS_REMOVED = "removed"
 STATUS_MISSING = "missing"
-STATUS_UNKNOWN = "unknown"
+STATUS_UNKNOWN = run_registry.STATUS_UNKNOWN
 VALID_STATUSES = {STATUS_PRESENT, STATUS_REMOVED, STATUS_MISSING, STATUS_UNKNOWN}
 
 
@@ -71,35 +73,44 @@ class BranchRemovalResult:
     error_code: str | None = None
 
 
+@dataclass(frozen=True)
+class RemoveWorktreeOptions:
+    discard_uncommitted: bool
+    force_branch: bool
+    keep_branch: bool
+
+
+@dataclass(frozen=True)
+class RemoveWorktreePlan:
+    record: PersistentWorktreeRecord
+    alias: str
+    status: str
+    source_git_root: str
+    execution_cwd: str
+    branch: str | None
+    discarded_paths: list[str] | None
+    warnings: list[str]
+
+
+class PersistentWorktreeRecord(TypedDict, total=False):
+    alias: str | None
+    runId: str
+    harness: str | None
+    branch: str | None
+    executionCwd: str | None
+    sourceGitRoot: str | None
+    createdAt: str
+    lastActivityAt: str
+    creationContext: JsonObject
+    registryWorktreeStatus: str | None
+
+
 def _utc_now_iso() -> str:
     return datetime.now(UTC).strftime(run_registry.UTC_TIMESTAMP_FORMAT)
 
 
 def _shell(args: list[str]) -> str:
     return shlex.join(args)
-
-
-def _run_git(
-    cwd: str,
-    args: list[str],
-    *,
-    timeout_seconds: int = GIT_MUTATION_TIMEOUT_SECONDS,
-) -> subprocess.CompletedProcess[str]:
-    command = ["git", "-C", cwd, *args]
-    try:
-        return subprocess.run(
-            command,
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=timeout_seconds,
-        )
-    except subprocess.TimeoutExpired as exc:
-        return timeout_completed_process(
-            command,
-            exc,
-            timeout_seconds=timeout_seconds,
-        )
 
 
 def _first_string(*values: object) -> str | None:
@@ -193,7 +204,7 @@ def _record_for_run(
     registry_root: Path,
     run_id: str,
     index_entry: JsonObject | None,
-) -> JsonObject | None:
+) -> PersistentWorktreeRecord | None:
     state = run_registry.load_run_state(registry_root, run_id)
     manifest = run_registry.load_run_manifest(registry_root, run_id)
     snapshot = run_registry.load_run_snapshot(registry_root, run_id)
@@ -232,9 +243,9 @@ def _record_for_run(
     }
 
 
-def load_persistent_records(registry_root: Path) -> list[JsonObject]:
+def load_persistent_records(registry_root: Path) -> list[PersistentWorktreeRecord]:
     index = run_registry.load_index(registry_root)
-    records: list[JsonObject] = []
+    records: list[PersistentWorktreeRecord] = []
     for run_id, entry in index.get("runs", {}).items():
         if not isinstance(run_id, str) or not isinstance(entry, dict):
             continue
@@ -247,7 +258,7 @@ def load_persistent_records(registry_root: Path) -> list[JsonObject]:
 def latest_persistent_record_for_harness(
     registry_root: Path,
     harness: str,
-) -> JsonObject | None:
+) -> PersistentWorktreeRecord | None:
     matches = [
         record
         for record in load_persistent_records(registry_root)
@@ -265,7 +276,7 @@ def latest_persistent_record_for_harness(
     return matches[0]
 
 
-def _reload_record(registry_root: Path, run_id: str) -> JsonObject | None:
+def _reload_record(registry_root: Path, run_id: str) -> PersistentWorktreeRecord | None:
     index = run_registry.load_index(registry_root)
     index_entry = index.get("runs", {}).get(run_id)
     return _record_for_run(
@@ -290,7 +301,7 @@ def _branch_exists(source_git_root: str, branch: str) -> bool | None:
     return None
 
 
-def detect_worktree_status(record: JsonObject) -> tuple[str, list[str]]:
+def detect_worktree_status(record: PersistentWorktreeRecord) -> tuple[str, list[str]]:
     warnings: list[str] = []
     registry_status = record.get("registryWorktreeStatus")
     if registry_status == STATUS_REMOVED:
@@ -338,7 +349,7 @@ def porcelain_status(
 
 
 def dirty_info(
-    record: JsonObject, status: str
+    record: PersistentWorktreeRecord, status: str
 ) -> tuple[bool | None, list[str], int | None, list[str]]:
     if status not in (STATUS_PRESENT, STATUS_UNKNOWN):
         return None, [], None, []
@@ -365,7 +376,7 @@ def _merge_base_is_ancestor(source_git_root: str, branch: str) -> bool | None:
 
 
 def merged_into_source(
-    record: JsonObject,
+    record: PersistentWorktreeRecord,
     status: str,
     *,
     include_detached: bool = False,
@@ -432,7 +443,7 @@ def _ahead_behind(source_git_root: str, branch: str, base: str) -> JsonObject | 
     return {"ahead": ahead, "behind": behind, "baseOid": base_oid}
 
 
-def ahead_behind(record: JsonObject, status: str) -> JsonObject | None:
+def ahead_behind(record: PersistentWorktreeRecord, status: str) -> JsonObject | None:
     if status not in (STATUS_PRESENT, STATUS_UNKNOWN):
         return None
     source_git_root = record.get("sourceGitRoot")
@@ -458,7 +469,7 @@ def ahead_behind(record: JsonObject, status: str) -> JsonObject | None:
     }
 
 
-def suggested_commands(record: JsonObject, status: str) -> JsonObject:
+def suggested_commands(record: PersistentWorktreeRecord, status: str) -> JsonObject:
     alias = record.get("alias") or record.get("runId") or "<handle>"
     execution_cwd = record.get("executionCwd")
     source_git_root = record.get("sourceGitRoot")
@@ -487,7 +498,9 @@ def suggested_commands(record: JsonObject, status: str) -> JsonObject:
     }
 
 
-def decorate_record(record: JsonObject, *, include_detached: bool = False) -> JsonObject:
+def decorate_record(
+    record: PersistentWorktreeRecord, *, include_detached: bool = False
+) -> JsonObject:
     status, warnings = detect_worktree_status(record)
     dirty, dirty_paths, dirty_total, dirty_warnings = dirty_info(record, status)
     merged, merged_warnings = merged_into_source(
@@ -583,7 +596,7 @@ def _error_payload(
     code: str,
     message: str,
     *,
-    record: JsonObject | None = None,
+    record: PersistentWorktreeRecord | JsonObject | None = None,
     dirty_paths: list[str] | None = None,
     next_actions: list[str] | None = None,
     retry_safe: bool = False,
@@ -621,7 +634,7 @@ def resolve_record(
     *,
     handle: str | None,
     latest_harness: str | None = None,
-) -> JsonObject:
+) -> PersistentWorktreeRecord:
     index = run_registry.load_index(registry_root)
     if latest_harness is not None:
         latest_record = latest_persistent_record_for_harness(registry_root, latest_harness)
@@ -635,7 +648,14 @@ def resolve_record(
             )
         return latest_record
     else:
-        assert handle is not None
+        if handle is None:
+            raise WorktreeManagementError(
+                _error_payload(
+                    "missing_handle",
+                    "A worktree handle is required.",
+                    next_actions=["delegate worktree list"],
+                )
+            )
         resolved = run_registry.resolve_handle(index, handle)
         if resolved.run_id is None:
             suggestions = list(resolved.suggestions)
@@ -789,7 +809,7 @@ def _raise_if_dirty_without_discard(
     dirty_paths: list[str],
     dirty_warnings: list[str] | None = None,
     discard_uncommitted: bool,
-    record: JsonObject,
+    record: PersistentWorktreeRecord,
     alias: str,
 ) -> None:
     """Fail closed when dirty state is unsafe to discard implicitly."""
@@ -823,7 +843,7 @@ def _raise_if_dirty_without_discard(
 
 def _raise_if_unmerged_without_override(
     *,
-    record: JsonObject,
+    record: PersistentWorktreeRecord,
     status: str,
     branch: str | None,
     keep_branch: bool,
@@ -869,7 +889,7 @@ def _raise_if_unmerged_without_override(
         )
 
 
-def _require_removal_metadata(record: JsonObject) -> tuple[str, str]:
+def _require_removal_metadata(record: PersistentWorktreeRecord) -> tuple[str, str]:
     """Validate that ``sourceGitRoot`` and ``executionCwd`` are present.
 
     Returns ``(source_git_root, execution_cwd)`` for direct use by the caller.
@@ -892,7 +912,7 @@ def _remove_worktree_path(
     source_git_root: str,
     execution_cwd: str,
     discard_uncommitted: bool,
-    record: JsonObject,
+    record: PersistentWorktreeRecord,
     alias: str,
 ) -> None:
     """Execute ``git worktree remove`` and raise on failure."""
@@ -967,6 +987,193 @@ def _mark_worktree_removed(
     )
 
 
+def _remove_payload(
+    *,
+    record: PersistentWorktreeRecord,
+    branch: object,
+    execution_cwd: object,
+    source_git_root: object,
+    path_removed: bool,
+    noop: bool,
+    branch_result: BranchRemovalResult,
+    alias: str,
+    discarded_paths: list[str] | None = None,
+    warnings: list[str] | None = None,
+) -> JsonObject:
+    payload: JsonObject = {
+        "schema": SCHEMA_REMOVE,
+        "ok": not bool(branch_result.error),
+        "alias": record.get("alias"),
+        "runId": record.get("runId"),
+        "branch": branch,
+        "executionCwd": execution_cwd,
+        "sourceGitRoot": source_git_root,
+        "removed": True,
+        "pathRemoved": path_removed,
+        "worktreeStatus": STATUS_REMOVED,
+        "noop": noop,
+    }
+    _apply_branch_removal_result(payload, branch_result, alias=alias)
+    if discarded_paths is not None:
+        payload["discardedDirtyPaths"] = discarded_paths
+    if warnings:
+        payload["warnings"] = warnings
+    return payload
+
+
+def _build_remove_worktree_plan(
+    record: PersistentWorktreeRecord,
+    *,
+    alias: str,
+    status: str,
+    status_warnings: list[str],
+    options: RemoveWorktreeOptions,
+    merged_check_already_passed: bool,
+) -> RemoveWorktreePlan:
+    dirty, dirty_paths, _dirty_total, dirty_warnings = dirty_info(record, status)
+    all_warnings = [*status_warnings, *dirty_warnings]
+    if status in (STATUS_PRESENT, STATUS_UNKNOWN):
+        _raise_if_dirty_without_discard(
+            dirty=dirty,
+            dirty_paths=dirty_paths,
+            dirty_warnings=dirty_warnings,
+            discard_uncommitted=options.discard_uncommitted,
+            record=record,
+            alias=alias,
+        )
+
+    source_git_root, execution_cwd = _require_removal_metadata(record)
+    branch = record.get("branch")
+    if not merged_check_already_passed:
+        _raise_if_unmerged_without_override(
+            record=record,
+            status=status,
+            branch=branch,
+            keep_branch=options.keep_branch,
+            force_branch=options.force_branch,
+            alias=alias,
+        )
+
+    return RemoveWorktreePlan(
+        record=record,
+        alias=alias,
+        status=status,
+        source_git_root=source_git_root,
+        execution_cwd=execution_cwd,
+        branch=branch,
+        discarded_paths=dirty_paths if options.discard_uncommitted and dirty_paths else None,
+        warnings=all_warnings,
+    )
+
+
+def _remove_already_removed(
+    record: PersistentWorktreeRecord,
+    *,
+    alias: str,
+    options: RemoveWorktreeOptions,
+) -> JsonObject:
+    source_git_root = record.get("sourceGitRoot")
+    branch = record.get("branch")
+    branch_result = _remove_branch_if_requested(
+        source_git_root=source_git_root,
+        branch=branch,
+        keep_branch=options.keep_branch,
+        force_branch=options.force_branch,
+        status=STATUS_REMOVED,
+    )
+    return _remove_payload(
+        record=record,
+        branch=branch,
+        execution_cwd=record.get("executionCwd"),
+        source_git_root=source_git_root,
+        path_removed=False,
+        noop=not branch_result.removed,
+        branch_result=branch_result,
+        alias=alias,
+    )
+
+
+def _remove_missing_worktree_path(
+    registry_root: Path,
+    plan: RemoveWorktreePlan,
+    *,
+    options: RemoveWorktreeOptions,
+) -> JsonObject:
+    branch_result = _remove_branch_if_requested(
+        source_git_root=plan.source_git_root,
+        branch=plan.branch,
+        keep_branch=options.keep_branch,
+        force_branch=options.force_branch,
+        status=plan.status,
+    )
+    _mark_worktree_removed(
+        registry_root=registry_root,
+        run_id=str(plan.record["runId"]),
+        discarded_paths=plan.discarded_paths,
+    )
+    return _remove_payload(
+        record=plan.record,
+        branch=plan.branch,
+        execution_cwd=plan.execution_cwd,
+        source_git_root=plan.source_git_root,
+        path_removed=False,
+        noop=False,
+        branch_result=branch_result,
+        alias=plan.alias,
+        discarded_paths=plan.discarded_paths,
+    )
+
+
+def _remove_present_worktree_path(
+    registry_root: Path,
+    plan: RemoveWorktreePlan,
+    *,
+    options: RemoveWorktreeOptions,
+) -> JsonObject:
+    _remove_worktree_path(
+        source_git_root=plan.source_git_root,
+        execution_cwd=plan.execution_cwd,
+        discard_uncommitted=options.discard_uncommitted,
+        record=plan.record,
+        alias=plan.alias,
+    )
+    branch_result = _remove_branch_if_requested(
+        source_git_root=plan.source_git_root,
+        branch=plan.branch,
+        keep_branch=options.keep_branch,
+        force_branch=options.force_branch,
+        status=plan.status,
+    )
+    # Override branchKept when keep_branch came from prune on a clean worktree
+    # whose branch is not merged into source (spec L673).
+    if (
+        options.keep_branch
+        and branch_result.kept_reason == "requested"
+        and isinstance(plan.branch, str)
+    ):
+        merged_val, _ = merged_into_source(plan.record, plan.status)
+        if merged_val is False:
+            branch_result = BranchRemovalResult(removed=False, kept_reason="unmerged")
+
+    _mark_worktree_removed(
+        registry_root=registry_root,
+        run_id=str(plan.record["runId"]),
+        discarded_paths=plan.discarded_paths,
+    )
+    return _remove_payload(
+        record=plan.record,
+        branch=plan.branch,
+        execution_cwd=plan.execution_cwd,
+        source_git_root=plan.source_git_root,
+        path_removed=True,
+        noop=False,
+        branch_result=branch_result,
+        alias=plan.alias,
+        discarded_paths=plan.discarded_paths,
+        warnings=plan.warnings,
+    )
+
+
 def remove_worktree(
     registry_root: Path,
     *,
@@ -984,153 +1191,35 @@ def remove_worktree(
         force=force,
         handle=handle,
     )
+    options = RemoveWorktreeOptions(
+        discard_uncommitted=discard_uncommitted,
+        force_branch=force_branch,
+        keep_branch=keep_branch,
+    )
     with run_registry.registry_lock(registry_root):
         record = resolve_record(registry_root, handle=handle)
         status, warnings = detect_worktree_status(record)
         alias = str(record.get("alias") or handle)
 
-        # Already-removed: optionally clean up a leftover branch.
         if status == STATUS_REMOVED:
-            source_git_root = record.get("sourceGitRoot")
-            branch = record.get("branch")
-            branch_result = _remove_branch_if_requested(
-                source_git_root=source_git_root,
-                branch=branch,
-                keep_branch=keep_branch,
-                force_branch=force_branch,
-                status=status,
-            )
-            payload: JsonObject = {
-                "schema": SCHEMA_REMOVE,
-                "ok": not bool(branch_result.error),
-                "alias": record.get("alias"),
-                "runId": record.get("runId"),
-                "branch": branch,
-                "executionCwd": record.get("executionCwd"),
-                "sourceGitRoot": source_git_root,
-                "removed": True,
-                "pathRemoved": False,
-                "worktreeStatus": STATUS_REMOVED,
-                "noop": not branch_result.removed,
-            }
-            _apply_branch_removal_result(payload, branch_result, alias=alias)
-            return payload
+            return _remove_already_removed(record, alias=alias, options=options)
 
-        # Dirty guard: refuse to remove uncommitted work unless explicitly asked.
-        dirty, dirty_paths, _dirty_total, dirty_warnings = dirty_info(record, status)
-        all_warnings = [*warnings, *dirty_warnings]
-        if status in (STATUS_PRESENT, STATUS_UNKNOWN):
-            _raise_if_dirty_without_discard(
-                dirty=dirty,
-                dirty_paths=dirty_paths,
-                dirty_warnings=dirty_warnings,
-                discard_uncommitted=discard_uncommitted,
-                record=record,
-                alias=alias,
-            )
-
-        # Metadata validation.
-        source_git_root, execution_cwd = _require_removal_metadata(record)
-        branch = record.get("branch")
-
-        # Unmerged-branch guard.
-        if not _merged_check_already_passed:
-            _raise_if_unmerged_without_override(
-                record=record,
-                status=status,
-                branch=branch,
-                keep_branch=keep_branch,
-                force_branch=force_branch,
-                alias=alias,
-            )
-
-        discarded_paths = dirty_paths if discard_uncommitted and dirty_paths else None
-
-        # Missing path: update registry and optionally delete the branch.
-        if status == STATUS_MISSING:
-            branch_result = _remove_branch_if_requested(
-                source_git_root=source_git_root,
-                branch=branch,
-                keep_branch=keep_branch,
-                force_branch=force_branch,
-                status=status,
-            )
-            _mark_worktree_removed(
-                registry_root=registry_root,
-                run_id=str(record["runId"]),
-                discarded_paths=discarded_paths,
-            )
-            payload = {
-                "schema": SCHEMA_REMOVE,
-                "ok": not bool(branch_result.error),
-                "alias": record.get("alias"),
-                "runId": record.get("runId"),
-                "branch": branch,
-                "executionCwd": execution_cwd,
-                "sourceGitRoot": source_git_root,
-                "removed": True,
-                "pathRemoved": False,
-                "worktreeStatus": STATUS_REMOVED,
-                "noop": False,
-            }
-            _apply_branch_removal_result(payload, branch_result, alias=alias)
-            return payload
-
-        # Remove the worktree directory.
-        _remove_worktree_path(
-            source_git_root=source_git_root,
-            execution_cwd=execution_cwd,
-            discard_uncommitted=discard_uncommitted,
-            record=record,
+        plan = _build_remove_worktree_plan(
+            record,
             alias=alias,
-        )
-
-        # Branch removal.
-        branch_result = _remove_branch_if_requested(
-            source_git_root=source_git_root,
-            branch=branch,
-            keep_branch=keep_branch,
-            force_branch=force_branch,
             status=status,
-        )
-        # Override branchKept when keep_branch came from prune on a clean
-        # worktree whose branch is not merged into source (spec L673).
-        # In that case _remove_branch was not called (force_branch=False),
-        # kept_reason is "requested", and the branch is still present.
-        if keep_branch and branch_result.kept_reason == "requested" and isinstance(branch, str):
-            merged_val, _ = merged_into_source(record, status)
-            if merged_val is False:
-                branch_result = BranchRemovalResult(removed=False, kept_reason="unmerged")
-
-        # Update registry.
-        _mark_worktree_removed(
-            registry_root=registry_root,
-            run_id=str(record["runId"]),
-            discarded_paths=discarded_paths,
+            status_warnings=warnings,
+            options=options,
+            merged_check_already_passed=_merged_check_already_passed,
         )
 
-        payload = {
-            "schema": SCHEMA_REMOVE,
-            "ok": True,
-            "alias": record.get("alias"),
-            "runId": record.get("runId"),
-            "branch": branch,
-            "executionCwd": execution_cwd,
-            "sourceGitRoot": source_git_root,
-            "removed": True,
-            "pathRemoved": True,
-            "worktreeStatus": STATUS_REMOVED,
-            "noop": False,
-        }
-        _apply_branch_removal_result(payload, branch_result, alias=alias)
-        if discarded_paths is not None:
-            payload["discardedDirtyPaths"] = discarded_paths
-        if all_warnings:
-            payload["warnings"] = all_warnings
-        return payload
+        if status == STATUS_MISSING:
+            return _remove_missing_worktree_path(registry_root, plan, options=options)
+
+        return _remove_present_worktree_path(registry_root, plan, options=options)
 
 
-def _older_than(record: JsonObject, days: int) -> bool | None:
+def _older_than(record: PersistentWorktreeRecord, days: int) -> bool | None:
     timestamp = record.get("lastActivityAt")
     dt = run_registry.parse_utc_timestamp(timestamp if isinstance(timestamp, str) else None)
     if dt is None:
@@ -1138,7 +1227,7 @@ def _older_than(record: JsonObject, days: int) -> bool | None:
     return dt < datetime.now(UTC) - timedelta(days=days)
 
 
-def _entry_ref(record: JsonObject, *, reason: str | None = None) -> JsonObject:
+def _entry_ref(record: PersistentWorktreeRecord, *, reason: str | None = None) -> JsonObject:
     entry: JsonObject = {"alias": record.get("alias"), "runId": record.get("runId")}
     if reason is not None:
         entry["reason"] = reason
@@ -1286,15 +1375,10 @@ def _worktree_list_paths_with_warning(source_git_root: str) -> tuple[set[str] | 
     return paths, None
 
 
-def _worktree_list_paths(source_git_root: str) -> set[str] | None:
-    paths, _warning = _worktree_list_paths_with_warning(source_git_root)
-    return paths
-
-
 def _reload_gc_candidate(
     registry_root: Path,
-    record: JsonObject,
-) -> tuple[JsonObject, str, str] | None:
+    record: PersistentWorktreeRecord,
+) -> tuple[PersistentWorktreeRecord, str, str] | None:
     fresh = _reload_record(registry_root, str(record["runId"]))
     if fresh is None:
         return None
@@ -1308,6 +1392,206 @@ def _reload_gc_candidate(
     return fresh, fresh_source, fresh_execution
 
 
+GcFreshAction = Callable[[PersistentWorktreeRecord, str, str], None]
+
+
+def _with_locked_fresh_gc_candidate(
+    registry_root: Path,
+    record: PersistentWorktreeRecord,
+    action: GcFreshAction,
+) -> None:
+    with run_registry.registry_lock(registry_root):
+        fresh_candidate = _reload_gc_candidate(registry_root, record)
+        if fresh_candidate is None:
+            return
+        action(*fresh_candidate)
+
+
+def _gc_missing_entry(
+    record: PersistentWorktreeRecord,
+    execution: str,
+    *,
+    dry_run: bool,
+) -> JsonObject:
+    return {
+        "alias": record.get("alias"),
+        "runId": record.get("runId"),
+        "executionCwd": execution,
+        "worktreeStatus": STATUS_MISSING,
+        "reason": "path_missing",
+        "action": "would_mark_missing" if dry_run else "marked_missing",
+    }
+
+
+def _gc_orphan_entry(
+    record: PersistentWorktreeRecord,
+    execution: str,
+    reason: str,
+    message: str | None = None,
+) -> JsonObject:
+    entry = {
+        "alias": record.get("alias"),
+        "runId": record.get("runId"),
+        "executionCwd": execution,
+        "branch": record.get("branch"),
+        "reason": reason,
+    }
+    if message:
+        entry["message"] = message
+    safe_actions = {
+        "worktree_metadata_missing": "inspect_path_before_manual_cleanup",
+        "branch_missing": "inspect_branch_metadata_before_manual_cleanup",
+        "worktree_list_failed": "retry_after_git_worktree_list_succeeds",
+    }
+    if reason in safe_actions:
+        entry["safeAction"] = safe_actions[reason]
+    return entry
+
+
+def _gc_reconcile_missing_path(
+    registry_root: Path,
+    record: PersistentWorktreeRecord,
+    execution: str,
+    *,
+    dry_run: bool,
+    reconciled: list[JsonObject],
+    prune_roots: set[str],
+) -> bool:
+    if Path(execution).exists():
+        return False
+    if dry_run:
+        reconciled.append(_gc_missing_entry(record, execution, dry_run=True))
+        return True
+
+    def mark_missing(
+        fresh: PersistentWorktreeRecord, fresh_source: str, fresh_execution: str
+    ) -> None:
+        if Path(fresh_execution).exists():
+            return
+        run_registry.set_worktree_status_locked(
+            registry_root,
+            str(fresh["runId"]),
+            STATUS_MISSING,
+        )
+        prune_roots.add(fresh_source)
+        reconciled.append(_gc_missing_entry(fresh, fresh_execution, dry_run=False))
+
+    _with_locked_fresh_gc_candidate(registry_root, record, mark_missing)
+    return True
+
+
+def _gc_reconcile_list_failure(
+    registry_root: Path,
+    record: PersistentWorktreeRecord,
+    execution: str,
+    *,
+    listed_paths: set[str] | None,
+    list_warning: str | None,
+    dry_run: bool,
+    orphans: list[JsonObject],
+) -> bool:
+    if listed_paths is not None:
+        return False
+    if dry_run:
+        orphans.append(_gc_orphan_entry(record, execution, "worktree_list_failed", list_warning))
+        return True
+
+    def mark_unknown(
+        fresh: PersistentWorktreeRecord, _fresh_source: str, fresh_execution: str
+    ) -> None:
+        if not Path(fresh_execution).exists():
+            return
+        run_registry.set_worktree_status_locked(
+            registry_root,
+            str(fresh["runId"]),
+            STATUS_UNKNOWN,
+        )
+        orphans.append(
+            _gc_orphan_entry(fresh, fresh_execution, "worktree_list_failed", list_warning)
+        )
+
+    _with_locked_fresh_gc_candidate(registry_root, record, mark_unknown)
+    return True
+
+
+def _gc_reconcile_missing_metadata(
+    registry_root: Path,
+    record: PersistentWorktreeRecord,
+    execution: str,
+    *,
+    listed_paths: set[str] | None,
+    dry_run: bool,
+    orphans: list[JsonObject],
+    warnings: list[JsonObject],
+) -> bool:
+    if listed_paths is None or _registered_worktree_path_matches(listed_paths, execution):
+        return False
+    if dry_run:
+        orphans.append(_gc_orphan_entry(record, execution, "worktree_metadata_missing"))
+        return True
+
+    def mark_unknown_if_still_orphaned(
+        fresh: PersistentWorktreeRecord,
+        fresh_source: str,
+        fresh_execution: str,
+    ) -> None:
+        fresh_paths, warning = _worktree_list_paths_with_warning(fresh_source)
+        if warning is not None:
+            warnings.append({"sourceGitRoot": fresh_source, "message": warning})
+        if (
+            Path(fresh_execution).exists()
+            and fresh_paths is not None
+            and not _registered_worktree_path_matches(fresh_paths, fresh_execution)
+        ):
+            run_registry.set_worktree_status_locked(
+                registry_root,
+                str(fresh["runId"]),
+                STATUS_UNKNOWN,
+            )
+            orphans.append(_gc_orphan_entry(fresh, fresh_execution, "worktree_metadata_missing"))
+
+    _with_locked_fresh_gc_candidate(registry_root, record, mark_unknown_if_still_orphaned)
+    return True
+
+
+def _gc_reconcile_missing_branch(
+    registry_root: Path,
+    record: PersistentWorktreeRecord,
+    source: str,
+    execution: str,
+    branch: str | None,
+    *,
+    dry_run: bool,
+    orphans: list[JsonObject],
+) -> bool:
+    if not isinstance(branch, str) or _branch_exists(source, branch) is not False:
+        return False
+    if dry_run:
+        orphans.append(_gc_orphan_entry(record, execution, "branch_missing"))
+        return True
+
+    def mark_unknown_if_branch_still_missing(
+        fresh: PersistentWorktreeRecord,
+        fresh_source: str,
+        fresh_execution: str,
+    ) -> None:
+        fresh_branch = fresh.get("branch")
+        if (
+            isinstance(fresh_branch, str)
+            and Path(fresh_execution).exists()
+            and _branch_exists(fresh_source, fresh_branch) is False
+        ):
+            run_registry.set_worktree_status_locked(
+                registry_root,
+                str(fresh["runId"]),
+                STATUS_UNKNOWN,
+            )
+            orphans.append(_gc_orphan_entry(fresh, fresh_execution, "branch_missing"))
+
+    _with_locked_fresh_gc_candidate(registry_root, record, mark_unknown_if_branch_still_missing)
+    return True
+
+
 def gc_worktrees(registry_root: Path, *, dry_run: bool = False) -> JsonObject:
     records = load_persistent_records(registry_root)
     paths_by_root: dict[str, set[str] | None] = {}
@@ -1315,41 +1599,6 @@ def gc_worktrees(registry_root: Path, *, dry_run: bool = False) -> JsonObject:
     reconciled: list[JsonObject] = []
     orphans: list[JsonObject] = []
     warnings: list[JsonObject] = []
-
-    def append_missing(record: JsonObject, execution: str) -> None:
-        reconciled.append(
-            {
-                "alias": record.get("alias"),
-                "runId": record.get("runId"),
-                "executionCwd": execution,
-                "worktreeStatus": STATUS_MISSING,
-                "reason": "path_missing",
-                "action": "would_mark_missing" if dry_run else "marked_missing",
-            }
-        )
-
-    def append_orphan(
-        record: JsonObject,
-        execution: str,
-        reason: str,
-        message: str | None = None,
-    ) -> None:
-        entry = {
-            "alias": record.get("alias"),
-            "runId": record.get("runId"),
-            "executionCwd": execution,
-            "branch": record.get("branch"),
-            "reason": reason,
-        }
-        if message:
-            entry["message"] = message
-        if reason == "worktree_metadata_missing":
-            entry["safeAction"] = "inspect_path_before_manual_cleanup"
-        elif reason == "branch_missing":
-            entry["safeAction"] = "inspect_branch_metadata_before_manual_cleanup"
-        elif reason == "worktree_list_failed":
-            entry["safeAction"] = "retry_after_git_worktree_list_succeeds"
-        orphans.append(entry)
 
     for record in records:
         current = record.get("registryWorktreeStatus")
@@ -1375,90 +1624,44 @@ def gc_worktrees(registry_root: Path, *, dry_run: bool = False) -> JsonObject:
             ),
             None,
         )
-        path_exists = Path(execution).exists()
-        if not path_exists:
-            if dry_run:
-                append_missing(record, execution)
-            else:
-                with run_registry.registry_lock(registry_root):
-                    fresh_candidate = _reload_gc_candidate(registry_root, record)
-                    if fresh_candidate is None:
-                        continue
-                    fresh, fresh_source, fresh_execution = fresh_candidate
-                    if Path(fresh_execution).exists():
-                        continue
-                    run_registry.set_worktree_status_locked(
-                        registry_root,
-                        str(fresh["runId"]),
-                        "missing",
-                    )
-                    prune_roots.add(fresh_source)
-                    append_missing(fresh, fresh_execution)
-            continue
-        if listed_paths is None:
-            if dry_run:
-                append_orphan(record, execution, "worktree_list_failed", list_warning)
-            else:
-                with run_registry.registry_lock(registry_root):
-                    fresh_candidate = _reload_gc_candidate(registry_root, record)
-                    if fresh_candidate is None:
-                        continue
-                    fresh, _fresh_source, fresh_execution = fresh_candidate
-                    if Path(fresh_execution).exists():
-                        run_registry.set_worktree_status_locked(
-                            registry_root,
-                            str(fresh["runId"]),
-                            "unknown",
-                        )
-                        append_orphan(fresh, fresh_execution, "worktree_list_failed", list_warning)
-            continue
-        if listed_paths is not None and not _registered_worktree_path_matches(
-            listed_paths, execution
+        if _gc_reconcile_missing_path(
+            registry_root,
+            record,
+            execution,
+            dry_run=dry_run,
+            reconciled=reconciled,
+            prune_roots=prune_roots,
         ):
-            if dry_run:
-                append_orphan(record, execution, "worktree_metadata_missing")
-            else:
-                with run_registry.registry_lock(registry_root):
-                    fresh_candidate = _reload_gc_candidate(registry_root, record)
-                    if fresh_candidate is None:
-                        continue
-                    fresh, fresh_source, fresh_execution = fresh_candidate
-                    fresh_paths, warning = _worktree_list_paths_with_warning(fresh_source)
-                    if warning is not None:
-                        warnings.append({"sourceGitRoot": fresh_source, "message": warning})
-                    if (
-                        Path(fresh_execution).exists()
-                        and fresh_paths is not None
-                        and not _registered_worktree_path_matches(fresh_paths, fresh_execution)
-                    ):
-                        run_registry.set_worktree_status_locked(
-                            registry_root,
-                            str(fresh["runId"]),
-                            "unknown",
-                        )
-                        append_orphan(fresh, fresh_execution, "worktree_metadata_missing")
             continue
-        if isinstance(branch, str) and _branch_exists(source, branch) is False:
-            if dry_run:
-                append_orphan(record, execution, "branch_missing")
-            else:
-                with run_registry.registry_lock(registry_root):
-                    fresh_candidate = _reload_gc_candidate(registry_root, record)
-                    if fresh_candidate is None:
-                        continue
-                    fresh, fresh_source, fresh_execution = fresh_candidate
-                    fresh_branch = fresh.get("branch")
-                    if (
-                        isinstance(fresh_branch, str)
-                        and Path(fresh_execution).exists()
-                        and _branch_exists(fresh_source, fresh_branch) is False
-                    ):
-                        run_registry.set_worktree_status_locked(
-                            registry_root,
-                            str(fresh["runId"]),
-                            "unknown",
-                        )
-                        append_orphan(fresh, fresh_execution, "branch_missing")
+        if _gc_reconcile_list_failure(
+            registry_root,
+            record,
+            execution,
+            listed_paths=listed_paths,
+            list_warning=list_warning,
+            dry_run=dry_run,
+            orphans=orphans,
+        ):
+            continue
+        if _gc_reconcile_missing_metadata(
+            registry_root,
+            record,
+            execution,
+            listed_paths=listed_paths,
+            dry_run=dry_run,
+            orphans=orphans,
+            warnings=warnings,
+        ):
+            continue
+        _gc_reconcile_missing_branch(
+            registry_root,
+            record,
+            source,
+            execution,
+            branch,
+            dry_run=dry_run,
+            orphans=orphans,
+        )
     if not dry_run:
         for source in prune_roots:
             _run_git(source, ["worktree", "prune"])

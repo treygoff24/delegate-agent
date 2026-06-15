@@ -365,14 +365,38 @@ class RetentionTests(unittest.TestCase):
             self.registry_root,
             {"tracking": {"retention": {"enabled": True, "rawLogDays": 0}}},
         )
-        output, _archived = self.retention.read_log_output(
+        output = self.retention.read_log_output(
             self.registry_root,
             run_id,
             "stdout.log",
             tail=2,
             raw=False,
         )
-        self.assertEqual(output, "line-198\nline-199\n")
+        self.assertEqual(output.content, "line-198\nline-199\n")
+        self.assertTrue(output.truncated)
+
+    def test_run_output_archived_tail_not_truncated_when_within_limit(self):
+        run_id, _alias = self.write_completed_run()
+        old = (datetime.now(UTC) - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        stdout_path = run_path / "stdout.log"
+        stdout_path.write_text("line-1\nline-2\n", encoding="utf-8")
+        state = json.loads((run_path / "state.json").read_text(encoding="utf-8"))
+        state["finishedAt"] = old
+        self.registry.write_json_atomic(run_path / "state.json", state)
+        self.retention.run_retention_pass(
+            self.registry_root,
+            {"tracking": {"retention": {"enabled": True, "rawLogDays": 0}}},
+        )
+        output = self.retention.read_log_output(
+            self.registry_root,
+            run_id,
+            "stdout.log",
+            tail=5,
+            raw=False,
+        )
+        self.assertEqual(output.content, "line-1\nline-2\n")
+        self.assertFalse(output.truncated)
 
     def test_retention_preserves_persistent_worktree_dirs(self):
         """Raw-log retention preserves persistent worktree directories outside the registry runs dir."""

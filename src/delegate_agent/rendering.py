@@ -1,139 +1,13 @@
 from __future__ import annotations
 
 import json
-import re
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import TextIO
 
-from delegate_agent import retention as delegate_retention
 from delegate_agent import run_registry
 from delegate_agent.json_types import JsonObject, JsonValue
 from delegate_agent.run_registry import parse_utc_timestamp as parse_timestamp
-
-REDACT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    # Authorization header value, quoted or bare. The optional quote after the key
-    # tolerates JSON ({"Authorization": "..."}); the value is bounded on the right
-    # so we don't swallow trailing structure (closing quote/brace/&/,).
-    (
-        re.compile(
-            r"(?i)\b(authorization[\"']?\s*[:=]\s*)"
-            r"(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,&}\"'\r\n][^\r\n,&}]*)"
-        ),
-        r"\1***",
-    ),
-    # Bare scheme token not behind an Authorization key (e.g. "Bearer eyJ...").
-    (
-        re.compile(r"(?i)\b((?:bearer|basic)\s+)[A-Za-z0-9._~+/=-]{8,}"),
-        r"\1***",
-    ),
-    # Bracketed environment assignments, e.g. os.environ["OPENAI_API_KEY"] = "..."
-    # and env['DB_PASSWORD']='...'. Keep this before the generic key matcher: the
-    # separator between the secret key and value is outside the bracketed lookup.
-    (
-        re.compile(
-            r"(?i)\b((?:os\.environ|env)\[\s*[\"'][^\"'\]\r\n]*"
-            r"(?:api[_-]?key|apikey|access[_-]?key|secret[_-]?key|private[_-]?key|"
-            r"access[_-]?token|refresh[_-]?token|auth[_-]?token|authtoken|"
-            r"client[_-]?secret|password|passwd|secret|token)"
-            r"[^\"'\]\r\n]*[\"']\s*\]\s*=\s*)"
-            r"(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,&};\"'\r\n][^\r\n,&};]*)"
-        ),
-        r"\1***",
-    ),
-    # Named credential keys with the value quoted, bare, or JSON-quoted. The left
-    # edge anchors on a non-alphanumeric character (or string start) rather than
-    # \b, so env-style prefixes joined by "_" still redact (OPENAI_API_KEY=,
-    # DB_PASSWORD=, aws_secret_access_key=). Separator is preserved so the shape
-    # stays readable.
-    (
-        re.compile(
-            r"(?i)(?:(?<=[^A-Za-z0-9])|^)("
-            r"api[_-]?key|apikey|access[_-]?key|secret[_-]?key|private[_-]?key|"
-            r"access[_-]?token|refresh[_-]?token|auth[_-]?token|authtoken|"
-            r"client[_-]?secret|password|passwd|secret|token"
-            r")([\"']?\s*[:=]\s*)"
-            r"(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,&};\"'\r\n][^\r\n,&};]*)"
-        ),
-        r"\1\2***",
-    ),
-    # Password embedded in a connection string: scheme://[user]:PASS@host. The
-    # scheme length is bounded so a long dotted string cannot backtrack quadratically.
-    (
-        re.compile(r"(?i)\b([a-z][a-z0-9+.-]{1,40}://[^\s:/@]*:)[^\s:/@]+(@)"),
-        r"\1***\2",
-    ),
-    # JWTs are anchored on the eyJ header (base64url of '{"') so this does not shred
-    # ordinary dotted identifiers and tracebacks the parent agent needs to read.
-    (
-        re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"),
-        "***",
-    ),
-    # PEM private key blocks are handled by _redact_pem_blocks() before this list
-    # runs. A DOTALL regex here is both easier to make backtracking-prone and can
-    # let keyed values like SECRET_KEY=<PEM> leak the body after the first newline.
-    # Provider token shapes are prefix-anchored; we deliberately avoid a blanket
-    # high-entropy matcher, which would redact legitimate hashes/IDs/output.
-    (re.compile(r"\bsk-(?:proj|ant|svcacct)-[A-Za-z0-9_-]{8,}"), "sk-***"),
-    (re.compile(r"\bsk-[A-Za-z0-9]{8,}"), "sk-***"),
-    (re.compile(r"\bgh[opusr]_[A-Za-z0-9]{20,}\b"), "gh***"),
-    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"), "github_pat_***"),
-    (re.compile(r"\b(AKIA|ASIA)[0-9A-Z]{16}\b"), r"\1***"),
-    (re.compile(r"\bAIza[0-9A-Za-z_-]{32,}\b"), "AIza***"),
-    (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}"), "xox***"),
-    # Stripe secret/restricted keys (live or test); publishable pk_ keys are
-    # public by design and intentionally excluded.
-    (re.compile(r"\b([sr]k_(?:live|test)_)[0-9A-Za-z]{10,}\b"), r"\1***"),
-    (re.compile(r"\bwhsec_[A-Za-z0-9]{10,}\b"), "whsec_***"),
-    (re.compile(r"\bnpm_[A-Za-z0-9]{36,}\b"), "npm_***"),
-    (re.compile(r"\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\b"), "SG.***"),
-    (
-        re.compile(
-            r"https://hooks\.slack(?:-gov)?\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]+"
-        ),
-        "***",
-    ),
-]
-
-
-PEM_BLOCK_PLACEHOLDER = "***PRIVATE KEY REDACTED***"
-_PEM_BEGIN = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")
-_PEM_END = re.compile(r"-----END [A-Z0-9 ]*PRIVATE KEY-----")
-
-
-def _redact_pem_blocks(value: str) -> str:
-    match = _PEM_BEGIN.search(value)
-    if match is None:
-        return value
-    parts: list[str] = []
-    pos = 0
-    while match is not None:
-        parts.append(value[pos : match.start()])
-        end = _PEM_END.search(value, match.end())
-        parts.append(PEM_BLOCK_PLACEHOLDER)
-        if end is None:
-            return "".join(parts)
-        pos = end.end()
-        match = _PEM_BEGIN.search(value, pos)
-    parts.append(value[pos:])
-    return "".join(parts)
-
-
-def redact_string(value: str) -> str:
-    redacted = _redact_pem_blocks(value)
-    for pattern, replacement in REDACT_PATTERNS:
-        redacted = pattern.sub(replacement, redacted)
-    return redacted
-
-
-def redact_value(value: JsonValue) -> JsonValue:
-    if isinstance(value, str):
-        return redact_string(value)
-    if isinstance(value, list):
-        return [redact_value(item) for item in value]
-    if isinstance(value, dict):
-        return {key: redact_value(item) for key, item in value.items()}
-    return value
+from delegate_agent.snapshot_view import SnapshotView
 
 
 def format_age(started_at: str | None, *, now: datetime | None = None) -> str:
@@ -155,109 +29,41 @@ def format_age(started_at: str | None, *, now: datetime | None = None) -> str:
     return f"{seconds}s"
 
 
-def merge_snapshot_view(
-    registry_root: Path,
-    run_id: str,
-    snapshot: JsonObject | None,
-    *,
-    redact: bool,
-) -> JsonObject:
-    state = run_registry.load_run_state(registry_root, run_id)
-    manifest = run_registry.load_run_manifest(registry_root, run_id)
-    stdout_bytes, stderr_bytes = delegate_retention.effective_log_byte_sizes(registry_root, run_id)
-    view: JsonObject = dict(snapshot or {})
-    if not view:
-        view = {
-            "schema": run_registry.SNAPSHOT_SCHEMA,
-            "ok": True,
-            "runId": run_id,
-        }
-    view.setdefault("ok", True)
-    view["runId"] = run_id
-    view.update(run_registry.status_fields(state))
-    view["stdoutBytes"] = stdout_bytes
-    view["stderrBytes"] = stderr_bytes
-    if state:
-        for key in ("lastActivityAt", "current", "exitCode", "finishedAt"):
-            if key in state and key not in view:
-                view[key] = state[key]
-        # Surface pre-launch failure fields when status is "failed".
-        if state.get("status") == "failed":
-            for key in ("error", "message", "plannedBranch", "plannedExecutionCwd"):
-                if key in state and key not in view:
-                    view[key] = state[key]
-        # Surface isolation metadata from state when present.
-        for key in ("worktreeStatus", "safeWorkspaceMethod"):
-            if key in state and key not in view:
-                view[key] = state[key]
-    if manifest:
-        for key in ("alias", "harness", "cwd", "executionCwd", "mode", "model", "startedAt"):
-            if key in manifest and key not in view:
-                view[key] = manifest[key]
-        for key in (
-            "isolationMode",
-            "effectiveIsolation",
-            "isolationLifecycle",
-            "preservedWorkspace",
-            "sourceGitRoot",
-            "branch",
-            "worktreeStatus",
-            "worktreeCleanupCommands",
-            "safeWorkspaceMethod",
-            "requestedReasoningEffort",
-            "resolvedReasoningEffort",
-            "reasoningEffortSource",
-            "reasoningCapabilitySource",
-            "reasoningTransport",
-        ):
-            if key in manifest and key not in view:
-                view[key] = manifest[key]
-    warnings = list(view.get("warnings") or [])
-    for source in (state, manifest):
-        if not source:
-            continue
-        source_warnings = source.get("warnings")
-        if isinstance(source_warnings, list):
-            for warning in source_warnings:
-                if isinstance(warning, str) and warning not in warnings:
-                    warnings.append(warning)
-    for warning in run_registry.large_log_warnings(stdout_bytes, stderr_bytes):
-        if warning not in warnings:
-            warnings.append(warning)
-    alias = view.get("alias")
-    if delegate_retention.raw_logs_archived(registry_root, run_id):
-        archive_warning = delegate_retention.archived_log_warning(
-            alias if isinstance(alias, str) else None,
-            run_id,
-        )
-        if archive_warning not in warnings:
-            warnings.append(archive_warning)
-    if warnings:
-        view["warnings"] = warnings
-    if isinstance(alias, str):
-        view.setdefault("snapshotCommand", run_registry.snapshot_command(alias))
-        if view.get("effectiveStatus") == run_registry.STATUS_STALE:
-            view.setdefault("nextActions", run_registry.stale_next_actions(alias))
-        if "completionReport" in view and isinstance(view["completionReport"], dict):
-            view["completionReport"].setdefault(
-                "command",
-                run_registry.run_output_command(alias, completion_report=True),
-            )
-    if redact:
-        view = redact_value(view)
-    return view
+SnapshotTextField = tuple[str, str]
 
 
-def snapshot_json_payload(view: JsonObject) -> JsonObject:
-    return view
+SNAPSHOT_CONTEXT_FIELDS: tuple[SnapshotTextField, ...] = (
+    ("cwd", "cwd"),
+    ("executionCwd", "execution cwd"),
+    ("model", "model"),
+    ("mode", "mode"),
+)
 
 
-def render_snapshot_text(view: JsonObject, stdout: TextIO) -> None:
-    alias = view.get("alias", view.get("runId", "?"))
-    status = view.get("status", "unknown")
-    started_at = view.get("startedAt")
+def _snapshot_value(view: SnapshotView, key: str) -> JsonValue | None:
+    return view.get(key)
+
+
+def _render_snapshot_string_fields(
+    view: SnapshotView,
+    fields: tuple[SnapshotTextField, ...],
+    stdout: TextIO,
+) -> None:
+    for key, label in fields:
+        value = _snapshot_value(view, key)
+        if isinstance(value, str) and value:
+            print(f"{label}: {value}", file=stdout)
+
+
+def _render_snapshot_header(view: SnapshotView, stdout: TextIO) -> None:
+    alias = _snapshot_value(view, "alias") or _snapshot_value(view, "runId") or "?"
+    status = _snapshot_value(view, "status") or "unknown"
+    started_at = _snapshot_value(view, "startedAt")
     age = format_age(started_at if isinstance(started_at, str) else None)
     print(f"{alias} · {status} · {age} elapsed", file=stdout)
+
+
+def _render_snapshot_status_detail(view: SnapshotView, stdout: TextIO) -> None:
     raw_status = view.get("rawStatus")
     effective_status = view.get("effectiveStatus")
     stale_reason = view.get("staleReason")
@@ -269,16 +75,9 @@ def render_snapshot_text(view: JsonObject, stdout: TextIO) -> None:
         print(f"status detail: raw={raw_status} effective={effective_status}", file=stdout)
     if isinstance(stale_reason, str) and stale_reason:
         print(f"stale reason: {stale_reason}", file=stdout)
-    for key, label in (
-        ("cwd", "cwd"),
-        ("executionCwd", "execution cwd"),
-        ("model", "model"),
-        ("mode", "mode"),
-    ):
-        value = view.get(key)
-        if isinstance(value, str) and value:
-            print(f"{label}: {value}", file=stdout)
-    # Isolation metadata
+
+
+def _render_snapshot_isolation(view: SnapshotView, stdout: TextIO) -> None:
     isolation_lifecycle = view.get("isolationLifecycle")
     if isolation_lifecycle == "persistent":
         print("isolation: worktree persistent", file=stdout)
@@ -298,6 +97,9 @@ def render_snapshot_text(view: JsonObject, stdout: TextIO) -> None:
     safe_method = view.get("safeWorkspaceMethod")
     if isinstance(safe_method, str) and safe_method:
         print(f"safe workspace method: {safe_method}", file=stdout)
+
+
+def _render_snapshot_reasoning(view: SnapshotView, stdout: TextIO) -> None:
     resolved_reasoning = view.get("resolvedReasoningEffort")
     if isinstance(resolved_reasoning, str) and resolved_reasoning:
         transport = view.get("reasoningTransport")
@@ -310,18 +112,27 @@ def render_snapshot_text(view: JsonObject, stdout: TextIO) -> None:
         suffix = f" ({', '.join(detail)})" if detail else ""
         print(f"reasoning effort: {resolved_reasoning}{suffix}", file=stdout)
 
+
+def _render_snapshot_current(view: SnapshotView, stdout: TextIO) -> None:
     current = view.get("current")
     if isinstance(current, str) and current:
         print(f"current: {current}", file=stdout)
 
+
+def _render_snapshot_cleanup(view: SnapshotView, stdout: TextIO) -> None:
     cleanup = view.get("worktreeCleanupCommands")
     if isinstance(cleanup, dict):
         render_worktree_cleanup_commands(cleanup, stdout)
 
+
+def _render_snapshot_assistant_text(view: SnapshotView, stdout: TextIO) -> None:
     assistant_text = view.get("assistantText")
     if isinstance(assistant_text, str) and assistant_text:
         print("assistant text:", file=stdout)
         print(assistant_text, file=stdout)
+
+
+def _render_snapshot_recent_events(view: SnapshotView, stdout: TextIO) -> None:
     recent_events = view.get("recentEvents")
     if isinstance(recent_events, list) and recent_events:
         print("recent:", file=stdout)
@@ -337,23 +148,43 @@ def render_snapshot_text(view: JsonObject, stdout: TextIO) -> None:
                 print(f"  - {kind}: {tool}", file=stdout)
             else:
                 print(f"  - {kind}", file=stdout)
-    warnings = view.get("warnings")
-    if isinstance(warnings, list) and warnings:
-        print("warnings:", file=stdout)
-        for warning in warnings:
-            if isinstance(warning, str):
-                print(f"  - {warning}", file=stdout)
-    next_actions = view.get("nextActions")
-    if isinstance(next_actions, list) and next_actions:
-        print("next actions:", file=stdout)
-        for action in next_actions:
-            if isinstance(action, str):
-                print(f"  - {action}", file=stdout)
+
+
+def _render_snapshot_string_list(
+    view: SnapshotView,
+    key: str,
+    heading: str,
+    stdout: TextIO,
+) -> None:
+    values = view.get(key)
+    if isinstance(values, list) and values:
+        print(f"{heading}:", file=stdout)
+        for value in values:
+            if isinstance(value, str):
+                print(f"  - {value}", file=stdout)
+
+
+def _render_snapshot_completion(view: SnapshotView, stdout: TextIO) -> None:
     completion = view.get("completionReport")
     if isinstance(completion, dict):
         command = completion.get("command")
         if isinstance(command, str):
             print(f"completion report: {command}", file=stdout)
+
+
+def render_snapshot_text(view: SnapshotView, stdout: TextIO) -> None:
+    _render_snapshot_header(view, stdout)
+    _render_snapshot_status_detail(view, stdout)
+    _render_snapshot_string_fields(view, SNAPSHOT_CONTEXT_FIELDS, stdout)
+    _render_snapshot_isolation(view, stdout)
+    _render_snapshot_reasoning(view, stdout)
+    _render_snapshot_current(view, stdout)
+    _render_snapshot_cleanup(view, stdout)
+    _render_snapshot_assistant_text(view, stdout)
+    _render_snapshot_recent_events(view, stdout)
+    _render_snapshot_string_list(view, "warnings", "warnings", stdout)
+    _render_snapshot_string_list(view, "nextActions", "next actions", stdout)
+    _render_snapshot_completion(view, stdout)
 
 
 def runs_json_payload(

@@ -1,18 +1,15 @@
-"""Creation-side helpers for worktree isolation planning and execution.
+"""Worktree isolation planning and creation helpers.
 
-This module owns isolation constants, IsolationContext, effective-isolation resolution,
-Git clean/HEAD checks, creation-context capture, worktree branch/path planning,
-persistent worktree creation, and prompt injection.
-
-Wave 3 scope: planning + execution helpers (validation, creation, prompt context).
-No removal helpers (those belong in worktree_mgmt.py in Wave 5).
+This module owns effective-isolation resolution, source Git validation,
+persistent worktree creation, and prompt context injection. Worktree removal
+lives in worktree_mgmt.py.
 """
 
 from __future__ import annotations
 
 import hashlib
 import re
-import subprocess
+import subprocess  # nosec B404 - isolation helpers intentionally run fixed git argv with shell=False.
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,35 +22,19 @@ from delegate_agent.config import (  # noqa: F401  # re-exported
     ConfigError,
 )
 from delegate_agent.git_utils import (
-    GIT_MUTATION_TIMEOUT_SECONDS,
     GIT_QUICK_TIMEOUT_SECONDS,
     GIT_TIMEOUT_RETURN_CODE,
-    timeout_completed_process,
+)
+from delegate_agent.git_utils import (
+    run_git as _run_git,
 )
 from delegate_agent.json_types import JsonObject
+from delegate_agent.prompt_instructions import SKILL_REVIEW_PREFIX
 
 
 @dataclass(frozen=True)
 class IsolationContext:
-    """Generalized isolation context replacing the old SafeIsolationContext.
-
-    Fields:
-        source_workspace: The original source workspace path.
-        effective_isolation: Final resolved isolation value (auto/none/worktree).
-        isolation_mode: The isolation mode after auto-mapping.
-        isolation_lifecycle: "none" | "temporary" | "persistent".
-        preserved_workspace: Whether the isolated workspace persists after the run.
-        planned_branch: Planned branch name (for worktree isolation; None otherwise).
-        planned_execution_cwd: Planned execution workspace path (None for source-only).
-        source_git_root: Git root of source workspace (None if non-git).
-        source_git_common_dir: Git common dir of source workspace (None if non-git).
-        source_head_oid: Full SHA of HEAD in source workspace (None if unavailable).
-        source_head_ref: Symbolic ref of HEAD, e.g. "refs/heads/main" (None if detached).
-        source_branch: Short branch name (None if detached or unavailable).
-        safe_workspace_method: For temporary safe isolation, "git-worktree" or
-            "directory-copy" when known.
-        warnings: Parent-facing safety/isolation warnings to surface in run metadata.
-    """
+    """Resolved isolation metadata shared by dry-run output, run metadata, and launch."""
 
     source_workspace: str
     effective_isolation: str
@@ -72,43 +53,9 @@ class IsolationContext:
 
 
 def compute_repo_fingerprint_from_common_dir(git_common_dir: str) -> str:
-    """Compute a deterministic 12-char fingerprint for a git common directory.
-
-    Resolves the filesystem path, then hashes the resolved posix path with
-    SHA-256 and truncates to 12 hex chars.
-    Stable across paths with spaces, unicode, and symlinks pointing to the same dir.
-    Distinct repos produce distinct fingerprints.
-    """
+    """Return a stable 12-char hash of the resolved Git common directory path."""
     resolved = Path(git_common_dir).resolve(strict=True).as_posix()
     return hashlib.sha256(resolved.encode("utf-8")).hexdigest()[:12]
-
-
-def repo_fingerprint(git_common_dir: str) -> str:
-    """Backward-compatible alias for compute_repo_fingerprint_from_common_dir."""
-    return compute_repo_fingerprint_from_common_dir(git_common_dir)
-
-
-def _run_git(
-    source_git_root: str,
-    args: list[str],
-    *,
-    timeout_seconds: int = GIT_MUTATION_TIMEOUT_SECONDS,
-) -> subprocess.CompletedProcess[str]:
-    command = ["git", "-C", source_git_root, *args]
-    try:
-        return subprocess.run(
-            command,
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=timeout_seconds,
-        )
-    except subprocess.TimeoutExpired as exc:
-        return timeout_completed_process(
-            command,
-            exc,
-            timeout_seconds=timeout_seconds,
-        )
 
 
 def _raise_if_git_timed_out(result: subprocess.CompletedProcess[str], action: str) -> None:
@@ -117,11 +64,7 @@ def _raise_if_git_timed_out(result: subprocess.CompletedProcess[str], action: st
 
 
 def short_run_id(run_id: str) -> str:
-    """Convert a full delegate run id to a short, filesystem-safe identifier.
-
-    Strips the 'del_' prefix, replaces non-alphanumeric chars (except ._-) with '-',
-    and truncates to 32 characters.
-    """
+    """Return a run-id segment safe for branch and path names."""
     s = run_id
     if s.startswith("del_"):
         s = s[4:]
@@ -130,13 +73,7 @@ def short_run_id(run_id: str) -> str:
 
 
 def branch_label(engine: str, model_alias: str | None) -> str:
-    """Compute the label segment of a worktree branch name.
-
-    - cursor: "cursor"
-    - codex: "codex"
-    - kimi: "kimi"
-    - droid: "droid-<slug>" where slug is lowercase, non-alnum→'-', collapsed.
-    """
+    """Return the engine/model segment used in Delegate worktree branch names."""
     if engine == "cursor":
         return "cursor"
     if engine == "codex":
@@ -155,27 +92,15 @@ def branch_label(engine: str, model_alias: str | None) -> str:
 
 
 def plan_branch_name(label: str, short_id: str) -> str:
-    """Plan the full branch name: delegate/<label>-<short-id>."""
     return f"delegate/{label}-{short_id}"
 
 
 def plan_worktree_path(data_home: Path, fingerprint: str, label: str, short_id: str) -> Path:
-    """Plan the worktree directory path.
-
-    The path is <dataHome>/<fingerprint>/<label>-<short-id>.
-    data_home comes from worktrees_data_home() and replaces the
-    ~/.delegate/worktrees default prefix.
-    """
     return data_home / fingerprint / f"{label}-{short_id}"
 
 
 def worktrees_data_home(config: JsonObject) -> Path:
-    """Return the data home directory for persistent worktrees.
-
-    If config worktrees.dataHome is set (non-empty string), uses that.
-    Otherwise defaults to ~/.delegate/worktrees.
-    The returned path is used as the base for <fingerprint>/<label>-<id>.
-    """
+    """Return the persistent worktree root, defaulting to ~/.delegate/worktrees."""
     cfg = config.get("worktrees", {})
     if not isinstance(cfg, dict):
         return Path.home() / ".delegate" / "worktrees"
@@ -192,18 +117,13 @@ def worktrees_data_home(config: JsonObject) -> Path:
 
 
 def _map_auto_isolation(engine: str, mode: str) -> str:
-    """Map 'auto' isolation to the legacy execution behavior for the engine/mode pair.
-
-    Returns 'worktree' for cursor/codex/kimi safe (temp isolated workspace),
-    'none' for droid safe and any work mode.
-    """
-    if mode == "safe" and engine in ("cursor", "codex", "kimi"):
+    """Preserve safe-mode isolation for local engines while leaving work mode in-place."""
+    if mode == "safe" and engine in ("cursor", "codex", "droid", "kimi"):
         return ISOLATION_WORKTREE
     return ISOLATION_NONE
 
 
 def _isolation_lifecycle(isolation_mode: str, mode: str) -> str:
-    """Determine isolation lifecycle."""
     if isolation_mode == ISOLATION_NONE:
         return "none"
     if isolation_mode == ISOLATION_WORKTREE:
@@ -228,18 +148,7 @@ def build_isolation_context(
     config: JsonObject | None = None,
     run_short_id: str | None = None,
 ) -> IsolationContext:
-    """Build an IsolationContext from a resolved isolation value.
-
-    Maps auto → legacy mode, sets lifecycle, and computes planned
-    worktree paths when effective isolation is worktree and a git
-    common directory is available.
-
-    model_alias: the raw model alias string (e.g. "qwen") used for
-        branch label computation (droid only). Passed as the model
-        parameter to branch_label().
-    run_short_id is used for planned path/branch names (e.g. a short
-    run-id or a placeholder string like '<short-run-id-placeholder>').
-    """
+    """Resolve isolation into launch metadata and planned persistent-worktree paths."""
     # isolation_mode preserves the raw resolved value (auto/none/worktree).
     # effective_isolation is the mapped behavior (none/worktree, never auto).
     isolation_mode_raw = resolved_isolation
@@ -284,17 +193,8 @@ def build_isolation_context(
     )
 
 
-# ---------------------------------------------------------------------------
-# Wave 3: execution-side helpers (validation, creation, prompt injection)
-# ---------------------------------------------------------------------------
-
-
 class IsolationExecutionError(Exception):
-    """Lightweight error raised by isolation execution helpers.
-
-    Callers (cli.py) catch and convert to DelegateError with the
-    appropriate exit code.
-    """
+    """Machine-readable isolation failure converted to DelegateError by cli.py."""
 
     def __init__(self, error: str, message: str) -> None:
         super().__init__(message)
@@ -303,11 +203,7 @@ class IsolationExecutionError(Exception):
 
 
 def require_valid_head(source_git_root: str) -> str:
-    """Validate that HEAD exists and return its OID.
-
-    Raises IsolationExecutionError("missing_git_head", ...) when the
-    repository has no commits (empty/unborn repo).
-    """
+    """Return HEAD's OID or raise missing_git_head for an unborn repository."""
     result = _run_git(
         source_git_root,
         ["rev-parse", "--verify", "HEAD"],
@@ -323,12 +219,7 @@ def require_valid_head(source_git_root: str) -> str:
 
 
 def require_clean_source(source_git_root: str) -> None:
-    """Require the source workspace to be clean (no staged, unstaged,
-    untracked, or submodule dirtiness).
-
-    Raises IsolationExecutionError("dirty_source_workspace", ...) when
-    git status --porcelain produces any output or exits non-zero.
-    """
+    """Require no staged, unstaged, untracked, or submodule dirtiness."""
     result = _run_git(
         source_git_root,
         ["status", "--porcelain=v1", "--untracked-files=normal", "--ignore-submodules=none"],
@@ -357,13 +248,7 @@ def create_persistent_worktree(
     worktree_path: str,
     base_oid: str,
 ) -> None:
-    """Create a persistent Git worktree on a new branch from base_oid.
-
-    Raises IsolationExecutionError("branch_collision", ...) when the
-    branch name already exists. Raises IsolationExecutionError(
-    "worktree_create_failed", ...) for other git failures (including
-    "branch already checked out").
-    """
+    """Create a persistent Git worktree on a new branch from base_oid."""
     branch_probe = _run_git(
         source_git_root,
         ["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
@@ -394,7 +279,7 @@ def create_persistent_worktree(
         )
 
 
-# Exact text from spec § "Prompt context note".
+# Keep this text stable; child prompts and tests rely on the exact wording.
 PERSISTENT_WORKTREE_CONTEXT_NOTE = (
     "You are running in a Delegate-created isolated Git worktree. "
     "Make changes in this execution workspace only. "
@@ -417,18 +302,7 @@ PERSISTENT_WORKTREE_CONTEXT_NOTE = (
 
 
 def prepend_persistent_worktree_context(prompt: str) -> str:
-    """Prepend the persistent-worktree context note AFTER the mandatory
-    skill-review prefix and BEFORE the user prompt.
-
-    The skill-review prefix is always at position 0 (added by
-    effective_prompt / prepend_skill_review_instructions). This
-    function inserts the worktree context between the skill-review
-    prefix and the rest of the prompt.
-    """
-    from delegate_agent.runner import (
-        SKILL_REVIEW_PREFIX,  # lazy: avoids runner -> cli -> isolation cycle
-    )
-
+    """Insert the worktree note after the skill prefix so the user prompt stays last."""
     if prompt.startswith(SKILL_REVIEW_PREFIX):
         insert_at = len(SKILL_REVIEW_PREFIX)
         return prompt[:insert_at] + PERSISTENT_WORKTREE_CONTEXT_NOTE + prompt[insert_at:]

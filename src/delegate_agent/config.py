@@ -4,11 +4,13 @@ import copy
 import json
 import os
 from pathlib import Path
+from typing import Final
 
 from delegate_agent import reasoning
 from delegate_agent.json_types import JsonObject, JsonValue, is_non_negative_int
 
-DEFAULT_CONFIG_PATH = Path.home() / ".delegate" / "config.json"
+DEFAULT_CONFIG_PATH: Path | None = None
+DEFAULT_CONFIG_RELATIVE: Final = Path(".delegate") / "config.json"
 WORKSPACE_CONFIG_RELATIVE = Path(".delegate") / "config.json"
 CONFIG_ENV = "DELEGATE_CONFIG"
 COMPLETION_REPORT_MODE_MARKDOWN = "markdown"
@@ -22,6 +24,7 @@ ISOLATION_AUTO = "auto"
 ISOLATION_NONE = "none"
 ISOLATION_WORKTREE = "worktree"
 VALID_ISOLATION_VALUES = (ISOLATION_AUTO, ISOLATION_NONE, ISOLATION_WORKTREE)
+SAFE_ISOLATION_REQUIRED_ENGINES = frozenset({"cursor", "droid", "kimi"})
 
 POLICY_PROFILES = ("safe", "trusted-hooks", "external-sandbox", "custom")
 POLICY_MODE_KEYS = frozenset(
@@ -44,7 +47,7 @@ DEFAULT_MODE_POLICY: JsonObject = {
     "bypassHookTrust": False,
 }
 
-DEFAULT_CONFIG: JsonObject = {
+_EMBEDDED_DEFAULT_CONFIG: JsonObject = {
     "tracking": {
         "completionReport": {
             "defaultMode": COMPLETION_REPORT_MODE_MARKDOWN,
@@ -100,6 +103,14 @@ DEFAULT_CONFIG: JsonObject = {
         },
     },
 }
+
+
+def embedded_default_config() -> JsonObject:
+    """Return a fresh copy of Delegate's embedded default configuration."""
+    return copy.deepcopy(_EMBEDDED_DEFAULT_CONFIG)
+
+
+DEFAULT_CONFIG: JsonObject = embedded_default_config()
 
 
 def _profile_policy(profile: str) -> JsonObject:
@@ -462,6 +473,20 @@ class InvalidIsolationError(Exception):
         super().__init__(message)
 
 
+def _validate_resolved_isolation_boundary(
+    value: str,
+    *,
+    engine: str,
+    mode: str,
+    source: str,
+) -> None:
+    if mode == "safe" and engine in SAFE_ISOLATION_REQUIRED_ENGINES and value == ISOLATION_NONE:
+        raise InvalidIsolationError(
+            f"{source} cannot be 'none' for {engine} safe mode; "
+            "use 'auto' or 'worktree' so safe mode runs in a temporary isolated workspace."
+        )
+
+
 def resolve_isolation(
     cli_value: str | None = None,
     input_json_value: str | None = None,
@@ -474,12 +499,24 @@ def resolve_isolation(
             raise InvalidIsolationError(
                 f"--isolation must be one of: {', '.join(VALID_ISOLATION_VALUES)}."
             )
+        _validate_resolved_isolation_boundary(
+            cli_value,
+            engine=engine,
+            mode=mode,
+            source="--isolation",
+        )
         return cli_value
     if input_json_value is not None:
         if input_json_value not in VALID_ISOLATION_VALUES:
             raise InvalidIsolationError(
                 f"isolation must be one of: {', '.join(VALID_ISOLATION_VALUES)}."
             )
+        _validate_resolved_isolation_boundary(
+            input_json_value,
+            engine=engine,
+            mode=mode,
+            source="input JSON isolation",
+        )
         return input_json_value
     if isinstance(loaded_config, dict):
         isolation_cfg = loaded_config.get("isolation")
@@ -497,6 +534,12 @@ def resolve_isolation(
                     raise InvalidIsolationError(
                         f"config isolation.{mode} must be one of: {', '.join(VALID_ISOLATION_VALUES)}."
                     )
+                _validate_resolved_isolation_boundary(
+                    value,
+                    engine=engine,
+                    mode=mode,
+                    source=f"config isolation.{mode}",
+                )
                 return value
     # Embedded defaults
     if mode == "work":
@@ -521,8 +564,14 @@ def deep_merge(base: JsonObject, override: JsonObject) -> JsonObject:
     return merged
 
 
+def default_config_path() -> Path:
+    if DEFAULT_CONFIG_PATH is not None:
+        return DEFAULT_CONFIG_PATH.expanduser()
+    return Path.home() / DEFAULT_CONFIG_RELATIVE
+
+
 def config_path() -> Path:
-    return Path(os.environ.get(CONFIG_ENV, str(DEFAULT_CONFIG_PATH))).expanduser()
+    return Path(os.environ.get(CONFIG_ENV, str(default_config_path()))).expanduser()
 
 
 def workspace_config_path(workspace: Path) -> Path:
@@ -550,10 +599,10 @@ def load_config(
     When DELEGATE_CONFIG is set, the path must exist; a missing file raises ConfigError
     instead of discarding lower-precedence layers.
     """
-    merged = copy.deepcopy(DEFAULT_CONFIG)
+    merged = embedded_default_config()
     primary_source = "embedded-default"
 
-    global_path = DEFAULT_CONFIG_PATH.expanduser()
+    global_path = default_config_path()
     if global_path.exists():
         merged = deep_merge(merged, read_config_file(global_path))
         primary_source = str(global_path)

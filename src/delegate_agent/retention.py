@@ -7,8 +7,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import BinaryIO
 
-from delegate_agent import archived_logs, run_registry
+from delegate_agent import archived_logs, log_output, run_registry
 from delegate_agent.json_types import JsonObject, is_non_negative_int
+from delegate_agent.log_output import LogOutput
 
 ARCHIVE_MEMBER_NAMES = (
     run_registry.STDOUT_LOG,
@@ -85,15 +86,21 @@ def _verify_archive_members(archive_file: Path, expected_sizes: dict[str, int]) 
         return all(name in found and found[name] == size for name, size in expected_sizes.items())
 
 
-def _tail_text_stream(stream: BinaryIO, lines: int) -> str:
+def _tail_text_stream_output(stream: BinaryIO, lines: int) -> LogOutput:
     if lines < 1:
         raise ValueError("tail lines must be at least 1")
     buffer: deque[str] = deque(maxlen=lines)
+    total_lines = 0
     for raw_line in stream:
+        total_lines += 1
         buffer.append(raw_line.decode("utf-8", errors="replace").rstrip("\r\n"))
     if not buffer:
-        return ""
-    return "\n".join(buffer) + "\n"
+        return LogOutput(content="", truncated=False)
+    return LogOutput(content="\n".join(buffer) + "\n", truncated=total_lines > lines)
+
+
+def _tail_text_stream(stream: BinaryIO, lines: int) -> str:
+    return _tail_text_stream_output(stream, lines).content
 
 
 def effective_log_byte_sizes(registry_root: Path, run_id: str) -> tuple[int, int]:
@@ -145,7 +152,9 @@ def _mark_raw_logs_archived(
     stderr_bytes: int = 0,
 ) -> None:
     state_path = run_path / run_registry.STATE_FILE
-    state = run_registry.read_json_object(state_path) or {}
+    state = run_registry.read_json_object(state_path)
+    if state is None:
+        state = {}
     state["rawLogsArchivedAt"] = run_registry.utc_now_iso()
     state["stdoutBytes"] = stdout_bytes
     state["stderrBytes"] = stderr_bytes
@@ -258,15 +267,19 @@ def read_archived_member(archive_file: Path, member_name: str) -> str:
 
 
 def tail_archived_member(archive_file: Path, member_name: str, lines: int) -> str:
+    return tail_archived_output(archive_file, member_name, lines).content
+
+
+def tail_archived_output(archive_file: Path, member_name: str, lines: int) -> LogOutput:
     _validate_archive_member_name(member_name)
     with tarfile.open(archive_file, "r:gz") as archive:
         try:
             extracted = archive.extractfile(member_name)
         except KeyError:
-            return ""
+            return LogOutput(content="", truncated=False)
         if extracted is None:
-            return ""
-        return _tail_text_stream(extracted, lines)
+            return LogOutput(content="", truncated=False)
+        return _tail_text_stream_output(extracted, lines)
 
 
 def read_log_output(
@@ -276,24 +289,21 @@ def read_log_output(
     *,
     tail: int | None,
     raw: bool,
-) -> tuple[str, bool]:
-    from delegate_agent.log_output import read_log_output as read_live_log_output
-
+) -> LogOutput:
     _validate_archive_member_name(log_name)
     run_path = run_registry.run_directory(registry_root, run_id)
     live_path = run_path / log_name
     if live_path.exists():
-        return read_live_log_output(live_path, tail=tail, raw=raw)
+        return log_output.read_log_output(live_path, tail=tail, raw=raw)
     archive_file = archive_path(registry_root, run_id)
     if not archive_file.exists():
-        return "", False
+        return LogOutput(content="", truncated=False)
     if raw:
         content = read_archived_member(archive_file, log_name)
-        return content, False
+        return LogOutput(content=content, truncated=False)
     if tail is None:
         raise ValueError("add --tail N or --raw to read stdout/stderr log output")
-    trimmed = tail_archived_member(archive_file, log_name, tail)
-    return trimmed, True
+    return tail_archived_output(archive_file, log_name, tail)
 
 
 def log_file_byte_size(registry_root: Path, run_id: str, log_name: str) -> int:

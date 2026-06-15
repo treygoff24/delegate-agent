@@ -6,17 +6,18 @@ import importlib.util
 import json
 import os
 import re
+import select
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = str(ROOT / "src")
-CLI_PATH = ROOT / "src" / "delegate_agent" / "cli.py"
+CLI_PATH = ROOT / "bin" / "delegate.py"
+MODULE_PATH = ROOT / "src" / "delegate_agent" / "cli.py"
 REGISTRY_PATH = ROOT / "src" / "delegate_agent" / "run_registry.py"
 RETENTION_PATH = ROOT / "src" / "delegate_agent" / "retention.py"
 
@@ -47,6 +48,17 @@ def parse_alias_from_bounded_stdout(stdout: str) -> str:
     raise AssertionError(f"alias not found in bounded output:\n{stdout}")
 
 
+def read_fifo_line(path: Path, *, timeout: float) -> str:
+    fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+    try:
+        ready, _, _ = select.select([fd], [], [], timeout)
+        if not ready:
+            raise AssertionError(f"timed out waiting for FIFO signal: {path}")
+        return os.read(fd, 4096).decode("utf-8").strip()
+    finally:
+        os.close(fd)
+
+
 def make_streaming_harness_script(*, include_completion: bool = True) -> str:
     completion_line = (
         f'printf \'{{"type":"completion","finalText":"{COMPLETION_MARKER}"}}\\n\'\n'
@@ -67,7 +79,12 @@ def make_sleeping_harness_script() -> str:
     return (
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
-        "sleep 4\n"
+        'if [ -n "${FAKE_STARTED_FIFO:-}" ]; then printf "started\\n" > "$FAKE_STARTED_FIFO"; fi\n'
+        'if [ -n "${FAKE_RELEASE_FIFO:-}" ]; then\n'
+        '  IFS= read -r _ < "$FAKE_RELEASE_FIFO"\n'
+        "else\n"
+        "  python3 -c 'import select; select.select([], [], [], 4)'\n"
+        "fi\n"
         f'printf \'{{"type":"message","role":"assistant","content":"{ASSISTANT_MARKER}"}}\\n\'\n'
         f'printf \'{{"type":"completion","finalText":"{COMPLETION_MARKER}"}}\\n\'\n'
         'exit "${FAKE_EXIT:-0}"\n'
@@ -102,7 +119,7 @@ def make_codex_streaming_script(*, include_completion: bool = True) -> str:
 
 class EndToEndTrackingTests(unittest.TestCase):
     def setUp(self):
-        self.delegate = load_module(CLI_PATH, "delegate_cli_e2e_test")
+        self.delegate = load_module(MODULE_PATH, "delegate_cli_e2e_test")
         self.registry = load_module(REGISTRY_PATH, "delegate_registry_e2e_test")
         self.retention = load_module(RETENTION_PATH, "delegate_retention_e2e_test")
         self.workspace_temp = tempfile.TemporaryDirectory()
@@ -354,6 +371,13 @@ class EndToEndTrackingTests(unittest.TestCase):
 
     def test_silent_running_harness_snapshots_as_running(self):
         self.write_fake_binaries(sleeping=True)
+        started_fifo = self.workspace / "fake-started.fifo"
+        release_fifo = self.workspace / "fake-release.fifo"
+        os.mkfifo(started_fifo)
+        os.mkfifo(release_fifo)
+        env = self.delegate_env()
+        env["FAKE_STARTED_FIFO"] = str(started_fifo)
+        env["FAKE_RELEASE_FIFO"] = str(release_fifo)
         process = subprocess.Popen(
             [
                 sys.executable,
@@ -368,18 +392,12 @@ class EndToEndTrackingTests(unittest.TestCase):
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env=self.delegate_env(),
+            env=env,
         )
         try:
-            run_id = None
-            deadline = time.monotonic() + 2.0
-            while time.monotonic() < deadline:
-                if self.registry.index_path(self.registry_root).exists():
-                    index = self.registry.load_index(self.registry_root)
-                    run_id = index["aliases"].get("droid")
-                    if run_id:
-                        break
-                time.sleep(0.05)
+            self.assertEqual(read_fifo_line(started_fifo, timeout=5), "started")
+            index = self.registry.load_index(self.registry_root)
+            run_id = index["aliases"].get("droid")
             self.assertIsNotNone(run_id)
 
             snapshot = self.run_cli(["snapshot", "droid"])
@@ -387,6 +405,8 @@ class EndToEndTrackingTests(unittest.TestCase):
             self.assertIn("droid · running", snapshot.stdout)
             self.assertNotIn("stale", snapshot.stdout)
 
+            with release_fifo.open("w", encoding="utf-8") as release:
+                release.write("go\n")
             stdout, stderr = process.communicate(timeout=10)
             self.assertEqual(process.returncode, 0, stderr)
             self.assertIn("alias: droid", stdout)
@@ -506,7 +526,6 @@ class EndToEndTrackingTests(unittest.TestCase):
         alias1 = parse_alias_from_bounded_stdout(first.stdout)
         self.assertEqual(alias1, "droid")
 
-        time.sleep(1.1)
         second = self.run_tracked_droid("second droid")
         self.assertEqual(second.returncode, 0, second.stderr)
         alias2 = parse_alias_from_bounded_stdout(second.stdout)
@@ -798,7 +817,7 @@ class EndToEndTrackingTests(unittest.TestCase):
         )
         self.assertEqual(json_tail.returncode, 0, json_tail.stderr)
         payload = json.loads(json_tail.stdout)
-        self.assertTrue(payload["sections"]["stdout"]["truncated"])
+        self.assertFalse(payload["sections"]["stdout"]["truncated"])
 
 
 if __name__ == "__main__":

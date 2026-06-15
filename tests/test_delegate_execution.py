@@ -12,6 +12,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 SRC = str(ROOT / "src")
 MODULE_PATH = ROOT / "src" / "delegate_agent" / "cli.py"
+SCRIPT_PATH = ROOT / "bin" / "delegate.py"
 
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
@@ -47,6 +48,57 @@ def safe_temp_dirs() -> set[Path]:
 class ExecutionTests(unittest.TestCase):
     def setUp(self):
         self.delegate = load_delegate()
+
+    def build_git_request(
+        self,
+        engine: str,
+        mode: str,
+        model_alias: str | None,
+        workspace: str,
+        prompt: str,
+        config: dict,
+        dry_run: bool,
+        **kwargs,
+    ):
+        return self.delegate.build_request(
+            engine,
+            mode,
+            model_alias,
+            self.delegate.ResolvedWorkspace(workspace, "git"),
+            prompt,
+            config,
+            dry_run,
+            **kwargs,
+        )
+
+    def parsed_launch(
+        self,
+        subcommand: str,
+        *,
+        cwd: str,
+        engine: str,
+        mode: str,
+        prompt_parts: list[str],
+        model_alias: str | None = None,
+        dry_run: bool = False,
+        isolation: str | None = None,
+        json_mode: bool = True,
+    ):
+        return self.delegate.ParsedCommand(
+            subcommand,
+            global_options=self.delegate.GlobalOptions(
+                json_mode=json_mode,
+                cwd=cwd,
+                isolation=isolation,
+            ),
+            launch=self.delegate.LaunchOptions(
+                engine=engine,
+                mode=mode,
+                model_alias=model_alias,
+                prompt_parts=prompt_parts,
+                dry_run=dry_run,
+            ),
+        )
 
     def make_fake_bin(self):
         temp = tempfile.TemporaryDirectory()
@@ -143,7 +195,11 @@ class ExecutionTests(unittest.TestCase):
                 }
             )
         )
-        parsed = self.delegate.ParsedCommand("run", json_mode=True, input_json=str(task))
+        parsed = self.delegate.ParsedCommand(
+            "run",
+            global_options=self.delegate.GlobalOptions(json_mode=True),
+            run_json=self.delegate.RunJsonOptions(str(task)),
+        )
         with self.assertRaises(self.delegate.DelegateError) as ctx:
             self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
         self.assertEqual(ctx.exception.error, "unknown_input_key")
@@ -196,7 +252,7 @@ class ExecutionTests(unittest.TestCase):
         completed = subprocess.run(
             [
                 sys.executable,
-                str(MODULE_PATH),
+                str(SCRIPT_PATH),
                 "--cwd",
                 repo.name,
                 "--json",
@@ -249,7 +305,7 @@ class ExecutionTests(unittest.TestCase):
         temp_dirs_before = safe_temp_dirs()
 
         completed = subprocess.run(
-            [sys.executable, str(MODULE_PATH), "--cwd", repo.name, "cursor", "safe", "review"],
+            [sys.executable, str(SCRIPT_PATH), "--cwd", repo.name, "cursor", "safe", "review"],
             text=True,
             capture_output=True,
             env=env,
@@ -274,7 +330,7 @@ class ExecutionTests(unittest.TestCase):
             temp_dirs_before = safe_temp_dirs()
 
             completed = subprocess.run(
-                [sys.executable, str(MODULE_PATH), "--cwd", workspace, "cursor", "safe", "review"],
+                [sys.executable, str(SCRIPT_PATH), "--cwd", workspace, "cursor", "safe", "review"],
                 text=True,
                 capture_output=True,
                 env=env,
@@ -372,7 +428,7 @@ class ExecutionTests(unittest.TestCase):
         completed = subprocess.run(
             [
                 sys.executable,
-                str(MODULE_PATH),
+                str(SCRIPT_PATH),
                 "--cwd",
                 repo.name,
                 "--json",
@@ -431,7 +487,7 @@ class ExecutionTests(unittest.TestCase):
         completed = subprocess.run(
             [
                 sys.executable,
-                str(MODULE_PATH),
+                str(SCRIPT_PATH),
                 "--cwd",
                 repo.name,
                 "--json",
@@ -454,7 +510,7 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(safe_temp_dirs() - temp_dirs_before, set())
 
     def test_codex_safe_dry_run_reports_isolated_workspace(self):
-        request = self.delegate.build_request(
+        request = self.build_git_request(
             "codex",
             "safe",
             None,
@@ -527,6 +583,26 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(once, twice)
         self.assertEqual(once.count("Delegate Codex safe mode"), 1)
 
+    def test_effective_prompt_droid_safe_order_and_idempotence(self):
+        once = self.delegate.effective_prompt(
+            "review the diff",
+            engine="droid",
+            mode="safe",
+            completion_report_mode="none",
+        )
+        twice = self.delegate.effective_prompt(
+            once,
+            engine="droid",
+            mode="safe",
+            completion_report_mode="none",
+        )
+        droid_idx = once.find("Delegate Droid safe mode")
+        user_idx = once.find("review the diff")
+        self.assertGreater(droid_idx, 0)
+        self.assertGreater(user_idx, droid_idx)
+        self.assertEqual(once, twice)
+        self.assertEqual(once.count("Delegate Droid safe mode"), 1)
+
     def test_effective_prompt_codex_work_omits_safe_prefix(self):
         p = self.delegate.effective_prompt(
             "ship the fix",
@@ -581,7 +657,7 @@ class ExecutionTests(unittest.TestCase):
                 json.dumps(
                     {
                         "kimi": {"binary": "delegate-test-kimi"},
-                        "isolation": {"safe": "none"},
+                        "isolation": {"safe": "auto"},
                     }
                 ),
                 encoding="utf-8",
@@ -619,7 +695,7 @@ class ExecutionTests(unittest.TestCase):
     # -- Wave 2: dry-run structured isolation fields --------------------------------
 
     def test_dry_run_cursor_safe_includes_structured_isolation_fields(self):
-        request = self.delegate.build_request(
+        request = self.build_git_request(
             "cursor",
             "safe",
             None,
@@ -638,7 +714,7 @@ class ExecutionTests(unittest.TestCase):
 
     def test_dry_run_cursor_work_auto_isolation_fields(self):
         """Work mode with auto isolation reports none lifecycle."""
-        request = self.delegate.build_request(
+        request = self.build_git_request(
             "cursor",
             "work",
             None,
@@ -655,7 +731,7 @@ class ExecutionTests(unittest.TestCase):
         self.assertIsNone(payload["plannedExecutionCwd"])
 
     def test_dry_run_codex_safe_uses_worktree_temporary(self):
-        request = self.delegate.build_request(
+        request = self.build_git_request(
             "codex",
             "safe",
             None,
@@ -671,7 +747,7 @@ class ExecutionTests(unittest.TestCase):
 
     def test_dry_run_isolation_field_is_not_repurposed(self):
         """The existing isolation field is kept as a human-readable note, not an enum."""
-        request = self.delegate.build_request(
+        request = self.build_git_request(
             "cursor",
             "safe",
             None,
@@ -718,16 +794,6 @@ class ExecutionTests(unittest.TestCase):
                 check=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-            )
-            self.delegate.ParsedCommand(
-                "cursor",
-                json_mode=True,
-                cwd=repo_dir,
-                engine="cursor",
-                mode="work",
-                prompt_parts=["hello"],
-                dry_run=True,
-                isolation="worktree",
             )
             _config, _ = self.delegate.load_config()
             stdout_buf = io.StringIO()
@@ -823,60 +889,36 @@ class ExecutionTests(unittest.TestCase):
 
     # -- Finding A: isolatedWorkspace always emitted as explicit boolean ----------
 
-    def test_dry_run_cursor_work_isolated_workspace_false(self):
-        """Cursor work mode dry-run JSON has isolatedWorkspace: false."""
-        request = self.delegate.build_request(
-            "cursor",
-            "work",
-            None,
-            "/repo",
-            "hello",
-            self.delegate.DEFAULT_CONFIG,
-            dry_run=True,
+    def test_dry_run_isolated_workspace_contract_by_harness_mode(self):
+        """Work mode stays in place; all safe harnesses with auto isolation are isolated."""
+        droid_config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        droid_config["droid"]["models"] = {"test-model": "real-model-id"}
+        cases = (
+            ("cursor", "work", None, self.delegate.DEFAULT_CONFIG, False),
+            ("cursor", "safe", None, self.delegate.DEFAULT_CONFIG, True),
+            ("droid", "safe", "test-model", droid_config, True),
         )
-        payload = self.delegate.dry_run_payload(request)
-        self.assertIn("isolatedWorkspace", payload)
-        self.assertFalse(payload["isolatedWorkspace"])
 
-    def test_dry_run_droid_safe_isolated_workspace_false(self):
-        """Droid safe mode dry-run JSON has isolatedWorkspace: false."""
-        config = dict(self.delegate.DEFAULT_CONFIG)
-        config["droid"] = dict(config["droid"])
-        config["droid"]["models"] = {"test-model": "real-model-id"}
-        request = self.delegate.build_request(
-            "droid",
-            "safe",
-            "test-model",
-            "/repo",
-            "hello",
-            config,
-            dry_run=True,
-        )
-        payload = self.delegate.dry_run_payload(request)
-        self.assertIn("isolatedWorkspace", payload)
-        self.assertFalse(payload["isolatedWorkspace"])
-
-    def test_dry_run_cursor_safe_isolated_workspace_true(self):
-        """Cursor safe mode dry-run JSON has isolatedWorkspace: true."""
-        request = self.delegate.build_request(
-            "cursor",
-            "safe",
-            None,
-            "/repo",
-            "review",
-            self.delegate.DEFAULT_CONFIG,
-            dry_run=True,
-        )
-        payload = self.delegate.dry_run_payload(request)
-        self.assertIn("isolatedWorkspace", payload)
-        self.assertTrue(payload["isolatedWorkspace"])
+        for engine, mode, model_alias, config, expected in cases:
+            with self.subTest(engine=engine, mode=mode):
+                request = self.build_git_request(
+                    engine,
+                    mode,
+                    model_alias,
+                    "/repo",
+                    "hello",
+                    config,
+                    dry_run=True,
+                )
+                payload = self.delegate.dry_run_payload(request)
+                self.assertIn("isolatedWorkspace", payload)
+                self.assertIs(payload["isolatedWorkspace"], expected)
 
     def test_dry_run_isolation_worktree_isolated_workspace_true(self):
         """--isolation worktree cursor work dry-run JSON has isolatedWorkspace: true."""
         repo, _git_cd = self._make_git_repo_with_commit()
-        parsed = self.delegate.ParsedCommand(
+        parsed = self.parsed_launch(
             "cursor",
-            json_mode=True,
             cwd=repo.name,
             engine="cursor",
             mode="work",
@@ -940,9 +982,8 @@ class ExecutionTests(unittest.TestCase):
         '<planned-worktree-path>' or '<planned-branch>' sentinel strings.
         The run-id may still be a placeholder since no run is allocated."""
         repo, _git_cd = self._make_git_repo_with_commit()
-        parsed = self.delegate.ParsedCommand(
+        parsed = self.parsed_launch(
             "cursor",
-            json_mode=True,
             cwd=repo.name,
             engine="cursor",
             mode="work",
@@ -974,9 +1015,8 @@ class ExecutionTests(unittest.TestCase):
         branch_prefix: str,
     ) -> None:
         repo, _git_cd = self._make_git_repo_with_commit()
-        parsed = self.delegate.ParsedCommand(
+        parsed = self.parsed_launch(
             engine,
-            json_mode=True,
             cwd=repo.name,
             engine=engine,
             mode="safe",
@@ -1013,9 +1053,8 @@ class ExecutionTests(unittest.TestCase):
     def test_dry_run_worktree_planned_paths_not_placeholders_codex(self):
         """Codex work --isolation worktree dry-run yields concrete planned paths."""
         repo, _git_cd = self._make_git_repo_with_commit()
-        parsed = self.delegate.ParsedCommand(
+        parsed = self.parsed_launch(
             "codex",
-            json_mode=True,
             cwd=repo.name,
             engine="codex",
             mode="work",
@@ -1039,9 +1078,8 @@ class ExecutionTests(unittest.TestCase):
     def test_dry_run_worktree_planned_paths_not_placeholders_droid_qwen(self):
         """Droid qwen work --isolation worktree dry-run yields concrete planned paths."""
         repo, _git_cd = self._make_git_repo_with_commit()
-        parsed = self.delegate.ParsedCommand(
+        parsed = self.parsed_launch(
             "droid",
-            json_mode=True,
             cwd=repo.name,
             engine="droid",
             mode="work",
@@ -1100,9 +1138,8 @@ class ExecutionTests(unittest.TestCase):
         """Non-Git workspace with --isolation worktree dry-run shows placeholder paths
         since fingerprint and branch cannot be computed (would fail at execution)."""
         with tempfile.TemporaryDirectory() as non_git_dir:
-            parsed = self.delegate.ParsedCommand(
+            parsed = self.parsed_launch(
                 "cursor",
-                json_mode=True,
                 cwd=non_git_dir,
                 engine="cursor",
                 mode="work",
@@ -1734,71 +1771,24 @@ class ExecutionTests(unittest.TestCase):
             # No temp dirs should remain (safe_temp_dirs returns dirs under tempfile)
             # The cleanup is handled by the context manager's finally block
 
-    # -- Cursor safe --isolation none does not write source .cursor/cli.json --
+    # -- Cursor safe --isolation none fails closed before source workspace use --
 
-    def test_cursor_safe_isolation_none_no_source_cursor_config(self):
-        """Cursor safe with --isolation none does not write .cursor/cli.json in source."""
+    def test_cursor_safe_isolation_none_rejected(self):
+        """Cursor safe cannot disable the temporary isolation boundary."""
         repo, _git_cd = self._make_git_repo_with_commit()
         source_cursor_config = Path(repo.name) / ".cursor" / "cli.json"
         self.assertFalse(source_cursor_config.exists())
-        # The safe_isolated_request context manager with isolation "none"
-        # skips isolation entirely, so no .cursor/cli.json is written.
-        config = dict(self.delegate.DEFAULT_CONFIG)
-        workspace = self.delegate.resolve_workspace(repo.name)
-        git_root, git_common_dir, head_oid, head_ref, branch_name = (
-            self.delegate.capture_git_metadata(repo.name)
-        )
-        effective = self.delegate.delegate_config.resolve_isolation(
-            cli_value="none",
-            loaded_config=config,
-            engine="cursor",
-            mode="safe",
-        )
-        isolation_context = self.delegate.build_isolation_context(
-            source_workspace=workspace.path,
-            resolved_isolation=effective,
-            engine="cursor",
-            mode="safe",
-            config=config,
-            run_short_id=None,
-            source_git_root=git_root,
-            source_git_common_dir=git_common_dir,
-            source_head_oid=head_oid,
-            source_head_ref=head_ref,
-            source_branch=branch_name,
-        )
-        request = self.delegate.Request(
-            "cursor",
-            "safe",
-            repo.name,
-            self.delegate.prefix_cursor_safe_prompt(
-                self.delegate.delegate_runner.SKILL_REVIEW_PREFIX + "hello"
-            ),
-            [
-                "agent",
-                "--workspace",
-                repo.name,
-                "-p",
-                "--trust",
-                "--model",
-                "composer-2.5",
-                "--output-format",
-                "text",
-                self.delegate.prefix_cursor_safe_prompt(
-                    self.delegate.delegate_runner.SKILL_REVIEW_PREFIX + "hello"
-                ),
-            ],
-            "composer-2.5",
-            workspace_kind="git",
-            isolation_context=isolation_context,
-        )
-        # safe_isolated_request should skip isolation for none
-        with self.delegate.safe_isolated_request(request) as isolated:
-            self.assertEqual(isolated.workspace, repo.name)
-        # After context exits, source .cursor/cli.json should NOT exist
+        with self.assertRaises(self.delegate.delegate_config.InvalidIsolationError) as ctx:
+            self.delegate.delegate_config.resolve_isolation(
+                cli_value="none",
+                loaded_config=self.delegate.DEFAULT_CONFIG,
+                engine="cursor",
+                mode="safe",
+            )
+        self.assertIn("cursor safe mode", str(ctx.exception))
         self.assertFalse(
             source_cursor_config.exists(),
-            "Source .cursor/cli.json should NOT be written for --isolation none",
+            "Rejected --isolation none must not write source .cursor/cli.json",
         )
 
     def test_safe_isolated_request_preserves_request_metadata(self):
@@ -2202,14 +2192,14 @@ class ExecutionTests(unittest.TestCase):
                 isolation_context=request.isolation_context,
             )
             # Force create_persistent_worktree to fail.
-            original_create = self.delegate.create_persistent_worktree
+            original_create = self.delegate.worktree_execution.create_persistent_worktree
 
             def failing_create(*args, **kwargs):
-                raise self.delegate.IsolationExecutionError(
+                raise self.delegate.worktree_execution.IsolationExecutionError(
                     "worktree_create_failed", "Simulated worktree failure"
                 )
 
-            self.delegate.create_persistent_worktree = failing_create
+            self.delegate.worktree_execution.create_persistent_worktree = failing_create
             try:
                 with self.assertRaises(self.delegate.DelegateError) as ctx:
                     self.delegate.execute_request(
@@ -2248,7 +2238,7 @@ class ExecutionTests(unittest.TestCase):
                 self.assertIn("plannedBranch", snapshot_payload)
                 self.assertIn("plannedExecutionCwd", snapshot_payload)
             finally:
-                self.delegate.create_persistent_worktree = original_create
+                self.delegate.worktree_execution.create_persistent_worktree = original_create
 
     def test_prelaunch_failure_snapshot_omits_unrealized_fields(self):
         """Pre-launch failure snapshot omits executionCwd/worktreeStatus/worktreeCleanupCommands
@@ -2278,14 +2268,14 @@ class ExecutionTests(unittest.TestCase):
                 workspace_kind=request.workspace_kind,
                 isolation_context=request.isolation_context,
             )
-            original_create = self.delegate.create_persistent_worktree
+            original_create = self.delegate.worktree_execution.create_persistent_worktree
 
             def failing_create(*args, **kwargs):
-                raise self.delegate.IsolationExecutionError(
+                raise self.delegate.worktree_execution.IsolationExecutionError(
                     "worktree_create_failed", "Simulated worktree failure"
                 )
 
-            self.delegate.create_persistent_worktree = failing_create
+            self.delegate.worktree_execution.create_persistent_worktree = failing_create
             try:
                 with self.assertRaises(self.delegate.DelegateError) as ctx:
                     self.delegate.execute_request(
@@ -2318,7 +2308,7 @@ class ExecutionTests(unittest.TestCase):
                 self.assertNotIn("worktreeCleanupCommands", snapshot)
                 self.assertNotIn("branch", snapshot)
             finally:
-                self.delegate.create_persistent_worktree = original_create
+                self.delegate.worktree_execution.create_persistent_worktree = original_create
 
     def test_partial_worktree_cleanup_uses_git_timeouts(self):
         """Failure-path cleanup must not run unbounded git subprocesses."""
@@ -2329,13 +2319,14 @@ class ExecutionTests(unittest.TestCase):
             run_path.mkdir()
             completed = subprocess.CompletedProcess(["git"], 0, "", "")
             with mock.patch.object(
-                self.delegate.subprocess, "run", return_value=completed
+                self.delegate.worktree_execution.subprocess, "run", return_value=completed
             ) as run_mock:
-                self.delegate._cleanup_partial_worktree(
+                self.delegate.worktree_execution._cleanup_partial_worktree(
                     "/repo",
                     str(worktree_path),
                     "delegate/cursor-partial",
                     run_path,
+                    stderr=io.StringIO(),
                     remove_branch=True,
                 )
 
@@ -2343,7 +2334,7 @@ class ExecutionTests(unittest.TestCase):
             for call in run_mock.call_args_list:
                 self.assertEqual(
                     call.kwargs.get("timeout"),
-                    self.delegate.GIT_MUTATION_TIMEOUT_SECONDS,
+                    self.delegate.worktree_execution.GIT_MUTATION_TIMEOUT_SECONDS,
                 )
 
     def test_partial_worktree_cleanup_records_branch_delete_failure(self):
@@ -2365,17 +2356,18 @@ class ExecutionTests(unittest.TestCase):
 
             with (
                 mock.patch.object(
-                    self.delegate.subprocess,
+                    self.delegate.worktree_execution.subprocess,
                     "run",
                     side_effect=[worktree_removed, branch_failed, branch_still_exists],
                 ),
-                mock.patch.object(self.delegate.sys, "stderr", io.StringIO()) as stderr,
             ):
-                self.delegate._cleanup_partial_worktree(
+                stderr = io.StringIO()
+                self.delegate.worktree_execution._cleanup_partial_worktree(
                     "/repo",
                     str(worktree_path),
                     "delegate/cursor-partial",
                     run_path,
+                    stderr=stderr,
                     remove_branch=True,
                 )
 
@@ -2383,6 +2375,49 @@ class ExecutionTests(unittest.TestCase):
             self.assertTrue(snapshot["cleanupFailed"])
             self.assertIn("branch -D delegate/cursor-partial", snapshot["manualCleanup"])
             self.assertIn("manual cleanup required", stderr.getvalue())
+
+    def test_partial_worktree_cleanup_warns_when_metadata_write_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            worktree_path = Path(temp_dir) / "partial-worktree"
+            worktree_path.mkdir()
+            run_path = Path(temp_dir) / "run"
+            run_path.mkdir()
+            snapshot_path = run_path / self.delegate.run_registry.SNAPSHOT_FILE
+            self.delegate.run_registry.write_json_atomic(snapshot_path, {"ok": False})
+            worktree_removed = subprocess.CompletedProcess(["git"], 0, "", "")
+            branch_failed = subprocess.CompletedProcess(
+                ["git"],
+                1,
+                "",
+                "fatal: branch deletion failed\n",
+            )
+            branch_still_exists = subprocess.CompletedProcess(["git"], 0, "", "")
+
+            with (
+                mock.patch.object(
+                    self.delegate.worktree_execution.subprocess,
+                    "run",
+                    side_effect=[worktree_removed, branch_failed, branch_still_exists],
+                ),
+                mock.patch.object(
+                    self.delegate.run_registry,
+                    "write_json_atomic",
+                    side_effect=OSError("disk full"),
+                ),
+            ):
+                stderr = io.StringIO()
+                self.delegate.worktree_execution._cleanup_partial_worktree(
+                    "/repo",
+                    str(worktree_path),
+                    "delegate/cursor-partial",
+                    run_path,
+                    stderr=stderr,
+                    remove_branch=True,
+                )
+
+            stderr_text = stderr.getvalue()
+            self.assertIn("could not record cleanup metadata", stderr_text)
+            self.assertIn("manual cleanup required", stderr_text)
 
     def test_partial_worktree_cleanup_ignores_already_missing_branch(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2403,17 +2438,18 @@ class ExecutionTests(unittest.TestCase):
 
             with (
                 mock.patch.object(
-                    self.delegate.subprocess,
+                    self.delegate.worktree_execution.subprocess,
                     "run",
                     side_effect=[worktree_removed, branch_delete_failed, branch_absent],
                 ),
-                mock.patch.object(self.delegate.sys, "stderr", io.StringIO()) as stderr,
             ):
-                self.delegate._cleanup_partial_worktree(
+                stderr = io.StringIO()
+                self.delegate.worktree_execution._cleanup_partial_worktree(
                     "/repo",
                     str(worktree_path),
                     "delegate/cursor-partial",
                     run_path,
+                    stderr=stderr,
                     remove_branch=True,
                 )
 

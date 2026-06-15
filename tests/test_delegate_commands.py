@@ -1,4 +1,4 @@
-import importlib.util
+import importlib
 import io
 import json
 import os
@@ -13,19 +13,13 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = str(ROOT / "src")
-MODULE_PATH = ROOT / "src" / "delegate_agent" / "cli.py"
 
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
 
 def load_delegate():
-    spec = importlib.util.spec_from_file_location("delegate_cli_under_test", MODULE_PATH)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return importlib.reload(importlib.import_module("delegate_agent.cli"))
 
 
 def make_git_repo(*, with_commit: bool = False):
@@ -78,6 +72,28 @@ class CommandTests(unittest.TestCase):
         with mock.patch.dict(os.environ, env, clear=False):
             code = self.delegate.main(argv, stdout=stdout, stderr=stderr)
         return code, stdout.getvalue(), stderr.getvalue()
+
+    def build_git_request(
+        self,
+        engine: str,
+        mode: str,
+        model_alias: str | None,
+        workspace: str,
+        prompt: str,
+        config: dict,
+        dry_run: bool,
+        **kwargs,
+    ):
+        return self.delegate.build_request(
+            engine,
+            mode,
+            model_alias,
+            self.delegate.ResolvedWorkspace(workspace, "git"),
+            prompt,
+            config,
+            dry_run,
+            **kwargs,
+        )
 
     def write_fake_executable(
         self,
@@ -155,7 +171,7 @@ class CommandTests(unittest.TestCase):
     def test_droid_safe_argv(self):
         argv = self.delegate.build_droid_argv("droid", "safe", "/repo", "model-id", "hello")
         self.assertEqual(
-            argv,
+            argv[:-1],
             [
                 "droid",
                 "exec",
@@ -165,9 +181,10 @@ class CommandTests(unittest.TestCase):
                 "model-id",
                 "--output-format",
                 "stream-json",
-                "hello",
             ],
         )
+        self.assertTrue(argv[-1].startswith(self.delegate.DROID_SAFE_REVIEW_PREFIX))
+        self.assertTrue(argv[-1].endswith("hello"))
         self.assertNotIn("--auto", argv)
         self.assertNotIn("--use-spec", argv)
         self.assertNotIn("--skip-permissions-unsafe", argv)
@@ -204,22 +221,34 @@ class CommandTests(unittest.TestCase):
 
     def test_invalid_alias_rejected_before_argv(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.build_request(
+            self.build_git_request(
                 "droid", "safe", "nope", "/repo", "hello", self.delegate.DEFAULT_CONFIG, True
             )
         self.assertEqual(ctx.exception.error, "invalid_alias")
+
+    def test_build_request_requires_resolved_workspace_boundary(self):
+        with self.assertRaisesRegex(TypeError, "build_request requires a ResolvedWorkspace"):
+            self.delegate.build_request(  # type: ignore[arg-type]
+                "cursor",
+                "safe",
+                None,
+                "/repo",
+                "hello",
+                self.delegate.DEFAULT_CONFIG,
+                True,
+            )
 
     def test_placeholder_droid_model_rejected_before_argv(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
         config["droid"]["models"] = {"my-model": "replace-with-your-droid-model-id"}
         with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.build_request("droid", "safe", "my-model", "/repo", "hello", config, True)
+            self.build_git_request("droid", "safe", "my-model", "/repo", "hello", config, True)
         self.assertEqual(ctx.exception.error, "unconfigured_model")
         self.assertIn("placeholder", ctx.exception.message)
 
         config["droid"]["models"] = {"my-model": "your-droid-model-id"}
         with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.build_request("droid", "safe", "my-model", "/repo", "hello", config, True)
+            self.build_git_request("droid", "safe", "my-model", "/repo", "hello", config, True)
         self.assertEqual(ctx.exception.error, "unconfigured_model")
 
     def test_codex_work_default_argv_uses_workspace_sandbox_with_network(self):
@@ -314,7 +343,7 @@ class CommandTests(unittest.TestCase):
         self.assertNotIn("--model", argv)
 
     def test_codex_dry_run_model_null_is_allowed(self):
-        request = self.delegate.build_request(
+        request = self.build_git_request(
             "codex",
             "work",
             None,
@@ -330,7 +359,7 @@ class CommandTests(unittest.TestCase):
     def test_codex_reasoning_effort_argv_uses_config_override(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
         config["codex"]["defaultModel"] = "gpt-5.5"
-        request = self.delegate.build_request(
+        request = self.build_git_request(
             "codex",
             "safe",
             None,
@@ -347,7 +376,7 @@ class CommandTests(unittest.TestCase):
 
     def test_codex_reasoning_effort_fails_without_model(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.build_request(
+            self.build_git_request(
                 "codex",
                 "safe",
                 None,
@@ -362,7 +391,7 @@ class CommandTests(unittest.TestCase):
     def test_droid_reasoning_effort_argv_uses_flag(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
         config["droid"]["models"] = {"reviewer": "gpt-5.5"}
-        request = self.delegate.build_request(
+        request = self.build_git_request(
             "droid",
             "safe",
             "reviewer",
@@ -382,7 +411,7 @@ class CommandTests(unittest.TestCase):
         config["codex"]["defaultModel"] = "gpt-5.5"
         config["droid"]["models"] = {"reviewer": "gpt-5.5"}
 
-        codex = self.delegate.build_request(
+        codex = self.build_git_request(
             "codex",
             "work",
             None,
@@ -400,7 +429,7 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(codex_payload["promptTransport"], "stdin")
         self.assertNotIn(secret_prompt, json.dumps(codex_payload["argv"]))
 
-        droid = self.delegate.build_request(
+        droid = self.build_git_request(
             "droid",
             "safe",
             "reviewer",
@@ -412,6 +441,7 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(droid.prompt_transport, "file")
         self.assertIsNone(droid.stdin_text)
         self.assertIsNotNone(droid.prompt_file_text)
+        self.assertTrue(droid.prompt_file_text.startswith(self.delegate.DROID_SAFE_REVIEW_PREFIX))
         self.assertIn(secret_prompt, droid.prompt_file_text)
         self.assertIn("--file", droid.argv)
         self.assertIn(self.delegate.DROID_PROMPT_FILE_ARG_PLACEHOLDER, droid.argv)
@@ -422,9 +452,38 @@ class CommandTests(unittest.TestCase):
         self.assertIn(self.delegate.DROID_PROMPT_FILE_DISPLAY, droid_payload["argv"])
         self.assertNotIn(secret_prompt, json.dumps(droid_payload["argv"]))
 
+    def test_droid_safe_request_injects_safe_prefix_once_after_skill_prompt(self):
+        repo = make_git_repo(with_commit=True)
+        self.addCleanup(repo.cleanup)
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["droid"]["models"] = {"reviewer": "gpt-5.5"}
+        parsed = self.delegate.ParsedCommand(
+            "droid",
+            global_options=self.delegate.GlobalOptions(cwd=repo.name),
+            launch=self.delegate.LaunchOptions(
+                "droid",
+                "safe",
+                model_alias="reviewer",
+                prompt_parts=["review the diff"],
+            ),
+        )
+
+        request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+
+        prompt = request.prompt_file_text
+        self.assertIsNotNone(prompt)
+        assert prompt is not None
+        self.assertTrue(prompt.startswith(self.delegate.delegate_runner.SKILL_REVIEW_PREFIX))
+        self.assertEqual(prompt.count(self.delegate.DROID_SAFE_REVIEW_PREFIX), 1)
+        self.assertGreater(
+            prompt.find(self.delegate.DROID_SAFE_REVIEW_PREFIX),
+            prompt.find("Delegate sub-agent skill review"),
+        )
+        self.assertIn("review the diff", prompt)
+
     def test_cursor_dry_run_redacts_prompt_argv_tail(self):
         secret_prompt = "TOP-SECRET-CURSOR-PROMPT"
-        request = self.delegate.build_request(
+        request = self.build_git_request(
             "cursor",
             "work",
             None,
@@ -466,7 +525,7 @@ class CommandTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            request = self.delegate.build_request(
+            request = self.build_git_request(
                 "droid",
                 "safe",
                 "reviewer",
@@ -481,7 +540,7 @@ class CommandTests(unittest.TestCase):
 
     def test_cursor_reasoning_effort_requires_mapping(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.build_request(
+            self.build_git_request(
                 "cursor",
                 "safe",
                 None,
@@ -496,7 +555,7 @@ class CommandTests(unittest.TestCase):
     def test_cursor_reasoning_effort_uses_configured_model_mapping(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
         config["cursor"]["reasoningEffortModels"] = {"high": "sonnet-4-thinking"}
-        request = self.delegate.build_request(
+        request = self.build_git_request(
             "cursor",
             "safe",
             None,
@@ -515,7 +574,7 @@ class CommandTests(unittest.TestCase):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
         config["codex"]["defaultModel"] = "gpt-5.5"
         config["codex"]["defaultReasoningEffort"] = "medium"
-        request = self.delegate.build_request(
+        request = self.build_git_request(
             "codex",
             "safe",
             None,
@@ -533,7 +592,7 @@ class CommandTests(unittest.TestCase):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
         config["codex"]["defaultReasoningEffort"] = "medium"
         self.assertIsNone(config["codex"]["defaultModel"])
-        request = self.delegate.build_request(
+        request = self.build_git_request(
             "codex",
             "safe",
             None,
@@ -553,7 +612,7 @@ class CommandTests(unittest.TestCase):
     def test_cursor_config_default_effort_degrades_to_warning_without_mapping(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
         config["cursor"]["defaultReasoningEffort"] = "high"
-        request = self.delegate.build_request(
+        request = self.build_git_request(
             "cursor",
             "safe",
             None,
@@ -571,7 +630,7 @@ class CommandTests(unittest.TestCase):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
         self.assertIsNone(config["codex"]["defaultModel"])
         with self.assertRaises(self.delegate.DelegateError) as caught:
-            self.delegate.build_request(
+            self.build_git_request(
                 "codex",
                 "safe",
                 None,
@@ -595,7 +654,7 @@ class CommandTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            request = self.delegate.build_request(
+            request = self.build_git_request(
                 "codex",
                 "safe",
                 None,
@@ -667,7 +726,11 @@ class CommandTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            parsed = self.delegate.ParsedCommand("run", json_mode=True, input_json=str(task))
+            parsed = self.delegate.ParsedCommand(
+                "run",
+                global_options=self.delegate.GlobalOptions(json_mode=True),
+                run_json=self.delegate.RunJsonOptions(str(task)),
+            )
             request = self.delegate.request_from_input_json(parsed, config)
         self.assertEqual(request.reasoning_effort_source, "input-json")
         self.assertIn('model_reasoning_effort="high"', request.argv)
@@ -690,7 +753,11 @@ class CommandTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            parsed = self.delegate.ParsedCommand("run", json_mode=True, input_json=str(task))
+            parsed = self.delegate.ParsedCommand(
+                "run",
+                global_options=self.delegate.GlobalOptions(json_mode=True),
+                run_json=self.delegate.RunJsonOptions(str(task)),
+            )
             request = self.delegate.request_from_input_json(parsed, config)
         self.assertIn('model_reasoning_effort="high"', request.argv)
         self.assertNotIn('model_reasoning_effort="medium"', request.argv)
@@ -862,7 +929,11 @@ class CommandTests(unittest.TestCase):
                     }
                 )
             )
-            parsed = self.delegate.ParsedCommand("run", json_mode=True, input_json=str(task))
+            parsed = self.delegate.ParsedCommand(
+                "run",
+                global_options=self.delegate.GlobalOptions(json_mode=True),
+                run_json=self.delegate.RunJsonOptions(str(task)),
+            )
             request = self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
             self.assertIsNone(request.model)
             self.assertNotIn("--model", request.argv)
@@ -881,7 +952,11 @@ class CommandTests(unittest.TestCase):
                     }
                 )
             )
-            parsed = self.delegate.ParsedCommand("run", json_mode=True, input_json=str(task))
+            parsed = self.delegate.ParsedCommand(
+                "run",
+                global_options=self.delegate.GlobalOptions(json_mode=True),
+                run_json=self.delegate.RunJsonOptions(str(task)),
+            )
             with self.assertRaises(self.delegate.DelegateError) as ctx:
                 self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
             self.assertEqual(ctx.exception.error, "invalid_input_key")
@@ -908,6 +983,11 @@ class CommandTests(unittest.TestCase):
         self.assertIn(
             self.delegate.DROID_PROMPT_FILE_DISPLAY, payload["modeMapping"]["droid"]["safe"]
         )
+        self.assertIn("<isolated-workspace>", payload["modeMapping"]["droid"]["safe"])
+        self.assertFalse(payload["isolation"]["safeNoneAllowed"]["droid"])
+        self.assertTrue(payload["isolation"]["safeNoneAllowed"]["codex"])
+        self.assertIn("safeNotes", payload["modeMapping"]["droid"])
+        self.assertIn("isolation none", payload["modeMapping"]["droid"]["safeNotes"][2])
         self.assertNotIn("--auto", payload["modeMapping"]["droid"]["safe"])
         self.assertNotIn("--use-spec", payload["modeMapping"]["droid"]["safe"])
         self.assertNotIn("--skip-permissions-unsafe", payload["modeMapping"]["droid"]["safe"])
@@ -953,7 +1033,7 @@ class CommandTests(unittest.TestCase):
         self.assertNotIn("sandbox_workspace_write.network_access=true", codex_work)
 
     def test_cursor_safe_dry_run_reports_isolation(self):
-        request = self.delegate.build_request(
+        request = self.build_git_request(
             "cursor",
             "safe",
             None,
@@ -1007,7 +1087,10 @@ class CommandTests(unittest.TestCase):
             secret.write_text("outside-secret\n")
             (Path(workspace) / "link.txt").symlink_to(secret)
 
-            copy_path, temp_base = self.delegate.create_directory_safe_workspace(workspace)
+            copy_path, temp_base, warnings = self.delegate.create_directory_safe_workspace(
+                workspace,
+                include_warnings=True,
+            )
             try:
                 copied = Path(copy_path) / "link.txt"
                 self.assertFalse(copied.is_symlink())
@@ -1016,6 +1099,10 @@ class CommandTests(unittest.TestCase):
                     self.delegate.SAFE_BLOCKED_SYMLINK_PLACEHOLDER,
                 )
                 self.assertNotIn(str(secret), copied.read_text(encoding="utf-8"))
+                self.assertEqual(len(warnings), 1)
+                self.assertIn(self.delegate.SAFE_EXTERNAL_SYMLINK_WARNING_PREFIX, warnings[0])
+                self.assertIn("link.txt", warnings[0])
+                self.assertNotIn(str(secret), warnings[0])
             finally:
                 shutil.rmtree(temp_base, ignore_errors=True)
 
@@ -1045,6 +1132,21 @@ class CommandTests(unittest.TestCase):
             finally:
                 shutil.rmtree(temp_base, ignore_errors=True)
 
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "mkfifo unavailable")
+    def test_create_directory_safe_workspace_skips_fifo_files(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            (root / "normal.txt").write_text("copy me\n", encoding="utf-8")
+            os.mkfifo(root / "signal.fifo")
+
+            copy_path, temp_base = self.delegate.create_directory_safe_workspace(workspace)
+            try:
+                copied = Path(copy_path)
+                self.assertEqual((copied / "normal.txt").read_text(encoding="utf-8"), "copy me\n")
+                self.assertFalse((copied / "signal.fifo").exists())
+            finally:
+                shutil.rmtree(temp_base, ignore_errors=True)
+
     def test_external_symlink_audit_warns_without_target_contents(self):
         with tempfile.TemporaryDirectory() as outside, tempfile.TemporaryDirectory() as workspace:
             secret = Path(outside) / "secret.txt"
@@ -1066,7 +1168,10 @@ class CommandTests(unittest.TestCase):
             link = Path(repo.name) / "external-link.txt"
             link.symlink_to(secret)
 
-            worktree_path, temp_base = self.delegate.create_git_safe_workspace(repo.name)
+            worktree_path, temp_base, warnings = self.delegate.create_git_safe_workspace(
+                repo.name,
+                include_warnings=True,
+            )
             try:
                 copied = Path(worktree_path) / "external-link.txt"
                 self.assertFalse(copied.is_symlink())
@@ -1075,12 +1180,48 @@ class CommandTests(unittest.TestCase):
                     self.delegate.SAFE_BLOCKED_SYMLINK_PLACEHOLDER,
                 )
                 self.assertNotIn(str(secret), copied.read_text(encoding="utf-8"))
+                self.assertEqual(len(warnings), 1)
+                self.assertIn(self.delegate.SAFE_EXTERNAL_SYMLINK_WARNING_PREFIX, warnings[0])
+                self.assertIn("external-link.txt", warnings[0])
+                self.assertNotIn(str(secret), warnings[0])
             finally:
                 self.delegate.cleanup_safe_isolated_workspace(
                     git_root=repo.name,
                     isolated_workspace=worktree_path,
                     temp_base=temp_base,
                 )
+
+    def test_create_git_safe_workspace_reports_worktree_timeout(self):
+        timeout = subprocess.CompletedProcess(
+            ["git"],
+            124,
+            "",
+            "git command timed out after 30s",
+        )
+        with (
+            mock.patch.object(self.delegate, "_run_git", return_value=timeout),
+            self.assertRaises(self.delegate.DelegateError) as ctx,
+        ):
+            self.delegate.create_git_safe_workspace("/repo")
+
+        self.assertEqual(ctx.exception.error, "safe_workspace_create_failed")
+        self.assertIn("timed out", ctx.exception.message)
+
+    def test_read_git_tracked_diff_reports_timeout_from_binary_runner(self):
+        timeout = subprocess.CompletedProcess(
+            ["git"],
+            124,
+            b"",
+            b"git command timed out after 30s",
+        )
+        with (
+            mock.patch.object(self.delegate, "_run_git_bytes", return_value=timeout),
+            self.assertRaises(self.delegate.DelegateError) as ctx,
+        ):
+            self.delegate.read_git_tracked_diff("/repo")
+
+        self.assertEqual(ctx.exception.error, "safe_workspace_sync_failed")
+        self.assertIn("timed out", ctx.exception.message)
 
     def test_safe_isolation_surfaces_external_symlink_warning(self):
         repo = make_git_repo(with_commit=True)
@@ -1203,8 +1344,30 @@ class KimiCommandTests(unittest.TestCase):
             code = self.delegate.main(argv, stdout=stdout, stderr=stderr)
         return code, stdout.getvalue(), stderr.getvalue()
 
+    def build_git_request(
+        self,
+        engine: str,
+        mode: str,
+        model_alias: str | None,
+        workspace: str,
+        prompt: str,
+        config: dict,
+        dry_run: bool,
+        **kwargs,
+    ):
+        return self.delegate.build_request(
+            engine,
+            mode,
+            model_alias,
+            self.delegate.ResolvedWorkspace(workspace, "git"),
+            prompt,
+            config,
+            dry_run,
+            **kwargs,
+        )
+
     def test_kimi_safe_argv(self):
-        request = self.delegate.build_request(
+        request = self.build_git_request(
             "kimi",
             "safe",
             None,
@@ -1225,7 +1388,7 @@ class KimiCommandTests(unittest.TestCase):
         self.assertTrue(prompt_arg.endswith("hello"))
 
     def test_kimi_work_argv(self):
-        request = self.delegate.build_request(
+        request = self.build_git_request(
             "kimi",
             "work",
             None,
@@ -1242,7 +1405,7 @@ class KimiCommandTests(unittest.TestCase):
         self.assertTrue(prompt_arg.endswith("hello"))
 
     def test_kimi_pass_through_argv(self):
-        request = self.delegate.build_request(
+        request = self.build_git_request(
             "kimi",
             "safe",
             None,
@@ -1261,7 +1424,7 @@ class KimiCommandTests(unittest.TestCase):
     def test_kimi_model_override_from_config(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
         config["kimi"]["defaultModel"] = "kimi-code/custom-model"
-        request = self.delegate.build_request(
+        request = self.build_git_request(
             "kimi",
             "safe",
             None,
@@ -1299,7 +1462,7 @@ class KimiCommandTests(unittest.TestCase):
     def test_kimi_unconfigured_default_model(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
         config["kimi"]["defaultModel"] = None
-        request = self.delegate.build_request(
+        request = self.build_git_request(
             "kimi",
             "work",
             None,

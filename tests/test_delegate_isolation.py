@@ -249,7 +249,7 @@ class BuildIsolationContextTests(unittest.TestCase):
         self.assertEqual(ctx.effective_isolation, "worktree")
         self.assertEqual(ctx.isolation_lifecycle, "temporary")
 
-    def test_droid_safe_auto_maps_to_none(self):
+    def test_droid_safe_auto_maps_to_worktree(self):
         iso = load_isolation()
         ctx = iso.build_isolation_context(
             source_workspace="/repo",
@@ -257,10 +257,9 @@ class BuildIsolationContextTests(unittest.TestCase):
             engine="droid",
             mode="safe",
         )
-        # isolation_mode preserves "auto"; effective_isolation is mapped to "none"
         self.assertEqual(ctx.isolation_mode, "auto")
-        self.assertEqual(ctx.effective_isolation, "none")
-        self.assertEqual(ctx.isolation_lifecycle, "none")
+        self.assertEqual(ctx.effective_isolation, "worktree")
+        self.assertEqual(ctx.isolation_lifecycle, "temporary")
         self.assertFalse(ctx.preserved_workspace)
 
     def test_any_work_auto_maps_to_none(self):
@@ -462,21 +461,19 @@ class ReexportTests(unittest.TestCase):
         self.assertIn("worktree", iso.VALID_ISOLATION_VALUES)
 
 
-class LazyImportCycleTests(unittest.TestCase):
-    """DEV-3: SKILL_REVIEW_PREFIX is lazily imported from runner to avoid cycle."""
+class PromptInstructionImportTests(unittest.TestCase):
+    """Isolation imports prompt constants from the neutral prompt_instructions module."""
 
-    def test_skill_review_prefix_lazy_import_no_cycle(self):
+    def test_prompt_instruction_import_no_cycle(self):
         """Subprocess imports isolation first (before runner) to prove no import cycle."""
         # Run in a clean subprocess to get a guaranteed fresh import order.
-        # isolation.py lazy-imports SKILL_REVIEW_PREFIX from runner.py at call time,
-        # not at module load time, which avoids a potential import cycle.
         code = "\n".join(
             [
                 "import sys",
                 f"sys.path.insert(0, {SRC!r})",
                 "from delegate_agent import isolation",
-                # Call a function that triggers the lazy import of SKILL_REVIEW_PREFIX
                 "result = isolation.prepend_persistent_worktree_context('hi')",
+                "assert 'Delegate-created isolated Git worktree' in result",
                 "print('ok')",
             ]
         )

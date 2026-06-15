@@ -1,0 +1,78 @@
+from __future__ import annotations
+
+from typing import Protocol, TypeAlias
+
+from delegate_agent.json_types import JsonObject
+
+MetadataKeyGroup: TypeAlias = tuple[str, ...]
+
+ISOLATION_METADATA_KEYS: MetadataKeyGroup = (
+    "isolatedWorkspace",
+    "isolationMode",
+    "effectiveIsolation",
+    "isolationLifecycle",
+    "preservedWorkspace",
+)
+
+PERSISTENT_WORKTREE_METADATA_KEYS: MetadataKeyGroup = (
+    "sourceGitRoot",
+    "branch",
+    "creationContext",
+    "worktreeStatus",
+    "safeWorkspaceMethod",
+)
+
+REASONING_METADATA_KEYS: MetadataKeyGroup = (
+    "requestedReasoningEffort",
+    "resolvedReasoningEffort",
+    "reasoningEffortSource",
+    "reasoningCapabilitySource",
+    "reasoningTransport",
+)
+
+SNAPSHOT_STATE_FALLBACK_KEYS: MetadataKeyGroup = (
+    "worktreeStatus",
+    "safeWorkspaceMethod",
+)
+
+SNAPSHOT_MANIFEST_FALLBACK_KEYS: MetadataKeyGroup = (
+    *ISOLATION_METADATA_KEYS[1:],
+    *PERSISTENT_WORKTREE_METADATA_KEYS,
+    "worktreeCleanupCommands",
+    *REASONING_METADATA_KEYS,
+)
+
+
+class RunMetadataCarrier(Protocol):
+    isolated_workspace: bool
+    isolation_mode: str
+    effective_isolation: str
+    isolation_lifecycle: str
+    preserved_workspace: bool
+    source_git_root: str | None
+    branch: str | None
+    creation_context: JsonObject | None
+    worktree_status: str | None
+    safe_workspace_method: str | None
+    warnings: tuple[str, ...]
+
+
+def add_run_metadata_payload_fields(payload: JsonObject, carrier: RunMetadataCarrier) -> None:
+    payload["isolatedWorkspace"] = carrier.isolated_workspace
+    payload["isolationMode"] = carrier.isolation_mode
+    payload["effectiveIsolation"] = carrier.effective_isolation
+    payload["isolationLifecycle"] = carrier.isolation_lifecycle
+    payload["preservedWorkspace"] = carrier.preserved_workspace
+
+    if carrier.source_git_root is not None:
+        payload["sourceGitRoot"] = carrier.source_git_root
+    if carrier.branch is not None:
+        payload["branch"] = carrier.branch
+    if carrier.creation_context is not None:
+        payload["creationContext"] = carrier.creation_context
+    if carrier.worktree_status is not None:
+        payload["worktreeStatus"] = carrier.worktree_status
+    if carrier.safe_workspace_method is not None:
+        payload["safeWorkspaceMethod"] = carrier.safe_workspace_method
+    if carrier.warnings:
+        payload["warnings"] = list(carrier.warnings)

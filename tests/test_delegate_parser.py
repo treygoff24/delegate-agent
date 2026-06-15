@@ -66,8 +66,8 @@ class ParserTests(unittest.TestCase):
 
     def test_global_flags_before_subcommand(self):
         parsed = self.delegate.parse_cli(["--json", "--cwd", "/tmp/repo", "models"])
-        self.assertTrue(parsed.json_mode)
-        self.assertEqual(parsed.cwd, "/tmp/repo")
+        self.assertTrue(parsed.global_options.json_mode)
+        self.assertEqual(parsed.global_options.cwd, "/tmp/repo")
 
     def test_trailing_json_is_rejected(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:
@@ -76,8 +76,8 @@ class ParserTests(unittest.TestCase):
 
     def test_prompt_file_before_prompt_text(self):
         parsed = self.delegate.parse_cli(["cursor", "safe", "--prompt-file", "task.md"])
-        self.assertEqual(parsed.prompt_file, "task.md")
-        self.assertEqual(parsed.prompt_parts, [])
+        self.assertEqual(parsed.launch.prompt_file, "task.md")
+        self.assertEqual(parsed.launch.prompt_parts, [])
 
     def test_prompt_file_after_prompt_text_is_rejected(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:
@@ -86,30 +86,30 @@ class ParserTests(unittest.TestCase):
 
     def test_codex_reasoning_effort_before_prompt(self):
         parsed = self.delegate.parse_cli(["codex", "safe", "--reasoning-effort", "high", "review"])
-        self.assertEqual(parsed.reasoning_effort, "high")
-        self.assertEqual(parsed.prompt_parts, ["review"])
+        self.assertEqual(parsed.launch.reasoning_effort, "high")
+        self.assertEqual(parsed.launch.prompt_parts, ["review"])
 
     def test_droid_reasoning_effort_after_alias_and_mode(self):
         parsed = self.delegate.parse_cli(
             ["droid", "reviewer", "safe", "--reasoning-effort", "high", "review"]
         )
-        self.assertEqual(parsed.engine, "droid")
-        self.assertEqual(parsed.model_alias, "reviewer")
-        self.assertEqual(parsed.reasoning_effort, "high")
-        self.assertEqual(parsed.prompt_parts, ["review"])
+        self.assertEqual(parsed.launch.engine, "droid")
+        self.assertEqual(parsed.launch.model_alias, "reviewer")
+        self.assertEqual(parsed.launch.reasoning_effort, "high")
+        self.assertEqual(parsed.launch.prompt_parts, ["review"])
 
     def test_dry_run_droid_reasoning_effort(self):
         parsed = self.delegate.parse_cli(
             ["dry-run", "droid", "reviewer", "safe", "--reasoning-effort", "high", "review"]
         )
-        self.assertTrue(parsed.dry_run)
-        self.assertEqual(parsed.engine, "droid")
-        self.assertEqual(parsed.reasoning_effort, "high")
+        self.assertTrue(parsed.launch.dry_run)
+        self.assertEqual(parsed.launch.engine, "droid")
+        self.assertEqual(parsed.launch.reasoning_effort, "high")
 
     def test_reasoning_effort_after_prompt_is_prompt_text(self):
         parsed = self.delegate.parse_cli(["codex", "safe", "review", "--reasoning-effort", "high"])
-        self.assertIsNone(parsed.reasoning_effort)
-        self.assertEqual(parsed.prompt_parts, ["review", "--reasoning-effort", "high"])
+        self.assertIsNone(parsed.launch.reasoning_effort)
+        self.assertEqual(parsed.launch.prompt_parts, ["review", "--reasoning-effort", "high"])
 
     def test_reasoning_effort_requires_value(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:
@@ -145,13 +145,13 @@ class ParserTests(unittest.TestCase):
     def test_codex_direct_commands_parse(self):
         parsed = self.delegate.parse_cli(["codex", "work", "implement"])
         self.assertEqual(parsed.subcommand, "codex")
-        self.assertEqual(parsed.engine, "codex")
-        self.assertEqual(parsed.mode, "work")
+        self.assertEqual(parsed.launch.engine, "codex")
+        self.assertEqual(parsed.launch.mode, "work")
 
     def test_dry_run_codex_parses(self):
         parsed = self.delegate.parse_cli(["dry-run", "codex", "safe", "review"])
         self.assertEqual(parsed.subcommand, "codex")
-        self.assertTrue(parsed.dry_run)
+        self.assertTrue(parsed.launch.dry_run)
 
     def test_json_describe_shape(self):
         payload = self.delegate.describe_payload(self.delegate.DEFAULT_CONFIG, "embedded-default")
@@ -169,7 +169,7 @@ class ParserTests(unittest.TestCase):
 
     def test_pass_through_parses_before_subcommand(self):
         parsed = self.delegate.parse_cli(["--pass-through", "cursor", "safe", "hello"])
-        self.assertTrue(parsed.pass_through)
+        self.assertTrue(parsed.global_options.pass_through)
         self.assertEqual(parsed.subcommand, "cursor")
 
     def test_json_pass_through_is_invalid(self):
@@ -203,11 +203,11 @@ class ParserTests(unittest.TestCase):
 
     def test_completion_report_none_flag(self):
         parsed = self.delegate.parse_cli(["--completion-report", "none", "cursor", "safe", "hello"])
-        self.assertEqual(parsed.completion_report, "none")
+        self.assertEqual(parsed.global_options.completion_report, "none")
 
     def test_no_completion_report_alias(self):
         parsed = self.delegate.parse_cli(["--no-completion-report", "cursor", "safe", "hello"])
-        self.assertEqual(parsed.completion_report, "none")
+        self.assertEqual(parsed.global_options.completion_report, "none")
 
     def test_pass_through_skips_completion_report_injection(self):
         parsed = self.delegate.parse_cli(["--pass-through", "cursor", "safe", "hello"])
@@ -234,7 +234,7 @@ class ParserTests(unittest.TestCase):
             prompt_path.write_text("original prompt\n")
             parsed = self.delegate.parse_cli(["cursor", "safe", "--prompt-file", str(prompt_path)])
             prompt = self.delegate.resolve_prompt(
-                parsed.prompt_parts, parsed.prompt_file, io.StringIO()
+                parsed.launch.prompt_parts, parsed.launch.prompt_file, io.StringIO()
             )
             effective = self.delegate.effective_prompt(
                 prompt,
@@ -244,6 +244,20 @@ class ParserTests(unittest.TestCase):
             self.assertIn("Delegate completion report requirement", effective)
             self.assertEqual(prompt_path.read_text(), "original prompt\n")
 
+    def test_nonblocking_stdin_select_failure_does_not_read(self):
+        class BadSelectableStdin:
+            def isatty(self):
+                return False
+
+            def fileno(self):
+                raise OSError("not selectable")
+
+            def read(self):
+                raise AssertionError("read should not be called")
+
+        stdin = BadSelectableStdin()
+        self.assertIsNone(self.delegate.read_stdin_source(stdin, block=False))
+
     def test_snapshot_latest_and_handle_are_mutually_exclusive(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:
             self.delegate.parse_cli(["snapshot", "--latest", "cursor", "cursor"])
@@ -252,9 +266,9 @@ class ParserTests(unittest.TestCase):
     def test_run_output_without_selector_defaults_to_completion_report(self):
         parsed = self.delegate.parse_cli(["run-output", "cursor"])
         self.assertEqual(parsed.subcommand, "run-output")
-        self.assertEqual(parsed.run_output_handle, "cursor")
-        self.assertTrue(parsed.run_output_completion_report)
-        self.assertTrue(parsed.run_output_default)
+        self.assertEqual(parsed.run_output.handle, "cursor")
+        self.assertTrue(parsed.run_output.completion_report)
+        self.assertTrue(parsed.run_output.default)
 
     def test_runs_limit_must_be_positive(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:
@@ -310,8 +324,8 @@ class ParserTests(unittest.TestCase):
 
     def test_run_output_stdout_without_tail_defaults_to_bounded_tail(self):
         parsed = self.delegate.parse_cli(["run-output", "cursor", "--stdout"])
-        self.assertTrue(parsed.run_output_stdout)
-        self.assertEqual(parsed.run_output_tail, self.delegate.RUN_OUTPUT_DEFAULT_TAIL_LINES)
+        self.assertTrue(parsed.run_output.stdout)
+        self.assertEqual(parsed.run_output.tail, self.delegate.RUN_OUTPUT_DEFAULT_TAIL_LINES)
 
     def test_worktree_misplaced_global_option_is_rejected(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:
@@ -329,26 +343,32 @@ class ParserTests(unittest.TestCase):
             self.delegate.parse_cli(["worktree", "show", "--latest", "cursor", "cursor-1"])
         self.assertEqual(ctx.exception.error, "invalid_option_combination")
 
+    def test_worktree_option_value_rejects_next_option_token(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(["worktree", "list", "--harness", "--status", "present"])
+        self.assertEqual(ctx.exception.error, "missing_option_value")
+        self.assertIn("--harness requires a value", ctx.exception.message)
+
     def test_parse_kimi_safe(self):
         parsed = self.delegate.parse_cli(["kimi", "safe", "review this"])
         self.assertEqual(parsed.subcommand, "kimi")
-        self.assertEqual(parsed.engine, "kimi")
-        self.assertEqual(parsed.mode, "safe")
-        self.assertEqual(parsed.prompt_parts, ["review this"])
+        self.assertEqual(parsed.launch.engine, "kimi")
+        self.assertEqual(parsed.launch.mode, "safe")
+        self.assertEqual(parsed.launch.prompt_parts, ["review this"])
 
     def test_parse_kimi_work(self):
         parsed = self.delegate.parse_cli(["kimi", "work", "fix this"])
         self.assertEqual(parsed.subcommand, "kimi")
-        self.assertEqual(parsed.engine, "kimi")
-        self.assertEqual(parsed.mode, "work")
-        self.assertEqual(parsed.prompt_parts, ["fix this"])
+        self.assertEqual(parsed.launch.engine, "kimi")
+        self.assertEqual(parsed.launch.mode, "work")
+        self.assertEqual(parsed.launch.prompt_parts, ["fix this"])
 
     def test_parse_kimi_dry_run(self):
         parsed = self.delegate.parse_cli(["dry-run", "kimi", "safe", "review"])
         self.assertEqual(parsed.subcommand, "kimi")
-        self.assertTrue(parsed.dry_run)
-        self.assertEqual(parsed.engine, "kimi")
-        self.assertEqual(parsed.mode, "safe")
+        self.assertTrue(parsed.launch.dry_run)
+        self.assertEqual(parsed.launch.engine, "kimi")
+        self.assertEqual(parsed.launch.mode, "safe")
 
     def test_parse_kimi_help(self):
         parsed = self.delegate.parse_cli(["kimi", "--help"])
@@ -358,10 +378,10 @@ class ParserTests(unittest.TestCase):
     def test_parse_kimi_prompt_file(self):
         parsed = self.delegate.parse_cli(["kimi", "safe", "--prompt-file", "task.md"])
         self.assertEqual(parsed.subcommand, "kimi")
-        self.assertEqual(parsed.engine, "kimi")
-        self.assertEqual(parsed.mode, "safe")
-        self.assertEqual(parsed.prompt_file, "task.md")
-        self.assertEqual(parsed.prompt_parts, [])
+        self.assertEqual(parsed.launch.engine, "kimi")
+        self.assertEqual(parsed.launch.mode, "safe")
+        self.assertEqual(parsed.launch.prompt_file, "task.md")
+        self.assertEqual(parsed.launch.prompt_parts, [])
 
     def test_parse_kimi_unknown_mode(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:
@@ -375,9 +395,9 @@ class ParserTests(unittest.TestCase):
 
     def test_worktree_prune_requires_filter_at_execution_time(self):
         parsed = self.delegate.parse_cli(["worktree", "prune"])
-        self.assertEqual(parsed.worktree_action, "prune")
-        self.assertFalse(parsed.worktree_merged)
-        self.assertIsNone(parsed.worktree_older_than)
+        self.assertEqual(parsed.worktree.action, "prune")
+        self.assertFalse(parsed.worktree.merged)
+        self.assertIsNone(parsed.worktree.older_than)
 
     def test_load_config_cli_overrides_win(self):
         config_path = ROOT / "src" / "delegate_agent" / "config.py"
@@ -403,23 +423,23 @@ class ParserTests(unittest.TestCase):
 
     def test_isolation_worktree_cursor_work_parses(self):
         parsed = self.delegate.parse_cli(["--isolation", "worktree", "cursor", "work", "fix this"])
-        self.assertEqual(parsed.isolation, "worktree")
-        self.assertEqual(parsed.engine, "cursor")
-        self.assertEqual(parsed.mode, "work")
+        self.assertEqual(parsed.global_options.isolation, "worktree")
+        self.assertEqual(parsed.launch.engine, "cursor")
+        self.assertEqual(parsed.launch.mode, "work")
 
     def test_isolation_none_codex_work_parses(self):
         parsed = self.delegate.parse_cli(["--isolation", "none", "codex", "work", "implement"])
-        self.assertEqual(parsed.isolation, "none")
-        self.assertEqual(parsed.engine, "codex")
-        self.assertEqual(parsed.mode, "work")
+        self.assertEqual(parsed.global_options.isolation, "none")
+        self.assertEqual(parsed.launch.engine, "codex")
+        self.assertEqual(parsed.launch.mode, "work")
 
     def test_isolation_auto_droid_safe_parses(self):
         parsed = self.delegate.parse_cli(
             ["--isolation", "auto", "droid", "minimax", "safe", "review"]
         )
-        self.assertEqual(parsed.isolation, "auto")
-        self.assertEqual(parsed.engine, "droid")
-        self.assertEqual(parsed.mode, "safe")
+        self.assertEqual(parsed.global_options.isolation, "auto")
+        self.assertEqual(parsed.launch.engine, "droid")
+        self.assertEqual(parsed.launch.mode, "safe")
 
     def test_isolation_unknown_value_raises(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:
@@ -455,7 +475,11 @@ class ParserTests(unittest.TestCase):
                     }
                 )
             )
-            parsed = self.delegate.ParsedCommand("run", json_mode=True, input_json=str(task))
+            parsed = self.delegate.ParsedCommand(
+                "run",
+                global_options=self.delegate.GlobalOptions(json_mode=True),
+                run_json=self.delegate.RunJsonOptions(str(task)),
+            )
             with self.assertRaises(self.delegate.DelegateError) as ctx:
                 self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
             self.assertEqual(ctx.exception.error, "unknown_input_key")
@@ -536,7 +560,11 @@ class ParserTests(unittest.TestCase):
                     }
                 )
             )
-            parsed = self.delegate.ParsedCommand("run", json_mode=True, input_json=str(task))
+            parsed = self.delegate.ParsedCommand(
+                "run",
+                global_options=self.delegate.GlobalOptions(json_mode=True),
+                run_json=self.delegate.RunJsonOptions(str(task)),
+            )
             with self.assertRaises(self.delegate.DelegateError) as ctx:
                 self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
             self.assertEqual(ctx.exception.error, "invalid_isolation")
@@ -567,7 +595,11 @@ class ParserTests(unittest.TestCase):
                     }
                 )
             )
-            parsed = self.delegate.ParsedCommand("run", json_mode=True, input_json=str(task))
+            parsed = self.delegate.ParsedCommand(
+                "run",
+                global_options=self.delegate.GlobalOptions(json_mode=True),
+                run_json=self.delegate.RunJsonOptions(str(task)),
+            )
             # pre_read_run_json_for_config loads workspace-local config
             _ws, cfg, _src = self.delegate.pre_read_run_json_for_config(str(task), None)
             request = self.delegate.request_from_input_json(parsed, cfg)
@@ -588,12 +620,14 @@ class ParserTests(unittest.TestCase):
                     "model": "minimax",
                     "cwd": repo1.name,
                     "prompt": "hello",
-                    "isolation": "none",
+                    "isolation": "auto",
                 }
             )
         )
         parsed = self.delegate.ParsedCommand(
-            "run", json_mode=True, cwd=repo2.name, input_json=str(task)
+            "run",
+            global_options=self.delegate.GlobalOptions(json_mode=True, cwd=repo2.name),
+            run_json=self.delegate.RunJsonOptions(str(task)),
         )
         with self.assertRaises(self.delegate.DelegateError) as ctx:
             self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
@@ -728,7 +762,11 @@ class ParserTests(unittest.TestCase):
                 self.assertEqual(result, "none")
 
                 # Build a full request from the JSON and verify it uses the resolved config
-                parsed = self.delegate.ParsedCommand("run", json_mode=False, input_json=str(task))
+                parsed = self.delegate.ParsedCommand(
+                    "run",
+                    global_options=self.delegate.GlobalOptions(json_mode=False),
+                    run_json=self.delegate.RunJsonOptions(str(task)),
+                )
                 request = self.delegate.request_from_input_json(parsed, cfg)
                 self.assertEqual(request.engine, "cursor")
                 self.assertEqual(request.mode, "work")

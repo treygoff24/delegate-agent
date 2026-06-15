@@ -9,7 +9,7 @@ subcommand, JSON help envelopes, destructive-safety, and prompt-boundary
 correctness.
 """
 
-import importlib.util
+import importlib
 import io
 import json
 import os
@@ -21,19 +21,12 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = str(ROOT / "src")
-MODULE_PATH = ROOT / "src" / "delegate_agent" / "cli.py"
-
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
 
 def load_delegate():
-    spec = importlib.util.spec_from_file_location("delegate_cli_help_test", MODULE_PATH)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return importlib.reload(importlib.import_module("delegate_agent.cli"))
 
 
 # Top-level commands that must support `<cmd> --help`.
@@ -235,8 +228,7 @@ class DestructiveSafetyTests(HelpCliTestBase):
         self.assertEqual(parsed.help_topic, "worktree remove")
         # No removal path is constructed: the worktree action is never set, so
         # emit_worktree's removal branch is unreachable.
-        self.assertIsNone(parsed.worktree_action)
-        self.assertIsNone(parsed.worktree_handle)
+        self.assertIsNone(parsed.worktree)
 
     def test_worktree_remove_with_help_main_prints_help(self):
         code, out, _err = self.run_main(["worktree", "remove", "cursor", "--help"])
@@ -252,9 +244,9 @@ class PromptBoundaryTests(HelpCliTestBase):
         # This is a run, NOT help. A naive "grep argv for --help" impl fails here.
         self.assertEqual(parsed.subcommand, "cursor")
         self.assertIsNone(parsed.help_topic)
-        self.assertEqual(parsed.engine, "cursor")
-        self.assertEqual(parsed.mode, "work")
-        self.assertEqual(parsed.prompt_parts, ["explain", "--help"])
+        self.assertEqual(parsed.launch.engine, "cursor")
+        self.assertEqual(parsed.launch.mode, "work")
+        self.assertEqual(parsed.launch.prompt_parts, ["explain", "--help"])
 
 
 class RegressionGuardTests(HelpCliTestBase):
@@ -264,8 +256,8 @@ class RegressionGuardTests(HelpCliTestBase):
         parsed = self.delegate.parse_cli(["cursor", "safe", "--prompt-file", "task.md"])
         self.assertEqual(parsed.subcommand, "cursor")
         self.assertIsNone(parsed.help_topic)
-        self.assertEqual(parsed.prompt_file, "task.md")
-        self.assertEqual(parsed.prompt_parts, [])
+        self.assertEqual(parsed.launch.prompt_file, "task.md")
+        self.assertEqual(parsed.launch.prompt_parts, [])
 
     def test_trailing_json_after_prompt_is_rejected(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:
@@ -285,7 +277,7 @@ class RegressionGuardTests(HelpCliTestBase):
         for argv in cases:
             with self.subTest(argv=argv):
                 parsed = self.delegate.parse_cli(argv)
-                self.assertTrue(parsed.json_mode)
+                self.assertTrue(parsed.global_options.json_mode)
 
 
 class UnknownTopicTests(HelpCliTestBase):

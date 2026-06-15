@@ -8,7 +8,7 @@ import secrets
 import subprocess
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -38,6 +38,13 @@ REGISTRY_LOCK_TIMEOUT_SECONDS = 30.0
 REGISTRY_LOCK_POLL_SECONDS = 0.05
 PRIVATE_DIR_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
+GIT_INFO_EXCLUDE_TIMEOUT_SECONDS = 5.0
+BYTES_PER_KIB = 1 << 10
+BYTES_PER_MIB = BYTES_PER_KIB * BYTES_PER_KIB
+
+
+class RegistryJsonError(ValueError):
+    """Raised when an existing registry JSON file cannot be trusted."""
 
 
 def supports_private_modes() -> bool:
@@ -76,6 +83,27 @@ def write_private_bytes(path: Path, payload: bytes) -> None:
     ensure_private_file(path)
 
 
+def write_text_atomic(path: Path, text: str, *, encoding: str = "utf-8") -> None:
+    """Atomically replace a non-private text file while preserving existing mode."""
+    temp = path.with_name(f".{path.name}.tmp")
+    existing_mode: int | None = None
+    try:
+        existing_mode = path.stat().st_mode & 0o777
+    except OSError:
+        existing_mode = None
+    fd = os.open(temp, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, existing_mode or 0o666)
+    try:
+        with os.fdopen(fd, "w", encoding=encoding) as handle:
+            handle.write(text)
+        if existing_mode is not None:
+            os.chmod(temp, existing_mode)
+        os.replace(temp, path)
+    except OSError:
+        with suppress(OSError):
+            os.unlink(temp)
+        raise
+
+
 def generate_run_id(now: datetime | None = None) -> str:
     moment = now or datetime.now(UTC)
     stamp = moment.strftime("%Y%m%dT%H%M%SZ")
@@ -99,13 +127,14 @@ def registry_root_if_exists(workspace: Path) -> Path | None:
 
 def git_info_exclude_path(git_root: Path) -> Path | None:
     try:
-        completed = subprocess.run(
+        completed = subprocess.run(  # nosec B603 B607 - fixed git argv is executed with shell=False.
             ["git", "-C", str(git_root), "rev-parse", "--git-path", "info/exclude"],
             capture_output=True,
             text=True,
             check=True,
+            timeout=GIT_INFO_EXCLUDE_TIMEOUT_SECONDS,
         )
-    except (FileNotFoundError, subprocess.CalledProcessError):
+    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return None
     relative = completed.stdout.strip()
     if not relative:
@@ -134,15 +163,13 @@ def empty_index() -> JsonObject:
 
 def load_index(registry_root: Path) -> JsonObject:
     path = index_path(registry_root)
-    if not path.exists():
+    data = read_json_object(path)
+    if data is None:
         return empty_index()
-    data: JsonValue = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(data, dict):
-        raise ValueError("index.json root must be an object")
     aliases = data.get("aliases")
     runs = data.get("runs")
     if not isinstance(aliases, dict) or not isinstance(runs, dict):
-        raise ValueError("index.json must contain aliases and runs objects")
+        raise RegistryJsonError(f"{path} must contain aliases and runs objects")
     return {
         "version": data.get("version", INDEX_VERSION),
         "aliases": aliases,
@@ -177,7 +204,7 @@ def ensure_git_delegate_exclude(git_root: Path) -> None:
         return
     if existing and not existing.endswith("\n"):
         existing += "\n"
-    exclude_file.write_text(existing + GIT_EXCLUDE_ENTRY + "\n", encoding="utf-8")
+    write_text_atomic(exclude_file, existing + GIT_EXCLUDE_ENTRY + "\n")
 
 
 def ensure_registry(workspace: Path, *, workspace_kind: str) -> Path:
@@ -283,7 +310,8 @@ def lookup_run_id(index: JsonObject, handle: str) -> str | None:
     return None
 
 
-LARGE_LOG_WARN_BYTES = 50 * 1024 * 1024
+LARGE_LOG_WARN_MIB = 50
+LARGE_LOG_WARN_BYTES = LARGE_LOG_WARN_MIB * BYTES_PER_MIB
 DEFAULT_RUNS_LIMIT = 20
 STATUS_RUNNING = "running"
 STATUS_STALE = "stale"
@@ -322,6 +350,27 @@ def run_output_command(handle: str, *, completion_report: bool = False) -> str:
     return base
 
 
+def alias_sequence_for_harness(alias: object, harness: str) -> int:
+    """Return the monotonic alias generation for a harness alias.
+
+    Alias claims are durable and allocated with exclusive creates, so the
+    numeric suffix is a better same-timestamp tiebreaker than the random run-id
+    suffix.  ``cursor`` is generation 1, ``cursor-2`` is generation 2, and
+    malformed or foreign aliases rank after valid harness aliases.
+    """
+    if not isinstance(alias, str):
+        return 0
+    if alias == harness:
+        return 1
+    prefix = f"{harness}-"
+    if not alias.startswith(prefix):
+        return 0
+    suffix = alias.removeprefix(prefix)
+    if not suffix.isdecimal():
+        return 0
+    return int(suffix)
+
+
 @dataclass(frozen=True)
 class ResolveResult:
     run_id: str | None
@@ -329,14 +378,30 @@ class ResolveResult:
     suggestions: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class RunTarget:
+    run_id: str
+    alias: str | None
+
+
+@dataclass(frozen=True)
+class RunTargetLookupError:
+    error: str
+    message: str
+
+
 def read_json_object(path: Path) -> JsonObject | None:
     if not path.exists():
         return None
     try:
         data: JsonValue = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
-    return data if isinstance(data, dict) else None
+    except json.JSONDecodeError as exc:
+        raise RegistryJsonError(f"invalid JSON in {path}: {exc}") from exc
+    except OSError as exc:
+        raise RegistryJsonError(f"could not read JSON file {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise RegistryJsonError(f"{path} root must be a JSON object")
+    return data
 
 
 def run_directory(registry_root: Path, run_id: str) -> Path:
@@ -455,6 +520,36 @@ def resolve_handle(index: JsonObject, handle: str) -> ResolveResult:
                 alias = candidate
                 break
     return ResolveResult(run_id, alias, ())
+
+
+def resolve_run_target(
+    registry_root: Path,
+    *,
+    handle: str | None,
+    latest_harness: str | None,
+) -> RunTarget | RunTargetLookupError:
+    index = load_index(registry_root)
+    if latest_harness is not None:
+        run_id = latest_run_id_for_harness(registry_root, index, latest_harness)
+        if run_id is None:
+            return RunTargetLookupError(
+                "no_matching_runs",
+                f"No runs found for harness: {latest_harness}",
+            )
+        return RunTarget(run_id, alias_for_run(index, run_id))
+    if handle is None:
+        return RunTargetLookupError(
+            "missing_handle",
+            "A run handle is required.",
+        )
+    resolved = resolve_handle(index, handle)
+    if resolved.run_id is None:
+        suggestions = ", ".join(resolved.suggestions) if resolved.suggestions else "(none)"
+        return RunTargetLookupError(
+            "unknown_handle",
+            f"Unknown run handle: {handle}. Suggestions: {suggestions}",
+        )
+    return RunTarget(resolved.run_id, resolved.alias)
 
 
 def load_run_state(registry_root: Path, run_id: str) -> JsonObject | None:
@@ -693,15 +788,16 @@ def set_worktree_status_locked(
 
 
 def latest_run_id_for_harness(registry_root: Path, index: JsonObject, harness: str) -> str | None:
-    matches: list[tuple[str, str]] = []
+    matches: list[tuple[str, int, str]] = []
     for run_id, entry in index.get("runs", {}).items():
         if not isinstance(entry, dict) or entry.get("harness") != harness:
             continue
         state = load_run_state(registry_root, run_id)
         manifest = load_run_manifest(registry_root, run_id)
         sort_ts = activity_timestamp(state, manifest, run_id)
-        matches.append((sort_ts, run_id))
+        alias_sequence = alias_sequence_for_harness(entry.get("alias"), harness)
+        matches.append((sort_ts, alias_sequence, run_id))
     if not matches:
         return None
     matches.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    return matches[0][1]
+    return matches[0][2]

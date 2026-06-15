@@ -2,16 +2,20 @@ from __future__ import annotations
 
 import json
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol, TypeAlias, cast
 
 from delegate_agent import run_registry
 from delegate_agent.json_types import JsonObject, JsonValue
 
+ReasoningDeclaration: TypeAlias = Mapping[str, object]
+
 # Bundled capabilities are a conservative fallback only. User config and a
 # refreshed workspace cache take precedence so private/custom models do not
 # require Delegate source changes, and stale bundled data can be bypassed.
-BUNDLED_REASONING_CAPABILITIES: dict[str, dict[str, JsonObject]] = {
+BUNDLED_REASONING_CAPABILITIES: dict[str, dict[str, ReasoningDeclaration]] = {
     "codex": {
         "gpt-5.5": {
             "supported": ("low", "medium", "high", "xhigh"),
@@ -84,6 +88,13 @@ class ReasoningCapabilityError(Exception):
         self.message = message
 
 
+class ReasoningPayloadCarrier(Protocol):
+    reasoning_effort: str | None
+    reasoning_effort_source: str | None
+    reasoning_capability_source: str | None
+    reasoning_transport: str | None
+
+
 def is_valid_effort_string(value: object) -> bool:
     # Effort values land in child argv and inside a quoted Codex TOML override
     # (model_reasoning_effort="…"), so quoting hazards are banned alongside
@@ -104,8 +115,7 @@ def normalize_effort(value: object) -> str:
             "reasoning effort must be a non-empty string without whitespace, "
             "double quotes, or backslashes.",
         )
-    assert isinstance(value, str)  # narrowed by is_valid_effort_string
-    return value
+    return cast(str, value)
 
 
 def _as_models_map(source: JsonValue) -> dict[str, JsonObject]:
@@ -140,7 +150,7 @@ def _cache_model_declarations(cache: JsonObject | None, harness: str) -> dict[st
     return _as_models_map(harness_decl.get("models"))
 
 
-def _supported_tuple(declaration: JsonObject) -> tuple[str, ...] | None:
+def _supported_tuple(declaration: ReasoningDeclaration) -> tuple[str, ...] | None:
     raw = declaration.get("supported")
     if isinstance(raw, tuple) and raw and all(isinstance(item, str) and item for item in raw):
         return raw
@@ -149,7 +159,7 @@ def _supported_tuple(declaration: JsonObject) -> tuple[str, ...] | None:
     return None
 
 
-def _default_effort(declaration: JsonObject, supported: tuple[str, ...]) -> str | None:
+def _default_effort(declaration: ReasoningDeclaration, supported: tuple[str, ...]) -> str | None:
     raw = declaration.get("default")
     if raw is None:
         return None
@@ -164,7 +174,7 @@ def _lookup_declaration(
     model: str,
     config: JsonObject,
     cache: JsonObject | None,
-) -> tuple[JsonObject | None, str]:
+) -> tuple[ReasoningDeclaration | None, str]:
     for source, declarations in (
         ("config", _config_model_declarations(config, harness)),
         ("cache", _cache_model_declarations(cache, harness)),
@@ -233,7 +243,7 @@ def resolve_reasoning_capability(
     )
 
 
-def add_reasoning_payload_fields(payload: JsonObject, carrier: object) -> None:
+def add_reasoning_payload_fields(payload: JsonObject, carrier: ReasoningPayloadCarrier) -> None:
     """Emit the reasoning JSON fields from any carrier with the shared attribute names.
 
     Used for both the CLI Request and the runner RunContext so dry-run payloads,
@@ -245,14 +255,12 @@ def add_reasoning_payload_fields(payload: JsonObject, carrier: object) -> None:
     if effort is not None:
         payload["requestedReasoningEffort"] = effort
         payload["resolvedReasoningEffort"] = effort
-    for attr, key in (
-        ("reasoning_effort_source", "reasoningEffortSource"),
-        ("reasoning_capability_source", "reasoningCapabilitySource"),
-        ("reasoning_transport", "reasoningTransport"),
-    ):
-        value = getattr(carrier, attr)
-        if value is not None:
-            payload[key] = value
+    if carrier.reasoning_effort_source is not None:
+        payload["reasoningEffortSource"] = carrier.reasoning_effort_source
+    if carrier.reasoning_capability_source is not None:
+        payload["reasoningCapabilitySource"] = carrier.reasoning_capability_source
+    if carrier.reasoning_transport is not None:
+        payload["reasoningTransport"] = carrier.reasoning_transport
 
 
 def reasoning_capability_cache_path(workspace: str | Path) -> Path:
@@ -266,7 +274,10 @@ def load_reasoning_capability_cache(workspace: str | Path) -> JsonObject | None:
     (config/bundled declarations may still resolve the model) and must not stop
     `capabilities refresh` from overwriting it with fresh data.
     """
-    loaded = run_registry.read_json_object(reasoning_capability_cache_path(workspace))
+    try:
+        loaded = run_registry.read_json_object(reasoning_capability_cache_path(workspace))
+    except run_registry.RegistryJsonError:
+        return None
     if loaded is None:
         return None
     try:
@@ -276,7 +287,7 @@ def load_reasoning_capability_cache(workspace: str | Path) -> JsonObject | None:
     return loaded
 
 
-def _copy_payload_model(declaration: JsonObject, *, source: str) -> JsonObject | None:
+def _copy_payload_model(declaration: ReasoningDeclaration, *, source: str) -> JsonObject | None:
     supported = _supported_tuple(declaration)
     if supported is None:
         return None
@@ -288,7 +299,7 @@ def _copy_payload_model(declaration: JsonObject, *, source: str) -> JsonObject |
 
 
 def _overlay_payload_models(
-    payload: JsonObject, declarations: dict[str, JsonObject], source: str
+    payload: JsonObject, declarations: Mapping[str, ReasoningDeclaration], source: str
 ) -> None:
     for model, declaration in sorted(declarations.items()):
         model_payload = _copy_payload_model(declaration, source=source)
@@ -390,9 +401,8 @@ def parse_codex_models_payload(raw: JsonObject) -> JsonObject:
             "capability_refresh_failed",
             "codex model payload must contain a models array.",
         )
-    parsed: JsonObject = {"schema": 1, "harnesses": {"codex": {"models": {}}}}
-    target = parsed["harnesses"]["codex"]["models"]
-    assert isinstance(target, dict)
+    target: JsonObject = {}
+    parsed: JsonObject = {"schema": 1, "harnesses": {"codex": {"models": target}}}
     for item in models:
         if not isinstance(item, dict):
             raise ReasoningCapabilityError(
@@ -431,7 +441,7 @@ def parse_codex_models_payload(raw: JsonObject) -> JsonObject:
 
 def refresh_reasoning_capabilities(*, cwd: str, codex_binary: str = "codex") -> JsonObject:
     try:
-        completed = subprocess.run(
+        completed = subprocess.run(  # nosec B603 - configured Codex binary is executed with shell=False and a timeout.
             [codex_binary, "debug", "models"],
             cwd=cwd,
             text=True,
@@ -481,7 +491,11 @@ def merge_reasoning_capability_cache(
         if isinstance(existing_harnesses, dict):
             harnesses.update(existing_harnesses)
     refreshed_harnesses = refreshed["harnesses"]
-    assert isinstance(refreshed_harnesses, dict)
+    if not isinstance(refreshed_harnesses, dict):
+        raise ReasoningCapabilityError(
+            "capability_refresh_failed",
+            "refreshed reasoning cache must contain a harnesses object.",
+        )
     harnesses.update(refreshed_harnesses)
     return {"schema": 1, "harnesses": harnesses}
 

@@ -1,3 +1,4 @@
+import contextlib
 import copy
 import importlib.util
 import io
@@ -7,7 +8,6 @@ import subprocess
 import sys
 import tempfile
 import threading
-import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -99,20 +99,31 @@ class ValidationTests(unittest.TestCase):
 
     def test_delayed_stdin_pipe_works(self):
         read_fd, write_fd = os.pipe()
+        reader_ready = threading.Event()
+        result: dict[str, object] = {}
 
-        def delayed_write():
-            time.sleep(0.05)
-            with os.fdopen(write_fd, "w", encoding="utf-8") as writer:
-                writer.write("from delayed stdin")
+        def read_prompt():
+            with os.fdopen(read_fd, "r", encoding="utf-8") as reader:
+                reader_ready.set()
+                try:
+                    result["prompt"] = self.delegate.resolve_prompt([], None, reader)
+                except Exception as exc:  # pragma: no cover - re-raised in main thread
+                    result["error"] = exc
 
-        thread = threading.Thread(target=delayed_write)
+        thread = threading.Thread(target=read_prompt)
         thread.start()
         try:
-            with os.fdopen(read_fd, "r", encoding="utf-8") as reader:
-                self.assertEqual(
-                    self.delegate.resolve_prompt([], None, reader), "from delayed stdin"
-                )
+            self.assertTrue(reader_ready.wait(timeout=5), "reader thread did not start")
+            with os.fdopen(write_fd, "w", encoding="utf-8") as writer:
+                writer.write("from delayed stdin")
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive(), "reader thread did not finish")
+            if "error" in result:
+                raise result["error"]  # type: ignore[misc]
+            self.assertEqual(result.get("prompt"), "from delayed stdin")
         finally:
+            with contextlib.suppress(OSError):
+                os.close(write_fd)
             thread.join(timeout=5)
 
     def test_direct_plus_prompt_file_fails(self):
@@ -162,7 +173,9 @@ class ValidationTests(unittest.TestCase):
             )
         )
         parsed = self.delegate.ParsedCommand(
-            "run", json_mode=True, cwd=str(nested), input_json=str(task)
+            "run",
+            global_options=self.delegate.GlobalOptions(json_mode=True, cwd=str(nested)),
+            run_json=self.delegate.RunJsonOptions(str(task)),
         )
         request = self.delegate.request_from_input_json(parsed, droid_test_config(self.delegate))
         self.assertEqual(Path(request.workspace).resolve(), Path(repo.name).resolve())
@@ -185,7 +198,11 @@ class ValidationTests(unittest.TestCase):
                     }
                 )
             )
-            parsed = self.delegate.ParsedCommand("run", json_mode=True, input_json=str(task))
+            parsed = self.delegate.ParsedCommand(
+                "run",
+                global_options=self.delegate.GlobalOptions(json_mode=True),
+                run_json=self.delegate.RunJsonOptions(str(task)),
+            )
             request = self.delegate.request_from_input_json(
                 parsed, droid_test_config(self.delegate)
             )
@@ -210,7 +227,9 @@ class ValidationTests(unittest.TestCase):
             )
         )
         parsed = self.delegate.ParsedCommand(
-            "run", json_mode=True, cwd=repo2.name, input_json=str(task)
+            "run",
+            global_options=self.delegate.GlobalOptions(json_mode=True, cwd=repo2.name),
+            run_json=self.delegate.RunJsonOptions(str(task)),
         )
         with self.assertRaises(self.delegate.DelegateError) as ctx:
             self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
@@ -262,6 +281,22 @@ class ValidationTests(unittest.TestCase):
             self.assertEqual(loaded["cursor"]["defaultModel"], "global-model")
             self.assertEqual(source, str(global_cfg))
 
+    def test_default_config_path_uses_current_home_at_call_time(self):
+        config_mod = load_config_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            config_dir = home / ".delegate"
+            config_dir.mkdir(parents=True)
+            global_cfg = config_dir / "config.json"
+            global_cfg.write_text(json.dumps({"cursor": {"defaultModel": "home-model"}}))
+            with (
+                mock.patch.object(config_mod, "DEFAULT_CONFIG_PATH", None),
+                mock.patch.object(config_mod.Path, "home", return_value=home),
+            ):
+                loaded, source = config_mod.load_config()
+        self.assertEqual(loaded["cursor"]["defaultModel"], "home-model")
+        self.assertEqual(source, str(global_cfg))
+
     def test_missing_delegate_config_raises_without_discarding_merged_layers(self):
         config_mod = load_config_module()
         with tempfile.TemporaryDirectory() as tmp:
@@ -287,11 +322,32 @@ class ValidationTests(unittest.TestCase):
             (delegate_dir / "config.json").write_text(
                 json.dumps({"cursor": {"defaultModel": "from-workspace"}})
             )
-            parsed = self.delegate.ParsedCommand("models", cwd=tmp)
+            parsed = self.delegate.ParsedCommand(
+                "models",
+                global_options=self.delegate.GlobalOptions(cwd=tmp),
+            )
             config, _source = self.delegate.load_config(
-                workspace=self.delegate.workspace_path_for_config(parsed.cwd)
+                workspace=self.delegate.workspace_path_for_config(parsed.global_options.cwd)
             )
             self.assertEqual(config["cursor"]["defaultModel"], "from-workspace")
+
+    def test_load_config_uses_private_embedded_default_copy(self):
+        config_mod = load_config_module()
+        cfg = config_mod.embedded_default_config()
+        cfg["cursor"]["argvPrefix"].append("mutated")
+        self.assertNotIn("mutated", config_mod.embedded_default_config()["cursor"]["argvPrefix"])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            missing_global = Path(tmp) / "missing.json"
+            config_mod.DEFAULT_CONFIG["cursor"]["defaultModel"] = "mutated-public"
+            with (
+                mock.patch.object(config_mod, "DEFAULT_CONFIG_PATH", missing_global),
+                mock.patch.dict(os.environ, {}, clear=True),
+            ):
+                loaded, source = config_mod.load_config()
+
+        self.assertEqual(source, "embedded-default")
+        self.assertEqual(loaded["cursor"]["defaultModel"], "composer-2.5")
 
     def test_policy_default_profile_safe_resolves_work_network(self):
         config_mod = load_config_module()
@@ -768,6 +824,61 @@ class ValidationTests(unittest.TestCase):
             )
         self.assertIn("must be one of", str(ctx.exception).lower())
 
+    def test_resolve_isolation_rejects_safe_none_for_prompt_only_harnesses(self):
+        config_mod = load_config_module()
+        for engine in ("cursor", "droid", "kimi"):
+            with self.subTest(engine=engine):
+                with self.assertRaises(config_mod.InvalidIsolationError) as ctx:
+                    config_mod.resolve_isolation(
+                        cli_value="none",
+                        loaded_config=config_mod.DEFAULT_CONFIG,
+                        engine=engine,
+                        mode="safe",
+                    )
+                self.assertIn(f"{engine} safe mode", str(ctx.exception))
+
+    def test_resolve_isolation_rejects_input_json_safe_none_for_droid(self):
+        config_mod = load_config_module()
+        with self.assertRaises(config_mod.InvalidIsolationError) as ctx:
+            config_mod.resolve_isolation(
+                input_json_value="none",
+                loaded_config=config_mod.DEFAULT_CONFIG,
+                engine="droid",
+                mode="safe",
+            )
+        self.assertIn("input JSON isolation", str(ctx.exception))
+
+    def test_resolve_isolation_rejects_config_safe_none_for_kimi(self):
+        config_mod = load_config_module()
+        with self.assertRaises(config_mod.InvalidIsolationError) as ctx:
+            config_mod.resolve_isolation(
+                loaded_config={"isolation": {"safe": "none"}},
+                engine="kimi",
+                mode="safe",
+            )
+        self.assertIn("config isolation.safe", str(ctx.exception))
+
+    def test_resolve_isolation_allows_codex_safe_none_and_work_none(self):
+        config_mod = load_config_module()
+        self.assertEqual(
+            config_mod.resolve_isolation(
+                cli_value="none",
+                loaded_config=config_mod.DEFAULT_CONFIG,
+                engine="codex",
+                mode="safe",
+            ),
+            "none",
+        )
+        self.assertEqual(
+            config_mod.resolve_isolation(
+                cli_value="none",
+                loaded_config=config_mod.DEFAULT_CONFIG,
+                engine="droid",
+                mode="work",
+            ),
+            "none",
+        )
+
     # -- Finding #3: request_from_input_json explicit null isolation -------------------
 
     def test_kimi_config_section_valid(self):
@@ -833,7 +944,11 @@ class ValidationTests(unittest.TestCase):
                     }
                 )
             )
-            parsed = delegate.ParsedCommand("run", json_mode=True, input_json=str(task))
+            parsed = delegate.ParsedCommand(
+                "run",
+                global_options=delegate.GlobalOptions(json_mode=True),
+                run_json=delegate.RunJsonOptions(str(task)),
+            )
             with self.assertRaises(delegate.DelegateError) as ctx:
                 delegate.request_from_input_json(parsed, droid_test_config(delegate))
             self.assertEqual(ctx.exception.error, "invalid_isolation")

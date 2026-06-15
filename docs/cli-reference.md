@@ -102,6 +102,8 @@ Typical dry-run JSON fields:
 
 `isolation` is a human-readable summary combining `effectiveIsolation` and `isolationLifecycle` (e.g. `"worktree temporary"`, `"worktree persistent"`, `"none"`). Depend on the structured fields rather than parsing it.
 
+`--isolation none` is rejected for Cursor, Droid, and Kimi safe mode because it would remove the temporary workspace/config boundary those safe contracts depend on. Codex safe can use `none` because Codex still runs with its read-only sandbox.
+
 Persistent worktree dry-runs may also include `plannedBranch` and `plannedExecutionCwd`; those are plans, not created resources. Temporary safe dry-runs usually keep `plannedExecutionCwd` unset because no temporary worktree or directory copy has been created.
 
 ### JSON input
@@ -130,7 +132,7 @@ Supported input keys:
 - `mode`: `safe` or `work`.
 - `model`: Droid requires a configured local alias; Codex and Kimi treat a non-empty string as a model override; Cursor does not accept per-run model aliases in v1.
 - `cwd`: optional workspace path. Git directories resolve to the repo root.
-- `isolation`: optional `auto`, `none`, or `worktree`. `null` is invalid.
+- `isolation`: optional `auto`, `none`, or `worktree`. `null` is invalid. `none` is rejected for Cursor, Droid, and Kimi safe mode; use `auto` or `worktree`.
 - `reasoningEffort`: optional non-empty effort string. It overrides provider `defaultReasoningEffort` for that JSON run.
 - `prompt`: required task prompt.
 

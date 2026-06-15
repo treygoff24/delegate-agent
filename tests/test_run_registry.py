@@ -322,6 +322,36 @@ class RunRegistryTests(unittest.TestCase):
                 newer_id,
             )
 
+    def test_latest_run_id_ties_same_timestamp_by_harness_alias_sequence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
+            # Deliberately invert lexicographic run-id suffix order. When two
+            # same-harness runs happen within the same second, the later alias
+            # allocation is the durable registration-order signal.
+            first_id = "del_20260520T100000Z_ffffff"
+            second_id = "del_20260520T100000Z_000000"
+            for run_id in (first_id, second_id):
+                run_path = self.registry.run_directory(root, run_id)
+                run_path.mkdir(parents=True)
+                self.registry.write_json_atomic(
+                    run_path / "state.json",
+                    {"status": "succeeded", "startedAt": "2026-05-20T10:00:00Z"},
+                )
+            index = {
+                "version": self.registry.INDEX_VERSION,
+                "aliases": {"cursor": first_id, "cursor-2": second_id},
+                "runs": {
+                    first_id: {"alias": "cursor", "harness": "cursor"},
+                    second_id: {"alias": "cursor-2", "harness": "cursor"},
+                },
+            }
+            self.registry.write_json_atomic(self.registry.index_path(root), index)
+            loaded = self.registry.load_index(root)
+            self.assertEqual(
+                self.registry.latest_run_id_for_harness(root, loaded, "cursor"),
+                second_id,
+            )
+
     def test_set_worktree_status_updates_state(self):
         """set_worktree_status updates worktreeStatus and optionally worktreeRemovedAt."""
         with tempfile.TemporaryDirectory() as tmp:

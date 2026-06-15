@@ -15,7 +15,14 @@ from pathlib import Path
 from typing import BinaryIO, TextIO
 
 from delegate_agent import config as delegate_config
-from delegate_agent import harness_events, reasoning, rendering, run_registry
+from delegate_agent import (
+    harness_events,
+    prompt_instructions,
+    reasoning,
+    rendering,
+    run_metadata,
+    run_registry,
+)
 from delegate_agent.json_types import JsonObject
 
 STDOUT_LOG = run_registry.STDOUT_LOG
@@ -29,31 +36,19 @@ COMPLETION_REPORT_FILE = run_registry.COMPLETION_REPORT_FILE
 PROGRESS_PERSIST_LINE_INTERVAL = 10
 PROGRESS_PERSIST_TIME_INTERVAL_SEC = 0.5
 DRAIN_JOIN_TIMEOUT_SEC = 5.0
+MILLISECONDS_PER_SECOND = 1000
+
+SKILL_REVIEW_PREFIX = prompt_instructions.SKILL_REVIEW_PREFIX
+COMPLETION_REPORT_SUFFIX = prompt_instructions.COMPLETION_REPORT_SUFFIX
+prepend_skill_review_instructions = prompt_instructions.prepend_skill_review_instructions
+append_completion_report_instructions = prompt_instructions.append_completion_report_instructions
 
 
-SKILL_REVIEW_PREFIX = """## Delegate sub-agent skill review requirement
-
-Before doing the task, review the full list of skills available in your current agent environment. Load/read and apply any skill instructions that are relevant to the task, workspace, tools, code quality, verification, or final deliverable. If no skill is relevant, proceed normally after explicitly deciding that. This requirement is mandatory for every Delegate Agent run; do not skip it just because the parent prompt did not mention skills.
-
-"""
-
-COMPLETION_REPORT_SUFFIX = """
-
-## Delegate completion report requirement
-
-When you finish, include a concise completion report for the parent agent before
-any operator-requested final payload:
-
-- Status: completed / blocked / failed
-- What you did or found
-- Files changed or reviewed
-- Verification run and result
-- Remaining risks or follow-ups
-
-Keep it concise. Do not include raw logs unless explicitly relevant. If the
-operator requested an exact final payload such as bare JSON, put that payload
-last after the report, without wrapping it in the report.
-"""
+class RunnerLaunchError(RuntimeError):
+    def __init__(self, error: str, message: str) -> None:
+        super().__init__(message)
+        self.error = error
+        self.message = message
 
 
 @dataclass(frozen=True)
@@ -87,18 +82,6 @@ class RunContext:
     prompt_transport: str = "argv"
 
 
-def prepend_skill_review_instructions(prompt: str) -> str:
-    if prompt.startswith(SKILL_REVIEW_PREFIX):
-        return prompt
-    return SKILL_REVIEW_PREFIX + prompt
-
-
-def append_completion_report_instructions(prompt: str) -> str:
-    if prompt.rstrip().endswith(COMPLETION_REPORT_SUFFIX.strip()):
-        return prompt
-    return prompt + COMPLETION_REPORT_SUFFIX
-
-
 def write_manifest(run_path: Path, manifest: JsonObject) -> None:
     run_registry.write_json_atomic(run_path / MANIFEST_FILE, manifest)
 
@@ -130,7 +113,7 @@ def completion_report_path(run_id: str) -> str:
 
 
 def format_duration(duration_ms: int) -> str:
-    total_seconds = max(duration_ms // 1000, 0)
+    total_seconds = max(duration_ms // MILLISECONDS_PER_SECOND, 0)
     minutes, seconds = divmod(total_seconds, 60)
     hours, minutes = divmod(minutes, 60)
     if hours:
@@ -160,23 +143,7 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
         "argv": argv,
         "promptTransport": ctx.prompt_transport,
     }
-    payload["isolatedWorkspace"] = ctx.isolated_workspace
-    payload["isolationMode"] = ctx.isolation_mode
-    payload["effectiveIsolation"] = ctx.effective_isolation
-    payload["isolationLifecycle"] = ctx.isolation_lifecycle
-    payload["preservedWorkspace"] = ctx.preserved_workspace
-    if ctx.source_git_root is not None:
-        payload["sourceGitRoot"] = ctx.source_git_root
-    if ctx.branch is not None:
-        payload["branch"] = ctx.branch
-    if ctx.creation_context is not None:
-        payload["creationContext"] = ctx.creation_context
-    if ctx.worktree_status is not None:
-        payload["worktreeStatus"] = ctx.worktree_status
-    if ctx.safe_workspace_method is not None:
-        payload["safeWorkspaceMethod"] = ctx.safe_workspace_method
-    if ctx.warnings:
-        payload["warnings"] = list(ctx.warnings)
+    run_metadata.add_run_metadata_payload_fields(payload, ctx)
     reasoning.add_reasoning_payload_fields(payload, ctx)
     return payload
 
@@ -261,29 +228,8 @@ def build_snapshot(
         **assistant_meta,
         **events_meta,
     }
-    # Always emit isolatedWorkspace as explicit boolean.
-    snapshot["isolatedWorkspace"] = ctx.isolated_workspace
-
-    # Always emit isolation metadata.
-    snapshot["isolationMode"] = ctx.isolation_mode
-    snapshot["effectiveIsolation"] = ctx.effective_isolation
-    snapshot["isolationLifecycle"] = ctx.isolation_lifecycle
-    snapshot["preservedWorkspace"] = ctx.preserved_workspace
+    run_metadata.add_run_metadata_payload_fields(snapshot, ctx)
     reasoning.add_reasoning_payload_fields(snapshot, ctx)
-
-    # Surface persistent-worktree fields.
-    if ctx.source_git_root is not None:
-        snapshot["sourceGitRoot"] = ctx.source_git_root
-    if ctx.branch is not None:
-        snapshot["branch"] = ctx.branch
-    if ctx.creation_context is not None:
-        snapshot["creationContext"] = ctx.creation_context
-    if ctx.worktree_status is not None:
-        snapshot["worktreeStatus"] = ctx.worktree_status
-    if ctx.safe_workspace_method is not None:
-        snapshot["safeWorkspaceMethod"] = ctx.safe_workspace_method
-    if ctx.warnings:
-        snapshot["warnings"] = list(ctx.warnings)
 
     # Worktree cleanup commands for persistent worktrees.
     cleanup = _worktree_cleanup_commands(ctx)
@@ -427,28 +373,7 @@ def completion_json_payload(
             ctx.alias, completion_report=True
         )
         payload["completionReportPath"] = completion_report_path(ctx.run_id)
-    # Always emit isolatedWorkspace as explicit boolean.
-    payload["isolatedWorkspace"] = ctx.isolated_workspace
-
-    # Always emit isolation metadata.
-    payload["isolationMode"] = ctx.isolation_mode
-    payload["effectiveIsolation"] = ctx.effective_isolation
-    payload["isolationLifecycle"] = ctx.isolation_lifecycle
-    payload["preservedWorkspace"] = ctx.preserved_workspace
-
-    # Surface persistent-worktree fields.
-    if ctx.source_git_root is not None:
-        payload["sourceGitRoot"] = ctx.source_git_root
-    if ctx.branch is not None:
-        payload["branch"] = ctx.branch
-    if ctx.creation_context is not None:
-        payload["creationContext"] = ctx.creation_context
-    if ctx.worktree_status is not None:
-        payload["worktreeStatus"] = ctx.worktree_status
-    if ctx.safe_workspace_method is not None:
-        payload["safeWorkspaceMethod"] = ctx.safe_workspace_method
-    if ctx.warnings:
-        payload["warnings"] = list(ctx.warnings)
+    run_metadata.add_run_metadata_payload_fields(payload, ctx)
     reasoning.add_reasoning_payload_fields(payload, ctx)
 
     # Worktree cleanup commands for persistent worktrees.
@@ -465,7 +390,7 @@ def completion_json_payload(
 def _drain_stream(
     pipe: BinaryIO,
     log_path: Path,
-    byte_counter: list[int],
+    byte_counter: ByteCounter,
     *,
     on_line: Callable[[str], None] | None,
 ) -> None:
@@ -474,7 +399,7 @@ def _drain_stream(
             chunk = pipe.readline()
             if not chunk:
                 break
-            byte_counter[0] += len(chunk)
+            byte_counter.total += len(chunk)
             log_handle.write(chunk)
             if on_line is not None:
                 on_line(chunk.decode("utf-8", errors="replace"))
@@ -539,6 +464,283 @@ def _cleanup_prompt_file_dir(temp_dir: Path | None) -> None:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
+@dataclass(frozen=True)
+class TrackedRunFiles:
+    run_path: Path
+    stdout_log: Path
+    stderr_log: Path
+
+
+@dataclass(frozen=True)
+class TrackedCaptureResult:
+    accumulator: harness_events.StreamAccumulator
+    exit_code: int
+    duration_ms: int
+    stdout_bytes: int
+    stderr_bytes: int
+    stdin_failures: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class TrackedFinalization:
+    status: str
+    report_written: bool
+
+
+@dataclass
+class ByteCounter:
+    total: int = 0
+
+
+def _prepare_tracked_run(
+    argv: list[str],
+    ctx: RunContext,
+    *,
+    manifest_argv: list[str] | None,
+) -> TrackedRunFiles:
+    run_path = run_registry.run_directory(ctx.registry_root, ctx.run_id)
+    run_registry.ensure_private_dir(run_path)
+    write_manifest(run_path, build_manifest(ctx, manifest_argv or argv))
+
+    stdout_log = run_path / STDOUT_LOG
+    stderr_log = run_path / STDERR_LOG
+    run_registry.write_private_bytes(stdout_log, b"")
+    run_registry.write_private_bytes(stderr_log, b"")
+    return TrackedRunFiles(run_path=run_path, stdout_log=stdout_log, stderr_log=stderr_log)
+
+
+def _launch_tracked_process(
+    argv: list[str],
+    cwd: str,
+    *,
+    stdin_text: str | None,
+) -> subprocess.Popen[bytes]:
+    return subprocess.Popen(  # nosec B603 - Delegate intentionally launches validated harness argv with shell=False.
+        argv,
+        cwd=cwd,
+        stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+
+def _runner_launch_error(argv: list[str], cwd: str, exc: OSError) -> RunnerLaunchError:
+    binary = argv[0] if argv else "<empty argv>"
+    return RunnerLaunchError(
+        "child_launch_failed",
+        f"Failed to launch child command {binary!r} in {cwd}: {exc}",
+    )
+
+
+def _record_tracked_launch_failure(
+    files: TrackedRunFiles,
+    ctx: RunContext,
+    error: RunnerLaunchError,
+) -> None:
+    extra: JsonObject = {"error": error.error, "message": error.message}
+    write_state(files.run_path, build_state(ctx, status="failed", extra=extra))
+    snapshot = build_snapshot(ctx, accumulator=harness_events.StreamAccumulator())
+    snapshot["ok"] = False
+    snapshot["status"] = "failed"
+    snapshot.update(extra)
+    write_snapshot(files.run_path, snapshot)
+
+
+def _capture_tracked_process(
+    process: subprocess.Popen[bytes],
+    files: TrackedRunFiles,
+    ctx: RunContext,
+    *,
+    started: float,
+    stdin_text: str | None,
+) -> TrackedCaptureResult:
+    accumulator = harness_events.StreamAccumulator()
+    persist_progress(files.run_path, ctx, accumulator, status="running", pid=process.pid)
+
+    line_buffer = ""
+    stdout_bytes_counter = ByteCounter()
+    stderr_bytes_counter = ByteCounter()
+    lines_since_persist = 0
+    last_persist_at = time.monotonic()
+    progress_dirty = False
+
+    def maybe_persist_running() -> None:
+        nonlocal lines_since_persist, last_persist_at, progress_dirty
+        if not progress_dirty:
+            return
+        progress_dirty = False
+        lines_since_persist = 0
+        last_persist_at = time.monotonic()
+        persist_progress(
+            files.run_path,
+            ctx,
+            accumulator,
+            status="running",
+            pid=process.pid,
+            stdout_bytes=stdout_bytes_counter.total,
+            stderr_bytes=stderr_bytes_counter.total,
+        )
+
+    if process.stdout is None or process.stderr is None:
+        raise RunnerLaunchError(
+            "missing_child_stream",
+            "Child process did not expose stdout/stderr pipes for tracking.",
+        )
+    with open_events_log(files.run_path) as events_handle:
+
+        def handle_stdout_line(chunk_text: str) -> None:
+            nonlocal line_buffer, lines_since_persist, last_persist_at, progress_dirty
+            line_buffer += chunk_text
+            while "\n" in line_buffer:
+                line, line_buffer = line_buffer.split("\n", 1)
+                accumulator.ingest_line(line)
+                progress_dirty = True
+                append_event(
+                    events_handle,
+                    {"kind": "stream.line", "stream": "stdout", "text": line[:500]},
+                )
+                lines_since_persist += 1
+                elapsed = time.monotonic() - last_persist_at
+                if (
+                    lines_since_persist >= PROGRESS_PERSIST_LINE_INTERVAL
+                    or elapsed >= PROGRESS_PERSIST_TIME_INTERVAL_SEC
+                ):
+                    events_handle.flush()
+                    maybe_persist_running()
+
+        stdout_thread = threading.Thread(
+            target=_drain_stream,
+            args=(process.stdout, files.stdout_log, stdout_bytes_counter),
+            kwargs={"on_line": handle_stdout_line},
+            daemon=True,
+        )
+        stderr_thread = threading.Thread(
+            target=_drain_stream,
+            args=(process.stderr, files.stderr_log, stderr_bytes_counter),
+            kwargs={"on_line": None},
+            daemon=True,
+        )
+        stdout_thread.start()
+        stderr_thread.start()
+        stdin_thread: threading.Thread | None = None
+        stdin_failures: list[str] = []
+        if stdin_text is not None:
+            stdin_thread = threading.Thread(
+                target=_write_stdin,
+                args=(process.stdin, stdin_text, stdin_failures),
+                daemon=True,
+            )
+            stdin_thread.start()
+        # Child agent runtimes are intentionally unbounded: callers cancel them
+        # via the OS/run-management surface, while quick metadata probes
+        # elsewhere use explicit timeouts.
+        exit_code = process.wait()
+        _join_stdin_thread(stdin_thread, process.stdin)
+        _join_drain_thread(stdout_thread, process.stdout)
+        _join_drain_thread(stderr_thread, process.stderr)
+        process.stdout.close()
+        process.stderr.close()
+        if line_buffer.strip():
+            accumulator.ingest_line(line_buffer)
+    return TrackedCaptureResult(
+        accumulator=accumulator,
+        exit_code=exit_code,
+        duration_ms=int((time.monotonic() - started) * MILLISECONDS_PER_SECOND),
+        stdout_bytes=stdout_bytes_counter.total,
+        stderr_bytes=stderr_bytes_counter.total,
+        stdin_failures=tuple(stdin_failures),
+    )
+
+
+def _ctx_with_stdin_warnings(
+    ctx: RunContext,
+    stdin_failures: tuple[str, ...],
+    stderr: TextIO,
+) -> RunContext:
+    if not stdin_failures:
+        return ctx
+    for failure in stdin_failures:
+        print(f"warning: {failure}", file=stderr)
+    return replace(ctx, warnings=(*ctx.warnings, *stdin_failures))
+
+
+def _completion_report_source(
+    ctx: RunContext,
+    accumulator: harness_events.StreamAccumulator,
+    *,
+    completion_report_mode: str,
+) -> str:
+    if accumulator.completion_text:
+        return accumulator.completion_text
+    if (
+        completion_report_mode == delegate_config.COMPLETION_REPORT_MODE_MARKDOWN
+        and ctx.harness != "codex"
+        and ctx.engine != "codex"
+    ):
+        return accumulator.assistant_text
+    return ""
+
+
+def _finalize_tracked_run(
+    files: TrackedRunFiles,
+    ctx: RunContext,
+    capture: TrackedCaptureResult,
+    *,
+    completion_report_mode: str,
+) -> TrackedFinalization:
+    status = status_from_exit(capture.exit_code)
+    report_written = write_completion_report(
+        files.run_path,
+        _completion_report_source(
+            ctx,
+            capture.accumulator,
+            completion_report_mode=completion_report_mode,
+        ),
+    )
+    persist_progress(
+        files.run_path,
+        ctx,
+        capture.accumulator,
+        status=status,
+        exit_code=capture.exit_code,
+        stdout_bytes=capture.stdout_bytes,
+        stderr_bytes=capture.stderr_bytes,
+        completion_report_written=report_written,
+    )
+    return TrackedFinalization(status=status, report_written=report_written)
+
+
+def _tracked_result(
+    ctx: RunContext,
+    capture: TrackedCaptureResult,
+    finalization: TrackedFinalization,
+    *,
+    json_mode: bool,
+    stdout: TextIO,
+) -> tuple[int, JsonObject | None]:
+    ok = capture.exit_code == 0
+    if json_mode:
+        payload = completion_json_payload(
+            ctx,
+            ok=ok,
+            status=finalization.status,
+            exit_code=capture.exit_code,
+            duration_ms=capture.duration_ms,
+            stdout_bytes=capture.stdout_bytes,
+            stderr_bytes=capture.stderr_bytes,
+            completion_report_written=finalization.report_written,
+        )
+        return capture.exit_code, payload
+
+    emit_bounded_text_summary(
+        ctx,
+        status=finalization.status,
+        duration_ms=capture.duration_ms,
+        stdout=stdout,
+    )
+    return capture.exit_code, None
+
+
 def execute_tracked(
     argv: list[str],
     cwd: str,
@@ -555,17 +757,7 @@ def execute_tracked(
 ) -> tuple[int, JsonObject | None]:
     if stdin_text is not None and prompt_file_text is not None:
         raise ValueError("stdin_text and prompt_file_text are mutually exclusive")
-    run_path = run_registry.run_directory(ctx.registry_root, ctx.run_id)
-    run_registry.ensure_private_dir(run_path)
-    write_manifest(run_path, build_manifest(ctx, manifest_argv or argv))
-
-    stdout_log = run_path / STDOUT_LOG
-    stderr_log = run_path / STDERR_LOG
-    run_registry.write_private_bytes(stdout_log, b"")
-    run_registry.write_private_bytes(stderr_log, b"")
-
-    accumulator = harness_events.StreamAccumulator()
-
+    files = _prepare_tracked_run(argv, ctx, manifest_argv=manifest_argv)
     started = time.monotonic()
     launch_argv, prompt_temp_dir = _materialize_prompt_file_argv(
         argv,
@@ -573,148 +765,34 @@ def execute_tracked(
         prompt_file_placeholder=prompt_file_placeholder,
     )
     try:
-        process = subprocess.Popen(
-            launch_argv,
-            cwd=cwd,
-            stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+        try:
+            process = _launch_tracked_process(
+                launch_argv,
+                cwd,
+                stdin_text=stdin_text,
+            )
+        except OSError as exc:
+            error = _runner_launch_error(launch_argv, cwd, exc)
+            _record_tracked_launch_failure(files, ctx, error)
+            raise error from exc
+        capture = _capture_tracked_process(
+            process,
+            files,
+            ctx,
+            started=started,
+            stdin_text=stdin_text,
         )
-    except Exception:
-        _cleanup_prompt_file_dir(prompt_temp_dir)
-        raise
-    try:
-        persist_progress(run_path, ctx, accumulator, status="running", pid=process.pid)
-
-        line_buffer = ""
-        stdout_bytes_counter = [0]
-        stderr_bytes_counter = [0]
-        lines_since_persist = 0
-        last_persist_at = time.monotonic()
-        progress_dirty = False
-
-        def maybe_persist_running() -> None:
-            nonlocal lines_since_persist, last_persist_at, progress_dirty
-            if not progress_dirty:
-                return
-            progress_dirty = False
-            lines_since_persist = 0
-            last_persist_at = time.monotonic()
-            persist_progress(
-                run_path,
-                ctx,
-                accumulator,
-                status="running",
-                pid=process.pid,
-                stdout_bytes=stdout_bytes_counter[0],
-                stderr_bytes=stderr_bytes_counter[0],
-            )
-
-        with open_events_log(run_path) as events_handle:
-
-            def handle_stdout_line(chunk_text: str) -> None:
-                nonlocal line_buffer, lines_since_persist, last_persist_at, progress_dirty
-                line_buffer += chunk_text
-                while "\n" in line_buffer:
-                    line, line_buffer = line_buffer.split("\n", 1)
-                    accumulator.ingest_line(line)
-                    progress_dirty = True
-                    append_event(
-                        events_handle,
-                        {"kind": "stream.line", "stream": "stdout", "text": line[:500]},
-                    )
-                    lines_since_persist += 1
-                    elapsed = time.monotonic() - last_persist_at
-                    if (
-                        lines_since_persist >= PROGRESS_PERSIST_LINE_INTERVAL
-                        or elapsed >= PROGRESS_PERSIST_TIME_INTERVAL_SEC
-                    ):
-                        events_handle.flush()
-                        maybe_persist_running()
-
-            stdout_thread = threading.Thread(
-                target=_drain_stream,
-                args=(process.stdout, stdout_log, stdout_bytes_counter),
-                kwargs={"on_line": handle_stdout_line},
-                daemon=True,
-            )
-            stderr_thread = threading.Thread(
-                target=_drain_stream,
-                args=(process.stderr, stderr_log, stderr_bytes_counter),
-                kwargs={"on_line": None},
-                daemon=True,
-            )
-            stdout_thread.start()
-            stderr_thread.start()
-            stdin_thread: threading.Thread | None = None
-            stdin_failures: list[str] = []
-            if stdin_text is not None:
-                stdin_thread = threading.Thread(
-                    target=_write_stdin,
-                    args=(process.stdin, stdin_text, stdin_failures),
-                    daemon=True,
-                )
-                stdin_thread.start()
-            exit_code = process.wait()
-            _join_stdin_thread(stdin_thread, process.stdin)
-            _join_drain_thread(stdout_thread, process.stdout)
-            _join_drain_thread(stderr_thread, process.stderr)
-            if process.stdout is not None:
-                process.stdout.close()
-            if process.stderr is not None:
-                process.stderr.close()
-            if line_buffer.strip():
-                accumulator.ingest_line(line_buffer)
-            duration_ms = int((time.monotonic() - started) * 1000)
     finally:
         _cleanup_prompt_file_dir(prompt_temp_dir)
 
-    if stdin_failures:
-        ctx = replace(ctx, warnings=(*ctx.warnings, *stdin_failures))
-        for failure in stdin_failures:
-            print(f"warning: {failure}", file=stderr)
-
-    stdout_bytes = stdout_bytes_counter[0]
-    stderr_bytes = stderr_bytes_counter[0]
-    status = status_from_exit(exit_code)
-    if accumulator.completion_text:
-        report_source = accumulator.completion_text
-    elif (
-        completion_report_mode == delegate_config.COMPLETION_REPORT_MODE_MARKDOWN
-        and ctx.harness != "codex"
-        and ctx.engine != "codex"
-    ):
-        report_source = accumulator.assistant_text
-    else:
-        report_source = ""
-    report_written = write_completion_report(run_path, report_source)
-    persist_progress(
-        run_path,
+    ctx = _ctx_with_stdin_warnings(ctx, capture.stdin_failures, stderr)
+    finalization = _finalize_tracked_run(
+        files,
         ctx,
-        accumulator,
-        status=status,
-        exit_code=exit_code,
-        stdout_bytes=stdout_bytes,
-        stderr_bytes=stderr_bytes,
-        completion_report_written=report_written,
+        capture,
+        completion_report_mode=completion_report_mode,
     )
-
-    ok = exit_code == 0
-    if json_mode:
-        payload = completion_json_payload(
-            ctx,
-            ok=ok,
-            status=status,
-            exit_code=exit_code,
-            duration_ms=duration_ms,
-            stdout_bytes=stdout_bytes,
-            stderr_bytes=stderr_bytes,
-            completion_report_written=report_written,
-        )
-        return exit_code, payload
-
-    emit_bounded_text_summary(ctx, status=status, duration_ms=duration_ms, stdout=stdout)
-    return exit_code, None
+    return _tracked_result(ctx, capture, finalization, json_mode=json_mode, stdout=stdout)
 
 
 def execute_passthrough(
@@ -734,22 +812,27 @@ def execute_passthrough(
         prompt_file_placeholder=prompt_file_placeholder,
     )
     try:
-        if stdin_text is None:
-            completed = subprocess.run(
-                launch_argv,
-                cwd=cwd,
-                stdin=subprocess.DEVNULL,
-                text=True,
-                check=False,
-            )
-        else:
-            completed = subprocess.run(
-                launch_argv,
-                cwd=cwd,
-                input=stdin_text,
-                text=True,
-                check=False,
-            )
+        # Passthrough mode mirrors the child runtime directly, so Delegate does
+        # not impose a separate timeout here.
+        try:
+            if stdin_text is None:
+                completed = subprocess.run(  # nosec B603 - passthrough intentionally mirrors validated harness argv with shell=False.
+                    launch_argv,
+                    cwd=cwd,
+                    stdin=subprocess.DEVNULL,
+                    text=True,
+                    check=False,
+                )
+            else:
+                completed = subprocess.run(  # nosec B603 - passthrough intentionally mirrors validated harness argv with shell=False.
+                    launch_argv,
+                    cwd=cwd,
+                    input=stdin_text,
+                    text=True,
+                    check=False,
+                )
+        except OSError as exc:
+            raise _runner_launch_error(launch_argv, cwd, exc) from exc
         return completed.returncode
     finally:
         _cleanup_prompt_file_dir(prompt_temp_dir)

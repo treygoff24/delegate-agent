@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from delegate_agent import VERSION
 from delegate_agent.json_types import JsonObject
 
 
@@ -202,8 +203,9 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             'delegate droid grok work "Implement this bounded change; run the named check."',
         ),
         notes=(
-            "safe mode stays read-only; work mode uses --skip-permissions-unsafe and is "
-            "intentionally no-prompt -- use only in workspaces you trust.",
+            "safe mode stays read-only in an isolated temporary copy; work mode uses "
+            "--skip-permissions-unsafe and is intentionally no-prompt -- use only in "
+            "workspaces you trust.",
             "Reasoning effort is model-specific and never changes safe/work permissions.",
             "Run delegate models to list available aliases.",
         ),
@@ -680,8 +682,6 @@ def render_overview_text() -> str:
     so the overview contains the literal substring ``worktree prune``.
     """
 
-    from delegate_agent import VERSION
-
     iso = "[--isolation auto|none|worktree]"
     lines: list[str] = [f"delegate {VERSION}", "", "Usage:"]
 
@@ -696,7 +696,8 @@ def render_overview_text() -> str:
         f"delegate [--cwd PATH] [--json] {iso} dry-run kimi {{safe,work}} [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} run --input-json FILE",
         "delegate [--cwd PATH] [--json] snapshot [--latest HARNESS] [--no-redact] <alias-or-runId>",
-        "delegate [--cwd PATH] [--json] runs [--active] [--recent] [--harness HARNESS] [--limit N]",
+        "delegate [--cwd PATH] [--json] runs "
+        "[--active|--running|--stale|--recent] [--harness HARNESS] [--limit N]",
         "delegate [--cwd PATH] [--json] run-output <alias-or-runId> "
         "[--completion-report] [--stdout] [--stderr] [--tail N] [--raw] [--no-redact]",
         "delegate [--cwd PATH] [--json] worktree list "

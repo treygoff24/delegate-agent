@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import importlib.util
+import importlib
 import io
 import json
 import os
@@ -12,9 +12,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.delegate_fixtures import seed_persistent_worktree_run, seed_plain_run
+
 ROOT = Path(__file__).resolve().parents[1]
 SRC = str(ROOT / "src")
-MODULE_PATH = ROOT / "src" / "delegate_agent" / "cli.py"
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
@@ -27,12 +28,7 @@ GIT_TEST_IDENTITY = (
 
 
 def load_delegate():
-    spec = importlib.util.spec_from_file_location("delegate_cli_under_test", MODULE_PATH)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return importlib.reload(importlib.import_module("delegate_agent.cli"))
 
 
 def git(*args: str, cwd: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -85,93 +81,19 @@ class WorktreeMgmtTests(unittest.TestCase):
         source_head_ref: str | None | object = object(),
         last_activity_at: str | None = None,
     ) -> tuple[str, str]:
-        registry_root = self.delegate.run_registry.ensure_registry(
-            Path(repo_path),
-            workspace_kind="git",
-        )
-        run_id, allocated_alias = self.delegate.run_registry.register_run(
-            registry_root,
+        return seed_persistent_worktree_run(
+            self.delegate,
+            repo_path,
+            git_runner=git,
+            alias=alias,
             harness=harness,
-            metadata={"mode": "work", "cwd": repo_path},
+            branch=branch,
+            execution_cwd=execution_cwd,
+            worktree_status=worktree_status,
+            creation_oid=creation_oid,
+            source_head_ref=source_head_ref,
+            last_activity_at=last_activity_at,
         )
-        if branch is None:
-            branch = f"delegate/cursor-{self.delegate.short_run_id(run_id)}"
-        if execution_cwd is None:
-            execution_cwd = str(Path(repo_path).parent / "worktree" / allocated_alias)
-        if creation_oid is None:
-            creation_oid = git("rev-parse", "HEAD", cwd=repo_path).stdout.strip()
-        if not isinstance(source_head_ref, (str, type(None))):
-            ref_result = subprocess.run(
-                ["git", "-C", repo_path, "symbolic-ref", "--quiet", "HEAD"],
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            source_head_ref = ref_result.stdout.strip() if ref_result.returncode == 0 else None
-        source_branch = (
-            source_head_ref[len("refs/heads/") :]
-            if isinstance(source_head_ref, str) and source_head_ref.startswith("refs/heads/")
-            else None
-        )
-        common_dir = git("rev-parse", "--git-common-dir", cwd=repo_path).stdout.strip()
-        if not Path(common_dir).is_absolute():
-            common_dir = str(Path(repo_path) / common_dir)
-        creation_context = {
-            "sourceHeadOid": creation_oid,
-            "sourceHeadRef": source_head_ref,
-            "sourceBranch": source_branch,
-            "sourceGitCommonDir": common_dir,
-            "branch": branch,
-            "plannedBranch": branch,
-            "plannedExecutionCwd": execution_cwd,
-        }
-        run_path = self.delegate.run_registry.run_directory(registry_root, run_id)
-        run_path.mkdir(parents=True, exist_ok=True)
-        manifest_alias = alias if alias != allocated_alias else allocated_alias
-        manifest = {
-            "schema": self.delegate.run_registry.MANIFEST_SCHEMA,
-            "runId": run_id,
-            "alias": manifest_alias,
-            "harness": harness,
-            "engine": harness,
-            "mode": "work",
-            "model": "composer-2.5",
-            "cwd": repo_path,
-            "executionCwd": execution_cwd,
-            "sourceGitRoot": repo_path,
-            "isolatedWorkspace": True,
-            "isolationMode": "worktree",
-            "effectiveIsolation": "worktree",
-            "isolationLifecycle": "persistent",
-            "preservedWorkspace": True,
-            "branch": branch,
-            "worktreeStatus": worktree_status,
-            "creationContext": creation_context,
-            "startedAt": self.delegate.run_registry.utc_now_iso(),
-        }
-        if last_activity_at is None:
-            last_activity_at = self.delegate.run_registry.utc_now_iso()
-        state = {
-            "schema": self.delegate.run_registry.STATE_SCHEMA,
-            "runId": run_id,
-            "alias": manifest_alias,
-            "status": "succeeded",
-            "worktreeStatus": worktree_status,
-            "lastActivityAt": last_activity_at,
-        }
-        self.delegate.run_registry.write_json_atomic(run_path / "manifest.json", manifest)
-        self.delegate.run_registry.write_json_atomic(run_path / "state.json", state)
-        if alias != allocated_alias:
-            index = self.delegate.run_registry.load_index(registry_root)
-            index["aliases"].pop(allocated_alias, None)
-            (registry_root / "aliases" / allocated_alias).unlink(missing_ok=True)
-            index["aliases"][alias] = run_id
-            entry = index["runs"][run_id]
-            if isinstance(entry, dict):
-                entry["alias"] = alias
-            self.delegate.run_registry.bind_alias_claim(registry_root, alias, run_id)
-            self.delegate.run_registry.save_index(registry_root, index)
-        return run_id, alias
 
     def _seed_plain_run(
         self,
@@ -180,39 +102,12 @@ class WorktreeMgmtTests(unittest.TestCase):
         harness: str = "cursor",
         last_activity_at: str | None = None,
     ) -> tuple[str, str]:
-        registry_root = self.delegate.run_registry.ensure_registry(
-            Path(repo_path),
-            workspace_kind="git",
-        )
-        run_id, alias = self.delegate.run_registry.register_run(
-            registry_root,
+        return seed_plain_run(
+            self.delegate,
+            repo_path,
             harness=harness,
-            metadata={"mode": "work", "cwd": repo_path},
+            last_activity_at=last_activity_at,
         )
-        run_path = self.delegate.run_registry.run_directory(registry_root, run_id)
-        manifest = {
-            "schema": self.delegate.run_registry.MANIFEST_SCHEMA,
-            "runId": run_id,
-            "alias": alias,
-            "harness": harness,
-            "engine": harness,
-            "mode": "work",
-            "model": "composer-2.5",
-            "cwd": repo_path,
-            "startedAt": self.delegate.run_registry.utc_now_iso(),
-        }
-        if last_activity_at is None:
-            last_activity_at = self.delegate.run_registry.utc_now_iso()
-        state = {
-            "schema": self.delegate.run_registry.STATE_SCHEMA,
-            "runId": run_id,
-            "alias": alias,
-            "status": "succeeded",
-            "lastActivityAt": last_activity_at,
-        }
-        self.delegate.run_registry.write_json_atomic(run_path / "manifest.json", manifest)
-        self.delegate.run_registry.write_json_atomic(run_path / "state.json", state)
-        return run_id, alias
 
     def _create_worktree_at(
         self,
@@ -719,7 +614,7 @@ class WorktreeMgmtTests(unittest.TestCase):
         _repo, path = self._make_repo()
         with tempfile.TemporaryDirectory() as fake_home:
             fixed_run_id = "del_20260101T000000Z_abcdef"
-            short_id = self.delegate.short_run_id(fixed_run_id)
+            short_id = self.delegate.worktree_execution.short_run_id(fixed_run_id)
             branch = f"delegate/cursor-{short_id}"
             git("branch", branch, cwd=path)
             before = git("rev-parse", branch, cwd=path).stdout.strip()
@@ -1695,27 +1590,26 @@ class WorktreeMgmtTests(unittest.TestCase):
             registry_root = self._registry_root(path)
             config = {"worktrees": {"autoPrune": {"enabled": True, "mergedOlderThanDays": 1}}}
 
-            # Hold the registry lock in a background thread.
             import threading
 
             lock_held = threading.Event()
+            release_lock = threading.Event()
 
             def hold_lock():
                 with self.delegate.run_registry.registry_lock(registry_root, timeout_seconds=30):
                     lock_held.set()
-                    # Keep lock for 5 seconds — long enough for maybe_auto_prune to notice.
-                    time.sleep(5)
+                    release_lock.wait(timeout=10)
 
             holder = threading.Thread(target=hold_lock)
             holder.start()
-            lock_held.wait(timeout=5)  # wait for lock to be acquired
-
-            # now maybe_auto_prune should return quickly (within 1s) since lock is contended.
-            t0 = time.monotonic()
-            result = self.delegate.worktree_mgmt.maybe_auto_prune(registry_root, config)
-            elapsed = time.monotonic() - t0
-
-            holder.join(timeout=10)
+            self.assertTrue(lock_held.wait(timeout=5), "registry lock was not acquired")
+            try:
+                t0 = time.monotonic()
+                result = self.delegate.worktree_mgmt.maybe_auto_prune(registry_root, config)
+                elapsed = time.monotonic() - t0
+            finally:
+                release_lock.set()
+                holder.join(timeout=10)
 
             # Result should indicate skip/unavailable (lock contention).
             self.assertIsNotNone(result)
@@ -1963,8 +1857,10 @@ class WorktreeMgmtTests(unittest.TestCase):
 
     def test_run_git_timeout_returns_structured_failure(self):
         _repo, path = self._make_repo()
+        from delegate_agent import git_utils
+
         with mock.patch.object(
-            self.delegate.worktree_mgmt.subprocess,
+            git_utils.subprocess,
             "run",
             side_effect=subprocess.TimeoutExpired(["git", "status"], 30),
         ):
@@ -1975,8 +1871,10 @@ class WorktreeMgmtTests(unittest.TestCase):
     def test_porcelain_status_uses_quick_git_timeout(self):
         _repo, path = self._make_repo()
         completed = subprocess.CompletedProcess(["git"], 0, "", "")
+        from delegate_agent import git_utils
+
         with mock.patch.object(
-            self.delegate.worktree_mgmt.subprocess,
+            git_utils.subprocess,
             "run",
             return_value=completed,
         ) as run:
@@ -2037,10 +1935,10 @@ class WorktreeMgmtTests(unittest.TestCase):
             self.delegate.run_registry.write_json_atomic(run_path / "snapshot.json", snapshot_data)
 
             # merge_snapshot_view should lift worktreeCleanupCommands from manifest.
-            from delegate_agent import rendering as delegate_rendering
+            from delegate_agent import snapshot_view
 
             loaded_snapshot = self.delegate.run_registry.load_run_snapshot(registry_root, run_id)
-            view = delegate_rendering.merge_snapshot_view(
+            view = snapshot_view.merge_snapshot_view(
                 registry_root,
                 run_id,
                 loaded_snapshot,

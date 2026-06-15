@@ -13,7 +13,8 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = str(ROOT / "src")
-CLI_PATH = ROOT / "src" / "delegate_agent" / "cli.py"
+CLI_PATH = ROOT / "bin" / "delegate.py"
+MODULE_PATH = ROOT / "src" / "delegate_agent" / "cli.py"
 RUNNER_PATH = ROOT / "src" / "delegate_agent" / "runner.py"
 REGISTRY_PATH = ROOT / "src" / "delegate_agent" / "run_registry.py"
 
@@ -138,6 +139,57 @@ class RunnerCaptureTests(unittest.TestCase):
             )
             warnings = snapshot.get("warnings", [])
             self.assertTrue(any("stdin prompt delivery" in w for w in warnings))
+
+    def test_tracked_launch_error_records_failed_state(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model="model-id",
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-05-20T21:42:33Z",
+            )
+            missing = str(Path(workspace) / "missing-agent")
+
+            with self.assertRaises(self.runner.RunnerLaunchError) as caught:
+                self.runner.execute_tracked(
+                    [missing],
+                    workspace,
+                    ctx,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+
+            self.assertEqual(caught.exception.error, "child_launch_failed")
+            run_path = root / "runs" / run_id
+            state = json.loads((run_path / "state.json").read_text(encoding="utf-8"))
+            snapshot = json.loads((run_path / "snapshot.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["status"], "failed")
+            self.assertEqual(state["error"], "child_launch_failed")
+            self.assertIn("missing-agent", state["message"])
+            self.assertFalse(snapshot["ok"])
+            self.assertEqual(snapshot["status"], "failed")
+            self.assertEqual(snapshot["error"], "child_launch_failed")
+
+    def test_passthrough_launch_error_uses_runner_error(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            missing = str(Path(workspace) / "missing-agent")
+
+            with self.assertRaises(self.runner.RunnerLaunchError) as caught:
+                self.runner.execute_passthrough([missing], workspace)
+
+        self.assertEqual(caught.exception.error, "child_launch_failed")
+        self.assertIn("missing-agent", caught.exception.message)
 
     def test_tracked_run_writes_logs_and_bounded_json(self):
         temp, bin_dir = make_streaming_fake_bin()
@@ -682,7 +734,7 @@ class RunnerCaptureTests(unittest.TestCase):
         read_fd = os.fdopen(reader, "rb", closefd=True)
         with tempfile.TemporaryDirectory() as tmp:
             log_path = Path(tmp) / "stdout.log"
-            byte_counter = [0]
+            byte_counter = self.runner.ByteCounter()
             thread = threading.Thread(
                 target=self.runner._drain_stream,
                 args=(read_fd, log_path, byte_counter),
@@ -693,7 +745,7 @@ class RunnerCaptureTests(unittest.TestCase):
             self.runner._join_drain_thread(thread, read_fd)
             read_fd.close()
             self.assertFalse(thread.is_alive())
-            self.assertEqual(byte_counter[0], len(b"line\n"))
+            self.assertEqual(byte_counter.total, len(b"line\n"))
 
     def test_tracked_run_batches_progress_persistence(self):
         temp = tempfile.TemporaryDirectory()

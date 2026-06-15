@@ -1,0 +1,580 @@
+from __future__ import annotations
+
+import shlex
+import subprocess  # nosec B404 - persistent worktree cleanup intentionally runs fixed git argv with shell=False.
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Protocol, TextIO
+
+from delegate_agent import harness_events, retention, run_registry
+from delegate_agent import runner as delegate_runner
+from delegate_agent.git_utils import (
+    GIT_MUTATION_TIMEOUT_SECONDS,
+    GIT_QUICK_TIMEOUT_SECONDS,
+    capture_git_metadata,
+)
+from delegate_agent.git_utils import run_git as _run_git
+from delegate_agent.isolation import (
+    IsolationContext,
+    IsolationExecutionError,
+    branch_label,
+    compute_repo_fingerprint_from_common_dir,
+    create_persistent_worktree,
+    plan_branch_name,
+    plan_worktree_path,
+    prepend_persistent_worktree_context,
+    require_clean_source,
+    require_valid_head,
+    short_run_id,
+    worktrees_data_home,
+)
+from delegate_agent.json_types import JsonObject
+from delegate_agent.prompt_transport import (
+    DROID_PROMPT_FILE_ARG_PLACEHOLDER,
+    PROMPT_TRANSPORT_FILE,
+    PROMPT_TRANSPORT_STDIN,
+)
+
+
+class PersistentWorktreeError(Exception):
+    """User-facing error raised by the persistent worktree execution boundary."""
+
+    def __init__(self, error: str, message: str) -> None:
+        super().__init__(message)
+        self.error = error
+        self.message = message
+
+
+class PersistentExecutionRequest(Protocol):
+    engine: str
+    mode: str
+    workspace: str
+    prompt: str
+    argv: list[str]
+    model: str | None
+    model_alias: str | None
+    workspace_kind: str
+    isolation_context: IsolationContext | None
+    warnings: tuple[str, ...]
+    reasoning_effort: str | None
+    reasoning_effort_source: str | None
+    reasoning_capability_source: str | None
+    reasoning_transport: str | None
+    stdin_text: str | None
+    prompt_file_text: str | None
+    prompt_transport: str
+    display_argv: list[str] | None
+
+
+class SourceWorkspace(Protocol):
+    path: str
+    kind: str
+
+
+BinaryValidator = Callable[[list[str], str], None]
+
+
+@dataclass(frozen=True)
+class PersistentWorktreeExecution:
+    request: PersistentExecutionRequest
+    json_mode: bool
+    config: JsonObject
+    pass_through: bool
+    completion_report_mode: str
+    source_workspace: SourceWorkspace
+    stdout: TextIO
+    stderr: TextIO
+    binary_validator: BinaryValidator
+
+
+@dataclass(frozen=True)
+class PersistentWorktreePreflight:
+    iso_ctx: IsolationContext
+    source_git_root: str
+    base_oid: str
+    source_git_common_dir: str | None
+    source_head_oid: str
+    source_head_ref: str | None
+    source_branch: str | None
+    registry_root: Path
+
+
+@dataclass(frozen=True)
+class PersistentWorktreeRegistration:
+    run_id: str
+    alias: str
+    run_path: Path
+    branch: str
+    worktree_path: str
+    creation_context: JsonObject
+    pre_ctx: delegate_runner.RunContext
+
+
+@dataclass(frozen=True)
+class ExecutionWorkspaceRequest:
+    argv: list[str]
+    display_argv: list[str]
+    stdin_text: str | None
+    prompt_file_text: str | None
+
+
+def execute_persistent_worktree(
+    execution: PersistentWorktreeExecution,
+) -> tuple[int, JsonObject | None]:
+    """Launch a work-mode child in a preserved Delegate-managed git worktree."""
+    preflight = _validate_persistent_worktree_request(execution)
+    registration = _register_persistent_worktree_run(execution, preflight)
+    _create_persistent_worktree_or_record_failure(execution, preflight, registration)
+    return _launch_child_in_persistent_worktree(execution, preflight, registration)
+
+
+def _validate_persistent_worktree_request(
+    execution: PersistentWorktreeExecution,
+) -> PersistentWorktreePreflight:
+    request = execution.request
+    iso_ctx = request.isolation_context
+    if iso_ctx is None:
+        raise PersistentWorktreeError(
+            "missing_isolation_context",
+            "Persistent worktree execution requires an isolation context.",
+        )
+
+    if request.workspace_kind != "git":
+        raise PersistentWorktreeError(
+            "worktree_requires_git",
+            "--isolation worktree requires a Git workspace.",
+        )
+    source_git_root = request.workspace
+
+    try:
+        base_oid = require_valid_head(source_git_root)
+    except IsolationExecutionError as exc:
+        raise PersistentWorktreeError(exc.error, exc.message) from exc
+    (
+        _current_git_root,
+        current_git_common_dir,
+        current_head_oid,
+        current_head_ref,
+        current_branch,
+    ) = capture_git_metadata(source_git_root)
+    current_head_oid = base_oid
+
+    if execution.pass_through:
+        raise PersistentWorktreeError(
+            "pass_through_with_persistent_isolation",
+            "--pass-through is not supported with persistent worktree runs (work mode + effective worktree isolation).",
+        )
+
+    try:
+        require_clean_source(source_git_root)
+    except IsolationExecutionError as exc:
+        raise PersistentWorktreeError(exc.error, exc.message) from exc
+
+    execution.binary_validator(request.argv, request.engine)
+
+    registry_root = run_registry.ensure_registry(
+        Path(execution.source_workspace.path),
+        workspace_kind=execution.source_workspace.kind,
+    )
+    retention.run_retention_pass(registry_root, execution.config)
+
+    return PersistentWorktreePreflight(
+        iso_ctx=iso_ctx,
+        source_git_root=source_git_root,
+        base_oid=base_oid,
+        source_git_common_dir=current_git_common_dir or iso_ctx.source_git_common_dir,
+        source_head_oid=current_head_oid,
+        source_head_ref=current_head_ref,
+        source_branch=current_branch,
+        registry_root=registry_root,
+    )
+
+
+def _build_persistent_worktree_run_context(
+    execution: PersistentWorktreeExecution,
+    preflight: PersistentWorktreePreflight,
+    *,
+    run_id: str,
+    alias: str,
+    branch: str,
+    worktree_path: str,
+    creation_context: JsonObject,
+) -> delegate_runner.RunContext:
+    request = execution.request
+    iso_ctx = preflight.iso_ctx
+    return delegate_runner.RunContext(
+        registry_root=preflight.registry_root,
+        run_id=run_id,
+        alias=alias,
+        harness=request.engine,
+        engine=request.engine,
+        mode=request.mode,
+        model=request.model,
+        source_cwd=execution.source_workspace.path,
+        execution_cwd=worktree_path,
+        workspace_kind=execution.source_workspace.kind,
+        isolated_workspace=True,
+        started_at=run_registry.utc_now_iso(),
+        creation_context=creation_context,
+        source_git_root=iso_ctx.source_git_root or preflight.source_git_root,
+        isolation_mode=iso_ctx.isolation_mode,
+        effective_isolation=iso_ctx.effective_isolation,
+        isolation_lifecycle=iso_ctx.isolation_lifecycle,
+        preserved_workspace=iso_ctx.preserved_workspace,
+        branch=branch,
+        worktree_status="present",
+        warnings=request.warnings,
+        reasoning_effort=request.reasoning_effort,
+        reasoning_effort_source=request.reasoning_effort_source,
+        reasoning_capability_source=request.reasoning_capability_source,
+        reasoning_transport=request.reasoning_transport,
+        prompt_transport=request.prompt_transport,
+    )
+
+
+def _register_persistent_worktree_run(
+    execution: PersistentWorktreeExecution,
+    preflight: PersistentWorktreePreflight,
+) -> PersistentWorktreeRegistration:
+    request = execution.request
+    label = branch_label(request.engine, request.model_alias)
+
+    run_id, alias = run_registry.register_run(
+        preflight.registry_root,
+        harness=request.engine,
+        metadata={
+            "mode": request.mode,
+            "model": request.model,
+            "cwd": execution.source_workspace.path,
+        },
+    )
+
+    short_id = short_run_id(run_id)
+    branch = plan_branch_name(label, short_id)
+    data_home = worktrees_data_home(execution.config)
+
+    source_git_common_dir = preflight.source_git_common_dir
+    if source_git_common_dir is None:
+        raise PersistentWorktreeError(
+            "worktree_requires_git",
+            "--isolation worktree could not determine the Git common directory.",
+        )
+
+    fingerprint = compute_repo_fingerprint_from_common_dir(source_git_common_dir)
+    worktree_path = str(plan_worktree_path(data_home, fingerprint, label, short_id))
+
+    creation_context: JsonObject = {
+        "sourceHeadOid": preflight.source_head_oid,
+        "sourceHeadRef": preflight.source_head_ref,
+        "sourceBranch": preflight.source_branch,
+        "sourceGitCommonDir": source_git_common_dir,
+        "branch": branch,
+        "plannedBranch": branch,
+        "plannedExecutionCwd": worktree_path,
+        "label": label,
+        "shortRunId": short_id,
+    }
+
+    pre_ctx = _build_persistent_worktree_run_context(
+        execution,
+        preflight,
+        run_id=run_id,
+        alias=alias,
+        branch=branch,
+        worktree_path=worktree_path,
+        creation_context=creation_context,
+    )
+    run_path = run_registry.run_directory(preflight.registry_root, run_id)
+    run_path.mkdir(parents=True, exist_ok=True)
+    delegate_runner.write_manifest(
+        run_path,
+        delegate_runner.build_manifest(pre_ctx, _public_argv(request)),
+    )
+
+    delegate_runner.write_state(
+        run_path,
+        delegate_runner.build_state(
+            pre_ctx,
+            status="creating_isolation",
+            extra={"plannedBranch": branch, "plannedExecutionCwd": worktree_path},
+        ),
+    )
+
+    return PersistentWorktreeRegistration(
+        run_id=run_id,
+        alias=alias,
+        run_path=run_path,
+        branch=branch,
+        worktree_path=worktree_path,
+        creation_context=creation_context,
+        pre_ctx=pre_ctx,
+    )
+
+
+def _record_persistent_worktree_creation_failure(
+    registration: PersistentWorktreeRegistration,
+    exc: IsolationExecutionError,
+) -> None:
+    failed_state = delegate_runner.build_state(
+        registration.pre_ctx,
+        status="failed",
+        extra={
+            "error": exc.error,
+            "message": exc.message,
+            "plannedBranch": registration.branch,
+            "plannedExecutionCwd": registration.worktree_path,
+        },
+    )
+    delegate_runner.write_state(registration.run_path, failed_state)
+
+    failed_snapshot = delegate_runner.build_snapshot(
+        registration.pre_ctx,
+        accumulator=harness_events.StreamAccumulator(),
+    )
+    failed_snapshot["ok"] = False
+    failed_snapshot["error"] = exc.error
+    failed_snapshot["message"] = exc.message
+    failed_snapshot["status"] = "failed"
+    failed_snapshot["plannedBranch"] = registration.branch
+    failed_snapshot["plannedExecutionCwd"] = registration.worktree_path
+    for key in ("executionCwd", "worktreeStatus", "worktreeCleanupCommands", "branch"):
+        failed_snapshot.pop(key, None)
+    delegate_runner.write_snapshot(registration.run_path, failed_snapshot)
+
+
+def _create_persistent_worktree_or_record_failure(
+    execution: PersistentWorktreeExecution,
+    preflight: PersistentWorktreePreflight,
+    registration: PersistentWorktreeRegistration,
+) -> None:
+    try:
+        create_persistent_worktree(
+            preflight.source_git_root,
+            registration.branch,
+            registration.worktree_path,
+            preflight.base_oid,
+        )
+    except IsolationExecutionError as exc:
+        _record_persistent_worktree_creation_failure(registration, exc)
+        if exc.error != "branch_collision":
+            _cleanup_partial_worktree(
+                preflight.source_git_root,
+                registration.worktree_path,
+                registration.branch,
+                registration.run_path,
+                stderr=execution.stderr,
+                remove_branch=True,
+            )
+        raise PersistentWorktreeError(exc.error, exc.message) from exc
+
+
+def _request_for_execution_workspace(
+    request: PersistentExecutionRequest,
+    execution_workspace: str,
+) -> ExecutionWorkspaceRequest:
+    execution_argv = _replace_workspace_arg_in_argv(
+        request,
+        request.argv,
+        execution_workspace,
+    )
+    execution_stdin_text = request.stdin_text
+    execution_prompt_file_text = request.prompt_file_text
+    execution_prompt = prepend_persistent_worktree_context(request.prompt)
+    if request.prompt_transport == PROMPT_TRANSPORT_STDIN:
+        execution_stdin_text = prepend_persistent_worktree_context(
+            execution_stdin_text or request.prompt
+        )
+    elif request.prompt_transport == PROMPT_TRANSPORT_FILE:
+        execution_prompt_file_text = prepend_persistent_worktree_context(
+            execution_prompt_file_text or request.prompt
+        )
+    else:
+        execution_argv[-1] = execution_prompt
+    execution_display_argv = _replace_workspace_arg_in_argv(
+        request,
+        _public_argv(request),
+        execution_workspace,
+    )
+    return ExecutionWorkspaceRequest(
+        argv=execution_argv,
+        display_argv=execution_display_argv,
+        stdin_text=execution_stdin_text,
+        prompt_file_text=execution_prompt_file_text,
+    )
+
+
+def _launch_child_in_persistent_worktree(
+    execution: PersistentWorktreeExecution,
+    preflight: PersistentWorktreePreflight,
+    registration: PersistentWorktreeRegistration,
+) -> tuple[int, JsonObject | None]:
+    request = execution.request
+    try:
+        execution_request = _request_for_execution_workspace(
+            request,
+            registration.worktree_path,
+        )
+        execution.binary_validator(execution_request.argv, request.engine)
+
+        exec_ctx = _build_persistent_worktree_run_context(
+            execution,
+            preflight,
+            run_id=registration.run_id,
+            alias=registration.alias,
+            branch=registration.branch,
+            worktree_path=registration.worktree_path,
+            creation_context=registration.creation_context,
+        )
+        delegate_runner.write_manifest(
+            registration.run_path,
+            delegate_runner.build_manifest(exec_ctx, execution_request.display_argv),
+        )
+        exit_code, payload = delegate_runner.execute_tracked(
+            execution_request.argv,
+            registration.worktree_path,
+            exec_ctx,
+            json_mode=execution.json_mode,
+            stdout=execution.stdout,
+            stderr=execution.stderr,
+            completion_report_mode=execution.completion_report_mode,
+            stdin_text=execution_request.stdin_text,
+            prompt_file_text=execution_request.prompt_file_text,
+            prompt_file_placeholder=DROID_PROMPT_FILE_ARG_PLACEHOLDER,
+            manifest_argv=execution_request.display_argv,
+        )
+    except Exception as exc:
+        error_msg = str(exc)
+        error_code = getattr(exc, "error", "execution_failed")
+        delegate_runner.write_state(
+            registration.run_path,
+            delegate_runner.build_state(
+                registration.pre_ctx,
+                status="failed",
+                extra={
+                    "error": error_code,
+                    "message": error_msg,
+                    "plannedBranch": registration.branch,
+                    "plannedExecutionCwd": registration.worktree_path,
+                },
+            ),
+        )
+        raise PersistentWorktreeError(error_code, error_msg) from exc
+
+    run_registry.set_worktree_status(
+        preflight.registry_root,
+        registration.run_id,
+        "present",
+    )
+
+    return exit_code, payload
+
+
+def _public_argv(request: PersistentExecutionRequest) -> list[str]:
+    return list(request.display_argv if request.display_argv is not None else request.argv)
+
+
+def _replace_argv_after_flag(argv: list[str], flag: str, value: str) -> list[str]:
+    updated = list(argv)
+    for index, token in enumerate(updated):
+        if token == flag and index + 1 < len(updated):
+            updated[index + 1] = value
+            return updated
+    return updated
+
+
+def _replace_workspace_arg_in_argv(
+    request: PersistentExecutionRequest,
+    argv: list[str],
+    execution_workspace: str,
+) -> list[str]:
+    if request.engine == "cursor":
+        return _replace_argv_after_flag(argv, "--workspace", execution_workspace)
+    if request.engine == "codex":
+        return _replace_argv_after_flag(argv, "--cd", execution_workspace)
+    if request.engine == "droid":
+        return _replace_argv_after_flag(argv, "--cwd", execution_workspace)
+    if request.engine == "kimi":
+        return list(argv)
+    return list(argv)
+
+
+def _cleanup_partial_worktree(
+    source_git_root: str,
+    worktree_path: str,
+    branch: str,
+    run_path: Path,
+    *,
+    stderr: TextIO,
+    remove_branch: bool = True,
+) -> None:
+    path = Path(worktree_path)
+    cleanup_failed = False
+    if path.exists() or path.is_symlink():
+        try:
+            result = _run_git(
+                source_git_root,
+                ["worktree", "remove", "--force", worktree_path],
+                timeout_seconds=GIT_MUTATION_TIMEOUT_SECONDS,
+            )
+            if result.returncode != 0:
+                cleanup_failed = True
+        except (OSError, subprocess.SubprocessError):
+            cleanup_failed = True
+    if remove_branch:
+        try:
+            result = _run_git(
+                source_git_root,
+                ["branch", "-D", branch],
+                timeout_seconds=GIT_MUTATION_TIMEOUT_SECONDS,
+            )
+            if result.returncode != 0 and _branch_delete_still_needs_cleanup(
+                source_git_root,
+                branch,
+            ):
+                cleanup_failed = True
+        except (OSError, subprocess.SubprocessError):
+            cleanup_failed = True
+    if cleanup_failed:
+        commands = [
+            shlex.join(
+                ["git", "-C", source_git_root, "worktree", "remove", "--force", worktree_path]
+            )
+        ]
+        if remove_branch:
+            commands.append(shlex.join(["git", "-C", source_git_root, "branch", "-D", branch]))
+        manual = " && ".join(commands)
+        snapshot_path = run_path / run_registry.SNAPSHOT_FILE
+        metadata_warning: str | None = None
+        if snapshot_path.exists():
+            try:
+                existing = run_registry.read_json_object(snapshot_path)
+                if existing is not None:
+                    existing["cleanupFailed"] = True
+                    existing["manualCleanup"] = manual
+                    run_registry.write_json_atomic(snapshot_path, existing)
+            except (OSError, ValueError) as exc:
+                metadata_warning = (
+                    "warning: partial worktree cleanup failed, and Delegate could not "
+                    f"record cleanup metadata in {snapshot_path}: {exc}"
+                )
+        if metadata_warning is not None:
+            print(metadata_warning, file=stderr)
+        print(
+            f"warning: partial worktree cleanup failed; manual cleanup required: {manual}",
+            file=stderr,
+        )
+
+
+def _branch_delete_still_needs_cleanup(source_git_root: str, branch: str) -> bool:
+    try:
+        result = _run_git(
+            source_git_root,
+            ["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+            timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return True
+    if result.returncode == 0:
+        return True
+    return result.returncode != 1
