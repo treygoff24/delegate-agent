@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import NoReturn, TextIO
+from typing import TextIO
 
 from delegate_agent import command_errors, redaction, run_registry, snapshot_view
 from delegate_agent import rendering as delegate_rendering
@@ -31,43 +31,18 @@ class InspectionError(command_errors.CommandError):
     pass
 
 
-def resolve_run_target(
-    registry_root: Path,
-    *,
-    handle: str | None,
-    latest_harness: str | None,
-) -> tuple[str, str | None]:
-    return command_errors.resolve_run_target(
-        registry_root,
-        handle=handle,
-        latest_harness=latest_harness,
-        error_cls=InspectionError,
-    )
-
-
-def _raise_no_registry_snapshot_error(command: SnapshotCommand) -> NoReturn:
-    if command.latest_harness is not None:
-        raise InspectionError(
-            "no_matching_runs",
-            f"No runs found for harness: {command.latest_harness}",
-        )
-    handle = command.handle
-    if handle is None:
-        raise InspectionError("missing_handle", "snapshot requires a run handle or --latest.")
-    raise InspectionError(
-        "unknown_handle",
-        f"Unknown run handle: {handle}. Suggestions: (none)",
-    )
-
-
 def emit_snapshot(command: SnapshotCommand, *, workspace_path: str, stdout: TextIO) -> int:
-    registry_root = run_registry.registry_root_if_exists(Path(workspace_path))
+    workspace = Path(workspace_path)
+    registry_root = run_registry.registry_root_if_exists(workspace)
     if registry_root is None:
-        _raise_no_registry_snapshot_error(command)
-    run_id, _alias = resolve_run_target(
+        if command.latest_harness is None and command.handle is None:
+            raise InspectionError("missing_handle", "snapshot requires a run handle or --latest.")
+        registry_root = run_registry.registry_root(workspace)
+    run_id, _alias = command_errors.resolve_run_target(
         registry_root,
         handle=command.handle,
         latest_harness=command.latest_harness,
+        error_cls=InspectionError,
     )
     snapshot = run_registry.load_run_snapshot(registry_root, run_id)
     view = snapshot_view.merge_snapshot_view(

@@ -45,20 +45,6 @@ class RunOutputError(command_errors.CommandError):
         self.next_actions = next_actions
 
 
-def _resolve_run_target(
-    registry_root: Path,
-    *,
-    handle: str | None,
-    latest_harness: str | None,
-) -> tuple[str, str | None]:
-    return command_errors.resolve_run_target(
-        registry_root,
-        handle=handle,
-        latest_harness=latest_harness,
-        error_cls=RunOutputError,
-    )
-
-
 def _add_log_output_section(
     *,
     registry_root: Path,
@@ -412,16 +398,15 @@ def _emit_run_output_sections(
 
 
 def emit(command: RunOutputCommand, *, workspace_path: str, stdout: TextIO) -> int:
-    registry_root = run_registry.registry_root_if_exists(Path(workspace_path))
+    workspace = Path(workspace_path)
+    registry_root = run_registry.registry_root_if_exists(workspace)
     if registry_root is None:
-        raise RunOutputError(
-            "unknown_handle",
-            f"Unknown run handle: {command.handle}. Suggestions: (none)",
-        )
-    run_id, alias = _resolve_run_target(
+        registry_root = run_registry.registry_root(workspace)
+    run_id, alias = command_errors.resolve_run_target(
         registry_root,
         handle=command.handle,
         latest_harness=None,
+        error_cls=RunOutputError,
     )
     sections: JsonObject = {}
     text_sections: dict[str, str] = {}

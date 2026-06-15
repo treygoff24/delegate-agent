@@ -118,8 +118,12 @@ def delegate_root(workspace: Path) -> Path:
     return workspace / DELEGATE_DIR_NAME
 
 
+def registry_root(workspace: Path) -> Path:
+    return delegate_root(workspace)
+
+
 def registry_root_if_exists(workspace: Path) -> Path | None:
-    root = delegate_root(workspace)
+    root = registry_root(workspace)
     if not index_path(root).exists():
         return None
     return root

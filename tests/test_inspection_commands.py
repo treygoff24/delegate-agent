@@ -15,6 +15,7 @@ if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
 from delegate_agent import (  # noqa: E402
+    command_errors,
     inspection_commands,
     run_registry,
 )
@@ -61,10 +62,11 @@ class InspectionCommandTests(unittest.TestCase):
             started_at="2026-05-20T12:05:00Z",
         )
 
-        run_id, alias = inspection_commands.resolve_run_target(
+        run_id, alias = command_errors.resolve_run_target(
             self.registry_root,
             handle=None,
             latest_harness="codex",
+            error_cls=inspection_commands.InspectionError,
         )
 
         self.assertEqual(run_id, latest_run_id)
@@ -123,7 +125,43 @@ class InspectionCommandTests(unittest.TestCase):
             )
 
         self.assertEqual(caught.exception.error, "no_matching_runs")
-        self.assertIn("droid", caught.exception.message)
+        self.assertEqual(caught.exception.message, "No runs found for harness: droid")
+
+    def test_missing_registry_snapshot_unknown_handle_message_comes_from_resolver(self):
+        isolated_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(isolated_dir.cleanup)
+        isolated = Path(isolated_dir.name)
+
+        with self.assertRaises(inspection_commands.InspectionError) as caught:
+            inspection_commands.emit_snapshot(
+                inspection_commands.SnapshotCommand(handle="missing"),
+                workspace_path=str(isolated),
+                stdout=io.StringIO(),
+            )
+
+        self.assertEqual(caught.exception.error, "unknown_handle")
+        self.assertEqual(
+            caught.exception.message,
+            "Unknown run handle: missing. Suggestions: (none)",
+        )
+
+    def test_missing_registry_snapshot_missing_handle_keeps_snapshot_message(self):
+        isolated_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(isolated_dir.cleanup)
+        isolated = Path(isolated_dir.name)
+
+        with self.assertRaises(inspection_commands.InspectionError) as caught:
+            inspection_commands.emit_snapshot(
+                inspection_commands.SnapshotCommand(handle=None),
+                workspace_path=str(isolated),
+                stdout=io.StringIO(),
+            )
+
+        self.assertEqual(caught.exception.error, "missing_handle")
+        self.assertEqual(
+            caught.exception.message,
+            "snapshot requires a run handle or --latest.",
+        )
 
 
 if __name__ == "__main__":
