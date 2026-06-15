@@ -21,6 +21,7 @@ from delegate_agent import (
     VERSION,
     argv_utils,
     capability_commands,
+    command_errors,
     command_help,
     inspection_commands,
     reasoning,
@@ -1283,14 +1284,11 @@ def emit_snapshot(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout: T
     command = parsed.snapshot
     if command is None:
         raise DelegateError("invalid_command", "snapshot options are required.")
-    try:
-        return inspection_commands.emit_snapshot(
-            command,
-            workspace_path=workspace.path,
-            stdout=stdout,
-        )
-    except inspection_commands.InspectionError as exc:
-        raise DelegateError(exc.error, exc.message) from exc
+    return inspection_commands.emit_snapshot(
+        command,
+        workspace_path=workspace.path,
+        stdout=stdout,
+    )
 
 
 def emit_runs(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout: TextIO) -> int:
@@ -1313,19 +1311,11 @@ def emit_run_output(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout:
     command = parsed.run_output
     if command is None:
         raise DelegateError("invalid_command", "run-output options are required.")
-    try:
-        return run_output_commands.emit(
-            command,
-            workspace_path=workspace.path,
-            stdout=stdout,
-        )
-    except run_output_commands.RunOutputError as exc:
-        raise DelegateError(
-            exc.error,
-            exc.message,
-            diagnostics=exc.diagnostics,
-            next_actions=exc.next_actions,
-        ) from exc
+    return run_output_commands.emit(
+        command,
+        workspace_path=workspace.path,
+        stdout=stdout,
+    )
 
 
 def emit_worktree(
@@ -3715,16 +3705,13 @@ def main(
             command = parsed.capabilities
             if command is None:
                 raise DelegateError("invalid_command", "capabilities options are required.")
-            try:
-                return capability_commands.emit(
-                    command,
-                    config=config,
-                    config_source=source,
-                    workspace=workspace.path,
-                    stdout=stdout,
-                )
-            except capability_commands.CapabilitiesError as exc:
-                raise DelegateError(exc.error, exc.message) from exc
+            return capability_commands.emit(
+                command,
+                config=config,
+                config_source=source,
+                workspace=workspace.path,
+                stdout=stdout,
+            )
 
         if parsed.subcommand in {"snapshot", "runs", "run-output", "worktree"}:
             existing_registry = run_registry.registry_root_if_exists(Path(workspace.path))
@@ -3786,6 +3773,18 @@ def main(
     except run_registry.RegistryJsonError as exc:
         return emit_error(
             DelegateError("invalid_run_registry", str(exc)),
+            json_mode,
+            stdout,
+            stderr,
+        )
+    except command_errors.CommandError as exc:
+        return emit_error(
+            DelegateError(
+                exc.error,
+                exc.message,
+                diagnostics=getattr(exc, "diagnostics", None),
+                next_actions=getattr(exc, "next_actions", None),
+            ),
             json_mode,
             stdout,
             stderr,
