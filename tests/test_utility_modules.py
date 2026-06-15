@@ -13,6 +13,7 @@ if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
 import delegate_agent.archived_logs as archived_logs  # noqa: E402
+import delegate_agent.argv_utils as argv_utils  # noqa: E402
 import delegate_agent.cli as cli  # noqa: E402
 import delegate_agent.json_types as json_types  # noqa: E402
 import delegate_agent.log_output as log_output  # noqa: E402
@@ -29,6 +30,41 @@ import delegate_agent.worktree_mgmt as worktree_mgmt  # noqa: E402
 
 
 class UtilityModuleTests(unittest.TestCase):
+    def test_argv_utils_replace_workspace_arg_by_engine(self):
+        cases = (
+            (
+                "cursor",
+                ["cursor-agent", "--workspace", "/old", "prompt"],
+                ["cursor-agent", "--workspace", "/new", "prompt"],
+            ),
+            (
+                "codex",
+                ["codex", "exec", "--cd", "/old", "prompt"],
+                ["codex", "exec", "--cd", "/new", "prompt"],
+            ),
+            (
+                "droid",
+                ["opencode", "run", "--cwd", "/old", "prompt"],
+                ["opencode", "run", "--cwd", "/new", "prompt"],
+            ),
+            ("kimi", ["kimi", "--prompt", "prompt"], ["kimi", "--prompt", "prompt"]),
+            (
+                "unknown",
+                ["agent", "--workspace", "/old", "prompt"],
+                ["agent", "--workspace", "/old", "prompt"],
+            ),
+        )
+        for engine, argv, expected in cases:
+            with self.subTest(engine=engine):
+                self.assertEqual(
+                    argv_utils.replace_workspace_arg_in_argv(engine, argv, "/new"),
+                    expected,
+                )
+                self.assertIsNot(
+                    argv_utils.replace_workspace_arg_in_argv(engine, argv, "/new"),
+                    argv,
+                )
+
     def test_json_types_non_negative_int_rejects_bool(self):
         self.assertTrue(json_types.is_non_negative_int(0))
         self.assertTrue(json_types.is_non_negative_int(3))

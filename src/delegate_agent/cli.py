@@ -19,6 +19,7 @@ from typing import NoReturn, TextIO
 
 from delegate_agent import (
     VERSION,
+    argv_utils,
     capability_commands,
     command_help,
     inspection_commands,
@@ -58,6 +59,8 @@ from delegate_agent.prompt_transport import (
     PROMPT_TRANSPORT_FILE,
     PROMPT_TRANSPORT_STDIN,
 )
+
+_replace_ws_by_engine = argv_utils.replace_workspace_arg_in_argv
 
 DEFAULT_CONFIG = delegate_config.embedded_default_config()
 CONFIG_ENV = delegate_config.CONFIG_ENV
@@ -2177,15 +2180,6 @@ def prefix_droid_safe_prompt(prompt: str) -> str:
     return f"{DROID_SAFE_REVIEW_PREFIX}{prompt}"
 
 
-def replace_argv_after_flag(argv: list[str], flag: str, value: str) -> list[str]:
-    updated = list(argv)
-    for index, token in enumerate(updated):
-        if token == flag and index + 1 < len(updated):
-            updated[index + 1] = value
-            return updated
-    return updated
-
-
 def _ensure_codex_skip_git_repo_check(argv: list[str]) -> list[str]:
     if "--skip-git-repo-check" in argv:
         return argv
@@ -2203,18 +2197,10 @@ def replace_safe_workspace_arg_in_argv(
     *,
     workspace_kind: str | None = None,
 ) -> list[str]:
-    if request.engine == "cursor":
-        return replace_argv_after_flag(argv, "--workspace", isolated_workspace)
-    if request.engine == "codex":
-        argv = replace_argv_after_flag(argv, "--cd", isolated_workspace)
-        if workspace_kind == "directory":
-            argv = _ensure_codex_skip_git_repo_check(argv)
-        return argv
-    if request.engine == "droid":
-        return replace_argv_after_flag(argv, "--cwd", isolated_workspace)
-    if request.engine == "kimi":
-        return list(argv)
-    return list(argv)
+    updated = _replace_ws_by_engine(request.engine, argv, isolated_workspace)
+    if request.engine == "codex" and workspace_kind == "directory":
+        updated = _ensure_codex_skip_git_repo_check(updated)
+    return updated
 
 
 def replace_workspace_arg_in_argv(
@@ -2222,16 +2208,7 @@ def replace_workspace_arg_in_argv(
     argv: list[str],
     execution_workspace: str,
 ) -> list[str]:
-    """Rewrite the workspace/--cwd argument for all engines."""
-    if request.engine == "cursor":
-        return replace_argv_after_flag(argv, "--workspace", execution_workspace)
-    if request.engine == "codex":
-        return replace_argv_after_flag(argv, "--cd", execution_workspace)
-    if request.engine == "droid":
-        return replace_argv_after_flag(argv, "--cwd", execution_workspace)
-    if request.engine == "kimi":
-        return list(argv)
-    return list(argv)
+    return _replace_ws_by_engine(request.engine, argv, execution_workspace)
 
 
 def write_text_atomic(path: Path, content: str) -> None:
@@ -2955,16 +2932,7 @@ def dry_run_payload(request: Request) -> JsonObject:
             payload["plannedExecutionCwd"] = planned_cwd
             payload["plannedBranch"] = planned_branch
             # Rewrite argv to show the planned workspace path, not the source.
-            if request.engine == "cursor":
-                payload["argv"] = replace_argv_after_flag(
-                    payload["argv"], "--workspace", planned_cwd
-                )
-            elif request.engine == "codex":
-                payload["argv"] = replace_argv_after_flag(payload["argv"], "--cd", planned_cwd)
-            elif request.engine == "droid":
-                payload["argv"] = replace_argv_after_flag(payload["argv"], "--cwd", planned_cwd)
-            elif request.engine == "kimi":
-                pass
+            payload["argv"] = _replace_ws_by_engine(request.engine, payload["argv"], planned_cwd)
         else:
             payload["plannedExecutionCwd"] = None
             payload["plannedBranch"] = None

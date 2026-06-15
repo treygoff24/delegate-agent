@@ -9,6 +9,7 @@ from typing import Protocol, TextIO
 
 from delegate_agent import harness_events, retention, run_registry
 from delegate_agent import runner as delegate_runner
+from delegate_agent.argv_utils import replace_workspace_arg_in_argv
 from delegate_agent.git_utils import (
     GIT_MUTATION_TIMEOUT_SECONDS,
     GIT_QUICK_TIMEOUT_SECONDS,
@@ -373,8 +374,8 @@ def _request_for_execution_workspace(
     request: PersistentExecutionRequest,
     execution_workspace: str,
 ) -> ExecutionWorkspaceRequest:
-    execution_argv = _replace_workspace_arg_in_argv(
-        request,
+    execution_argv = replace_workspace_arg_in_argv(
+        request.engine,
         request.argv,
         execution_workspace,
     )
@@ -391,8 +392,8 @@ def _request_for_execution_workspace(
         )
     else:
         execution_argv[-1] = execution_prompt
-    execution_display_argv = _replace_workspace_arg_in_argv(
-        request,
+    execution_display_argv = replace_workspace_arg_in_argv(
+        request.engine,
         _public_argv(request),
         execution_workspace,
     )
@@ -472,31 +473,6 @@ def _launch_child_in_persistent_worktree(
 
 def _public_argv(request: PersistentExecutionRequest) -> list[str]:
     return list(request.display_argv if request.display_argv is not None else request.argv)
-
-
-def _replace_argv_after_flag(argv: list[str], flag: str, value: str) -> list[str]:
-    updated = list(argv)
-    for index, token in enumerate(updated):
-        if token == flag and index + 1 < len(updated):
-            updated[index + 1] = value
-            return updated
-    return updated
-
-
-def _replace_workspace_arg_in_argv(
-    request: PersistentExecutionRequest,
-    argv: list[str],
-    execution_workspace: str,
-) -> list[str]:
-    if request.engine == "cursor":
-        return _replace_argv_after_flag(argv, "--workspace", execution_workspace)
-    if request.engine == "codex":
-        return _replace_argv_after_flag(argv, "--cd", execution_workspace)
-    if request.engine == "droid":
-        return _replace_argv_after_flag(argv, "--cwd", execution_workspace)
-    if request.engine == "kimi":
-        return list(argv)
-    return list(argv)
 
 
 def _cleanup_partial_worktree(
