@@ -4,6 +4,7 @@ import os
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import unittest
@@ -272,6 +273,76 @@ class RunRegistryTests(unittest.TestCase):
                 self.registry.latest_run_id_for_harness(root, index, "cursor"),
                 newer_id,
             )
+
+    def test_bulk_run_readers_tolerate_corrupt_per_run_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
+            state_corrupt_id = self.registry.generate_run_id(
+                datetime(2026, 5, 20, 10, 0, 0, tzinfo=UTC)
+            )
+            manifest_corrupt_id = self.registry.generate_run_id(
+                datetime(2026, 5, 20, 10, 1, 0, tzinfo=UTC)
+            )
+            healthy_id = self.registry.generate_run_id(datetime(2026, 5, 20, 10, 2, 0, tzinfo=UTC))
+            for run_id in (state_corrupt_id, manifest_corrupt_id, healthy_id):
+                self.registry.register_run(root, harness="cursor", run_id=run_id)
+
+            state_corrupt_path = self.registry.run_directory(root, state_corrupt_id)
+            manifest_corrupt_path = self.registry.run_directory(root, manifest_corrupt_id)
+            healthy_path = self.registry.run_directory(root, healthy_id)
+            (state_corrupt_path / "state.json").write_text("{garbage", encoding="utf-8")
+            archive_file = root / "archive" / f"{state_corrupt_id}.tar.gz"
+            archive_file.parent.mkdir(parents=True)
+            stdout_path = state_corrupt_path / "stdout.log"
+            stdout_path.write_text("archived stdout\n", encoding="utf-8")
+            with tarfile.open(archive_file, "w:gz") as archive:
+                archive.add(stdout_path, arcname="stdout.log")
+            stdout_path.unlink()
+            self.registry.write_json_atomic(
+                state_corrupt_path / "manifest.json",
+                {"startedAt": "2026-05-20T10:00:00Z", "executionCwd": "/tmp/state-corrupt"},
+            )
+            self.registry.write_json_atomic(
+                manifest_corrupt_path / "state.json",
+                {"status": "succeeded", "finishedAt": "2026-05-20T10:01:00Z"},
+            )
+            (manifest_corrupt_path / "manifest.json").write_text("{garbage", encoding="utf-8")
+            self.registry.write_json_atomic(
+                healthy_path / "state.json",
+                {"status": "succeeded", "finishedAt": "2026-05-20T11:00:00Z"},
+            )
+            self.registry.write_json_atomic(
+                healthy_path / "manifest.json",
+                {"startedAt": "2026-05-20T11:00:00Z", "executionCwd": "/tmp/healthy"},
+            )
+
+            index = self.registry.load_index(root)
+            summaries = self.registry.list_run_summaries(root, index, harness="cursor", limit=10)
+
+            self.assertCountEqual(
+                [summary["runId"] for summary in summaries],
+                [state_corrupt_id, manifest_corrupt_id, healthy_id],
+            )
+            by_id = {summary["runId"]: summary for summary in summaries}
+            self.assertEqual(by_id[state_corrupt_id]["status"], self.registry.STATUS_UNKNOWN)
+            self.assertEqual(by_id[state_corrupt_id]["executionCwd"], "/tmp/state-corrupt")
+            self.assertEqual(by_id[state_corrupt_id]["stdoutBytes"], len("archived stdout\n"))
+            self.assertEqual(by_id[manifest_corrupt_id]["status"], "succeeded")
+            self.assertNotIn("executionCwd", by_id[manifest_corrupt_id])
+            self.assertEqual(
+                self.registry.latest_run_id_for_harness(root, index, "cursor"),
+                healthy_id,
+            )
+
+    def test_targeted_run_state_load_still_fails_loud_for_corrupt_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
+            run_id, _alias = self.registry.register_run(root, harness="cursor")
+            run_path = self.registry.run_directory(root, run_id)
+            (run_path / "state.json").write_text("{garbage", encoding="utf-8")
+
+            with self.assertRaises(self.registry.RegistryJsonError):
+                self.registry.load_run_state(root, run_id)
 
     def test_large_log_warnings_threshold(self):
         warnings = self.registry.large_log_warnings(self.registry.LARGE_LOG_WARN_BYTES + 1, 0)

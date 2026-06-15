@@ -263,6 +263,40 @@ class RetentionTests(unittest.TestCase):
         self.assertEqual(result["archived"], 0)
         self.assertTrue((run_path / "stdout.log").exists())
 
+    def test_retention_pass_skips_corrupt_per_run_json(self):
+        state_corrupt_id, _ = self.write_completed_run()
+        manifest_corrupt_id, _ = self.write_completed_run()
+        state_corrupt_path = self.registry.run_directory(self.registry_root, state_corrupt_id)
+        manifest_corrupt_path = self.registry.run_directory(self.registry_root, manifest_corrupt_id)
+        (state_corrupt_path / "state.json").write_text("{garbage", encoding="utf-8")
+        self.registry.write_json_atomic(
+            manifest_corrupt_path / "state.json",
+            {"schema": "delegate.state.v1", "status": "succeeded"},
+        )
+        (manifest_corrupt_path / "manifest.json").write_text("{garbage", encoding="utf-8")
+
+        result = self.retention.run_retention_pass(
+            self.registry_root,
+            self.config,
+            now=datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC),
+        )
+
+        self.assertEqual(result, {"scanned": 2, "archived": 0, "skipped": 2})
+        self.assertTrue((state_corrupt_path / "stdout.log").exists())
+        self.assertTrue((manifest_corrupt_path / "stdout.log").exists())
+
+    def test_mark_raw_logs_archived_treats_corrupt_state_as_empty(self):
+        run_id, _alias = self.write_completed_run()
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        (run_path / "state.json").write_text("{garbage", encoding="utf-8")
+
+        self.retention._mark_raw_logs_archived(run_path, stdout_bytes=12, stderr_bytes=34)
+
+        state = json.loads((run_path / "state.json").read_text(encoding="utf-8"))
+        self.assertIn("rawLogsArchivedAt", state)
+        self.assertEqual(state["stdoutBytes"], 12)
+        self.assertEqual(state["stderrBytes"], 34)
+
     def test_crash_recovery_finishes_archival_when_archive_exists(self):
         run_id, _alias = self.write_completed_run()
         old = (datetime.now(UTC) - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")

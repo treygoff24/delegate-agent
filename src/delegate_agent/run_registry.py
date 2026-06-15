@@ -404,6 +404,13 @@ def read_json_object(path: Path) -> JsonObject | None:
     return data
 
 
+def read_json_object_or_none(path: Path) -> JsonObject | None:
+    try:
+        return read_json_object(path)
+    except RegistryJsonError:
+        return None
+
+
 def run_directory(registry_root: Path, run_id: str) -> Path:
     return runs_dir(registry_root) / run_id
 
@@ -556,12 +563,20 @@ def load_run_state(registry_root: Path, run_id: str) -> JsonObject | None:
     return read_json_object(run_directory(registry_root, run_id) / STATE_FILE)
 
 
+def load_run_state_or_none(registry_root: Path, run_id: str) -> JsonObject | None:
+    return read_json_object_or_none(run_directory(registry_root, run_id) / STATE_FILE)
+
+
 def load_run_snapshot(registry_root: Path, run_id: str) -> JsonObject | None:
     return read_json_object(run_directory(registry_root, run_id) / SNAPSHOT_FILE)
 
 
 def load_run_manifest(registry_root: Path, run_id: str) -> JsonObject | None:
     return read_json_object(run_directory(registry_root, run_id) / MANIFEST_FILE)
+
+
+def load_run_manifest_or_none(registry_root: Path, run_id: str) -> JsonObject | None:
+    return read_json_object_or_none(run_directory(registry_root, run_id) / MANIFEST_FILE)
 
 
 def log_byte_sizes(registry_root: Path, run_id: str) -> tuple[int, int]:
@@ -600,6 +615,28 @@ def effective_log_byte_sizes(registry_root: Path, run_id: str) -> tuple[int, int
         return log_byte_sizes(registry_root, run_id)
     if raw_logs_archived(registry_root, run_id):
         return _archived_log_byte_sizes(registry_root, run_id)
+    return 0, 0
+
+
+def _summary_log_byte_sizes(
+    registry_root: Path,
+    run_id: str,
+    state: JsonObject | None,
+) -> tuple[int, int]:
+    run_path = run_directory(registry_root, run_id)
+    stdout_path = run_path / STDOUT_LOG
+    stderr_path = run_path / STDERR_LOG
+    if stdout_path.exists() or stderr_path.exists():
+        return log_byte_sizes(registry_root, run_id)
+    if raw_logs_archived(registry_root, run_id):
+        state_sizes = archived_logs.state_log_byte_sizes(state)
+        if state_sizes is not None:
+            return state_sizes
+        return archived_logs.archive_log_byte_sizes(
+            archived_logs.archive_path(registry_root, run_id),
+            stdout_log=STDOUT_LOG,
+            stderr_log=STDERR_LOG,
+        )
     return 0, 0
 
 
@@ -647,10 +684,10 @@ def build_run_summary(
     run_id: str,
     index_entry: JsonObject,
 ) -> JsonObject:
-    state = load_run_state(registry_root, run_id)
-    manifest = load_run_manifest(registry_root, run_id)
+    state = load_run_state_or_none(registry_root, run_id)
+    manifest = load_run_manifest_or_none(registry_root, run_id)
 
-    stdout_bytes, stderr_bytes = effective_log_byte_sizes(registry_root, run_id)
+    stdout_bytes, stderr_bytes = _summary_log_byte_sizes(registry_root, run_id, state)
     alias = index_entry.get("alias")
     harness = index_entry.get("harness")
     handle = alias if isinstance(alias, str) else run_id
@@ -792,8 +829,8 @@ def latest_run_id_for_harness(registry_root: Path, index: JsonObject, harness: s
     for run_id, entry in index.get("runs", {}).items():
         if not isinstance(entry, dict) or entry.get("harness") != harness:
             continue
-        state = load_run_state(registry_root, run_id)
-        manifest = load_run_manifest(registry_root, run_id)
+        state = load_run_state_or_none(registry_root, run_id)
+        manifest = load_run_manifest_or_none(registry_root, run_id)
         sort_ts = activity_timestamp(state, manifest, run_id)
         alias_sequence = alias_sequence_for_harness(entry.get("alias"), harness)
         matches.append((sort_ts, alias_sequence, run_id))

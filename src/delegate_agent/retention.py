@@ -49,7 +49,7 @@ def raw_log_retention_days(config: JsonObject) -> int:
 
 
 def should_skip_archival(registry_root: Path, run_id: str) -> bool:
-    state = run_registry.load_run_state(registry_root, run_id)
+    state = run_registry.load_run_state_or_none(registry_root, run_id)
     status = run_registry.effective_status(state)
     return status in (
         run_registry.STATUS_RUNNING,
@@ -135,8 +135,8 @@ def is_eligible_for_archival(
         return False
     moment = now or datetime.now(UTC)
     activity = run_registry.activity_datetime(
-        run_registry.load_run_state(registry_root, run_id),
-        run_registry.load_run_manifest(registry_root, run_id),
+        run_registry.load_run_state_or_none(registry_root, run_id),
+        run_registry.load_run_manifest_or_none(registry_root, run_id),
         run_id,
     )
     if activity is None:
@@ -152,7 +152,7 @@ def _mark_raw_logs_archived(
     stderr_bytes: int = 0,
 ) -> None:
     state_path = run_path / run_registry.STATE_FILE
-    state = run_registry.read_json_object(state_path)
+    state = run_registry.read_json_object_or_none(state_path)
     if state is None:
         state = {}
     state["rawLogsArchivedAt"] = run_registry.utc_now_iso()
