@@ -732,3 +732,14 @@ def completion_report_default_mode(config: JsonObject) -> str:
         return COMPLETION_REPORT_MODE_MARKDOWN
     mode = completion.get("defaultMode", COMPLETION_REPORT_MODE_MARKDOWN)
     return mode if mode in COMPLETION_REPORT_MODES else COMPLETION_REPORT_MODE_MARKDOWN
+
+
+def harness_binary(config: JsonObject, engine: str) -> str:
+    embedded = _EMBEDDED_DEFAULT_CONFIG.get(engine)
+    default_binary = "codex"
+    if isinstance(embedded, dict) and isinstance(embedded.get("binary"), str):
+        default_binary = embedded["binary"]
+    section = config.get(engine)
+    if isinstance(section, dict) and isinstance(section.get("binary"), str):
+        return section["binary"]
+    return default_binary

@@ -5,6 +5,7 @@ from typing import TextIO
 
 from delegate_agent import command_errors, reasoning
 from delegate_agent import rendering as delegate_rendering
+from delegate_agent.config import harness_binary
 from delegate_agent.json_types import JsonObject
 
 
@@ -28,19 +29,12 @@ def capabilities_payload(config: JsonObject, config_source: str, workspace: str)
     }
 
 
-def _codex_binary(config: JsonObject) -> str:
-    codex_cfg = config.get("codex")
-    if isinstance(codex_cfg, dict) and isinstance(codex_cfg.get("binary"), str):
-        return codex_cfg["binary"]
-    return "codex"
-
-
 def _refresh_payload(config: JsonObject, workspace: str) -> JsonObject:
     try:
         existing_cache = reasoning.load_reasoning_capability_cache(workspace)
         refreshed_cache = reasoning.refresh_reasoning_capabilities(
             cwd=workspace,
-            codex_binary=_codex_binary(config),
+            codex_binary=harness_binary(config, "codex"),
         )
         cache = reasoning.merge_reasoning_capability_cache(existing_cache, refreshed_cache)
         cache_path = reasoning.write_reasoning_capability_cache(workspace, cache)

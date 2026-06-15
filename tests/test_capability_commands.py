@@ -16,9 +16,21 @@ from delegate_agent import (  # noqa: E402
     capability_commands,
     reasoning,
 )
+from delegate_agent.config import harness_binary  # noqa: E402
 
 
 class CapabilityCommandTests(unittest.TestCase):
+    def test_harness_binary_uses_embedded_default_when_section_missing(self):
+        self.assertEqual(harness_binary({}, "codex"), "codex")
+        self.assertEqual(harness_binary({}, "droid"), "droid")
+        self.assertEqual(harness_binary({}, "kimi"), "kimi")
+
+    def test_harness_binary_uses_configured_binary(self):
+        self.assertEqual(
+            harness_binary({"codex": {"binary": "codex-test"}}, "codex"),
+            "codex-test",
+        )
+
     def test_emit_json_reports_reasoning_payload_without_refreshing(self):
         with tempfile.TemporaryDirectory() as workspace:
             config = {
