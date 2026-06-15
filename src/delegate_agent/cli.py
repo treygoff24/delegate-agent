@@ -2677,7 +2677,6 @@ def safe_isolated_request(request: Request) -> Iterator[Request]:
     warnings = merge_warnings(
         tuple(warnings_list),
         safe_workspace_warnings,
-        external_symlink_warnings(request.workspace),
     )
 
     isolation = IsolationContext(
@@ -2805,9 +2804,7 @@ def build_kimi_argv(
     argv = [str(kimi["binary"])]
     if mode == MODE_SAFE:
         prompt = prefix_kimi_safe_prompt(prompt)
-    elif mode == MODE_WORK:
-        argv.append("--yolo")
-    else:
+    elif mode != MODE_WORK:
         validate_mode(mode)
     if model:
         argv.extend(["--model", model])
@@ -3527,7 +3524,6 @@ def describe_payload(
                 ],
                 "work": [
                     config["kimi"]["binary"],
-                    "--yolo",
                     "--model",
                     config["kimi"]["defaultModel"],
                     "--output-format",
@@ -3536,7 +3532,7 @@ def describe_payload(
                     "<skill-review-prompt>",
                 ],
                 "workNotes": [
-                    "Uses Kimi --yolo by default for work mode.",
+                    "Kimi prompt mode auto-approves tool actions; Delegate does not pass --yolo because Kimi rejects combining it with --prompt.",
                     "No CLI workspace flag; Delegate sets subprocess cwd.",
                 ],
             },

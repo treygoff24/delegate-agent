@@ -996,7 +996,8 @@ class CommandTests(unittest.TestCase):
         self.assertNotIn("--plan", kimi_safe)
         self.assertNotIn("--yolo", kimi_safe)
         self.assertNotIn("--auto", kimi_safe)
-        self.assertIn("--yolo", kimi_work)
+        self.assertNotIn("--yolo", kimi_work)
+        self.assertIn("--prompt", kimi_work)
         self.assertNotIn("--auto", kimi_work)
 
     def test_describe_and_models_include_runtime_and_config_provenance(self):
@@ -1397,9 +1398,10 @@ class KimiCommandTests(unittest.TestCase):
             self.delegate.DEFAULT_CONFIG,
             dry_run=True,
         )
-        self.assertIn("--yolo", request.argv)
+        self.assertNotIn("--yolo", request.argv)
         self.assertNotIn("--auto", request.argv)
         self.assertNotIn("--plan", request.argv)
+        self.assertIn("--prompt", request.argv)
         prompt_arg = request.argv[request.argv.index("--prompt") + 1]
         self.assertFalse(prompt_arg.startswith(self.delegate.KIMI_SAFE_REVIEW_PREFIX))
         self.assertTrue(prompt_arg.endswith("hello"))
