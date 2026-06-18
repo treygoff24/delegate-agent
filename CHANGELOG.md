@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- New `claude` engine wrapping Claude Code headless mode (`claude -p`). `delegate claude safe` and `delegate claude work` deliver the prompt on stdin and parse Claude Code's `stream-json` output, the same way the other harnesses are normalized. Requires Claude Code 2.1.x or newer (verified on 2.1.181) for `--effort`, `--permission-mode auto`, and `--no-session-persistence`.
+
+- Claude safe mode runs in a temporary isolated workspace (detached worktree or directory copy) with `--permission-mode plan`, `--strict-mcp-config`, a Read/Grep/Glob tool set, and a read-only Bash allowlist (`git diff/status/show/log`, `rg`, `grep`, `ls`). Safe mode is added to the engines that require real isolation, so `--isolation none` is rejected for it.
+
+- Claude work mode uses `claude.workPermissionMode` (default `auto`). Delegate only emits `--permission-mode bypassPermissions` when `policy.harness.claude.work.bypassApprovalsAndSandbox` is explicitly set; `workPermissionMode` itself rejects `bypassPermissions` so a global sandbox profile can never silently broaden Claude's permissions.
+
+- Reasoning effort for Claude maps directly to Claude Code's native `--effort` (`low`, `medium`, `high`, `xhigh`, `max`), validated before launch and kept independent of the Codex/Droid model-capability cache.
+
+- New `claude` config section (`binary`, `defaultModel`, `defaultReasoningEffort`, `workPermissionMode`, `noSessionPersistence`, `bare`) with validation, and Claude coverage across `describe`, `models`, `reasoning-capabilities`, and `dry-run`. Tool activity is surfaced as `tool.started` / `tool.completed` events parsed from Claude's `tool_use` / `tool_result` content blocks.
+
 ## [0.4.0] - 2026-06-15
 
 ### Changed
