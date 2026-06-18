@@ -99,17 +99,20 @@ class StreamAccumulator:
         if event_type == "completion":
             self._ingest_completion(payload)
             return
+        # assistant/user/result are the stream-json envelope shared by the Cursor
+        # and Claude Code harnesses; tool_call.* is Cursor-specific (Claude reports
+        # tool activity via tool_use/tool_result content blocks instead).
         if event_type == "assistant":
-            self._ingest_cursor_assistant(payload)
+            self._ingest_assistant_event(payload)
             return
         if event_type == "user":
-            self._ingest_user_message(payload)
+            self._ingest_user_event(payload)
             return
         if event_type in ("tool_call.started", "tool_call.completed"):
             self._ingest_cursor_tool(payload, event_type)
             return
         if event_type == "result":
-            self._ingest_cursor_result(payload)
+            self._ingest_result_event(payload)
             return
         if event_type in ("item.started", "item.completed"):
             self._ingest_codex_item(payload, completed=event_type == "item.completed")
@@ -142,7 +145,7 @@ class StreamAccumulator:
         if text:
             self._record_recoverable_assistant_text(text)
 
-    def _ingest_cursor_assistant(self, payload: JsonObject) -> None:
+    def _ingest_assistant_event(self, payload: JsonObject) -> None:
         message = payload.get("message")
         if isinstance(message, dict):
             content = message.get("content")
@@ -169,7 +172,7 @@ class StreamAccumulator:
                         )
                         self.current = _tool_current(tool, target)
 
-    def _ingest_user_message(self, payload: JsonObject) -> None:
+    def _ingest_user_event(self, payload: JsonObject) -> None:
         message = payload.get("message")
         if not isinstance(message, dict):
             return
@@ -212,7 +215,7 @@ class StreamAccumulator:
         if isinstance(final_text, str) and final_text.strip():
             self._record_successful_completion_text(final_text)
 
-    def _ingest_cursor_result(self, payload: JsonObject) -> None:
+    def _ingest_result_event(self, payload: JsonObject) -> None:
         result = payload.get("result")
         if isinstance(result, str) and result.strip():
             if payload.get("is_error") is True:
