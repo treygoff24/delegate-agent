@@ -48,6 +48,7 @@ Use this before making a public source release, GitHub release, or package artif
   ```bash
   delegate --json describe
   delegate --json dry-run codex safe "Review only."
+  delegate --json dry-run claude safe "Review only."
   delegate --json dry-run kimi safe "Review only."
   ```
 
