@@ -141,9 +141,26 @@ class StreamAccumulator:
     def _ingest_cursor_assistant(self, payload: JsonObject) -> None:
         message = payload.get("message")
         if isinstance(message, dict):
-            text = _extract_text(message.get("content"))
+            content = message.get("content")
+            text = _extract_text(content)
             if text:
                 self._record_recoverable_assistant_text(text)
+            if isinstance(content, list):
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    if block.get("type") == "tool_use":
+                        tool = _string_field(block, "name") or "tool"
+                        target = _tool_use_target(block)
+                        self.events.append(
+                            NormalizedEvent(
+                                kind="tool.started",
+                                tool=tool,
+                                target=target,
+                                path=target,
+                            )
+                        )
+                        self.current = _tool_current(tool, target)
 
     def _record_recoverable_assistant_text(self, text: str) -> None:
         stripped = self._record_assistant_text(text)
@@ -162,6 +179,9 @@ class StreamAccumulator:
     def _ingest_cursor_result(self, payload: JsonObject) -> None:
         result = payload.get("result")
         if isinstance(result, str) and result.strip():
+            if payload.get("is_error") is True:
+                self._record_recoverable_assistant_text(result)
+                return
             self._record_successful_completion_text(result)
 
     def _ingest_codex_item(self, payload: JsonObject, *, completed: bool) -> None:
@@ -328,6 +348,17 @@ def _codex_command_status(status: str | None, *, completed: bool) -> str | None:
     if status == "completed":
         return "success"
     return status
+
+
+def _tool_use_target(block: JsonObject) -> str | None:
+    tool_input = block.get("input")
+    if not isinstance(tool_input, dict):
+        return None
+    for key in ("command", "file_path", "path", "pattern", "url"):
+        value = tool_input.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
 
 
 def _tool_target(payload: JsonObject) -> str | None:

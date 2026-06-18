@@ -278,3 +278,61 @@ class HarnessEventsTests(unittest.TestCase):
         self.assertEqual(len(acc.events), 1)
         self.assertEqual(acc.events[0].kind, "text")
         self.assertIn("not json", acc.events[0].message or "")
+
+    def test_claude_assistant_tool_use_blocks_emit_tool_started(self):
+        acc = self.events.StreamAccumulator()
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "Running git status"},
+                            {
+                                "type": "tool_use",
+                                "name": "Bash",
+                                "input": {"command": "git status"},
+                            },
+                        ]
+                    },
+                }
+            )
+        )
+        tool_events = [event for event in acc.events if event.kind == "tool.started"]
+        self.assertEqual(len(tool_events), 1)
+        self.assertEqual(tool_events[0].tool, "Bash")
+        self.assertEqual(tool_events[0].target, "git status")
+        self.assertEqual(acc.current, "Bash git status")
+        self.assertIn("Running git status", acc.assistant_text)
+
+    def test_claude_error_result_does_not_emit_success_completion(self):
+        acc = self.events.StreamAccumulator()
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "result",
+                    "subtype": "error_during_execution",
+                    "is_error": True,
+                    "result": "partial output",
+                }
+            )
+        )
+        self.assertFalse(any(event.kind == "run.completed" for event in acc.events))
+        self.assertIsNone(acc.completion_text)
+        self.assertEqual(acc.recoverable_assistant_text, "partial output")
+
+    def test_claude_success_result_still_emits_success_completion(self):
+        acc = self.events.StreamAccumulator()
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "result": "Status: completed\n- done",
+                }
+            )
+        )
+        completed = [event for event in acc.events if event.kind == "run.completed"]
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(completed[0].status, "succeeded")
+        self.assertEqual(acc.completion_text, "Status: completed\n- done")

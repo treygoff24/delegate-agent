@@ -499,6 +499,33 @@ class ExecutionTests(unittest.TestCase):
         self.assertIn("auto", request.argv)
         self.assertNotIn("bypassPermissions", request.argv)
 
+    def test_claude_describe_runtime_bypass_no_drift(self):
+        def assert_bypass(config, expected):
+            runtime = self.delegate._claude_runtime_policy(config, "work")
+            harness = self.delegate._claude_harness_bypass_enabled(config, "work")
+            self.assertEqual(runtime["bypassApprovalsAndSandbox"], expected)
+            self.assertEqual(harness, expected)
+            self.assertEqual(runtime["bypassApprovalsAndSandbox"], harness)
+
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        assert_bypass(config, False)
+
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config.setdefault("policy", {})
+        config["policy"].setdefault("harness", {})
+        config["policy"]["harness"].setdefault("claude", {})
+        config["policy"]["harness"]["claude"]["work"] = {
+            "bypassApprovalsAndSandbox": True,
+        }
+        assert_bypass(config, True)
+
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config.setdefault("policy", {})
+        config["policy"]["profile"] = "external-sandbox"
+        config["policy"].setdefault("work", {})
+        config["policy"]["work"]["bypassApprovalsAndSandbox"] = True
+        assert_bypass(config, False)
+
     def test_claude_work_harness_policy_allows_bypass(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
         config["policy"]["harness"] = {"claude": {"work": {"bypassApprovalsAndSandbox": True}}}

@@ -47,6 +47,10 @@ Work mode is edit-capable. Use it only for bounded tasks in workspaces you trust
 - Claude work uses `claude.workPermissionMode`; Delegate policy can explicitly map `policy.harness.claude.work.bypassApprovalsAndSandbox` to Claude `--permission-mode bypassPermissions`.
 - Kimi work emits Kimi `--yolo` by default for non-interactive edit-capable prompt-mode runs.
 
+#### Claude bypass scope
+
+`describe`'s `policyFieldSupport` marks Claude as supporting `bypassApprovalsAndSandbox`, but the Claude harness honors that field only when set at `policy.harness.claude.work.bypassApprovalsAndSandbox`. Unlike Codex, the global `policy.work` scope and the `external-sandbox` profile do not grant Claude bypass. This is deliberate: it prevents a Codex-oriented global profile from silently broadening Claude Code permissions.
+
 Delegate never auto-commits, pushes, merges, deploys, or publishes work-mode changes.
 
 ## Reasoning-effort boundary

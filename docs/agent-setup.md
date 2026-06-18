@@ -40,6 +40,8 @@ This guide covers both human setup and non-interactive setup for agents or CI jo
 
    Delegate does not manage runtime login. Run each runtime's own login/status command before real launches. A missing child binary causes Delegate to fail with exit code `3` for real runs.
 
+   The Claude harness requires Claude Code 2.1.x or newer (verified on 2.1.181) for `--effort`, `--permission-mode auto`, and `--no-session-persistence`.
+
 4. Copy and edit config:
 
    ```bash

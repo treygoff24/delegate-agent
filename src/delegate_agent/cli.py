@@ -155,7 +155,7 @@ SAFE_BLOCKED_SYMLINK_PLACEHOLDER = "External symlink blocked by Delegate safe is
 CLAUDE_SAFE_TOOLS = "Read,Grep,Glob,Bash"
 CLAUDE_SAFE_ALLOWED_TOOLS = (
     "Bash(git diff:*),Bash(git status:*),Bash(git show:*),Bash(git log:*),"
-    "Bash(rg:*),Bash(grep:*),Bash(ls:*),Bash(sed:*),Bash(cat:*)"
+    "Bash(rg:*),Bash(grep:*),Bash(ls:*)"
 )
 MISSING_BINARY_PROBE_DIRS = (
     "~/.claude/local",
@@ -1835,8 +1835,7 @@ def _codex_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     if isinstance(build.model_alias, str) and build.model_alias:
         model = build.model_alias
     else:
-        default_model = codex.get("defaultModel")
-        model = default_model if isinstance(default_model, str) and default_model else None
+        model = _resolve_default_model(codex)
     policy = delegate_config.effective_policy(build.config, engine="codex", mode=build.mode)
     capability, reasoning_warnings = _capability_with_config_fallback(
         lambda: reasoning.resolve_reasoning_capability(
@@ -1878,8 +1877,7 @@ def _claude_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     if isinstance(build.model_alias, str) and build.model_alias:
         model = build.model_alias
     else:
-        default_model = claude.get("defaultModel")
-        model = default_model if isinstance(default_model, str) and default_model else None
+        model = _resolve_default_model(claude)
     policy = delegate_config.effective_policy(build.config, engine="claude", mode=build.mode)
     effort: str | None = None
     warnings: tuple[str, ...] = ()
@@ -1927,8 +1925,7 @@ def _kimi_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     if isinstance(build.model_alias, str) and build.model_alias:
         model = build.model_alias
     else:
-        default_model = kimi.get("defaultModel")
-        model = default_model if isinstance(default_model, str) and default_model else None
+        model = _resolve_default_model(kimi)
     argv = build_kimi_argv(
         kimi,
         build.mode,
@@ -3385,9 +3382,13 @@ def _claude_runtime_policy(config: JsonObject, mode: str) -> JsonObject:
     return policy
 
 
-def _codex_describe_model(codex: JsonObject) -> str | None:
-    default_model = codex.get("defaultModel")
+def _resolve_default_model(section: JsonObject) -> str | None:
+    default_model = section.get("defaultModel")
     return default_model if isinstance(default_model, str) and default_model else None
+
+
+def _codex_describe_model(codex: JsonObject) -> str | None:
+    return _resolve_default_model(codex)
 
 
 def _codex_describe_argv(
@@ -3411,8 +3412,7 @@ def _codex_describe_argv(
 
 
 def _claude_describe_model(claude: JsonObject) -> str | None:
-    default_model = claude.get("defaultModel")
-    return default_model if isinstance(default_model, str) and default_model else None
+    return _resolve_default_model(claude)
 
 
 def _claude_describe_argv(
