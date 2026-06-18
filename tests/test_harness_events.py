@@ -336,3 +336,167 @@ class HarnessEventsTests(unittest.TestCase):
         self.assertEqual(len(completed), 1)
         self.assertEqual(completed[0].status, "succeeded")
         self.assertEqual(acc.completion_text, "Status: completed\n- done")
+
+    def test_claude_tool_result_emits_tool_completed_correlated_by_id(self):
+        acc = self.events.StreamAccumulator()
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "toolu_01abc",
+                                "name": "Bash",
+                                "input": {"command": "echo hello"},
+                            }
+                        ]
+                    },
+                }
+            )
+        )
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "user",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "toolu_01abc",
+                                "content": "hello",
+                                "is_error": False,
+                            }
+                        ]
+                    },
+                }
+            )
+        )
+        started = [event for event in acc.events if event.kind == "tool.started"]
+        completed = [event for event in acc.events if event.kind == "tool.completed"]
+        self.assertEqual(len(started), 1)
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(completed[0].tool, "Bash")
+        self.assertEqual(completed[0].target, "echo hello")
+        self.assertEqual(completed[0].status, "success")
+        self.assertEqual(acc.current, "Bash echo hello")
+
+    def test_claude_tool_result_error_sets_error_status(self):
+        acc = self.events.StreamAccumulator()
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "toolu_02def",
+                                "name": "Bash",
+                                "input": {"command": "false"},
+                            }
+                        ]
+                    },
+                }
+            )
+        )
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "user",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "toolu_02def",
+                                "content": "boom",
+                                "is_error": True,
+                            }
+                        ]
+                    },
+                }
+            )
+        )
+        completed = [event for event in acc.events if event.kind == "tool.completed"]
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(completed[0].status, "error")
+
+    def test_claude_tool_result_content_does_not_leak(self):
+        acc = self.events.StreamAccumulator()
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "user",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "toolu_03ghi",
+                                "content": "SECRET COMMAND OUTPUT",
+                                "is_error": False,
+                            }
+                        ]
+                    },
+                }
+            )
+        )
+        completed = [event for event in acc.events if event.kind == "tool.completed"]
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(completed[0].tool, "tool")
+        self.assertIsNone(completed[0].target)
+        self.assertNotIn("SECRET COMMAND OUTPUT", acc.assistant_text)
+        self.assertFalse(
+            any("SECRET COMMAND OUTPUT" in (event.message or "") for event in acc.events)
+        )
+
+    def test_claude_parallel_tool_results_each_complete(self):
+        acc = self.events.StreamAccumulator()
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "toolu_a",
+                                "name": "Read",
+                                "input": {"file_path": "a.py"},
+                            },
+                            {
+                                "type": "tool_use",
+                                "id": "toolu_b",
+                                "name": "Read",
+                                "input": {"file_path": "b.py"},
+                            },
+                        ]
+                    },
+                }
+            )
+        )
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "user",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "toolu_a",
+                                "content": "...",
+                                "is_error": False,
+                            },
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "toolu_b",
+                                "content": "...",
+                                "is_error": False,
+                            },
+                        ]
+                    },
+                }
+            )
+        )
+        completed = [event for event in acc.events if event.kind == "tool.completed"]
+        self.assertEqual({event.target for event in completed}, {"a.py", "b.py"})

@@ -53,6 +53,7 @@ class StreamAccumulator:
     _assistant_text_cache: str | None = field(default=None, repr=False)
     _codex_completion_candidate: str | None = field(default=None, repr=False)
     _last_recoverable_assistant_text: str | None = field(default=None, repr=False)
+    _pending_tool_uses: dict[str, tuple[str, str | None]] = field(default_factory=dict, repr=False)
 
     def _invalidate_assistant_text_cache(self) -> None:
         self._assistant_text_cache = None
@@ -100,6 +101,9 @@ class StreamAccumulator:
             return
         if event_type == "assistant":
             self._ingest_cursor_assistant(payload)
+            return
+        if event_type == "user":
+            self._ingest_user_message(payload)
             return
         if event_type in ("tool_call.started", "tool_call.completed"):
             self._ingest_cursor_tool(payload, event_type)
@@ -152,6 +156,9 @@ class StreamAccumulator:
                     if block.get("type") == "tool_use":
                         tool = _string_field(block, "name") or "tool"
                         target = _tool_use_target(block)
+                        tool_id = _string_field(block, "id")
+                        if tool_id:
+                            self._pending_tool_uses[tool_id] = (tool, target)
                         self.events.append(
                             NormalizedEvent(
                                 kind="tool.started",
@@ -161,6 +168,35 @@ class StreamAccumulator:
                             )
                         )
                         self.current = _tool_current(tool, target)
+
+    def _ingest_user_message(self, payload: JsonObject) -> None:
+        message = payload.get("message")
+        if not isinstance(message, dict):
+            return
+        content = message.get("content")
+        if not isinstance(content, list):
+            return
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") != "tool_result":
+                continue
+            tool_id = _string_field(block, "tool_use_id")
+            tool, target = (
+                self._pending_tool_uses.pop(tool_id, (None, None)) if tool_id else (None, None)
+            )
+            tool = tool or "tool"
+            status = "error" if block.get("is_error") is True else "success"
+            self.events.append(
+                NormalizedEvent(
+                    kind="tool.completed",
+                    tool=tool,
+                    target=target,
+                    path=target,
+                    status=status,
+                )
+            )
+            self.current = _tool_current(tool, target)
 
     def _record_recoverable_assistant_text(self, text: str) -> None:
         stripped = self._record_assistant_text(text)
