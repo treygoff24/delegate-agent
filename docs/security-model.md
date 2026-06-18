@@ -6,7 +6,7 @@ Delegate is a launcher and run recorder for other agent runtimes. It improves co
 
 Delegate controls:
 
-- Which child argv is built for Cursor, Droid, Codex, or Kimi.
+- Which child argv is built for Cursor, Droid, Codex, Claude, or Kimi.
 - Whether the child is launched in `safe` or `work` mode.
 - Whether a requested reasoning effort is translated into the supported child-runtime mechanism for the resolved harness/model.
 - Whether the execution workspace is the source checkout, a temporary isolated workspace, or a persistent Git worktree.
@@ -27,12 +27,13 @@ Delegate does not control:
 
 Safe mode is for review and investigation.
 
-- Cursor safe, Droid safe, Codex safe, and Kimi safe run in an isolated temporary workspace by default.
+- Cursor safe, Droid safe, Codex safe, Claude safe, and Kimi safe run in an isolated temporary workspace by default.
 - Cursor safe also writes a read-oriented `.cursor/cli.json` in the isolated workspace only.
 - Codex safe uses `--ask-for-approval never exec --sandbox read-only`.
+- Claude safe uses `claude -p` with stdin prompt transport, `--permission-mode plan`, `--strict-mcp-config`, Read/Grep/Glob, and selected read-only Bash tools.
 - Droid safe uses Delegate's read-only safety prompt, does not add Droid work-mode unsafe flags, and uses the isolated temporary workspace as a defense-in-depth boundary.
 - Kimi safe uses Delegate's read-only safety prompt and does not enable Kimi `--plan`. Kimi prompt mode auto-approves tool actions even without `--yolo`, so there is no runtime read-only enforcement for Kimi safe; the isolated temporary workspace is the effective boundary and the safety prompt is advisory.
-- Explicit `--isolation none` is rejected for Cursor, Droid, and Kimi safe mode because it would remove the isolation/config boundary those safe contracts rely on. Codex safe may opt out of Delegate workspace isolation because the Codex read-only sandbox remains active.
+- Explicit `--isolation none` is rejected for Cursor, Claude, Droid, and Kimi safe mode because it would remove the isolation/config boundary those safe contracts rely on. Codex safe may opt out of Delegate workspace isolation because the Codex read-only sandbox remains active.
 
 Safe mode is not a proof of zero side effects. Treat it as a defensive default plus prompt/runtime policy. A runtime could still read available files, use configured credentials, or perform actions allowed by its own permissions.
 
@@ -43,6 +44,7 @@ Work mode is edit-capable. Use it only for bounded tasks in workspaces you trust
 - Cursor work runs with edit-enabling Cursor flags.
 - Droid work adds Droid's unsafe skip flag for non-interactive edits.
 - Codex work uses the configured Codex policy and sandbox settings.
+- Claude work uses `claude.workPermissionMode`; Delegate policy can explicitly map `policy.harness.claude.work.bypassApprovalsAndSandbox` to Claude `--permission-mode bypassPermissions`.
 - Kimi work emits Kimi `--yolo` by default for non-interactive edit-capable prompt-mode runs.
 
 Delegate never auto-commits, pushes, merges, deploys, or publishes work-mode changes.
@@ -54,6 +56,7 @@ Delegate never auto-commits, pushes, merges, deploys, or publishes work-mode cha
 - Delegate `safe` or `work` mode.
 - Temporary or persistent workspace isolation.
 - Codex sandbox or approval policy.
+- Claude permission mode.
 - Droid unsafe/edit flags.
 - Cursor force or MCP approval flags.
 - Kimi plan/yolo behavior.
@@ -65,7 +68,7 @@ Unsupported effort/model combinations fail before launch. Treat higher effort as
 
 ### Temporary safe isolation
 
-Cursor safe, Droid safe, Codex safe, and Kimi safe normally run in a temporary Git worktree or directory copy. This protects the source checkout from ordinary relative-path edits made inside the execution workspace. Delegate may still write `.delegate/` metadata in the source workspace for tracked runs.
+Cursor safe, Droid safe, Codex safe, Claude safe, and Kimi safe normally run in a temporary Git worktree or directory copy. This protects the source checkout from ordinary relative-path edits made inside the execution workspace. Delegate may still write `.delegate/` metadata in the source workspace for tracked runs.
 
 Git repositories with commits use a detached temporary Git worktree. Non-Git directories use a temporary directory copy. Git repositories with no commits fall back to a temporary directory copy because Git cannot create a detached worktree from an unborn `HEAD`; Delegate reports that fallback in run metadata.
 

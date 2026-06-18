@@ -40,7 +40,7 @@ ruff check .
 ruff format --check .
 ```
 
-`ruff` ships in the `dev` optional-dependencies group; run `ruff format .` to apply formatting. Required CI does not need real Cursor, Droid, or Codex binaries.
+`ruff` ships in the `dev` optional-dependencies group; run `ruff format .` to apply formatting. Required CI does not need real Cursor, Droid, Codex, Claude, or Kimi binaries.
 
 ## Reporting issues
 

@@ -853,3 +853,56 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertIn("branch -d delegate/cursor-demo", output)
             self.assertNotIn("worktree remove --force", output)
             self.assertNotIn("branch -D", output)
+
+    def test_tracked_claude_result_stream_writes_completion_report(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        script = Path(temp.name) / "claude"
+        script.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            'prompt="$(cat)"\n'
+            'printf \'{"type":"assistant","message":{"content":[{"type":"text","text":"read:%s"}]}}\\n\' "$prompt"\n'
+            'printf \'%s\\n\' \'{"type":"result","subtype":"success","result":"Status: completed\\\\n- final from claude"}\'\n',
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="claude")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="claude",
+                engine="claude",
+                mode="safe",
+                model="claude-sonnet-4-6",
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-05-20T21:42:33Z",
+                prompt_transport="stdin",
+            )
+            code, payload = self.runner.execute_tracked(
+                [str(script), "-p"],
+                workspace,
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+                stdin_text="CLAUDE STDIN PROMPT",
+                manifest_argv=[str(script), "-p", "<prompt via stdin>"],
+            )
+            self.assertEqual(code, 0)
+            assert payload is not None
+            self.assertIn("completionReportCommand", payload)
+            run_path = self.registry.run_directory(root, run_id)
+            report = (run_path / "completion-report.md").read_text(encoding="utf-8")
+            snapshot = json.loads((run_path / "snapshot.json").read_text(encoding="utf-8"))
+            manifest = json.loads((run_path / "manifest.json").read_text(encoding="utf-8"))
+            self.assertIn("final from claude", report)
+            self.assertIn("read:CLAUDE STDIN PROMPT", snapshot["assistantText"])
+            self.assertEqual(manifest["promptTransport"], "stdin")
+            self.assertNotIn("CLAUDE STDIN PROMPT", json.dumps(manifest["argv"]))

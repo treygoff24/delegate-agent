@@ -62,6 +62,8 @@ BUNDLED_REASONING_CAPABILITIES: dict[str, dict[str, ReasoningDeclaration]] = {
 TRANSPORT_CODEX_CONFIG = "codex-config"
 TRANSPORT_DROID_FLAG = "droid-flag"
 TRANSPORT_CURSOR_MODEL_SELECTION = "cursor-model-selection"
+TRANSPORT_CLAUDE_EFFORT_FLAG = "claude-effort-flag"
+CLAUDE_NATIVE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
 TRANSPORT_BY_HARNESS = {
     "codex": TRANSPORT_CODEX_CONFIG,
@@ -116,6 +118,27 @@ def normalize_effort(value: object) -> str:
             "double quotes, or backslashes.",
         )
     return cast(str, value)
+
+
+def resolve_claude_native_effort(requested_effort: str | None) -> str | None:
+    """Validate Claude Code's native --effort values.
+
+    Claude Code exposes reasoning effort as a process-level flag, not a
+    per-model capability declaration. Keep this separate from
+    ``resolve_reasoning_capability`` so user/cache model capability tables do
+    not imply Claude model catalog support.
+    """
+    if requested_effort is None:
+        return None
+    effort = normalize_effort(requested_effort)
+    if effort not in CLAUDE_NATIVE_EFFORTS:
+        supported_label = ", ".join(CLAUDE_NATIVE_EFFORTS)
+        raise ReasoningCapabilityError(
+            "unsupported_reasoning_effort",
+            f"claude does not support reasoning effort {effort!r}; "
+            f"supported values: {supported_label}.",
+        )
+    return effort
 
 
 def _as_models_map(source: JsonValue) -> dict[str, JsonObject]:
@@ -349,6 +372,12 @@ def build_reasoning_capabilities_payload(
     harnesses["cursor"] = {
         "transport": TRANSPORT_BY_HARNESS["cursor"],
         "models": _cursor_reasoning_models_payload(mappings),
+    }
+    harnesses["claude"] = {
+        "transport": TRANSPORT_CLAUDE_EFFORT_FLAG,
+        "source": "static",
+        "supported": list(CLAUDE_NATIVE_EFFORTS),
+        "models": {},
     }
     return {"harnesses": harnesses}
 

@@ -363,6 +363,25 @@ class ExecutionTests(unittest.TestCase):
         path.chmod(0o755)
         return bin_dir
 
+    def make_claude_safe_fake(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        bin_dir = Path(temp.name)
+        path = bin_dir / "claude"
+        path.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "touch mutated-by-claude.txt\n"
+            'prompt="$(cat)"\n'
+            'printf \'%s\\n\' \'{"type":"system","cwd":"fake"}\'\n'
+            'printf \'{"type":"assistant","message":{"content":[{"type":"text","text":"saw stdin: %s"}]}}\\n\' "$prompt"\n'
+            'printf \'%s\\n\' \'{"type":"result","subtype":"success","result":"Status: completed\\\\n- final from claude"}\'\n'
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        path.chmod(0o755)
+        return bin_dir
+
     def test_codex_safe_default_argv_uses_read_only_sandbox_without_network_or_bypasses(self):
         policy = self.delegate.delegate_config.effective_policy(
             self.delegate.DEFAULT_CONFIG,
@@ -408,6 +427,127 @@ class ExecutionTests(unittest.TestCase):
         self.assertIn("--sandbox", argv)
         self.assertIn("read-only", argv)
 
+    def test_claude_safe_default_argv_uses_plan_permissions_and_stdin(self):
+        argv = self.delegate.build_claude_argv(
+            self.delegate.DEFAULT_CONFIG["claude"],
+            "safe",
+            "claude-opus-4-8",
+            {"bypassApprovalsAndSandbox": True},
+            stream_capture=True,
+            reasoning_effort="xhigh",
+        )
+        self.assertEqual(argv[:2], ["claude", "-p"])
+        self.assertIn("--input-format", argv)
+        self.assertIn("text", argv)
+        self.assertIn("--output-format", argv)
+        self.assertIn("stream-json", argv)
+        self.assertIn("--permission-mode", argv)
+        self.assertIn("plan", argv)
+        self.assertIn("--strict-mcp-config", argv)
+        self.assertIn("--tools", argv)
+        tools = argv[argv.index("--tools") + 1]
+        self.assertIn("Read", tools)
+        self.assertIn("Grep", tools)
+        self.assertIn("Glob", tools)
+        self.assertIn("Bash", tools)
+        self.assertIn("--allowedTools", argv)
+        allowed_tools = argv[argv.index("--allowedTools") + 1]
+        self.assertIn("Bash(git diff:*)", allowed_tools)
+        self.assertIn("Bash(git status:*)", allowed_tools)
+        self.assertIn("--no-session-persistence", argv)
+        self.assertIn("--model", argv)
+        self.assertIn("claude-opus-4-8", argv)
+        self.assertIn("--effort", argv)
+        self.assertIn("xhigh", argv)
+        self.assertNotIn("--dangerously-skip-permissions", argv)
+
+    def test_claude_work_does_not_bypass_from_global_policy(self):
+        argv = self.delegate.build_claude_argv(
+            self.delegate.DEFAULT_CONFIG["claude"],
+            "work",
+            None,
+            {"bypassApprovalsAndSandbox": True},
+        )
+        self.assertIn("--permission-mode", argv)
+        self.assertIn("auto", argv)
+        self.assertNotIn("bypassPermissions", argv)
+
+    def test_claude_work_uses_harness_scoped_policy_bypass(self):
+        argv = self.delegate.build_claude_argv(
+            self.delegate.DEFAULT_CONFIG["claude"],
+            "work",
+            None,
+            {"bypassApprovalsAndSandbox": True},
+            allow_bypass_permissions=True,
+        )
+        self.assertIn("--permission-mode", argv)
+        self.assertIn("bypassPermissions", argv)
+
+    def test_claude_work_external_sandbox_profile_does_not_bypass(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["policy"]["profile"] = "external-sandbox"
+        request = self.build_git_request(
+            "claude",
+            "work",
+            None,
+            "/repo",
+            "ship",
+            config,
+            dry_run=True,
+        )
+        self.assertIn("--permission-mode", request.argv)
+        self.assertIn("auto", request.argv)
+        self.assertNotIn("bypassPermissions", request.argv)
+
+    def test_claude_work_harness_policy_allows_bypass(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["policy"]["harness"] = {"claude": {"work": {"bypassApprovalsAndSandbox": True}}}
+        request = self.build_git_request(
+            "claude",
+            "work",
+            None,
+            "/repo",
+            "ship",
+            config,
+            dry_run=True,
+        )
+        self.assertIn("--permission-mode", request.argv)
+        self.assertIn("bypassPermissions", request.argv)
+
+    def test_claude_config_rejects_bypass_permission_mode(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["claude"]["workPermissionMode"] = "bypassPermissions"
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.validate_config(config)
+        self.assertEqual(ctx.exception.error, "invalid_claude_config")
+        self.assertIn(
+            "policy.harness.claude.work.bypassApprovalsAndSandbox",
+            ctx.exception.message,
+        )
+
+    def test_claude_request_uses_stdin_transport_without_prompt_in_argv(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["claude"]["defaultModel"] = "claude-sonnet-4-6"
+        request = self.build_git_request(
+            "claude",
+            "safe",
+            None,
+            "/repo",
+            "SECRET CLAUDE PROMPT",
+            config,
+            dry_run=True,
+            reasoning_effort="high",
+            reasoning_effort_source="cli",
+        )
+        self.assertEqual(request.prompt_transport, self.delegate.PROMPT_TRANSPORT_STDIN)
+        self.assertEqual(request.stdin_text, "SECRET CLAUDE PROMPT")
+        self.assertNotIn("SECRET CLAUDE PROMPT", request.argv)
+        self.assertEqual(request.reasoning_effort, "high")
+        self.assertEqual(request.reasoning_transport, "claude-effort-flag")
+        self.assertEqual(request.reasoning_capability_source, "static")
+        self.assertIn("--effort", request.argv)
+        self.assertIn("high", request.argv)
+
     def test_codex_safe_git_execution_does_not_mutate_original_workspace(self):
         repo = make_git_repo()
         self.addCleanup(repo.cleanup)
@@ -451,6 +591,48 @@ class ExecutionTests(unittest.TestCase):
         # argv structure assertions live in the dry-run and unit tests; the tracked
         # run JSON summary does not surface argv at the top level (matches Cursor's
         # safe-mutation test).
+        self.assertEqual(safe_temp_dirs() - temp_dirs_before, set())
+
+    def test_claude_safe_git_execution_does_not_mutate_original_workspace(self):
+        repo = make_git_repo()
+        self.addCleanup(repo.cleanup)
+        subprocess.run(
+            ["git", "-C", repo.name, *GIT_TEST_IDENTITY, "commit", "--allow-empty", "-m", "init"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        fake_bin = self.make_claude_safe_fake()
+        config = Path(repo.name) / "config.json"
+        config.write_text(json.dumps(self.delegate.DEFAULT_CONFIG))
+        env = os.environ.copy()
+        env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
+        env["DELEGATE_CONFIG"] = str(config)
+        temp_dirs_before = safe_temp_dirs()
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT_PATH),
+                "--cwd",
+                repo.name,
+                "--json",
+                "claude",
+                "safe",
+                "review",
+            ],
+            text=True,
+            capture_output=True,
+            env=env,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads(completed.stdout)
+        self.assertFalse((Path(repo.name) / "mutated-by-claude.txt").exists())
+        self.assertTrue(payload.get("isolatedWorkspace"))
+        self.assertEqual(Path(payload["cwd"]).resolve(), Path(repo.name).resolve())
+        self.assertIn("executionCwd", payload)
+        self.assertNotEqual(payload["executionCwd"], payload["cwd"])
         self.assertEqual(safe_temp_dirs() - temp_dirs_before, set())
 
     def make_kimi_safe_fake(self):
@@ -583,6 +765,26 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(once, twice)
         self.assertEqual(once.count("Delegate Codex safe mode"), 1)
 
+    def test_effective_prompt_claude_safe_order_and_idempotence(self):
+        once = self.delegate.effective_prompt(
+            "review the diff",
+            engine="claude",
+            mode="safe",
+            completion_report_mode="none",
+        )
+        twice = self.delegate.effective_prompt(
+            once,
+            engine="claude",
+            mode="safe",
+            completion_report_mode="none",
+        )
+        claude_idx = once.find("Delegate Claude safe mode")
+        user_idx = once.find("review the diff")
+        self.assertGreater(claude_idx, 0)
+        self.assertGreater(user_idx, claude_idx)
+        self.assertEqual(once, twice)
+        self.assertEqual(once.count("Delegate Claude safe mode"), 1)
+
     def test_effective_prompt_droid_safe_order_and_idempotence(self):
         once = self.delegate.effective_prompt(
             "review the diff",
@@ -638,17 +840,17 @@ class ExecutionTests(unittest.TestCase):
         config_path = "/tmp/delegate-config.json"
         with self.assertRaises(self.delegate.DelegateError) as ctx:
             self.delegate.ensure_binary(
-                ["delegate-definitely-missing-kimi", "--prompt", "hello"],
-                engine="kimi",
+                ["delegate-definitely-missing-claude", "-p"],
+                engine="claude",
                 config_source=config_path,
             )
         error = ctx.exception
         self.assertEqual(error.error, "missing_binary")
         self.assertEqual(error.exit_code, self.delegate.EXIT_MISSING_BINARY)
         self.assertIn("searched PATH of the delegate process", error.message)
-        self.assertIn("kimi.binary", error.message)
+        self.assertIn("claude.binary", error.message)
         self.assertEqual(error.diagnostics["configPath"], config_path)
-        self.assertEqual(error.diagnostics["configKey"], "kimi.binary")
+        self.assertEqual(error.diagnostics["configKey"], "claude.binary")
 
     def test_missing_binary_json_includes_candidate_path(self):
         with tempfile.TemporaryDirectory() as home:

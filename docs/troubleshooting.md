@@ -15,6 +15,7 @@ Real runs require the selected child runtime on `PATH`:
 command -v agent
 command -v droid
 command -v codex
+command -v claude
 command -v kimi
 ```
 
@@ -30,7 +31,7 @@ binary may work in a terminal and still be invisible to Delegate from an agent,
 cron, launchd, or another non-interactive subprocess.
 
 The durable fix is to set an absolute binary path in the active config, for
-example `codex.binary`, `droid.binary`, `kimi.binary`, or `cursor.argvPrefix`.
+example `codex.binary`, `claude.binary`, `droid.binary`, `kimi.binary`, or `cursor.argvPrefix`.
 JSON errors include `configPath`, `configKey`, and, when Delegate sees a likely
 user-local install, `suggestedBinaryPath`.
 
@@ -78,11 +79,12 @@ delegate --json capabilities
 Common causes:
 
 - Codex effort was requested but no Codex model was resolved. Set `codex.defaultModel` or pass a Codex model in JSON run input.
+- Claude effort must be one of Claude Code's native labels: `low`, `medium`, `high`, `xhigh`, or `max`.
 - Cursor effort was requested but `cursor.reasoningEffortModels.<level>` is missing. Cursor effort uses model selection rather than a standalone effort flag.
 - Droid or Codex model support is not in config, the workspace cache, or bundled fallback data.
 - The effort string is misspelled. Delegate treats labels literally and does not translate between provider naming schemes.
 
-These failures apply to explicit per-run effort (`--reasoning-effort` or JSON run input). For Cursor, Droid, and Codex, a config `defaultReasoningEffort` that cannot be satisfied does not fail the run; the run proceeds without reasoning effort and records a warning in the dry-run payload, manifest, and snapshot. Kimi does not support reasoning effort, so `kimi.defaultReasoningEffort` must stay `null`.
+These failures apply to explicit per-run effort (`--reasoning-effort` or JSON run input). For Cursor, Droid, and Codex, a config `defaultReasoningEffort` that cannot be satisfied does not fail the run; the run proceeds without reasoning effort and records a warning in the dry-run payload, manifest, and snapshot. Claude config defaults are validated against its static native labels at config load. Kimi does not support reasoning effort, so `kimi.defaultReasoningEffort` must stay `null`.
 
 For private or newly released models, declare support in `reasoning.capabilities` in config. Inspect first with plain `capabilities`. To refresh workspace-local discovered data, run:
 
@@ -126,10 +128,13 @@ Some inspection commands accept trailing `--json` for convenience, such as
 
 ## Safe-mode isolation fails
 
-Cursor, Codex, and Kimi safe create an isolated temporary workspace. Droid safe
-runs in the requested workspace. In Git repositories, Delegate first tries a
-detached worktree; for non-Git directories and some Git fallback cases, it uses
-a directory copy.
+Cursor, Droid, Codex, Claude, and Kimi safe create an isolated temporary
+workspace by default. In Git repositories, Delegate first tries a detached
+worktree; for non-Git directories and some Git fallback cases, it uses a
+directory copy. Codex safe is the only safe harness that may opt out with
+`--isolation none`, because Codex still keeps its read-only sandbox active.
+Cursor, Droid, Claude, and Kimi safe reject `--isolation none` because their
+safe contracts depend on Delegate's temporary workspace boundary.
 
 Dry-run can inspect the planned argv and isolation mode, but it does not
 materialize the temporary workspace, create the detached worktree, copy files,
@@ -202,7 +207,7 @@ reviewing the worktree.
 
 ## CI does not have child runtimes
 
-That is expected. Required tests do not need real Cursor, Droid, Codex, or Kimi binaries:
+That is expected. Required tests do not need real Cursor, Droid, Codex, Claude, or Kimi binaries:
 
 ```bash
 python3 -m compileall -q src tests bin

@@ -72,6 +72,10 @@ def emit(
         for harness, harness_payload in harnesses.items():
             if not isinstance(harness_payload, dict):
                 continue
+            supported = harness_payload.get("supported")
+            if isinstance(supported, list):
+                print(f"{harness}: {len(supported)} static effort level(s)", file=stdout)
+                continue
             models = harness_payload.get("models")
             if not isinstance(models, dict):
                 continue

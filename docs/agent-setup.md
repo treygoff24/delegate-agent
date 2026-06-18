@@ -34,6 +34,7 @@ This guide covers both human setup and non-interactive setup for agents or CI jo
    command -v agent || echo "Cursor Agent CLI missing"
    command -v droid || echo "Factory Droid CLI missing"
    command -v codex || echo "Codex CLI missing"
+   command -v claude || echo "Claude Code CLI missing"
    command -v kimi || echo "Kimi Code CLI missing"
    ```
 
@@ -71,12 +72,14 @@ This guide covers both human setup and non-interactive setup for agents or CI jo
    ```bash
    delegate --json dry-run codex safe "Review only. Do not edit files."
    delegate --json dry-run codex safe --reasoning-effort high "Review only. Do not edit files."
+   delegate --json dry-run claude safe "Review only. Do not edit files."
+   delegate --json dry-run claude safe --reasoning-effort high "Review only. Do not edit files."
    delegate --json dry-run cursor safe "Review only. Do not edit files."
    delegate --json dry-run droid reviewer safe "Review only. Do not edit files."
    delegate --json dry-run kimi safe "Review only. Do not edit files."
    ```
 
-   The Codex, Cursor, and Kimi dry-runs succeed with the unedited example config when no reasoning effort is requested. The Codex reasoning-effort dry-run requires a resolved Codex model from config or JSON input. The Droid dry-run validates the alias, so it returns `unconfigured_model` until you replace the `reviewer` placeholder in `config.json` with a real model ID.
+   The Codex, Claude, Cursor, and Kimi dry-runs succeed with the unedited example config when no reasoning effort is requested. The Codex reasoning-effort dry-run requires a resolved Codex model from config or JSON input. Claude reasoning effort is static and maps to Claude Code `--effort`. The Droid dry-run validates the alias, so it returns `unconfigured_model` until you replace the `reviewer` placeholder in `config.json` with a real model ID.
 
 ## Non-interactive agent setup
 
@@ -116,6 +119,7 @@ For an orchestrating agent, script, or CI job:
 
    ```bash
    command -v codex >/dev/null || exit 3
+   command -v claude >/dev/null || exit 3
    command -v kimi >/dev/null || exit 3
    ```
 
@@ -141,7 +145,7 @@ For an orchestrating agent, script, or CI job:
 
 ## CI expectations
 
-The required test suite does not need real Cursor, Droid, Codex, or Kimi binaries. Tests use dry-run paths and fake binaries where needed:
+The required test suite does not need real Cursor, Droid, Codex, Claude, or Kimi binaries. Tests use dry-run paths and fake binaries where needed:
 
 ```bash
 python3 -m compileall -q src tests bin

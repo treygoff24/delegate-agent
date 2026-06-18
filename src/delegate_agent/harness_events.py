@@ -17,7 +17,7 @@ EVENT_TAIL = 400
 # completion event. Codex is excluded on purpose: its agent_message events can
 # be preamble ("I'll start by..."), and only a message sealed by turn.completed
 # is the real answer.
-ASSISTANT_RECOVERY_HARNESSES = frozenset({"cursor", "droid", "kimi"})
+ASSISTANT_RECOVERY_HARNESSES = frozenset({"cursor", "droid", "kimi", "claude"})
 
 
 @dataclass

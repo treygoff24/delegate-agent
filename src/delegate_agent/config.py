@@ -24,7 +24,7 @@ ISOLATION_AUTO = "auto"
 ISOLATION_NONE = "none"
 ISOLATION_WORKTREE = "worktree"
 VALID_ISOLATION_VALUES = (ISOLATION_AUTO, ISOLATION_NONE, ISOLATION_WORKTREE)
-SAFE_ISOLATION_REQUIRED_ENGINES = frozenset({"cursor", "droid", "kimi"})
+SAFE_ISOLATION_REQUIRED_ENGINES = frozenset({"cursor", "droid", "kimi", "claude"})
 
 POLICY_PROFILES = ("safe", "trusted-hooks", "external-sandbox", "custom")
 POLICY_MODE_KEYS = frozenset(
@@ -39,6 +39,7 @@ POLICY_MODE_KEYS = frozenset(
 # Safe mode is read-only by promise, so reject them in any safe-mode policy block.
 SAFE_FORBIDDEN_BYPASS_KEYS = ("bypassApprovalsAndSandbox", "bypassHookTrust")
 CODEX_WORK_SANDBOX_VALUES = ("read-only", "workspace-write", "danger-full-access")
+CLAUDE_WORK_PERMISSION_MODES = ("acceptEdits", "auto", "default", "dontAsk", "plan")
 
 DEFAULT_MODE_POLICY: JsonObject = {
     "networkAccess": False,
@@ -75,6 +76,14 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
         "binary": "kimi",
         "defaultModel": "kimi-code/kimi-for-coding",
         "defaultReasoningEffort": None,
+    },
+    "claude": {
+        "binary": "claude",
+        "defaultModel": None,
+        "defaultReasoningEffort": None,
+        "workPermissionMode": "auto",
+        "noSessionPersistence": True,
+        "bare": False,
     },
     "policy": {
         "profile": "safe",
@@ -358,6 +367,55 @@ def _validate_kimi_section(kimi: JsonValue) -> None:
         )
 
 
+def _validate_claude_section(claude: JsonValue) -> None:
+    if not isinstance(claude, dict):
+        raise ConfigError("invalid_claude_config", "claude config must be an object.")
+    if not isinstance(claude.get("binary"), str) or not claude["binary"].strip():
+        raise ConfigError("invalid_claude_config", "claude.binary must be a non-empty string.")
+    default_model = claude.get("defaultModel")
+    if default_model is not None and not isinstance(default_model, str):
+        raise ConfigError(
+            "invalid_claude_config",
+            "claude.defaultModel must be a string or null.",
+        )
+    default_effort = claude.get("defaultReasoningEffort")
+    if default_effort is not None:
+        if not isinstance(default_effort, str):
+            raise ConfigError(
+                "invalid_claude_config",
+                "claude.defaultReasoningEffort must be a string or null.",
+            )
+        try:
+            reasoning.resolve_claude_native_effort(default_effort)
+        except reasoning.ReasoningCapabilityError as exc:
+            raise ConfigError(
+                "invalid_claude_config",
+                f"claude.defaultReasoningEffort: {exc.message}",
+            ) from exc
+    permission_mode = claude.get("workPermissionMode", "auto")
+    if permission_mode == "bypassPermissions":
+        raise ConfigError(
+            "invalid_claude_config",
+            "claude.workPermissionMode cannot be bypassPermissions; "
+            "use policy.harness.claude.work.bypassApprovalsAndSandbox "
+            "for explicit Delegate-controlled bypass.",
+        )
+    if permission_mode not in CLAUDE_WORK_PERMISSION_MODES:
+        raise ConfigError(
+            "invalid_claude_config",
+            f"claude.workPermissionMode must be one of: {', '.join(CLAUDE_WORK_PERMISSION_MODES)}.",
+        )
+    no_session = claude.get("noSessionPersistence", True)
+    if not isinstance(no_session, bool):
+        raise ConfigError(
+            "invalid_claude_config",
+            "claude.noSessionPersistence must be a boolean.",
+        )
+    bare = claude.get("bare", False)
+    if not isinstance(bare, bool):
+        raise ConfigError("invalid_claude_config", "claude.bare must be a boolean.")
+
+
 def _validate_provider_default_reasoning_effort(
     value: JsonValue,
     *,
@@ -415,14 +473,15 @@ def _validate_reasoning_section(section: JsonValue) -> None:
         )
     for harness, models in capabilities.items():
         # Only codex and droid consult this table at launch. Accepting other
-        # keys (e.g. cursor, or a typo) would validate cleanly and then be
-        # silently ignored; cursor reasoning lives in cursor.reasoningEffortModels.
+        # keys (e.g. cursor, claude, or a typo) would validate cleanly and then
+        # be silently ignored; cursor reasoning lives in cursor.reasoningEffortModels
+        # and Claude uses static native --effort labels.
         if harness not in ("codex", "droid"):
             raise ConfigError(
                 "invalid_reasoning_config",
                 f"reasoning.capabilities.{harness} is not supported; capability "
                 "declarations apply to codex and droid only (cursor uses "
-                "cursor.reasoningEffortModels).",
+                "cursor.reasoningEffortModels; claude uses native --effort labels).",
             )
         if not isinstance(models, dict):
             raise ConfigError(
@@ -718,6 +777,7 @@ def validate_config(config: JsonObject) -> None:
     _validate_policy_section(config.get("policy"))
     _validate_codex_section(config.get("codex"))
     _validate_kimi_section(config.get("kimi"))
+    _validate_claude_section(config.get("claude"))
     _validate_reasoning_section(config.get("reasoning"))
     _validate_isolation_section(config.get("isolation"))
     _validate_worktrees_section(config.get("worktrees"))

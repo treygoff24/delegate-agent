@@ -27,6 +27,7 @@ command_help = load_module(COMMAND_HELP_PATH, "delegate_command_help_test")
 # Top-level command names = registry keys with no space.
 TOP_LEVEL_COMMANDS = (
     "cursor",
+    "claude",
     "codex",
     "droid",
     "kimi",

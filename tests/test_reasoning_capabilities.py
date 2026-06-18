@@ -12,6 +12,7 @@ from delegate_agent.reasoning import (  # noqa: E402
     ReasoningCapabilityError,
     build_reasoning_capabilities_payload,
     normalize_effort,
+    resolve_claude_native_effort,
     resolve_reasoning_capability,
 )
 
@@ -181,6 +182,16 @@ class ReasoningCapabilityTests(unittest.TestCase):
                 normalize_effort(bad)
         self.assertEqual(normalize_effort("xhigh"), "xhigh")
 
+    def test_claude_native_effort_accepts_static_cli_levels(self):
+        for effort in ("low", "medium", "high", "xhigh", "max"):
+            with self.subTest(effort=effort):
+                self.assertEqual(resolve_claude_native_effort(effort), effort)
+
+    def test_claude_native_effort_rejects_non_cli_levels(self):
+        with self.assertRaises(ReasoningCapabilityError) as ctx:
+            resolve_claude_native_effort("off")
+        self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
+
     def test_cursor_capabilities_aggregate_efforts_by_model(self):
         payload = build_reasoning_capabilities_payload(
             {
@@ -198,6 +209,14 @@ class ReasoningCapabilityTests(unittest.TestCase):
         self.assertEqual(cursor_models["gpt-5"]["supported"], ["low", "medium"])
         self.assertEqual(cursor_models["gpt-5"]["source"], "config")
         self.assertEqual(cursor_models["sonnet-thinking"]["supported"], ["high"])
+
+    def test_capabilities_payload_includes_static_claude_efforts(self):
+        payload = build_reasoning_capabilities_payload({}, cache=None)
+        claude = payload["harnesses"]["claude"]
+        self.assertEqual(claude["transport"], "claude-effort-flag")
+        self.assertEqual(claude["source"], "static")
+        self.assertEqual(claude["supported"], ["low", "medium", "high", "xhigh", "max"])
+        self.assertEqual(claude["models"], {})
 
 
 if __name__ == "__main__":

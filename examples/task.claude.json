@@ -1,0 +1,8 @@
+{
+  "engine": "claude",
+  "mode": "safe",
+  "cwd": "/path/to/workspace",
+  "isolation": "auto",
+  "reasoningEffort": "high",
+  "prompt": "Review this workspace for correctness risks. Do not edit files. Report findings with file, line, severity, and rationale."
+}

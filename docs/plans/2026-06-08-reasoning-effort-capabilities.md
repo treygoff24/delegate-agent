@@ -1337,7 +1337,7 @@ Expected: PASS.
 **Parallel:** no
 **Blocked by:** Tasks 1-7
 **Owned files:** none
-**Invariants:** Required validation should not need real Cursor, Droid, or Codex binaries except optional live capability refresh smoke.
+**Invariants:** Required validation should not need real Cursor, Droid, Codex, Claude, or Kimi binaries except optional live capability refresh smoke.
 **Out of scope:** Packaging and release.
 
 **Files:**

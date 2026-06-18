@@ -32,6 +32,7 @@ def load_delegate():
 # Top-level commands that must support `<cmd> --help`.
 TOP_LEVEL_COMMANDS = (
     "cursor",
+    "claude",
     "codex",
     "droid",
     "dry-run",
@@ -82,6 +83,7 @@ class MultiLevelHelpTests(HelpCliTestBase):
 
     CASES = (
         (["cursor", "safe", "--help"], "cursor"),
+        (["claude", "safe", "--help"], "claude"),
         (["droid", "x", "--help"], "droid"),
         (["droid", "x", "safe", "--help"], "droid"),
         (["dry-run", "cursor", "--help"], "dry-run"),
@@ -107,6 +109,7 @@ class DashHAliasTests(HelpCliTestBase):
 
     CASES = (
         (["cursor", "-h"], "cursor"),
+        (["claude", "-h"], "claude"),
         (["worktree", "remove", "-h"], "worktree remove"),
         (["droid", "-h"], "droid"),
         (["dry-run", "-h"], "dry-run"),
@@ -125,6 +128,7 @@ class JsonCommandHelpTests(HelpCliTestBase):
 
     CASES = (
         (["--json", "cursor", "--help"], "cursor"),
+        (["--json", "claude", "--help"], "claude"),
         (["--json", "codex", "--help"], "codex"),
         (["--json", "droid", "--help"], "droid"),
         (["--json", "dry-run", "--help"], "dry-run"),
@@ -139,6 +143,7 @@ class JsonCommandHelpTests(HelpCliTestBase):
         (["--json", "help", "--help"], "help"),
         (["--json", "worktree", "remove", "--help"], "worktree remove"),
         (["--json", "cursor", "safe", "--help"], "cursor"),
+        (["--json", "claude", "safe", "--help"], "claude"),
     )
 
     def test_json_command_help(self):

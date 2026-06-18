@@ -43,6 +43,8 @@ class ParserTests(unittest.TestCase):
         examples = [
             ["cursor", "safe", "analyze this"],
             ["cursor", "work", "fix this"],
+            ["claude", "safe", "analyze this"],
+            ["claude", "work", "fix this"],
             ["droid", "minimax", "safe", "analyze this"],
             ["droid", "minimax", "work", "fix this"],
             ["--json", "run", "--input-json", "task.json"],
@@ -52,6 +54,7 @@ class ParserTests(unittest.TestCase):
             ["--json", "describe"],
             ["agent-help"],
             ["dry-run", "cursor", "work", "prompt"],
+            ["dry-run", "claude", "safe", "prompt"],
             ["--json", "dry-run", "droid", "minimax", "safe", "--prompt-file", "task.md"],
             ["snapshot", "cursor"],
             ["--json", "snapshot", "--latest", "cursor"],
@@ -148,9 +151,22 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(parsed.launch.engine, "codex")
         self.assertEqual(parsed.launch.mode, "work")
 
+    def test_claude_direct_commands_parse(self):
+        parsed = self.delegate.parse_cli(["claude", "safe", "--reasoning-effort", "high", "review"])
+        self.assertEqual(parsed.subcommand, "claude")
+        self.assertEqual(parsed.launch.engine, "claude")
+        self.assertEqual(parsed.launch.mode, "safe")
+        self.assertEqual(parsed.launch.reasoning_effort, "high")
+        self.assertEqual(parsed.launch.prompt_parts, ["review"])
+
     def test_dry_run_codex_parses(self):
         parsed = self.delegate.parse_cli(["dry-run", "codex", "safe", "review"])
         self.assertEqual(parsed.subcommand, "codex")
+        self.assertTrue(parsed.launch.dry_run)
+
+    def test_dry_run_claude_parses(self):
+        parsed = self.delegate.parse_cli(["dry-run", "claude", "work", "ship"])
+        self.assertEqual(parsed.subcommand, "claude")
         self.assertTrue(parsed.launch.dry_run)
 
     def test_json_describe_shape(self):
@@ -159,13 +175,30 @@ class ParserTests(unittest.TestCase):
         self.assertIn("safe", payload["modes"])
         self.assertIn("work", payload["modes"])
         self.assertIn("cursor", payload["modeMapping"])
+        self.assertIn("claude", payload["modeMapping"])
         self.assertIn("codex", payload["modeMapping"])
+        self.assertIn("claude", payload["engines"])
         self.assertIn("codex", payload["engines"])
         self.assertIn("policyProfiles", payload)
         self.assertIn("policyFieldSupport", payload)
         self.assertIn("effectivePolicy", payload)
+        self.assertIn("claude", payload["effectivePolicy"])
         self.assertIn("codex", payload["effectivePolicy"])
         self.assertIn("passThrough", payload)
+
+    def test_describe_claude_effective_policy_masks_global_external_sandbox_bypass(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["policy"]["profile"] = "external-sandbox"
+        payload = self.delegate.describe_payload(config, "test")
+        self.assertFalse(payload["effectivePolicy"]["claude"]["work"]["bypassApprovalsAndSandbox"])
+        self.assertNotIn("bypassPermissions", payload["modeMapping"]["claude"]["work"])
+
+    def test_describe_claude_effective_policy_reports_harness_scoped_bypass(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["policy"]["harness"] = {"claude": {"work": {"bypassApprovalsAndSandbox": True}}}
+        payload = self.delegate.describe_payload(config, "test")
+        self.assertTrue(payload["effectivePolicy"]["claude"]["work"]["bypassApprovalsAndSandbox"])
+        self.assertIn("bypassPermissions", payload["modeMapping"]["claude"]["work"])
 
     def test_pass_through_parses_before_subcommand(self):
         parsed = self.delegate.parse_cli(["--pass-through", "cursor", "safe", "hello"])
@@ -568,6 +601,83 @@ class ParserTests(unittest.TestCase):
             with self.assertRaises(self.delegate.DelegateError) as ctx:
                 self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
             self.assertEqual(ctx.exception.error, "invalid_isolation")
+
+    def test_run_input_json_claude_safe_uses_stdin_and_model_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "task.json"
+            task.write_text(
+                json.dumps(
+                    {
+                        "engine": "claude",
+                        "mode": "safe",
+                        "model": "claude-sonnet-4-6",
+                        "cwd": tmp,
+                        "prompt": "SECRET JSON CLAUDE PROMPT",
+                        "reasoningEffort": "high",
+                    }
+                )
+            )
+            parsed = self.delegate.ParsedCommand(
+                "run",
+                global_options=self.delegate.GlobalOptions(json_mode=True),
+                run_json=self.delegate.RunJsonOptions(str(task)),
+            )
+            request = self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+            self.assertEqual(request.engine, "claude")
+            self.assertEqual(request.mode, "safe")
+            self.assertEqual(request.model, "claude-sonnet-4-6")
+            self.assertEqual(request.prompt_transport, self.delegate.PROMPT_TRANSPORT_STDIN)
+            self.assertEqual(request.stdin_text, request.prompt)
+            self.assertNotIn("SECRET JSON CLAUDE PROMPT", request.argv)
+            self.assertEqual(request.reasoning_transport, "claude-effort-flag")
+
+    def test_run_input_json_claude_safe_rejects_isolation_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "task.json"
+            task.write_text(
+                json.dumps(
+                    {
+                        "engine": "claude",
+                        "mode": "safe",
+                        "cwd": tmp,
+                        "isolation": "none",
+                        "prompt": "hello",
+                    }
+                )
+            )
+            parsed = self.delegate.ParsedCommand(
+                "run",
+                global_options=self.delegate.GlobalOptions(json_mode=True),
+                run_json=self.delegate.RunJsonOptions(str(task)),
+            )
+            with self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+            self.assertEqual(ctx.exception.error, "invalid_isolation")
+
+    def test_run_input_json_claude_work_accepts_model_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "task.json"
+            task.write_text(
+                json.dumps(
+                    {
+                        "engine": "claude",
+                        "mode": "work",
+                        "model": "claude-opus-4-8",
+                        "cwd": tmp,
+                        "prompt": "ship",
+                    }
+                )
+            )
+            parsed = self.delegate.ParsedCommand(
+                "run",
+                global_options=self.delegate.GlobalOptions(json_mode=True),
+                run_json=self.delegate.RunJsonOptions(str(task)),
+            )
+            request = self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+            self.assertEqual(request.engine, "claude")
+            self.assertEqual(request.mode, "work")
+            self.assertEqual(request.model, "claude-opus-4-8")
+            self.assertIn("claude-opus-4-8", request.argv)
 
     def test_run_input_json_workspace_config_resolves_isolation(self):
         with tempfile.TemporaryDirectory() as tmp:

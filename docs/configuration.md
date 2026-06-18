@@ -65,6 +65,14 @@ Copy `config.example.json` and replace placeholders before real Droid runs:
     "defaultModel": null,
     "defaultReasoningEffort": null
   },
+  "claude": {
+    "binary": "claude",
+    "defaultModel": null,
+    "defaultReasoningEffort": null,
+    "workPermissionMode": "auto",
+    "noSessionPersistence": true,
+    "bare": false
+  },
   "kimi": {
     "binary": "kimi",
     "defaultModel": "kimi-code/kimi-for-coding",
@@ -161,6 +169,30 @@ Controls local run recording.
 - `ignoreUserConfig`: include Codex `--ignore-user-config`.
 - Codex safe mode always uses `--sandbox read-only` in v1; `codex.safeSandbox` is rejected.
 
+### `claude`
+
+```json
+{
+  "claude": {
+    "binary": "claude",
+    "defaultModel": null,
+    "defaultReasoningEffort": null,
+    "workPermissionMode": "auto",
+    "noSessionPersistence": true,
+    "bare": false
+  }
+}
+```
+
+- `binary`: child executable for Claude Code.
+- `defaultModel`: optional Claude model string. `null` lets Claude Code choose its own default.
+- `defaultReasoningEffort`: optional Claude Code effort string: `low`, `medium`, `high`, `xhigh`, or `max`. Delegate emits it as `--effort`.
+- `workPermissionMode`: Claude Code permission mode for work runs. Allowed values are `acceptEdits`, `auto`, `default`, `dontAsk`, and `plan`.
+- `workPermissionMode` cannot be `bypassPermissions`; use `policy.harness.claude.work.bypassApprovalsAndSandbox` when you explicitly want Delegate to emit Claude `--permission-mode bypassPermissions`.
+- `noSessionPersistence`: defaults to `true`, adding `--no-session-persistence` to headless calls.
+- `bare`: opt-in `--bare` mode for runs that should skip Claude Code customizations and auto-discovery.
+- Claude safe mode uses `claude -p`, stdin prompt delivery, `--permission-mode plan`, `--strict-mcp-config`, Read/Grep/Glob, and selected read-only Bash tools.
+
 ### `kimi`
 
 ```json
@@ -203,7 +235,7 @@ Controls local run recording.
 }
 ```
 
-- `capabilities`: optional map of harness name (`codex` or `droid` only; cursor uses `cursor.reasoningEffortModels`) to model capability declarations.
+- `capabilities`: optional map of harness name (`codex` or `droid` only; cursor uses `cursor.reasoningEffortModels`, and Claude uses static native `--effort` labels) to model capability declarations.
 - `supported`: non-empty array of exact effort strings. Delegate treats these literally; it does not translate `xhigh` to another provider spelling.
 - `default`: optional effort string that must be present in `supported`. It is informational only (shown by `delegate capabilities`); launches apply `<engine>.defaultReasoningEffort`, not per-model defaults.
 - Effort strings may not contain whitespace, double quotes, or backslashes.
@@ -230,7 +262,7 @@ Profiles:
 - `external-sandbox`: permits Codex approval/sandbox bypass and hook-trust bypass for work mode. Use only inside a separate sandbox you control.
 - `custom`: no profile defaults; use explicit per-mode/per-harness settings.
 
-Supported boolean policy keys: `networkAccess`, `webSearch`, `bypassApprovalsAndSandbox`, and `bypassHookTrust`. Only Codex currently consumes all of these fields. Cursor and Droid ignore unsupported policy fields rather than translating them to runtime flags.
+Supported boolean policy keys: `networkAccess`, `webSearch`, `bypassApprovalsAndSandbox`, and `bypassHookTrust`. Only Codex currently consumes all of these fields. Claude consumes `bypassApprovalsAndSandbox` only from the harness-scoped `policy.harness.claude.work` block, mapping it to `--permission-mode bypassPermissions`. Cursor, Droid, and Kimi ignore unsupported policy fields rather than translating them to runtime flags.
 
 `bypassApprovalsAndSandbox` and `bypassHookTrust` are work-mode escalations. Setting either to `true` under a safe-mode policy block (`policy.safe` or `policy.harness.<engine>.safe`) is rejected at config load with `invalid_policy_config`, because safe mode is read-only by contract.
 
@@ -245,7 +277,7 @@ Supported boolean policy keys: `networkAccess`, `webSearch`, `bypassApprovalsAnd
 }
 ```
 
-Allowed values are `auto`, `none`, and `worktree`. For Cursor, Droid, and Kimi
+Allowed values are `auto`, `none`, and `worktree`. For Cursor, Claude, Droid, and Kimi
 safe mode, an effective value of `none` is rejected because those safe contracts
 depend on Delegate's temporary workspace/config boundary. Use `auto` or
 `worktree` for those safe-mode harnesses. Codex safe can use `none` because the
@@ -253,7 +285,7 @@ Codex read-only sandbox remains active.
 
 Embedded defaults:
 
-- `safe`: `auto`. Cursor, Droid, Codex, and Kimi safe use temporary workspace isolation by default.
+- `safe`: `auto`. Cursor, Claude, Droid, Codex, and Kimi safe use temporary workspace isolation by default.
 - `work`: `none`. Work mode runs in the real workspace unless you opt into worktree isolation.
 
 ### `worktrees`

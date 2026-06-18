@@ -42,6 +42,14 @@
     "ephemeral": true,
     "ignoreUserConfig": false
   },
+  "claude": {
+    "binary": "claude",
+    "defaultModel": null,
+    "defaultReasoningEffort": null,
+    "workPermissionMode": "auto",
+    "noSessionPersistence": true,
+    "bare": false
+  },
   "kimi": {
     "binary": "kimi",
     "defaultModel": "kimi-code/kimi-for-coding",

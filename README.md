@@ -4,7 +4,7 @@
 
 # Delegate Agent
 
-Delegate Agent is a small CLI for handing a bounded task to another coding-agent runtime. It normalizes common calls to Cursor Agent, Factory Droid, OpenAI Codex, and Kimi Code so humans or other agents can launch review, investigation, and implementation jobs without remembering each tool's flags.
+Delegate Agent is a small CLI for handing a bounded task to another coding-agent runtime. It normalizes common calls to Cursor Agent, Factory Droid, OpenAI Codex, Claude Code, and Kimi Code so humans or other agents can launch review, investigation, and implementation jobs without remembering each tool's flags.
 
 Use it when you want a predictable wrapper around prompts like:
 
@@ -14,7 +14,7 @@ Use it when you want a predictable wrapper around prompts like:
 
 Delegate does **not** commit, push, merge, deploy, publish, or run a background service. It builds the child command, adds safety framing, launches the selected runtime, and records local run metadata for later inspection.
 
-Prompt handling is provider-specific: Codex prompts are delivered to the child
+Prompt handling is provider-specific: Codex and Claude prompts are delivered to the child
 runtime over stdin; Droid prompts are delivered through a private temporary
 prompt file using Droid's `--file` option; Cursor Agent and Kimi Code currently
 require prompt argv. Delegate redacts Cursor and Kimi prompt argv in dry-run
@@ -50,6 +50,7 @@ Delegate wraps other CLIs. Install and authenticate only the runtimes you plan t
 command -v agent   # Cursor Agent CLI (default model: Cursor Composer), used by delegate cursor ...
 command -v droid   # Factory Droid CLI, used by delegate droid ...
 command -v codex   # OpenAI Codex CLI, used by delegate codex ...
+command -v claude  # Claude Code CLI, used by delegate claude ...
 command -v kimi    # Kimi Code CLI, used by delegate kimi ...
 ```
 
@@ -82,12 +83,14 @@ Preview the command without launching a child runtime:
 
 ```bash
 delegate --json dry-run codex safe "Review this repository. Do not edit files."
+delegate --json dry-run claude safe "Review this repository. Do not edit files."
 ```
 
 Run a read-only review in an isolated temporary workspace:
 
 ```bash
 delegate codex safe "Review this repository for correctness risks. Do not edit files."
+delegate claude safe "Review this repository for correctness risks. Do not edit files."
 delegate cursor safe "Review the current diff for regressions. Do not edit files."
 delegate kimi safe "Review this repository for regressions. Do not edit files."
 ```
@@ -96,6 +99,7 @@ Run an edit-capable task in a workspace you trust:
 
 ```bash
 delegate cursor work "Fix the parser bug. Run python3 -m unittest tests.test_delegate_parser. Report changed files."
+delegate claude work "Implement the scoped change and run the named check. Report changed files."
 delegate kimi work "Implement the scoped change and run the named check. Report changed files."
 ```
 
@@ -107,10 +111,11 @@ $EDITOR /tmp/delegate-task.json
 delegate --json run --input-json /tmp/delegate-task.json
 ```
 
-Reasoning effort is provider-aware and model-specific. Unsupported combinations fail before launch. It changes only the requested model thinking depth/cost/latency; it does not change safe/work mode, sandboxing, approvals, or edit capability. For example, after configuring `codex.defaultModel`:
+Reasoning effort is provider-aware. Unsupported combinations fail before launch. It changes only the requested model thinking depth/cost/latency; it does not change safe/work mode, sandboxing, approvals, or edit capability. Codex/Droid validate effort against a resolved model capability table, Cursor maps effort to configured model selection, and Claude maps directly to Claude Code `--effort` (`low`, `medium`, `high`, `xhigh`, `max`). For example, after configuring `codex.defaultModel`:
 
 ```bash
 delegate --json dry-run codex safe --reasoning-effort high "Review this repository. Do not edit files."
+delegate --json dry-run claude safe --reasoning-effort high "Review this repository. Do not edit files."
 ```
 
 Inspect tracked output by alias:
@@ -138,8 +143,8 @@ Delegate separates three ideas:
 
 Defaults are intentionally conservative for review paths:
 
-- `delegate cursor safe`, `delegate codex safe`, and `delegate kimi safe` run in an isolated temporary workspace.
-- `delegate droid ALIAS safe` runs in the real workspace using Droid's default read-oriented behavior.
+- `delegate cursor safe`, `delegate codex safe`, `delegate claude safe`, `delegate droid ALIAS safe`, and `delegate kimi safe` run in an isolated temporary workspace.
+- Claude safe mode invokes `claude -p` with prompt text on stdin, `--permission-mode plan`, `--strict-mcp-config`, Read/Grep/Glob plus selected read-only Bash tools, and `--no-session-persistence` by default.
 - `work` mode can edit. By default it runs in the real workspace for backward compatibility.
 
 For edit-capable isolation, use a persistent Git worktree:
@@ -153,7 +158,7 @@ delegate worktree remove <alias-or-runId>
 
 Worktree isolation protects the source checkout from ordinary relative-path edits. It is **not** a full security sandbox; the child process can still use its runtime permissions, credentials, network access, and absolute paths according to the environment and runtime policy.
 
-Temporary safe isolation preserves internal symlinks, but replaces symlinks that point outside the source workspace with inert placeholder files inside the isolated workspace. Delegate reports a warning listing the relative symlink paths it blocked. In Git repositories with no commits yet, Cursor/Codex/Kimi safe isolation falls back to a directory copy because Git cannot create a detached worktree from an unborn `HEAD`.
+Temporary safe isolation preserves internal symlinks, but replaces symlinks that point outside the source workspace with inert placeholder files inside the isolated workspace. Delegate reports a warning listing the relative symlink paths it blocked. In Git repositories with no commits yet, Cursor/Codex/Claude/Droid/Kimi safe isolation falls back to a directory copy because Git cannot create a detached worktree from an unborn `HEAD`.
 
 Snapshots and `run-output` redact common credential shapes by default, including authorization headers, bearer/basic tokens, JWT-like strings, and common `token=` / `api_key=` / `password=` values. Use `--no-redact` only when exact output is necessary and safe to display.
 

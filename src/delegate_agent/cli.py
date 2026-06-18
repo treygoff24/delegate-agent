@@ -97,6 +97,12 @@ SAFE_REVIEW_PREFIX_BY_ENGINE: dict[str, str] = {
         "Report findings with file path, line reference, severity, and rationale. "
         "If a write is blocked, do not retry it.\n\n"
     ),
+    "claude": (
+        "Delegate Claude safe mode (code review/investigation only): "
+        "Do not edit, create, or delete files. "
+        "Report findings with file path, line reference, severity, and rationale. "
+        "If a write is blocked, do not retry it.\n\n"
+    ),
     "droid": (
         "Delegate Droid safe mode (code review/investigation only): "
         "Do not edit, create, or delete files. "
@@ -146,7 +152,13 @@ SAFE_EXTERNAL_SYMLINK_WARNING_PREFIX = (
     "inside the isolated workspace"
 )
 SAFE_BLOCKED_SYMLINK_PLACEHOLDER = "External symlink blocked by Delegate safe isolation.\n"
+CLAUDE_SAFE_TOOLS = "Read,Grep,Glob,Bash"
+CLAUDE_SAFE_ALLOWED_TOOLS = (
+    "Bash(git diff:*),Bash(git status:*),Bash(git show:*),Bash(git log:*),"
+    "Bash(rg:*),Bash(grep:*),Bash(ls:*),Bash(sed:*),Bash(cat:*)"
+)
 MISSING_BINARY_PROBE_DIRS = (
+    "~/.claude/local",
     "~/.kimi-code/bin",
     "~/.local/bin",
     "~/bin",
@@ -563,7 +575,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
         )
     if subcommand == "run":
         return parse_run(rest, json_mode, cwd, pass_through, completion_report, isolation)
-    if subcommand in ("cursor", "codex", "kimi"):
+    if subcommand in ("cursor", "codex", "kimi", "claude"):
         return parse_modeless_engine(
             subcommand,
             rest,
@@ -789,13 +801,16 @@ def parse_dry_run(
     if rest and command_help.is_help_token(rest[0]):
         return help_command(json_mode, "dry-run")
     if not rest:
-        raise DelegateError("missing_engine", "dry-run requires cursor, droid, codex, or kimi.")
+        raise DelegateError(
+            "missing_engine",
+            "dry-run requires cursor, droid, codex, kimi, or claude.",
+        )
     engine = rest[0]
     if engine.startswith("-"):
         raise DelegateError(
             "misplaced_global_option", "Global options must appear before the subcommand."
         )
-    if engine in ("cursor", "codex", "kimi"):
+    if engine in ("cursor", "codex", "kimi", "claude"):
         return parse_modeless_engine(
             engine,
             rest[1:],
@@ -818,7 +833,10 @@ def parse_dry_run(
             isolation=isolation,
             help_topic="dry-run",
         )
-    raise DelegateError("invalid_engine", "dry-run engine must be cursor, droid, codex, or kimi.")
+    raise DelegateError(
+        "invalid_engine",
+        "dry-run engine must be cursor, droid, codex, kimi, or claude.",
+    )
 
 
 def parse_prompt_tail(rest: list[str]) -> tuple[str | None, str | None, list[str]]:
@@ -932,7 +950,7 @@ def parse_snapshot(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedC
     )
 
 
-KNOWN_HARNESSES = ("cursor", "droid", "codex", "kimi")
+KNOWN_HARNESSES = ("cursor", "droid", "codex", "kimi", "claude")
 
 
 def parse_runs(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
@@ -1453,7 +1471,9 @@ def effective_prompt(
     completion_report_mode: str,
 ) -> str:
     prompt = delegate_runner.prepend_skill_review_instructions(prompt)
-    safe_prefix = SAFE_REVIEW_PREFIX_BY_ENGINE.get(engine) if engine in {"codex", "droid"} else None
+    safe_prefix = (
+        SAFE_REVIEW_PREFIX_BY_ENGINE.get(engine) if engine in {"codex", "droid", "claude"} else None
+    )
     if mode == MODE_SAFE and safe_prefix is not None and safe_prefix not in prompt:
         # prepend_skill_review_instructions guarantees SKILL_REVIEW_PREFIX at index 0,
         # so provider-specific safe prefixes slot in cleanly between skill-review
@@ -1471,7 +1491,7 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         return request_from_input_json(parsed, config)
     launch = parsed.launch
     global_options = parsed.global_options
-    if launch is None or launch.engine not in ("cursor", "droid", "codex", "kimi"):
+    if launch is None or launch.engine not in ("cursor", "droid", "codex", "kimi", "claude"):
         raise DelegateError("invalid_command", "Command does not map to an execution request.")
     if launch.mode is None:
         raise DelegateError("invalid_command", "Command does not map to an execution request.")
@@ -1562,8 +1582,11 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
     engine = raw.get("engine")
     mode = raw.get("mode")
     prompt = raw.get("prompt")
-    if engine not in ("cursor", "droid", "codex", "kimi"):
-        raise DelegateError("invalid_engine", "engine must be cursor, droid, codex, or kimi.")
+    if engine not in ("cursor", "droid", "codex", "kimi", "claude"):
+        raise DelegateError(
+            "invalid_engine",
+            "engine must be cursor, droid, codex, kimi, or claude.",
+        )
     if not isinstance(mode, str):
         raise DelegateError("invalid_mode", "mode must be safe or work.")
     validate_mode(mode)
@@ -1581,7 +1604,7 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
     if engine == "droid":
         if not isinstance(model_alias, str) or not model_alias:
             raise DelegateError("missing_model", "droid run input requires model alias.")
-    elif engine in ("codex", "kimi"):
+    elif engine in ("codex", "kimi", "claude"):
         if model_alias is not None and not isinstance(model_alias, str):
             raise DelegateError("invalid_model", f"model must be a string or null for {engine}.")
         if model_alias == "":
@@ -1850,6 +1873,49 @@ def _codex_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     )
 
 
+def _claude_request_parts(build: EngineBuildInput) -> EngineRequestParts:
+    claude = build.config["claude"]
+    if isinstance(build.model_alias, str) and build.model_alias:
+        model = build.model_alias
+    else:
+        default_model = claude.get("defaultModel")
+        model = default_model if isinstance(default_model, str) and default_model else None
+    policy = delegate_config.effective_policy(build.config, engine="claude", mode=build.mode)
+    effort: str | None = None
+    warnings: tuple[str, ...] = ()
+    if build.requested_effort is not None:
+        try:
+            effort = reasoning.resolve_claude_native_effort(build.requested_effort)
+        except reasoning.ReasoningCapabilityError as exc:
+            if build.effort_source != "config":
+                raise DelegateError(exc.error, exc.message) from exc
+            warnings = (f"ignoring claude.defaultReasoningEffort: {exc.message}",)
+    argv = build_claude_argv(
+        claude,
+        build.mode,
+        model,
+        policy,
+        stream_capture=build.stream_capture,
+        reasoning_effort=effort,
+        allow_bypass_permissions=_claude_harness_bypass_enabled(build.config, build.mode),
+    )
+    return EngineRequestParts(
+        model=model,
+        argv=argv,
+        model_alias=build.model_alias,
+        prompt_transport=PROMPT_TRANSPORT_STDIN,
+        stdin_text=build.prompt,
+        display_argv=list(argv),
+        warnings=warnings,
+        reasoning_effort=effort,
+        reasoning_effort_source=build.effort_source if effort is not None else None,
+        reasoning_capability_source="static" if effort is not None else None,
+        reasoning_transport=(
+            reasoning.TRANSPORT_CLAUDE_EFFORT_FLAG if effort is not None else None
+        ),
+    )
+
+
 def _kimi_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     _ = build.effort_source, build.cache
     if build.requested_effort is not None:
@@ -1885,6 +1951,7 @@ ENGINE_REQUEST_PARTS_BUILDERS: dict[str, EngineRequestPartsBuilder] = {
     "cursor": _cursor_request_parts,
     "droid": _droid_request_parts,
     "codex": _codex_request_parts,
+    "claude": _claude_request_parts,
     "kimi": _kimi_request_parts,
 }
 
@@ -1896,7 +1963,10 @@ def _engine_request_parts(
 ) -> EngineRequestParts:
     builder = ENGINE_REQUEST_PARTS_BUILDERS.get(engine)
     if builder is None:
-        raise DelegateError("invalid_engine", "engine must be cursor, droid, codex, or kimi.")
+        raise DelegateError(
+            "invalid_engine",
+            "engine must be cursor, droid, codex, kimi, or claude.",
+        )
     return builder(build)
 
 
@@ -2073,6 +2143,28 @@ def prefix_droid_safe_prompt(prompt: str) -> str:
             return prompt
         return prompt[:insert_at] + safe_prefix + prompt[insert_at:]
     return f"{safe_prefix}{prompt}"
+
+
+def _claude_harness_bypass_enabled(config: JsonObject, mode: str) -> bool:
+    """Return true only for explicit Claude-scoped bypass policy.
+
+    Delegate's historical policy profiles were Codex-oriented. Requiring the
+    Claude bypass to live under policy.harness.claude.work prevents a global
+    external-sandbox profile from silently broadening Claude Code permissions.
+    """
+    if mode != MODE_WORK:
+        return False
+    policy = config.get("policy")
+    if not isinstance(policy, dict):
+        return False
+    harnesses = policy.get("harness")
+    if not isinstance(harnesses, dict):
+        return False
+    claude_policy = harnesses.get("claude")
+    if not isinstance(claude_policy, dict):
+        return False
+    work_policy = claude_policy.get(MODE_WORK)
+    return isinstance(work_policy, dict) and work_policy.get("bypassApprovalsAndSandbox") is True
 
 
 def _ensure_codex_skip_git_repo_check(argv: list[str]) -> list[str]:
@@ -2709,6 +2801,56 @@ def build_kimi_argv(
     return argv
 
 
+def build_claude_argv(
+    claude: JsonObject,
+    mode: str,
+    model: str | None,
+    policy: JsonObject,
+    *,
+    stream_capture: bool = True,
+    reasoning_effort: str | None = None,
+    allow_bypass_permissions: bool = False,
+) -> list[str]:
+    argv = [
+        str(claude["binary"]),
+        "-p",
+        "--output-format",
+        "stream-json" if stream_capture else "text",
+        "--input-format",
+        "text",
+    ]
+    if mode == MODE_SAFE:
+        argv.extend(
+            [
+                "--permission-mode",
+                "plan",
+                "--tools",
+                CLAUDE_SAFE_TOOLS,
+                "--allowedTools",
+                CLAUDE_SAFE_ALLOWED_TOOLS,
+                "--strict-mcp-config",
+            ]
+        )
+    elif mode == MODE_WORK:
+        permission_mode = (
+            "bypassPermissions"
+            if allow_bypass_permissions and policy.get("bypassApprovalsAndSandbox") is True
+            else str(claude.get("workPermissionMode", "auto"))
+        )
+        argv.extend(["--permission-mode", permission_mode])
+    else:
+        validate_mode(mode)
+    if claude.get("noSessionPersistence", True) is True:
+        argv.append("--no-session-persistence")
+    if claude.get("bare", False) is True:
+        argv.append("--bare")
+    if model:
+        argv.extend(["--model", model])
+    if reasoning_effort is not None:
+        argv.extend(["--effort", reasoning_effort])
+    return argv
+
+
 def build_codex_argv(
     codex: JsonObject,
     mode: str,
@@ -2834,7 +2976,10 @@ def dry_run_payload(request: Request) -> JsonObject:
     else:
         # Fallback when no isolation context is provided (e.g. direct build_request calls in tests).
         # Use embedded-default logic: safe local harnesses -> worktree temporary, others -> none.
-        if request.engine in ("cursor", "codex", "droid", "kimi") and request.mode == MODE_SAFE:
+        if (
+            request.engine in ("cursor", "codex", "droid", "kimi", "claude")
+            and request.mode == MODE_SAFE
+        ):
             payload["isolatedWorkspace"] = True
             payload["isolation"] = (
                 "Execution uses a temporary detached git worktree or directory copy; "
@@ -2860,7 +3005,7 @@ def dry_run_payload(request: Request) -> JsonObject:
 def _binary_config_key(engine: str | None) -> str | None:
     if engine == "cursor":
         return "cursor.argvPrefix"
-    if engine in {"codex", "droid", "kimi"}:
+    if engine in {"codex", "droid", "kimi", "claude"}:
         return f"{engine}.binary"
     return None
 
@@ -3195,6 +3340,14 @@ def models_payload(
             "defaultReasoningEffort": config["codex"].get("defaultReasoningEffort"),
             "profile": config["codex"]["profile"],
         },
+        "claude": {
+            "binary": config["claude"]["binary"],
+            "defaultModel": config["claude"]["defaultModel"],
+            "defaultReasoningEffort": config["claude"].get("defaultReasoningEffort"),
+            "workPermissionMode": config["claude"]["workPermissionMode"],
+            "noSessionPersistence": config["claude"]["noSessionPersistence"],
+            "bare": config["claude"]["bare"],
+        },
         "kimi": {
             "binary": config["kimi"]["binary"],
             "defaultModel": config["kimi"]["defaultModel"],
@@ -3204,19 +3357,32 @@ def models_payload(
 
 
 def _policy_field_support_matrix() -> JsonObject:
-    supported = {
+    codex_supported = {
         "networkAccess": True,
         "webSearch": True,
         "bypassApprovalsAndSandbox": True,
         "bypassHookTrust": True,
     }
     unsupported = {key: False for key in delegate_config.POLICY_MODE_KEYS}
+    claude_supported = dict(unsupported)
+    claude_supported["bypassApprovalsAndSandbox"] = True
     return {
-        "codex": supported,
+        "codex": codex_supported,
+        "claude": claude_supported,
         "cursor": unsupported,
         "droid": unsupported,
         "kimi": unsupported,
     }
+
+
+def _claude_runtime_policy(config: JsonObject, mode: str) -> JsonObject:
+    policy = {key: False for key in delegate_config.POLICY_MODE_KEYS}
+    if mode == MODE_WORK:
+        policy["bypassApprovalsAndSandbox"] = _claude_harness_bypass_enabled(
+            config,
+            mode,
+        )
+    return policy
 
 
 def _codex_describe_model(codex: JsonObject) -> str | None:
@@ -3244,14 +3410,38 @@ def _codex_describe_argv(
     )
 
 
+def _claude_describe_model(claude: JsonObject) -> str | None:
+    default_model = claude.get("defaultModel")
+    return default_model if isinstance(default_model, str) and default_model else None
+
+
+def _claude_describe_argv(
+    config: JsonObject,
+    claude: JsonObject,
+    *,
+    mode: str,
+    policy: JsonObject,
+) -> list[str]:
+    return build_claude_argv(
+        claude,
+        mode,
+        _claude_describe_model(claude),
+        policy,
+        allow_bypass_permissions=_claude_harness_bypass_enabled(config, mode),
+    )
+
+
 def describe_payload(
     config: JsonObject,
     config_source: str,
     workspace: Path | None = None,
 ) -> JsonObject:
     codex = config["codex"]
+    claude = config["claude"]
     codex_safe_policy = delegate_config.effective_policy(config, engine="codex", mode=MODE_SAFE)
     codex_work_policy = delegate_config.effective_policy(config, engine="codex", mode=MODE_WORK)
+    claude_safe_policy = _claude_runtime_policy(config, MODE_SAFE)
+    claude_work_policy = _claude_runtime_policy(config, MODE_WORK)
     codex_safe_argv = _codex_describe_argv(
         codex,
         mode=MODE_SAFE,
@@ -3266,6 +3456,18 @@ def describe_payload(
         prompt="<skill-review-prompt>",
         policy=codex_work_policy,
     )
+    claude_safe_argv = _claude_describe_argv(
+        config,
+        claude,
+        mode=MODE_SAFE,
+        policy=claude_safe_policy,
+    )
+    claude_work_argv = _claude_describe_argv(
+        config,
+        claude,
+        mode=MODE_WORK,
+        policy=claude_work_policy,
+    )
     return {
         "ok": True,
         "version": VERSION,
@@ -3273,13 +3475,17 @@ def describe_payload(
         "configPath": str(config_path()),
         "configSource": config_source,
         "configResolution": config_resolution_payload(config_source, workspace),
-        "engines": ["cursor", "droid", "codex", "kimi"],
+        "engines": ["cursor", "droid", "codex", "kimi", "claude"],
         "policyProfiles": list(delegate_config.POLICY_PROFILES),
         "policyFieldSupport": _policy_field_support_matrix(),
         "effectivePolicy": {
             "codex": {
                 "safe": codex_safe_policy,
                 "work": codex_work_policy,
+            },
+            "claude": {
+                "safe": claude_safe_policy,
+                "work": claude_work_policy,
             },
         },
         "modes": [MODE_SAFE, MODE_WORK],
@@ -3289,6 +3495,7 @@ def describe_payload(
             "droid": PROMPT_TRANSPORT_FILE,
             "codex": PROMPT_TRANSPORT_STDIN,
             "kimi": PROMPT_TRANSPORT_ARGV,
+            "claude": PROMPT_TRANSPORT_STDIN,
         },
         "globalOptions": [
             "--cwd",
@@ -3313,6 +3520,7 @@ def describe_payload(
                 "droid": False,
                 "codex": True,
                 "kimi": False,
+                "claude": False,
             },
         },
         "worktrees": {
@@ -3401,6 +3609,20 @@ def describe_payload(
                     "profile is config-only (codex.profile); not accepted in run input JSON.",
                 ],
             },
+            "claude": {
+                "safe": claude_safe_argv,
+                "safeNotes": [
+                    "Runs in an isolated temporary workspace (detached git worktree or directory copy).",
+                    "Uses Claude Code -p with --permission-mode plan, --strict-mcp-config, Read/Grep/Glob, and selected read-only Bash tools.",
+                    "Prompt is delivered on stdin; dry-run argv and manifests do not contain the prompt.",
+                ],
+                "work": claude_work_argv,
+                "workNotes": [
+                    "Uses claude.workPermissionMode unless policy.harness.claude.work.bypassApprovalsAndSandbox explicitly requests bypassPermissions.",
+                    "Reasoning effort is emitted as Claude Code --effort, independent of model capability cache.",
+                    "Delegate sets subprocess cwd; Claude Code receives no workspace argv flag.",
+                ],
+            },
             "kimi": {
                 "safe": [
                     config["kimi"]["binary"],
@@ -3468,6 +3690,19 @@ def emit_models(
         f"codex: binary={codex['binary']} defaultModel={model_label} profile={profile_label}",
         file=stdout,
     )
+    claude = config["claude"]
+    claude_default_model = claude.get("defaultModel")
+    claude_model_label = (
+        claude_default_model
+        if isinstance(claude_default_model, str) and claude_default_model
+        else "(none)"
+    )
+    print(
+        "claude: "
+        f"binary={claude['binary']} defaultModel={claude_model_label} "
+        f"workPermissionMode={claude['workPermissionMode']}",
+        file=stdout,
+    )
     kimi = config["kimi"]
     kimi_default_model = kimi.get("defaultModel")
     kimi_model_label = (
@@ -3498,7 +3733,7 @@ def emit_describe(
     print(f"delegate {VERSION}", file=stdout)
     print(f"config: {payload['configPath']} ({payload['configSource']})", file=stdout)
     print(f"runtime: {payload['runtime']['modulePath']}", file=stdout)
-    print("engines: cursor, droid, codex, kimi", file=stdout)
+    print("engines: cursor, droid, codex, kimi, claude", file=stdout)
     print("modes: safe, work", file=stdout)
     print("prompt sources: direct, --prompt-file, stdin", file=stdout)
     print("global options must appear before the subcommand", file=stdout)
@@ -3538,6 +3773,8 @@ Good defaults:
   delegate droid <alias> work "Implement this bounded change; run the named check."
   delegate codex safe "Review this workspace. Do not edit files."
   delegate codex work "Implement the scoped fix, run the named check, and report changed files."
+  delegate claude safe "Review this workspace. Do not edit files."
+  delegate claude work "Implement the scoped fix, run the named check, and report changed files."
   delegate kimi safe "Review this repo for regressions; report file/line/severity."
   delegate kimi work "Implement the scoped task; report changed files and tests."
 
@@ -3549,6 +3786,14 @@ Kimi:
 Codex:
   - Model selection uses codex.defaultModel in config or optional JSON input model; no CLI model alias in v1.
   - Codex profile (codex.profile) is config-only; run input JSON must not include profile.
+
+Claude:
+  - Uses Claude Code headless mode: claude -p with prompt delivered on stdin.
+  - Safe mode runs in an isolated temporary workspace with --permission-mode plan,
+    --strict-mcp-config, Read/Grep/Glob, and selected read-only Bash tools.
+  - Work mode uses claude.workPermissionMode, or bypassPermissions only when
+    Delegate policy explicitly enables policy.harness.claude.work.bypassApprovalsAndSandbox.
+  - Reasoning effort maps to Claude Code --effort (low, medium, high, xhigh, max).
 
 Droid modes:
   - Droid safe mode remains read-only in an isolated temporary workspace: no --auto, --use-spec, or unsafe skip.

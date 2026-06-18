@@ -17,6 +17,7 @@ Use the real workspace instead when the task depends on uncommitted local files 
 ```bash
 delegate --isolation worktree cursor work "Implement the scoped change and run the named check."
 delegate --isolation worktree codex work "Implement the scoped change and report changed files."
+delegate --isolation worktree claude work "Implement the scoped change and report changed files."
 delegate --isolation worktree droid implementer work "Implement the scoped change and report changed files."
 delegate --isolation worktree kimi work "Implement the scoped change and report changed files."
 ```

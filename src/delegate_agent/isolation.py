@@ -80,6 +80,8 @@ def branch_label(engine: str, model_alias: str | None) -> str:
         return "codex"
     if engine == "kimi":
         return "kimi"
+    if engine == "claude":
+        return "claude"
     if engine == "droid":
         if not model_alias:
             return "droid"
@@ -118,7 +120,7 @@ def worktrees_data_home(config: JsonObject) -> Path:
 
 def _map_auto_isolation(engine: str, mode: str) -> str:
     """Preserve safe-mode isolation for local engines while leaving work mode in-place."""
-    if mode == "safe" and engine in ("cursor", "codex", "droid", "kimi"):
+    if mode == "safe" and engine in ("cursor", "codex", "droid", "kimi", "claude"):
         return ISOLATION_WORKTREE
     return ISOLATION_NONE
 
