@@ -1,0 +1,304 @@
+WEBVTT
+
+00:00:00.000 --> 00:00:02.700
+Delegate Agent solves a practical command
+
+00:00:02.700 --> 00:00:05.399
+line problem. You may want a
+
+00:00:05.399 --> 00:00:08.099
+child coding runtime to review a
+
+00:00:08.099 --> 00:00:10.799
+diff, investigate a failure, or implement
+
+00:00:10.799 --> 00:00:13.498
+a scoped change, but each runtime
+
+00:00:13.498 --> 00:00:16.198
+expects different flags, prompt delivery, safety
+
+00:00:16.198 --> 00:00:18.898
+controls, and output formats. This repository
+
+00:00:18.898 --> 00:00:21.598
+wraps those differences in one Python
+
+00:00:21.598 --> 00:00:24.297
+CLI. The same command surface can
+
+00:00:24.297 --> 00:00:26.997
+launch Cursor Agent, Factory Droid, OpenAI
+
+00:00:26.997 --> 00:00:29.697
+Codex, Claude Code, or Kimi Code,
+
+00:00:29.697 --> 00:00:32.396
+while keeping local records that parent
+
+00:00:32.396 --> 00:00:35.096
+agents can inspect later. The top-level
+
+00:00:35.096 --> 00:00:37.796
+path is deliberately small. bin/delegate.py imports
+
+00:00:37.796 --> 00:00:40.495
+src/delegate_agent/cli.py, and that module owns the
+
+00:00:40.495 --> 00:00:43.195
+main control flow. It parses arguments,
+
+00:00:43.195 --> 00:00:45.895
+resolves the workspace, loads configuration, builds
+
+00:00:45.895 --> 00:00:48.594
+a Request object, and decides whether
+
+00:00:48.594 --> 00:00:51.294
+the run is a dry run,
+
+00:00:51.294 --> 00:00:53.994
+a tracked launch, or a persistent
+
+00:00:53.994 --> 00:00:56.693
+worktree launch. Configuration is layered so
+
+00:00:56.693 --> 00:00:59.393
+local automation can be predictable without
+
+00:00:59.393 --> 00:01:02.093
+hiding operator settings. Embedded defaults come
+
+00:01:02.093 --> 00:01:04.793
+first. User config, workspace config, and
+
+00:01:04.793 --> 00:01:07.492
+DELEGATE_CONFIG overlay those defaults. The validator
+
+00:01:07.492 --> 00:01:10.192
+checks provider sections, policy, reasoning declarations,
+
+00:01:10.192 --> 00:01:12.892
+tracking, retention, isolation, and worktree settings
+
+00:01:12.892 --> 00:01:15.591
+before any child process starts. The
+
+00:01:15.591 --> 00:01:18.291
+first safety idea is mode. Safe
+
+00:01:18.291 --> 00:01:20.991
+mode is for review and investigation.
+
+00:01:20.991 --> 00:01:23.690
+Work mode is edit capable. This
+
+00:01:23.690 --> 00:01:26.390
+boundary is separate from reasoning effort.
+
+00:01:26.390 --> 00:01:29.090
+A higher reasoning effort can ask
+
+00:01:29.090 --> 00:01:31.789
+a model to think more, but
+
+00:01:31.789 --> 00:01:34.489
+it does not change sandboxing, network
+
+00:01:34.489 --> 00:01:37.189
+access, approval mode, or edit permission.
+
+00:01:37.189 --> 00:01:39.889
+The second safety idea is isolation.
+
+00:01:39.889 --> 00:01:42.588
+Safe runs normally execute in a
+
+00:01:42.588 --> 00:01:45.288
+temporary detached worktree or a directory
+
+00:01:45.288 --> 00:01:47.988
+copy, so ordinary relative-path edits do
+
+00:01:47.988 --> 00:01:50.687
+not touch the source checkout. Work
+
+00:01:50.687 --> 00:01:53.387
+runs can stay in the source
+
+00:01:53.387 --> 00:01:56.087
+checkout, or they can create a
+
+00:01:56.087 --> 00:01:58.786
+preserved Git worktree and branch for
+
+00:01:58.786 --> 00:02:01.486
+later review. Each runtime gets a
+
+00:02:01.486 --> 00:02:04.186
+tailored harness. Cursor and Kimi still
+
+00:02:04.186 --> 00:02:06.885
+use argv prompt transport, so Delegate
+
+00:02:06.885 --> 00:02:09.585
+redacts prompt text in public argv
+
+00:02:09.585 --> 00:02:12.285
+and manifests. Droid uses a private
+
+00:02:12.285 --> 00:02:14.984
+prompt file. Codex and Claude receive
+
+00:02:14.984 --> 00:02:17.684
+prompts over stdin, which keeps task
+
+00:02:17.684 --> 00:02:20.384
+text out of process argv. When
+
+00:02:20.384 --> 00:02:23.084
+tracked execution begins, Delegate creates a
+
+00:02:23.084 --> 00:02:25.783
+local run record under dot delegate.
+
+00:02:25.783 --> 00:02:28.483
+The runner writes a manifest, mutable
+
+00:02:28.483 --> 00:02:31.183
+state, a bounded snapshot, stdout and
+
+00:02:31.183 --> 00:02:33.882
+stderr logs, stream events, and sometimes
+
+00:02:33.882 --> 00:02:36.582
+a completion report. These files are
+
+00:02:36.582 --> 00:02:39.282
+local runtime state, not source files
+
+00:02:39.282 --> 00:02:41.981
+to commit. Those records power the
+
+00:02:41.981 --> 00:02:44.681
+inspection commands. Runs lists recent or
+
+00:02:44.681 --> 00:02:47.381
+active runs. Snapshot shows current status,
+
+00:02:47.381 --> 00:02:50.080
+isolation details, recent events, and bounded
+
+00:02:50.080 --> 00:02:52.780
+assistant text. Run output selects the
+
+00:02:52.780 --> 00:02:55.480
+best parent facing result, then falls
+
+00:02:55.480 --> 00:02:58.180
+back to recovered final text or
+
+00:02:58.180 --> 00:03:00.879
+bounded log diagnostics. Persistent worktrees add
+
+00:03:00.879 --> 00:03:03.579
+a full lifecycle. Delegate checks that
+
+00:03:03.579 --> 00:03:06.279
+Git has a valid head, the
+
+00:03:06.279 --> 00:03:08.978
+source checkout is clean, pass through
+
+00:03:08.978 --> 00:03:11.678
+mode is off, and the child
+
+00:03:11.678 --> 00:03:14.378
+binary exists. It then creates a
+
+00:03:14.378 --> 00:03:17.077
+branch, launches the child in the
+
+00:03:17.077 --> 00:03:19.777
+worktree, records review commands, and later
+
+00:03:19.777 --> 00:03:22.477
+refuses unsafe cleanup unless the caller
+
+00:03:22.477 --> 00:03:25.176
+opts in. The codebase is intentionally
+
+00:03:25.176 --> 00:03:27.876
+lean. Runtime Python dependencies are zero.
+
+00:03:27.876 --> 00:03:30.576
+The current tracked snapshot is dominated
+
+00:03:30.576 --> 00:03:33.275
+by Python, with about twenty nine
+
+00:03:33.275 --> 00:03:35.975
+thousand lines. Tests are larger than
+
+00:03:35.975 --> 00:03:38.675
+source, which matches the project’s focus
+
+00:03:38.675 --> 00:03:41.375
+on command contracts and safety boundaries.
+
+00:03:41.375 --> 00:03:44.074
+The main maintenance hotspot is src/delegate_agent/cli.py.
+
+00:03:44.074 --> 00:03:46.774
+It is the coordination center for
+
+00:03:46.774 --> 00:03:49.474
+parsing, request building, prompt framing, temporary
+
+00:03:49.474 --> 00:03:52.173
+isolation, and runtime dispatch. Worktree management
+
+00:03:52.173 --> 00:03:54.873
+is the next hotspot because cleanup,
+
+00:03:54.873 --> 00:03:57.573
+dirty state, merge checks, and registry
+
+00:03:57.573 --> 00:04:00.272
+drift all meet there. If you
+
+00:04:00.272 --> 00:04:02.972
+are contributing, choose the subsystem first.
+
+00:04:02.972 --> 00:04:05.672
+Runtime flag changes start in cli.py.
+
+00:04:05.672 --> 00:04:08.371
+Registry and output changes start in
+
+00:04:08.371 --> 00:04:11.071
+runner.py, run_registry.py, and run_output_commands.py. Persistent worktree
+
+00:04:11.071 --> 00:04:13.771
+changes start in isolation.py, worktree_execution.py, and
+
+00:04:13.771 --> 00:04:16.470
+worktree_mgmt.py. You can remember Delegate as
+
+00:04:16.470 --> 00:04:19.170
+three layers. First, the CLI builds
+
+00:04:19.170 --> 00:04:21.870
+a safe and explicit request. Next,
+
+00:04:21.870 --> 00:04:24.570
+the runner records what the child
+
+00:04:24.570 --> 00:04:27.269
+runtime does. Finally, inspection and worktree
+
+00:04:27.269 --> 00:04:29.969
+commands make the result usable without
+
+00:04:29.969 --> 00:04:32.219
+guessing where the logs went.
