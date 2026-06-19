@@ -66,15 +66,15 @@
   ],
   "videoOverview": {
     "status": "ready",
-    "sizeBytes": 7289722,
+    "sizeBytes": 8910377,
     "contentType": "video/mp4",
-    "generatedAt": "2026-06-19T00:37:17Z",
+    "generatedAt": "2026-06-19T00:58:36Z",
     "durationSeconds": 272.25,
     "captionTracks": [
       {
         "language": "en",
         "label": "English",
-        "sizeBytes": 7179,
+        "sizeBytes": 6905,
         "contentType": "text/vtt"
       }
     ],

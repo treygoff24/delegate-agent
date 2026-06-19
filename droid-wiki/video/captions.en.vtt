@@ -1,304 +1,274 @@
 WEBVTT
 
-00:00:00.000 --> 00:00:02.700
-Delegate Agent solves a practical command
+00:00:00.000 --> 00:00:02.838
+Delegate Agent solves a practical command line problem.
 
-00:00:02.700 --> 00:00:05.399
-line problem. You may want a
+00:00:03.291 --> 00:00:05.032
+You may want a child coding runtime to
 
-00:00:05.399 --> 00:00:08.099
-child coding runtime to review a
+00:00:05.100 --> 00:00:08.391
+review a diff, investigate a failure, or implement
 
-00:00:08.099 --> 00:00:10.799
-diff, investigate a failure, or implement
+00:00:08.424 --> 00:00:11.512
+a scoped change, but each runtime expects different
 
-00:00:10.799 --> 00:00:13.498
-a scoped change, but each runtime
+00:00:11.557 --> 00:00:15.199
+flags, prompt delivery, safety controls, and output
 
-00:00:13.498 --> 00:00:16.198
-expects different flags, prompt delivery, safety
+00:00:15.244 --> 00:00:18.886
+formats. This repository wraps those differences in
 
-00:00:16.198 --> 00:00:18.898
-controls, and output formats. This repository
+00:00:18.976 --> 00:00:20.559
+one Python CLI.
 
-00:00:18.898 --> 00:00:21.598
-wraps those differences in one Python
+00:00:21.079 --> 00:00:23.839
+The same command surface can launch Cursor Agent,
 
-00:00:21.598 --> 00:00:24.297
-CLI. The same command surface can
+00:00:24.121 --> 00:00:27.820
+Factory Droid, OpenAI Codex, Claude Code,
 
-00:00:24.297 --> 00:00:26.997
-launch Cursor Agent, Factory Droid, OpenAI
+00:00:28.147 --> 00:00:30.805
+or Kimi Code, while keeping local records that
 
-00:00:26.997 --> 00:00:29.697
-Codex, Claude Code, or Kimi Code,
+00:00:30.861 --> 00:00:32.411
+parent agents can inspect later.
 
-00:00:29.697 --> 00:00:32.396
-while keeping local records that parent
+00:00:33.033 --> 00:00:35.419
+The top-level path is deliberately small.
 
-00:00:32.396 --> 00:00:35.096
-agents can inspect later. The top-level
+00:00:35.747 --> 00:00:37.782
+A thin launcher hands off to the main
 
-00:00:35.096 --> 00:00:37.796
-path is deliberately small. bin/delegate.py imports
+00:00:37.862 --> 00:00:40.723
+CLI module, and that module owns the control
 
-00:00:37.796 --> 00:00:40.495
-src/delegate_agent/cli.py, and that module owns the
+00:00:40.779 --> 00:00:44.511
+flow. It parses arguments, resolves the workspace,
 
-00:00:40.495 --> 00:00:43.195
-main control flow. It parses arguments,
+00:00:44.964 --> 00:00:48.661
+loads configuration, builds a request object, and decides
 
-00:00:43.195 --> 00:00:45.895
-resolves the workspace, loads configuration, builds
+00:00:48.695 --> 00:00:50.516
+whether the run is a dry run, a
 
-00:00:45.895 --> 00:00:48.594
-a Request object, and decides whether
+00:00:50.584 --> 00:00:53.637
+tracked launch, or a persistent worktree launch.
 
-00:00:48.594 --> 00:00:51.294
-the run is a dry run,
+00:00:54.259 --> 00:00:57.256
+Configuration is layered so local automation can be
 
-00:00:51.294 --> 00:00:53.994
-a tracked launch, or a persistent
+00:00:57.301 --> 00:00:59.744
+predictable without hiding operator settings.
 
-00:00:53.994 --> 00:00:56.693
-worktree launch. Configuration is layered so
+00:01:00.139 --> 00:01:01.711
+Embedded defaults come first.
 
-00:00:56.693 --> 00:00:59.393
-local automation can be predictable without
+00:01:02.334 --> 00:01:06.201
+User config, workspace config, and an environment
 
-00:00:59.393 --> 00:01:02.093
-hiding operator settings. Embedded defaults come
+00:01:06.269 --> 00:01:08.192
+override layer on top of those defaults.
 
-00:01:02.093 --> 00:01:04.793
-first. User config, workspace config, and
+00:01:08.643 --> 00:01:12.319
+The validator checks provider sections, policy, reasoning
 
-00:01:04.793 --> 00:01:07.492
-DELEGATE_CONFIG overlay those defaults. The validator
+00:01:12.375 --> 00:01:16.152
+declarations, tracking, retention, isolation,
 
-00:01:07.492 --> 00:01:10.192
-checks provider sections, policy, reasoning declarations,
+00:01:16.186 --> 00:01:19.025
+and worktree settings before any child process starts.
 
-00:01:10.192 --> 00:01:12.892
-tracking, retention, isolation, and worktree settings
+00:01:19.647 --> 00:01:21.479
+The first safety idea is mode.
 
-00:01:12.892 --> 00:01:15.591
-before any child process starts. The
+00:01:21.875 --> 00:01:24.284
+Safe mode is for review and investigation.
 
-00:01:15.591 --> 00:01:18.291
-first safety idea is mode. Safe
+00:01:24.679 --> 00:01:26.614
+Work mode is edit capable.
 
-00:01:18.291 --> 00:01:20.991
-mode is for review and investigation.
+00:01:27.065 --> 00:01:29.361
+This boundary is separate from reasoning effort.
 
-00:01:20.991 --> 00:01:23.690
-Work mode is edit capable. This
+00:01:29.757 --> 00:01:31.996
+A higher reasoning effort can ask a model
 
-00:01:23.690 --> 00:01:26.390
-boundary is separate from reasoning effort.
+00:01:32.041 --> 00:01:34.359
+to think more, but it does not change
 
-00:01:26.390 --> 00:01:29.090
-A higher reasoning effort can ask
+00:01:34.416 --> 00:01:38.114
+sandboxing, network access, approval mode, or edit
 
-00:01:29.090 --> 00:01:31.789
-a model to think more, but
+00:01:38.148 --> 00:01:41.846
+permission. The second safety idea is isolation.
 
-00:01:31.789 --> 00:01:34.489
-it does not change sandboxing, network
+00:01:42.298 --> 00:01:45.261
+Safe runs normally execute in a temporary detached
 
-00:01:34.489 --> 00:01:37.189
-access, approval mode, or edit permission.
+00:01:45.295 --> 00:01:49.490
+worktree or a directory copy, so ordinary relative-path
 
-00:01:37.189 --> 00:01:39.889
-The second safety idea is isolation.
+00:01:49.625 --> 00:01:52.091
+edits do not touch the source checkout.
 
-00:01:39.889 --> 00:01:42.588
-Safe runs normally execute in a
+00:01:52.804 --> 00:01:54.805
+Work runs can stay in the source checkout,
 
-00:01:42.588 --> 00:01:45.288
-temporary detached worktree or a directory
+00:01:55.257 --> 00:01:58.039
+or they can create a preserved Git worktree
 
-00:01:45.288 --> 00:01:47.988
-copy, so ordinary relative-path edits do
+00:01:58.085 --> 00:01:59.599
+and branch for later review.
 
-00:01:47.988 --> 00:01:50.687
-not touch the source checkout. Work
+00:02:00.312 --> 00:02:02.494
+Each runtime gets a tailored harness.
 
-00:01:50.687 --> 00:01:53.387
-runs can stay in the source
+00:02:02.890 --> 00:02:05.084
+Cursor and Kimi still pass the prompt through
 
-00:01:53.387 --> 00:01:56.087
-checkout, or they can create a
+00:02:05.107 --> 00:02:08.183
+the argument vector, so Delegate redacts prompt text
 
-00:01:56.087 --> 00:01:58.786
-preserved Git worktree and branch for
+00:02:08.307 --> 00:02:10.025
+in public arguments and manifests.
 
-00:01:58.786 --> 00:02:01.486
-later review. Each runtime gets a
+00:02:10.422 --> 00:02:12.458
+Droid uses a private prompt file.
 
-00:02:01.486 --> 00:02:04.186
-tailored harness. Cursor and Kimi still
+00:02:12.853 --> 00:02:15.691
+Codex and Claude receive prompts over standard input,
 
-00:02:04.186 --> 00:02:06.885
-use argv prompt transport, so Delegate
+00:02:16.020 --> 00:02:17.942
+which keeps task text out of the process
 
-00:02:06.885 --> 00:02:09.585
-redacts prompt text in public argv
+00:02:17.976 --> 00:02:21.504
+arguments. When tracked execution begins,
 
-00:02:09.585 --> 00:02:12.285
-and manifests. Droid uses a private
+00:02:21.719 --> 00:02:24.150
+Delegate creates a local run record under dot
 
-00:02:12.285 --> 00:02:14.984
-prompt file. Codex and Claude receive
+00:02:24.196 --> 00:02:27.599
+delegate. The runner writes a manifest, mutable state,
 
-00:02:14.984 --> 00:02:17.684
-prompts over stdin, which keeps task
+00:02:27.927 --> 00:02:31.489
+a bounded snapshot, standard output and standard error
 
-00:02:17.684 --> 00:02:20.384
-text out of process argv. When
+00:02:31.534 --> 00:02:35.120
+logs, stream events, and sometimes a completion report.
 
-00:02:20.384 --> 00:02:23.084
-tracked execution begins, Delegate creates a
+00:02:35.515 --> 00:02:38.682
+These files are local runtime state, not source
 
-00:02:23.084 --> 00:02:25.783
-local run record under dot delegate.
+00:02:38.727 --> 00:02:39.654
+files to commit.
 
-00:02:25.783 --> 00:02:28.483
-The runner writes a manifest, mutable
+00:02:39.982 --> 00:02:42.266
+Those records power the inspection commands.
 
-00:02:28.483 --> 00:02:31.183
-state, a bounded snapshot, stdout and
+00:02:42.786 --> 00:02:44.879
+Runs lists recent or active runs.
 
-00:02:31.183 --> 00:02:33.882
-stderr logs, stream events, and sometimes
+00:02:45.331 --> 00:02:48.916
+Snapshot shows current status, isolation details,
 
-00:02:33.882 --> 00:02:36.582
-a completion report. These files are
+00:02:49.368 --> 00:02:52.048
+recent events, and bounded assistant text.
 
-00:02:36.582 --> 00:02:39.282
-local runtime state, not source files
+00:02:52.670 --> 00:02:55.248
+Run output selects the best parent facing result,
 
-00:02:39.282 --> 00:02:41.981
-to commit. Those records power the
+00:02:55.701 --> 00:02:58.290
+then falls back to recovered final text or
 
-00:02:41.981 --> 00:02:44.681
-inspection commands. Runs lists recent or
+00:02:58.358 --> 00:02:59.908
+bounded log diagnostics.
 
-00:02:44.681 --> 00:02:47.381
-active runs. Snapshot shows current status,
+00:03:00.428 --> 00:03:02.803
+Persistent worktrees add a full lifecycle.
 
-00:02:47.381 --> 00:02:50.080
-isolation details, recent events, and bounded
+00:03:03.255 --> 00:03:05.438
+Delegate checks that Git has a valid head,
 
-00:02:50.080 --> 00:02:52.780
-assistant text. Run output selects the
+00:03:05.720 --> 00:03:08.570
+the source checkout is clean, pass through mode
 
-00:02:52.780 --> 00:02:55.480
-best parent facing result, then falls
+00:03:08.593 --> 00:03:10.990
+is off, and the child binary exists.
 
-00:02:55.480 --> 00:02:58.180
-back to recovered final text or
+00:03:11.443 --> 00:03:13.964
+It then creates a branch, launches the child
 
-00:02:58.180 --> 00:03:00.879
-bounded log diagnostics. Persistent worktrees add
+00:03:14.009 --> 00:03:17.334
+in the worktree, records review commands, and later
 
-00:03:00.879 --> 00:03:03.579
-a full lifecycle. Delegate checks that
+00:03:17.413 --> 00:03:20.828
+refuses unsafe cleanup unless the caller opts in.
 
-00:03:03.579 --> 00:03:06.279
-Git has a valid head, the
+00:03:21.540 --> 00:03:23.633
+The codebase is intentionally lean.
 
-00:03:06.279 --> 00:03:08.978
-source checkout is clean, pass through
+00:03:24.153 --> 00:03:27.128
+Runtime Python dependencies are zero.
 
-00:03:08.978 --> 00:03:11.678
-mode is off, and the child
+00:03:27.455 --> 00:03:30.757
+The current tracked snapshot is dominated by Python,
 
-00:03:11.678 --> 00:03:14.378
-binary exists. It then creates a
+00:03:30.916 --> 00:03:32.849
+with about twenty nine thousand lines.
 
-00:03:14.378 --> 00:03:17.077
-branch, launches the child in the
+00:03:33.245 --> 00:03:35.608
+Tests are larger than source, which matches the
 
-00:03:17.077 --> 00:03:19.777
-worktree, records review commands, and later
+00:03:35.677 --> 00:03:39.352
+project's focus on command contracts and safety boundaries.
 
-00:03:19.777 --> 00:03:22.477
-refuses unsafe cleanup unless the caller
+00:03:40.065 --> 00:03:42.360
+The main maintenance hotspot is the main CLI
 
-00:03:22.477 --> 00:03:25.176
-opts in. The codebase is intentionally
+00:03:42.416 --> 00:03:46.024
+module. It is the coordination center for parsing,
 
-00:03:25.176 --> 00:03:27.876
-lean. Runtime Python dependencies are zero.
+00:03:46.352 --> 00:03:50.174
+request building, prompt framing, temporary isolation,
 
-00:03:27.876 --> 00:03:30.576
-The current tracked snapshot is dominated
+00:03:50.208 --> 00:03:51.554
+and runtime dispatch.
 
-00:03:30.576 --> 00:03:33.275
-by Python, with about twenty nine
+00:03:52.267 --> 00:03:55.794
+Worktree management is the next hotspot, because cleanup,
 
-00:03:33.275 --> 00:03:35.975
-thousand lines. Tests are larger than
+00:03:55.952 --> 00:03:59.322
+dirty state, merge checks, and registry drift all
 
-00:03:35.975 --> 00:03:38.675
-source, which matches the project’s focus
+00:03:59.379 --> 00:04:02.477
+meet there. If you are contributing, choose the
 
-00:03:38.675 --> 00:03:41.375
-on command contracts and safety boundaries.
+00:04:02.546 --> 00:04:05.836
+subsystem first. Runtime flag changes start in the
 
-00:03:41.375 --> 00:03:44.074
-The main maintenance hotspot is src/delegate_agent/cli.py.
+00:04:05.870 --> 00:04:09.071
+CLI module. Registry and output changes start in
 
-00:03:44.074 --> 00:03:46.774
-It is the coordination center for
+00:04:09.105 --> 00:04:11.072
+the runner and run-output modules.
 
-00:03:46.774 --> 00:03:49.474
-parsing, request building, prompt framing, temporary
+00:04:11.694 --> 00:04:14.804
+Persistent worktree changes start in the isolation and
 
-00:03:49.474 --> 00:03:52.173
-isolation, and runtime dispatch. Worktree management
+00:04:14.872 --> 00:04:18.219
+worktree-management modules. You can remember Delegate as three
 
-00:03:52.173 --> 00:03:54.873
-is the next hotspot because cleanup,
+00:04:18.265 --> 00:04:21.204
+layers. First, the CLI builds a safe and
 
-00:03:54.873 --> 00:03:57.573
-dirty state, merge checks, and registry
+00:04:21.250 --> 00:04:24.506
+explicit request. Next, the runner records what the
 
-00:03:57.573 --> 00:04:00.272
-drift all meet there. If you
+00:04:24.552 --> 00:04:25.931
+child runtime does.
 
-00:04:00.272 --> 00:04:02.972
-are contributing, choose the subsystem first.
+00:04:26.451 --> 00:04:29.380
+Finally, inspection and worktree commands make the result
 
-00:04:02.972 --> 00:04:05.672
-Runtime flag changes start in cli.py.
-
-00:04:05.672 --> 00:04:08.371
-Registry and output changes start in
-
-00:04:08.371 --> 00:04:11.071
-runner.py, run_registry.py, and run_output_commands.py. Persistent worktree
-
-00:04:11.071 --> 00:04:13.771
-changes start in isolation.py, worktree_execution.py, and
-
-00:04:13.771 --> 00:04:16.470
-worktree_mgmt.py. You can remember Delegate as
-
-00:04:16.470 --> 00:04:19.170
-three layers. First, the CLI builds
-
-00:04:19.170 --> 00:04:21.870
-a safe and explicit request. Next,
-
-00:04:21.870 --> 00:04:24.570
-the runner records what the child
-
-00:04:24.570 --> 00:04:27.269
-runtime does. Finally, inspection and worktree
-
-00:04:27.269 --> 00:04:29.969
-commands make the result usable without
-
-00:04:29.969 --> 00:04:32.219
-guessing where the logs went.
+00:04:29.471 --> 00:04:32.219
+usable without guessing where the logs went.
