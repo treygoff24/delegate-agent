@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from typing import TextIO
 
 from delegate_agent import run_registry
-from delegate_agent.json_types import JsonObject, JsonValue
+from delegate_agent.json_types import JsonObject
 from delegate_agent.run_registry import parse_utc_timestamp as parse_timestamp
 from delegate_agent.snapshot_view import SnapshotView
 
@@ -40,25 +40,21 @@ SNAPSHOT_CONTEXT_FIELDS: tuple[SnapshotTextField, ...] = (
 )
 
 
-def _snapshot_value(view: SnapshotView, key: str) -> JsonValue | None:
-    return view.get(key)
-
-
 def _render_snapshot_string_fields(
     view: SnapshotView,
     fields: tuple[SnapshotTextField, ...],
     stdout: TextIO,
 ) -> None:
     for key, label in fields:
-        value = _snapshot_value(view, key)
+        value = view.get(key)
         if isinstance(value, str) and value:
             print(f"{label}: {value}", file=stdout)
 
 
 def _render_snapshot_header(view: SnapshotView, stdout: TextIO) -> None:
-    alias = _snapshot_value(view, "alias") or _snapshot_value(view, "runId") or "?"
-    status = _snapshot_value(view, "status") or "unknown"
-    started_at = _snapshot_value(view, "startedAt")
+    alias = view.get("alias") or view.get("runId") or "?"
+    status = view.get("status") or "unknown"
+    started_at = view.get("startedAt")
     age = format_age(started_at if isinstance(started_at, str) else None)
     print(f"{alias} · {status} · {age} elapsed", file=stdout)
 
