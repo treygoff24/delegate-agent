@@ -99,10 +99,6 @@ def _tail_text_stream_output(stream: BinaryIO, lines: int) -> LogOutput:
     return LogOutput(content="\n".join(buffer) + "\n", truncated=total_lines > lines)
 
 
-def _tail_text_stream(stream: BinaryIO, lines: int) -> str:
-    return _tail_text_stream_output(stream, lines).content
-
-
 def effective_log_byte_sizes(registry_root: Path, run_id: str) -> tuple[int, int]:
     return run_registry.effective_log_byte_sizes(registry_root, run_id)
 
@@ -264,10 +260,6 @@ def read_archived_member(archive_file: Path, member_name: str) -> str:
         if extracted is None:
             return ""
         return extracted.read().decode("utf-8", errors="replace")
-
-
-def tail_archived_member(archive_file: Path, member_name: str, lines: int) -> str:
-    return tail_archived_output(archive_file, member_name, lines).content
 
 
 def tail_archived_output(archive_file: Path, member_name: str, lines: int) -> LogOutput:
