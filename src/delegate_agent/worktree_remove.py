@@ -18,7 +18,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from delegate_agent import run_registry
-from delegate_agent import worktree_mgmt as wm
 from delegate_agent.git_utils import GIT_TIMEOUT_RETURN_CODE
 from delegate_agent.json_types import JsonObject
 from delegate_agent.worktree_records import (
@@ -538,3 +537,11 @@ def remove_worktree(
             return _remove_missing_worktree_path(registry_root, plan, options=options)
 
         return _remove_present_worktree_path(registry_root, plan, options=options)
+
+
+# Deferred to the bottom to break the worktree_mgmt<->worktree_remove facade
+# cycle: worktree_mgmt re-exports this module's surface (a top-level import here
+# would fail when worktree_remove is imported first). All `wm.<seam>` access
+# above is call-time, so binding the alias after our own definitions is
+# sufficient and keeps mock.patch.object(worktree_mgmt, ...) seams working.
+from delegate_agent import worktree_mgmt as wm  # noqa: E402

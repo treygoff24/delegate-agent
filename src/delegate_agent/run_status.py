@@ -4,11 +4,14 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-from delegate_agent import archived_logs, run_registry
+from delegate_agent import archived_logs
 from delegate_agent.json_types import JsonObject
 
 LARGE_LOG_WARN_MIB = 50
-LARGE_LOG_WARN_BYTES = LARGE_LOG_WARN_MIB * run_registry.BYTES_PER_MIB
+# 1 << 20 == 1 MiB == run_registry.BYTES_PER_MIB. Inlined so this module needs no
+# import-time run_registry reference, which would otherwise create an import-order
+# cycle (run_registry re-exports this module after defining BYTES_PER_MIB).
+LARGE_LOG_WARN_BYTES = LARGE_LOG_WARN_MIB * (1 << 20)
 DEFAULT_RUNS_LIMIT = 20
 STATUS_RUNNING = "running"
 STATUS_STALE = "stale"
@@ -231,3 +234,10 @@ def list_run_summaries(
         summaries.append(summary)
     summaries.sort(key=lambda item: item.get("activityAt", ""), reverse=True)
     return summaries[:limit]
+
+
+# Deferred to the bottom to break the run_registry<->run_status facade cycle:
+# run_registry re-exports this module's surface (a top-level import here would
+# fail when run_status is imported first). Every `run_registry.<name>` access
+# above is call-time, so binding the module after our own definitions suffices.
+from delegate_agent import run_registry  # noqa: E402

@@ -20,7 +20,6 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from delegate_agent import run_registry
-from delegate_agent import worktree_mgmt as wm
 from delegate_agent.json_types import JsonObject, is_non_negative_int
 from delegate_agent.worktree_records import (
     SCHEMA_GC,
@@ -516,3 +515,11 @@ def maybe_auto_prune(
         )
     except wm.WorktreeManagementError as exc:
         return dict(exc.payload)
+
+
+# Deferred to the bottom to break the worktree_mgmt<->worktree_gc facade cycle:
+# worktree_mgmt re-exports this module's surface (a top-level import here would
+# fail when worktree_gc is imported first). All `wm.<seam>` access above is
+# call-time, so binding the alias after our own definitions is sufficient and
+# keeps the monkeypatch seams (mock.patch.object(worktree_mgmt, ...)) working.
+from delegate_agent import worktree_mgmt as wm  # noqa: E402

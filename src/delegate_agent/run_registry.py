@@ -521,7 +521,7 @@ def latest_run_id_for_harness(registry_root: Path, index: JsonObject, harness: s
     return matches[0][2]
 
 
-from delegate_agent import run_status  # noqa: E402  # imported after BYTES_PER_MIB is defined
+from delegate_agent import run_status  # noqa: E402  # facade re-export, placed after core defs
 from delegate_agent.run_status import (  # noqa: E402, F401  # re-exported
     DEFAULT_RUNS_LIMIT,
     LARGE_LOG_WARN_BYTES,
