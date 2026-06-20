@@ -13,7 +13,6 @@ import sys
 import tempfile
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn, TextIO
 
@@ -65,6 +64,16 @@ from delegate_agent.prompt_transport import (
     PROMPT_TRANSPORT_ARGV,
     PROMPT_TRANSPORT_FILE,
     PROMPT_TRANSPORT_STDIN,
+)
+from delegate_agent.request_models import (
+    EngineBuildInput,
+    EngineRequestParts,
+    GlobalOptions,
+    LaunchOptions,
+    ParsedCommand,
+    Request,
+    ResolvedWorkspace,
+    RunJsonOptions,
 )
 
 _replace_ws_by_engine = argv_utils.replace_workspace_arg_in_argv
@@ -166,128 +175,6 @@ MISSING_BINARY_PROBE_DIRS = (
     "~/bin",
     "/opt/homebrew/bin",
 )
-
-
-@dataclass
-class GlobalOptions:
-    json_mode: bool = False
-    cwd: str | None = None
-    pass_through: bool = False
-    completion_report: str | None = None
-    isolation: str | None = None
-
-
-@dataclass
-class LaunchOptions:
-    engine: str | None
-    mode: str | None
-    model_alias: str | None = None
-    prompt_parts: list[str] | None = None
-    prompt_file: str | None = None
-    reasoning_effort: str | None = None
-    dry_run: bool = False
-
-
-@dataclass
-class RunJsonOptions:
-    input_json: str
-
-
-@dataclass(init=False)
-class ParsedCommand:
-    subcommand: str
-    global_options: GlobalOptions
-    help_topic: str | None = None
-    launch: LaunchOptions | None = None
-    run_json: RunJsonOptions | None = None
-    snapshot: inspection_commands.SnapshotCommand | None = None
-    runs: inspection_commands.RunsCommand | None = None
-    run_output: run_output_commands.RunOutputCommand | None = None
-    worktree: worktree_commands.WorktreeCommand | None = None
-    capabilities: capability_commands.CapabilitiesCommand | None = None
-
-    def __init__(
-        self,
-        subcommand: str,
-        *,
-        help_topic: str | None = None,
-        global_options: GlobalOptions | None = None,
-        launch: LaunchOptions | None = None,
-        run_json: RunJsonOptions | None = None,
-        snapshot: inspection_commands.SnapshotCommand | None = None,
-        runs: inspection_commands.RunsCommand | None = None,
-        run_output: run_output_commands.RunOutputCommand | None = None,
-        worktree: worktree_commands.WorktreeCommand | None = None,
-        capabilities: capability_commands.CapabilitiesCommand | None = None,
-    ) -> None:
-        self.subcommand = subcommand
-        self.global_options = global_options or GlobalOptions()
-        self.help_topic = help_topic
-        self.launch = launch
-        self.run_json = run_json
-        self.snapshot = snapshot
-        self.runs = runs
-        self.run_output = run_output
-        self.worktree = worktree
-        self.capabilities = capabilities
-
-
-@dataclass(frozen=True)
-class ResolvedWorkspace:
-    path: str
-    kind: str
-
-
-@dataclass
-class Request:
-    engine: str
-    mode: str
-    workspace: str
-    prompt: str
-    argv: list[str]
-    model: str | None
-    model_alias: str | None = None
-    dry_run: bool = False
-    workspace_kind: str = "git"
-    isolation_context: IsolationContext | None = None
-    reasoning_effort: str | None = None
-    reasoning_effort_source: str | None = None
-    reasoning_capability_source: str | None = None
-    reasoning_transport: str | None = None
-    warnings: tuple[str, ...] = ()
-    stdin_text: str | None = None
-    prompt_file_text: str | None = None
-    prompt_transport: str = PROMPT_TRANSPORT_ARGV
-    display_argv: list[str] | None = None
-
-
-@dataclass(frozen=True)
-class EngineRequestParts:
-    model: str | None
-    argv: list[str]
-    model_alias: str | None = None
-    prompt_transport: str = PROMPT_TRANSPORT_ARGV
-    display_argv: list[str] | None = None
-    warnings: tuple[str, ...] = ()
-    stdin_text: str | None = None
-    prompt_file_text: str | None = None
-    reasoning_effort: str | None = None
-    reasoning_effort_source: str | None = None
-    reasoning_capability_source: str | None = None
-    reasoning_transport: str | None = None
-
-
-@dataclass(frozen=True)
-class EngineBuildInput:
-    mode: str
-    model_alias: str | None
-    resolved: ResolvedWorkspace
-    prompt: str
-    config: JsonObject
-    stream_capture: bool
-    requested_effort: str | None
-    effort_source: str | None
-    cache: JsonObject | None
 
 
 HELP = command_help.render_overview_text()
