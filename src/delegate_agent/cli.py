@@ -32,6 +32,7 @@ from delegate_agent import rendering as delegate_rendering
 from delegate_agent import retention as delegate_retention
 from delegate_agent import runner as delegate_runner
 from delegate_agent.argv_utils import public_argv
+from delegate_agent.constants import MODE_SAFE, MODE_WORK, VALID_MODES
 from delegate_agent.errors import (
     EXIT_MISSING_BINARY,
     EXIT_OK,
@@ -90,9 +91,6 @@ _replace_ws_by_engine = argv_utils.replace_workspace_arg_in_argv
 DEFAULT_CONFIG = delegate_config.embedded_default_config()
 CONFIG_ENV = delegate_config.CONFIG_ENV
 
-MODE_SAFE = "safe"
-MODE_WORK = "work"
-VALID_MODES = {MODE_SAFE, MODE_WORK}
 RUN_INPUT_KEYS = {"engine", "mode", "model", "cwd", "prompt", "isolation", "reasoningEffort"}
 MISPLACED_GLOBAL_OPTIONS = frozenset(
     {
