@@ -21,7 +21,7 @@ from delegate_agent.argv_builders import (
     build_codex_argv,
 )
 from delegate_agent.config import config_path
-from delegate_agent.constants import MODE_SAFE, MODE_WORK
+from delegate_agent.constants import KNOWN_ENGINES, MODE_SAFE, MODE_WORK
 from delegate_agent.errors import EXIT_OK, DelegateError
 from delegate_agent.json_types import JsonObject
 from delegate_agent.prompt_transport import (
@@ -162,10 +162,6 @@ def _claude_runtime_policy(config: JsonObject, mode: str) -> JsonObject:
     return policy
 
 
-def _codex_describe_model(codex: JsonObject) -> str | None:
-    return _resolve_default_model(codex)
-
-
 def _codex_describe_argv(
     codex: JsonObject,
     *,
@@ -178,16 +174,12 @@ def _codex_describe_argv(
         codex,
         mode,
         workspace,
-        _codex_describe_model(codex),
+        _resolve_default_model(codex),
         prompt,
         policy,
         workspace_kind="git",
         prompt_transport=PROMPT_TRANSPORT_STDIN,
     )
-
-
-def _claude_describe_model(claude: JsonObject) -> str | None:
-    return _resolve_default_model(claude)
 
 
 def _claude_describe_argv(
@@ -200,7 +192,7 @@ def _claude_describe_argv(
     return build_claude_argv(
         claude,
         mode,
-        _claude_describe_model(claude),
+        _resolve_default_model(claude),
         policy,
         allow_bypass_permissions=_claude_harness_bypass_enabled(config, mode),
     )
@@ -250,7 +242,7 @@ def describe_payload(
         "configPath": str(config_path()),
         "configSource": config_source,
         "configResolution": config_resolution_payload(config_source, workspace),
-        "engines": ["cursor", "droid", "codex", "kimi", "claude"],
+        "engines": list(KNOWN_ENGINES),
         "policyProfiles": list(delegate_config.POLICY_PROFILES),
         "policyFieldSupport": _policy_field_support_matrix(),
         "effectivePolicy": {

@@ -21,6 +21,7 @@ from delegate_agent.config import (  # noqa: F401  # re-exported
     VALID_ISOLATION_VALUES,
     ConfigError,
 )
+from delegate_agent.constants import KNOWN_ENGINES
 from delegate_agent.git_utils import (
     GIT_QUICK_TIMEOUT_SECONDS,
     GIT_TIMEOUT_RETURN_CODE,
@@ -120,7 +121,7 @@ def worktrees_data_home(config: JsonObject) -> Path:
 
 def _map_auto_isolation(engine: str, mode: str) -> str:
     """Preserve safe-mode isolation for local engines while leaving work mode in-place."""
-    if mode == "safe" and engine in ("cursor", "codex", "droid", "kimi", "claude"):
+    if mode == "safe" and engine in KNOWN_ENGINES:
         return ISOLATION_WORKTREE
     return ISOLATION_NONE
 

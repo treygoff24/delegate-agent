@@ -46,7 +46,7 @@ from delegate_agent.cli_parser import (  # noqa: F401  # re-exported for tests /
     parse_cli,
     parse_required_positive_int_option,
 )
-from delegate_agent.constants import MODE_SAFE
+from delegate_agent.constants import KNOWN_ENGINES, MODE_SAFE
 from delegate_agent.describe_payload import (  # noqa: F401  # re-exported for tests / back-compat
     _claude_runtime_policy,
     describe_payload,
@@ -258,10 +258,7 @@ def dry_run_payload(request: Request) -> JsonObject:
     else:
         # Fallback when no isolation context is provided (e.g. direct build_request calls in tests).
         # Use embedded-default logic: safe local harnesses -> worktree temporary, others -> none.
-        if (
-            request.engine in ("cursor", "codex", "droid", "kimi", "claude")
-            and request.mode == MODE_SAFE
-        ):
+        if request.engine in KNOWN_ENGINES and request.mode == MODE_SAFE:
             payload["isolatedWorkspace"] = True
             payload["isolation"] = (
                 "Execution uses a temporary detached git worktree or directory copy; "
@@ -645,7 +642,6 @@ def main(
 
         if parsed.subcommand != "run":
             workspace = resolve_workspace(global_options.cwd)
-            # (non-run path uses workspace resolved above)
 
         if parsed.subcommand == "capabilities":
             command = parsed.capabilities

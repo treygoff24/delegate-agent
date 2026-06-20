@@ -14,13 +14,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from delegate_agent import VERSION
+from delegate_agent.constants import ENGINES_PROSE
 from delegate_agent.json_types import JsonObject
-
-# Prose enumeration of the known harnesses, interpolated into the several
-# OptionSpec descriptions that accept a HARNESS argument. Kept as a local
-# literal so this module stays import-pure (importing cli.KNOWN_HARNESSES would
-# create a cycle); the order mirrors that registry.
-_HARNESS_LIST_PROSE = "cursor, droid, codex, kimi, or claude"
 
 
 @dataclass(frozen=True)
@@ -301,7 +296,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             OptionSpec(
                 "--latest",
                 "HARNESS",
-                f"Snapshot the most recent run for HARNESS ({_HARNESS_LIST_PROSE}).",
+                f"Snapshot the most recent run for HARNESS ({ENGINES_PROSE}).",
             ),
             OptionSpec("--no-redact", None, "Do not redact secrets in the output."),
         ),
@@ -331,7 +326,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             OptionSpec(
                 "--harness",
                 "HARNESS",
-                f"Filter by harness: {_HARNESS_LIST_PROSE}.",
+                f"Filter by harness: {ENGINES_PROSE}.",
             ),
             OptionSpec("--limit", "N", "Cap the number of runs listed (positive integer)."),
         ),
@@ -411,7 +406,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "[--harness HARNESS] [--status STATUS] [--limit N] [--no-auto-prune]",
         ),
         options=(
-            OptionSpec("--harness", "HARNESS", f"Filter by harness ({_HARNESS_LIST_PROSE})."),
+            OptionSpec("--harness", "HARNESS", f"Filter by harness ({ENGINES_PROSE})."),
             OptionSpec(
                 "--status",
                 "STATUS",
@@ -449,7 +444,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             OptionSpec(
                 "--latest",
                 "HARNESS",
-                f"Show the most recent worktree for HARNESS ({_HARNESS_LIST_PROSE}).",
+                f"Show the most recent worktree for HARNESS ({ENGINES_PROSE}).",
             ),
         ),
         examples=(
@@ -511,7 +506,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             OptionSpec(
                 "--harness",
                 "HARNESS",
-                f"Prune only the given harness ({_HARNESS_LIST_PROSE}).",
+                f"Prune only the given harness ({ENGINES_PROSE}).",
             ),
             OptionSpec(
                 "--include-detached",

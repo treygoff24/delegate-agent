@@ -155,11 +155,10 @@ def _validate_persistent_worktree_request(
     (
         _current_git_root,
         current_git_common_dir,
-        current_head_oid,
+        _current_head_oid,
         current_head_ref,
         current_branch,
     ) = capture_git_metadata(source_git_root)
-    current_head_oid = base_oid
 
     if execution.pass_through:
         raise PersistentWorktreeError(
@@ -185,7 +184,7 @@ def _validate_persistent_worktree_request(
         source_git_root=source_git_root,
         base_oid=base_oid,
         source_git_common_dir=current_git_common_dir or iso_ctx.source_git_common_dir,
-        source_head_oid=current_head_oid,
+        source_head_oid=base_oid,
         source_head_ref=current_head_ref,
         source_branch=current_branch,
         registry_root=registry_root,

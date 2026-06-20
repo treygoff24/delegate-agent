@@ -21,7 +21,7 @@ from delegate_agent import (
     worktree_mgmt,
 )
 from delegate_agent import config as delegate_config
-from delegate_agent.constants import validate_mode
+from delegate_agent.constants import ENGINES_PROSE, KNOWN_ENGINES, validate_mode
 from delegate_agent.errors import DelegateError
 from delegate_agent.request_models import (
     GlobalOptions,
@@ -539,7 +539,7 @@ def parse_dry_run(
         )
     raise DelegateError(
         "invalid_engine",
-        "dry-run engine must be cursor, droid, codex, kimi, or claude.",
+        f"dry-run engine must be {ENGINES_PROSE}.",
     )
 
 
@@ -649,9 +649,6 @@ def parse_snapshot(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedC
     )
 
 
-KNOWN_HARNESSES = ("cursor", "droid", "codex", "kimi", "claude")
-
-
 def parse_runs(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
     # Help wins over flags: a help token anywhere is help.
     rest, json_mode = consume_json_option(rest, json_mode)
@@ -686,10 +683,10 @@ def parse_runs(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedComma
             if i + 1 >= len(rest):
                 raise DelegateError("missing_harness", "runs --harness requires a harness name.")
             harness = rest[i + 1]
-            if harness not in KNOWN_HARNESSES:
+            if harness not in KNOWN_ENGINES:
                 raise DelegateError(
                     "invalid_harness",
-                    f"runs --harness must be one of {', '.join(KNOWN_HARNESSES)}.",
+                    f"runs --harness must be one of {', '.join(KNOWN_ENGINES)}.",
                 )
             i += 2
             continue

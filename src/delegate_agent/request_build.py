@@ -33,7 +33,7 @@ from delegate_agent.argv_builders import (
     prefix_droid_safe_prompt,
     redacted_prompt_argv,
 )
-from delegate_agent.constants import MODE_SAFE, validate_mode
+from delegate_agent.constants import ENGINES_PROSE, KNOWN_ENGINES, MODE_SAFE, validate_mode
 from delegate_agent.errors import DelegateError
 from delegate_agent.git_utils import GIT_QUICK_TIMEOUT_SECONDS, capture_git_metadata
 from delegate_agent.git_utils import run_git as _run_git
@@ -215,7 +215,7 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         return request_from_input_json(parsed, config)
     launch = parsed.launch
     global_options = parsed.global_options
-    if launch is None or launch.engine not in ("cursor", "droid", "codex", "kimi", "claude"):
+    if launch is None or launch.engine not in KNOWN_ENGINES:
         raise DelegateError("invalid_command", "Command does not map to an execution request.")
     if launch.mode is None:
         raise DelegateError("invalid_command", "Command does not map to an execution request.")
@@ -306,10 +306,10 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
     engine = raw.get("engine")
     mode = raw.get("mode")
     prompt = raw.get("prompt")
-    if engine not in ("cursor", "droid", "codex", "kimi", "claude"):
+    if engine not in KNOWN_ENGINES:
         raise DelegateError(
             "invalid_engine",
-            "engine must be cursor, droid, codex, kimi, or claude.",
+            f"engine must be {ENGINES_PROSE}.",
         )
     if not isinstance(mode, str):
         raise DelegateError("invalid_mode", "mode must be safe or work.")
@@ -359,15 +359,11 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
             "isolation in input JSON must be auto, none, or worktree.",
         )
 
-    # Resolve workspace from CLI --cwd and JSON cwd.
     workspace = resolve_workspace(global_options.cwd, json_cwd)
-
-    # Capture git metadata for isolation planning (read-only).
     git_root, git_common_dir, git_head_oid, git_head_ref, git_branch = capture_git_metadata(
         workspace.path
     )
 
-    # Resolve effective isolation and build isolation context.
     try:
         effective_isolation = delegate_config.resolve_isolation(
             cli_value=global_options.isolation,
@@ -670,7 +666,7 @@ def _engine_request_parts(
     if builder is None:
         raise DelegateError(
             "invalid_engine",
-            "engine must be cursor, droid, codex, kimi, or claude.",
+            f"engine must be {ENGINES_PROSE}.",
         )
     return builder(build)
 
