@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from delegate_agent.request_models import Request
+
 WORKSPACE_FLAG_BY_ENGINE: dict[str, str | None] = {
     "cursor": "--workspace",
     "codex": "--cd",
@@ -23,3 +28,8 @@ def replace_workspace_arg_in_argv(engine: str, argv: list[str], value: str) -> l
     if flag is None:
         return list(argv)
     return replace_argv_after_flag(argv, flag, value)
+
+
+def public_argv(request: Request) -> list[str]:
+    """Return the display-safe argv for a request (redacted form when present)."""
+    return list(request.display_argv if request.display_argv is not None else request.argv)

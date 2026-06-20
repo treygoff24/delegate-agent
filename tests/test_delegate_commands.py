@@ -17,6 +17,8 @@ SRC = str(ROOT / "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
+from delegate_agent import safe_workspace  # noqa: E402  # needs sys.path bootstrap above
+
 
 def load_delegate():
     return importlib.reload(importlib.import_module("delegate_agent.cli"))
@@ -1202,7 +1204,7 @@ class CommandTests(unittest.TestCase):
             "git command timed out after 30s",
         )
         with (
-            mock.patch.object(self.delegate, "_run_git", return_value=timeout),
+            mock.patch.object(safe_workspace, "_run_git", return_value=timeout),
             self.assertRaises(self.delegate.DelegateError) as ctx,
         ):
             self.delegate.create_git_safe_workspace("/repo")
@@ -1218,7 +1220,7 @@ class CommandTests(unittest.TestCase):
             b"git command timed out after 30s",
         )
         with (
-            mock.patch.object(self.delegate, "_run_git_bytes", return_value=timeout),
+            mock.patch.object(safe_workspace, "_run_git_bytes", return_value=timeout),
             self.assertRaises(self.delegate.DelegateError) as ctx,
         ):
             self.delegate.read_git_tracked_diff("/repo")
