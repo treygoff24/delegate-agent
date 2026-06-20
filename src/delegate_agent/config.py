@@ -311,22 +311,14 @@ def _validate_worktrees_section(worktrees: JsonValue) -> None:
 def _validate_codex_section(codex: JsonValue) -> None:
     if not isinstance(codex, dict):
         raise ConfigError("invalid_codex_config", "codex config must be an object.")
-    if not isinstance(codex.get("binary"), str) or not codex["binary"].strip():
-        raise ConfigError("invalid_codex_config", "codex.binary must be a non-empty string.")
-    default_model = codex.get("defaultModel")
-    if default_model is not None and not isinstance(default_model, str):
-        raise ConfigError(
-            "invalid_codex_config",
-            "codex.defaultModel must be a string or null.",
-        )
+    require_non_empty_str(codex.get("binary"), path="codex.binary", error="invalid_codex_config")
+    optional_str(codex.get("defaultModel"), path="codex.defaultModel", error="invalid_codex_config")
     _validate_provider_default_reasoning_effort(
         codex.get("defaultReasoningEffort"),
         path="codex.defaultReasoningEffort",
         error="invalid_codex_config",
     )
-    profile = codex.get("profile")
-    if profile is not None and not isinstance(profile, str):
-        raise ConfigError("invalid_codex_config", "codex.profile must be a string or null.")
+    optional_str(codex.get("profile"), path="codex.profile", error="invalid_codex_config")
     work_sandbox = codex.get("workSandbox", "workspace-write")
     if work_sandbox not in CODEX_WORK_SANDBOX_VALUES:
         raise ConfigError(
@@ -338,28 +330,19 @@ def _validate_codex_section(codex: JsonValue) -> None:
             "invalid_codex_config",
             "codex.safeSandbox is not supported; Codex safe always uses read-only.",
         )
-    ephemeral = codex.get("ephemeral", True)
-    if not isinstance(ephemeral, bool):
-        raise ConfigError("invalid_codex_config", "codex.ephemeral must be a boolean.")
-    ignore_user = codex.get("ignoreUserConfig", False)
-    if not isinstance(ignore_user, bool):
-        raise ConfigError(
-            "invalid_codex_config",
-            "codex.ignoreUserConfig must be a boolean.",
-        )
+    require_bool(codex.get("ephemeral", True), path="codex.ephemeral", error="invalid_codex_config")
+    require_bool(
+        codex.get("ignoreUserConfig", False),
+        path="codex.ignoreUserConfig",
+        error="invalid_codex_config",
+    )
 
 
 def _validate_kimi_section(kimi: JsonValue) -> None:
     if not isinstance(kimi, dict):
         raise ConfigError("invalid_kimi_config", "kimi config must be an object.")
-    if not isinstance(kimi.get("binary"), str) or not kimi["binary"].strip():
-        raise ConfigError("invalid_kimi_config", "kimi.binary must be a non-empty string.")
-    default_model = kimi.get("defaultModel")
-    if default_model is not None and not isinstance(default_model, str):
-        raise ConfigError(
-            "invalid_kimi_config",
-            "kimi.defaultModel must be a string or null.",
-        )
+    require_non_empty_str(kimi.get("binary"), path="kimi.binary", error="invalid_kimi_config")
+    optional_str(kimi.get("defaultModel"), path="kimi.defaultModel", error="invalid_kimi_config")
     if kimi.get("defaultReasoningEffort") is not None:
         raise ConfigError(
             "invalid_kimi_config",
@@ -370,14 +353,10 @@ def _validate_kimi_section(kimi: JsonValue) -> None:
 def _validate_claude_section(claude: JsonValue) -> None:
     if not isinstance(claude, dict):
         raise ConfigError("invalid_claude_config", "claude config must be an object.")
-    if not isinstance(claude.get("binary"), str) or not claude["binary"].strip():
-        raise ConfigError("invalid_claude_config", "claude.binary must be a non-empty string.")
-    default_model = claude.get("defaultModel")
-    if default_model is not None and not isinstance(default_model, str):
-        raise ConfigError(
-            "invalid_claude_config",
-            "claude.defaultModel must be a string or null.",
-        )
+    require_non_empty_str(claude.get("binary"), path="claude.binary", error="invalid_claude_config")
+    optional_str(
+        claude.get("defaultModel"), path="claude.defaultModel", error="invalid_claude_config"
+    )
     default_effort = claude.get("defaultReasoningEffort")
     if default_effort is not None:
         if not isinstance(default_effort, str):
@@ -405,15 +384,12 @@ def _validate_claude_section(claude: JsonValue) -> None:
             "invalid_claude_config",
             f"claude.workPermissionMode must be one of: {', '.join(CLAUDE_WORK_PERMISSION_MODES)}.",
         )
-    no_session = claude.get("noSessionPersistence", True)
-    if not isinstance(no_session, bool):
-        raise ConfigError(
-            "invalid_claude_config",
-            "claude.noSessionPersistence must be a boolean.",
-        )
-    bare = claude.get("bare", False)
-    if not isinstance(bare, bool):
-        raise ConfigError("invalid_claude_config", "claude.bare must be a boolean.")
+    require_bool(
+        claude.get("noSessionPersistence", True),
+        path="claude.noSessionPersistence",
+        error="invalid_claude_config",
+    )
+    require_bool(claude.get("bare", False), path="claude.bare", error="invalid_claude_config")
 
 
 def _validate_provider_default_reasoning_effort(
@@ -613,6 +589,24 @@ class ConfigError(Exception):
         self.message = message
 
 
+def require_non_empty_str(value: JsonValue, *, path: str, error: str) -> None:
+    """Require ``value`` to be a string whose stripped form is non-empty."""
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(error, f"{path} must be a non-empty string.")
+
+
+def optional_str(value: JsonValue, *, path: str, error: str) -> None:
+    """Allow ``value`` to be a string or null; reject any other type."""
+    if value is not None and not isinstance(value, str):
+        raise ConfigError(error, f"{path} must be a string or null.")
+
+
+def require_bool(value: JsonValue, *, path: str, error: str) -> None:
+    """Require ``value`` to be a boolean."""
+    if not isinstance(value, bool):
+        raise ConfigError(error, f"{path} must be a boolean.")
+
+
 def deep_merge(base: JsonObject, override: JsonObject) -> JsonObject:
     merged = copy.deepcopy(base)
     for key, value in override.items():
@@ -713,10 +707,9 @@ def validate_config(config: JsonObject) -> None:
         raise ConfigError(
             "invalid_cursor_config", "cursor.argvPrefix must be a non-empty array of strings."
         )
-    if not isinstance(cursor.get("defaultModel"), str) or not cursor["defaultModel"].strip():
-        raise ConfigError(
-            "invalid_cursor_config", "cursor.defaultModel must be a non-empty string."
-        )
+    require_non_empty_str(
+        cursor.get("defaultModel"), path="cursor.defaultModel", error="invalid_cursor_config"
+    )
     _validate_provider_default_reasoning_effort(
         cursor.get("defaultReasoningEffort"),
         path="cursor.defaultReasoningEffort",
@@ -725,8 +718,7 @@ def validate_config(config: JsonObject) -> None:
     _validate_cursor_reasoning_models(cursor.get("reasoningEffortModels"))
     if not isinstance(droid, dict):
         raise ConfigError("invalid_droid_config", "droid config must be an object.")
-    if not isinstance(droid.get("binary"), str) or not droid["binary"].strip():
-        raise ConfigError("invalid_droid_config", "droid.binary must be a non-empty string.")
+    require_non_empty_str(droid.get("binary"), path="droid.binary", error="invalid_droid_config")
     _validate_provider_default_reasoning_effort(
         droid.get("defaultReasoningEffort"),
         path="droid.defaultReasoningEffort",
@@ -796,6 +788,8 @@ def completion_report_default_mode(config: JsonObject) -> str:
 
 def harness_binary(config: JsonObject, engine: str) -> str:
     embedded = _EMBEDDED_DEFAULT_CONFIG.get(engine)
+    # 'codex' is an arbitrary safe fallback that only fires when an engine has no
+    # embedded section (an invariant violation), since codex is the baseline harness.
     default_binary = "codex"
     if isinstance(embedded, dict) and isinstance(embedded.get("binary"), str):
         default_binary = embedded["binary"]
