@@ -35,6 +35,12 @@ from delegate_agent import config as delegate_config
 from delegate_agent import rendering as delegate_rendering
 from delegate_agent import retention as delegate_retention
 from delegate_agent import runner as delegate_runner
+from delegate_agent.errors import (
+    EXIT_MISSING_BINARY,
+    EXIT_OK,
+    EXIT_USAGE,
+    DelegateError,
+)
 from delegate_agent.git_utils import (
     GIT_MUTATION_TIMEOUT_SECONDS,
     GIT_QUICK_TIMEOUT_SECONDS,
@@ -65,10 +71,6 @@ _replace_ws_by_engine = argv_utils.replace_workspace_arg_in_argv
 
 DEFAULT_CONFIG = delegate_config.embedded_default_config()
 CONFIG_ENV = delegate_config.CONFIG_ENV
-
-EXIT_OK = 0
-EXIT_USAGE = 2
-EXIT_MISSING_BINARY = 3
 
 MODE_SAFE = "safe"
 MODE_WORK = "work"
@@ -164,24 +166,6 @@ MISSING_BINARY_PROBE_DIRS = (
     "~/bin",
     "/opt/homebrew/bin",
 )
-
-
-class DelegateError(Exception):
-    def __init__(
-        self,
-        error: str,
-        message: str,
-        exit_code: int = EXIT_USAGE,
-        *,
-        diagnostics: JsonObject | None = None,
-        next_actions: list[str] | None = None,
-    ) -> None:
-        super().__init__(message)
-        self.error = error
-        self.message = message
-        self.exit_code = exit_code
-        self.diagnostics = diagnostics
-        self.next_actions = next_actions
 
 
 @dataclass
