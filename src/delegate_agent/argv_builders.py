@@ -24,37 +24,24 @@ from delegate_agent.prompt_transport import (
     PROMPT_TRANSPORT_STDIN,
 )
 
+# Each engine's safe-review prefix is one shared body behind a per-engine label
+# (cursor uses "Delegate review mode"; the rest "Delegate <Engine> safe mode").
+# Resolved strings are byte-identical to the historical per-engine literals.
+_SAFE_REVIEW_BODY = (
+    "(code review/investigation only): "
+    "Do not edit, create, or delete files. "
+    "Report findings with file path, line reference, severity, and rationale. "
+    "If a write is blocked, do not retry it.\n\n"
+)
+_SAFE_REVIEW_LABEL_BY_ENGINE = {
+    "cursor": "Delegate review mode",
+    "codex": "Delegate Codex safe mode",
+    "claude": "Delegate Claude safe mode",
+    "droid": "Delegate Droid safe mode",
+    "kimi": "Delegate Kimi safe mode",
+}
 SAFE_REVIEW_PREFIX_BY_ENGINE: dict[str, str] = {
-    "cursor": (
-        "Delegate review mode (code review/investigation only): "
-        "Do not edit, create, or delete files. "
-        "Report findings with file path, line reference, severity, and rationale. "
-        "If a write is blocked, do not retry it.\n\n"
-    ),
-    "codex": (
-        "Delegate Codex safe mode (code review/investigation only): "
-        "Do not edit, create, or delete files. "
-        "Report findings with file path, line reference, severity, and rationale. "
-        "If a write is blocked, do not retry it.\n\n"
-    ),
-    "claude": (
-        "Delegate Claude safe mode (code review/investigation only): "
-        "Do not edit, create, or delete files. "
-        "Report findings with file path, line reference, severity, and rationale. "
-        "If a write is blocked, do not retry it.\n\n"
-    ),
-    "droid": (
-        "Delegate Droid safe mode (code review/investigation only): "
-        "Do not edit, create, or delete files. "
-        "Report findings with file path, line reference, severity, and rationale. "
-        "If a write is blocked, do not retry it.\n\n"
-    ),
-    "kimi": (
-        "Delegate Kimi safe mode (code review/investigation only): "
-        "Do not edit, create, or delete files. "
-        "Report findings with file path, line reference, severity, and rationale. "
-        "If a write is blocked, do not retry it.\n\n"
-    ),
+    engine: f"{label} {_SAFE_REVIEW_BODY}" for engine, label in _SAFE_REVIEW_LABEL_BY_ENGINE.items()
 }
 
 CLAUDE_SAFE_TOOLS = "Read,Grep,Glob,Bash"
@@ -73,18 +60,20 @@ def redacted_prompt_argv(argv: list[str], replacement: str = CURSOR_PROMPT_REDAC
     return redacted
 
 
-def prefix_cursor_safe_prompt(prompt: str) -> str:
-    safe_prefix = SAFE_REVIEW_PREFIX_BY_ENGINE["cursor"]
+def _prefix_safe_prompt(prompt: str, engine: str) -> str:
+    """Idempotently prepend the engine's safe-review prefix."""
+    safe_prefix = SAFE_REVIEW_PREFIX_BY_ENGINE[engine]
     if prompt.startswith(safe_prefix):
         return prompt
     return f"{safe_prefix}{prompt}"
+
+
+def prefix_cursor_safe_prompt(prompt: str) -> str:
+    return _prefix_safe_prompt(prompt, "cursor")
 
 
 def prefix_kimi_safe_prompt(prompt: str) -> str:
-    safe_prefix = SAFE_REVIEW_PREFIX_BY_ENGINE["kimi"]
-    if prompt.startswith(safe_prefix):
-        return prompt
-    return f"{safe_prefix}{prompt}"
+    return _prefix_safe_prompt(prompt, "kimi")
 
 
 def prefix_droid_safe_prompt(prompt: str) -> str:

@@ -617,12 +617,7 @@ def _claude_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         stdin_text=build.prompt,
         display_argv=list(argv),
         warnings=warnings,
-        reasoning_effort=effort,
-        reasoning_effort_source=build.effort_source if effort is not None else None,
-        reasoning_capability_source="static" if effort is not None else None,
-        reasoning_transport=(
-            reasoning.TRANSPORT_CLAUDE_EFFORT_FLAG if effort is not None else None
-        ),
+        **claude_reasoning_request_kwargs(effort, build.effort_source),
     )
 
 
@@ -825,6 +820,23 @@ def reasoning_request_kwargs(
         "reasoning_effort_source": source or "cli",
         "reasoning_capability_source": capability.source,
         "reasoning_transport": capability.transport,
+    }
+
+
+def claude_reasoning_request_kwargs(effort: str | None, source: str | None) -> JsonObject:
+    """Reasoning payload fields for Claude's static native-effort flag.
+
+    The sibling of ``reasoning_request_kwargs`` for the engine that resolves a
+    flag (``--effort``) rather than a ``ReasoningCapability`` object. Returns
+    ``{}`` when no effort applies so the request-parts defaults stand.
+    """
+    if effort is None:
+        return {}
+    return {
+        "reasoning_effort": effort,
+        "reasoning_effort_source": source,
+        "reasoning_capability_source": "static",
+        "reasoning_transport": reasoning.TRANSPORT_CLAUDE_EFFORT_FLAG,
     }
 
 
