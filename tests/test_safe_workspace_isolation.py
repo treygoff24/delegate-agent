@@ -9,6 +9,10 @@ from unittest import mock
 
 from tests.delegate_commands_test_base import CommandTestBase, make_git_repo
 
+# Imported after the base (which bootstraps sys.path); the two timeout tests
+# monkeypatch safe_workspace._run_git / _run_git_bytes directly on this module.
+from delegate_agent import safe_workspace
+
 
 class SafeWorkspaceIsolationTests(CommandTestBase):
     def test_cursor_safe_dry_run_reports_isolation(self):
@@ -178,7 +182,7 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
             "git command timed out after 30s",
         )
         with (
-            mock.patch.object(self.delegate, "_run_git", return_value=timeout),
+            mock.patch.object(safe_workspace, "_run_git", return_value=timeout),
             self.assertRaises(self.delegate.DelegateError) as ctx,
         ):
             self.delegate.create_git_safe_workspace("/repo")
@@ -194,7 +198,7 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
             b"git command timed out after 30s",
         )
         with (
-            mock.patch.object(self.delegate, "_run_git_bytes", return_value=timeout),
+            mock.patch.object(safe_workspace, "_run_git_bytes", return_value=timeout),
             self.assertRaises(self.delegate.DelegateError) as ctx,
         ):
             self.delegate.read_git_tracked_diff("/repo")
