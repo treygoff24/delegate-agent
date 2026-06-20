@@ -8,13 +8,25 @@ import secrets
 import subprocess
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from delegate_agent import archived_logs
-from delegate_agent.json_types import JsonObject, JsonValue
+from delegate_agent import private_io
+from delegate_agent.json_types import JsonObject
+from delegate_agent.private_io import (  # noqa: F401  # re-exported
+    RegistryJsonError,
+    ensure_private_dir,
+    ensure_private_file,
+    read_json_object,
+    read_json_object_or_none,
+    supports_private_modes,
+    write_json_atomic,
+    write_private_bytes,
+    write_private_text,
+    write_text_atomic,
+)
 
 DELEGATE_DIR_NAME = ".delegate"
 GIT_EXCLUDE_ENTRY = ".delegate/"
@@ -36,72 +48,11 @@ RUN_OUTPUT_SCHEMA = "delegate.run-output.v1"
 REGISTRY_LOCK_NAME = ".registry.lock"
 REGISTRY_LOCK_TIMEOUT_SECONDS = 30.0
 REGISTRY_LOCK_POLL_SECONDS = 0.05
-PRIVATE_DIR_MODE = 0o700
-PRIVATE_FILE_MODE = 0o600
+PRIVATE_DIR_MODE = private_io.PRIVATE_DIR_MODE
+PRIVATE_FILE_MODE = private_io.PRIVATE_FILE_MODE
 GIT_INFO_EXCLUDE_TIMEOUT_SECONDS = 5.0
 BYTES_PER_KIB = 1 << 10
 BYTES_PER_MIB = BYTES_PER_KIB * BYTES_PER_KIB
-
-
-class RegistryJsonError(ValueError):
-    """Raised when an existing registry JSON file cannot be trusted."""
-
-
-def supports_private_modes() -> bool:
-    """Return whether chmod-style private mode hardening is available."""
-    return os.name == "posix"
-
-
-def ensure_private_dir(path: Path) -> None:
-    """Create a registry directory and make it owner-only on POSIX."""
-    path.mkdir(parents=True, exist_ok=True)
-    if supports_private_modes():
-        os.chmod(path, PRIVATE_DIR_MODE)
-
-
-def ensure_private_file(path: Path) -> None:
-    """Make an existing registry file owner-read/write on POSIX."""
-    if supports_private_modes():
-        os.chmod(path, PRIVATE_FILE_MODE)
-
-
-def write_private_text(path: Path, text: str, *, encoding: str = "utf-8") -> None:
-    """Create/truncate a registry text file with owner-only permissions."""
-    ensure_private_dir(path.parent)
-    fd = os.open(path, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, PRIVATE_FILE_MODE)
-    with os.fdopen(fd, "w", encoding=encoding) as handle:
-        handle.write(text)
-    ensure_private_file(path)
-
-
-def write_private_bytes(path: Path, payload: bytes) -> None:
-    """Create/truncate a registry byte file with owner-only permissions."""
-    ensure_private_dir(path.parent)
-    fd = os.open(path, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, PRIVATE_FILE_MODE)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(payload)
-    ensure_private_file(path)
-
-
-def write_text_atomic(path: Path, text: str, *, encoding: str = "utf-8") -> None:
-    """Atomically replace a non-private text file while preserving existing mode."""
-    temp = path.with_name(f".{path.name}.tmp")
-    existing_mode: int | None = None
-    try:
-        existing_mode = path.stat().st_mode & 0o777
-    except OSError:
-        existing_mode = None
-    fd = os.open(temp, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, existing_mode or 0o666)
-    try:
-        with os.fdopen(fd, "w", encoding=encoding) as handle:
-            handle.write(text)
-        if existing_mode is not None:
-            os.chmod(temp, existing_mode)
-        os.replace(temp, path)
-    except OSError:
-        with suppress(OSError):
-            os.unlink(temp)
-        raise
 
 
 def generate_run_id(now: datetime | None = None) -> str:
@@ -179,16 +130,6 @@ def load_index(registry_root: Path) -> JsonObject:
         "aliases": aliases,
         "runs": runs,
     }
-
-
-def write_json_atomic(path: Path, payload: JsonObject) -> None:
-    temp = path.with_suffix(path.suffix + ".tmp")
-    write_private_text(
-        temp,
-        json.dumps(payload, indent=2, sort_keys=True) + "\n",
-    )
-    os.replace(temp, path)
-    ensure_private_file(path)
 
 
 def save_index(registry_root: Path, index: JsonObject) -> None:
@@ -314,17 +255,6 @@ def lookup_run_id(index: JsonObject, handle: str) -> str | None:
     return None
 
 
-LARGE_LOG_WARN_MIB = 50
-LARGE_LOG_WARN_BYTES = LARGE_LOG_WARN_MIB * BYTES_PER_MIB
-DEFAULT_RUNS_LIMIT = 20
-STATUS_RUNNING = "running"
-STATUS_STALE = "stale"
-STATUS_UNKNOWN = "unknown"
-STATUS_FILTER_ACTIVE = "active"
-STATUS_FILTER_RECENT = "recent"
-STATUS_FILTER_RUNNING = "running"
-STATUS_FILTER_STALE = "stale"
-
 UTC_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 
@@ -394,108 +324,8 @@ class RunTargetLookupError:
     message: str
 
 
-def read_json_object(path: Path) -> JsonObject | None:
-    if not path.exists():
-        return None
-    try:
-        data: JsonValue = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise RegistryJsonError(f"invalid JSON in {path}: {exc}") from exc
-    except OSError as exc:
-        raise RegistryJsonError(f"could not read JSON file {path}: {exc}") from exc
-    if not isinstance(data, dict):
-        raise RegistryJsonError(f"{path} root must be a JSON object")
-    return data
-
-
-def read_json_object_or_none(path: Path) -> JsonObject | None:
-    try:
-        return read_json_object(path)
-    except RegistryJsonError:
-        return None
-
-
 def run_directory(registry_root: Path, run_id: str) -> Path:
     return runs_dir(registry_root) / run_id
-
-
-def large_log_warnings(stdout_bytes: int, stderr_bytes: int) -> list[str]:
-    warnings: list[str] = []
-    if stdout_bytes > LARGE_LOG_WARN_BYTES:
-        warnings.append(f"{STDOUT_LOG} > 50 MB ({stdout_bytes} bytes)")
-    if stderr_bytes > LARGE_LOG_WARN_BYTES:
-        warnings.append(f"{STDERR_LOG} > 50 MB ({stderr_bytes} bytes)")
-    return warnings
-
-
-def process_alive(pid: int | None) -> bool | None:
-    if pid is None:
-        return None
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
-
-
-def effective_status(state: JsonObject | None) -> str:
-    if not state:
-        return "unknown"
-    status = state.get("status")
-    if not isinstance(status, str) or not status:
-        return "unknown"
-    if status != STATUS_RUNNING:
-        return status
-    pid = state.get("pid")
-    if not isinstance(pid, int) or isinstance(pid, bool) or pid < 1:
-        return STATUS_STALE
-    alive = process_alive(pid)
-    if alive is False:
-        return STATUS_STALE
-    return STATUS_RUNNING
-
-
-def raw_status(state: JsonObject | None) -> str:
-    if not state:
-        return STATUS_UNKNOWN
-    status = state.get("status")
-    if not isinstance(status, str) or not status:
-        return STATUS_UNKNOWN
-    return status
-
-
-def status_fields(state: JsonObject | None) -> JsonObject:
-    # Probe pid liveness once so effectiveStatus and staleReason cannot disagree
-    # when the process exits between two separate probes.
-    raw = raw_status(state)
-    effective = raw
-    reason: str | None = None
-    if raw == STATUS_RUNNING:
-        pid = state.get("pid") if state else None
-        if not isinstance(pid, int) or isinstance(pid, bool) or pid < 1:
-            effective, reason = STATUS_STALE, "missing_pid"
-        elif process_alive(pid) is False:
-            effective, reason = STATUS_STALE, "dead_pid"
-    fields: JsonObject = {
-        "rawStatus": raw,
-        "effectiveStatus": effective,
-        "status": effective,
-    }
-    if reason is not None:
-        fields["staleReason"] = reason
-    return fields
-
-
-def stale_next_actions(alias_or_run_id: str) -> list[str]:
-    return [
-        f"delegate snapshot {alias_or_run_id}",
-        f"delegate run-output {alias_or_run_id} --completion-report",
-        f"delegate run-output {alias_or_run_id} --stderr --tail 100",
-    ]
 
 
 def suggest_handles(index: JsonObject, handle: str, *, limit: int = 8) -> list[str]:
@@ -587,94 +417,6 @@ def load_run_manifest_or_none(registry_root: Path, run_id: str) -> JsonObject | 
     return read_json_object_or_none(run_directory(registry_root, run_id) / MANIFEST_FILE)
 
 
-def log_byte_sizes(registry_root: Path, run_id: str) -> tuple[int, int]:
-    run_path = run_directory(registry_root, run_id)
-    stdout_bytes = 0
-    stderr_bytes = 0
-    stdout_path = run_path / STDOUT_LOG
-    stderr_path = run_path / STDERR_LOG
-    if stdout_path.exists():
-        stdout_bytes = stdout_path.stat().st_size
-    if stderr_path.exists():
-        stderr_bytes = stderr_path.stat().st_size
-    return stdout_bytes, stderr_bytes
-
-
-def _archived_log_byte_sizes(registry_root: Path, run_id: str) -> tuple[int, int]:
-    state_sizes = archived_logs.state_log_byte_sizes(load_run_state(registry_root, run_id))
-    if state_sizes is not None:
-        return state_sizes
-    return archived_logs.archive_log_byte_sizes(
-        archived_logs.archive_path(registry_root, run_id),
-        stdout_log=STDOUT_LOG,
-        stderr_log=STDERR_LOG,
-    )
-
-
-def raw_logs_archived(registry_root: Path, run_id: str) -> bool:
-    return archived_logs.archive_path(registry_root, run_id).exists()
-
-
-def effective_log_byte_sizes(registry_root: Path, run_id: str) -> tuple[int, int]:
-    run_path = run_directory(registry_root, run_id)
-    stdout_path = run_path / STDOUT_LOG
-    stderr_path = run_path / STDERR_LOG
-    if stdout_path.exists() or stderr_path.exists():
-        return log_byte_sizes(registry_root, run_id)
-    if raw_logs_archived(registry_root, run_id):
-        return _archived_log_byte_sizes(registry_root, run_id)
-    return 0, 0
-
-
-def _summary_log_byte_sizes(
-    registry_root: Path,
-    run_id: str,
-    state: JsonObject | None,
-) -> tuple[int, int]:
-    run_path = run_directory(registry_root, run_id)
-    stdout_path = run_path / STDOUT_LOG
-    stderr_path = run_path / STDERR_LOG
-    if stdout_path.exists() or stderr_path.exists():
-        return log_byte_sizes(registry_root, run_id)
-    if raw_logs_archived(registry_root, run_id):
-        state_sizes = archived_logs.state_log_byte_sizes(state)
-        if state_sizes is not None:
-            return state_sizes
-        return archived_logs.archive_log_byte_sizes(
-            archived_logs.archive_path(registry_root, run_id),
-            stdout_log=STDOUT_LOG,
-            stderr_log=STDERR_LOG,
-        )
-    return 0, 0
-
-
-def activity_timestamp(
-    state: JsonObject | None,
-    manifest: JsonObject | None,
-    run_id: str | None = None,
-) -> str:
-    if state:
-        for key in ("finishedAt", "lastActivityAt", "startedAt"):
-            value = state.get(key)
-            if isinstance(value, str) and value:
-                return value
-    if manifest:
-        started = manifest.get("startedAt")
-        if isinstance(started, str) and started:
-            return started
-    if run_id:
-        return timestamp_from_run_id(run_id)
-    return ""
-
-
-def activity_datetime(
-    state: JsonObject | None,
-    manifest: JsonObject | None,
-    run_id: str | None = None,
-) -> datetime | None:
-    return parse_utc_timestamp(activity_timestamp(state, manifest, run_id))
-
-
 def alias_for_run(index: JsonObject, run_id: str) -> str | None:
     entry = index.get("runs", {}).get(run_id)
     if isinstance(entry, dict):
@@ -687,89 +429,37 @@ def alias_for_run(index: JsonObject, run_id: str) -> str | None:
     return None
 
 
-def build_run_summary(
-    registry_root: Path,
-    run_id: str,
-    index_entry: JsonObject,
-) -> JsonObject:
-    state = load_run_state_or_none(registry_root, run_id)
-    manifest = load_run_manifest_or_none(registry_root, run_id)
-
-    stdout_bytes, stderr_bytes = _summary_log_byte_sizes(registry_root, run_id, state)
-    alias = index_entry.get("alias")
-    harness = index_entry.get("harness")
-    handle = alias if isinstance(alias, str) else run_id
-    summary: JsonObject = {
-        "runId": run_id,
-        "alias": alias if isinstance(alias, str) else None,
-        "harness": harness if isinstance(harness, str) else None,
-        "stdoutBytes": stdout_bytes,
-        "stderrBytes": stderr_bytes,
-        "warnings": large_log_warnings(stdout_bytes, stderr_bytes),
-        "activityAt": activity_timestamp(state, manifest),
-    }
-    summary.update(status_fields(state))
-    if summary.get("effectiveStatus") == STATUS_STALE:
-        summary["nextActions"] = stale_next_actions(handle)
-    if state and isinstance(state.get("current"), str):
-        summary["current"] = state["current"]
-    if isinstance(alias, str):
-        summary["snapshotCommand"] = snapshot_command(alias)
-
-    # Isolation metadata: detect persistent worktree runs.
-    worktree_status = None
-    if state and isinstance(state.get("worktreeStatus"), str):
-        worktree_status = state["worktreeStatus"]
-        summary["worktreeStatus"] = worktree_status
-        summary["isolationLifecycle"] = "persistent"
-    if manifest:
-        execution_cwd = manifest.get("executionCwd")
-        if isinstance(execution_cwd, str) and execution_cwd:
-            summary["executionCwd"] = execution_cwd
-        source_git_root = manifest.get("sourceGitRoot")
-        if isinstance(source_git_root, str) and source_git_root:
-            summary["sourceGitRoot"] = source_git_root
-
-    return summary
-
-
-def list_run_summaries(
-    registry_root: Path,
-    index: JsonObject,
-    *,
-    active: bool = False,
-    status_filter: str | None = None,
-    harness: str | None = None,
-    limit: int = DEFAULT_RUNS_LIMIT,
-) -> list[JsonObject]:
-    if limit < 1:
-        raise ValueError("limit must be at least 1")
-    summaries: list[JsonObject] = []
-    for run_id, entry in index.get("runs", {}).items():
-        if not isinstance(entry, dict):
-            continue
-        entry_harness = entry.get("harness")
-        if harness is not None and entry_harness != harness:
-            continue
-        summary = build_run_summary(registry_root, run_id, entry)
-        status = summary.get("status")
-        if active and status not in (STATUS_RUNNING, STATUS_STALE):
-            continue
-        if status_filter == STATUS_FILTER_RUNNING and status != STATUS_RUNNING:
-            continue
-        if status_filter == STATUS_FILTER_STALE and status != STATUS_STALE:
-            continue
-        summaries.append(summary)
-    summaries.sort(key=lambda item: item.get("activityAt", ""), reverse=True)
-    return summaries[:limit]
-
-
 def timestamp_from_run_id(run_id: str) -> str:
     match = re.match(r"^del_(\d{8}T\d{6}Z)_", run_id)
     if not match:
         return ""
     raw = match.group(1)
     return f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}T{raw[9:11]}:{raw[11:13]}:{raw[13:15]}Z"
+
+
+def _write_worktree_status(
+    registry_root: Path,
+    run_id: str,
+    status: str,
+    *,
+    removed_at: str | None = None,
+    discarded_dirty_paths: list[str] | None = None,
+) -> JsonObject:
+    valid_statuses = {"present", "removed", "missing", "unknown"}
+    if status not in valid_statuses:
+        raise ValueError(f"worktree status must be one of: {', '.join(sorted(valid_statuses))}")
+    run_path = run_directory(registry_root, run_id)
+    state_path = run_path / STATE_FILE
+    if not state_path.exists():
+        raise FileNotFoundError(f"State file not found for run {run_id}")
+    state: JsonObject = json.loads(state_path.read_text(encoding="utf-8"))
+    state["worktreeStatus"] = status
+    if removed_at is not None:
+        state["worktreeRemovedAt"] = removed_at
+    if discarded_dirty_paths is not None:
+        state["discardedDirtyPaths"] = discarded_dirty_paths
+    write_json_atomic(state_path, state)
+    return state
 
 
 def set_worktree_status(
@@ -779,7 +469,6 @@ def set_worktree_status(
     *,
     removed_at: str | None = None,
     discarded_dirty_paths: list[str] | None = None,
-    _skip_lock: bool = False,
 ) -> JsonObject:
     """Set the worktreeStatus field on a run's state, and optionally worktreeRemovedAt.
 
@@ -787,30 +476,15 @@ def set_worktree_status(
     persists via write_json_atomic, and returns the updated state.
 
     Status must be one of: 'present', 'removed', 'missing', 'unknown'.
-    _skip_lock is for internal use when the caller already holds the registry lock.
     """
-    valid_statuses = {"present", "removed", "missing", "unknown"}
-    if status not in valid_statuses:
-        raise ValueError(f"worktree status must be one of: {', '.join(sorted(valid_statuses))}")
-
-    def _write():
-        run_path = run_directory(registry_root, run_id)
-        state_path = run_path / STATE_FILE
-        if not state_path.exists():
-            raise FileNotFoundError(f"State file not found for run {run_id}")
-        state: JsonObject = json.loads(state_path.read_text(encoding="utf-8"))
-        state["worktreeStatus"] = status
-        if removed_at is not None:
-            state["worktreeRemovedAt"] = removed_at
-        if discarded_dirty_paths is not None:
-            state["discardedDirtyPaths"] = discarded_dirty_paths
-        write_json_atomic(state_path, state)
-        return state
-
-    if _skip_lock:
-        return _write()
     with registry_lock(registry_root):
-        return _write()
+        return _write_worktree_status(
+            registry_root,
+            run_id,
+            status,
+            removed_at=removed_at,
+            discarded_dirty_paths=discarded_dirty_paths,
+        )
 
 
 def set_worktree_status_locked(
@@ -822,13 +496,12 @@ def set_worktree_status_locked(
     discarded_dirty_paths: list[str] | None = None,
 ) -> JsonObject:
     """Set worktree status when the caller already holds the registry lock."""
-    return set_worktree_status(
+    return _write_worktree_status(
         registry_root,
         run_id,
         status,
         removed_at=removed_at,
         discarded_dirty_paths=discarded_dirty_paths,
-        _skip_lock=True,
     )
 
 
@@ -839,10 +512,38 @@ def latest_run_id_for_harness(registry_root: Path, index: JsonObject, harness: s
             continue
         state = load_run_state_or_none(registry_root, run_id)
         manifest = load_run_manifest_or_none(registry_root, run_id)
-        sort_ts = activity_timestamp(state, manifest, run_id)
+        sort_ts = run_status.activity_timestamp(state, manifest, run_id)
         alias_sequence = alias_sequence_for_harness(entry.get("alias"), harness)
         matches.append((sort_ts, alias_sequence, run_id))
     if not matches:
         return None
     matches.sort(key=lambda item: (item[0], item[1]), reverse=True)
     return matches[0][2]
+
+
+from delegate_agent import run_status  # noqa: E402  # imported after BYTES_PER_MIB is defined
+from delegate_agent.run_status import (  # noqa: E402, F401  # re-exported
+    DEFAULT_RUNS_LIMIT,
+    LARGE_LOG_WARN_BYTES,
+    LARGE_LOG_WARN_MIB,
+    STATUS_FILTER_ACTIVE,
+    STATUS_FILTER_RECENT,
+    STATUS_FILTER_RUNNING,
+    STATUS_FILTER_STALE,
+    STATUS_RUNNING,
+    STATUS_STALE,
+    STATUS_UNKNOWN,
+    activity_datetime,
+    activity_timestamp,
+    build_run_summary,
+    effective_log_byte_sizes,
+    effective_status,
+    large_log_warnings,
+    list_run_summaries,
+    log_byte_sizes,
+    process_alive,
+    raw_logs_archived,
+    raw_status,
+    stale_next_actions,
+    status_fields,
+)

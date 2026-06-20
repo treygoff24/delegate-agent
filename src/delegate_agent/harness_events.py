@@ -352,7 +352,6 @@ class StreamAccumulator:
             "eventsTruncated": True,
             "eventsLimit": EVENT_LIMIT,
             "eventsOmittedMiddle": max(omitted, 0),
-            "recentEvents": recent_events,
         }
         return recent_events, meta
 
