@@ -31,8 +31,20 @@ from delegate_agent import config as delegate_config
 from delegate_agent import rendering as delegate_rendering
 from delegate_agent import retention as delegate_retention
 from delegate_agent import runner as delegate_runner
+from delegate_agent.argv_builders import (  # noqa: F401  # re-exported for tests / back-compat
+    SAFE_REVIEW_PREFIX_BY_ENGINE,
+    _claude_harness_bypass_enabled,
+    build_claude_argv,
+    build_codex_argv,
+    build_cursor_argv,
+    build_droid_argv,
+    build_kimi_argv,
+    prefix_cursor_safe_prompt,
+    prefix_droid_safe_prompt,
+    redacted_prompt_argv,
+)
 from delegate_agent.argv_utils import public_argv
-from delegate_agent.constants import MODE_SAFE, MODE_WORK, VALID_MODES
+from delegate_agent.constants import MODE_SAFE, MODE_WORK, validate_mode
 from delegate_agent.errors import (
     EXIT_MISSING_BINARY,
     EXIT_OK,
@@ -51,7 +63,7 @@ from delegate_agent.isolation import (
     build_isolation_context,
 )
 from delegate_agent.json_types import JsonObject, JsonValue
-from delegate_agent.prompt_transport import (
+from delegate_agent.prompt_transport import (  # noqa: F401  # CURSOR_PROMPT_REDACTION re-exported for tests
     CURSOR_PROMPT_REDACTION,
     DROID_PROMPT_FILE_ARG_PLACEHOLDER,
     DROID_PROMPT_FILE_DISPLAY,
@@ -101,43 +113,6 @@ MISPLACED_GLOBAL_OPTIONS = frozenset(
         "--completion-report",
         "--no-completion-report",
     }
-)
-SAFE_REVIEW_PREFIX_BY_ENGINE: dict[str, str] = {
-    "cursor": (
-        "Delegate review mode (code review/investigation only): "
-        "Do not edit, create, or delete files. "
-        "Report findings with file path, line reference, severity, and rationale. "
-        "If a write is blocked, do not retry it.\n\n"
-    ),
-    "codex": (
-        "Delegate Codex safe mode (code review/investigation only): "
-        "Do not edit, create, or delete files. "
-        "Report findings with file path, line reference, severity, and rationale. "
-        "If a write is blocked, do not retry it.\n\n"
-    ),
-    "claude": (
-        "Delegate Claude safe mode (code review/investigation only): "
-        "Do not edit, create, or delete files. "
-        "Report findings with file path, line reference, severity, and rationale. "
-        "If a write is blocked, do not retry it.\n\n"
-    ),
-    "droid": (
-        "Delegate Droid safe mode (code review/investigation only): "
-        "Do not edit, create, or delete files. "
-        "Report findings with file path, line reference, severity, and rationale. "
-        "If a write is blocked, do not retry it.\n\n"
-    ),
-    "kimi": (
-        "Delegate Kimi safe mode (code review/investigation only): "
-        "Do not edit, create, or delete files. "
-        "Report findings with file path, line reference, severity, and rationale. "
-        "If a write is blocked, do not retry it.\n\n"
-    ),
-}
-CLAUDE_SAFE_TOOLS = "Read,Grep,Glob,Bash"
-CLAUDE_SAFE_ALLOWED_TOOLS = (
-    "Bash(git diff:*),Bash(git status:*),Bash(git show:*),Bash(git log:*),"
-    "Bash(rg:*),Bash(grep:*),Bash(ls:*)"
 )
 MISSING_BINARY_PROBE_DIRS = (
     "~/.claude/local",
@@ -735,11 +710,6 @@ def parse_prompt_tail(rest: list[str]) -> tuple[str | None, str | None, list[str
             "Global options must appear before the subcommand; use --prompt-file for literal flag text.",
         )
     return prompt_file, reasoning_effort, prompt_parts
-
-
-def validate_mode(mode: str) -> None:
-    if mode not in VALID_MODES:
-        raise DelegateError("invalid_mode", "Mode must be safe or work.")
 
 
 def parse_snapshot(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
@@ -1534,14 +1504,6 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
     )
 
 
-def redacted_prompt_argv(argv: list[str], replacement: str = CURSOR_PROMPT_REDACTION) -> list[str]:
-    if not argv:
-        return []
-    redacted = list(argv)
-    redacted[-1] = replacement
-    return redacted
-
-
 def build_request(
     engine: str,
     mode: str,
@@ -1951,257 +1913,6 @@ def reasoning_request_kwargs(
         "reasoning_capability_source": capability.source,
         "reasoning_transport": capability.transport,
     }
-
-
-def prefix_cursor_safe_prompt(prompt: str) -> str:
-    safe_prefix = SAFE_REVIEW_PREFIX_BY_ENGINE["cursor"]
-    if prompt.startswith(safe_prefix):
-        return prompt
-    return f"{safe_prefix}{prompt}"
-
-
-def prefix_kimi_safe_prompt(prompt: str) -> str:
-    safe_prefix = SAFE_REVIEW_PREFIX_BY_ENGINE["kimi"]
-    if prompt.startswith(safe_prefix):
-        return prompt
-    return f"{safe_prefix}{prompt}"
-
-
-def prefix_droid_safe_prompt(prompt: str) -> str:
-    safe_prefix = SAFE_REVIEW_PREFIX_BY_ENGINE["droid"]
-    if prompt.startswith(safe_prefix):
-        return prompt
-    skill_prefix = delegate_runner.SKILL_REVIEW_PREFIX
-    if prompt.startswith(skill_prefix):
-        insert_at = len(skill_prefix)
-        if prompt[insert_at:].startswith(safe_prefix):
-            return prompt
-        return prompt[:insert_at] + safe_prefix + prompt[insert_at:]
-    return f"{safe_prefix}{prompt}"
-
-
-def _claude_harness_bypass_enabled(config: JsonObject, mode: str) -> bool:
-    """Return true only for explicit Claude-scoped bypass policy.
-
-    Delegate's historical policy profiles were Codex-oriented. Requiring the
-    Claude bypass to live under policy.harness.claude.work prevents a global
-    external-sandbox profile from silently broadening Claude Code permissions.
-    """
-    if mode != MODE_WORK:
-        return False
-    policy = config.get("policy")
-    if not isinstance(policy, dict):
-        return False
-    harnesses = policy.get("harness")
-    if not isinstance(harnesses, dict):
-        return False
-    claude_policy = harnesses.get("claude")
-    if not isinstance(claude_policy, dict):
-        return False
-    work_policy = claude_policy.get(MODE_WORK)
-    return isinstance(work_policy, dict) and work_policy.get("bypassApprovalsAndSandbox") is True
-
-
-def build_cursor_argv(
-    prefix: list[str],
-    mode: str,
-    workspace: str,
-    model: str,
-    prompt: str,
-    *,
-    stream_capture: bool = True,
-) -> list[str]:
-    argv = [*prefix, "--workspace", workspace, "-p", "--trust"]
-    if mode == MODE_WORK:
-        argv.extend(["--approve-mcps", "--force"])
-    elif mode == MODE_SAFE:
-        prompt = prefix_cursor_safe_prompt(prompt)
-    else:
-        validate_mode(mode)
-    if stream_capture:
-        argv.extend(["--model", model, "--print", "--output-format", "stream-json", prompt])
-    else:
-        argv.extend(["--model", model, "--output-format", "text", prompt])
-    return argv
-
-
-def build_droid_argv(
-    binary: str,
-    mode: str,
-    workspace: str,
-    model: str,
-    prompt: str,
-    *,
-    stream_capture: bool = True,
-    reasoning_capability: reasoning.ReasoningCapability | None = None,
-    prompt_transport: str = PROMPT_TRANSPORT_ARGV,
-) -> list[str]:
-    argv = [binary, "exec", "--cwd", workspace]
-    if mode == MODE_WORK:
-        argv.append("--skip-permissions-unsafe")
-    elif mode == MODE_SAFE:
-        prompt = prefix_droid_safe_prompt(prompt)
-    else:
-        validate_mode(mode)
-    if reasoning_capability is not None:
-        argv.extend(["--reasoning-effort", reasoning_capability.effort])
-    if stream_capture:
-        argv.extend(["--model", model, "--output-format", "stream-json"])
-    else:
-        argv.extend(["--model", model])
-    if prompt_transport == PROMPT_TRANSPORT_ARGV:
-        argv.append(prompt)
-    elif prompt_transport == PROMPT_TRANSPORT_FILE:
-        argv.extend(["--file", DROID_PROMPT_FILE_ARG_PLACEHOLDER])
-    elif prompt_transport != PROMPT_TRANSPORT_STDIN:
-        raise DelegateError(
-            "invalid_prompt_transport",
-            f"Unsupported Droid prompt transport: {prompt_transport}",
-        )
-    return argv
-
-
-def build_kimi_argv(
-    kimi: JsonObject,
-    mode: str,
-    workspace: str,
-    model: str | None,
-    prompt: str,
-    *,
-    stream_capture: bool = True,
-) -> list[str]:
-    argv = [str(kimi["binary"])]
-    if mode == MODE_SAFE:
-        prompt = prefix_kimi_safe_prompt(prompt)
-    elif mode != MODE_WORK:
-        validate_mode(mode)
-    if model:
-        argv.extend(["--model", model])
-    if stream_capture:
-        argv.extend(["--output-format", "stream-json"])
-    argv.extend(["--prompt", prompt])
-    return argv
-
-
-def build_claude_argv(
-    claude: JsonObject,
-    mode: str,
-    model: str | None,
-    policy: JsonObject,
-    *,
-    stream_capture: bool = True,
-    reasoning_effort: str | None = None,
-    allow_bypass_permissions: bool = False,
-) -> list[str]:
-    argv = [
-        str(claude["binary"]),
-        "-p",
-        "--output-format",
-        "stream-json" if stream_capture else "text",
-        "--input-format",
-        "text",
-    ]
-    if mode == MODE_SAFE:
-        argv.extend(
-            [
-                "--permission-mode",
-                "plan",
-                "--tools",
-                CLAUDE_SAFE_TOOLS,
-                "--allowedTools",
-                CLAUDE_SAFE_ALLOWED_TOOLS,
-                "--strict-mcp-config",
-            ]
-        )
-    elif mode == MODE_WORK:
-        permission_mode = (
-            "bypassPermissions"
-            if allow_bypass_permissions and policy.get("bypassApprovalsAndSandbox") is True
-            else str(claude.get("workPermissionMode", "auto"))
-        )
-        argv.extend(["--permission-mode", permission_mode])
-    else:
-        validate_mode(mode)
-    if claude.get("noSessionPersistence", True) is True:
-        argv.append("--no-session-persistence")
-    if claude.get("bare", False) is True:
-        argv.append("--bare")
-    if model:
-        argv.extend(["--model", model])
-    if reasoning_effort is not None:
-        argv.extend(["--effort", reasoning_effort])
-    return argv
-
-
-def build_codex_argv(
-    codex: JsonObject,
-    mode: str,
-    workspace: str,
-    model: str | None,
-    prompt: str,
-    policy: JsonObject,
-    *,
-    workspace_kind: str,
-    stream_capture: bool = True,
-    reasoning_capability: reasoning.ReasoningCapability | None = None,
-    prompt_transport: str = PROMPT_TRANSPORT_ARGV,
-) -> list[str]:
-    binary = str(codex["binary"])
-    argv = [binary]
-    # Safe mode is read-only by contract: never emit the dangerous bypass flags,
-    # even if a policy block somehow carries them. Config validation rejects such
-    # configs up front, but enforce the invariant structurally here too.
-    elevated = mode == MODE_WORK
-    bypass_sandbox = elevated and policy.get("bypassApprovalsAndSandbox") is True
-    bypass_hook_trust = elevated and policy.get("bypassHookTrust") is True
-    if policy.get("webSearch") is True:
-        argv.append("--search")
-    if not bypass_sandbox:
-        argv.extend(["--ask-for-approval", "never"])
-    if codex.get("profile"):
-        argv.extend(["--profile", str(codex["profile"])])
-    if model:
-        argv.extend(["--model", model])
-    if reasoning_capability is not None:
-        argv.extend(
-            [
-                "-c",
-                f'model_reasoning_effort="{reasoning_capability.effort}"',
-            ]
-        )
-    argv.append("exec")
-    argv.extend(["--cd", workspace])
-    if codex.get("ignoreUserConfig") is True:
-        argv.append("--ignore-user-config")
-    if workspace_kind != "git":
-        argv.append("--skip-git-repo-check")
-    if bypass_sandbox:
-        argv.append("--dangerously-bypass-approvals-and-sandbox")
-    else:
-        sandbox = codex["workSandbox"] if mode == MODE_WORK else "read-only"
-        argv.extend(["--sandbox", str(sandbox)])
-        if (
-            mode == MODE_WORK
-            and sandbox == "workspace-write"
-            and policy.get("networkAccess") is True
-        ):
-            argv.extend(["-c", "sandbox_workspace_write.network_access=true"])
-    if bypass_hook_trust:
-        argv.append("--dangerously-bypass-hook-trust")
-    if stream_capture:
-        argv.extend(["--color", "never", "--json"])
-        if codex.get("ephemeral", True) is True:
-            argv.append("--ephemeral")
-    if prompt_transport == PROMPT_TRANSPORT_ARGV:
-        argv.append(prompt)
-    elif prompt_transport == PROMPT_TRANSPORT_STDIN:
-        argv.append("-")
-    else:
-        raise DelegateError(
-            "invalid_prompt_transport",
-            f"Unsupported Codex prompt transport: {prompt_transport}",
-        )
-    return argv
 
 
 def dry_run_payload(request: Request) -> JsonObject:
