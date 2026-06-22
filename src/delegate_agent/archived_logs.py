@@ -3,7 +3,7 @@ from __future__ import annotations
 import tarfile
 from pathlib import Path
 
-from delegate_agent.json_types import JsonObject
+from delegate_agent.json_types import JsonObject, is_non_negative_int
 
 
 def archive_dir(registry_root: Path) -> Path:
@@ -19,7 +19,7 @@ def state_log_byte_sizes(state: JsonObject | None) -> tuple[int, int] | None:
         return None
     stdout_bytes = state.get("stdoutBytes")
     stderr_bytes = state.get("stderrBytes")
-    if isinstance(stdout_bytes, int) and isinstance(stderr_bytes, int):
+    if is_non_negative_int(stdout_bytes) and is_non_negative_int(stderr_bytes):
         return stdout_bytes, stderr_bytes
     return None
 

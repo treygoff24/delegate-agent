@@ -72,6 +72,22 @@ class ParserTests(unittest.TestCase):
         self.assertTrue(parsed.global_options.json_mode)
         self.assertEqual(parsed.global_options.cwd, "/tmp/repo")
 
+    def test_infer_global_json_after_value_taking_globals(self):
+        cases = [
+            ["--isolation", "worktree", "--json", "cursor"],
+            ["--completion-report", "markdown", "--json", "cursor"],
+            ["--cwd", "/tmp/repo", "--completion-report", "none", "--json", "models"],
+        ]
+        for argv in cases:
+            with self.subTest(argv=argv):
+                self.assertTrue(self.delegate.infer_global_json(argv))
+
+    def test_infer_global_json_after_flag_globals(self):
+        self.assertTrue(self.delegate.infer_global_json(["--pass-through", "--json", "cursor"]))
+        self.assertTrue(
+            self.delegate.infer_global_json(["--no-completion-report", "--json", "cursor"])
+        )
+
     def test_trailing_json_is_rejected(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:
             self.delegate.parse_cli(["dry-run", "droid", "minimax", "work", "hello", "--json"])

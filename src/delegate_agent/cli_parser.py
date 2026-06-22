@@ -42,6 +42,8 @@ MISPLACED_GLOBAL_OPTIONS = frozenset(
     }
 )
 
+VALUE_GLOBAL_OPTIONS = frozenset({"--cwd", "--isolation", "--completion-report"})
+
 
 def infer_global_json(argv: list[str]) -> bool:
     i = 0
@@ -49,8 +51,11 @@ def infer_global_json(argv: list[str]) -> bool:
         token = argv[i]
         if token == "--json":
             return True
-        if token == "--cwd":
+        if token in VALUE_GLOBAL_OPTIONS:
             i += 2
+            continue
+        if token in MISPLACED_GLOBAL_OPTIONS:
+            i += 1
             continue
         if token in ("--help", "-h", "--version"):
             return False

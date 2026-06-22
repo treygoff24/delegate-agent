@@ -28,9 +28,13 @@ _UNSET = object()
 def large_log_warnings(stdout_bytes: int, stderr_bytes: int) -> list[str]:
     warnings: list[str] = []
     if stdout_bytes > LARGE_LOG_WARN_BYTES:
-        warnings.append(f"{run_registry.STDOUT_LOG} > 50 MB ({stdout_bytes} bytes)")
+        warnings.append(
+            f"{run_registry.STDOUT_LOG} > {LARGE_LOG_WARN_MIB} MiB ({stdout_bytes} bytes)"
+        )
     if stderr_bytes > LARGE_LOG_WARN_BYTES:
-        warnings.append(f"{run_registry.STDERR_LOG} > 50 MB ({stderr_bytes} bytes)")
+        warnings.append(
+            f"{run_registry.STDERR_LOG} > {LARGE_LOG_WARN_MIB} MiB ({stderr_bytes} bytes)"
+        )
     return warnings
 
 
