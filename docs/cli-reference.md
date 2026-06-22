@@ -312,6 +312,8 @@ delegate worktree gc [--dry-run]
 
 `worktree show --latest HARNESS` selects the latest persistent worktree for the harness, not merely the latest run overall. `worktree list` JSON includes a `summary` with status counts, registry drift counts, warning counts, `autoPruneMode`, and whether the returned operation was read-only; `summary.totalPersistentWorktrees` is always registry-wide, while `allStatusCounts` is scoped to the `--harness` filter (pre-status-filter) and `statusCounts` to the visible entries. `worktree gc` JSON includes `mode`, `effects`, per-entry `action`, and orphan `safeAction` fields to distinguish dry-run inspection from registry reconciliation; `gc` never deletes worktree directories.
 
+List/show entry fields include `branchMergedIntoSource` (branch graph only), `mergedIntoSource` (fully integrated: branch merged and worktree clean), `hasUncommittedChanges`, `integrationStatus`, and `uncommittedChangesIntegrated`. **Migration:** older consumers that read `mergedIntoSource` for branch-graph merge state should switch to `branchMergedIntoSource`; reserve `mergedIntoSource` for full integration. When `integrationStatus` is `branch-merged-worktree-dirty`, merge/cherry-pick suggestions are suppressed because commit integration is already complete and only uncommitted edits remain.
+
 Worktree JSON schemas:
 
 - `delegate.worktree-list.v1`

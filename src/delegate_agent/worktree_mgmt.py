@@ -267,7 +267,67 @@ def ahead_behind(record: PersistentWorktreeRecord, status: str) -> JsonObject | 
     }
 
 
-def suggested_commands(record: PersistentWorktreeRecord, status: str) -> JsonObject:
+def _integration_status(
+    *,
+    branch_merged: bool | None,
+    has_uncommitted_changes: bool | None,
+) -> str | None:
+    if branch_merged is None or has_uncommitted_changes is None:
+        return "unknown"
+    if branch_merged:
+        return "branch-merged-worktree-dirty" if has_uncommitted_changes else "fully-integrated"
+    return "branch-unmerged-worktree-dirty" if has_uncommitted_changes else "branch-unmerged"
+
+
+def integration_fields(
+    *,
+    branch_merged: bool | None,
+    has_uncommitted_changes: bool | None,
+) -> JsonObject:
+    fully_integrated = (
+        branch_merged is True and has_uncommitted_changes is False
+        if branch_merged is not None and has_uncommitted_changes is not None
+        else None
+    )
+    uncommitted_changes_integrated = (
+        None if has_uncommitted_changes is None else not has_uncommitted_changes
+    )
+    return {
+        "branchMergedIntoSource": branch_merged,
+        "hasUncommittedChanges": has_uncommitted_changes,
+        "mergedIntoSource": fully_integrated,
+        "integrationStatus": _integration_status(
+            branch_merged=branch_merged,
+            has_uncommitted_changes=has_uncommitted_changes,
+        ),
+        "uncommittedChangesIntegrated": uncommitted_changes_integrated,
+    }
+
+
+def _suppress_merge_suggestions(
+    *,
+    status: str,
+    dirty: bool | None,
+    ahead_behind_payload: JsonObject | None,
+) -> bool:
+    if dirty is not True or status not in (STATUS_PRESENT, STATUS_UNKNOWN):
+        return False
+    if not isinstance(ahead_behind_payload, dict):
+        return False
+    vs_current = ahead_behind_payload.get("vsCurrentHead")
+    if not isinstance(vs_current, dict):
+        return False
+    ahead = vs_current.get("ahead")
+    return ahead == 0
+
+
+def suggested_commands(
+    record: PersistentWorktreeRecord,
+    status: str,
+    *,
+    dirty: bool | None = None,
+    ahead_behind_payload: JsonObject | None = None,
+) -> JsonObject:
     alias = record.get("alias") or record.get("runId") or "<handle>"
     execution_cwd = record.get("executionCwd")
     source_git_root = record.get("sourceGitRoot")
@@ -282,7 +342,12 @@ def suggested_commands(record: PersistentWorktreeRecord, status: str) -> JsonObj
         review_diff = _shell(["git", "-C", execution_cwd, "diff", "--stat", "HEAD"])
         if isinstance(base, str) and base:
             review_diff_base = _shell(["git", "-C", execution_cwd, "diff", "--stat", base])
-    if isinstance(source_git_root, str) and isinstance(branch, str):
+    suppress_merge = _suppress_merge_suggestions(
+        status=status,
+        dirty=dirty,
+        ahead_behind_payload=ahead_behind_payload,
+    )
+    if not suppress_merge and isinstance(source_git_root, str) and isinstance(branch, str):
         merge = _shell(["git", "-C", source_git_root, "merge", "--no-ff", branch])
         if isinstance(base, str) and base:
             cherry = _shell(["git", "-C", source_git_root, "cherry-pick", f"{base}..{branch}"])
@@ -301,7 +366,7 @@ def decorate_record(
 ) -> JsonObject:
     status, warnings = detect_worktree_status(record)
     dirty, dirty_paths, dirty_total, dirty_warnings = dirty_info(record, status)
-    merged, merged_warnings = merged_into_source(
+    branch_merged, merged_warnings = merged_into_source(
         record,
         status,
         include_detached=include_detached,
@@ -319,7 +384,10 @@ def decorate_record(
         "registryWorktreeStatus": record.get("registryWorktreeStatus"),
         "worktreeStatus": status,
         "dirty": dirty,
-        "mergedIntoSource": merged,
+        **integration_fields(
+            branch_merged=branch_merged,
+            has_uncommitted_changes=dirty,
+        ),
     }
     registry_status = record.get("registryWorktreeStatus")
     if isinstance(registry_status, str) and registry_status != status:
@@ -521,7 +589,14 @@ def show_worktree(
     entry["porcelainStatusTotalLines"] = porcelain_total
     entry["porcelainStatusTruncated"] = porcelain_truncated
     entry["aheadBehind"] = ahead_behind(record, str(entry.get("worktreeStatus")))
-    entry["suggestedCommands"] = suggested_commands(record, str(entry.get("worktreeStatus")))
+    entry["suggestedCommands"] = suggested_commands(
+        record,
+        str(entry.get("worktreeStatus")),
+        dirty=entry.get("dirty") if isinstance(entry.get("dirty"), bool) else None,
+        ahead_behind_payload=entry.get("aheadBehind")
+        if isinstance(entry.get("aheadBehind"), dict)
+        else None,
+    )
     source_git_root = record.get("sourceGitRoot")
     entry["currentSourceHeadRef"] = (
         _symbolic_ref(source_git_root, "HEAD") if isinstance(source_git_root, str) else None

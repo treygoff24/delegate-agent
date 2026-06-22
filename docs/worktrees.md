@@ -63,7 +63,23 @@ delegate worktree show --latest cursor
 
 `worktree show --latest HARNESS` resolves the most recent persistent worktree for that harness. It intentionally ignores newer non-worktree runs from the same harness.
 
-`worktree show` reports status, path, branch, dirty state, ahead/behind counts, and suggested review or cleanup commands. `worktree list` is read-only unless an enabled auto-prune pass runs before listing; JSON output includes `summary.autoPruneMode` (`disabled`, `attempted`, or `suppressed`) and `summary.readOnly`.
+`worktree show` reports status, path, branch, dirty state, branch merge vs full integration state, ahead/behind counts, and suggested review or cleanup commands. `worktree list` is read-only unless an enabled auto-prune pass runs before listing; JSON output includes `summary.autoPruneMode` (`disabled`, `attempted`, or `suppressed`) and `summary.readOnly`.
+
+### Integration state semantics
+
+Worktree list/show JSON distinguishes branch merge from full integration:
+
+| Field | Meaning |
+| --- | --- |
+| `branchMergedIntoSource` | Branch tip is an ancestor of current source `HEAD` (Git graph only). |
+| `mergedIntoSource` | Fully integrated: branch merged **and** the worktree has no uncommitted changes. |
+| `hasUncommittedChanges` | Same tri-state as `dirty`. |
+| `integrationStatus` | Summary enum such as `fully-integrated`, `branch-merged-worktree-dirty`, `branch-unmerged`, or `branch-unmerged-worktree-dirty`. |
+| `uncommittedChangesIntegrated` | `false` when uncommitted edits remain; `true` when the worktree is clean. |
+
+**Migration note:** Before this correction, `mergedIntoSource` matched the branch-graph check only. Automation that treated `mergedIntoSource: true` as safe to retire must instead require `mergedIntoSource: true` (fully integrated) or inspect `integrationStatus`. Use `branchMergedIntoSource` when you only need the old branch-graph meaning (for example, matching `worktree remove` / `worktree prune --merged` behavior).
+
+When a branch is merged but the worktree still has local edits, `worktree show` keeps review/diff guidance but omits no-op `mergeIntoSource` / `cherryPickRange` suggestions (ahead vs current `HEAD` is zero and remaining work is uncommitted files).
 
 Common statuses:
 
