@@ -12,6 +12,7 @@ __pycache__/
 dist/
 build/
 *.egg-info/
+node_modules/
 
 # OS/editor noise
 .DS_Store
@@ -20,6 +21,7 @@ build/
 
 # Local runtime/config state. Commit examples instead.
 .delegate/
+.factory/
 config.json
 cursor-prereq.json
 *.bak*
