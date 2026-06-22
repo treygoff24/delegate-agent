@@ -369,6 +369,7 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
         report = payload["sections"]["completionReport"]
         self.assertTrue(report["synthetic"])
         self.assertEqual(report["source"], "stdout.log")
+        self.assertEqual(report["recoveryQuality"], "explicit_completion")
         self.assertIn("json fallback", report["content"])
 
     def test_synthetic_completion_report_redacts_by_default_and_can_be_disabled(self):
@@ -676,6 +677,141 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
         # Text mode must carry an in-band cue that this is a recovered message,
         # not a child-written completion report.
         self.assertIn("synthetic", output)
+
+        json_stdout = io.StringIO()
+        code = self.delegate.main(
+            [
+                "--json",
+                "--cwd",
+                str(self.workspace),
+                "run-output",
+                alias,
+                "--completion-report",
+            ],
+            stdout=json_stdout,
+        )
+        self.assertEqual(code, 0)
+        report = json.loads(json_stdout.getvalue())["sections"]["completionReport"]
+        self.assertEqual(report["recoveryQuality"], "housekeeping_fallback")
+
+    def test_run_output_recovers_substantive_report_over_housekeeping_for_droid(self):
+        run_id, alias = self.write_run(harness="droid", status="succeeded", pid=None)
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        (run_path / "stdout.log").write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": "Status: completed\n- fixed recovery\n- added tests",
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": "Plan is up-to-date.",
+                        }
+                    ),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        stdout = io.StringIO()
+        code = self.delegate.main(
+            [
+                "--json",
+                "--cwd",
+                str(self.workspace),
+                "run-output",
+                alias,
+                "--completion-report",
+            ],
+            stdout=stdout,
+        )
+        self.assertEqual(code, 0)
+        report = json.loads(stdout.getvalue())["sections"]["completionReport"]
+        self.assertEqual(report["recoveryQuality"], "substantive_assistant_fallback")
+        self.assertIn("fixed recovery", report["content"])
+        self.assertNotIn("Plan is up-to-date", report["content"])
+
+    def test_run_output_recovers_substantive_report_over_long_progress_message(self):
+        run_id, alias = self.write_run(harness="droid", status="succeeded", pid=None)
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        (run_path / "stdout.log").write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": "Status: completed\n- delivered the fix",
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": (
+                                "I am still investigating the repository layout, reading files, "
+                                "and running additional checks before I can finalize anything."
+                            ),
+                        }
+                    ),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        stdout = io.StringIO()
+        code = self.delegate.main(
+            [
+                "--json",
+                "--cwd",
+                str(self.workspace),
+                "run-output",
+                alias,
+                "--completion-report",
+            ],
+            stdout=stdout,
+        )
+        self.assertEqual(code, 0)
+        report = json.loads(stdout.getvalue())["sections"]["completionReport"]
+        self.assertEqual(report["recoveryQuality"], "substantive_assistant_fallback")
+        self.assertIn("delivered the fix", report["content"])
+        self.assertNotIn("still investigating", report["content"])
+
+    def test_run_output_marks_housekeeping_only_recovery_quality(self):
+        run_id, alias = self.write_run(harness="droid", status="succeeded", pid=None)
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        (run_path / "stdout.log").write_text(
+            json.dumps(
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": "The final report was delivered in the previous message.",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        stdout = io.StringIO()
+        code = self.delegate.main(
+            [
+                "--json",
+                "--cwd",
+                str(self.workspace),
+                "run-output",
+                alias,
+                "--completion-report",
+            ],
+            stdout=stdout,
+        )
+        self.assertEqual(code, 0)
+        report = json.loads(stdout.getvalue())["sections"]["completionReport"]
+        self.assertEqual(report["recoveryQuality"], "housekeeping_fallback")
 
     def test_run_output_completion_report_codex_never_recovers_interim_message(self):
         run_id, alias = self.write_run(harness="codex", status="succeeded", pid=None)

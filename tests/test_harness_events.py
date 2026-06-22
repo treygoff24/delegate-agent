@@ -500,3 +500,98 @@ class HarnessEventsTests(unittest.TestCase):
         )
         completed = [event for event in acc.events if event.kind == "tool.completed"]
         self.assertEqual({event.target for event in completed}, {"a.py", "b.py"})
+
+    def test_substantive_assistant_text_preferred_over_later_housekeeping(self):
+        acc = self.events.StreamAccumulator()
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": "Status: completed\n- fixed parser\n- added tests",
+                }
+            )
+        )
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": "Plan is up-to-date.",
+                }
+            )
+        )
+        self.assertIn("fixed parser", acc.recoverable_assistant_text or "")
+        self.assertNotIn("Plan is up-to-date", acc.recoverable_assistant_text or "")
+        self.assertEqual(acc.assistant_recovery_quality(), "substantive_assistant_fallback")
+
+    def test_substantive_assistant_text_preferred_over_longer_progress_message(self):
+        acc = self.events.StreamAccumulator()
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": "Status: completed\n- shipped the fix",
+                }
+            )
+        )
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": (
+                        "I am still investigating the repository layout, reading files, "
+                        "and running additional checks before I can finalize anything."
+                    ),
+                }
+            )
+        )
+        self.assertIn("shipped the fix", acc.recoverable_assistant_text or "")
+        self.assertNotIn("still investigating", acc.recoverable_assistant_text or "")
+        self.assertEqual(acc.assistant_recovery_quality(), "substantive_assistant_fallback")
+
+    def test_housekeeping_only_assistant_text_is_still_recoverable(self):
+        acc = self.events.StreamAccumulator()
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": "The final report was delivered in the previous message.",
+                }
+            )
+        )
+        self.assertEqual(
+            acc.recoverable_assistant_text,
+            "The final report was delivered in the previous message.",
+        )
+        self.assertEqual(acc.assistant_recovery_quality(), "housekeeping_fallback")
+
+    def test_explicit_completion_wins_over_assistant_recovery_quality(self):
+        acc = self.events.StreamAccumulator()
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": "Status: completed\n- interim report",
+                }
+            )
+        )
+        acc.ingest_line(
+            json.dumps({"type": "completion", "finalText": "Status: completed\n- explicit"})
+        )
+        self.assertEqual(acc.completion_text, "Status: completed\n- explicit")
+        self.assertEqual(acc.assistant_recovery_quality(), "explicit_completion")
+
+    def test_classify_substantive_and_housekeeping_helpers(self):
+        self.assertTrue(self.events.is_substantive_assistant_text("Status: completed\n- did work"))
+        self.assertTrue(self.events.is_housekeeping_assistant_text("Plan is up-to-date."))
+        self.assertTrue(self.events.is_housekeeping_assistant_text("I am still investigating."))
+        self.assertFalse(
+            self.events.is_substantive_assistant_text(
+                "The final report was delivered in the previous message."
+            )
+        )
