@@ -82,11 +82,11 @@ class CapabilityCommandTests(unittest.TestCase):
             payload = models_payload(config, "test-config", Path(workspace))
             self.assertIn("reasoningAliases", payload)
             self.assertEqual(payload["reasoningAliases"]["droid"]["glm"]["source"], "bundled")
+            cursor_alias = payload["reasoningAliases"]["cursor"][config["cursor"]["defaultModel"]]
+            self.assertNotIn("supported", cursor_alias)
             self.assertEqual(
-                payload["reasoningAliases"]["cursor"][config["cursor"]["defaultModel"]][
-                    "supported"
-                ],
-                ["high"],
+                cursor_alias["effortModelRouting"],
+                [{"effort": "high", "model": "cursor-thinking"}],
             )
             kimi_key = config["kimi"]["defaultModel"]
             kimi = payload["reasoningAliases"]["kimi"][kimi_key]
@@ -111,6 +111,11 @@ class CapabilityCommandTests(unittest.TestCase):
                 by_provider_alias[("droid", "glm")]["reasoningEfforts"],
                 ["off", "high"],
             )
+            self.assertEqual(
+                by_provider_alias[("cursor", "cursor")]["reasoningEffortRouting"],
+                [{"effort": "high", "modelConfigured": True}],
+            )
+            self.assertNotIn("cursor-thinking", json.dumps(summary))
 
             redacted = redact_discovery_payload(payload)
             self.assertEqual(redacted["droid"]["models"]["glm"], "<redacted-model-id>")
@@ -128,6 +133,85 @@ class CapabilityCommandTests(unittest.TestCase):
                 "delegate --json models --summary --redacted",
                 describe_summary["recommendedDiscovery"],
             )
+
+    def test_full_redacted_discovery_scrubs_paths_model_keys_and_argv_values(self):
+        from delegate_agent.describe_payload import (
+            describe_payload,
+            models_payload,
+            redact_discovery_payload,
+        )
+
+        with tempfile.TemporaryDirectory() as workspace:
+            private_model = "private-provider/private-model-123"
+            private_wrapper = "/Users/example/private/bin/wrapper"
+            from delegate_agent.config import embedded_default_config
+
+            config = embedded_default_config()
+            config["cursor"]["defaultModel"] = private_model
+            config["cursor"]["argvPrefix"] = [
+                private_wrapper,
+                "--profile",
+                "private",
+                "OPENAI_API_KEY=sk-proj-abc123456789",
+                "--model",
+                private_model,
+                f"--model={private_model}",
+            ]
+            config["cursor"]["reasoningEffortModels"] = {"high": private_model}
+            config["droid"]["models"] = {"private": private_model}
+            config["codex"]["binary"] = private_wrapper
+            config["codex"]["defaultModel"] = private_model
+            config["claude"]["binary"] = private_wrapper
+            config["claude"]["defaultModel"] = private_model
+            config["kimi"]["binary"] = private_wrapper
+            config["kimi"]["defaultModel"] = private_model
+
+            redacted_models = redact_discovery_payload(
+                models_payload(config, "/Users/example/private/config.json", Path(workspace))
+            )
+            redacted_describe = redact_discovery_payload(
+                describe_payload(config, "/Users/example/private/config.json", Path(workspace))
+            )
+            combined = json.dumps([redacted_models, redacted_describe])
+
+            self.assertNotIn(private_model, combined)
+            self.assertNotIn(private_wrapper, combined)
+            self.assertNotIn("sk-proj-abc123456789", combined)
+            self.assertIn("<redacted-model-id>", combined)
+            self.assertIn("<redacted-path>", combined)
+
+    def test_models_text_redacted_hides_model_ids_and_paths(self):
+        from delegate_agent.describe_payload import emit_models
+
+        private_model = "private-provider/private-model-123"
+        private_wrapper = "/Users/example/private/bin/wrapper"
+        config = {
+            "cursor": {"defaultModel": private_model, "argvPrefix": [private_wrapper]},
+            "droid": {"models": {"private": private_model}},
+            "codex": {"binary": private_wrapper, "defaultModel": private_model, "profile": ""},
+            "claude": {
+                "binary": private_wrapper,
+                "defaultModel": private_model,
+                "workPermissionMode": "auto",
+            },
+            "kimi": {"binary": private_wrapper, "defaultModel": private_model},
+        }
+        stdout = io.StringIO()
+
+        code = emit_models(
+            config,
+            "/Users/example/private/config.json",
+            json_mode=False,
+            stdout=stdout,
+            redacted=True,
+        )
+
+        self.assertEqual(code, 0)
+        output = stdout.getvalue()
+        self.assertNotIn(private_model, output)
+        self.assertNotIn(private_wrapper, output)
+        self.assertIn("<redacted-model-id>", output)
+        self.assertIn("<redacted-path>", output)
 
     def test_emit_text_summarizes_harness_model_counts(self):
         with tempfile.TemporaryDirectory() as workspace:

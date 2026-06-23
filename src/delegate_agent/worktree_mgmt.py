@@ -295,7 +295,11 @@ def integration_fields(
     return {
         "branchMergedIntoSource": branch_merged,
         "hasUncommittedChanges": has_uncommitted_changes,
-        "mergedIntoSource": fully_integrated,
+        # Backward compatibility: v1 exposed mergedIntoSource as the branch
+        # ancestry check. Keep that meaning and expose the aggregate state under
+        # a new field instead of silently repurposing the old one.
+        "mergedIntoSource": branch_merged,
+        "fullyIntegrated": fully_integrated,
         "integrationStatus": _integration_status(
             branch_merged=branch_merged,
             has_uncommitted_changes=has_uncommitted_changes,
@@ -310,7 +314,7 @@ def _suppress_merge_suggestions(
     dirty: bool | None,
     ahead_behind_payload: JsonObject | None,
 ) -> bool:
-    if dirty is not True or status not in (STATUS_PRESENT, STATUS_UNKNOWN):
+    if status not in (STATUS_PRESENT, STATUS_UNKNOWN):
         return False
     if not isinstance(ahead_behind_payload, dict):
         return False
@@ -362,7 +366,10 @@ def suggested_commands(
 
 
 def decorate_record(
-    record: PersistentWorktreeRecord, *, include_detached: bool = False
+    record: PersistentWorktreeRecord,
+    *,
+    include_detached: bool = False,
+    include_work_summary: bool = False,
 ) -> JsonObject:
     status, warnings = detect_worktree_status(record)
     dirty, dirty_paths, dirty_total, dirty_warnings = dirty_info(record, status)
@@ -398,7 +405,7 @@ def decorate_record(
     if dirty_paths:
         output["dirtyPaths"] = dirty_paths[:MAX_DIRTY_PATHS_REPORTED]
         output["dirtyPathsTotal"] = dirty_total
-    if status in (STATUS_PRESENT, STATUS_UNKNOWN):
+    if include_work_summary and status in (STATUS_PRESENT, STATUS_UNKNOWN):
         summary = worktree_summary.build_work_summary(
             source_git_root=record.get("sourceGitRoot")
             if isinstance(record.get("sourceGitRoot"), str)
@@ -587,7 +594,7 @@ def resolve_record(
                     next_actions=next_actions,
                     suggestions=suggestions,
                     suggestion_scope="worktrees",
-                    list_command="python3 bin/delegate.py worktree list",
+                    list_command="delegate worktree list",
                 )
             )
         run_id = resolved.run_id
@@ -618,7 +625,11 @@ def show_worktree(
     include_detached: bool = False,
 ) -> JsonObject:
     record = resolve_record(registry_root, handle=handle, latest_harness=latest_harness)
-    entry = decorate_record(record, include_detached=include_detached)
+    entry = decorate_record(
+        record,
+        include_detached=include_detached,
+        include_work_summary=True,
+    )
     execution_cwd = entry.get("executionCwd")
     porcelain: list[str] | None = None
     porcelain_total = 0

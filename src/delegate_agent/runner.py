@@ -19,6 +19,7 @@ from delegate_agent import (
     harness_events,
     prompt_instructions,
     reasoning,
+    redaction,
     rendering,
     run_metadata,
     run_registry,
@@ -354,6 +355,8 @@ def emit_bounded_text_summary(
                 print("work summary: no file changes or commits detected", file=stdout)
         if extra.get("commitPolicyViolated") is True:
             print("commit policy: violated (--forbid-commit)", file=stdout)
+        if extra.get("commitPolicyUnverified") is True:
+            print("commit policy: unverified (--forbid-commit)", file=stdout)
     print(f"snapshot: {run_registry.snapshot_command(ctx.alias)}", file=stdout)
     print(
         f"completion report: {run_registry.run_output_command(ctx.alias, completion_report=True)}",
@@ -419,11 +422,11 @@ def completion_json_payload(
         payload.update(extra)
 
     if not ok:
-        if extra is not None and extra.get("commitPolicyViolated") is True:
-            payload["error"] = "commit_policy_violated"
-            payload["message"] = (
-                "Child command created commits even though --forbid-commit was set."
-            )
+        if extra is not None and (
+            extra.get("commitPolicyViolated") is True or extra.get("commitPolicyUnverified") is True
+        ):
+            payload["error"] = str(extra.get("error") or "commit_policy_violated")
+            payload["message"] = str(extra.get("message") or "Commit policy failed.")
         else:
             payload["error"] = "child_failed"
             payload["message"] = "Child command failed."
@@ -549,7 +552,12 @@ def _final_extra(ctx: RunContext, capture_exit_code: int) -> tuple[int, JsonObje
     if summary is not None:
         extra["workSummary"] = summary
     commits_created = worktree_summary.commits_created_count(summary)
-    if summary is not None and commits_created > 0 and not ctx.forbid_commit:
+    if (
+        summary is not None
+        and commits_created is not None
+        and commits_created > 0
+        and not ctx.forbid_commit
+    ):
         extra["warnings"] = [
             "Child command created commits; review the persistent worktree before integration."
         ]
@@ -559,12 +567,23 @@ def _final_extra(ctx: RunContext, capture_exit_code: int) -> tuple[int, JsonObje
         ]
         extra["commitsCreatedByChild"] = True
     if ctx.forbid_commit:
-        violated = commits_created > 0
+        unverified = commits_created is None
+        violated = commits_created is not None and commits_created > 0
         extra["commitPolicy"] = {
             "forbidCommit": True,
             "violated": violated,
+            "verified": not unverified,
             "commitsCreatedCount": commits_created,
         }
+        if unverified:
+            extra["commitPolicyUnverified"] = True
+            extra["childExitCode"] = capture_exit_code
+            extra["error"] = "commit_policy_unverified"
+            extra["message"] = (
+                "Delegate could not verify --forbid-commit because final Git inspection failed."
+            )
+            if capture_exit_code == 0:
+                return 1, extra
         if violated:
             extra["commitPolicyViolated"] = True
             extra["childExitCode"] = capture_exit_code
@@ -595,7 +614,7 @@ def _progress_current_label(accumulator: harness_events.StreamAccumulator) -> st
     current = (accumulator.current or "").strip()
     if not current:
         return "waiting for child output"
-    return current[:160]
+    return redaction.redact_progress_label(current)[:160]
 
 
 def _emit_progress_started(ctx: RunContext, stderr: TextIO) -> None:

@@ -590,6 +590,21 @@ class HarnessEventsTests(unittest.TestCase):
         self.assertTrue(self.events.is_substantive_assistant_text("Status: completed\n- did work"))
         self.assertTrue(self.events.is_housekeeping_assistant_text("Plan is up-to-date."))
         self.assertTrue(self.events.is_housekeeping_assistant_text("I am still investigating."))
+        self.assertTrue(
+            self.events.is_housekeeping_assistant_text(
+                "I'm still investigating.\n- checking files\n- running tests"
+            )
+        )
+        self.assertFalse(
+            self.events.is_substantive_assistant_text(
+                "I'm still investigating.\n- checking files\n- running tests"
+            )
+        )
+        self.assertTrue(
+            self.events.is_housekeeping_assistant_text(
+                "I\u2019m still investigating.\n- checking files\n- running tests"
+            )
+        )
         self.assertFalse(
             self.events.is_substantive_assistant_text(
                 "The final report was delivered in the previous message."

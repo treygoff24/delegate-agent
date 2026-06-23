@@ -106,7 +106,9 @@ delegate kimi work "Implement the scoped change and run the named check. Report 
 ```
 
 For long foreground runs, add `--progress` to emit bounded parent heartbeats to
-stderr while keeping final stdout machine-readable:
+stderr while keeping final stdout machine-readable. Heartbeat labels are
+redacted before printing but are still operational metadata, not raw child
+output:
 
 ```bash
 delegate --json claude safe --progress "Review this repository. Do not edit files."
@@ -153,7 +155,7 @@ Delegate separates three ideas:
 Defaults are intentionally conservative for review paths:
 
 - `delegate cursor safe`, `delegate codex safe`, `delegate claude safe`, `delegate droid ALIAS safe`, and `delegate kimi safe` run in an isolated temporary workspace.
-- Claude safe mode invokes `claude -p` with prompt text on stdin, `--permission-mode plan`, `--strict-mcp-config`, Read/Grep/Glob plus selected read-only Bash tools, and `--no-session-persistence` by default.
+- Claude safe mode invokes `claude -p` with prompt text on stdin, `--permission-mode plan`, `--strict-mcp-config`, Read/Grep/Glob plus selected read-only Bash tools, and `--no-session-persistence` by default. Delegate does not currently prove that Claude Code hooks, plugins, user settings, or other non-MCP customization surfaces are disabled.
 - `work` mode can edit. By default it runs in the real workspace for backward compatibility.
 
 For edit-capable isolation, use a persistent Git worktree:
@@ -170,7 +172,8 @@ Worktree isolation protects the source checkout from ordinary relative-path edit
 
 Persistent worktree completions and `worktree list/show` include a work summary
 with dirty state, changed file counts, diff stat, and commits created by the
-child. `--forbid-commit` fails the run if the child creates commits.
+child where that summary is available. `--forbid-commit` fails the run if
+commits remain ahead of the creation base when the child exits.
 
 Temporary safe isolation preserves internal symlinks, but replaces symlinks that point outside the source workspace with inert placeholder files inside the isolated workspace. Delegate reports a warning listing the relative symlink paths it blocked. In Git repositories with no commits yet, Cursor/Codex/Claude/Droid/Kimi safe isolation falls back to a directory copy because Git cannot create a detached worktree from an unborn `HEAD`.
 

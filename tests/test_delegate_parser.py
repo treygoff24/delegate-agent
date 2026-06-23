@@ -818,6 +818,30 @@ class ParserTests(unittest.TestCase):
                 self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
             self.assertEqual(ctx.exception.error, "invalid_progress")
 
+    def test_run_input_json_forbid_commit_must_be_boolean(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "task.json"
+            task.write_text(
+                json.dumps(
+                    {
+                        "engine": "cursor",
+                        "mode": "work",
+                        "cwd": tmp,
+                        "isolation": "worktree",
+                        "prompt": "hello",
+                        "forbidCommit": "yes",
+                    }
+                )
+            )
+            parsed = self.delegate.ParsedCommand(
+                "run",
+                global_options=self.delegate.GlobalOptions(json_mode=True),
+                run_json=self.delegate.RunJsonOptions(str(task)),
+            )
+            with self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+            self.assertEqual(ctx.exception.error, "invalid_forbid_commit")
+
     def test_run_input_json_claude_safe_rejects_isolation_none(self):
         with tempfile.TemporaryDirectory() as tmp:
             task = Path(tmp) / "task.json"

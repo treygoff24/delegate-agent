@@ -26,10 +26,12 @@ _HOUSEKEEPING_PATTERNS = (
 
 _PROGRESS_PATTERNS = (
     re.compile(r"^I'll start by\b", re.IGNORECASE | re.MULTILINE),
-    re.compile(r"^I am still investigating\b", re.IGNORECASE | re.MULTILINE),
     re.compile(r"^Working\.{3}$", re.IGNORECASE | re.MULTILINE),
     re.compile(r"^Let me (?:check|read|look|investigate|start)\b", re.IGNORECASE | re.MULTILINE),
-    re.compile(r"^I'?m (?:checking|investigating|reading|working)\b", re.IGNORECASE | re.MULTILINE),
+    re.compile(
+        "^I(?: am|'m|\u2019m)\\s+(?:still\\s+)?(?:checking|investigating|reading|working)\\b",
+        re.IGNORECASE | re.MULTILINE,
+    ),
 )
 
 

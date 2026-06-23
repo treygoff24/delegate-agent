@@ -45,15 +45,17 @@ prompt argv in dry-run output and run manifests.
 `--reasoning-effort LEVEL` is optional and parsed only before prompt text begins. Unsupported model/effort pairs fail closed before launch with `unsupported_reasoning_effort`. It affects only model reasoning depth, cost, or latency; it does not change `safe`/`work` permissions, sandboxing, approvals, network policy, or edit capability. Cursor effort is model-selection based and requires `cursor.reasoningEffortModels`; Droid emits `--reasoning-effort LEVEL`; Codex emits a `model_reasoning_effort` config override after the model is resolved; Claude emits Claude Code `--effort LEVEL`. Kimi does not support reasoning effort in v1.
 
 `--progress` is an opt-in launch flag that emits bounded parent progress
-heartbeats to stderr while preserving final stdout and JSON stdout. It is useful
-for long tracked foreground launches and is incompatible with `--pass-through`.
+heartbeats to stderr while preserving final stdout and JSON stdout. Heartbeat
+labels are redacted before printing. It is useful for long tracked foreground
+launches and is incompatible with `--pass-through`.
 
 `--forbid-commit` is an opt-in launch flag for `work` mode with persistent
-worktree isolation. It injects a no-commit prompt note and fails the run if the
-child creates commits. Without it, Delegate still reports created commits in the
-work summary, emits a warning plus suggested review commands, but does not fail
-solely because commits exist. Validation rejects `--forbid-commit` outside
-`work` mode with `--isolation worktree`.
+worktree isolation. It injects a no-commit prompt note and fails the run if
+commits remain ahead of the creation base when the child exits. Without it,
+Delegate still reports remaining child commits in the work summary, emits a
+warning plus suggested review commands, but does not fail solely because commits
+exist. Validation rejects `--forbid-commit` outside `work` mode with
+`--isolation worktree`.
 
 ### `delegate claude`
 
@@ -64,6 +66,7 @@ delegate [--json] [--isolation auto|none|worktree] claude {safe,work} [--reasoni
 ```
 
 - Safe mode runs in an isolated temporary copy of the workspace (under `--isolation auto`) and uses Claude Code `--permission-mode plan`, `--strict-mcp-config`, Read/Grep/Glob, and selected read-only Bash tools such as `git diff`/`git status`.
+- Claude safe mode is not hermetic: Delegate does not prove hooks, plugins, user settings, output styles, or other non-MCP customization surfaces are disabled. Use `claude.bare: true` for a more minimal/reproducible Claude invocation, and keep safe-mode work review-only.
 - Prompt text is delivered on stdin to `claude -p`; dry-run argv and tracked run manifests do not contain the prompt.
 - JSON-streaming runs use `--output-format stream-json --input-format text`; pass-through runs use `--output-format text`.
 - Work mode uses `claude.workPermissionMode` from config, unless Delegate policy explicitly enables `policy.harness.claude.work.bypassApprovalsAndSandbox`, which maps to Claude `--permission-mode bypassPermissions`.
@@ -336,7 +339,7 @@ delegate worktree gc [--dry-run]
 
 `worktree show --latest HARNESS` selects the latest persistent worktree for the harness, not merely the latest run overall. `worktree list` JSON includes a `summary` with status counts, registry drift counts, warning counts, `autoPruneMode`, and whether the returned operation was read-only; `summary.totalPersistentWorktrees` is always registry-wide, while `allStatusCounts` is scoped to the `--harness` filter (pre-status-filter) and `statusCounts` to the visible entries. `worktree gc` JSON includes `mode`, `effects`, per-entry `action`, and orphan `safeAction` fields to distinguish dry-run inspection from registry reconciliation; `gc` never deletes worktree directories.
 
-List/show entry fields include `branchMergedIntoSource` (branch graph only), `mergedIntoSource` (fully integrated: branch merged and worktree clean), `hasUncommittedChanges`, `integrationStatus`, `uncommittedChangesIntegrated`, and `workSummary` when Delegate can inspect the worktree. **Migration:** older consumers that read `mergedIntoSource` for branch-graph merge state should switch to `branchMergedIntoSource`; reserve `mergedIntoSource` for full integration. When `integrationStatus` is `branch-merged-worktree-dirty`, merge/cherry-pick suggestions are suppressed because commit integration is already complete and only uncommitted edits remain.
+List/show entry fields include `branchMergedIntoSource` (branch graph only), `mergedIntoSource` (backward-compatible branch graph state), `fullyIntegrated` (branch merged and worktree clean), `hasUncommittedChanges`, `integrationStatus`, and `uncommittedChangesIntegrated`. `workSummary` is included on `worktree show` and run completion payloads when Delegate can inspect the worktree; `worktree list` omits the deep summary for responsiveness. Consumers that need safe retirement should require `fullyIntegrated: true` or inspect `integrationStatus`. When `integrationStatus` is `branch-merged-worktree-dirty`, merge/cherry-pick suggestions are suppressed because commit integration is already complete and only uncommitted edits remain.
 
 Unknown persistent-worktree handles return suggestions scoped to persistent
 worktrees plus a `listCommand` hint (`delegate worktree list`). Run-output and

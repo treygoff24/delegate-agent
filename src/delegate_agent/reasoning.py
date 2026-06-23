@@ -144,10 +144,10 @@ def format_explicit_reasoning_effort_error(
     if context_parts:
         message = f"{detail} ({', '.join(context_parts)})"
     parts = [message]
+    if effort is not None:
+        parts.append(f"Requested effort: {effort!r}.")
     if supported:
         parts.append(f"Supported values: {', '.join(supported)}.")
-    if effort is not None and not supported:
-        parts.insert(1, f"Requested effort: {effort!r}.")
     parts.append(INSPECT_REASONING_DISCOVERY_HINT)
     return " ".join(parts)
 
@@ -467,20 +467,19 @@ def _cursor_alias_reasoning_summary(cursor: JsonObject) -> JsonObject:
     alias = default_model if isinstance(default_model, str) and default_model else "(default)"
     payload: JsonObject = {"alias": alias}
     if isinstance(default_model, str) and default_model:
-        payload["model"] = default_model
+        payload["defaultModel"] = default_model
     mappings = cursor.get("reasoningEffortModels")
-    supported: list[str] = []
+    routing: list[JsonObject] = []
     if isinstance(mappings, dict):
-        supported = sorted(
-            effort
-            for effort, model in mappings.items()
+        routing = [
+            {"effort": effort, "model": model}
+            for effort, model in sorted(mappings.items())
             if isinstance(effort, str) and effort and isinstance(model, str) and model
-        )
-    if supported:
-        payload["supported"] = supported
+        ]
+    if routing:
+        payload["effortModelRouting"] = routing
         payload["source"] = "config"
     else:
-        payload["supported"] = None
         payload["source"] = "none"
         payload["warning"] = (
             "cursor.reasoningEffortModels is empty; configure effort-to-model mappings."

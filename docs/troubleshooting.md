@@ -137,9 +137,10 @@ delegate --json claude safe --progress "Review only. Do not edit."
 delegate --json droid reviewer work --progress "Implement the scoped change."
 ```
 
-Progress messages go to stderr. They are intentionally bounded and do not
-include raw child output. `--progress` is incompatible with `--pass-through`,
-which already streams raw child output.
+Progress messages go to stderr. They are intentionally bounded, redact
+secret-like labels before printing, and do not include raw child output.
+`--progress` is incompatible with `--pass-through`, which already streams raw
+child output.
 
 ## Safe-mode isolation fails
 
@@ -180,7 +181,8 @@ before launching.
 ## Persistent worktree run failed with `commit_policy_violated`
 
 `--forbid-commit` is valid only for `work` mode with persistent worktree
-isolation. When enabled, Delegate fails the run if the child creates commits:
+isolation. When enabled, Delegate fails the run if commits remain ahead of the
+creation base when the child exits:
 
 ```bash
 delegate --json --isolation worktree cursor work --forbid-commit "Implement without committing."

@@ -810,6 +810,32 @@ class RunnerCaptureTests(unittest.TestCase):
         maybe_persist_running()
         self.assertEqual(outcomes, ["persisted", "skipped"])
 
+    def test_progress_current_label_redacts_secret_like_tool_targets(self):
+        accumulator = self.runner.harness_events.StreamAccumulator()
+        accumulator.current = (
+            'running curl -H "Authorization: Bearer bearer-output-token-12345" https://example.test'
+        )
+
+        label = self.runner._progress_current_label(accumulator)
+
+        self.assertIn("Authorization: ***", label)
+        self.assertNotIn("bearer-output-token-12345", label)
+
+    def test_progress_current_label_redacts_absolute_paths(self):
+        accumulator = self.runner.harness_events.StreamAccumulator()
+        accumulator.current = (
+            "Bash cat /Users/treygoff/Code/client/.env /root/.ssh/id_rsa "
+            "/workspace/client/.env /mnt/c/Users/trey/.env"
+        )
+
+        label = self.runner._progress_current_label(accumulator)
+
+        self.assertIn("<redacted-path>", label)
+        self.assertNotIn("/Users/treygoff/Code/client/.env", label)
+        self.assertNotIn("/root/.ssh/id_rsa", label)
+        self.assertNotIn("/workspace/client/.env", label)
+        self.assertNotIn("/mnt/c/Users/trey/.env", label)
+
     def test_emit_bounded_text_summary_uses_shared_cleanup_renderer(self):
         with tempfile.TemporaryDirectory() as workspace:
             root = self.registry.ensure_registry(Path(workspace), workspace_kind="git")

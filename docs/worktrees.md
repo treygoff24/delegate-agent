@@ -30,8 +30,9 @@ delegate --isolation worktree cursor work --forbid-commit "Implement the scoped 
 ```
 
 With `--forbid-commit`, Delegate adds a no-commit prompt note and marks the run
-failed if commits are created. Without it, commits are allowed but still reported
-in the work summary with a warning and suggested review commands.
+failed if commits remain ahead of the creation base when the child exits.
+Without it, commits are allowed but still reported in the work summary with a
+warning and suggested review commands.
 
 For work mode, `--isolation worktree` creates a persistent worktree under the Delegate data home. The default is:
 
@@ -65,7 +66,8 @@ delegate --json --isolation worktree dry-run cursor work "Implement only."
 Delegate prepends a note telling the child agent that it is running in a Delegate-created isolated Git worktree, that it should make changes only in that execution workspace, and that the orchestrator manages merge and cleanup.
 
 When `--forbid-commit` is active, the note also tells the child not to run
-`git commit` because Delegate will fail the run if commits are created.
+`git commit` because Delegate will fail the run if commits remain ahead of the
+creation base at exit.
 
 ## Inspect
 
@@ -81,7 +83,9 @@ delegate worktree show --latest cursor
 
 `workSummary` includes dirty state, changed file count, diff stat, and commits
 created by the child (`commitsCreatedCount` and `commitsCreated`). It is present
-when Delegate can inspect the persistent worktree.
+on `worktree show` and run completion payloads when Delegate can inspect the
+persistent worktree; `worktree list` keeps this deep summary out of overview
+entries for responsiveness.
 
 ### Integration state semantics
 
@@ -90,12 +94,16 @@ Worktree list/show JSON distinguishes branch merge from full integration:
 | Field | Meaning |
 | --- | --- |
 | `branchMergedIntoSource` | Branch tip is an ancestor of current source `HEAD` (Git graph only). |
-| `mergedIntoSource` | Fully integrated: branch merged **and** the worktree has no uncommitted changes. |
+| `mergedIntoSource` | Backward-compatible branch-graph merge state; same meaning as `branchMergedIntoSource`. |
+| `fullyIntegrated` | Branch merged **and** the worktree has no uncommitted changes. |
 | `hasUncommittedChanges` | Same tri-state as `dirty`. |
 | `integrationStatus` | Summary enum such as `fully-integrated`, `branch-merged-worktree-dirty`, `branch-unmerged`, or `branch-unmerged-worktree-dirty`. |
 | `uncommittedChangesIntegrated` | `false` when uncommitted edits remain; `true` when the worktree is clean. |
 
-**Migration note:** Before this correction, `mergedIntoSource` matched the branch-graph check only. Automation that treated `mergedIntoSource: true` as safe to retire must instead require `mergedIntoSource: true` (fully integrated) or inspect `integrationStatus`. Use `branchMergedIntoSource` when you only need the old branch-graph meaning (for example, matching `worktree remove` / `worktree prune --merged` behavior).
+Automation that needs safe retirement should require `fullyIntegrated: true` or
+inspect `integrationStatus`; use `mergedIntoSource` / `branchMergedIntoSource`
+when you only need the branch-graph meaning (for example, matching `worktree
+remove` / `worktree prune --merged` behavior).
 
 When a branch is merged but the worktree still has local edits, `worktree show` keeps review/diff guidance but omits no-op `mergeIntoSource` / `cherryPickRange` suggestions (ahead vs current `HEAD` is zero and remaining work is uncommitted files).
 

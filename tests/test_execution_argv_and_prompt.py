@@ -28,11 +28,21 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
             "droid",
             "safe",
             repo.name,
-            "hello",
-            ["droid", "exec", "--cwd", repo.name, "--model", "model-id", "hello"],
+            "SECRET PROMPT VALUE",
+            [
+                "droid",
+                "exec",
+                "--cwd",
+                repo.name,
+                "--model",
+                "model-id",
+                "SECRET PROMPT VALUE",
+            ],
             "model-id",
         )
-        with mock.patch.dict(os.environ, {"PATH": env_path}):
+        stdout_buf = io.StringIO()
+        stderr_buf = io.StringIO()
+        with mock.patch.dict(os.environ, {"PATH": env_path, "FAKE_ECHO_ARGS": "1"}):
             code, payload = self.delegate.execute_request(
                 request,
                 json_mode=True,
@@ -40,8 +50,8 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
                 pass_through=False,
                 completion_report_mode="markdown",
                 source_workspace=workspace,
-                stdout=io.StringIO(),
-                stderr=io.StringIO(),
+                stdout=stdout_buf,
+                stderr=stderr_buf,
             )
         self.assertEqual(code, 0)
         self.assertIsNotNone(payload)
@@ -50,8 +60,14 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertIn("runId", payload)
         self.assertIn("snapshotCommand", payload)
         self.assertEqual(payload["exitCode"], 0)
+        self.assertGreater(payload["stdoutBytes"], 0)
+        self.assertGreater(payload["stderrBytes"], 0)
         self.assertNotIn("stdout", payload)
         self.assertNotIn("stderr", payload)
+        payload_text = json.dumps(payload)
+        self.assertNotIn("SECRET PROMPT VALUE", payload_text)
+        self.assertNotIn("SECRET PROMPT VALUE", stdout_buf.getvalue())
+        self.assertNotIn("SECRET PROMPT VALUE", stderr_buf.getvalue())
 
     def test_json_failure_shape_with_fake_binary(self):
         repo = make_git_repo()

@@ -95,13 +95,13 @@ _REASONING_EFFORT_OPTION = OptionSpec(
 _PROGRESS_OPTION = OptionSpec(
     "--progress",
     None,
-    "Emit bounded parent progress heartbeats to stderr while preserving final stdout.",
+    "Emit bounded, redacted parent progress heartbeats to stderr while preserving final stdout.",
 )
 _FORBID_COMMIT_OPTION = OptionSpec(
     "--forbid-commit",
     None,
     "Only valid for persistent worktree work runs (--isolation worktree); "
-    "fail if the child creates commits.",
+    "fail if commits remain ahead of the creation base when the child exits.",
 )
 _PROMPT_ARG = ArgSpec(
     "prompt",
@@ -236,6 +236,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "do not contain the prompt.",
             "Safe mode runs in an isolated temporary copy with --permission-mode plan, "
             "--strict-mcp-config, Read/Grep/Glob, and selected read-only Bash tools.",
+            "Claude safe mode is not hermetic: Delegate does not prove hooks, plugins, "
+            "user settings, output styles, or other non-MCP customization surfaces are disabled.",
             "Work mode uses claude.workPermissionMode, unless Delegate policy explicitly "
             "enables harness-scoped bypassApprovalsAndSandbox.",
             "Reasoning effort maps to Claude Code --effort.",

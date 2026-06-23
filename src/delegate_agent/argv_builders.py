@@ -31,8 +31,8 @@ _SAFE_REVIEW_BODY = (
     "Inspect, map, and reason about the workspace. "
     "You may propose patches or commands in text, but do not edit, create, delete, "
     "format, commit, or otherwise mutate files or repo state. "
-    "If a write is blocked, treat that as confirmation of the read-only boundary "
-    "and continue with a text-only report.\n\n"
+    "If a write is blocked, do not retry or work around it; continue with a "
+    "text-only report.\n\n"
 )
 _SAFE_REVIEW_LABEL_BY_ENGINE = {
     "cursor": "Delegate review mode",

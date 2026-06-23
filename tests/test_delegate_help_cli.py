@@ -207,6 +207,13 @@ class HelpSubcommandTests(HelpCliTestBase):
         self.assertIn("--progress", payload["launchOptions"])
         self.assertIn("--forbid-commit", payload["launchOptions"])
 
+    def test_describe_summary_text_renders_without_full_payload_keys(self):
+        code, out, _err = self.run_main(["describe", "--summary", "--redacted"])
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertIn("delegate", out)
+        self.assertIn("launch options:", out)
+        self.assertIn("recommended discovery:", out)
+
 
 class JsonPositionIndependenceTests(HelpCliTestBase):
     """`--json` anywhere in a help invocation yields the same focused help (D3)."""

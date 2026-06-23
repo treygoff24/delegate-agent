@@ -156,20 +156,23 @@ def build_work_summary(
     head_commit = _rev_parse(execution_cwd, "HEAD", warnings)
     source_head = _rev_parse(source_git_root, "HEAD", warnings)
 
-    commits_count = 0
+    commits_count: int | None = None
     commits: list[JsonObject] = []
     branch_ahead_of_base: JsonObject | None = None
     diff_stat_vs_base: JsonObject | None = None
     if base is not None:
-        commits_count = _rev_list_count(execution_cwd, f"{base}..HEAD", warnings) or 0
-        behind_base = _rev_list_count(execution_cwd, f"HEAD..{base}", warnings) or 0
-        branch_ahead_of_base = {
-            "ahead": commits_count,
-            "behind": behind_base,
-            "baseOid": base,
-        }
-        commits = _commits_created(execution_cwd, base, warnings)
+        commits_count = _rev_list_count(execution_cwd, f"{base}..HEAD", warnings)
+        behind_base = _rev_list_count(execution_cwd, f"HEAD..{base}", warnings)
+        if commits_count is not None and behind_base is not None:
+            branch_ahead_of_base = {
+                "ahead": commits_count,
+                "behind": behind_base,
+                "baseOid": base,
+            }
+        if commits_count is not None:
+            commits = _commits_created(execution_cwd, base, warnings)
         diff_stat_vs_base = _diff_shortstat(execution_cwd, base, warnings)
+    commit_inspection_verified = commits_count is not None
 
     branch_ahead_of_source = (
         _ahead_behind(execution_cwd, source_head, "HEAD", warnings) if source_head else None
@@ -182,13 +185,16 @@ def build_work_summary(
         "changedFilesTruncated": changed_total > len(changed_files),
         "commitsCreatedCount": commits_count,
         "commitsCreated": commits,
-        "commitsCreatedTruncated": commits_count > len(commits),
+        "commitsCreatedTruncated": (
+            commits_count > len(commits) if commit_inspection_verified else False
+        ),
+        "commitInspectionStatus": "verified" if commit_inspection_verified else "unverified",
         "baseCommit": base,
         "headCommit": head_commit,
         "sourceHead": source_head,
         "branch": branch,
         "diffStat": _diff_shortstat(execution_cwd, "HEAD", warnings),
-        "noChanges": (not dirty and commits_count == 0),
+        "noChanges": (not dirty and commits_count == 0 if commit_inspection_verified else False),
     }
     if branch_ahead_of_base is not None:
         summary["branchAheadOfBase"] = branch_ahead_of_base
@@ -201,8 +207,8 @@ def build_work_summary(
     return summary
 
 
-def commits_created_count(summary: JsonObject | None) -> int:
+def commits_created_count(summary: JsonObject | None) -> int | None:
     if not isinstance(summary, dict):
-        return 0
+        return None
     count = summary.get("commitsCreatedCount")
-    return count if isinstance(count, int) and count > 0 else 0
+    return count if isinstance(count, int) and count >= 0 else None

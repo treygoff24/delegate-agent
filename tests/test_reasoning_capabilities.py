@@ -177,6 +177,7 @@ class ReasoningCapabilityTests(unittest.TestCase):
                 config={},
             )
         self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
+        self.assertIn("Requested effort: 'max'.", ctx.exception.message)
 
     def test_effort_strings_reject_toml_quoting_hazards(self):
         # Effort values are interpolated into a quoted Codex TOML override, so
@@ -271,7 +272,15 @@ class ReasoningCapabilityTests(unittest.TestCase):
         }
         summaries = build_alias_reasoning_summaries(config, cache=None)
         cursor = summaries["cursor"]["composer-2.5"]
-        self.assertEqual(cursor["supported"], ["high", "low"])
+        self.assertNotIn("supported", cursor)
+        self.assertEqual(cursor["defaultModel"], "composer-2.5")
+        self.assertEqual(
+            cursor["effortModelRouting"],
+            [
+                {"effort": "high", "model": "sonnet-thinking"},
+                {"effort": "low", "model": "gpt-5"},
+            ],
+        )
         self.assertEqual(cursor["source"], "config")
         self.assertEqual(cursor["configDefault"], "high")
 
@@ -295,6 +304,7 @@ class ReasoningCapabilityTests(unittest.TestCase):
         self.assertIn("alias 'glm'", message)
         self.assertIn("harness droid", message)
         self.assertIn("model 'glm-5.1'", message)
+        self.assertIn("Requested effort: 'medium'.", message)
         self.assertIn("Supported values: off, high", message)
         self.assertIn(INSPECT_REASONING_DISCOVERY_HINT, message)
 

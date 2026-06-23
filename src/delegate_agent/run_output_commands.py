@@ -326,7 +326,7 @@ def _add_completion_report_section(
             run_id,
             allow_last_assistant=allow_last_assistant,
         )
-    if text:
+    if text and recovery_quality != "housekeeping_fallback":
         report_meta: JsonObject = {
             "bytes": len(text.encode("utf-8")),
             "source": run_registry.STDOUT_LOG,

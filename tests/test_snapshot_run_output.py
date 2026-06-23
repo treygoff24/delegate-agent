@@ -646,7 +646,7 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
         self.assertEqual(code, self.delegate.EXIT_USAGE)
         self.assertIn("missing_completion_report", stderr.getvalue())
 
-    def test_run_output_completion_report_recovers_droid_interim_message(self):
+    def test_run_output_completion_report_rejects_droid_interim_message(self):
         run_id, alias = self.write_run(harness="droid", status="succeeded", pid=None)
         run_path = self.registry.run_directory(self.registry_root, run_id)
         (run_path / "stdout.log").write_text(
@@ -654,13 +654,13 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
                 {
                     "type": "message",
                     "role": "assistant",
-                    "content": "I am still investigating.",
+                    "content": "I'm still investigating.\n- checking files\n- running tests",
                 }
             )
             + "\n",
             encoding="utf-8",
         )
-        stdout = io.StringIO()
+        stderr = io.StringIO()
         code = self.delegate.main(
             [
                 "--cwd",
@@ -669,14 +669,10 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
                 alias,
                 "--completion-report",
             ],
-            stdout=stdout,
+            stderr=stderr,
         )
-        self.assertEqual(code, 0)
-        output = stdout.getvalue()
-        self.assertIn("I am still investigating.", output)
-        # Text mode must carry an in-band cue that this is a recovered message,
-        # not a child-written completion report.
-        self.assertIn("synthetic", output)
+        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        self.assertIn("missing_completion_report", stderr.getvalue())
 
         json_stdout = io.StringIO()
         code = self.delegate.main(
@@ -690,9 +686,10 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
             ],
             stdout=json_stdout,
         )
-        self.assertEqual(code, 0)
-        report = json.loads(json_stdout.getvalue())["sections"]["completionReport"]
-        self.assertEqual(report["recoveryQuality"], "housekeeping_fallback")
+        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        payload = json.loads(json_stdout.getvalue())
+        self.assertEqual(payload["error"], "missing_completion_report")
+        self.assertEqual(payload["diagnostics"]["recovery"]["quality"], "housekeeping_fallback")
 
     def test_run_output_recovers_substantive_report_over_housekeeping_for_droid(self):
         run_id, alias = self.write_run(harness="droid", status="succeeded", pid=None)
@@ -783,7 +780,7 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
         self.assertIn("delivered the fix", report["content"])
         self.assertNotIn("still investigating", report["content"])
 
-    def test_run_output_marks_housekeeping_only_recovery_quality(self):
+    def test_run_output_default_marks_housekeeping_only_recovery_quality_in_diagnostics(self):
         run_id, alias = self.write_run(harness="droid", status="succeeded", pid=None)
         run_path = self.registry.run_directory(self.registry_root, run_id)
         (run_path / "stdout.log").write_text(
@@ -805,13 +802,16 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
                 str(self.workspace),
                 "run-output",
                 alias,
-                "--completion-report",
             ],
             stdout=stdout,
         )
         self.assertEqual(code, 0)
-        report = json.loads(stdout.getvalue())["sections"]["completionReport"]
-        self.assertEqual(report["recoveryQuality"], "housekeeping_fallback")
+        sections = json.loads(stdout.getvalue())["sections"]
+        self.assertNotIn("completionReport", sections)
+        self.assertIn(
+            "recovery quality: housekeeping_fallback",
+            sections["diagnostics"]["content"],
+        )
 
     def test_run_output_completion_report_codex_never_recovers_interim_message(self):
         run_id, alias = self.write_run(harness="codex", status="succeeded", pid=None)

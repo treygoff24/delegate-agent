@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 from typing import TextIO
 
-from delegate_agent import VERSION, command_help, reasoning
+from delegate_agent import VERSION, command_help, reasoning, redaction
 from delegate_agent import config as delegate_config
 from delegate_agent import rendering as delegate_rendering
 from delegate_agent.argv_builders import (
@@ -58,18 +58,88 @@ def _redacted_config_source(value: str) -> str:
     return _redacted_path(value) if _is_path_like(value) else value
 
 
-def _redact_discovery_value(key: str, value: JsonValue) -> JsonValue:
+MODEL_ID_REASONING_ALIAS_PROVIDERS = frozenset({"codex", "cursor", "claude", "kimi"})
+MODEL_ARG_FLAGS = frozenset({"--model", "-m"})
+MODEL_ARG_INLINE_RE = re.compile(r"^(--model|-m)=(.+)$")
+
+
+def _redact_argv_values(values: list[JsonValue], *, ancestors: tuple[str, ...]) -> list[JsonValue]:
+    redacted: list[JsonValue] = []
+    previous = ""
+    for item in values:
+        if isinstance(item, str):
+            inline_model_arg = MODEL_ARG_INLINE_RE.match(item)
+            if inline_model_arg is not None:
+                redacted.append(f"{inline_model_arg.group(1)}={REDACTED_MODEL_ID}")
+            elif previous in MODEL_ARG_FLAGS:
+                redacted.append(_redacted_model_id(item))
+            else:
+                redacted_item = _redact_discovery_value(
+                    str(len(redacted)), item, ancestors=ancestors
+                )
+                redacted.append(redaction.redact_string(redacted_item))
+        else:
+            redacted_item = _redact_discovery_value(str(len(redacted)), item, ancestors=ancestors)
+            redacted.append(redacted_item)
+        previous = item if isinstance(item, str) else ""
+    return redacted
+
+
+def _reasoning_alias_provider(ancestors: tuple[str, ...]) -> str | None:
+    if len(ancestors) >= 2 and ancestors[0] == "reasoningAliases":
+        provider = ancestors[1]
+        return provider if provider in MODEL_ID_REASONING_ALIAS_PROVIDERS else None
+    return None
+
+
+def _redacted_dict_key(
+    key: str,
+    *,
+    ancestors: tuple[str, ...],
+    existing: dict[str, JsonValue],
+) -> str:
+    provider = _reasoning_alias_provider(ancestors)
+    if provider is None:
+        return key
+    candidate = REDACTED_MODEL_ID
+    if candidate not in existing:
+        return candidate
+    suffix = 2
+    while f"{REDACTED_MODEL_ID}-{suffix}" in existing:
+        suffix += 1
+    return f"{REDACTED_MODEL_ID}-{suffix}"
+
+
+def _redact_discovery_value(
+    key: str,
+    value: JsonValue,
+    *,
+    ancestors: tuple[str, ...] = (),
+) -> JsonValue:
     if isinstance(value, dict):
         if key in {"models", "reasoningEffortModels"} and all(
             isinstance(item, str) for item in value.values()
         ):
             return {str(alias): _redacted_model_id(model) for alias, model in value.items()}
-        return {
-            str(child_key): _redact_discovery_value(str(child_key), child_value)
-            for child_key, child_value in value.items()
-        }
+        redacted_dict: dict[str, JsonValue] = {}
+        next_ancestors = (*ancestors, key) if key else ancestors
+        for child_key, child_value in value.items():
+            child_key_text = str(child_key)
+            redacted_key = _redacted_dict_key(
+                child_key_text,
+                ancestors=next_ancestors,
+                existing=redacted_dict,
+            )
+            redacted_dict[redacted_key] = _redact_discovery_value(
+                child_key_text,
+                child_value,
+                ancestors=next_ancestors,
+            )
+        return redacted_dict
     if isinstance(value, list):
-        return [_redact_discovery_value(key, item) for item in value]
+        if key in {"safe", "work", "argvPrefix"}:
+            return _redact_argv_values(value, ancestors=(*ancestors, key))
+        return [_redact_discovery_value(key, item, ancestors=(*ancestors, key)) for item in value]
     if isinstance(value, str):
         if key in {
             "path",
@@ -87,6 +157,12 @@ def _redact_discovery_value(key: str, value: JsonValue) -> JsonValue:
             return _redacted_path(value)
         if key in {"model", "defaultModel"}:
             return _redacted_model_id(value)
+        if key == "alias" and _reasoning_alias_provider(ancestors) is not None:
+            return _redacted_model_id(value)
+        if key in {"warning", "warnings", "message"}:
+            return _redact_reasoning_warning(value)
+        if _is_path_like(value):
+            return _redacted_path(value)
     return value
 
 
@@ -230,6 +306,24 @@ def _summary_reasoning_fields(
     source = reasoning_payload.get("source")
     if isinstance(source, str):
         output["reasoningCapabilitySource"] = source
+    routing = reasoning_payload.get("effortModelRouting")
+    if isinstance(routing, list):
+        routed: list[JsonObject] = []
+        for item in routing:
+            if not isinstance(item, dict):
+                continue
+            effort = item.get("effort")
+            model = item.get("model")
+            if not isinstance(effort, str) or not effort:
+                continue
+            route: JsonObject = {"effort": effort}
+            if redacted:
+                route["modelConfigured"] = isinstance(model, str) and bool(model)
+            else:
+                route["model"] = model if isinstance(model, str) and model else None
+            routed.append(route)
+        if routed:
+            output["reasoningEffortRouting"] = routed
     warning = reasoning_payload.get("warning")
     if isinstance(warning, str):
         output["warnings"] = _warning_field(warning, redacted=redacted)
@@ -249,6 +343,32 @@ def _redact_reasoning_warning(warning: str) -> str:
 
 def _warning_field(warning: str, *, redacted: bool) -> list[str]:
     return [_redact_reasoning_warning(warning) if redacted else warning]
+
+
+def _redacted_text_model_label(value: object) -> str:
+    return REDACTED_MODEL_ID if isinstance(value, str) and bool(value) else "(none)"
+
+
+def _text_model_label(value: object, *, redacted: bool) -> str:
+    if redacted:
+        return _redacted_text_model_label(value)
+    return value if isinstance(value, str) and value else "(none)"
+
+
+def _text_path_label(value: object, *, redacted: bool) -> str:
+    if not isinstance(value, str) or not value:
+        return "(none)"
+    if redacted and _is_path_like(value):
+        return REDACTED_PATH
+    return value
+
+
+def _text_argv_prefix_label(value: object, *, redacted: bool) -> str:
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        return "(none)"
+    if redacted:
+        return "<redacted-argv-prefix>" if value else "(none)"
+    return " ".join(value)
 
 
 def models_summary_payload(
@@ -582,6 +702,7 @@ def describe_payload(
                     "Runs in an isolated temporary workspace (detached git worktree or directory copy).",
                     "Uses Claude Code -p with --permission-mode plan, --strict-mcp-config, Read/Grep/Glob, and selected read-only Bash tools.",
                     "Prompt is delivered on stdin; dry-run argv and manifests do not contain the prompt.",
+                    "Delegate does not prove Claude hooks, plugins, or user settings are disabled; keep safe-mode work review-only.",
                 ],
                 "work": claude_work_argv,
                 "workNotes": [
@@ -698,47 +819,50 @@ def emit_models(
         return EXIT_OK
     if config_source == "embedded-default":
         print("warning: using embedded default config", file=stdout)
+    cursor = config["cursor"]
     print(
-        f"cursor: {config['cursor']['defaultModel']} ({' '.join(config['cursor']['argvPrefix'])})",
+        "cursor: "
+        f"{_text_model_label(cursor.get('defaultModel'), redacted=redacted)} "
+        f"({_text_argv_prefix_label(cursor.get('argvPrefix'), redacted=redacted)})",
         file=stdout,
     )
     print("droid:", file=stdout)
     for alias, model_id in sorted(config["droid"]["models"].items()):
-        print(f"  {alias} -> {model_id}", file=stdout)
+        print(f"  {alias} -> {_text_model_label(model_id, redacted=redacted)}", file=stdout)
     codex = config["codex"]
-    default_model = codex.get("defaultModel")
-    model_label = default_model if isinstance(default_model, str) and default_model else "(none)"
     profile = codex.get("profile")
-    profile_label = profile if isinstance(profile, str) and profile else "(none)"
+    if redacted and isinstance(profile, str) and profile:
+        profile_label = "<redacted-profile>"
+    elif isinstance(profile, str) and profile:
+        profile_label = profile
+    else:
+        profile_label = "(none)"
     print(
-        f"codex: binary={codex['binary']} defaultModel={model_label} profile={profile_label}",
+        "codex: "
+        f"binary={_text_path_label(codex.get('binary'), redacted=redacted)} "
+        f"defaultModel={_text_model_label(codex.get('defaultModel'), redacted=redacted)} "
+        f"profile={profile_label}",
         file=stdout,
     )
     claude = config["claude"]
-    claude_default_model = claude.get("defaultModel")
-    claude_model_label = (
-        claude_default_model
-        if isinstance(claude_default_model, str) and claude_default_model
-        else "(none)"
-    )
     print(
         "claude: "
-        f"binary={claude['binary']} defaultModel={claude_model_label} "
+        f"binary={_text_path_label(claude.get('binary'), redacted=redacted)} "
+        f"defaultModel={_text_model_label(claude.get('defaultModel'), redacted=redacted)} "
         f"workPermissionMode={claude['workPermissionMode']}",
         file=stdout,
     )
     kimi = config["kimi"]
-    kimi_default_model = kimi.get("defaultModel")
-    kimi_model_label = (
-        kimi_default_model
-        if isinstance(kimi_default_model, str) and kimi_default_model
-        else "(none)"
-    )
     print(
-        f"kimi: binary={kimi['binary']} defaultModel={kimi_model_label}",
+        "kimi: "
+        f"binary={_text_path_label(kimi.get('binary'), redacted=redacted)} "
+        f"defaultModel={_text_model_label(kimi.get('defaultModel'), redacted=redacted)}",
         file=stdout,
     )
-    print(f"runtime: {runtime_payload()['modulePath']}", file=stdout)
+    print(
+        f"runtime: {_text_path_label(runtime_payload()['modulePath'], redacted=redacted)}",
+        file=stdout,
+    )
     return EXIT_OK
 
 
@@ -762,6 +886,16 @@ def emit_describe(
         payload["redacted"] = True
     if json_mode:
         delegate_rendering.print_json(payload, stdout)
+        return EXIT_OK
+    if summary:
+        print(f"delegate {payload['version']} summary", file=stdout)
+        print(f"config: {payload['configSource']}", file=stdout)
+        print(f"engines: {', '.join(payload['engines'])}", file=stdout)
+        print(f"modes: {', '.join(payload['modes'])}", file=stdout)
+        print(f"launch options: {', '.join(payload['launchOptions'])}", file=stdout)
+        print("recommended discovery:", file=stdout)
+        for command in payload["recommendedDiscovery"]:
+            print(f"  {command}", file=stdout)
         return EXIT_OK
     print(f"delegate {VERSION}", file=stdout)
     print(f"config: {payload['configPath']} ({payload['configSource']})", file=stdout)
@@ -824,6 +958,8 @@ Claude:
   - Uses Claude Code headless mode: claude -p with prompt delivered on stdin.
   - Safe mode runs in an isolated temporary workspace with --permission-mode plan,
     --strict-mcp-config, Read/Grep/Glob, and selected read-only Bash tools.
+    Delegate does not currently prove that Claude Code hooks, plugins, user
+    settings, or other non-MCP customization surfaces are disabled.
   - Work mode uses claude.workPermissionMode, or bypassPermissions only when
     Delegate policy explicitly enables policy.harness.claude.work.bypassApprovalsAndSandbox.
   - Reasoning effort maps to Claude Code --effort (low, medium, high, xhigh, max).
@@ -846,7 +982,7 @@ Rules for agents:
   - Always review diffs after work mode when Git is available; outside Git, manually review changed files.
   - Do not use delegate for production deploys or repository publishing unless the operator explicitly asks.
   - Launch normally; do not pipe delegate launches through tail just to suppress noise.
-  - For long tracked foreground runs, add --progress before prompt text to get bounded stderr heartbeats.
+  - For long tracked foreground runs, add --progress before prompt text to get bounded, redacted stderr heartbeats.
   - After a tracked run, use delegate snapshot/runs/run-output; do not tail launch output or .delegate log files.
   - Default output is bounded; use --pass-through only when raw harness streaming is required.
   - If you intentionally pipe delegate output in a shell script, use set -o pipefail.

@@ -100,6 +100,14 @@ REDACT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 PEM_BLOCK_PLACEHOLDER = "***PRIVATE KEY REDACTED***"
 _PEM_BEGIN = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")
 _PEM_END = re.compile(r"-----END [A-Z0-9 ]*PRIVATE KEY-----")
+_PROGRESS_PATH_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(
+        r"(?<![A-Za-z0-9+.-]:)/(?:Users|private|tmp|var|Volumes|home|opt|etc|"
+        r"Applications|Library|root|mnt|workspace|workspaces|srv|usr)(?:/[^\s\"'`<>|;,)]+)*"
+    ),
+    re.compile(r"(?<!\S)~(?:/[^\s\"'`<>|;,)]+)+"),
+    re.compile(r"\b[A-Za-z]:\\[^\s\"'`<>|;,)]+"),
+]
 
 
 def _redact_pem_blocks(value: str) -> str:
@@ -124,6 +132,13 @@ def redact_string(value: str) -> str:
     redacted = _redact_pem_blocks(value)
     for pattern, replacement in REDACT_PATTERNS:
         redacted = pattern.sub(replacement, redacted)
+    return redacted
+
+
+def redact_progress_label(value: str) -> str:
+    redacted = redact_string(value)
+    for pattern in _PROGRESS_PATH_PATTERNS:
+        redacted = pattern.sub("<redacted-path>", redacted)
     return redacted
 
 

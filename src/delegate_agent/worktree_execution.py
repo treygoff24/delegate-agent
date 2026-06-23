@@ -416,7 +416,8 @@ def _persistent_prompt(prompt: str, *, forbid_commit: bool) -> str:
     return (
         "Delegate commit policy: --forbid-commit is active for this run. "
         "Do not run `git commit` or create commits. Leave file changes uncommitted; "
-        "Delegate will mark the run failed if new commits exist when the child exits.\n\n"
+        "Delegate will mark the run failed if commits remain ahead of the creation base "
+        "when the child exits.\n\n"
         f"{prompt}"
     )
 

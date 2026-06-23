@@ -326,7 +326,7 @@ def render_worktree_list_text(payload: JsonObject, stdout: TextIO) -> None:
                 if branch_merged_value is False
                 else "-"
             )
-            integrated_value = entry.get("mergedIntoSource")
+            integrated_value = entry.get("fullyIntegrated")
             integrated = (
                 "yes" if integrated_value is True else "no" if integrated_value is False else "-"
             )
@@ -402,9 +402,10 @@ def render_worktree_show_text(payload: JsonObject, stdout: TextIO) -> None:
     # Dirty flag (tri-state: yes / no / unknown)
     _render_tri_state_flag("dirty", payload.get("dirty"), stdout)
 
-    # Branch merge vs full integration (tri-state each).
+    # Backward-compatible branch merge flag, followed by more explicit integration fields.
+    _render_tri_state_flag("merged", payload.get("mergedIntoSource"), stdout)
     _render_tri_state_flag("branch merged", payload.get("branchMergedIntoSource"), stdout)
-    _render_tri_state_flag("fully integrated", payload.get("mergedIntoSource"), stdout)
+    _render_tri_state_flag("fully integrated", payload.get("fullyIntegrated"), stdout)
     integration_status = payload.get("integrationStatus")
     if isinstance(integration_status, str) and integration_status:
         print(f"integration status: {integration_status}", file=stdout)

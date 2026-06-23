@@ -7,6 +7,8 @@ from unittest import mock
 
 from tests.execution_test_base import ExecutionTestBase, safe_temp_dirs
 
+from delegate_agent import worktree_summary
+
 
 class ExecutionWorktreeRunTests(ExecutionTestBase):
     # -- Persistent worktree: cursor work runs in isolated worktree -----------
@@ -682,6 +684,82 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             self.assertEqual(payload["commitPolicy"]["commitsCreatedCount"], 1)
             self.assertEqual(payload["childExitCode"], 0)
             self.assertEqual(payload["workSummary"]["commitsCreatedCount"], 1)
+
+    def test_forbid_commit_fails_closed_when_commit_inspection_unverified(self):
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            mock.patch.dict(os.environ, {"HOME": fake_home}),
+        ):
+            repo, _git_cd = self._make_git_repo_with_commit()
+            fake_bin = self.make_cursor_safe_fake_agent()
+            workspace = self.delegate.resolve_workspace(repo.name)
+            request = self._make_persistent_worktree_request(
+                "cursor",
+                "work",
+                repo.name,
+                self.delegate.DEFAULT_CONFIG,
+            )
+            request = self.delegate.Request(
+                request.engine,
+                request.mode,
+                request.workspace,
+                request.prompt,
+                [
+                    str(fake_bin / "agent"),
+                    "--workspace",
+                    repo.name,
+                    "-p",
+                    "--trust",
+                    "--model",
+                    "composer-2.5",
+                    "--output-format",
+                    "text",
+                    "hello",
+                ],
+                request.model,
+                dry_run=False,
+                workspace_kind=request.workspace_kind,
+                isolation_context=request.isolation_context,
+                forbid_commit=True,
+            )
+            original_run_git = worktree_summary.run_git
+
+            def fail_commit_count(cwd, args, *, timeout_seconds):
+                if args[:2] == ["rev-list", "--count"]:
+                    return subprocess.CompletedProcess(
+                        ["git", "-C", cwd, *args],
+                        128,
+                        "",
+                        "fatal: not a git repository",
+                    )
+                return original_run_git(cwd, args, timeout_seconds=timeout_seconds)
+
+            with (
+                mock.patch.dict(
+                    os.environ, {"PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", "")}
+                ),
+                mock.patch.object(worktree_summary, "run_git", fail_commit_count),
+            ):
+                code, payload = self.delegate.execute_request(
+                    request,
+                    json_mode=True,
+                    config=self.delegate.DEFAULT_CONFIG,
+                    pass_through=False,
+                    completion_report_mode="none",
+                    source_workspace=workspace,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+
+            self.assertEqual(code, 1)
+            self.assertIsNotNone(payload)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["error"], "commit_policy_unverified")
+            self.assertTrue(payload["commitPolicyUnverified"])
+            self.assertFalse(payload["commitPolicy"]["verified"])
+            self.assertIsNone(payload["commitPolicy"]["commitsCreatedCount"])
+            self.assertEqual(payload["childExitCode"], 0)
+            self.assertEqual(payload["workSummary"]["commitInspectionStatus"], "unverified")
 
     def test_child_commits_without_forbid_commit_surface_warning(self):
         with (

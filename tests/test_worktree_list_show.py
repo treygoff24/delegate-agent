@@ -325,7 +325,7 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
                 payload["nextActions"],
                 ["delegate worktree show cursor-worktree"],
             )
-            self.assertEqual(payload["listCommand"], "python3 bin/delegate.py worktree list")
+            self.assertEqual(payload["listCommand"], "delegate worktree list")
             self.assertNotIn("cursor, ", payload["message"])
 
     def test_worktree_show_text_render_order(self):
@@ -361,6 +361,7 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
                 "dirty": True,
                 "branchMergedIntoSource": False,
                 "mergedIntoSource": False,
+                "fullyIntegrated": False,
                 "integrationStatus": "branch-unmerged-worktree-dirty",
                 "aheadBehind": {
                     "vsCreationBase": {"ahead": 3, "behind": 0, "baseOid": base_oid},
@@ -382,6 +383,7 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
             # Assert ordering per spec L621.
             idx_creation = lines.find("created from")
             idx_dirty = lines.find("dirty: yes")
+            idx_merged = lines.find("merged: no")
             idx_branch_merged = lines.find("branch merged: no")
             idx_fully_integrated = lines.find("fully integrated: no")
             idx_integration_status = lines.find("integration status:")
@@ -392,6 +394,7 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
 
             self.assertGreater(idx_creation, -1, "creation-context line missing")
             self.assertGreater(idx_dirty, -1, "dirty line missing")
+            self.assertGreater(idx_merged, -1, "legacy merged line missing")
             self.assertGreater(idx_branch_merged, -1, "branch merged line missing")
             self.assertGreater(idx_fully_integrated, -1, "fully integrated line missing")
             self.assertGreater(idx_integration_status, -1, "integration status line missing")
@@ -402,7 +405,8 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
 
             # Assert each section appears after the previous one.
             self.assertLess(idx_creation, idx_dirty)
-            self.assertLess(idx_dirty, idx_branch_merged)
+            self.assertLess(idx_dirty, idx_merged)
+            self.assertLess(idx_merged, idx_branch_merged)
             self.assertLess(idx_branch_merged, idx_fully_integrated)
             self.assertLess(idx_fully_integrated, idx_integration_status)
             self.assertLess(idx_integration_status, idx_ahead)
@@ -474,7 +478,8 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
             )
 
             self.assertTrue(payload["branchMergedIntoSource"])
-            self.assertFalse(payload["mergedIntoSource"])
+            self.assertTrue(payload["mergedIntoSource"])
+            self.assertFalse(payload["fullyIntegrated"])
             self.assertTrue(payload["hasUncommittedChanges"])
             self.assertFalse(payload["uncommittedChangesIntegrated"])
             self.assertEqual(payload["integrationStatus"], "branch-merged-worktree-dirty")
@@ -510,9 +515,13 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
 
             self.assertTrue(payload["branchMergedIntoSource"])
             self.assertTrue(payload["mergedIntoSource"])
+            self.assertTrue(payload["fullyIntegrated"])
             self.assertFalse(payload["hasUncommittedChanges"])
             self.assertTrue(payload["uncommittedChangesIntegrated"])
             self.assertEqual(payload["integrationStatus"], "fully-integrated")
+            commands = payload["suggestedCommands"]
+            self.assertIsNone(commands["mergeIntoSource"])
+            self.assertIsNone(commands["cherryPickRange"])
 
     def test_list_entry_exposes_branch_and_full_integration_fields(self):
         _repo, path = self._make_repo()
@@ -536,8 +545,64 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
 
             self.assertFalse(entry["branchMergedIntoSource"])
             self.assertFalse(entry["mergedIntoSource"])
+            self.assertFalse(entry["fullyIntegrated"])
             self.assertTrue(entry["hasUncommittedChanges"])
             self.assertEqual(entry["integrationStatus"], "branch-unmerged-worktree-dirty")
+
+    def test_branch_unmerged_clean_worktree_reports_review_ready_state(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            base_oid = git("rev-parse", "HEAD", cwd=path).stdout.strip()
+            branch = "delegate/cursor-unmerged-clean"
+            wt_path = str(Path(fake_home) / "wt" / "cursor-unmerged-clean")
+            self._seed_persistent_run(
+                path,
+                alias="cursor-unmerged-clean",
+                branch=branch,
+                execution_cwd=wt_path,
+                creation_oid=base_oid,
+            )
+            self._create_worktree_at(path, branch, wt_path)
+            (Path(wt_path) / "feature.txt").write_text("feature\n", encoding="utf-8")
+            git("add", "feature.txt", cwd=wt_path)
+            git("commit", "-m", "feature", cwd=wt_path)
+
+            payload = self.delegate.worktree_mgmt.show_worktree(
+                self._registry_root(path),
+                handle="cursor-unmerged-clean",
+            )
+
+            self.assertFalse(payload["branchMergedIntoSource"])
+            self.assertFalse(payload["mergedIntoSource"])
+            self.assertFalse(payload["fullyIntegrated"])
+            self.assertFalse(payload["hasUncommittedChanges"])
+            self.assertTrue(payload["uncommittedChangesIntegrated"])
+            self.assertEqual(payload["integrationStatus"], "branch-unmerged")
+            self.assertIsNotNone(payload["suggestedCommands"]["mergeIntoSource"])
+            self.assertIsNotNone(payload["suggestedCommands"]["cherryPickRange"])
+
+    def test_worktree_list_does_not_build_deep_work_summaries(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            branch = "delegate/cursor-list-light"
+            wt_path = str(Path(fake_home) / "wt" / "cursor-list-light")
+            self._seed_persistent_run(
+                path,
+                alias="cursor-list-light",
+                branch=branch,
+                execution_cwd=wt_path,
+            )
+            self._create_worktree_at(path, branch, wt_path)
+
+            with mock.patch.object(
+                self.delegate.worktree_mgmt.worktree_summary,
+                "build_work_summary",
+            ) as summary_mock:
+                result = self.delegate.worktree_mgmt.list_worktrees(self._registry_root(path))
+
+            self.assertEqual(len(result["entries"]), 1)
+            self.assertNotIn("workSummary", result["entries"][0])
+            summary_mock.assert_not_called()
 
 
 if __name__ == "__main__":
