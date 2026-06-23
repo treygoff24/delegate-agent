@@ -998,17 +998,17 @@ class RunnerCaptureTests(unittest.TestCase):
     def test_progress_current_label_redacts_absolute_paths(self):
         accumulator = self.runner.harness_events.StreamAccumulator()
         accumulator.current = (
-            "Bash cat /Users/treygoff/Code/client/.env /root/.ssh/id_rsa "
-            "/workspace/client/.env /mnt/c/Users/trey/.env /app/x /nix/store/x"
+            "Bash cat /Users/alice/Code/client/.env /root/.ssh/id_rsa "
+            "/workspace/client/.env /mnt/c/Users/dev/.env /app/x /nix/store/x"
         )
 
         label = self.runner._progress_current_label(accumulator)
 
         self.assertIn("<redacted-path>", label)
-        self.assertNotIn("/Users/treygoff/Code/client/.env", label)
+        self.assertNotIn("/Users/alice/Code/client/.env", label)
         self.assertNotIn("/root/.ssh/id_rsa", label)
         self.assertNotIn("/workspace/client/.env", label)
-        self.assertNotIn("/mnt/c/Users/trey/.env", label)
+        self.assertNotIn("/mnt/c/Users/dev/.env", label)
         self.assertNotIn("/app/x", label)
         self.assertNotIn("/nix/store/x", label)
 
