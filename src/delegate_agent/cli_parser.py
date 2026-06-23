@@ -746,6 +746,7 @@ def parse_run_output(rest: list[str], json_mode: bool, cwd: str | None) -> Parse
     stdout_flag = False
     stderr_flag = False
     tail: int | None = None
+    max_chars: int | None = None
     raw = False
     no_redact = False
     i = 1
@@ -781,6 +782,16 @@ def parse_run_output(rest: list[str], json_mode: bool, cwd: str | None) -> Parse
                 missing_value_description="a line count",
             )
             continue
+        if token == "--max-chars":
+            max_chars, i = parse_required_positive_int_option(
+                rest,
+                i,
+                option_label="run-output --max-chars",
+                missing_error="missing_max_chars",
+                invalid_error="invalid_max_chars",
+                missing_value_description="a positive integer",
+            )
+            continue
         raise DelegateError("unknown_option", f"run-output does not support option: {token}")
     default_output = not (completion_report or stdout_flag or stderr_flag or raw)
     if default_output:
@@ -789,6 +800,11 @@ def parse_run_output(rest: list[str], json_mode: bool, cwd: str | None) -> Parse
         raise DelegateError(
             "invalid_option_combination",
             "run-output --raw cannot be combined with --tail.",
+        )
+    if raw and max_chars is not None:
+        raise DelegateError(
+            "invalid_option_combination",
+            "run-output --raw cannot be combined with --max-chars.",
         )
     if (stdout_flag or stderr_flag) and not raw and tail is None:
         tail = RUN_OUTPUT_DEFAULT_TAIL_LINES
@@ -802,6 +818,7 @@ def parse_run_output(rest: list[str], json_mode: bool, cwd: str | None) -> Parse
             stdout=stdout_flag,
             stderr=stderr_flag,
             tail=tail,
+            max_chars=max_chars,
             raw=raw,
             no_redact=no_redact,
             default=default_output,

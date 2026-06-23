@@ -344,7 +344,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         summary="Inspect a tracked run's completion report or captured stdout/stderr.",
         usage=(
             "delegate [--json] run-output <alias-or-runId> "
-            "[--completion-report] [--stdout] [--stderr] [--tail N] [--raw] [--no-redact]",
+            "[--completion-report] [--stdout] [--stderr] [--tail N] [--max-chars N] "
+            "[--raw] [--no-redact]",
         ),
         arguments=(ArgSpec("<alias-or-runId>", True, "Run handle to inspect."),),
         options=(
@@ -353,7 +354,16 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             OptionSpec("--stderr", None, "Print captured stderr (defaults to --tail 80)."),
             OptionSpec("--tail", "N", "Print only the last N lines of the selected stream."),
             OptionSpec(
-                "--raw", None, "Print the full stream unbounded (incompatible with --tail)."
+                "--max-chars",
+                "N",
+                "Cap non-raw stdout/stderr output to the last N characters after tailing "
+                "(default 60000; incompatible with --raw).",
+            ),
+            OptionSpec(
+                "--raw",
+                None,
+                "Print the full stream unbounded (incompatible with --tail and --max-chars; "
+                "may be very large).",
             ),
             OptionSpec("--no-redact", None, "Do not redact secrets in the output."),
         ),
@@ -361,10 +371,13 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "delegate run-output cursor",
             "delegate run-output cursor --completion-report",
             "delegate run-output cursor --stderr --tail 100",
+            "delegate run-output cursor --stdout --max-chars 20000",
         ),
         notes=(
             "With no selector, prints the best available parent-facing output.",
             "Prefer this over piping launch output through tail.",
+            "Non-raw stdout/stderr are bounded by line tail and character cap; use --raw only "
+            "when you intentionally need the full stream.",
         ),
         see_also=("snapshot", "runs"),
     ),
@@ -726,7 +739,8 @@ def render_overview_text() -> str:
         "delegate [--cwd PATH] [--json] runs "
         "[--active|--running|--stale|--recent] [--harness HARNESS] [--limit N]",
         "delegate [--cwd PATH] [--json] run-output <alias-or-runId> "
-        "[--completion-report] [--stdout] [--stderr] [--tail N] [--raw] [--no-redact]",
+        "[--completion-report] [--stdout] [--stderr] [--tail N] [--max-chars N] "
+        "[--raw] [--no-redact]",
         "delegate [--cwd PATH] [--json] worktree list "
         "[--harness HARNESS] [--status STATUS] [--limit N] [--no-auto-prune]",
         "delegate [--cwd PATH] [--json] worktree show <alias-or-runId>",

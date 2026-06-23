@@ -285,6 +285,28 @@ class RegressionGuardTests(HelpCliTestBase):
                 self.assertTrue(parsed.global_options.json_mode)
 
 
+class RunOutputHelpTests(HelpCliTestBase):
+    """run-output help documents bounded output and raw incompatibilities."""
+
+    def test_run_output_help_mentions_max_chars_and_raw_limits(self):
+        code, out, _err = self.run_main(["run-output", "--help"])
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertIn("--max-chars", out)
+        self.assertIn("60000", out)
+        self.assertIn("--raw", out)
+        self.assertIn("--tail", out)
+        self.assertIn("incompatible", out.lower())
+
+    def test_run_output_json_help_documents_max_chars(self):
+        code, out, _err = self.run_main(["--json", "run-output", "--help"])
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        payload = json.loads(out)
+        flags = {opt["flag"] for opt in payload["options"]}
+        self.assertIn("--max-chars", flags)
+        raw_option = next(opt for opt in payload["options"] if opt["flag"] == "--raw")
+        self.assertIn("--max-chars", raw_option["description"])
+
+
 class UnknownTopicTests(HelpCliTestBase):
     """Unknown help topics error cleanly with exit 2 (m3)."""
 

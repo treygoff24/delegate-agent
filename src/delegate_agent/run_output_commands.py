@@ -6,10 +6,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, TextIO
 
-from delegate_agent import command_errors, harness_events, redaction, run_registry
+from delegate_agent import command_errors, harness_events, log_output, redaction, run_registry
 from delegate_agent import rendering as delegate_rendering
 from delegate_agent import retention as delegate_retention
 from delegate_agent.json_types import JsonObject
+from delegate_agent.log_output import RUN_OUTPUT_DEFAULT_MAX_CHARS
 
 RECOVERY_STDOUT_TAIL_LINES = 2000
 RECOVERY_STDOUT_TAIL_BYTES = 1_000_000
@@ -26,6 +27,7 @@ class RunOutputCommand:
     stdout: bool = False
     stderr: bool = False
     tail: int | None = None
+    max_chars: int | None = None
     raw: bool = False
     no_redact: bool = False
     default: bool = False
@@ -45,6 +47,12 @@ class RunOutputError(command_errors.CommandError):
         self.next_actions = next_actions
 
 
+def _effective_max_chars(command: RunOutputCommand) -> int | None:
+    if command.raw:
+        return None
+    return command.max_chars if command.max_chars is not None else RUN_OUTPUT_DEFAULT_MAX_CHARS
+
+
 def _add_log_output_section(
     *,
     registry_root: Path,
@@ -53,6 +61,7 @@ def _add_log_output_section(
     section_name: str,
     tail: int | None,
     raw: bool,
+    max_chars: int | None,
     sections: JsonObject,
     text_sections: dict[str, str],
 ) -> None:
@@ -63,6 +72,7 @@ def _add_log_output_section(
         tail=tail,
         raw=raw,
     )
+    content = output.content
     meta: JsonObject = {
         "bytes": delegate_retention.log_file_byte_size(registry_root, run_id, log_name),
         "truncated": output.truncated,
@@ -70,8 +80,15 @@ def _add_log_output_section(
     }
     if tail is not None and not raw:
         meta["tailLines"] = tail
+    if max_chars is not None:
+        capped = log_output.cap_content_by_chars(content, max_chars)
+        content = capped.content
+        meta["maxChars"] = max_chars
+        meta["charTruncated"] = capped.char_truncated
+        meta["returnedChars"] = capped.returned_chars
+        meta["omittedChars"] = capped.omitted_chars
     sections[section_name] = meta
-    text_sections[section_name] = output.content
+    text_sections[section_name] = content
 
 
 def _decode_recovery_tail(data: bytes, *, truncated: bool) -> tuple[str, bool]:
@@ -261,6 +278,7 @@ def _add_default_run_output_fallback(
             section_name=section_name,
             tail=RUN_OUTPUT_DEFAULT_TAIL_LINES,
             raw=False,
+            max_chars=RUN_OUTPUT_DEFAULT_MAX_CHARS,
             sections=sections,
             text_sections=text_sections,
         )
@@ -441,6 +459,7 @@ def emit(command: RunOutputCommand, *, workspace_path: str, stdout: TextIO) -> i
         sections=sections,
         text_sections=text_sections,
     )
+    max_chars = _effective_max_chars(command)
     try:
         if command.stdout or command.raw:
             _add_log_output_section(
@@ -450,6 +469,7 @@ def emit(command: RunOutputCommand, *, workspace_path: str, stdout: TextIO) -> i
                 section_name="stdout",
                 tail=command.tail,
                 raw=command.raw,
+                max_chars=None if command.raw else max_chars,
                 sections=sections,
                 text_sections=text_sections,
             )
@@ -461,6 +481,7 @@ def emit(command: RunOutputCommand, *, workspace_path: str, stdout: TextIO) -> i
                 section_name="stderr",
                 tail=command.tail,
                 raw=command.raw,
+                max_chars=None if command.raw else max_chars,
                 sections=sections,
                 text_sections=text_sections,
             )

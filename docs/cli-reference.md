@@ -238,7 +238,7 @@ Tracked runs return bounded parent-facing output and store local metadata under 
 ```bash
 delegate runs [--active|--running|--stale|--recent] [--harness HARNESS] [--limit N]
 delegate snapshot [--latest HARNESS] [--no-redact] <alias-or-runId>
-delegate run-output <alias-or-runId> [--completion-report] [--stdout] [--stderr] [--tail N] [--raw] [--no-redact]
+delegate run-output <alias-or-runId> [--completion-report] [--stdout] [--stderr] [--tail N] [--max-chars N] [--raw] [--no-redact]
 ```
 
 `delegate runs` defaults to recent runs. `--active` preserves the legacy active view and includes both live `running` runs and `stale` runs. Use `--running` for only live tracked processes and `--stale` for runs recorded as running whose PID is missing or dead. `--active`, `--running`, `--stale`, and `--recent` are mutually exclusive.
@@ -281,8 +281,9 @@ With no selector, `run-output` prints the best available parent-facing output:
 `completion-report.md` when present, a recovered final assistant message when
 possible, otherwise bounded stdout/stderr tails plus diagnostics. Explicit
 selectors are preserved. `--stdout` or `--stderr` without `--tail` or `--raw`
-defaults to a bounded `--tail 80`; use `--raw` only when you intentionally need
-the full stream.
+defaults to a bounded `--tail 80` and a character cap (default 60000); use
+`--max-chars N` to override the cap. `--raw` returns the full stream with no
+line or character bounds and cannot be combined with `--tail` or `--max-chars`.
 
 When `completion-report.md` is absent, `run-output --completion-report` makes a
 bounded best-effort attempt to recover an explicit final response from the

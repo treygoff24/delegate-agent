@@ -1126,6 +1126,84 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
         self.assertNotIn("line0", output)
         self.assertIn("line80", output)
 
+    def test_run_output_huge_single_line_tail_is_char_capped_at_end(self):
+        from delegate_agent.log_output import RUN_OUTPUT_DEFAULT_MAX_CHARS
+
+        run_id, alias = self.write_run()
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        prefix = "START-"
+        suffix = "-END"
+        filler_len = RUN_OUTPUT_DEFAULT_MAX_CHARS + 5000
+        (run_path / "stdout.log").write_text(
+            prefix + ("x" * filler_len) + suffix + "\n",
+            encoding="utf-8",
+        )
+        stdout = io.StringIO()
+        code = self.delegate.main(
+            [
+                "--json",
+                "--cwd",
+                str(self.workspace),
+                "run-output",
+                alias,
+                "--stdout",
+                "--tail",
+                "1",
+            ],
+            stdout=stdout,
+        )
+        self.assertEqual(code, 0)
+        section = json.loads(stdout.getvalue())["sections"]["stdout"]
+        self.assertTrue(section["charTruncated"])
+        self.assertEqual(section["maxChars"], RUN_OUTPUT_DEFAULT_MAX_CHARS)
+        self.assertEqual(section["returnedChars"], RUN_OUTPUT_DEFAULT_MAX_CHARS)
+        self.assertGreater(section["omittedChars"], 0)
+        self.assertNotIn("START-", section["content"])
+        self.assertIn(suffix, section["content"])
+
+    def test_run_output_max_chars_override(self):
+        run_id, alias = self.write_run()
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        (run_path / "stdout.log").write_text(("y" * 500) + "\n", encoding="utf-8")
+        stdout = io.StringIO()
+        code = self.delegate.main(
+            [
+                "--json",
+                "--cwd",
+                str(self.workspace),
+                "run-output",
+                alias,
+                "--stdout",
+                "--tail",
+                "1",
+                "--max-chars",
+                "100",
+            ],
+            stdout=stdout,
+        )
+        self.assertEqual(code, 0)
+        section = json.loads(stdout.getvalue())["sections"]["stdout"]
+        self.assertTrue(section["charTruncated"])
+        self.assertEqual(section["maxChars"], 100)
+        self.assertEqual(section["returnedChars"], 100)
+        self.assertEqual(section["omittedChars"], 401)
+        self.assertEqual(len(section["content"]), 100)
+
+    def test_run_output_raw_stdout_has_no_char_cap_metadata(self):
+        run_id, alias = self.write_run()
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        (run_path / "stdout.log").write_text(("z" * 100_000) + "\n", encoding="utf-8")
+        stdout = io.StringIO()
+        code = self.delegate.main(
+            ["--json", "--cwd", str(self.workspace), "run-output", alias, "--raw"],
+            stdout=stdout,
+        )
+        self.assertEqual(code, 0)
+        section = json.loads(stdout.getvalue())["sections"]["stdout"]
+        self.assertNotIn("maxChars", section)
+        self.assertNotIn("charTruncated", section)
+        self.assertEqual(len(section["content"]), 100_001)
+
 
 if __name__ == "__main__":
     unittest.main()
