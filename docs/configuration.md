@@ -307,3 +307,23 @@ Embedded defaults:
 - `autoPrune.mergedOlderThanDays`: non-negative integer.
 
 See [Worktrees](worktrees.md) for lifecycle details.
+
+### `progress`
+
+```json
+{
+  "progress": {
+    "enabled": false,
+    "initialDelaySec": 30,
+    "intervalSec": 60
+  }
+}
+```
+
+Controls parent progress heartbeats for tracked foreground runs. Heartbeats are written to stderr so `--json` stdout stays machine-readable.
+
+- `enabled`: must be a boolean. When `true`, tracked foreground runs emit heartbeats unless a launch passes `--no-progress`. When `false` (the default), runs are silent unless a launch passes `--progress`. The per-launch flag always wins over config.
+- `initialDelaySec`: delay before the first heartbeat. Must be a positive, finite number. Default `30`.
+- `intervalSec`: spacing between subsequent heartbeats. Must be a positive, finite number. Default `60`.
+
+Timing resolves as environment override, then config, then embedded default. Non-positive, non-finite, or non-numeric `initialDelaySec`/`intervalSec`, and a non-boolean `enabled`, are rejected at config load. See [CLI reference](cli-reference.md) for the `--progress` / `--no-progress` launch flags.
