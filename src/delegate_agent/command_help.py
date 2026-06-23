@@ -566,10 +566,22 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
     "models": CommandSpec(
         name="models",
         summary="List configured engines and model settings.",
-        usage=("delegate [--json] models",),
+        usage=("delegate [--json] models [--summary] [--redacted]",),
+        options=(
+            OptionSpec("--summary", None, "Emit a compact alias-centered inventory."),
+            OptionSpec(
+                "--redacted",
+                None,
+                "Mask local paths and provider/private model IDs for safe sharing.",
+            ),
+        ),
         examples=(
             "delegate models",
             "delegate --json models",
+            "delegate --json models --summary --redacted",
+        ),
+        notes=(
+            "Raw output is unchanged for compatibility; agent discovery should prefer --summary --redacted.",
         ),
         see_also=("describe", "cursor", "codex", "droid", "kimi", "claude"),
     ),
@@ -593,12 +605,24 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
     "describe": CommandSpec(
         name="describe",
         summary="Print a machine-readable inventory of engines, modes, argv shapes, and policy.",
-        usage=("delegate [--json] describe",),
+        usage=("delegate [--json] describe [--summary] [--redacted]",),
+        options=(
+            OptionSpec("--summary", None, "Emit a compact command/config surface summary."),
+            OptionSpec(
+                "--redacted",
+                None,
+                "Mask local paths and provider/private model IDs for safe sharing.",
+            ),
+        ),
         examples=(
             "delegate describe",
             "delegate --json describe",
+            "delegate --json describe --summary --redacted",
         ),
-        notes=("--json describe is the best single call for an agent to learn the surface.",),
+        notes=(
+            "--json describe is the full detailed surface.",
+            "Agent discovery should start with --summary --redacted, then use raw describe only when needed.",
+        ),
         see_also=("models", "agent-help", "help"),
     ),
     "agent-help": CommandSpec(

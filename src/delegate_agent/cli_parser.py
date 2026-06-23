@@ -25,6 +25,7 @@ from delegate_agent.constants import ENGINES_PROSE, KNOWN_ENGINES, validate_mode
 from delegate_agent.errors import DelegateError
 from delegate_agent.request_models import (
     GlobalOptions,
+    InspectionOptions,
     LaunchOptions,
     ParsedCommand,
     RunJsonOptions,
@@ -125,6 +126,7 @@ def parse_help_subcommand(rest: list[str], json_mode: bool) -> ParsedCommand:
 
 
 SIMPLE_INSPECTION_SUBCOMMANDS = frozenset({"models", "describe", "agent-help"})
+INSPECTION_OPTION_SUBCOMMANDS = frozenset({"models", "describe"})
 
 
 def parse_simple_inspection_subcommand(
@@ -140,7 +142,19 @@ def parse_simple_inspection_subcommand(
     rest, json_mode = consume_json_option(rest, json_mode)
     if any(command_help.is_help_token(token) for token in rest):
         return help_command(json_mode, name)
-    require_no_extra(rest, name)
+    summary = False
+    redacted = False
+    if name in INSPECTION_OPTION_SUBCOMMANDS:
+        for token in rest:
+            if token == "--summary":
+                summary = True
+                continue
+            if token == "--redacted":
+                redacted = True
+                continue
+            require_no_extra([token], name)
+    else:
+        require_no_extra(rest, name)
     return ParsedCommand(
         name,
         global_options=GlobalOptions(
@@ -150,6 +164,7 @@ def parse_simple_inspection_subcommand(
             completion_report=completion_report,
             isolation=isolation,
         ),
+        inspection=InspectionOptions(summary=summary, redacted=redacted),
     )
 
 

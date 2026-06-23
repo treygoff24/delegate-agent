@@ -50,8 +50,10 @@ class ParserTests(unittest.TestCase):
             ["--json", "run", "--input-json", "task.json"],
             ["models"],
             ["--json", "models"],
+            ["--json", "models", "--summary", "--redacted"],
             ["describe"],
             ["--json", "describe"],
+            ["--json", "describe", "--summary", "--redacted"],
             ["agent-help"],
             ["dry-run", "cursor", "work", "prompt"],
             ["dry-run", "claude", "safe", "prompt"],
@@ -71,6 +73,18 @@ class ParserTests(unittest.TestCase):
         parsed = self.delegate.parse_cli(["--json", "--cwd", "/tmp/repo", "models"])
         self.assertTrue(parsed.global_options.json_mode)
         self.assertEqual(parsed.global_options.cwd, "/tmp/repo")
+
+    def test_models_and_describe_parse_summary_redacted_options(self):
+        for subcommand in ("models", "describe"):
+            with self.subTest(subcommand=subcommand):
+                parsed = self.delegate.parse_cli([subcommand, "--summary", "--redacted"])
+                self.assertTrue(parsed.inspection.summary)
+                self.assertTrue(parsed.inspection.redacted)
+
+    def test_models_unknown_option_fails_clearly(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(["models", "--verbose"])
+        self.assertEqual(ctx.exception.error, "unexpected_argument")
 
     def test_infer_global_json_after_value_taking_globals(self):
         cases = [

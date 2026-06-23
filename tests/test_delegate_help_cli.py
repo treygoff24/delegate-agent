@@ -181,6 +181,15 @@ class HelpSubcommandTests(HelpCliTestBase):
         self.assertIsInstance(payload["commands"], list)
         self.assertTrue(payload["commands"])
 
+    def test_models_and_describe_help_include_compact_redacted_discovery_flags(self):
+        for command in ("models", "describe"):
+            with self.subTest(command=command):
+                code, out, _err = self.run_main([command, "--help"])
+                self.assertEqual(code, self.delegate.EXIT_OK)
+                self.assertIn("--summary", out)
+                self.assertIn("--redacted", out)
+                self.assertIn(f"delegate --json {command} --summary --redacted", out)
+
 
 class JsonPositionIndependenceTests(HelpCliTestBase):
     """`--json` anywhere in a help invocation yields the same focused help (D3)."""

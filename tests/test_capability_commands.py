@@ -68,7 +68,12 @@ class CapabilityCommandTests(unittest.TestCase):
 
     def test_emit_json_includes_reasoning_aliases_in_models_payload(self):
         from delegate_agent.config import embedded_default_config
-        from delegate_agent.describe_payload import models_payload
+        from delegate_agent.describe_payload import (
+            describe_summary_payload,
+            models_payload,
+            models_summary_payload,
+            redact_discovery_payload,
+        )
 
         with tempfile.TemporaryDirectory() as workspace:
             config = embedded_default_config()
@@ -87,6 +92,35 @@ class CapabilityCommandTests(unittest.TestCase):
             kimi = payload["reasoningAliases"]["kimi"][kimi_key]
             self.assertIsNone(kimi["supported"])
             self.assertIn("not supported", kimi["warning"])
+
+            summary = models_summary_payload(config, "test-config", Path(workspace), redacted=True)
+            self.assertTrue(summary["summary"])
+            self.assertTrue(summary["redacted"])
+            by_provider_alias = {
+                (item["provider"], item["alias"]): item for item in summary["aliases"]
+            }
+            self.assertTrue(by_provider_alias[("droid", "glm")]["modelConfigured"])
+            self.assertNotIn("glm-5.1", json.dumps(summary))
+            self.assertEqual(
+                by_provider_alias[("droid", "glm")]["reasoningEfforts"],
+                ["off", "high"],
+            )
+
+            redacted = redact_discovery_payload(payload)
+            self.assertEqual(redacted["droid"]["models"]["glm"], "<redacted-model-id>")
+            self.assertEqual(redacted["runtime"]["modulePath"], "<redacted-path>")
+
+            describe_summary = describe_summary_payload(
+                config,
+                "test-config",
+                Path(workspace),
+                redacted=True,
+            )
+            self.assertTrue(describe_summary["summary"])
+            self.assertIn(
+                "delegate --json models --summary --redacted",
+                describe_summary["recommendedDiscovery"],
+            )
 
     def test_emit_text_summarizes_harness_model_counts(self):
         with tempfile.TemporaryDirectory() as workspace:

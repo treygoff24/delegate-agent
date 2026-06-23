@@ -95,6 +95,7 @@ from delegate_agent.request_build import (  # noqa: F401  # re-exported for test
 )
 from delegate_agent.request_models import (  # noqa: F401  # re-exported for tests / back-compat
     GlobalOptions,
+    InspectionOptions,
     LaunchOptions,
     ParsedCommand,
     Request,
@@ -630,12 +631,26 @@ def main(
             validate_config(config)
 
         if parsed.subcommand == "models":
+            inspection = parsed.inspection or InspectionOptions()
             return emit_models(
-                config, source, global_options.json_mode, stdout, workspace=config_workspace
+                config,
+                source,
+                global_options.json_mode,
+                stdout,
+                workspace=config_workspace,
+                summary=inspection.summary,
+                redacted=inspection.redacted,
             )
         if parsed.subcommand == "describe":
+            inspection = parsed.inspection or InspectionOptions()
             return emit_describe(
-                config, source, global_options.json_mode, stdout, workspace=config_workspace
+                config,
+                source,
+                global_options.json_mode,
+                stdout,
+                workspace=config_workspace,
+                summary=inspection.summary,
+                redacted=inspection.redacted,
             )
         if parsed.subcommand == "agent-help":
             return emit_agent_help(stdout)

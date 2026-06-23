@@ -46,6 +46,12 @@ class RunJsonOptions:
     input_json: str
 
 
+@dataclass
+class InspectionOptions:
+    summary: bool = False
+    redacted: bool = False
+
+
 @dataclass(init=False)
 class ParsedCommand:
     subcommand: str
@@ -58,6 +64,7 @@ class ParsedCommand:
     run_output: run_output_commands.RunOutputCommand | None = None
     worktree: worktree_commands.WorktreeCommand | None = None
     capabilities: capability_commands.CapabilitiesCommand | None = None
+    inspection: InspectionOptions | None = None
 
     def __init__(
         self,
@@ -72,6 +79,7 @@ class ParsedCommand:
         run_output: run_output_commands.RunOutputCommand | None = None,
         worktree: worktree_commands.WorktreeCommand | None = None,
         capabilities: capability_commands.CapabilitiesCommand | None = None,
+        inspection: InspectionOptions | None = None,
     ) -> None:
         self.subcommand = subcommand
         self.global_options = global_options or GlobalOptions()
@@ -83,6 +91,7 @@ class ParsedCommand:
         self.run_output = run_output
         self.worktree = worktree
         self.capabilities = capabilities
+        self.inspection = inspection
 
 
 @dataclass(frozen=True)
