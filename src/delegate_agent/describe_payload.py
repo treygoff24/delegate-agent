@@ -50,6 +50,14 @@ def _redacted_model_id(value: object) -> str:
     return REDACTED_MODEL_ID
 
 
+def _is_path_like(value: str) -> bool:
+    return value.startswith(("/", "~", ".")) or "\\" in value or value.endswith(".json")
+
+
+def _redacted_config_source(value: str) -> str:
+    return _redacted_path(value) if _is_path_like(value) else value
+
+
 def _redact_discovery_value(key: str, value: JsonValue) -> JsonValue:
     if isinstance(value, dict):
         if key in {"models", "reasoningEffortModels"} and all(
@@ -74,6 +82,8 @@ def _redact_discovery_value(key: str, value: JsonValue) -> JsonValue:
             "configPath",
             "dataHome",
         }:
+            return _redacted_path(value)
+        if key in {"configSource", "source"} and _is_path_like(value):
             return _redacted_path(value)
         if key in {"model", "defaultModel"}:
             return _redacted_model_id(value)
@@ -308,7 +318,7 @@ def models_summary_payload(
         "ok": True,
         "summary": True,
         "redacted": redacted,
-        "configSource": config_source,
+        "configSource": _redacted_config_source(config_source) if redacted else config_source,
         "version": VERSION,
         "aliases": aliases,
         "counts": {
@@ -635,7 +645,7 @@ def describe_summary_payload(
         "summary": True,
         "redacted": redacted,
         "version": VERSION,
-        "configSource": config_source,
+        "configSource": _redacted_config_source(config_source) if redacted else config_source,
         "configResolution": config_resolution if isinstance(config_resolution, dict) else {},
         "engines": list(KNOWN_ENGINES),
         "modes": [MODE_SAFE, MODE_WORK],

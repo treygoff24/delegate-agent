@@ -181,7 +181,7 @@ class SnapshotRedactionTests(SnapshotCommandTestBase):
         _, alias = self.write_run(stdout_bytes=large)
         stdout = io.StringIO()
         self.delegate.main(["--cwd", str(self.workspace), "snapshot", alias], stdout=stdout)
-        self.assertIn("stdout.log > 50 MB", stdout.getvalue())
+        self.assertIn("stdout.log > 50 MiB", stdout.getvalue())
 
 
 if __name__ == "__main__":

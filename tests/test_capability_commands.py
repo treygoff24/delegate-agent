@@ -93,9 +93,15 @@ class CapabilityCommandTests(unittest.TestCase):
             self.assertIsNone(kimi["supported"])
             self.assertIn("not supported", kimi["warning"])
 
-            summary = models_summary_payload(config, "test-config", Path(workspace), redacted=True)
+            summary = models_summary_payload(
+                config,
+                "/private/test-config.json",
+                Path(workspace),
+                redacted=True,
+            )
             self.assertTrue(summary["summary"])
             self.assertTrue(summary["redacted"])
+            self.assertEqual(summary["configSource"], "<redacted-path>")
             by_provider_alias = {
                 (item["provider"], item["alias"]): item for item in summary["aliases"]
             }
@@ -112,11 +118,12 @@ class CapabilityCommandTests(unittest.TestCase):
 
             describe_summary = describe_summary_payload(
                 config,
-                "test-config",
+                "/private/test-config.json",
                 Path(workspace),
                 redacted=True,
             )
             self.assertTrue(describe_summary["summary"])
+            self.assertEqual(describe_summary["configSource"], "<redacted-path>")
             self.assertIn(
                 "delegate --json models --summary --redacted",
                 describe_summary["recommendedDiscovery"],

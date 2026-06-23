@@ -314,8 +314,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
     "run": CommandSpec(
         name="run",
         summary=(
-            "Launch a run from a JSON input file "
-            "(engine, mode, model, cwd, prompt, isolation)."
+            "Launch a run from a JSON input file (engine, mode, model, cwd, prompt, isolation)."
         ),
         usage=("delegate [--json] [--isolation auto|none|worktree] run --input-json FILE",),
         options=(
@@ -859,9 +858,7 @@ def render_overview_text() -> str:
     lines.append(
         "  delegate --json describe --summary --redacted  Compact, safe surface inventory."
     )
-    lines.append(
-        "  delegate --json models --summary --redacted    Compact, safe model inventory."
-    )
+    lines.append("  delegate --json models --summary --redacted    Compact, safe model inventory.")
     lines.append("  delegate agent-help             Full agent guidance.")
 
     lines.append("")
