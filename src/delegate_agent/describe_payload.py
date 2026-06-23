@@ -641,7 +641,12 @@ def describe_summary_payload(
         "modes": [MODE_SAFE, MODE_WORK],
         "isolationValues": list(delegate_config.VALID_ISOLATION_VALUES),
         "globalOptions": full["globalOptions"],
-        "launchOptions": ["--prompt-file", "--reasoning-effort", "--progress"],
+        "launchOptions": [
+            "--prompt-file",
+            "--reasoning-effort",
+            "--progress",
+            "--forbid-commit",
+        ],
         "commands": commands if isinstance(commands, list) else [],
         "recommendedDiscovery": [
             "delegate --json describe --summary --redacted",

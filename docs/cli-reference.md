@@ -18,20 +18,20 @@ Use `delegate --help` for the exact command list from the installed version. Glo
 ### Direct runtime commands
 
 ```bash
-delegate cursor safe [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
-delegate cursor work [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+delegate cursor safe [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate cursor work [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 
-delegate droid MODEL_ALIAS safe [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
-delegate droid MODEL_ALIAS work [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+delegate droid MODEL_ALIAS safe [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate droid MODEL_ALIAS work [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 
-delegate codex safe [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
-delegate codex work [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+delegate codex safe [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate codex work [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 
-delegate claude safe [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
-delegate claude work [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+delegate claude safe [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate claude work [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 
-delegate kimi safe [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
-delegate kimi work [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+delegate kimi safe [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate kimi work [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 ```
 
 Prompt sources are direct arguments, `--prompt-file`, or Delegate stdin. After
@@ -44,12 +44,21 @@ prompt argv in dry-run output and run manifests.
 
 `--reasoning-effort LEVEL` is optional and parsed only before prompt text begins. Unsupported model/effort pairs fail closed before launch with `unsupported_reasoning_effort`. It affects only model reasoning depth, cost, or latency; it does not change `safe`/`work` permissions, sandboxing, approvals, network policy, or edit capability. Cursor effort is model-selection based and requires `cursor.reasoningEffortModels`; Droid emits `--reasoning-effort LEVEL`; Codex emits a `model_reasoning_effort` config override after the model is resolved; Claude emits Claude Code `--effort LEVEL`. Kimi does not support reasoning effort in v1.
 
+`--progress` is an opt-in launch flag that emits bounded parent progress
+heartbeats to stderr while preserving final stdout and JSON stdout. It is useful
+for long tracked foreground launches and is incompatible with `--pass-through`.
+
+`--forbid-commit` is an opt-in launch flag for `work` mode with persistent
+worktree isolation. It injects a no-commit prompt note and fails the run if the
+child creates commits. Without it, Delegate still reports created commits in the
+work summary, but does not fail solely because commits exist.
+
 ### `delegate claude`
 
 Usage:
 
 ```bash
-delegate [--json] [--isolation auto|none|worktree] claude {safe,work} [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+delegate [--json] [--isolation auto|none|worktree] claude {safe,work} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 ```
 
 - Safe mode runs in an isolated temporary copy of the workspace (under `--isolation auto`) and uses Claude Code `--permission-mode plan`, `--strict-mcp-config`, Read/Grep/Glob, and selected read-only Bash tools such as `git diff`/`git status`.
@@ -71,11 +80,11 @@ delegate --isolation worktree claude work "Implement the feature in a persistent
 Usage:
 
 ```bash
-delegate [--json] [--isolation auto|none|worktree] kimi {safe,work} [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+delegate [--json] [--isolation auto|none|worktree] kimi {safe,work} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 ```
 
 - Safe mode runs in an isolated temporary copy of the workspace (under `--isolation auto`) and uses a read-only safety prompt. Delegate intentionally avoids Kimi `--plan` in safe mode. Kimi prompt mode auto-approves tool actions, so the isolation is the effective write boundary; the safety prompt is advisory.
-- Work mode emits Kimi `--yolo` by default and runs in the real workspace unless you opt into worktree isolation.
+- Work mode uses Kimi prompt mode and runs in the real workspace unless you opt into worktree isolation. Delegate does not emit `--yolo` because Kimi rejects combining `--yolo` with `--prompt`.
 - Model selection comes from `kimi.defaultModel` config or the `model` key in JSON run input; there is no CLI model alias.
 - `--reasoning-effort` is unsupported for Kimi in v1.
 - Kimi prompt text is passed via argv.
@@ -150,6 +159,8 @@ Supported input keys:
   "cwd": "/path/to/workspace",
   "isolation": "worktree",
   "reasoningEffort": "high",
+  "progress": true,
+  "forbidCommit": true,
   "prompt": "Implement the scoped task and report changed files."
 }
 ```
@@ -160,6 +171,8 @@ Supported input keys:
 - `cwd`: optional workspace path. Git directories resolve to the repo root.
 - `isolation`: optional `auto`, `none`, or `worktree`. `null` is invalid. `none` is rejected for Cursor, Claude, Droid, and Kimi safe mode; use `auto` or `worktree`.
 - `reasoningEffort`: optional non-empty effort string. It overrides provider `defaultReasoningEffort` for that JSON run.
+- `progress`: optional boolean. `true` enables parent progress heartbeats on stderr.
+- `forbidCommit`: optional boolean. `true` requires `mode: "work"` with persistent worktree isolation and fails the run if the child creates commits.
 - `prompt`: required task prompt.
 
 `profile` is not accepted in run input JSON. Configure Codex profile in `codex.profile` instead.
@@ -167,6 +180,8 @@ Supported input keys:
 ### Discovery
 
 ```bash
+delegate --json describe --summary --redacted
+delegate --json models --summary --redacted
 delegate --json describe
 delegate --json models
 delegate --json capabilities
@@ -174,7 +189,7 @@ delegate --json capabilities refresh
 delegate agent-help
 ```
 
-`describe` reports version, engines, modes, supported isolation values, prompt transforms, effective policy, and representative argv shapes. It also includes a `commands` catalog (each entry has `command` and `summary`) so an agent can enumerate the whole command surface in one call. `models` reports configured Cursor, Droid, Codex, Claude, and Kimi model settings.
+`describe` reports version, engines, modes, supported isolation values, prompt transforms, effective policy, and representative argv shapes. It also includes a `commands` catalog (each entry has `command` and `summary`) so an agent can enumerate the whole command surface in one call. `models` reports configured Cursor, Droid, Codex, Claude, and Kimi model settings. Agents should start with `--summary --redacted` for a compact, safe-to-share inventory, then use raw output only when needed.
 
 Both `describe` and `models` include provenance fields useful for detecting installed-runtime drift:
 
@@ -268,10 +283,15 @@ Common JSON fields for tracked run completion:
   "effectiveIsolation": "worktree",
   "isolationLifecycle": "temporary",
   "preservedWorkspace": false,
+  "progressRequested": false,
   "snapshotCommand": "delegate snapshot codex",
   "completionReportCommand": "delegate run-output codex --completion-report"
 }
 ```
+
+Persistent worktree completions also include `branch`, `worktree`, a
+`workSummary`, and (when requested) `commitPolicy`. `workSummary` reports dirty
+state, changed file count, diff stat, and commits created by the child.
 
 Snapshot JSON uses schema `delegate.snapshot.v1` and includes fields such as `alias`, `runId`, `harness`, `status`, `rawStatus`, `effectiveStatus`, `staleReason`, `nextActions`, `cwd`, `executionCwd`, `assistantText`, `recentEvents`, `warnings`, `exitCode`, reasoning metadata, and isolation/worktree metadata when applicable. Inspection commands do not rewrite a stale run's recorded state; they expose the raw recorded status plus the effective status computed from the current PID check.
 
@@ -313,7 +333,11 @@ delegate worktree gc [--dry-run]
 
 `worktree show --latest HARNESS` selects the latest persistent worktree for the harness, not merely the latest run overall. `worktree list` JSON includes a `summary` with status counts, registry drift counts, warning counts, `autoPruneMode`, and whether the returned operation was read-only; `summary.totalPersistentWorktrees` is always registry-wide, while `allStatusCounts` is scoped to the `--harness` filter (pre-status-filter) and `statusCounts` to the visible entries. `worktree gc` JSON includes `mode`, `effects`, per-entry `action`, and orphan `safeAction` fields to distinguish dry-run inspection from registry reconciliation; `gc` never deletes worktree directories.
 
-List/show entry fields include `branchMergedIntoSource` (branch graph only), `mergedIntoSource` (fully integrated: branch merged and worktree clean), `hasUncommittedChanges`, `integrationStatus`, and `uncommittedChangesIntegrated`. **Migration:** older consumers that read `mergedIntoSource` for branch-graph merge state should switch to `branchMergedIntoSource`; reserve `mergedIntoSource` for full integration. When `integrationStatus` is `branch-merged-worktree-dirty`, merge/cherry-pick suggestions are suppressed because commit integration is already complete and only uncommitted edits remain.
+List/show entry fields include `branchMergedIntoSource` (branch graph only), `mergedIntoSource` (fully integrated: branch merged and worktree clean), `hasUncommittedChanges`, `integrationStatus`, `uncommittedChangesIntegrated`, and `workSummary` when Delegate can inspect the worktree. **Migration:** older consumers that read `mergedIntoSource` for branch-graph merge state should switch to `branchMergedIntoSource`; reserve `mergedIntoSource` for full integration. When `integrationStatus` is `branch-merged-worktree-dirty`, merge/cherry-pick suggestions are suppressed because commit integration is already complete and only uncommitted edits remain.
+
+Unknown persistent-worktree handles return suggestions scoped to persistent
+worktrees plus a `listCommand` hint (`delegate worktree list`). Run-output and
+snapshot handle suggestions remain scoped to tracked runs.
 
 Worktree JSON schemas:
 

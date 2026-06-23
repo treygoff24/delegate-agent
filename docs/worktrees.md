@@ -22,6 +22,17 @@ delegate --isolation worktree droid implementer work "Implement the scoped chang
 delegate --isolation worktree kimi work "Implement the scoped change and report changed files."
 ```
 
+Add `--forbid-commit` when the child should leave only uncommitted edits for
+the orchestrator to inspect:
+
+```bash
+delegate --isolation worktree cursor work --forbid-commit "Implement the scoped change without creating commits."
+```
+
+With `--forbid-commit`, Delegate adds a no-commit prompt note and marks the run
+failed if commits are created. Without it, commits are allowed but still reported
+in the work summary.
+
 For work mode, `--isolation worktree` creates a persistent worktree under the Delegate data home. The default is:
 
 ```text
@@ -53,6 +64,9 @@ delegate --json --isolation worktree dry-run cursor work "Implement only."
 
 Delegate prepends a note telling the child agent that it is running in a Delegate-created isolated Git worktree, that it should make changes only in that execution workspace, and that the orchestrator manages merge and cleanup.
 
+When `--forbid-commit` is active, the note also tells the child not to run
+`git commit` because Delegate will fail the run if commits are created.
+
 ## Inspect
 
 ```bash
@@ -63,7 +77,11 @@ delegate worktree show --latest cursor
 
 `worktree show --latest HARNESS` resolves the most recent persistent worktree for that harness. It intentionally ignores newer non-worktree runs from the same harness.
 
-`worktree show` reports status, path, branch, dirty state, branch merge vs full integration state, ahead/behind counts, and suggested review or cleanup commands. `worktree list` is read-only unless an enabled auto-prune pass runs before listing; JSON output includes `summary.autoPruneMode` (`disabled`, `attempted`, or `suppressed`) and `summary.readOnly`.
+`worktree show` reports status, path, branch, dirty state, branch merge vs full integration state, ahead/behind counts, work summary, and suggested review or cleanup commands. `worktree list` is read-only unless an enabled auto-prune pass runs before listing; JSON output includes `summary.autoPruneMode` (`disabled`, `attempted`, or `suppressed`) and `summary.readOnly`.
+
+`workSummary` includes dirty state, changed file count, diff stat, and commits
+created by the child (`commitsCreatedCount` and `commitsCreated`). It is present
+when Delegate can inspect the persistent worktree.
 
 ### Integration state semantics
 
@@ -80,6 +98,10 @@ Worktree list/show JSON distinguishes branch merge from full integration:
 **Migration note:** Before this correction, `mergedIntoSource` matched the branch-graph check only. Automation that treated `mergedIntoSource: true` as safe to retire must instead require `mergedIntoSource: true` (fully integrated) or inspect `integrationStatus`. Use `branchMergedIntoSource` when you only need the old branch-graph meaning (for example, matching `worktree remove` / `worktree prune --merged` behavior).
 
 When a branch is merged but the worktree still has local edits, `worktree show` keeps review/diff guidance but omits no-op `mergeIntoSource` / `cherryPickRange` suggestions (ahead vs current `HEAD` is zero and remaining work is uncommitted files).
+
+Unknown handle suggestions for `worktree show/remove` are scoped to persistent
+worktrees and include `delegate worktree list` guidance. Run handles from
+non-worktree launches are not suggested for worktree management commands.
 
 Common statuses:
 

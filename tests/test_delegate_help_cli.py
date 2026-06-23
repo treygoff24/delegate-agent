@@ -190,11 +190,22 @@ class HelpSubcommandTests(HelpCliTestBase):
                 self.assertIn("--redacted", out)
                 self.assertIn(f"delegate --json {command} --summary --redacted", out)
 
-    def test_engine_help_includes_progress_launch_option(self):
-        code, out, _err = self.run_main(["droid", "--help"])
+    def test_engine_help_includes_progress_and_commit_policy_launch_options(self):
+        for command in ("cursor", "claude", "codex", "droid", "kimi", "dry-run"):
+            with self.subTest(command=command):
+                code, out, _err = self.run_main([command, "--help"])
+                self.assertEqual(code, self.delegate.EXIT_OK)
+                self.assertIn("--progress", out)
+                self.assertIn("stderr", out)
+                self.assertIn("--forbid-commit", out)
+                self.assertIn("persistent worktree", out)
+
+    def test_describe_summary_lists_launch_options(self):
+        code, out, _err = self.run_main(["--json", "describe", "--summary"])
         self.assertEqual(code, self.delegate.EXIT_OK)
-        self.assertIn("--progress", out)
-        self.assertIn("stderr", out)
+        payload = json.loads(out)
+        self.assertIn("--progress", payload["launchOptions"])
+        self.assertIn("--forbid-commit", payload["launchOptions"])
 
 
 class JsonPositionIndependenceTests(HelpCliTestBase):
@@ -357,6 +368,12 @@ class SparseArgsNoIndexErrorTests(HelpCliTestBase):
 
 class KimiHelpTests(HelpCliTestBase):
     """Kimi harness surfaces in discovery commands."""
+
+    def test_kimi_help_matches_no_yolo_argv_policy(self):
+        code, out, _err = self.run_main(["kimi", "--help"])
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertNotIn("--yolo by default", out)
+        self.assertIn("does not emit --yolo", out)
 
     def test_kimi_in_describe_engines(self):
         code, out, _err = self.run_main(["--json", "describe"])
