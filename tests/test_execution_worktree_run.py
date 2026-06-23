@@ -683,6 +683,65 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             self.assertEqual(payload["childExitCode"], 0)
             self.assertEqual(payload["workSummary"]["commitsCreatedCount"], 1)
 
+    def test_child_commits_without_forbid_commit_surface_warning(self):
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            mock.patch.dict(os.environ, {"HOME": fake_home}),
+        ):
+            repo, _git_cd = self._make_git_repo_with_commit()
+            fake_bin = self._make_commit_fake_bin()
+            workspace = self.delegate.resolve_workspace(repo.name)
+            request = self._make_persistent_worktree_request(
+                "cursor",
+                "work",
+                repo.name,
+                self.delegate.DEFAULT_CONFIG,
+            )
+            request = self.delegate.Request(
+                request.engine,
+                request.mode,
+                request.workspace,
+                request.prompt,
+                [
+                    str(fake_bin / "agent"),
+                    "--workspace",
+                    repo.name,
+                    "-p",
+                    "--trust",
+                    "--model",
+                    "composer-2.5",
+                    "--output-format",
+                    "text",
+                    "hello",
+                ],
+                request.model,
+                dry_run=False,
+                workspace_kind=request.workspace_kind,
+                isolation_context=request.isolation_context,
+            )
+            with mock.patch.dict(
+                os.environ, {"PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", "")}
+            ):
+                code, payload = self.delegate.execute_request(
+                    request,
+                    json_mode=True,
+                    config=self.delegate.DEFAULT_CONFIG,
+                    pass_through=False,
+                    completion_report_mode="none",
+                    source_workspace=workspace,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+
+            self.assertEqual(code, 0)
+            self.assertIsNotNone(payload)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["workSummary"]["commitsCreatedCount"], 1)
+            self.assertTrue(payload["commitsCreatedByChild"])
+            self.assertIn("warnings", payload)
+            self.assertIn("Child command created commits", payload["warnings"][0])
+            self.assertIn("delegate worktree show", payload["nextActions"][0])
+
     def test_forbid_commit_prompt_context_reaches_child(self):
         with (
             tempfile.TemporaryDirectory() as fake_home,

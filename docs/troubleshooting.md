@@ -211,7 +211,9 @@ delegate run-output <alias-or-runId> --stdout --tail 80 --max-chars 20000
 
 Non-raw stdout/stderr output is bounded by both line tail and character cap.
 Use `--raw` only when you intentionally need the full stream; it is incompatible
-with `--tail` and `--max-chars` and may print very large output.
+with `--tail` and `--max-chars`, may print very large output, and includes
+`rawOutputBytes` in JSON metadata so callers can see how much raw output was
+returned.
 
 If your prompt requires an exact structured final answer such as bare JSON, use
 `--no-completion-report` today so Delegate does not inject completion-report

@@ -338,12 +338,18 @@ def emit_bounded_text_summary(
     if extra is not None:
         work_summary = extra.get("workSummary")
         if isinstance(work_summary, dict):
+            commits_created = work_summary.get("commitsCreatedCount", 0)
             print(
                 "work summary: "
                 f"{work_summary.get('changedFilesCount', 0)} changed files, "
-                f"{work_summary.get('commitsCreatedCount', 0)} commits",
+                f"{commits_created} commits",
                 file=stdout,
             )
+            if commits_created:
+                print(
+                    "warning: child created commits; review them before integration",
+                    file=stdout,
+                )
             if work_summary.get("noChanges") is True:
                 print("work summary: no file changes or commits detected", file=stdout)
         if extra.get("commitPolicyViolated") is True:
@@ -542,8 +548,17 @@ def _final_extra(ctx: RunContext, capture_exit_code: int) -> tuple[int, JsonObje
     summary = _persistent_work_summary(ctx)
     if summary is not None:
         extra["workSummary"] = summary
+    commits_created = worktree_summary.commits_created_count(summary)
+    if summary is not None and commits_created > 0 and not ctx.forbid_commit:
+        extra["warnings"] = [
+            "Child command created commits; review the persistent worktree before integration."
+        ]
+        extra["nextActions"] = [
+            f"delegate worktree show {ctx.alias}",
+            f"git -C {shlex.quote(ctx.execution_cwd)} log --oneline --decorate --max-count=5 HEAD",
+        ]
+        extra["commitsCreatedByChild"] = True
     if ctx.forbid_commit:
-        commits_created = worktree_summary.commits_created_count(summary)
         violated = commits_created > 0
         extra["commitPolicy"] = {
             "forbidCommit": True,

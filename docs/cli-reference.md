@@ -51,7 +51,9 @@ for long tracked foreground launches and is incompatible with `--pass-through`.
 `--forbid-commit` is an opt-in launch flag for `work` mode with persistent
 worktree isolation. It injects a no-commit prompt note and fails the run if the
 child creates commits. Without it, Delegate still reports created commits in the
-work summary, but does not fail solely because commits exist.
+work summary, emits a warning plus suggested review commands, but does not fail
+solely because commits exist. Validation rejects `--forbid-commit` outside
+`work` mode with `--isolation worktree`.
 
 ### `delegate claude`
 
@@ -303,7 +305,8 @@ possible, otherwise bounded stdout/stderr tails plus diagnostics. Explicit
 selectors are preserved. `--stdout` or `--stderr` without `--tail` or `--raw`
 defaults to a bounded `--tail 80` and a character cap (default 60000); use
 `--max-chars N` to override the cap. `--raw` returns the full stream with no
-line or character bounds and cannot be combined with `--tail` or `--max-chars`.
+line or character bounds, includes `rawOutputBytes` in JSON metadata, and cannot
+be combined with `--tail` or `--max-chars`.
 
 When `completion-report.md` is absent, `run-output --completion-report` makes a
 bounded best-effort attempt to recover an explicit final response from the

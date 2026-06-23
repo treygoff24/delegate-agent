@@ -1044,6 +1044,7 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
         payload = json.loads(stdout.getvalue())
         stdout_section = payload["sections"]["stdout"]
         self.assertFalse(stdout_section["truncated"])
+        self.assertEqual(stdout_section["rawOutputBytes"], len("line1\nline2\n"))
         self.assertEqual(stdout_section["content"], "line1\nline2\n")
 
     def test_run_output_redacts_secrets_by_default(self):
@@ -1202,6 +1203,7 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
         section = json.loads(stdout.getvalue())["sections"]["stdout"]
         self.assertNotIn("maxChars", section)
         self.assertNotIn("charTruncated", section)
+        self.assertEqual(section["rawOutputBytes"], 100_001)
         self.assertEqual(len(section["content"]), 100_001)
 
 

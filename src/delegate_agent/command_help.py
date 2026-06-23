@@ -100,7 +100,8 @@ _PROGRESS_OPTION = OptionSpec(
 _FORBID_COMMIT_OPTION = OptionSpec(
     "--forbid-commit",
     None,
-    "Fail persistent worktree work runs if the child creates commits.",
+    "Only valid for persistent worktree work runs (--isolation worktree); "
+    "fail if the child creates commits.",
 )
 _PROMPT_ARG = ArgSpec(
     "prompt",
@@ -414,7 +415,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
                 "--raw",
                 None,
                 "Print the full stream unbounded (incompatible with --tail and --max-chars; "
-                "may be very large).",
+                "may be very large; JSON includes rawOutputBytes).",
             ),
             OptionSpec("--no-redact", None, "Do not redact secrets in the output."),
         ),

@@ -5,6 +5,27 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Compact, redacted discovery for agent callers: `delegate --json describe --summary --redacted` and `delegate --json models --summary --redacted`.
+- Foreground launch progress via `--progress`, emitted to stderr so JSON stdout remains machine-readable.
+- Persistent worktree `workSummary` metadata, including dirty state, changed file counts, diff stat, and child-created commits. `--forbid-commit` now fails persistent worktree work runs if the child creates commits.
+- `run-output --max-chars` for bounded non-raw stdout/stderr sections, plus `rawOutputBytes` metadata for intentional `--raw` reads.
+
+### Changed
+
+- `worktree list/show` now distinguish `branchMergedIntoSource` from `mergedIntoSource`; `mergedIntoSource` means the branch is merged and the worktree has no uncommitted changes.
+- Kimi help and docs now match actual argv behavior: Delegate uses Kimi prompt mode and does not emit `--yolo` with `--prompt`.
+
+### Fixed
+
+- Global `--json` inference now applies consistently before more subcommands.
+- Completion-report recovery now prefers substantive final assistant output over housekeeping/progress output when no explicit completion report exists.
+- Worktree handle suggestions are scoped to persistent worktrees, and safe-mode prompts more clearly allow read-only investigation and text-only patch proposals.
+- Shared fake-agent test harness output is quiet by default.
+
 ## [0.5.0] - 2026-06-18
 
 ### Added

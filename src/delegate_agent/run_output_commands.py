@@ -78,6 +78,8 @@ def _add_log_output_section(
         "truncated": output.truncated,
         "archived": delegate_retention.raw_logs_archived(registry_root, run_id),
     }
+    if raw:
+        meta["rawOutputBytes"] = meta["bytes"]
     if tail is not None and not raw:
         meta["tailLines"] = tail
     if max_chars is not None:

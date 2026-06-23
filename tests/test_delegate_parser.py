@@ -744,6 +744,56 @@ class ParserTests(unittest.TestCase):
             request = self.delegate.request_from_input_json(parsed, cfg)
             self.assertTrue(request.progress)
 
+    def test_run_input_json_threads_forbid_commit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            subprocess.run(
+                ["git", "-C", tmp, "init"],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "-C", tmp, "config", "user.email", "test@example.com"],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "-C", tmp, "config", "user.name", "Test User"],
+                check=True,
+                capture_output=True,
+            )
+            Path(tmp, "README.md").write_text("# test\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "-C", tmp, "add", "README.md"],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "-C", tmp, "commit", "-m", "init"],
+                check=True,
+                capture_output=True,
+            )
+            task = Path(tmp) / "task.json"
+            task.write_text(
+                json.dumps(
+                    {
+                        "engine": "cursor",
+                        "mode": "work",
+                        "cwd": tmp,
+                        "isolation": "worktree",
+                        "prompt": "hello",
+                        "forbidCommit": True,
+                    }
+                )
+            )
+            parsed = self.delegate.ParsedCommand(
+                "run",
+                global_options=self.delegate.GlobalOptions(json_mode=True),
+                run_json=self.delegate.RunJsonOptions(str(task)),
+            )
+            request = self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+            self.assertTrue(request.forbid_commit)
+            self.assertEqual(request.isolation_context.isolation_lifecycle, "persistent")
+
     def test_run_input_json_progress_must_be_boolean(self):
         with tempfile.TemporaryDirectory() as tmp:
             task = Path(tmp) / "task.json"

@@ -31,7 +31,7 @@ delegate --isolation worktree cursor work --forbid-commit "Implement the scoped 
 
 With `--forbid-commit`, Delegate adds a no-commit prompt note and marks the run
 failed if commits are created. Without it, commits are allowed but still reported
-in the work summary.
+in the work summary with a warning and suggested review commands.
 
 For work mode, `--isolation worktree` creates a persistent worktree under the Delegate data home. The default is:
 
