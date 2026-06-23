@@ -240,6 +240,27 @@ class HarnessEventsTests(unittest.TestCase):
             acc.ingest_line(json.dumps(payload))
         self.assertIsNone(acc.completion_text)
 
+    def test_codex_empty_completed_agent_message_clears_completion_candidate(self):
+        acc = self.events.StreamAccumulator()
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "I'll start by reviewing."},
+                }
+            )
+        )
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "   "},
+                }
+            )
+        )
+        acc.ingest_line(json.dumps({"type": "turn.completed"}))
+        self.assertIsNone(acc.completion_text)
+
     def test_real_codex_stream_fixture_matches_parser_assumptions(self):
         # Guards against Codex changing its event schema: the other codex tests
         # use hand-authored JSON, so they would stay green even if the real
@@ -610,3 +631,19 @@ class HarnessEventsTests(unittest.TestCase):
                 "The final report was delivered in the previous message."
             )
         )
+
+    def test_structured_report_with_interior_progress_line_is_substantive(self):
+        report = (
+            "## Summary\n"
+            "- Fixed the recovery classifier.\n"
+            "- Added regression coverage.\n\n"
+            "Let me check the failing case below.\n\n"
+            "## Verification\n"
+            "- python3 -m unittest tests.test_harness_events"
+        )
+        self.assertTrue(self.events.is_substantive_assistant_text(report))
+        self.assertFalse(self.events.is_housekeeping_assistant_text(report))
+
+        acc = self.events.StreamAccumulator()
+        acc.ingest_line(json.dumps({"type": "message", "role": "assistant", "content": report}))
+        self.assertEqual(acc.assistant_recovery_quality(), "substantive_assistant_fallback")

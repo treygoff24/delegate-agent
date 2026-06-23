@@ -780,6 +780,39 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
         self.assertIn("delivered the fix", report["content"])
         self.assertNotIn("still investigating", report["content"])
 
+    def test_run_output_recovers_structured_report_with_interior_progress_line(self):
+        run_id, alias = self.write_run(harness="droid", status="succeeded", pid=None)
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        report_text = (
+            "## Summary\n"
+            "- Fixed the recovery classifier.\n"
+            "- Added regression coverage.\n\n"
+            "Let me check the failing case below.\n\n"
+            "## Verification\n"
+            "- python3 -m unittest tests.test_snapshot_run_output"
+        )
+        (run_path / "stdout.log").write_text(
+            json.dumps({"type": "message", "role": "assistant", "content": report_text}) + "\n",
+            encoding="utf-8",
+        )
+        stdout = io.StringIO()
+        code = self.delegate.main(
+            [
+                "--json",
+                "--cwd",
+                str(self.workspace),
+                "run-output",
+                alias,
+                "--completion-report",
+            ],
+            stdout=stdout,
+        )
+        self.assertEqual(code, 0)
+        report = json.loads(stdout.getvalue())["sections"]["completionReport"]
+        self.assertEqual(report["recoveryQuality"], "substantive_assistant_fallback")
+        self.assertIn("Fixed the recovery classifier", report["content"])
+        self.assertIn("Let me check the failing case below", report["content"])
+
     def test_run_output_default_marks_housekeeping_only_recovery_quality_in_diagnostics(self):
         run_id, alias = self.write_run(harness="droid", status="succeeded", pid=None)
         run_path = self.registry.run_directory(self.registry_root, run_id)

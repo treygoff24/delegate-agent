@@ -34,6 +34,15 @@ _PROGRESS_PATTERNS = (
     ),
 )
 
+_STATUS_LINE_PATTERN = re.compile(
+    r"^Status:\s*(?:completed|failed|blocked)\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+_REPORT_HEADER_PATTERN = re.compile(
+    r"^##\s+(?:Summary|What I did|Verification|Files changed)\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+
 
 def is_housekeeping_assistant_text(text: str) -> bool:
     stripped = text.strip()
@@ -51,30 +60,33 @@ def is_substantive_assistant_text(text: str) -> bool:
     stripped = text.strip()
     if not stripped:
         return False
+    if _STATUS_LINE_PATTERN.search(stripped):
+        return True
+    if stripped.startswith("Verdict:"):
+        return True
+    if _REPORT_HEADER_PATTERN.search(stripped):
+        return True
+    bullet_lines = [line for line in stripped.splitlines() if line.strip().startswith("- ")]
+    if len(bullet_lines) >= 2:
+        if len(stripped) < 80:
+            for pattern in _HOUSEKEEPING_PATTERNS:
+                if pattern.search(stripped):
+                    return False
+            for pattern in _PROGRESS_PATTERNS:
+                if pattern.search(stripped):
+                    return False
+        return True
+    if len(bullet_lines) == 1 and len(stripped) >= 80:
+        return True
+    if len(stripped) >= 200 and "\n" in stripped:
+        return True
     for pattern in _HOUSEKEEPING_PATTERNS:
         if pattern.search(stripped):
             return False
     for pattern in _PROGRESS_PATTERNS:
         if pattern.search(stripped):
             return False
-    if re.search(
-        r"^Status:\s*(?:completed|failed|blocked)\b", stripped, re.IGNORECASE | re.MULTILINE
-    ):
-        return True
-    if stripped.startswith("Verdict:"):
-        return True
-    if re.search(
-        r"^##\s+(?:Summary|What I did|Verification|Files changed)\b",
-        stripped,
-        re.IGNORECASE | re.MULTILINE,
-    ):
-        return True
-    bullet_lines = [line for line in stripped.splitlines() if line.strip().startswith("- ")]
-    if len(bullet_lines) >= 2:
-        return True
-    if len(bullet_lines) == 1 and len(stripped) >= 80:
-        return True
-    return len(stripped) >= 200 and "\n" in stripped
+    return False
 
 
 def assistant_recovery_quality_for_text(text: str) -> RecoveryQuality:
@@ -316,6 +328,8 @@ class StreamAccumulator:
             if text:
                 stripped = self._record_assistant_text(text)
                 self._codex_completion_candidate = stripped
+            else:
+                self._codex_completion_candidate = None
             return
         if item_type == "command_execution":
             self._ingest_codex_command_execution(item, completed=completed)
