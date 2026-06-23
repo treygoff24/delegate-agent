@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import TextIO
 
-from delegate_agent import VERSION, command_help
+from delegate_agent import VERSION, command_help, reasoning
 from delegate_agent import config as delegate_config
 from delegate_agent import rendering as delegate_rendering
 from delegate_agent.argv_builders import (
@@ -96,11 +96,13 @@ def models_payload(
     config_source: str,
     workspace: Path | None = None,
 ) -> JsonObject:
+    cache = reasoning.load_reasoning_capability_cache(workspace) if workspace is not None else None
     return {
         "ok": True,
         "configSource": config_source,
         "configResolution": config_resolution_payload(config_source, workspace),
         "runtime": runtime_payload(),
+        "reasoningAliases": reasoning.build_alias_reasoning_summaries(config, cache),
         "cursor": {
             "defaultModel": config["cursor"]["defaultModel"],
             "argvPrefix": config["cursor"]["argvPrefix"],

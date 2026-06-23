@@ -34,8 +34,13 @@ class CapabilityCommandTests(unittest.TestCase):
     def test_emit_json_reports_reasoning_payload_without_refreshing(self):
         with tempfile.TemporaryDirectory() as workspace:
             config = {
-                "codex": {"defaultModel": "gpt-5.5"},
-                "cursor": {"reasoningEffortModels": {"high": "cursor-thinking"}},
+                "codex": {"defaultModel": "gpt-5.5", "binary": "codex"},
+                "cursor": {
+                    "defaultModel": "composer-2.5",
+                    "argvPrefix": ["agent"],
+                    "reasoningEffortModels": {"high": "cursor-thinking"},
+                },
+                "droid": {"models": {"glm": "glm-5.1"}, "binary": "droid"},
             }
             stdout = io.StringIO()
 
@@ -58,6 +63,30 @@ class CapabilityCommandTests(unittest.TestCase):
             self.assertIn("codex", payload["reasoning"]["harnesses"])
             cursor_models = payload["reasoning"]["harnesses"]["cursor"]["models"]
             self.assertEqual(cursor_models["cursor-thinking"]["supported"], ["high"])
+            self.assertIn("aliases", payload["reasoning"])
+            self.assertIn("glm", payload["reasoning"]["aliases"]["droid"])
+
+    def test_emit_json_includes_reasoning_aliases_in_models_payload(self):
+        from delegate_agent.config import embedded_default_config
+        from delegate_agent.describe_payload import models_payload
+
+        with tempfile.TemporaryDirectory() as workspace:
+            config = embedded_default_config()
+            config["droid"]["models"] = {"glm": "glm-5.1"}
+            config["cursor"]["reasoningEffortModels"] = {"high": "cursor-thinking"}
+            payload = models_payload(config, "test-config", Path(workspace))
+            self.assertIn("reasoningAliases", payload)
+            self.assertEqual(payload["reasoningAliases"]["droid"]["glm"]["source"], "bundled")
+            self.assertEqual(
+                payload["reasoningAliases"]["cursor"][config["cursor"]["defaultModel"]][
+                    "supported"
+                ],
+                ["high"],
+            )
+            kimi_key = config["kimi"]["defaultModel"]
+            kimi = payload["reasoningAliases"]["kimi"][kimi_key]
+            self.assertIsNone(kimi["supported"])
+            self.assertIn("not supported", kimi["warning"])
 
     def test_emit_text_summarizes_harness_model_counts(self):
         with tempfile.TemporaryDirectory() as workspace:

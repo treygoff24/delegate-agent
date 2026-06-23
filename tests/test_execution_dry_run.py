@@ -473,10 +473,48 @@ class ExecutionDryRunTests(ExecutionTestBase):
             )
             payload = self.delegate.dry_run_payload(request)
             # Falls back to sentinel placeholders for non-Git workspaces
-            self.assertEqual(payload["plannedExecutionCwd"], "<planned-worktree-path>")
-            self.assertEqual(payload["plannedBranch"], "<planned-branch>")
-            self.assertIn("isolatedWorkspace", payload)
-            self.assertTrue(payload["isolatedWorkspace"])
+        self.assertEqual(payload["plannedExecutionCwd"], "<planned-worktree-path>")
+        self.assertEqual(payload["plannedBranch"], "<planned-branch>")
+        self.assertIn("isolatedWorkspace", payload)
+        self.assertTrue(payload["isolatedWorkspace"])
+
+    def test_dry_run_unsupported_reasoning_effort_includes_discovery_hint(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["codex"] = dict(config["codex"])
+        config["codex"]["defaultModel"] = "gpt-5.5"
+        with self.assertRaises(self.delegate.DelegateError) as caught:
+            self.build_git_request(
+                "codex",
+                "safe",
+                None,
+                "/repo",
+                "review",
+                config,
+                dry_run=True,
+                reasoning_effort="max",
+            )
+        self.assertEqual(caught.exception.error, "unsupported_reasoning_effort")
+        self.assertIn("harness codex", caught.exception.message)
+        self.assertIn("model 'gpt-5.5'", caught.exception.message)
+        self.assertIn("delegate --json capabilities", caught.exception.message)
+
+    def test_dry_run_kimi_reasoning_effort_reports_unsupported_alias_summary(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        with self.assertRaises(self.delegate.DelegateError) as caught:
+            self.build_git_request(
+                "kimi",
+                "safe",
+                None,
+                "/repo",
+                "hello",
+                config,
+                dry_run=True,
+                reasoning_effort="high",
+            )
+        self.assertEqual(caught.exception.error, "unsupported_reasoning_effort")
+        self.assertIn("harness kimi", caught.exception.message)
+        self.assertIn("reasoning effort is not supported", caught.exception.message)
+        self.assertIn("delegate --json models", caught.exception.message)
 
 
 if __name__ == "__main__":

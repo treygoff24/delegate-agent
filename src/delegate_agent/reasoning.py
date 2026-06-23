@@ -64,6 +64,11 @@ TRANSPORT_DROID_FLAG = "droid-flag"
 TRANSPORT_CURSOR_MODEL_SELECTION = "cursor-model-selection"
 TRANSPORT_CLAUDE_EFFORT_FLAG = "claude-effort-flag"
 CLAUDE_NATIVE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+INSPECT_REASONING_DISCOVERY_HINT = (
+    "Inspect `delegate --json models` or `delegate --json capabilities` "
+    "for reasoning-effort support."
+)
+KIMI_UNSUPPORTED_REASONING_WARNING = "reasoning effort is not supported for kimi."
 
 TRANSPORT_BY_HARNESS = {
     "codex": TRANSPORT_CODEX_CONFIG,
@@ -120,7 +125,39 @@ def normalize_effort(value: object) -> str:
     return cast(str, value)
 
 
-def resolve_claude_native_effort(requested_effort: str | None) -> str | None:
+def format_explicit_reasoning_effort_error(
+    *,
+    harness: str,
+    detail: str,
+    alias: str | None = None,
+    model: str | None = None,
+    effort: str | None = None,
+    supported: tuple[str, ...] | list[str] | None = None,
+) -> str:
+    context_parts: list[str] = []
+    if alias:
+        context_parts.append(f"alias {alias!r}")
+    context_parts.append(f"harness {harness}")
+    if model:
+        context_parts.append(f"model {model!r}")
+    message = detail
+    if context_parts:
+        message = f"{detail} ({', '.join(context_parts)})"
+    parts = [message]
+    if supported:
+        parts.append(f"Supported values: {', '.join(supported)}.")
+    if effort is not None and not supported:
+        parts.insert(1, f"Requested effort: {effort!r}.")
+    parts.append(INSPECT_REASONING_DISCOVERY_HINT)
+    return " ".join(parts)
+
+
+def resolve_claude_native_effort(
+    requested_effort: str | None,
+    *,
+    alias: str | None = None,
+    model: str | None = None,
+) -> str | None:
     """Validate Claude Code's native --effort values.
 
     Claude Code exposes reasoning effort as a process-level flag, not a
@@ -132,11 +169,16 @@ def resolve_claude_native_effort(requested_effort: str | None) -> str | None:
         return None
     effort = normalize_effort(requested_effort)
     if effort not in CLAUDE_NATIVE_EFFORTS:
-        supported_label = ", ".join(CLAUDE_NATIVE_EFFORTS)
         raise ReasoningCapabilityError(
             "unsupported_reasoning_effort",
-            f"claude does not support reasoning effort {effort!r}; "
-            f"supported values: {supported_label}.",
+            format_explicit_reasoning_effort_error(
+                harness="claude",
+                alias=alias,
+                model=model,
+                effort=effort,
+                supported=CLAUDE_NATIVE_EFFORTS,
+                detail="does not support reasoning effort",
+            ),
         )
     return effort
 
@@ -216,6 +258,7 @@ def resolve_reasoning_capability(
     requested_effort: str | None,
     config: JsonObject,
     cache: JsonObject | None = None,
+    alias: str | None = None,
 ) -> ReasoningCapability | None:
     if requested_effort is None:
         return None
@@ -223,12 +266,21 @@ def resolve_reasoning_capability(
     if harness not in TRANSPORT_BY_HARNESS:
         raise ReasoningCapabilityError(
             "unsupported_reasoning_effort",
-            f"Reasoning effort is not supported for harness: {harness}.",
+            format_explicit_reasoning_effort_error(
+                harness=harness,
+                alias=alias,
+                model=model,
+                detail="reasoning effort is not supported",
+            ),
         )
     if not model:
         raise ReasoningCapabilityError(
             "unsupported_reasoning_effort",
-            f"{harness} reasoning effort requires a resolved model.",
+            format_explicit_reasoning_effort_error(
+                harness=harness,
+                alias=alias,
+                detail="reasoning effort requires a resolved model",
+            ),
         )
 
     declaration, source = _lookup_declaration(
@@ -240,20 +292,37 @@ def resolve_reasoning_capability(
     if declaration is None:
         raise ReasoningCapabilityError(
             "unsupported_reasoning_effort",
-            f"{harness} model {model!r} has no declared reasoning-effort capability.",
+            format_explicit_reasoning_effort_error(
+                harness=harness,
+                alias=alias,
+                model=model,
+                effort=effort,
+                detail="has no declared reasoning-effort capability",
+            ),
         )
     supported = _supported_tuple(declaration)
     if supported is None:
         raise ReasoningCapabilityError(
             "invalid_reasoning_config",
-            f"{harness} model {model!r} has malformed reasoning capability data.",
+            format_explicit_reasoning_effort_error(
+                harness=harness,
+                alias=alias,
+                model=model,
+                effort=effort,
+                detail="has malformed reasoning capability data",
+            ),
         )
     if effort not in supported:
-        supported_label = ", ".join(supported)
         raise ReasoningCapabilityError(
             "unsupported_reasoning_effort",
-            f"{harness} model {model!r} does not support reasoning effort {effort!r}; "
-            f"supported values: {supported_label}.",
+            format_explicit_reasoning_effort_error(
+                harness=harness,
+                alias=alias,
+                model=model,
+                effort=effort,
+                supported=supported,
+                detail="does not support reasoning effort",
+            ),
         )
     return ReasoningCapability(
         harness=harness,
@@ -344,6 +413,200 @@ def _cursor_reasoning_models_payload(mappings: JsonValue) -> JsonObject:
     return models
 
 
+def _model_reasoning_summary(
+    *,
+    harness: str,
+    alias: str,
+    model: str | None,
+    config: JsonObject,
+    cache: JsonObject | None,
+    config_default: str | None = None,
+) -> JsonObject:
+    payload: JsonObject = {"alias": alias}
+    if model:
+        payload["model"] = model
+    else:
+        payload["supported"] = None
+        payload["source"] = "none"
+        payload["warning"] = f"{harness} requires a resolved model for reasoning-effort support."
+        return payload
+
+    declaration, source = _lookup_declaration(
+        harness=harness,
+        model=model,
+        config=config,
+        cache=cache,
+    )
+    if declaration is None:
+        payload["supported"] = None
+        payload["source"] = "none"
+        payload["warning"] = (
+            f"no declared reasoning-effort capability for {harness} model {model!r}."
+        )
+        return payload
+
+    supported = _supported_tuple(declaration)
+    if supported is None:
+        payload["supported"] = None
+        payload["source"] = source
+        payload["warning"] = f"malformed reasoning capability data for {harness} model {model!r}."
+        return payload
+
+    payload["supported"] = list(supported)
+    payload["source"] = source
+    default = _default_effort(declaration, supported)
+    if default is not None:
+        payload["default"] = default
+    if config_default is not None:
+        payload["configDefault"] = config_default
+    return payload
+
+
+def _cursor_alias_reasoning_summary(cursor: JsonObject) -> JsonObject:
+    default_model = cursor.get("defaultModel")
+    alias = default_model if isinstance(default_model, str) and default_model else "(default)"
+    payload: JsonObject = {"alias": alias}
+    if isinstance(default_model, str) and default_model:
+        payload["model"] = default_model
+    mappings = cursor.get("reasoningEffortModels")
+    supported: list[str] = []
+    if isinstance(mappings, dict):
+        supported = sorted(
+            effort
+            for effort, model in mappings.items()
+            if isinstance(effort, str) and effort and isinstance(model, str) and model
+        )
+    if supported:
+        payload["supported"] = supported
+        payload["source"] = "config"
+    else:
+        payload["supported"] = None
+        payload["source"] = "none"
+        payload["warning"] = (
+            "cursor.reasoningEffortModels is empty; configure effort-to-model mappings."
+        )
+    default_effort = cursor.get("defaultReasoningEffort")
+    if isinstance(default_effort, str):
+        payload["configDefault"] = default_effort
+    return payload
+
+
+def _claude_alias_reasoning_summary(claude: JsonObject) -> JsonObject:
+    default_model = claude.get("defaultModel")
+    alias = default_model if isinstance(default_model, str) and default_model else "(default)"
+    payload: JsonObject = {
+        "alias": alias,
+        "supported": list(CLAUDE_NATIVE_EFFORTS),
+        "source": "static",
+        "transport": TRANSPORT_CLAUDE_EFFORT_FLAG,
+    }
+    if isinstance(default_model, str) and default_model:
+        payload["model"] = default_model
+    default_effort = claude.get("defaultReasoningEffort")
+    if isinstance(default_effort, str):
+        payload["configDefault"] = default_effort
+    return payload
+
+
+def _kimi_alias_reasoning_summary(kimi: JsonObject) -> JsonObject:
+    default_model = kimi.get("defaultModel")
+    alias = default_model if isinstance(default_model, str) and default_model else "(default)"
+    payload: JsonObject = {
+        "alias": alias,
+        "supported": None,
+        "source": "none",
+        "warning": KIMI_UNSUPPORTED_REASONING_WARNING,
+    }
+    if isinstance(default_model, str) and default_model:
+        payload["model"] = default_model
+    return payload
+
+
+def build_alias_reasoning_summaries(
+    config: JsonObject,
+    cache: JsonObject | None,
+) -> JsonObject:
+    summaries: JsonObject = {}
+
+    droid = config.get("droid")
+    droid_aliases: JsonObject = {}
+    if isinstance(droid, dict):
+        models = droid.get("models")
+        config_default = droid.get("defaultReasoningEffort")
+        default_effort = config_default if isinstance(config_default, str) else None
+        if isinstance(models, dict):
+            for alias, model_id in sorted(models.items()):
+                if not (
+                    isinstance(alias, str) and alias and isinstance(model_id, str) and model_id
+                ):
+                    continue
+                droid_aliases[alias] = _model_reasoning_summary(
+                    harness="droid",
+                    alias=alias,
+                    model=model_id,
+                    config=config,
+                    cache=cache,
+                    config_default=default_effort,
+                )
+    summaries["droid"] = droid_aliases
+
+    codex = config.get("codex")
+    codex_aliases: JsonObject = {}
+    if isinstance(codex, dict):
+        default_model = codex.get("defaultModel")
+        config_default = codex.get("defaultReasoningEffort")
+        default_effort = config_default if isinstance(config_default, str) else None
+        if isinstance(default_model, str) and default_model:
+            codex_aliases[default_model] = _model_reasoning_summary(
+                harness="codex",
+                alias=default_model,
+                model=default_model,
+                config=config,
+                cache=cache,
+                config_default=default_effort,
+            )
+        else:
+            codex_aliases["(unconfigured)"] = {
+                "alias": "(unconfigured)",
+                "supported": None,
+                "source": "none",
+                "warning": "codex.defaultModel is not set; reasoning effort requires a resolved model.",
+            }
+    summaries["codex"] = codex_aliases
+
+    cursor = config.get("cursor")
+    if isinstance(cursor, dict):
+        default_model = cursor.get("defaultModel")
+        alias_key = (
+            default_model if isinstance(default_model, str) and default_model else "(default)"
+        )
+        summaries["cursor"] = {alias_key: _cursor_alias_reasoning_summary(cursor)}
+    else:
+        summaries["cursor"] = {}
+
+    claude = config.get("claude")
+    if isinstance(claude, dict):
+        default_model = claude.get("defaultModel")
+        alias_key = (
+            default_model if isinstance(default_model, str) and default_model else "(default)"
+        )
+        summaries["claude"] = {alias_key: _claude_alias_reasoning_summary(claude)}
+    else:
+        summaries["claude"] = {}
+
+    kimi = config.get("kimi")
+    if isinstance(kimi, dict):
+        default_model = kimi.get("defaultModel")
+        alias_key = (
+            default_model if isinstance(default_model, str) and default_model else "(default)"
+        )
+        summaries["kimi"] = {alias_key: _kimi_alias_reasoning_summary(kimi)}
+    else:
+        summaries["kimi"] = {}
+
+    return summaries
+
+
 def build_reasoning_capabilities_payload(
     config: JsonObject,
     cache: JsonObject | None,
@@ -379,7 +642,14 @@ def build_reasoning_capabilities_payload(
         "supported": list(CLAUDE_NATIVE_EFFORTS),
         "models": {},
     }
-    return {"harnesses": harnesses}
+    harnesses["kimi"] = {
+        "transport": None,
+        "supported": None,
+        "source": "none",
+        "warning": KIMI_UNSUPPORTED_REASONING_WARNING,
+        "models": {},
+    }
+    return {"harnesses": harnesses, "aliases": build_alias_reasoning_summaries(config, cache)}
 
 
 def validate_cache_payload(cache: JsonObject) -> None:

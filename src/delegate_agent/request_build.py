@@ -505,6 +505,7 @@ def _droid_request_parts(build: EngineBuildInput) -> EngineRequestParts:
             requested_effort=build.requested_effort,
             config=build.config,
             cache=build.cache,
+            alias=build.model_alias,
         ),
         engine="droid",
         effort_source=build.effort_source,
@@ -552,6 +553,7 @@ def _codex_request_parts(build: EngineBuildInput) -> EngineRequestParts:
             requested_effort=build.requested_effort,
             config=build.config,
             cache=build.cache,
+            alias=build.model_alias or model,
         ),
         engine="codex",
         effort_source=build.effort_source,
@@ -591,7 +593,11 @@ def _claude_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     warnings: tuple[str, ...] = ()
     if build.requested_effort is not None:
         try:
-            effort = reasoning.resolve_claude_native_effort(build.requested_effort)
+            effort = reasoning.resolve_claude_native_effort(
+                build.requested_effort,
+                alias=build.model_alias,
+                model=model,
+            )
         except reasoning.ReasoningCapabilityError as exc:
             if build.effort_source != "config":
                 raise DelegateError(exc.error, exc.message) from exc
@@ -620,9 +626,18 @@ def _claude_request_parts(build: EngineBuildInput) -> EngineRequestParts:
 def _kimi_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     _ = build.effort_source, build.cache
     if build.requested_effort is not None:
+        kimi = build.config.get("kimi")
+        default_model = kimi.get("defaultModel") if isinstance(kimi, dict) else None
+        model = default_model if isinstance(default_model, str) and default_model else None
         raise DelegateError(
             "unsupported_reasoning_effort",
-            "Reasoning effort is not supported for harness: kimi.",
+            reasoning.format_explicit_reasoning_effort_error(
+                harness="kimi",
+                alias=build.model_alias,
+                model=model,
+                effort=build.requested_effort,
+                detail="reasoning effort is not supported",
+            ),
         )
     kimi = build.config["kimi"]
     if isinstance(build.model_alias, str) and build.model_alias:
@@ -782,17 +797,37 @@ def resolve_cursor_reasoning_capability(
 ) -> reasoning.ReasoningCapability | None:
     if requested_effort is None:
         return None
+    default_model = cursor_config.get("defaultModel")
+    alias = default_model if isinstance(default_model, str) and default_model else None
     mappings = cursor_config.get("reasoningEffortModels")
     if not isinstance(mappings, dict):
         raise DelegateError(
             "unsupported_reasoning_effort",
-            "Cursor reasoning effort requires cursor.reasoningEffortModels.",
+            reasoning.format_explicit_reasoning_effort_error(
+                harness="cursor",
+                alias=alias,
+                model=alias,
+                effort=requested_effort,
+                detail="requires cursor.reasoningEffortModels",
+            ),
         )
     model = mappings.get(requested_effort)
     if not isinstance(model, str) or not model:
+        supported = sorted(
+            effort
+            for effort, mapped_model in mappings.items()
+            if isinstance(effort, str) and effort and isinstance(mapped_model, str) and mapped_model
+        )
         raise DelegateError(
             "unsupported_reasoning_effort",
-            f"Cursor reasoning effort {requested_effort!r} requires a configured model mapping.",
+            reasoning.format_explicit_reasoning_effort_error(
+                harness="cursor",
+                alias=alias,
+                model=alias,
+                effort=requested_effort,
+                supported=supported or None,
+                detail="requires a configured model mapping",
+            ),
         )
     return reasoning.ReasoningCapability(
         harness="cursor",

@@ -9,8 +9,12 @@ if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
 from delegate_agent.reasoning import (  # noqa: E402
+    INSPECT_REASONING_DISCOVERY_HINT,
+    KIMI_UNSUPPORTED_REASONING_WARNING,
     ReasoningCapabilityError,
+    build_alias_reasoning_summaries,
     build_reasoning_capabilities_payload,
+    format_explicit_reasoning_effort_error,
     normalize_effort,
     resolve_claude_native_effort,
     resolve_reasoning_capability,
@@ -217,6 +221,91 @@ class ReasoningCapabilityTests(unittest.TestCase):
         self.assertEqual(claude["source"], "static")
         self.assertEqual(claude["supported"], ["low", "medium", "high", "xhigh", "max"])
         self.assertEqual(claude["models"], {})
+
+    def test_capabilities_payload_marks_kimi_unsupported(self):
+        payload = build_reasoning_capabilities_payload({}, cache=None)
+        kimi = payload["harnesses"]["kimi"]
+        self.assertIsNone(kimi["transport"])
+        self.assertIsNone(kimi["supported"])
+        self.assertEqual(kimi["source"], "none")
+        self.assertEqual(kimi["warning"], KIMI_UNSUPPORTED_REASONING_WARNING)
+
+    def test_alias_summary_reports_supported_droid_alias(self):
+        config = {
+            "droid": {
+                "models": {"glm": "glm-5.1"},
+                "defaultReasoningEffort": "high",
+            }
+        }
+        summaries = build_alias_reasoning_summaries(config, cache=None)
+        glm = summaries["droid"]["glm"]
+        self.assertEqual(glm["alias"], "glm")
+        self.assertEqual(glm["model"], "glm-5.1")
+        self.assertEqual(glm["supported"], ["off", "high"])
+        self.assertEqual(glm["default"], "high")
+        self.assertEqual(glm["source"], "bundled")
+        self.assertEqual(glm["configDefault"], "high")
+
+    def test_alias_summary_warns_when_model_has_no_declaration(self):
+        config = {"droid": {"models": {"custom": "custom:missing"}}}
+        summaries = build_alias_reasoning_summaries(config, cache=None)
+        custom = summaries["droid"]["custom"]
+        self.assertIsNone(custom["supported"])
+        self.assertEqual(custom["source"], "none")
+        self.assertIn("no declared reasoning-effort capability", custom["warning"])
+
+    def test_alias_summary_includes_claude_native_efforts(self):
+        config = {"claude": {"defaultModel": "claude-sonnet-4-6"}}
+        summaries = build_alias_reasoning_summaries(config, cache=None)
+        claude = summaries["claude"]["claude-sonnet-4-6"]
+        self.assertEqual(claude["supported"], ["low", "medium", "high", "xhigh", "max"])
+        self.assertEqual(claude["source"], "static")
+
+    def test_alias_summary_maps_cursor_efforts_from_config(self):
+        config = {
+            "cursor": {
+                "defaultModel": "composer-2.5",
+                "reasoningEffortModels": {"low": "gpt-5", "high": "sonnet-thinking"},
+                "defaultReasoningEffort": "high",
+            }
+        }
+        summaries = build_alias_reasoning_summaries(config, cache=None)
+        cursor = summaries["cursor"]["composer-2.5"]
+        self.assertEqual(cursor["supported"], ["high", "low"])
+        self.assertEqual(cursor["source"], "config")
+        self.assertEqual(cursor["configDefault"], "high")
+
+    def test_alias_summary_marks_kimi_unsupported(self):
+        config = {"kimi": {"defaultModel": "kimi-code/kimi-for-coding"}}
+        summaries = build_alias_reasoning_summaries(config, cache=None)
+        kimi = summaries["kimi"]["kimi-code/kimi-for-coding"]
+        self.assertIsNone(kimi["supported"])
+        self.assertEqual(kimi["warning"], KIMI_UNSUPPORTED_REASONING_WARNING)
+
+    def test_unsupported_effort_error_includes_context_and_discovery_hint(self):
+        with self.assertRaises(ReasoningCapabilityError) as ctx:
+            resolve_reasoning_capability(
+                harness="droid",
+                model="glm-5.1",
+                requested_effort="medium",
+                config={},
+                alias="glm",
+            )
+        message = ctx.exception.message
+        self.assertIn("alias 'glm'", message)
+        self.assertIn("harness droid", message)
+        self.assertIn("model 'glm-5.1'", message)
+        self.assertIn("Supported values: off, high", message)
+        self.assertIn(INSPECT_REASONING_DISCOVERY_HINT, message)
+
+    def test_explicit_error_formatter_includes_discovery_hint(self):
+        message = format_explicit_reasoning_effort_error(
+            harness="codex",
+            detail="reasoning effort requires a resolved model",
+            alias="gpt-5.5",
+        )
+        self.assertIn("alias 'gpt-5.5'", message)
+        self.assertIn(INSPECT_REASONING_DISCOVERY_HINT, message)
 
 
 if __name__ == "__main__":
