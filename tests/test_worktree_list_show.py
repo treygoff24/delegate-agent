@@ -305,6 +305,29 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
 
             self.assertEqual(result.get("alias"), "droid-worktree")
 
+    def test_worktree_unknown_handle_suggestions_are_scoped_to_worktrees(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory():
+            self._seed_plain_run(path, harness="cursor")
+            self._seed_persistent_run(path, alias="cursor-worktree", harness="cursor")
+
+            with self.assertRaises(self.delegate.worktree_mgmt.WorktreeManagementError) as ctx:
+                self.delegate.worktree_mgmt.show_worktree(
+                    self._registry_root(path),
+                    handle="cursorx",
+                )
+
+            payload = ctx.exception.payload
+            self.assertEqual(payload["code"], "unknown_handle")
+            self.assertEqual(payload["suggestionScope"], "worktrees")
+            self.assertEqual(payload["suggestions"], ["cursor-worktree"])
+            self.assertEqual(
+                payload["nextActions"],
+                ["delegate worktree show cursor-worktree"],
+            )
+            self.assertEqual(payload["listCommand"], "python3 bin/delegate.py worktree list")
+            self.assertNotIn("cursor, ", payload["message"])
+
     def test_worktree_show_text_render_order(self):
         """render_worktree_show_text outputs lines in spec L621 order:
         creation-context → dirty → merged → ahead/behind → porcelain → suggested-commands → trailing metadata."""

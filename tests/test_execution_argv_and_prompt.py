@@ -616,6 +616,8 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
             user, engine="codex", mode="safe", completion_report_mode="markdown"
         )
         self.assertIn("Delegate sub-agent skill review", p)
+        self.assertIn("safe/read-only mode", p)
+        self.assertIn("must not override the read-only requirement", p)
         codex_idx = p.find("Delegate Codex safe mode")
         user_idx = p.find("review the diff")
         suffix_idx = p.find("Delegate completion report requirement")

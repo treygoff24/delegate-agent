@@ -482,6 +482,9 @@ def _error_payload(
     next_actions: list[str] | None = None,
     retry_safe: bool = False,
     warnings: list[str] | None = None,
+    suggestions: list[str] | None = None,
+    suggestion_scope: str | None = None,
+    list_command: str | None = None,
 ) -> JsonObject:
     payload: JsonObject = {
         "ok": False,
@@ -506,7 +509,37 @@ def _error_payload(
         payload["nextActions"] = next_actions
     if warnings is not None:
         payload["warnings"] = warnings
+    if suggestions is not None:
+        payload["suggestions"] = suggestions
+    if suggestion_scope is not None:
+        payload["suggestionScope"] = suggestion_scope
+    if list_command is not None:
+        payload["listCommand"] = list_command
     return payload
+
+
+def suggest_worktree_handles(
+    registry_root: Path,
+    handle: str,
+    *,
+    limit: int = 8,
+) -> list[str]:
+    records = load_persistent_records(registry_root)
+    scoped_index: JsonObject = {"aliases": {}, "runs": {}}
+    aliases = scoped_index["aliases"]
+    runs = scoped_index["runs"]
+    if not isinstance(aliases, dict) or not isinstance(runs, dict):
+        return []
+    for record in records:
+        alias = record.get("alias")
+        run_id = record.get("runId")
+        if not isinstance(alias, str) or not alias:
+            continue
+        if not isinstance(run_id, str) or not run_id:
+            continue
+        aliases[alias] = run_id
+        runs[run_id] = {"alias": alias}
+    return run_registry.suggest_handles(scoped_index, handle, limit=limit)
 
 
 def resolve_record(
@@ -538,7 +571,7 @@ def resolve_record(
             )
         resolved = run_registry.resolve_handle(index, handle)
         if resolved.run_id is None:
-            suggestions = list(resolved.suggestions)
+            suggestions = suggest_worktree_handles(registry_root, handle)
             next_actions = (
                 [f"delegate worktree show {suggestions[0]}"]
                 if suggestions
@@ -552,6 +585,9 @@ def resolve_record(
                         f"{', '.join(suggestions) if suggestions else '(none)'}"
                     ),
                     next_actions=next_actions,
+                    suggestions=suggestions,
+                    suggestion_scope="worktrees",
+                    list_command="python3 bin/delegate.py worktree list",
                 )
             )
         run_id = resolved.run_id
