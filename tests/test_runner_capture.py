@@ -812,20 +812,21 @@ class RunnerCaptureTests(unittest.TestCase):
 
     def test_progress_current_label_redacts_secret_like_tool_targets(self):
         accumulator = self.runner.harness_events.StreamAccumulator()
+        bearer_token = "bearer-output-" + "token-12345"
         accumulator.current = (
-            'running curl -H "Authorization: Bearer bearer-output-token-12345" https://example.test'
+            f'running curl -H "Authorization: Bearer {bearer_token}" https://example.test'
         )
 
         label = self.runner._progress_current_label(accumulator)
 
         self.assertIn("Authorization: ***", label)
-        self.assertNotIn("bearer-output-token-12345", label)
+        self.assertNotIn(bearer_token, label)
 
     def test_progress_current_label_redacts_absolute_paths(self):
         accumulator = self.runner.harness_events.StreamAccumulator()
         accumulator.current = (
             "Bash cat /Users/treygoff/Code/client/.env /root/.ssh/id_rsa "
-            "/workspace/client/.env /mnt/c/Users/trey/.env"
+            "/workspace/client/.env /mnt/c/Users/trey/.env /app/x /nix/store/x"
         )
 
         label = self.runner._progress_current_label(accumulator)
@@ -835,6 +836,59 @@ class RunnerCaptureTests(unittest.TestCase):
         self.assertNotIn("/root/.ssh/id_rsa", label)
         self.assertNotIn("/workspace/client/.env", label)
         self.assertNotIn("/mnt/c/Users/trey/.env", label)
+        self.assertNotIn("/app/x", label)
+        self.assertNotIn("/nix/store/x", label)
+
+    def test_progress_current_label_preserves_urls_and_non_paths(self):
+        from delegate_agent import redaction as redaction_mod
+
+        for unchanged in (
+            "Read src/delegate_agent/runner.py",
+            "Edit tests/test_foo.py",
+            "reviewing a/b and c/d",
+        ):
+            self.assertEqual(
+                redaction_mod.redact_progress_label(unchanged),
+                unchanged,
+            )
+
+        tilde_masked = redaction_mod.redact_progress_label("~/Code/foo")
+        self.assertIn("<redacted-path>", tilde_masked)
+        self.assertNotIn("~/Code", tilde_masked)
+        self.assertNotIn("~<redacted-path>", tilde_masked)
+
+        accumulator = self.runner.harness_events.StreamAccumulator()
+        accumulator.current = (
+            "fetch https://example.test and https://example.test/app/file ratio 1/2 /"
+        )
+
+        label = self.runner._progress_current_label(accumulator)
+
+        self.assertIn("https://example.test", label)
+        self.assertIn("https://example.test/app/file", label)
+        self.assertIn("ratio 1/2", label)
+        self.assertIn(" /", label)
+        self.assertNotIn("<redacted-path>", label)
+
+    def test_progress_interval_from_env_overrides_config_default(self):
+        env_name = self.runner.PROGRESS_INTERVAL_ENV
+        config_default = 60.0
+        with mock.patch.dict(os.environ, {env_name: "12.5"}, clear=False):
+            self.assertEqual(
+                self.runner._progress_interval_from_env(env_name, config_default),
+                12.5,
+            )
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(env_name, None)
+            self.assertEqual(
+                self.runner._progress_interval_from_env(env_name, config_default),
+                config_default,
+            )
+        with mock.patch.dict(os.environ, {env_name: "not-a-number"}, clear=False):
+            self.assertEqual(
+                self.runner._progress_interval_from_env(env_name, config_default),
+                config_default,
+            )
 
     def test_emit_bounded_text_summary_uses_shared_cleanup_renderer(self):
         with tempfile.TemporaryDirectory() as workspace:

@@ -611,6 +611,8 @@ def safe_isolated_request(request: Request) -> Iterator[Request]:
             reasoning_capability_source=request.reasoning_capability_source,
             reasoning_transport=request.reasoning_transport,
             progress=request.progress,
+            progress_initial_delay_sec=request.progress_initial_delay_sec,
+            progress_interval_sec=request.progress_interval_sec,
             forbid_commit=request.forbid_commit,
             warnings=request.warnings,
             stdin_text=request.stdin_text,

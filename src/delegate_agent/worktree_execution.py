@@ -233,6 +233,8 @@ def _build_persistent_worktree_run_context(
         reasoning_transport=request.reasoning_transport,
         prompt_transport=request.prompt_transport,
         forbid_commit=request.forbid_commit,
+        progress_initial_delay_sec=request.progress_initial_delay_sec,
+        progress_interval_sec=request.progress_interval_sec,
     )
 
 
@@ -461,6 +463,8 @@ def _launch_child_in_persistent_worktree(
             prompt_file_placeholder=DROID_PROMPT_FILE_ARG_PLACEHOLDER,
             manifest_argv=execution_request.display_argv,
             progress=request.progress,
+            progress_initial_delay_sec=request.progress_initial_delay_sec,
+            progress_interval_sec=request.progress_interval_sec,
         )
     except Exception as exc:
         error_msg = str(exc)

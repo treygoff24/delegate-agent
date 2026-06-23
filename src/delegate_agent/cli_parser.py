@@ -143,14 +143,10 @@ def parse_simple_inspection_subcommand(
     if any(command_help.is_help_token(token) for token in rest):
         return help_command(json_mode, name)
     summary = False
-    redacted = False
     if name in INSPECTION_OPTION_SUBCOMMANDS:
         for token in rest:
             if token == "--summary":
                 summary = True
-                continue
-            if token == "--redacted":
-                redacted = True
                 continue
             require_no_extra([token], name)
     else:
@@ -164,7 +160,7 @@ def parse_simple_inspection_subcommand(
             completion_report=completion_report,
             isolation=isolation,
         ),
-        inspection=InspectionOptions(summary=summary, redacted=redacted),
+        inspection=InspectionOptions(summary=summary),
     )
 
 
@@ -436,7 +432,7 @@ def parse_modeless_engine(
     # prompt text (`cursor work explain --help`).
     if len(rest) >= 2 and command_help.is_help_token(rest[1]):
         return help_command(json_mode, topic)
-    prompt_file, reasoning_effort, progress, forbid_commit, prompt_parts = parse_prompt_tail(
+    prompt_file, reasoning_effort, progress_intent, forbid_commit, prompt_parts = parse_prompt_tail(
         rest[1:]
     )
     return ParsedCommand(
@@ -454,7 +450,7 @@ def parse_modeless_engine(
             prompt_parts=prompt_parts,
             prompt_file=prompt_file,
             reasoning_effort=reasoning_effort,
-            progress=progress,
+            progress_intent=progress_intent,
             forbid_commit=forbid_commit,
             dry_run=dry_run,
         ),
@@ -495,7 +491,7 @@ def parse_droid(
     # Help wins after the mode, before prompt capture: `droid x safe --help`.
     if len(rest) >= 3 and command_help.is_help_token(rest[2]):
         return help_command(json_mode, topic)
-    prompt_file, reasoning_effort, progress, forbid_commit, prompt_parts = parse_prompt_tail(
+    prompt_file, reasoning_effort, progress_intent, forbid_commit, prompt_parts = parse_prompt_tail(
         rest[2:]
     )
     return ParsedCommand(
@@ -514,7 +510,7 @@ def parse_droid(
             prompt_parts=prompt_parts,
             prompt_file=prompt_file,
             reasoning_effort=reasoning_effort,
-            progress=progress,
+            progress_intent=progress_intent,
             forbid_commit=forbid_commit,
             dry_run=dry_run,
         ),
@@ -573,10 +569,10 @@ def parse_dry_run(
 
 def parse_prompt_tail(
     rest: list[str],
-) -> tuple[str | None, str | None, bool, bool, list[str]]:
+) -> tuple[str | None, str | None, str | None, bool, list[str]]:
     prompt_file: str | None = None
     reasoning_effort: str | None = None
-    progress = False
+    progress_intent: str | None = None
     forbid_commit = False
     prompt_parts: list[str] = []
     i = 0
@@ -619,12 +615,31 @@ def parse_prompt_tail(
             i += 2
             continue
         if token == "--progress":
-            if progress:
+            if progress_intent == "on":
                 raise DelegateError(
                     "invalid_option_combination",
                     "Only one --progress flag is allowed.",
                 )
-            progress = True
+            if progress_intent == "off":
+                raise DelegateError(
+                    "invalid_option_combination",
+                    "--progress and --no-progress cannot be combined.",
+                )
+            progress_intent = "on"
+            i += 1
+            continue
+        if token == "--no-progress":
+            if progress_intent == "off":
+                raise DelegateError(
+                    "invalid_option_combination",
+                    "Only one --no-progress flag is allowed.",
+                )
+            if progress_intent == "on":
+                raise DelegateError(
+                    "invalid_option_combination",
+                    "--progress and --no-progress cannot be combined.",
+                )
+            progress_intent = "off"
             i += 1
             continue
         if token == "--forbid-commit":
@@ -646,7 +661,7 @@ def parse_prompt_tail(
         raise_misplaced_global_option(
             "Global options must appear before the subcommand; use --prompt-file for literal flag text.",
         )
-    return prompt_file, reasoning_effort, progress, forbid_commit, prompt_parts
+    return prompt_file, reasoning_effort, progress_intent, forbid_commit, prompt_parts
 
 
 def parse_snapshot(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:

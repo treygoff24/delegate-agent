@@ -130,15 +130,16 @@ Some inspection commands accept trailing `--json` for convenience, such as
 
 Tracked launches buffer child output so Delegate can return a bounded final
 summary and preserve JSON stdout. For long-running foreground jobs, add
-`--progress` after the mode and before prompt text:
+`--progress` after the mode and before prompt text, or set `progress.enabled`
+to `true` in config and use `--no-progress` to override for one launch:
 
 ```bash
 delegate --json claude safe --progress "Review only. Do not edit."
 delegate --json droid reviewer work --progress "Implement the scoped change."
 ```
 
-Progress messages go to stderr. They are intentionally bounded, redact
-secret-like labels before printing, and do not include raw child output.
+Progress messages go to stderr. They are intentionally bounded, credential-scrubbed
+labels before printing, and do not include raw child output.
 `--progress` is incompatible with `--pass-through`, which already streams raw
 child output.
 

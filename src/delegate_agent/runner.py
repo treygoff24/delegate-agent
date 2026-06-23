@@ -87,6 +87,8 @@ class RunContext:
     reasoning_transport: str | None = None
     prompt_transport: str = "argv"
     forbid_commit: bool = False
+    progress_initial_delay_sec: float = PROGRESS_INITIAL_DELAY_SEC
+    progress_interval_sec: float = PROGRESS_HEARTBEAT_INTERVAL_SEC
 
 
 def write_manifest(run_path: Path, manifest: JsonObject) -> None:
@@ -706,6 +708,8 @@ def _capture_tracked_process(
     started: float,
     stdin_text: str | None,
     progress_stderr: TextIO | None = None,
+    progress_initial_delay_sec: float = PROGRESS_INITIAL_DELAY_SEC,
+    progress_interval_sec: float = PROGRESS_HEARTBEAT_INTERVAL_SEC,
 ) -> TrackedCaptureResult:
     accumulator = harness_events.StreamAccumulator()
     persist_progress(files.run_path, ctx, accumulator, status="running", pid=process.pid)
@@ -791,11 +795,11 @@ def _capture_tracked_process(
             _emit_progress_started(ctx, progress_stderr)
             initial_delay = _progress_interval_from_env(
                 PROGRESS_INITIAL_DELAY_ENV,
-                PROGRESS_INITIAL_DELAY_SEC,
+                progress_initial_delay_sec,
             )
             interval = _progress_interval_from_env(
                 PROGRESS_INTERVAL_ENV,
-                PROGRESS_HEARTBEAT_INTERVAL_SEC,
+                progress_interval_sec,
             )
             next_progress_at = time.monotonic() + initial_delay
             while True:
@@ -939,6 +943,8 @@ def execute_tracked(
     prompt_file_placeholder: str | None = None,
     manifest_argv: list[str] | None = None,
     progress: bool = False,
+    progress_initial_delay_sec: float = PROGRESS_INITIAL_DELAY_SEC,
+    progress_interval_sec: float = PROGRESS_HEARTBEAT_INTERVAL_SEC,
 ) -> tuple[int, JsonObject | None]:
     if stdin_text is not None and prompt_file_text is not None:
         raise ValueError("stdin_text and prompt_file_text are mutually exclusive")
@@ -967,6 +973,8 @@ def execute_tracked(
             started=started,
             stdin_text=stdin_text,
             progress_stderr=stderr if progress else None,
+            progress_initial_delay_sec=progress_initial_delay_sec,
+            progress_interval_sec=progress_interval_sec,
         )
     finally:
         _cleanup_prompt_file_dir(prompt_temp_dir)

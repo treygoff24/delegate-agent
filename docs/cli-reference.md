@@ -44,10 +44,12 @@ prompt argv in dry-run output and run manifests.
 
 `--reasoning-effort LEVEL` is optional and parsed only before prompt text begins. Unsupported model/effort pairs fail closed before launch with `unsupported_reasoning_effort`. It affects only model reasoning depth, cost, or latency; it does not change `safe`/`work` permissions, sandboxing, approvals, network policy, or edit capability. Cursor effort is model-selection based and requires `cursor.reasoningEffortModels`; Droid emits `--reasoning-effort LEVEL`; Codex emits a `model_reasoning_effort` config override after the model is resolved; Claude emits Claude Code `--effort LEVEL`. Kimi does not support reasoning effort in v1.
 
-`--progress` is an opt-in launch flag that emits bounded parent progress
-heartbeats to stderr while preserving final stdout and JSON stdout. Heartbeat
-labels are redacted before printing. It is useful for long tracked foreground
-launches and is incompatible with `--pass-through`.
+`--progress` enables parent progress heartbeats on stderr for tracked foreground
+runs. `--no-progress` disables them even when `progress.enabled` is true in
+config. When neither flag is set, config `progress.enabled` applies (default
+`false`). Heartbeat labels are credential-scrubbed before printing. Timing
+resolves as env override > config > built-in default (30s initial / 60s
+interval). It is incompatible with `--pass-through`.
 
 `--forbid-commit` is an opt-in launch flag for `work` mode with persistent
 worktree isolation. It injects a no-commit prompt note and fails the run if
@@ -176,7 +178,7 @@ Supported input keys:
 - `cwd`: optional workspace path. Git directories resolve to the repo root.
 - `isolation`: optional `auto`, `none`, or `worktree`. `null` is invalid. `none` is rejected for Cursor, Claude, Droid, and Kimi safe mode; use `auto` or `worktree`.
 - `reasoningEffort`: optional non-empty effort string. It overrides provider `defaultReasoningEffort` for that JSON run.
-- `progress`: optional boolean. `true` enables parent progress heartbeats on stderr.
+- `progress`: optional boolean. `true` enables parent progress heartbeats on stderr; `false` disables them even when `progress.enabled` is true in config. When omitted, config `progress.enabled` applies (default `false`).
 - `forbidCommit`: optional boolean. `true` requires `mode: "work"` with persistent worktree isolation and fails the run if the child creates commits.
 - `prompt`: required task prompt.
 
@@ -185,8 +187,8 @@ Supported input keys:
 ### Discovery
 
 ```bash
-delegate --json describe --summary --redacted
-delegate --json models --summary --redacted
+delegate --json describe --summary
+delegate --json models --summary
 delegate --json describe
 delegate --json models
 delegate --json capabilities
@@ -194,7 +196,7 @@ delegate --json capabilities refresh
 delegate agent-help
 ```
 
-`describe` reports version, engines, modes, supported isolation values, prompt transforms, effective policy, and representative argv shapes. It also includes a `commands` catalog (each entry has `command` and `summary`) so an agent can enumerate the whole command surface in one call. `models` reports configured Cursor, Droid, Codex, Claude, and Kimi model settings. Agents should start with `--summary --redacted` for a compact, safe-to-share inventory, then use raw output only when needed.
+`describe` reports version, engines, modes, supported isolation values, prompt transforms, effective policy, and representative argv shapes. It also includes a `commands` catalog (each entry has `command` and `summary`) so an agent can enumerate the whole command surface in one call. `models` reports configured Cursor, Droid, Codex, Claude, and Kimi model settings. Discovery output applies best-effort credential scrubbing; model IDs and paths are shown verbatim. Agents should start with `--summary` for a compact inventory, then use raw output only when needed.
 
 Both `describe` and `models` include provenance fields useful for detecting installed-runtime drift:
 

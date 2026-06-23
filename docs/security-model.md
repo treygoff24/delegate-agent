@@ -102,7 +102,9 @@ Persistent worktree isolation is not a security sandbox. It does not prevent:
 
 Newly-created `.delegate/` registry directories and files are made owner-only on POSIX systems.
 
-`snapshot` and `run-output` redact secret-like strings by default, including authorization headers, bearer/basic tokens, JWT-like strings, and common `token=` / `api_key=` / `password=` key-values. Redaction is a last-resort safety feature, not a substitute for keeping secrets out of prompts and logs. Raw local logs and child runtime state can still contain secrets. `--no-redact` intentionally disables display-side redaction.
+Delegate output may contain secrets the child runtime emitted. Credential scrubbing is best-effort defense-in-depth across run-output, snapshot, heartbeat, and discovery surfaces (`describe`/`models`). It catches recognizable shapes such as authorization headers, bearer/basic tokens, JWT-like strings, connection-string passwords, and common `token=` / `api_key=` / `password=` key-values. It does not guarantee removal of every secret (for example, a literal secret split across separate argv elements in config may still appear in discovery output). The real boundary for safe review is safe-mode isolation, not output scrubbing.
+
+`snapshot` and `run-output` apply the same credential scrubbing by default. Raw local logs and child runtime state can still contain secrets. `--no-redact` intentionally disables display-side redaction on run-output and snapshot.
 
 `--pass-through` streams raw child output and is incompatible with JSON mode. Use it only when raw child streaming is required.
 

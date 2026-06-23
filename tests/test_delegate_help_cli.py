@@ -181,14 +181,14 @@ class HelpSubcommandTests(HelpCliTestBase):
         self.assertIsInstance(payload["commands"], list)
         self.assertTrue(payload["commands"])
 
-    def test_models_and_describe_help_include_compact_redacted_discovery_flags(self):
+    def test_models_and_describe_help_include_summary_discovery_flags(self):
         for command in ("models", "describe"):
             with self.subTest(command=command):
                 code, out, _err = self.run_main([command, "--help"])
                 self.assertEqual(code, self.delegate.EXIT_OK)
                 self.assertIn("--summary", out)
-                self.assertIn("--redacted", out)
-                self.assertIn(f"delegate --json {command} --summary --redacted", out)
+                self.assertNotIn("--redacted", out)
+                self.assertIn(f"delegate --json {command} --summary", out)
 
     def test_engine_help_includes_progress_and_commit_policy_launch_options(self):
         for command in ("cursor", "claude", "codex", "droid", "kimi", "dry-run"):
@@ -205,10 +205,11 @@ class HelpSubcommandTests(HelpCliTestBase):
         self.assertEqual(code, self.delegate.EXIT_OK)
         payload = json.loads(out)
         self.assertIn("--progress", payload["launchOptions"])
+        self.assertIn("--no-progress", payload["launchOptions"])
         self.assertIn("--forbid-commit", payload["launchOptions"])
 
     def test_describe_summary_text_renders_without_full_payload_keys(self):
-        code, out, _err = self.run_main(["describe", "--summary", "--redacted"])
+        code, out, _err = self.run_main(["describe", "--summary"])
         self.assertEqual(code, self.delegate.EXIT_OK)
         self.assertIn("delegate", out)
         self.assertIn("launch options:", out)

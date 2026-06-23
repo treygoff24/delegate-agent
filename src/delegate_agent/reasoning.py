@@ -65,7 +65,7 @@ TRANSPORT_CURSOR_MODEL_SELECTION = "cursor-model-selection"
 TRANSPORT_CLAUDE_EFFORT_FLAG = "claude-effort-flag"
 CLAUDE_NATIVE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 INSPECT_REASONING_DISCOVERY_HINT = (
-    "Inspect `delegate --json models --summary --redacted` or "
+    "Inspect `delegate --json models --summary` or "
     "`delegate --json capabilities` for reasoning-effort support."
 )
 KIMI_UNSUPPORTED_REASONING_WARNING = "reasoning effort is not supported for kimi."

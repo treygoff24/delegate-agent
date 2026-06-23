@@ -100,14 +100,34 @@ REDACT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 PEM_BLOCK_PLACEHOLDER = "***PRIVATE KEY REDACTED***"
 _PEM_BEGIN = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")
 _PEM_END = re.compile(r"-----END [A-Z0-9 ]*PRIVATE KEY-----")
-_PROGRESS_PATH_PATTERNS: list[re.Pattern[str]] = [
-    re.compile(
-        r"(?<![A-Za-z0-9+.-]:)/(?:Users|private|tmp|var|Volumes|home|opt|etc|"
-        r"Applications|Library|root|mnt|workspace|workspaces|srv|usr)(?:/[^\s\"'`<>|;,)]+)*"
-    ),
-    re.compile(r"(?<!\S)~(?:/[^\s\"'`<>|;,)]+)+"),
-    re.compile(r"\b[A-Za-z]:\\[^\s\"'`<>|;,)]+"),
-]
+_URL_SPAN_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s\"'`<>|;,)]+")
+# Absolute POSIX paths outside URL spans; avoid matching ratio-style "1/2".
+_ABSOLUTE_POSIX_PATH_RE = re.compile(
+    r"(?<![A-Za-z0-9_.~+-])/(?:[^\s\"'`<>|;,)]+(?:/[^\s\"'`<>|;,)]+)*)"
+)
+_TILDE_PATH_RE = re.compile(r"(?<!\S)~(?:/[^\s\"'`<>|;,)]+)+")
+_WINDOWS_PATH_RE = re.compile(r"\b[A-Za-z]:\\[^\s\"'`<>|;,)]+")
+
+
+def _mask_progress_paths_outside_urls(value: str) -> str:
+    parts: list[str] = []
+    last = 0
+    for match in _URL_SPAN_RE.finditer(value):
+        segment = value[last : match.start()]
+        if segment:
+            segment = _ABSOLUTE_POSIX_PATH_RE.sub("<redacted-path>", segment)
+            segment = _TILDE_PATH_RE.sub("<redacted-path>", segment)
+            segment = _WINDOWS_PATH_RE.sub("<redacted-path>", segment)
+            parts.append(segment)
+        parts.append(match.group(0))
+        last = match.end()
+    tail = value[last:]
+    if tail:
+        tail = _ABSOLUTE_POSIX_PATH_RE.sub("<redacted-path>", tail)
+        tail = _TILDE_PATH_RE.sub("<redacted-path>", tail)
+        tail = _WINDOWS_PATH_RE.sub("<redacted-path>", tail)
+        parts.append(tail)
+    return "".join(parts)
 
 
 def _redact_pem_blocks(value: str) -> str:
@@ -137,9 +157,7 @@ def redact_string(value: str) -> str:
 
 def redact_progress_label(value: str) -> str:
     redacted = redact_string(value)
-    for pattern in _PROGRESS_PATH_PATTERNS:
-        redacted = pattern.sub("<redacted-path>", redacted)
-    return redacted
+    return _mask_progress_paths_outside_urls(redacted)
 
 
 def redact_value(value: JsonValue) -> JsonValue:

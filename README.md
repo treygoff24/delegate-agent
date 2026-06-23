@@ -68,8 +68,8 @@ Inspect what Delegate sees:
 
 ```bash
 delegate --version       # installed version — include this in bug reports
-delegate --json describe --summary --redacted
-delegate --json models --summary --redacted
+delegate --json describe --summary
+delegate --json models --summary
 delegate --json describe
 delegate --json models
 delegate --json capabilities
@@ -106,9 +106,10 @@ delegate kimi work "Implement the scoped change and run the named check. Report 
 ```
 
 For long foreground runs, add `--progress` to emit bounded parent heartbeats to
-stderr while keeping final stdout machine-readable. Heartbeat labels are
-redacted before printing but are still operational metadata, not raw child
-output:
+stderr while keeping final stdout machine-readable, or set `progress.enabled`
+to `true` in config. Use `--no-progress` to override config for one launch.
+Heartbeat labels are credential-scrubbed before printing but are still
+operational metadata, not raw child output:
 
 ```bash
 delegate --json claude safe --progress "Review this repository. Do not edit files."

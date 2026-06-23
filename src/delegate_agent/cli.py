@@ -439,6 +439,8 @@ def make_run_context(
         reasoning_transport=request.reasoning_transport,
         prompt_transport=request.prompt_transport,
         forbid_commit=request.forbid_commit,
+        progress_initial_delay_sec=request.progress_initial_delay_sec,
+        progress_interval_sec=request.progress_interval_sec,
     )
 
 
@@ -541,6 +543,8 @@ def execute_request(
                 prompt_file_placeholder=DROID_PROMPT_FILE_ARG_PLACEHOLDER,
                 manifest_argv=public_argv(isolated_request),
                 progress=isolated_request.progress,
+                progress_initial_delay_sec=isolated_request.progress_initial_delay_sec,
+                progress_interval_sec=isolated_request.progress_interval_sec,
             )
         except delegate_runner.RunnerLaunchError as exc:
             raise DelegateError(exc.error, exc.message) from exc
@@ -645,7 +649,6 @@ def main(
                 stdout,
                 workspace=config_workspace,
                 summary=inspection.summary,
-                redacted=inspection.redacted,
             )
         if parsed.subcommand == "describe":
             inspection = parsed.inspection or InspectionOptions()
@@ -656,7 +659,6 @@ def main(
                 stdout,
                 workspace=config_workspace,
                 summary=inspection.summary,
-                redacted=inspection.redacted,
             )
         if parsed.subcommand == "agent-help":
             return emit_agent_help(stdout)

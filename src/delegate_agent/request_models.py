@@ -38,7 +38,7 @@ class LaunchOptions:
     prompt_parts: list[str] | None = None
     prompt_file: str | None = None
     reasoning_effort: str | None = None
-    progress: bool = False
+    progress_intent: str | None = None
     forbid_commit: bool = False
     dry_run: bool = False
 
@@ -51,7 +51,6 @@ class RunJsonOptions:
 @dataclass
 class InspectionOptions:
     summary: bool = False
-    redacted: bool = False
 
 
 @dataclass(init=False)
@@ -119,6 +118,8 @@ class Request:
     reasoning_capability_source: str | None = None
     reasoning_transport: str | None = None
     progress: bool = False
+    progress_initial_delay_sec: float = 30.0
+    progress_interval_sec: float = 60.0
     forbid_commit: bool = False
     warnings: tuple[str, ...] = ()
     stdin_text: str | None = None

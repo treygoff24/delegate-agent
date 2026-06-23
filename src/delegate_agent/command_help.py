@@ -95,7 +95,12 @@ _REASONING_EFFORT_OPTION = OptionSpec(
 _PROGRESS_OPTION = OptionSpec(
     "--progress",
     None,
-    "Emit bounded, redacted parent progress heartbeats to stderr while preserving final stdout.",
+    "Emit bounded, credential-scrubbed parent progress heartbeats to stderr while preserving final stdout.",
+)
+_NO_PROGRESS_OPTION = OptionSpec(
+    "--no-progress",
+    None,
+    "Disable progress heartbeats for this launch even when progress.enabled is true in config.",
 )
 _FORBID_COMMIT_OPTION = OptionSpec(
     "--forbid-commit",
@@ -132,6 +137,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         options=(
             _REASONING_EFFORT_OPTION,
             _PROGRESS_OPTION,
+            _NO_PROGRESS_OPTION,
             _FORBID_COMMIT_OPTION,
             _PROMPT_FILE_OPTION,
         ),
@@ -160,6 +166,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         options=(
             _REASONING_EFFORT_OPTION,
             _PROGRESS_OPTION,
+            _NO_PROGRESS_OPTION,
             _FORBID_COMMIT_OPTION,
             _PROMPT_FILE_OPTION,
         ),
@@ -192,6 +199,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         options=(
             _REASONING_EFFORT_OPTION,
             _PROGRESS_OPTION,
+            _NO_PROGRESS_OPTION,
             _FORBID_COMMIT_OPTION,
             _PROMPT_FILE_OPTION,
         ),
@@ -223,6 +231,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         options=(
             _REASONING_EFFORT_OPTION,
             _PROGRESS_OPTION,
+            _NO_PROGRESS_OPTION,
             _FORBID_COMMIT_OPTION,
             _PROMPT_FILE_OPTION,
         ),
@@ -264,6 +273,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         options=(
             _REASONING_EFFORT_OPTION,
             _PROGRESS_OPTION,
+            _NO_PROGRESS_OPTION,
             _FORBID_COMMIT_OPTION,
             _PROMPT_FILE_OPTION,
         ),
@@ -299,6 +309,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         options=(
             _REASONING_EFFORT_OPTION,
             _PROGRESS_OPTION,
+            _NO_PROGRESS_OPTION,
             _FORBID_COMMIT_OPTION,
             _PROMPT_FILE_OPTION,
         ),
@@ -620,22 +631,16 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
     "models": CommandSpec(
         name="models",
         summary="List configured engines and model settings.",
-        usage=("delegate [--json] models [--summary] [--redacted]",),
-        options=(
-            OptionSpec("--summary", None, "Emit a compact alias-centered inventory."),
-            OptionSpec(
-                "--redacted",
-                None,
-                "Mask local paths and provider/private model IDs for safe sharing.",
-            ),
-        ),
+        usage=("delegate [--json] models [--summary]",),
+        options=(OptionSpec("--summary", None, "Emit a compact alias-centered inventory."),),
         examples=(
             "delegate models",
             "delegate --json models",
-            "delegate --json models --summary --redacted",
+            "delegate --json models --summary",
         ),
         notes=(
-            "Raw output is unchanged for compatibility; agent discovery should prefer --summary --redacted.",
+            "Discovery output applies best-effort credential scrubbing; model IDs and paths are shown verbatim.",
+            "Agent discovery should prefer --summary, then use raw output only when needed.",
         ),
         see_also=("describe", "cursor", "codex", "droid", "kimi", "claude"),
     ),
@@ -659,23 +664,17 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
     "describe": CommandSpec(
         name="describe",
         summary="Print a machine-readable inventory of engines, modes, argv shapes, and policy.",
-        usage=("delegate [--json] describe [--summary] [--redacted]",),
-        options=(
-            OptionSpec("--summary", None, "Emit a compact command/config surface summary."),
-            OptionSpec(
-                "--redacted",
-                None,
-                "Mask local paths and provider/private model IDs for safe sharing.",
-            ),
-        ),
+        usage=("delegate [--json] describe [--summary]",),
+        options=(OptionSpec("--summary", None, "Emit a compact command/config surface summary."),),
         examples=(
             "delegate describe",
             "delegate --json describe",
-            "delegate --json describe --summary --redacted",
+            "delegate --json describe --summary",
         ),
         notes=(
             "--json describe is the full detailed surface.",
-            "Agent discovery should start with --summary --redacted, then use raw describe only when needed.",
+            "Discovery output applies best-effort credential scrubbing.",
+            "Agent discovery should start with --summary, then use raw describe only when needed.",
         ),
         see_also=("models", "agent-help", "help"),
     ),
@@ -829,9 +828,9 @@ def render_overview_text() -> str:
         "[--merged] [--older-than DAYS] [--harness HARNESS] [--include-detached] [--dry-run] "
         "[--discard-uncommitted] [--force-branch] [--force]",
         "delegate [--cwd PATH] [--json] worktree gc [--dry-run]",
-        "delegate [--json] models [--summary] [--redacted]",
+        "delegate [--json] models [--summary]",
         "delegate [--json] capabilities [refresh]",
-        "delegate [--json] describe [--summary] [--redacted]",
+        "delegate [--json] describe [--summary]",
         "delegate agent-help",
         "delegate help [<command> [<subcommand>]]",
     ]
@@ -858,10 +857,8 @@ def render_overview_text() -> str:
     lines.append("Discovery:")
     lines.append("  delegate help <command>        Focused help for any command path.")
     lines.append("  delegate --json <command> --help   Machine-readable spec for an agent.")
-    lines.append(
-        "  delegate --json describe --summary --redacted  Compact, safe surface inventory."
-    )
-    lines.append("  delegate --json models --summary --redacted    Compact, safe model inventory.")
+    lines.append("  delegate --json describe --summary  Compact command/config surface inventory.")
+    lines.append("  delegate --json models --summary    Compact model inventory.")
     lines.append("  delegate agent-help             Full agent guidance.")
 
     lines.append("")

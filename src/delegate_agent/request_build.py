@@ -93,6 +93,40 @@ def validate_config(config: JsonObject) -> None:
         raise DelegateError(exc.error, exc.message) from exc
 
 
+ProgressIntent = str | None
+
+
+def resolve_effective_progress(intent: ProgressIntent, config: JsonObject) -> bool:
+    if intent == "off":
+        return False
+    if intent == "on":
+        return True
+    progress_section = config.get("progress")
+    if isinstance(progress_section, dict):
+        enabled = progress_section.get("enabled", False)
+        if isinstance(enabled, bool):
+            return enabled
+    return False
+
+
+def resolve_progress_timing(config: JsonObject) -> tuple[float, float]:
+    progress_section = config.get("progress")
+    if not isinstance(progress_section, dict):
+        return (
+            delegate_runner.PROGRESS_INITIAL_DELAY_SEC,
+            delegate_runner.PROGRESS_HEARTBEAT_INTERVAL_SEC,
+        )
+    initial = progress_section.get(
+        "initialDelaySec",
+        delegate_runner.PROGRESS_INITIAL_DELAY_SEC,
+    )
+    interval = progress_section.get(
+        "intervalSec",
+        delegate_runner.PROGRESS_HEARTBEAT_INTERVAL_SEC,
+    )
+    return float(initial), float(interval)
+
+
 def resolve_workspace(global_cwd: str | None, json_cwd: str | None = None) -> ResolvedWorkspace:
     if global_cwd and json_cwd:
         global_workspace = workspace_for(global_cwd)
@@ -255,11 +289,13 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         raise DelegateError("invalid_command", "Command does not map to an execution request.")
     if launch.mode is None:
         raise DelegateError("invalid_command", "Command does not map to an execution request.")
-    if launch.progress and global_options.pass_through:
+    effective_progress = resolve_effective_progress(launch.progress_intent, config)
+    if effective_progress and global_options.pass_through:
         raise DelegateError(
             "invalid_option_combination",
             "--progress is incompatible with --pass-through.",
         )
+    progress_initial_delay_sec, progress_interval_sec = resolve_progress_timing(config)
     workspace = resolve_workspace(global_options.cwd)
     prompt = resolve_prompt(launch.prompt_parts, launch.prompt_file, stdin)
 
@@ -318,7 +354,9 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         isolation_context=isolation_context,
         reasoning_effort=launch.reasoning_effort,
         reasoning_effort_source="cli" if launch.reasoning_effort is not None else None,
-        progress=launch.progress,
+        progress=effective_progress,
+        progress_initial_delay_sec=progress_initial_delay_sec,
+        progress_interval_sec=progress_interval_sec,
         forbid_commit=launch.forbid_commit,
     )
 
@@ -373,14 +411,21 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
             raise DelegateError(exc.error, "reasoningEffort must be a non-empty string.") from exc
     else:
         reasoning_effort = None
-    raw_progress = raw.get("progress", False)
-    if not isinstance(raw_progress, bool):
-        raise DelegateError("invalid_progress", "progress must be true or false.")
-    if raw_progress and global_options.pass_through:
+    raw_progress_intent: ProgressIntent
+    if "progress" in raw:
+        raw_progress = raw["progress"]
+        if not isinstance(raw_progress, bool):
+            raise DelegateError("invalid_progress", "progress must be true or false.")
+        raw_progress_intent = "on" if raw_progress else "off"
+    else:
+        raw_progress_intent = None
+    effective_progress = resolve_effective_progress(raw_progress_intent, config)
+    if effective_progress and global_options.pass_through:
         raise DelegateError(
             "invalid_option_combination",
             "progress is incompatible with --pass-through.",
         )
+    progress_initial_delay_sec, progress_interval_sec = resolve_progress_timing(config)
     raw_forbid_commit = raw.get("forbidCommit", False)
     if not isinstance(raw_forbid_commit, bool):
         raise DelegateError("invalid_forbid_commit", "forbidCommit must be true or false.")
@@ -473,7 +518,9 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         isolation_context=isolation_context,
         reasoning_effort=reasoning_effort,
         reasoning_effort_source="input-json" if reasoning_effort is not None else None,
-        progress=raw_progress,
+        progress=effective_progress,
+        progress_initial_delay_sec=progress_initial_delay_sec,
+        progress_interval_sec=progress_interval_sec,
         forbid_commit=raw_forbid_commit,
     )
 
@@ -492,6 +539,8 @@ def build_request(
     reasoning_effort: str | None = None,
     reasoning_effort_source: str | None = None,
     progress: bool = False,
+    progress_initial_delay_sec: float = delegate_runner.PROGRESS_INITIAL_DELAY_SEC,
+    progress_interval_sec: float = delegate_runner.PROGRESS_HEARTBEAT_INTERVAL_SEC,
     forbid_commit: bool = False,
 ) -> Request:
     if not isinstance(workspace, ResolvedWorkspace):
@@ -519,6 +568,8 @@ def build_request(
         requested_effort=requested_effort,
         effort_source=effort_source,
         progress=progress,
+        progress_initial_delay_sec=progress_initial_delay_sec,
+        progress_interval_sec=progress_interval_sec,
         forbid_commit=forbid_commit,
     )
 
@@ -770,6 +821,8 @@ def _build_request_for_workspace(
     requested_effort: str | None,
     effort_source: str | None,
     progress: bool,
+    progress_initial_delay_sec: float,
+    progress_interval_sec: float,
     forbid_commit: bool,
 ) -> Request:
     cache = (
@@ -807,6 +860,8 @@ def _build_request_for_workspace(
         reasoning_capability_source=parts.reasoning_capability_source,
         reasoning_transport=parts.reasoning_transport,
         progress=progress,
+        progress_initial_delay_sec=progress_initial_delay_sec,
+        progress_interval_sec=progress_interval_sec,
         forbid_commit=forbid_commit,
         warnings=parts.warnings,
         stdin_text=parts.stdin_text,

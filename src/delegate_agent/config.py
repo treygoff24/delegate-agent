@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import os
 from pathlib import Path
 from typing import Final
@@ -110,6 +111,11 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
             "enabled": False,
             "mergedOlderThanDays": 7,
         },
+    },
+    "progress": {
+        "enabled": False,
+        "initialDelaySec": 30,
+        "intervalSec": 60,
     },
 }
 
@@ -258,6 +264,34 @@ def _validate_required_non_negative_int(
         raise ConfigError(error, f"{path} must not be null.")
     if not is_non_negative_int(value):
         raise ConfigError(error, f"{path} must be a non-negative integer.")
+
+
+def _validate_progress_section(progress: JsonValue) -> None:
+    if progress is None:
+        return
+    if not isinstance(progress, dict):
+        raise ConfigError("invalid_progress_config", "progress config must be an object.")
+    if "enabled" in progress:
+        enabled = progress["enabled"]
+        if not isinstance(enabled, bool):
+            raise ConfigError(
+                "invalid_progress_config",
+                "progress.enabled must be a boolean.",
+            )
+    for key in ("initialDelaySec", "intervalSec"):
+        if key not in progress:
+            continue
+        value = progress[key]
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value <= 0
+        ):
+            raise ConfigError(
+                "invalid_progress_config",
+                f"progress.{key} must be a positive number.",
+            )
 
 
 def _validate_worktrees_section(worktrees: JsonValue) -> None:
@@ -773,6 +807,7 @@ def validate_config(config: JsonObject) -> None:
     _validate_reasoning_section(config.get("reasoning"))
     _validate_isolation_section(config.get("isolation"))
     _validate_worktrees_section(config.get("worktrees"))
+    _validate_progress_section(config.get("progress"))
 
 
 def completion_report_default_mode(config: JsonObject) -> str:

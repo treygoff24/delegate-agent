@@ -7,9 +7,7 @@ agent-help. Reference output only — no run execution happens here.
 
 from __future__ import annotations
 
-import copy
 import os
-import re
 import sys
 from pathlib import Path
 from typing import TextIO
@@ -25,7 +23,7 @@ from delegate_agent.argv_builders import (
 from delegate_agent.config import config_path
 from delegate_agent.constants import KNOWN_ENGINES, MODE_SAFE, MODE_WORK
 from delegate_agent.errors import EXIT_OK, DelegateError
-from delegate_agent.json_types import JsonObject, JsonValue
+from delegate_agent.json_types import JsonObject
 from delegate_agent.prompt_transport import (
     DROID_PROMPT_FILE_DISPLAY,
     PROMPT_TRANSPORT_ARGV,
@@ -36,148 +34,26 @@ from delegate_agent.request_build import _resolve_default_model
 
 CONFIG_ENV = delegate_config.CONFIG_ENV
 
-REDACTED_PATH = "<redacted-path>"
-REDACTED_MODEL_ID = "<redacted-model-id>"
+
+def _scrub_discovery_payload(payload: JsonObject) -> JsonObject:
+    scrubbed = redaction.redact_value(payload)
+    return scrubbed if isinstance(scrubbed, dict) else {"ok": False}
 
 
-def _redacted_path(value: object) -> str:
-    _ = value
-    return REDACTED_PATH
+def _text_model_label(value: object) -> str:
+    return value if isinstance(value, str) and value else "(none)"
 
 
-def _redacted_model_id(value: object) -> str:
-    _ = value
-    return REDACTED_MODEL_ID
-
-
-def _is_path_like(value: str) -> bool:
-    return value.startswith(("/", "~", ".")) or "\\" in value or value.endswith(".json")
-
-
-def _redacted_config_source(value: str) -> str:
-    return _redacted_path(value) if _is_path_like(value) else value
-
-
-MODEL_ID_REASONING_ALIAS_PROVIDERS = frozenset({"codex", "cursor", "claude", "kimi"})
-MODEL_ARG_FLAGS = frozenset({"--model", "-m"})
-MODEL_ARG_INLINE_RE = re.compile(r"^(--model|-m)=(.+)$")
-
-
-def _redact_argv_values(values: list[JsonValue], *, ancestors: tuple[str, ...]) -> list[JsonValue]:
-    redacted: list[JsonValue] = []
-    previous = ""
-    for item in values:
-        if isinstance(item, str):
-            inline_model_arg = MODEL_ARG_INLINE_RE.match(item)
-            if inline_model_arg is not None:
-                redacted.append(f"{inline_model_arg.group(1)}={REDACTED_MODEL_ID}")
-            elif previous in MODEL_ARG_FLAGS:
-                redacted.append(_redacted_model_id(item))
-            else:
-                redacted_item = _redact_discovery_value(
-                    str(len(redacted)), item, ancestors=ancestors
-                )
-                redacted.append(redaction.redact_string(redacted_item))
-        else:
-            redacted_item = _redact_discovery_value(str(len(redacted)), item, ancestors=ancestors)
-            redacted.append(redacted_item)
-        previous = item if isinstance(item, str) else ""
-    return redacted
-
-
-def _reasoning_alias_provider(ancestors: tuple[str, ...]) -> str | None:
-    if len(ancestors) >= 2 and ancestors[0] == "reasoningAliases":
-        provider = ancestors[1]
-        return provider if provider in MODEL_ID_REASONING_ALIAS_PROVIDERS else None
-    return None
-
-
-def _redacted_dict_key(
-    key: str,
-    *,
-    ancestors: tuple[str, ...],
-    existing: dict[str, JsonValue],
-) -> str:
-    provider = _reasoning_alias_provider(ancestors)
-    if provider is None:
-        return key
-    candidate = REDACTED_MODEL_ID
-    if candidate not in existing:
-        return candidate
-    suffix = 2
-    while f"{REDACTED_MODEL_ID}-{suffix}" in existing:
-        suffix += 1
-    return f"{REDACTED_MODEL_ID}-{suffix}"
-
-
-def _redact_discovery_value(
-    key: str,
-    value: JsonValue,
-    *,
-    ancestors: tuple[str, ...] = (),
-) -> JsonValue:
-    if isinstance(value, dict):
-        if key in {"models", "reasoningEffortModels"} and all(
-            isinstance(item, str) for item in value.values()
-        ):
-            return {str(alias): _redacted_model_id(model) for alias, model in value.items()}
-        redacted_dict: dict[str, JsonValue] = {}
-        next_ancestors = (*ancestors, key) if key else ancestors
-        for child_key, child_value in value.items():
-            child_key_text = str(child_key)
-            redacted_key = _redacted_dict_key(
-                child_key_text,
-                ancestors=next_ancestors,
-                existing=redacted_dict,
-            )
-            redacted_dict[redacted_key] = _redact_discovery_value(
-                child_key_text,
-                child_value,
-                ancestors=next_ancestors,
-            )
-        return redacted_dict
-    if isinstance(value, list):
-        if key in {"safe", "work", "argvPrefix"}:
-            return _redact_argv_values(value, ancestors=(*ancestors, key))
-        return [_redact_discovery_value(key, item, ancestors=(*ancestors, key)) for item in value]
-    if isinstance(value, str):
-        if key in {
-            "path",
-            "effectiveConfigPath",
-            "workspace",
-            "modulePath",
-            "packageRoot",
-            "executable",
-            "pythonExecutable",
-            "configPath",
-            "dataHome",
-        }:
-            return _redacted_path(value)
-        if key in {"configSource", "source"} and _is_path_like(value):
-            return _redacted_path(value)
-        if key in {"model", "defaultModel"}:
-            return _redacted_model_id(value)
-        if key == "alias" and _reasoning_alias_provider(ancestors) is not None:
-            return _redacted_model_id(value)
-        if key in {"warning", "warnings", "message"}:
-            return _redact_reasoning_warning(value)
-        if _is_path_like(value):
-            return _redacted_path(value)
+def _text_path_label(value: object) -> str:
+    if not isinstance(value, str) or not value:
+        return "(none)"
     return value
 
 
-def redact_discovery_payload(payload: JsonObject) -> JsonObject:
-    """Mask local paths and private model ids for agent discovery surfaces.
-
-    This is intentionally separate from secret redaction: the goal is not to
-    hide credentials inside arbitrary text, but to make routine `models` and
-    `describe` discovery safe to paste into logs or subagent prompts while
-    preserving aliases and shape.
-    """
-
-    copied = copy.deepcopy(payload)
-    redacted = _redact_discovery_value("", copied)
-    return redacted if isinstance(redacted, dict) else {"ok": False}
+def _text_argv_prefix_label(value: object) -> str:
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        return "(none)"
+    return " ".join(value) if value else "(none)"
 
 
 def runtime_payload() -> JsonObject:
@@ -288,9 +164,7 @@ def _reasoning_for_alias(reasoning_aliases: JsonObject, engine: str, alias: str)
     return payload if isinstance(payload, dict) else {}
 
 
-def _summary_reasoning_fields(
-    reasoning_payload: JsonObject, *, redacted: bool = False
-) -> JsonObject:
+def _summary_reasoning_fields(reasoning_payload: JsonObject) -> JsonObject:
     output: JsonObject = {}
     supported = reasoning_payload.get("supported")
     if isinstance(supported, list) and all(isinstance(item, str) for item in supported):
@@ -317,66 +191,20 @@ def _summary_reasoning_fields(
             if not isinstance(effort, str) or not effort:
                 continue
             route: JsonObject = {"effort": effort}
-            if redacted:
-                route["modelConfigured"] = isinstance(model, str) and bool(model)
-            else:
-                route["model"] = model if isinstance(model, str) and model else None
+            route["model"] = model if isinstance(model, str) and model else None
             routed.append(route)
         if routed:
             output["reasoningEffortRouting"] = routed
     warning = reasoning_payload.get("warning")
     if isinstance(warning, str):
-        output["warnings"] = _warning_field(warning, redacted=redacted)
+        output["warnings"] = [warning]
     return output
-
-
-def _model_field(model: object, *, redacted: bool) -> JsonObject:
-    configured = isinstance(model, str) and bool(model)
-    if redacted:
-        return {"modelConfigured": configured}
-    return {"defaultModel": model if configured else None}
-
-
-def _redact_reasoning_warning(warning: str) -> str:
-    return re.sub(r"model '[^']+'", f"model '{REDACTED_MODEL_ID}'", warning)
-
-
-def _warning_field(warning: str, *, redacted: bool) -> list[str]:
-    return [_redact_reasoning_warning(warning) if redacted else warning]
-
-
-def _redacted_text_model_label(value: object) -> str:
-    return REDACTED_MODEL_ID if isinstance(value, str) and bool(value) else "(none)"
-
-
-def _text_model_label(value: object, *, redacted: bool) -> str:
-    if redacted:
-        return _redacted_text_model_label(value)
-    return value if isinstance(value, str) and value else "(none)"
-
-
-def _text_path_label(value: object, *, redacted: bool) -> str:
-    if not isinstance(value, str) or not value:
-        return "(none)"
-    if redacted and _is_path_like(value):
-        return REDACTED_PATH
-    return value
-
-
-def _text_argv_prefix_label(value: object, *, redacted: bool) -> str:
-    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-        return "(none)"
-    if redacted:
-        return "<redacted-argv-prefix>" if value else "(none)"
-    return " ".join(value)
 
 
 def models_summary_payload(
     config: JsonObject,
     config_source: str,
     workspace: Path | None = None,
-    *,
-    redacted: bool = False,
 ) -> JsonObject:
     cache = reasoning.load_reasoning_capability_cache(workspace) if workspace is not None else None
     reasoning_aliases = reasoning.build_alias_reasoning_summaries(config, cache)
@@ -394,7 +222,9 @@ def models_summary_payload(
             "available": True,
             "safeSupported": True,
             "workSupported": True,
-            **_model_field(default_model, redacted=redacted),
+            "defaultModel": default_model
+            if isinstance(default_model, str) and default_model
+            else None,
         }
         reason_key = (
             default_model if isinstance(default_model, str) and default_model else "(default)"
@@ -402,7 +232,6 @@ def models_summary_payload(
         entry.update(
             _summary_reasoning_fields(
                 _reasoning_for_alias(reasoning_aliases, engine, reason_key),
-                redacted=redacted,
             )
         )
         aliases.append(entry)
@@ -421,15 +250,11 @@ def models_summary_payload(
                     "available": isinstance(model_id, str) and bool(model_id),
                     "safeSupported": True,
                     "workSupported": True,
+                    "model": model_id if isinstance(model_id, str) else None,
                 }
-                if redacted:
-                    entry["modelConfigured"] = isinstance(model_id, str) and bool(model_id)
-                else:
-                    entry["model"] = model_id if isinstance(model_id, str) else None
                 entry.update(
                     _summary_reasoning_fields(
                         _reasoning_for_alias(reasoning_aliases, "droid", alias),
-                        redacted=redacted,
                     )
                 )
                 aliases.append(entry)
@@ -437,8 +262,7 @@ def models_summary_payload(
     return {
         "ok": True,
         "summary": True,
-        "redacted": redacted,
-        "configSource": _redacted_config_source(config_source) if redacted else config_source,
+        "configSource": config_source,
         "version": VERSION,
         "aliases": aliases,
         "counts": {
@@ -447,7 +271,7 @@ def models_summary_payload(
         },
         "discovery": {
             "fullModels": "delegate --json models",
-            "safeSummary": "delegate --json models --summary --redacted",
+            "safeSummary": "delegate --json models --summary",
             "reasoningCapabilities": "delegate --json capabilities",
         },
     }
@@ -753,20 +577,15 @@ def describe_summary_payload(
     config: JsonObject,
     config_source: str,
     workspace: Path | None = None,
-    *,
-    redacted: bool = False,
 ) -> JsonObject:
     full = describe_payload(config, config_source, workspace)
     config_resolution = full.get("configResolution")
-    if redacted and isinstance(config_resolution, dict):
-        config_resolution = redact_discovery_payload(config_resolution)
     commands = full.get("commands")
     return {
         "ok": True,
         "summary": True,
-        "redacted": redacted,
         "version": VERSION,
-        "configSource": _redacted_config_source(config_source) if redacted else config_source,
+        "configSource": config_source,
         "configResolution": config_resolution if isinstance(config_resolution, dict) else {},
         "engines": list(KNOWN_ENGINES),
         "modes": [MODE_SAFE, MODE_WORK],
@@ -776,15 +595,70 @@ def describe_summary_payload(
             "--prompt-file",
             "--reasoning-effort",
             "--progress",
+            "--no-progress",
             "--forbid-commit",
         ],
         "commands": commands if isinstance(commands, list) else [],
         "recommendedDiscovery": [
-            "delegate --json describe --summary --redacted",
-            "delegate --json models --summary --redacted",
+            "delegate --json describe --summary",
+            "delegate --json models --summary",
             "delegate --json help <command>",
         ],
     }
+
+
+def _emit_models_text(payload: JsonObject, config_source: str, stdout: TextIO) -> None:
+    if config_source == "embedded-default":
+        print("warning: using embedded default config", file=stdout)
+    cursor = payload.get("cursor")
+    if isinstance(cursor, dict):
+        print(
+            "cursor: "
+            f"{_text_model_label(cursor.get('defaultModel'))} "
+            f"({_text_argv_prefix_label(cursor.get('argvPrefix'))})",
+            file=stdout,
+        )
+    print("droid:", file=stdout)
+    droid = payload.get("droid")
+    if isinstance(droid, dict):
+        models = droid.get("models")
+        if isinstance(models, dict):
+            for alias, model_id in sorted(models.items()):
+                print(f"  {alias} -> {_text_model_label(model_id)}", file=stdout)
+    codex = payload.get("codex")
+    if isinstance(codex, dict):
+        profile = codex.get("profile")
+        profile_label = profile if isinstance(profile, str) and profile else "(none)"
+        print(
+            "codex: "
+            f"binary={_text_path_label(codex.get('binary'))} "
+            f"defaultModel={_text_model_label(codex.get('defaultModel'))} "
+            f"profile={profile_label}",
+            file=stdout,
+        )
+    claude = payload.get("claude")
+    if isinstance(claude, dict):
+        print(
+            "claude: "
+            f"binary={_text_path_label(claude.get('binary'))} "
+            f"defaultModel={_text_model_label(claude.get('defaultModel'))} "
+            f"workPermissionMode={claude.get('workPermissionMode')}",
+            file=stdout,
+        )
+    kimi = payload.get("kimi")
+    if isinstance(kimi, dict):
+        print(
+            "kimi: "
+            f"binary={_text_path_label(kimi.get('binary'))} "
+            f"defaultModel={_text_model_label(kimi.get('defaultModel'))}",
+            file=stdout,
+        )
+    runtime = payload.get("runtime")
+    if isinstance(runtime, dict):
+        print(
+            f"runtime: {_text_path_label(runtime.get('modulePath'))}",
+            file=stdout,
+        )
 
 
 def emit_models(
@@ -795,74 +669,29 @@ def emit_models(
     *,
     workspace: Path | None = None,
     summary: bool = False,
-    redacted: bool = False,
 ) -> int:
     if summary:
-        payload = models_summary_payload(config, config_source, workspace, redacted=redacted)
+        payload = _scrub_discovery_payload(models_summary_payload(config, config_source, workspace))
         if json_mode:
             delegate_rendering.print_json(payload, stdout)
         else:
-            for item in payload["aliases"]:
-                warnings = item.get("warnings")
-                suffix = f" warnings={len(warnings)}" if isinstance(warnings, list) else ""
-                print(
-                    f"{item['provider']}:{item['alias']} safe={item['safeSupported']} work={item['workSupported']}{suffix}",
-                    file=stdout,
-                )
+            aliases = payload.get("aliases")
+            if isinstance(aliases, list):
+                for item in aliases:
+                    if not isinstance(item, dict):
+                        continue
+                    warnings = item.get("warnings")
+                    suffix = f" warnings={len(warnings)}" if isinstance(warnings, list) else ""
+                    print(
+                        f"{item['provider']}:{item['alias']} safe={item['safeSupported']} work={item['workSupported']}{suffix}",
+                        file=stdout,
+                    )
         return EXIT_OK
+    payload = _scrub_discovery_payload(models_payload(config, config_source, workspace))
     if json_mode:
-        payload = models_payload(config, config_source, workspace)
-        if redacted:
-            payload = redact_discovery_payload(payload)
-            payload["redacted"] = True
         delegate_rendering.print_json(payload, stdout)
         return EXIT_OK
-    if config_source == "embedded-default":
-        print("warning: using embedded default config", file=stdout)
-    cursor = config["cursor"]
-    print(
-        "cursor: "
-        f"{_text_model_label(cursor.get('defaultModel'), redacted=redacted)} "
-        f"({_text_argv_prefix_label(cursor.get('argvPrefix'), redacted=redacted)})",
-        file=stdout,
-    )
-    print("droid:", file=stdout)
-    for alias, model_id in sorted(config["droid"]["models"].items()):
-        print(f"  {alias} -> {_text_model_label(model_id, redacted=redacted)}", file=stdout)
-    codex = config["codex"]
-    profile = codex.get("profile")
-    if redacted and isinstance(profile, str) and profile:
-        profile_label = "<redacted-profile>"
-    elif isinstance(profile, str) and profile:
-        profile_label = profile
-    else:
-        profile_label = "(none)"
-    print(
-        "codex: "
-        f"binary={_text_path_label(codex.get('binary'), redacted=redacted)} "
-        f"defaultModel={_text_model_label(codex.get('defaultModel'), redacted=redacted)} "
-        f"profile={profile_label}",
-        file=stdout,
-    )
-    claude = config["claude"]
-    print(
-        "claude: "
-        f"binary={_text_path_label(claude.get('binary'), redacted=redacted)} "
-        f"defaultModel={_text_model_label(claude.get('defaultModel'), redacted=redacted)} "
-        f"workPermissionMode={claude['workPermissionMode']}",
-        file=stdout,
-    )
-    kimi = config["kimi"]
-    print(
-        "kimi: "
-        f"binary={_text_path_label(kimi.get('binary'), redacted=redacted)} "
-        f"defaultModel={_text_model_label(kimi.get('defaultModel'), redacted=redacted)}",
-        file=stdout,
-    )
-    print(
-        f"runtime: {_text_path_label(runtime_payload()['modulePath'], redacted=redacted)}",
-        file=stdout,
-    )
+    _emit_models_text(payload, config_source, stdout)
     return EXIT_OK
 
 
@@ -874,16 +703,13 @@ def emit_describe(
     *,
     workspace: Path | None = None,
     summary: bool = False,
-    redacted: bool = False,
 ) -> int:
-    payload = (
-        describe_summary_payload(config, config_source, workspace, redacted=redacted)
+    raw_payload = (
+        describe_summary_payload(config, config_source, workspace)
         if summary
         else describe_payload(config, config_source, workspace)
     )
-    if redacted and not summary:
-        payload = redact_discovery_payload(payload)
-        payload["redacted"] = True
+    payload = _scrub_discovery_payload(raw_payload)
     if json_mode:
         delegate_rendering.print_json(payload, stdout)
         return EXIT_OK
@@ -1002,8 +828,8 @@ Prefer:
   delegate run-output cursor --completion-report
 
 Discovery:
-  delegate --json models --summary --redacted
-  delegate --json describe --summary --redacted
+  delegate --json models --summary
+  delegate --json describe --summary
   delegate --json models        # full/raw details when needed
   delegate --json describe      # full/raw details when needed
   delegate agent-help
