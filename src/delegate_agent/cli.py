@@ -222,6 +222,8 @@ def dry_run_payload(request: Request) -> JsonObject:
         payload["warnings"] = list(request.warnings)
     if request.progress:
         payload["progressRequested"] = True
+    if request.forbid_commit:
+        payload["commitPolicy"] = {"forbidCommit": True}
 
     # Structured isolation fields from the isolation context.
     if request.isolation_context is not None:
@@ -436,6 +438,7 @@ def make_run_context(
         reasoning_capability_source=request.reasoning_capability_source,
         reasoning_transport=request.reasoning_transport,
         prompt_transport=request.prompt_transport,
+        forbid_commit=request.forbid_commit,
     )
 
 

@@ -33,7 +33,13 @@ from delegate_agent.argv_builders import (
     prefix_droid_safe_prompt,
     redacted_prompt_argv,
 )
-from delegate_agent.constants import ENGINES_PROSE, KNOWN_ENGINES, MODE_SAFE, validate_mode
+from delegate_agent.constants import (
+    ENGINES_PROSE,
+    KNOWN_ENGINES,
+    MODE_SAFE,
+    MODE_WORK,
+    validate_mode,
+)
 from delegate_agent.errors import DelegateError
 from delegate_agent.git_utils import GIT_QUICK_TIMEOUT_SECONDS, capture_git_metadata
 from delegate_agent.git_utils import run_git as _run_git
@@ -64,6 +70,7 @@ RUN_INPUT_KEYS = {
     "isolation",
     "reasoningEffort",
     "progress",
+    "forbidCommit",
 }
 
 
@@ -218,6 +225,26 @@ def effective_prompt(
     return prompt
 
 
+def _validate_forbid_commit(
+    *,
+    forbid_commit: bool,
+    mode: str,
+    isolation_context: IsolationContext | None,
+) -> None:
+    if not forbid_commit:
+        return
+    if mode != MODE_WORK:
+        raise DelegateError(
+            "invalid_option_combination",
+            "--forbid-commit requires work mode with persistent worktree isolation.",
+        )
+    if isolation_context is None or isolation_context.isolation_lifecycle != "persistent":
+        raise DelegateError(
+            "invalid_option_combination",
+            "--forbid-commit requires --isolation worktree so Delegate can enforce the policy.",
+        )
+
+
 def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO) -> Request:
     validate_config(config)
     if parsed.subcommand == "run":
@@ -266,6 +293,11 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         source_head_ref=git_head_ref,
         source_branch=git_branch,
     )
+    _validate_forbid_commit(
+        forbid_commit=launch.forbid_commit,
+        mode=launch.mode,
+        isolation_context=isolation_context,
+    )
 
     completion_report_mode = resolve_completion_report_mode(parsed, config)
     prompt = effective_prompt(
@@ -287,6 +319,7 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         reasoning_effort=launch.reasoning_effort,
         reasoning_effort_source="cli" if launch.reasoning_effort is not None else None,
         progress=launch.progress,
+        forbid_commit=launch.forbid_commit,
     )
 
 
@@ -348,6 +381,9 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
             "invalid_option_combination",
             "progress is incompatible with --pass-through.",
         )
+    raw_forbid_commit = raw.get("forbidCommit", False)
+    if not isinstance(raw_forbid_commit, bool):
+        raise DelegateError("invalid_forbid_commit", "forbidCommit must be true or false.")
     if engine == "droid":
         if not isinstance(model_alias, str) or not model_alias:
             raise DelegateError("missing_model", "droid run input requires model alias.")
@@ -412,6 +448,11 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         source_head_ref=git_head_ref,
         source_branch=git_branch,
     )
+    _validate_forbid_commit(
+        forbid_commit=raw_forbid_commit,
+        mode=str(mode),
+        isolation_context=isolation_context,
+    )
 
     completion_report_mode = resolve_completion_report_mode(parsed, config)
     prompt = effective_prompt(
@@ -433,6 +474,7 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         reasoning_effort=reasoning_effort,
         reasoning_effort_source="input-json" if reasoning_effort is not None else None,
         progress=raw_progress,
+        forbid_commit=raw_forbid_commit,
     )
 
 
@@ -450,6 +492,7 @@ def build_request(
     reasoning_effort: str | None = None,
     reasoning_effort_source: str | None = None,
     progress: bool = False,
+    forbid_commit: bool = False,
 ) -> Request:
     if not isinstance(workspace, ResolvedWorkspace):
         raise TypeError(
@@ -476,6 +519,7 @@ def build_request(
         requested_effort=requested_effort,
         effort_source=effort_source,
         progress=progress,
+        forbid_commit=forbid_commit,
     )
 
 
@@ -726,6 +770,7 @@ def _build_request_for_workspace(
     requested_effort: str | None,
     effort_source: str | None,
     progress: bool,
+    forbid_commit: bool,
 ) -> Request:
     cache = (
         reasoning.load_reasoning_capability_cache(resolved.path)
@@ -762,6 +807,7 @@ def _build_request_for_workspace(
         reasoning_capability_source=parts.reasoning_capability_source,
         reasoning_transport=parts.reasoning_transport,
         progress=progress,
+        forbid_commit=forbid_commit,
         warnings=parts.warnings,
         stdin_text=parts.stdin_text,
         prompt_file_text=parts.prompt_file_text,

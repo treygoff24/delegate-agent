@@ -22,6 +22,7 @@ from delegate_agent import (
     rendering,
     run_metadata,
     run_registry,
+    worktree_summary,
 )
 from delegate_agent.json_types import JsonObject
 
@@ -84,6 +85,7 @@ class RunContext:
     reasoning_capability_source: str | None = None
     reasoning_transport: str | None = None
     prompt_transport: str = "argv"
+    forbid_commit: bool = False
 
 
 def write_manifest(run_path: Path, manifest: JsonObject) -> None:
@@ -149,6 +151,8 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
     }
     run_metadata.add_run_metadata_payload_fields(payload, ctx)
     reasoning.add_reasoning_payload_fields(payload, ctx)
+    if ctx.forbid_commit:
+        payload["commitPolicy"] = {"forbidCommit": True}
     return payload
 
 
@@ -213,6 +217,7 @@ def build_snapshot(
     accumulator: harness_events.StreamAccumulator,
     exit_code: int | None = None,
     completion_report_written: bool = False,
+    extra: JsonObject | None = None,
 ) -> JsonObject:
     _assistant_text, assistant_meta = accumulator.bounded_assistant_text()
     recent_events, events_meta = accumulator.bounded_recent_events()
@@ -248,6 +253,8 @@ def build_snapshot(
             "path": report_path,
             "command": run_registry.run_output_command(ctx.alias, completion_report=True),
         }
+    if extra is not None:
+        snapshot.update(extra)
     return snapshot
 
 
@@ -262,6 +269,7 @@ def persist_progress(
     stderr_bytes: int = 0,
     pid: int | None = None,
     completion_report_written: bool = False,
+    extra: JsonObject | None = None,
 ) -> None:
     write_state(
         run_path,
@@ -273,6 +281,7 @@ def persist_progress(
             stderr_bytes=stderr_bytes,
             current=accumulator.current,
             pid=pid,
+            extra=extra,
         ),
     )
     write_snapshot(
@@ -282,6 +291,7 @@ def persist_progress(
             accumulator=accumulator,
             exit_code=exit_code,
             completion_report_written=completion_report_written,
+            extra=extra,
         ),
     )
 
@@ -301,6 +311,7 @@ def emit_bounded_text_summary(
     status: str,
     duration_ms: int,
     stdout: TextIO,
+    extra: JsonObject | None = None,
 ) -> None:
     harness_label = ctx.harness
     print(
@@ -324,6 +335,19 @@ def emit_bounded_text_summary(
         print(f"safe workspace method: {ctx.safe_workspace_method}", file=stdout)
     for warning in ctx.warnings:
         print(f"warning: {warning}", file=stdout)
+    if extra is not None:
+        work_summary = extra.get("workSummary")
+        if isinstance(work_summary, dict):
+            print(
+                "work summary: "
+                f"{work_summary.get('changedFilesCount', 0)} changed files, "
+                f"{work_summary.get('commitsCreatedCount', 0)} commits",
+                file=stdout,
+            )
+            if work_summary.get("noChanges") is True:
+                print("work summary: no file changes or commits detected", file=stdout)
+        if extra.get("commitPolicyViolated") is True:
+            print("commit policy: violated (--forbid-commit)", file=stdout)
     print(f"snapshot: {run_registry.snapshot_command(ctx.alias)}", file=stdout)
     print(
         f"completion report: {run_registry.run_output_command(ctx.alias, completion_report=True)}",
@@ -354,6 +378,7 @@ def completion_json_payload(
     stdout_bytes: int,
     stderr_bytes: int,
     completion_report_written: bool = False,
+    extra: JsonObject | None = None,
 ) -> JsonObject:
     payload: JsonObject = {
         "ok": ok,
@@ -384,10 +409,18 @@ def completion_json_payload(
     cleanup = _worktree_cleanup_commands(ctx)
     if cleanup is not None:
         payload["worktreeCleanupCommands"] = cleanup
+    if extra is not None:
+        payload.update(extra)
 
     if not ok:
-        payload["error"] = "child_failed"
-        payload["message"] = "Child command failed."
+        if extra is not None and extra.get("commitPolicyViolated") is True:
+            payload["error"] = "commit_policy_violated"
+            payload["message"] = (
+                "Child command created commits even though --forbid-commit was set."
+            )
+        else:
+            payload["error"] = "child_failed"
+            payload["message"] = "Child command failed."
     return payload
 
 
@@ -488,7 +521,43 @@ class TrackedCaptureResult:
 @dataclass(frozen=True)
 class TrackedFinalization:
     status: str
+    exit_code: int
     report_written: bool
+    extra: JsonObject
+
+
+def _persistent_work_summary(ctx: RunContext) -> JsonObject | None:
+    if ctx.isolation_lifecycle != "persistent":
+        return None
+    return worktree_summary.build_work_summary(
+        source_git_root=ctx.source_git_root,
+        execution_cwd=ctx.execution_cwd,
+        branch=ctx.branch,
+        creation_context=ctx.creation_context,
+    )
+
+
+def _final_extra(ctx: RunContext, capture_exit_code: int) -> tuple[int, JsonObject]:
+    extra: JsonObject = {}
+    summary = _persistent_work_summary(ctx)
+    if summary is not None:
+        extra["workSummary"] = summary
+    if ctx.forbid_commit:
+        commits_created = worktree_summary.commits_created_count(summary)
+        violated = commits_created > 0
+        extra["commitPolicy"] = {
+            "forbidCommit": True,
+            "violated": violated,
+            "commitsCreatedCount": commits_created,
+        }
+        if violated:
+            extra["commitPolicyViolated"] = True
+            extra["childExitCode"] = capture_exit_code
+            extra["error"] = "commit_policy_violated"
+            extra["message"] = "Child command created commits even though --forbid-commit was set."
+            if capture_exit_code == 0:
+                return 1, extra
+    return capture_exit_code, extra
 
 
 @dataclass
@@ -763,7 +832,8 @@ def _finalize_tracked_run(
     *,
     completion_report_mode: str,
 ) -> TrackedFinalization:
-    status = status_from_exit(capture.exit_code)
+    exit_code, extra = _final_extra(ctx, capture.exit_code)
+    status = status_from_exit(exit_code)
     report_written = write_completion_report(
         files.run_path,
         _completion_report_source(
@@ -777,12 +847,15 @@ def _finalize_tracked_run(
         ctx,
         capture.accumulator,
         status=status,
-        exit_code=capture.exit_code,
+        exit_code=exit_code,
         stdout_bytes=capture.stdout_bytes,
         stderr_bytes=capture.stderr_bytes,
         completion_report_written=report_written,
+        extra=extra,
     )
-    return TrackedFinalization(status=status, report_written=report_written)
+    return TrackedFinalization(
+        status=status, exit_code=exit_code, report_written=report_written, extra=extra
+    )
 
 
 def _tracked_result(
@@ -793,27 +866,29 @@ def _tracked_result(
     json_mode: bool,
     stdout: TextIO,
 ) -> tuple[int, JsonObject | None]:
-    ok = capture.exit_code == 0
+    ok = finalization.exit_code == 0
     if json_mode:
         payload = completion_json_payload(
             ctx,
             ok=ok,
             status=finalization.status,
-            exit_code=capture.exit_code,
+            exit_code=finalization.exit_code,
             duration_ms=capture.duration_ms,
             stdout_bytes=capture.stdout_bytes,
             stderr_bytes=capture.stderr_bytes,
             completion_report_written=finalization.report_written,
+            extra=finalization.extra,
         )
-        return capture.exit_code, payload
+        return finalization.exit_code, payload
 
     emit_bounded_text_summary(
         ctx,
         status=finalization.status,
         duration_ms=capture.duration_ms,
         stdout=stdout,
+        extra=finalization.extra,
     )
-    return capture.exit_code, None
+    return finalization.exit_code, None
 
 
 def execute_tracked(

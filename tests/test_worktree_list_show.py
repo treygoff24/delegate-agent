@@ -68,6 +68,8 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
             self.assertGreaterEqual(payload["aheadBehind"]["vsCreationBase"]["ahead"], 1)
             self.assertIn("?? scratch.txt", payload["porcelainStatus"])
             self.assertIn("safeRemove", payload["suggestedCommands"])
+            self.assertEqual(payload["workSummary"]["commitsCreatedCount"], 1)
+            self.assertEqual(payload["workSummary"]["changedFilesCount"], 1)
 
     def test_worktree_show_unknown_status_still_includes_inspection_data(self):
         _repo, path = self._make_repo()

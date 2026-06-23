@@ -141,6 +141,16 @@ class ParserTests(unittest.TestCase):
         self.assertFalse(parsed.launch.progress)
         self.assertEqual(parsed.launch.prompt_parts, ["review", "--progress"])
 
+    def test_forbid_commit_launch_option_before_prompt(self):
+        parsed = self.delegate.parse_cli(["cursor", "work", "--forbid-commit", "fix"])
+        self.assertTrue(parsed.launch.forbid_commit)
+        self.assertEqual(parsed.launch.prompt_parts, ["fix"])
+
+    def test_forbid_commit_after_prompt_is_prompt_text(self):
+        parsed = self.delegate.parse_cli(["cursor", "work", "fix", "--forbid-commit"])
+        self.assertFalse(parsed.launch.forbid_commit)
+        self.assertEqual(parsed.launch.prompt_parts, ["fix", "--forbid-commit"])
+
     def test_progress_with_pass_through_is_invalid(self):
         parsed = self.delegate.parse_cli(["--pass-through", "codex", "safe", "--progress", "x"])
         with self.assertRaises(self.delegate.DelegateError) as ctx:

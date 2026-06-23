@@ -63,6 +63,7 @@ class PersistentExecutionRequest(Protocol):
     reasoning_capability_source: str | None
     reasoning_transport: str | None
     progress: bool
+    forbid_commit: bool
     stdin_text: str | None
     prompt_file_text: str | None
     prompt_transport: str
@@ -231,6 +232,7 @@ def _build_persistent_worktree_run_context(
         reasoning_capability_source=request.reasoning_capability_source,
         reasoning_transport=request.reasoning_transport,
         prompt_transport=request.prompt_transport,
+        forbid_commit=request.forbid_commit,
     )
 
 
@@ -381,14 +383,16 @@ def _request_for_execution_workspace(
     )
     execution_stdin_text = request.stdin_text
     execution_prompt_file_text = request.prompt_file_text
-    execution_prompt = prepend_persistent_worktree_context(request.prompt)
+    execution_prompt = _persistent_prompt(request.prompt, forbid_commit=request.forbid_commit)
     if request.prompt_transport == PROMPT_TRANSPORT_STDIN:
-        execution_stdin_text = prepend_persistent_worktree_context(
-            execution_stdin_text or request.prompt
+        execution_stdin_text = _persistent_prompt(
+            execution_stdin_text or request.prompt,
+            forbid_commit=request.forbid_commit,
         )
     elif request.prompt_transport == PROMPT_TRANSPORT_FILE:
-        execution_prompt_file_text = prepend_persistent_worktree_context(
-            execution_prompt_file_text or request.prompt
+        execution_prompt_file_text = _persistent_prompt(
+            execution_prompt_file_text or request.prompt,
+            forbid_commit=request.forbid_commit,
         )
     else:
         execution_argv[-1] = execution_prompt
@@ -402,6 +406,18 @@ def _request_for_execution_workspace(
         display_argv=execution_display_argv,
         stdin_text=execution_stdin_text,
         prompt_file_text=execution_prompt_file_text,
+    )
+
+
+def _persistent_prompt(prompt: str, *, forbid_commit: bool) -> str:
+    prompt = prepend_persistent_worktree_context(prompt)
+    if not forbid_commit:
+        return prompt
+    return (
+        "Delegate commit policy: --forbid-commit is active for this run. "
+        "Do not run `git commit` or create commits. Leave file changes uncommitted; "
+        "Delegate will mark the run failed if new commits exist when the child exits.\n\n"
+        f"{prompt}"
     )
 
 

@@ -19,7 +19,7 @@ from __future__ import annotations
 from contextlib import suppress
 from pathlib import Path
 
-from delegate_agent import run_registry
+from delegate_agent import run_registry, worktree_summary
 from delegate_agent.git_utils import (
     GIT_QUICK_TIMEOUT_SECONDS,
 )
@@ -398,6 +398,21 @@ def decorate_record(
     if dirty_paths:
         output["dirtyPaths"] = dirty_paths[:MAX_DIRTY_PATHS_REPORTED]
         output["dirtyPathsTotal"] = dirty_total
+    if status in (STATUS_PRESENT, STATUS_UNKNOWN):
+        summary = worktree_summary.build_work_summary(
+            source_git_root=record.get("sourceGitRoot")
+            if isinstance(record.get("sourceGitRoot"), str)
+            else None,
+            execution_cwd=record.get("executionCwd")
+            if isinstance(record.get("executionCwd"), str)
+            else "",
+            branch=record.get("branch") if isinstance(record.get("branch"), str) else None,
+            creation_context=record.get("creationContext")
+            if isinstance(record.get("creationContext"), dict)
+            else None,
+        )
+        if summary is not None:
+            output["workSummary"] = summary
     return output
 
 

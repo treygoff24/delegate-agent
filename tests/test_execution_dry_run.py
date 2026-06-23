@@ -65,6 +65,95 @@ class ExecutionDryRunTests(ExecutionTestBase):
             payload = self.delegate.dry_run_payload(request)
         self.assertTrue(payload["progressRequested"])
 
+    def test_dry_run_reports_forbid_commit_policy_for_persistent_worktree(self):
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            mock.patch.dict(os.environ, {"HOME": fake_home}),
+            tempfile.TemporaryDirectory() as repo_dir,
+        ):
+            subprocess.run(
+                ["git", "-C", repo_dir, "init"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            subprocess.run(
+                ["git", "-C", repo_dir, "config", "user.name", "Test"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            subprocess.run(
+                ["git", "-C", repo_dir, "config", "user.email", "test@example.com"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            subprocess.run(
+                ["git", "-C", repo_dir, "commit", "--allow-empty", "-m", "init"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            parsed = self.delegate.parse_cli(
+                [
+                    "--cwd",
+                    repo_dir,
+                    "--isolation",
+                    "worktree",
+                    "--json",
+                    "dry-run",
+                    "cursor",
+                    "work",
+                    "--forbid-commit",
+                    "fix",
+                ]
+            )
+            request = self.delegate.request_from_parsed(
+                parsed,
+                self.delegate.DEFAULT_CONFIG,
+                io.StringIO(""),
+            )
+            payload = self.delegate.dry_run_payload(request)
+        self.assertEqual(payload["commitPolicy"], {"forbidCommit": True})
+
+    def test_forbid_commit_requires_persistent_worktree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parsed = self.delegate.parse_cli(
+                ["--cwd", tmp, "--json", "dry-run", "cursor", "work", "--forbid-commit", "fix"]
+            )
+            with self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.delegate.request_from_parsed(
+                    parsed,
+                    self.delegate.DEFAULT_CONFIG,
+                    io.StringIO(""),
+                )
+        self.assertEqual(ctx.exception.error, "invalid_option_combination")
+
+    def test_forbid_commit_rejects_safe_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parsed = self.delegate.parse_cli(
+                [
+                    "--cwd",
+                    tmp,
+                    "--isolation",
+                    "worktree",
+                    "--json",
+                    "dry-run",
+                    "cursor",
+                    "safe",
+                    "--forbid-commit",
+                    "review",
+                ]
+            )
+            with self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.delegate.request_from_parsed(
+                    parsed,
+                    self.delegate.DEFAULT_CONFIG,
+                    io.StringIO(""),
+                )
+        self.assertEqual(ctx.exception.error, "invalid_option_combination")
+
     # -- Wave 2: dry-run structured isolation fields --------------------------------
 
     def test_dry_run_cursor_safe_includes_structured_isolation_fields(self):

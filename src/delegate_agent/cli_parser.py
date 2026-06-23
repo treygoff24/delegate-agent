@@ -436,7 +436,9 @@ def parse_modeless_engine(
     # prompt text (`cursor work explain --help`).
     if len(rest) >= 2 and command_help.is_help_token(rest[1]):
         return help_command(json_mode, topic)
-    prompt_file, reasoning_effort, progress, prompt_parts = parse_prompt_tail(rest[1:])
+    prompt_file, reasoning_effort, progress, forbid_commit, prompt_parts = parse_prompt_tail(
+        rest[1:]
+    )
     return ParsedCommand(
         engine,
         global_options=GlobalOptions(
@@ -453,6 +455,7 @@ def parse_modeless_engine(
             prompt_file=prompt_file,
             reasoning_effort=reasoning_effort,
             progress=progress,
+            forbid_commit=forbid_commit,
             dry_run=dry_run,
         ),
     )
@@ -492,7 +495,9 @@ def parse_droid(
     # Help wins after the mode, before prompt capture: `droid x safe --help`.
     if len(rest) >= 3 and command_help.is_help_token(rest[2]):
         return help_command(json_mode, topic)
-    prompt_file, reasoning_effort, progress, prompt_parts = parse_prompt_tail(rest[2:])
+    prompt_file, reasoning_effort, progress, forbid_commit, prompt_parts = parse_prompt_tail(
+        rest[2:]
+    )
     return ParsedCommand(
         "droid",
         global_options=GlobalOptions(
@@ -510,6 +515,7 @@ def parse_droid(
             prompt_file=prompt_file,
             reasoning_effort=reasoning_effort,
             progress=progress,
+            forbid_commit=forbid_commit,
             dry_run=dry_run,
         ),
     )
@@ -565,10 +571,13 @@ def parse_dry_run(
     )
 
 
-def parse_prompt_tail(rest: list[str]) -> tuple[str | None, str | None, bool, list[str]]:
+def parse_prompt_tail(
+    rest: list[str],
+) -> tuple[str | None, str | None, bool, bool, list[str]]:
     prompt_file: str | None = None
     reasoning_effort: str | None = None
     progress = False
+    forbid_commit = False
     prompt_parts: list[str] = []
     i = 0
     while i < len(rest):
@@ -618,6 +627,15 @@ def parse_prompt_tail(rest: list[str]) -> tuple[str | None, str | None, bool, li
             progress = True
             i += 1
             continue
+        if token == "--forbid-commit":
+            if forbid_commit:
+                raise DelegateError(
+                    "invalid_option_combination",
+                    "Only one --forbid-commit flag is allowed.",
+                )
+            forbid_commit = True
+            i += 1
+            continue
         prompt_parts = rest[i:]
         break
     if "--prompt-file" in prompt_parts:
@@ -628,7 +646,7 @@ def parse_prompt_tail(rest: list[str]) -> tuple[str | None, str | None, bool, li
         raise_misplaced_global_option(
             "Global options must appear before the subcommand; use --prompt-file for literal flag text.",
         )
-    return prompt_file, reasoning_effort, progress, prompt_parts
+    return prompt_file, reasoning_effort, progress, forbid_commit, prompt_parts
 
 
 def parse_snapshot(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
