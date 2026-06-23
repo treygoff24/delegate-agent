@@ -610,6 +610,7 @@ def safe_isolated_request(request: Request) -> Iterator[Request]:
             reasoning_effort_source=request.reasoning_effort_source,
             reasoning_capability_source=request.reasoning_capability_source,
             reasoning_transport=request.reasoning_transport,
+            progress=request.progress,
             warnings=request.warnings,
             stdin_text=request.stdin_text,
             prompt_file_text=request.prompt_file_text,

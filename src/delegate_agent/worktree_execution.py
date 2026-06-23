@@ -62,6 +62,7 @@ class PersistentExecutionRequest(Protocol):
     reasoning_effort_source: str | None
     reasoning_capability_source: str | None
     reasoning_transport: str | None
+    progress: bool
     stdin_text: str | None
     prompt_file_text: str | None
     prompt_transport: str
@@ -442,6 +443,7 @@ def _launch_child_in_persistent_worktree(
             prompt_file_text=execution_request.prompt_file_text,
             prompt_file_placeholder=DROID_PROMPT_FILE_ARG_PLACEHOLDER,
             manifest_argv=execution_request.display_argv,
+            progress=request.progress,
         )
     except Exception as exc:
         error_msg = str(exc)

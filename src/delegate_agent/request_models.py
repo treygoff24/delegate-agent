@@ -38,6 +38,7 @@ class LaunchOptions:
     prompt_parts: list[str] | None = None
     prompt_file: str | None = None
     reasoning_effort: str | None = None
+    progress: bool = False
     dry_run: bool = False
 
 
@@ -116,6 +117,7 @@ class Request:
     reasoning_effort_source: str | None = None
     reasoning_capability_source: str | None = None
     reasoning_transport: str | None = None
+    progress: bool = False
     warnings: tuple[str, ...] = ()
     stdin_text: str | None = None
     prompt_file_text: str | None = None

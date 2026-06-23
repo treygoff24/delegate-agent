@@ -52,6 +52,19 @@ class ExecutionDryRunTests(ExecutionTestBase):
         self.assertEqual(payload["reasoningCapabilitySource"], "bundled")
         self.assertIn('model_reasoning_effort="high"', payload["argv"])
 
+    def test_dry_run_reports_progress_requested(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parsed = self.delegate.parse_cli(
+                ["--cwd", tmp, "--json", "dry-run", "codex", "safe", "--progress", "review"]
+            )
+            request = self.delegate.request_from_parsed(
+                parsed,
+                self.delegate.DEFAULT_CONFIG,
+                io.StringIO(""),
+            )
+            payload = self.delegate.dry_run_payload(request)
+        self.assertTrue(payload["progressRequested"])
+
     # -- Wave 2: dry-run structured isolation fields --------------------------------
 
     def test_dry_run_cursor_safe_includes_structured_isolation_fields(self):

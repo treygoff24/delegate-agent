@@ -190,6 +190,12 @@ class HelpSubcommandTests(HelpCliTestBase):
                 self.assertIn("--redacted", out)
                 self.assertIn(f"delegate --json {command} --summary --redacted", out)
 
+    def test_engine_help_includes_progress_launch_option(self):
+        code, out, _err = self.run_main(["droid", "--help"])
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertIn("--progress", out)
+        self.assertIn("stderr", out)
+
 
 class JsonPositionIndependenceTests(HelpCliTestBase):
     """`--json` anywhere in a help invocation yields the same focused help (D3)."""

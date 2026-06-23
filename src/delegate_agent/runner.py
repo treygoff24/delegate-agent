@@ -37,6 +37,10 @@ PROGRESS_PERSIST_LINE_INTERVAL = 10
 PROGRESS_PERSIST_TIME_INTERVAL_SEC = 0.5
 DRAIN_JOIN_TIMEOUT_SEC = 5.0
 MILLISECONDS_PER_SECOND = 1000
+PROGRESS_INITIAL_DELAY_SEC = 30.0
+PROGRESS_HEARTBEAT_INTERVAL_SEC = 60.0
+PROGRESS_INITIAL_DELAY_ENV = "DELEGATE_PROGRESS_INITIAL_DELAY_SEC"
+PROGRESS_INTERVAL_ENV = "DELEGATE_PROGRESS_INTERVAL_SEC"
 
 SKILL_REVIEW_PREFIX = prompt_instructions.SKILL_REVIEW_PREFIX
 COMPLETION_REPORT_SUFFIX = prompt_instructions.COMPLETION_REPORT_SUFFIX
@@ -492,6 +496,51 @@ class ByteCounter:
     total: int = 0
 
 
+def _progress_interval_from_env(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return max(value, 0.01)
+
+
+def _progress_current_label(accumulator: harness_events.StreamAccumulator) -> str:
+    current = (accumulator.current or "").strip()
+    if not current:
+        return "waiting for child output"
+    return current[:160]
+
+
+def _emit_progress_started(ctx: RunContext, stderr: TextIO) -> None:
+    print(
+        "delegate: run started "
+        f"alias={ctx.alias} handle={ctx.alias} "
+        f"snapshot={run_registry.snapshot_command(ctx.alias)!r}",
+        file=stderr,
+        flush=True,
+    )
+
+
+def _emit_progress_heartbeat(
+    ctx: RunContext,
+    accumulator: harness_events.StreamAccumulator,
+    *,
+    started: float,
+    stderr: TextIO,
+) -> None:
+    elapsed_ms = int((time.monotonic() - started) * MILLISECONDS_PER_SECOND)
+    print(
+        "delegate: still running "
+        f"alias={ctx.alias} elapsed={format_duration(elapsed_ms)} "
+        f"last_event={_progress_current_label(accumulator)!r}",
+        file=stderr,
+        flush=True,
+    )
+
+
 def _prepare_tracked_run(
     argv: list[str],
     ctx: RunContext,
@@ -553,6 +602,7 @@ def _capture_tracked_process(
     *,
     started: float,
     stdin_text: str | None,
+    progress_stderr: TextIO | None = None,
 ) -> TrackedCaptureResult:
     accumulator = harness_events.StreamAccumulator()
     persist_progress(files.run_path, ctx, accumulator, status="running", pid=process.pid)
@@ -634,7 +684,32 @@ def _capture_tracked_process(
         # Child agent runtimes are intentionally unbounded: callers cancel them
         # via the OS/run-management surface, while quick metadata probes
         # elsewhere use explicit timeouts.
-        exit_code = process.wait()
+        if progress_stderr is not None:
+            _emit_progress_started(ctx, progress_stderr)
+            initial_delay = _progress_interval_from_env(
+                PROGRESS_INITIAL_DELAY_ENV,
+                PROGRESS_INITIAL_DELAY_SEC,
+            )
+            interval = _progress_interval_from_env(
+                PROGRESS_INTERVAL_ENV,
+                PROGRESS_HEARTBEAT_INTERVAL_SEC,
+            )
+            next_progress_at = time.monotonic() + initial_delay
+            while True:
+                timeout = max(next_progress_at - time.monotonic(), 0.01)
+                try:
+                    exit_code = process.wait(timeout=timeout)
+                    break
+                except subprocess.TimeoutExpired:
+                    _emit_progress_heartbeat(
+                        ctx,
+                        accumulator,
+                        started=started,
+                        stderr=progress_stderr,
+                    )
+                    next_progress_at = time.monotonic() + interval
+        else:
+            exit_code = process.wait()
         _join_stdin_thread(stdin_thread, process.stdin)
         _join_drain_thread(stdout_thread, process.stdout)
         _join_drain_thread(stderr_thread, process.stderr)
@@ -754,6 +829,7 @@ def execute_tracked(
     prompt_file_text: str | None = None,
     prompt_file_placeholder: str | None = None,
     manifest_argv: list[str] | None = None,
+    progress: bool = False,
 ) -> tuple[int, JsonObject | None]:
     if stdin_text is not None and prompt_file_text is not None:
         raise ValueError("stdin_text and prompt_file_text are mutually exclusive")
@@ -781,6 +857,7 @@ def execute_tracked(
             ctx,
             started=started,
             stdin_text=stdin_text,
+            progress_stderr=stderr if progress else None,
         )
     finally:
         _cleanup_prompt_file_dir(prompt_temp_dir)

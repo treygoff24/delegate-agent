@@ -641,7 +641,7 @@ def describe_summary_payload(
         "modes": [MODE_SAFE, MODE_WORK],
         "isolationValues": list(delegate_config.VALID_ISOLATION_VALUES),
         "globalOptions": full["globalOptions"],
-        "launchOptions": ["--prompt-file", "--reasoning-effort"],
+        "launchOptions": ["--prompt-file", "--reasoning-effort", "--progress"],
         "commands": commands if isinstance(commands, list) else [],
         "recommendedDiscovery": [
             "delegate --json describe --summary --redacted",
@@ -831,6 +831,7 @@ Rules for agents:
   - Always review diffs after work mode when Git is available; outside Git, manually review changed files.
   - Do not use delegate for production deploys or repository publishing unless the operator explicitly asks.
   - Launch normally; do not pipe delegate launches through tail just to suppress noise.
+  - For long tracked foreground runs, add --progress before prompt text to get bounded stderr heartbeats.
   - After a tracked run, use delegate snapshot/runs/run-output; do not tail launch output or .delegate log files.
   - Default output is bounded; use --pass-through only when raw harness streaming is required.
   - If you intentionally pipe delegate output in a shell script, use set -o pipefail.

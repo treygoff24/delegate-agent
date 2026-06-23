@@ -55,7 +55,16 @@ from delegate_agent.request_models import (
     ResolvedWorkspace,
 )
 
-RUN_INPUT_KEYS = {"engine", "mode", "model", "cwd", "prompt", "isolation", "reasoningEffort"}
+RUN_INPUT_KEYS = {
+    "engine",
+    "mode",
+    "model",
+    "cwd",
+    "prompt",
+    "isolation",
+    "reasoningEffort",
+    "progress",
+}
 
 
 def load_config(
@@ -219,6 +228,11 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         raise DelegateError("invalid_command", "Command does not map to an execution request.")
     if launch.mode is None:
         raise DelegateError("invalid_command", "Command does not map to an execution request.")
+    if launch.progress and global_options.pass_through:
+        raise DelegateError(
+            "invalid_option_combination",
+            "--progress is incompatible with --pass-through.",
+        )
     workspace = resolve_workspace(global_options.cwd)
     prompt = resolve_prompt(launch.prompt_parts, launch.prompt_file, stdin)
 
@@ -272,6 +286,7 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         isolation_context=isolation_context,
         reasoning_effort=launch.reasoning_effort,
         reasoning_effort_source="cli" if launch.reasoning_effort is not None else None,
+        progress=launch.progress,
     )
 
 
@@ -325,6 +340,14 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
             raise DelegateError(exc.error, "reasoningEffort must be a non-empty string.") from exc
     else:
         reasoning_effort = None
+    raw_progress = raw.get("progress", False)
+    if not isinstance(raw_progress, bool):
+        raise DelegateError("invalid_progress", "progress must be true or false.")
+    if raw_progress and global_options.pass_through:
+        raise DelegateError(
+            "invalid_option_combination",
+            "progress is incompatible with --pass-through.",
+        )
     if engine == "droid":
         if not isinstance(model_alias, str) or not model_alias:
             raise DelegateError("missing_model", "droid run input requires model alias.")
@@ -409,6 +432,7 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         isolation_context=isolation_context,
         reasoning_effort=reasoning_effort,
         reasoning_effort_source="input-json" if reasoning_effort is not None else None,
+        progress=raw_progress,
     )
 
 
@@ -425,6 +449,7 @@ def build_request(
     isolation_context: IsolationContext | None = None,
     reasoning_effort: str | None = None,
     reasoning_effort_source: str | None = None,
+    progress: bool = False,
 ) -> Request:
     if not isinstance(workspace, ResolvedWorkspace):
         raise TypeError(
@@ -450,6 +475,7 @@ def build_request(
         isolation_context=isolation_context,
         requested_effort=requested_effort,
         effort_source=effort_source,
+        progress=progress,
     )
 
 
@@ -699,6 +725,7 @@ def _build_request_for_workspace(
     isolation_context: IsolationContext | None,
     requested_effort: str | None,
     effort_source: str | None,
+    progress: bool,
 ) -> Request:
     cache = (
         reasoning.load_reasoning_capability_cache(resolved.path)
@@ -734,6 +761,7 @@ def _build_request_for_workspace(
         reasoning_effort_source=parts.reasoning_effort_source,
         reasoning_capability_source=parts.reasoning_capability_source,
         reasoning_transport=parts.reasoning_transport,
+        progress=progress,
         warnings=parts.warnings,
         stdin_text=parts.stdin_text,
         prompt_file_text=parts.prompt_file_text,

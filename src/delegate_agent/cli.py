@@ -220,6 +220,8 @@ def dry_run_payload(request: Request) -> JsonObject:
     reasoning.add_reasoning_payload_fields(payload, request)
     if request.warnings:
         payload["warnings"] = list(request.warnings)
+    if request.progress:
+        payload["progressRequested"] = True
 
     # Structured isolation fields from the isolation context.
     if request.isolation_context is not None:
@@ -535,6 +537,7 @@ def execute_request(
                 prompt_file_text=isolated_request.prompt_file_text,
                 prompt_file_placeholder=DROID_PROMPT_FILE_ARG_PLACEHOLDER,
                 manifest_argv=public_argv(isolated_request),
+                progress=isolated_request.progress,
             )
         except delegate_runner.RunnerLaunchError as exc:
             raise DelegateError(exc.error, exc.message) from exc

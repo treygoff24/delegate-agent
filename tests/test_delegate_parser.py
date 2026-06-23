@@ -131,6 +131,26 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(parsed.launch.reasoning_effort, "high")
         self.assertEqual(parsed.launch.prompt_parts, ["review"])
 
+    def test_progress_launch_option_before_prompt(self):
+        parsed = self.delegate.parse_cli(["codex", "safe", "--progress", "review"])
+        self.assertTrue(parsed.launch.progress)
+        self.assertEqual(parsed.launch.prompt_parts, ["review"])
+
+    def test_progress_after_prompt_is_prompt_text(self):
+        parsed = self.delegate.parse_cli(["codex", "safe", "review", "--progress"])
+        self.assertFalse(parsed.launch.progress)
+        self.assertEqual(parsed.launch.prompt_parts, ["review", "--progress"])
+
+    def test_progress_with_pass_through_is_invalid(self):
+        parsed = self.delegate.parse_cli(["--pass-through", "codex", "safe", "--progress", "x"])
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.request_from_parsed(
+                parsed,
+                self.delegate.DEFAULT_CONFIG,
+                io.StringIO(""),
+            )
+        self.assertEqual(ctx.exception.error, "invalid_option_combination")
+
     def test_dry_run_droid_reasoning_effort(self):
         parsed = self.delegate.parse_cli(
             ["dry-run", "droid", "reviewer", "safe", "--reasoning-effort", "high", "review"]
@@ -548,6 +568,7 @@ class ParserTests(unittest.TestCase):
 
     def test_run_input_keys_contains_isolation(self):
         self.assertIn("isolation", self.delegate.RUN_INPUT_KEYS)
+        self.assertIn("progress", self.delegate.RUN_INPUT_KEYS)
 
     def test_run_input_json_unknown_key_still_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -687,6 +708,55 @@ class ParserTests(unittest.TestCase):
             self.assertEqual(request.stdin_text, request.prompt)
             self.assertNotIn("SECRET JSON CLAUDE PROMPT", request.argv)
             self.assertEqual(request.reasoning_transport, "claude-effort-flag")
+
+    def test_run_input_json_threads_progress(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "task.json"
+            task.write_text(
+                json.dumps(
+                    {
+                        "engine": "droid",
+                        "mode": "safe",
+                        "model": "minimax",
+                        "cwd": tmp,
+                        "prompt": "hello",
+                        "progress": True,
+                    }
+                )
+            )
+            parsed = self.delegate.ParsedCommand(
+                "run",
+                global_options=self.delegate.GlobalOptions(json_mode=True),
+                run_json=self.delegate.RunJsonOptions(str(task)),
+            )
+            cfg = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+            cfg["droid"]["models"] = {"minimax": "model-id"}
+            request = self.delegate.request_from_input_json(parsed, cfg)
+            self.assertTrue(request.progress)
+
+    def test_run_input_json_progress_must_be_boolean(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "task.json"
+            task.write_text(
+                json.dumps(
+                    {
+                        "engine": "droid",
+                        "mode": "safe",
+                        "model": "minimax",
+                        "cwd": tmp,
+                        "prompt": "hello",
+                        "progress": "yes",
+                    }
+                )
+            )
+            parsed = self.delegate.ParsedCommand(
+                "run",
+                global_options=self.delegate.GlobalOptions(json_mode=True),
+                run_json=self.delegate.RunJsonOptions(str(task)),
+            )
+            with self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+            self.assertEqual(ctx.exception.error, "invalid_progress")
 
     def test_run_input_json_claude_safe_rejects_isolation_none(self):
         with tempfile.TemporaryDirectory() as tmp:
