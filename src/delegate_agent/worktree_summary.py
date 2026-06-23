@@ -3,7 +3,12 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from delegate_agent.git_utils import GIT_QUICK_TIMEOUT_SECONDS, run_git
+from delegate_agent.git_utils import (
+    GIT_QUICK_TIMEOUT_SECONDS,
+    git_stdout_or_warn,
+    rev_parse_verify,
+    run_git,
+)
 from delegate_agent.json_types import JsonObject
 
 MAX_CHANGED_FILES_REPORTED = 50
@@ -15,12 +20,13 @@ def _str(value: Any) -> str | None:
 
 
 def _git_stdout(cwd: str, args: list[str], warnings: list[str]) -> str | None:
-    result = run_git(cwd, args, timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS)
-    if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
-        warnings.append(f"git {' '.join(args)} failed: {detail}")
-        return None
-    return result.stdout.strip()
+    return git_stdout_or_warn(
+        cwd,
+        args,
+        warnings=warnings,
+        timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
+        git_runner=run_git,
+    )
 
 
 def _parse_porcelain_line(line: str) -> JsonObject:
@@ -45,9 +51,16 @@ def _changed_files(execution_cwd: str, warnings: list[str]) -> tuple[list[JsonOb
     if stdout is None:
         return [], 0
     lines = stdout.splitlines()
+    return changed_files_from_porcelain_lines(lines)
+
+
+def changed_files_from_porcelain_lines(
+    lines: list[str],
+    total: int | None = None,
+) -> tuple[list[JsonObject], int]:
     return (
         [_parse_porcelain_line(line) for line in lines[:MAX_CHANGED_FILES_REPORTED]],
-        len(lines),
+        len(lines) if total is None else total,
     )
 
 
@@ -76,7 +89,13 @@ def _diff_shortstat(execution_cwd: str, rev: str, warnings: list[str]) -> JsonOb
 
 
 def _rev_parse(cwd: str, rev: str, warnings: list[str]) -> str | None:
-    return _git_stdout(cwd, ["rev-parse", "--verify", rev], warnings)
+    return rev_parse_verify(
+        cwd,
+        rev,
+        warnings=warnings,
+        timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
+        git_runner=run_git,
+    )
 
 
 def _rev_list_count(cwd: str, rev_range: str, warnings: list[str]) -> int | None:
@@ -107,7 +126,7 @@ def _ahead_behind(cwd: str, left: str, right: str, warnings: list[str]) -> JsonO
         return None
 
 
-def _commits_created(execution_cwd: str, base: str, warnings: list[str]) -> list[JsonObject]:
+def _commits_created(execution_cwd: str, base: str, warnings: list[str]) -> list[JsonObject] | None:
     stdout = _git_stdout(
         execution_cwd,
         [
@@ -120,7 +139,7 @@ def _commits_created(execution_cwd: str, base: str, warnings: list[str]) -> list
         warnings,
     )
     if stdout is None:
-        return []
+        return None
     commits: list[JsonObject] = []
     for line in stdout.splitlines():
         parts = line.split("\x01", 2)
@@ -137,6 +156,7 @@ def build_work_summary(
     execution_cwd: str,
     branch: str | None,
     creation_context: JsonObject | None,
+    prefetched_changed_files: tuple[list[JsonObject], int] | None = None,
 ) -> JsonObject | None:
     """Return a compact objective summary for a persistent worktree run.
 
@@ -151,13 +171,17 @@ def build_work_summary(
     creation = creation_context if isinstance(creation_context, dict) else {}
     base = _str(creation.get("sourceHeadOid"))
 
-    changed_files, changed_total = _changed_files(execution_cwd, warnings)
+    if prefetched_changed_files is None:
+        changed_files, changed_total = _changed_files(execution_cwd, warnings)
+    else:
+        changed_files, changed_total = prefetched_changed_files
     dirty = changed_total > 0
     head_commit = _rev_parse(execution_cwd, "HEAD", warnings)
     source_head = _rev_parse(source_git_root, "HEAD", warnings)
 
     commits_count: int | None = None
     commits: list[JsonObject] = []
+    commits_fetch_ok = False
     branch_ahead_of_base: JsonObject | None = None
     diff_stat_vs_base: JsonObject | None = None
     if base is not None:
@@ -170,7 +194,9 @@ def build_work_summary(
                 "baseOid": base,
             }
         if commits_count is not None:
-            commits = _commits_created(execution_cwd, base, warnings)
+            commits_result = _commits_created(execution_cwd, base, warnings)
+            commits_fetch_ok = commits_result is not None
+            commits = commits_result or []
         diff_stat_vs_base = _diff_shortstat(execution_cwd, base, warnings)
     commit_inspection_verified = commits_count is not None
 
@@ -186,7 +212,9 @@ def build_work_summary(
         "commitsCreatedCount": commits_count,
         "commitsCreated": commits,
         "commitsCreatedTruncated": (
-            commits_count > len(commits) if commit_inspection_verified else False
+            commits_count > len(commits)
+            if commit_inspection_verified and commits_fetch_ok
+            else False
         ),
         "commitInspectionStatus": "verified" if commit_inspection_verified else "unverified",
         "baseCommit": base,

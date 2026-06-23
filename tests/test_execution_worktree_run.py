@@ -625,6 +625,82 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             self.assertEqual(state["workSummary"]["changedFilesCount"], 1)
             self.assertEqual(snapshot["workSummary"]["changedFilesCount"], 1)
 
+    def test_work_summary_does_not_mark_failed_commit_fetch_as_truncated(self):
+        repo, _git_cd = self._make_git_repo_with_commit()
+        base_oid = subprocess.run(
+            ["git", "-C", repo.name, "rev-parse", "HEAD"],
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+        for idx in range(3):
+            path = Path(repo.name) / f"commit-{idx}.txt"
+            path.write_text(f"{idx}\n", encoding="utf-8")
+            subprocess.run(["git", "-C", repo.name, "add", path.name], check=True)
+            subprocess.run(
+                ["git", "-C", repo.name, "commit", "-m", f"commit {idx}"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+        original_run_git = worktree_summary.run_git
+
+        def fail_commit_log(cwd, args, *, timeout_seconds):
+            if args and args[0] == "log":
+                return subprocess.CompletedProcess(
+                    ["git", "-C", cwd, *args],
+                    128,
+                    "",
+                    "fatal: log fetch failed",
+                )
+            return original_run_git(cwd, args, timeout_seconds=timeout_seconds)
+
+        with mock.patch.object(worktree_summary, "run_git", fail_commit_log):
+            summary = worktree_summary.build_work_summary(
+                source_git_root=repo.name,
+                execution_cwd=repo.name,
+                branch="delegate/test",
+                creation_context={"sourceHeadOid": base_oid},
+            )
+
+        self.assertIsNotNone(summary)
+        self.assertEqual(summary["commitsCreatedCount"], 3)
+        self.assertEqual(summary["commitsCreated"], [])
+        self.assertFalse(summary["commitsCreatedTruncated"])
+        self.assertTrue(any("git log" in warning for warning in summary["warnings"]))
+
+    def test_work_summary_marks_real_commit_list_truncation(self):
+        repo, _git_cd = self._make_git_repo_with_commit()
+        base_oid = subprocess.run(
+            ["git", "-C", repo.name, "rev-parse", "HEAD"],
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+        for idx in range(worktree_summary.MAX_COMMITS_REPORTED + 1):
+            path = Path(repo.name) / f"commit-{idx}.txt"
+            path.write_text(f"{idx}\n", encoding="utf-8")
+            subprocess.run(["git", "-C", repo.name, "add", path.name], check=True)
+            subprocess.run(
+                ["git", "-C", repo.name, "commit", "-m", f"commit {idx}"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+        summary = worktree_summary.build_work_summary(
+            source_git_root=repo.name,
+            execution_cwd=repo.name,
+            branch="delegate/test",
+            creation_context={"sourceHeadOid": base_oid},
+        )
+
+        self.assertIsNotNone(summary)
+        self.assertEqual(summary["commitsCreatedCount"], worktree_summary.MAX_COMMITS_REPORTED + 1)
+        self.assertEqual(len(summary["commitsCreated"]), worktree_summary.MAX_COMMITS_REPORTED)
+        self.assertTrue(summary["commitsCreatedTruncated"])
+
     def test_forbid_commit_fails_when_child_creates_commit(self):
         with (
             tempfile.TemporaryDirectory() as fake_home,

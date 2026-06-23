@@ -22,6 +22,7 @@ from pathlib import Path
 from delegate_agent import run_registry, worktree_summary
 from delegate_agent.git_utils import (
     GIT_QUICK_TIMEOUT_SECONDS,
+    rev_parse_verify,
 )
 from delegate_agent.git_utils import (
     run_git as _run_git,
@@ -199,14 +200,12 @@ def merged_into_source(
 
 
 def _rev_parse(source_git_root: str, rev: str) -> str | None:
-    result = _run_git(
+    return rev_parse_verify(
         source_git_root,
-        ["rev-parse", "--verify", rev],
+        rev,
         timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
+        git_runner=_run_git,
     )
-    if result.returncode != 0:
-        return None
-    return result.stdout.strip()
 
 
 def _symbolic_ref(source_git_root: str, rev: str) -> str | None:
@@ -311,7 +310,6 @@ def integration_fields(
 def _suppress_merge_suggestions(
     *,
     status: str,
-    dirty: bool | None,
     ahead_behind_payload: JsonObject | None,
 ) -> bool:
     if status not in (STATUS_PRESENT, STATUS_UNKNOWN):
@@ -329,7 +327,6 @@ def suggested_commands(
     record: PersistentWorktreeRecord,
     status: str,
     *,
-    dirty: bool | None = None,
     ahead_behind_payload: JsonObject | None = None,
 ) -> JsonObject:
     alias = record.get("alias") or record.get("runId") or "<handle>"
@@ -348,7 +345,6 @@ def suggested_commands(
             review_diff_base = _shell(["git", "-C", execution_cwd, "diff", "--stat", base])
     suppress_merge = _suppress_merge_suggestions(
         status=status,
-        dirty=dirty,
         ahead_behind_payload=ahead_behind_payload,
     )
     if not suppress_merge and isinstance(source_git_root, str) and isinstance(branch, str):
@@ -370,6 +366,7 @@ def decorate_record(
     *,
     include_detached: bool = False,
     include_work_summary: bool = False,
+    include_porcelain_cache: bool = False,
 ) -> JsonObject:
     status, warnings = detect_worktree_status(record)
     dirty, dirty_paths, dirty_total, dirty_warnings = dirty_info(record, status)
@@ -405,7 +402,19 @@ def decorate_record(
     if dirty_paths:
         output["dirtyPaths"] = dirty_paths[:MAX_DIRTY_PATHS_REPORTED]
         output["dirtyPathsTotal"] = dirty_total
+    if include_porcelain_cache:
+        output["_porcelainStatusLines"] = dirty_paths if dirty is not None else None
+        output["_porcelainStatusTotalLines"] = dirty_total
+        output["_porcelainStatusWarnings"] = dirty_warnings
     if include_work_summary and status in (STATUS_PRESENT, STATUS_UNKNOWN):
+        prefetched_changed_files = (
+            worktree_summary.changed_files_from_porcelain_lines(
+                dirty_paths,
+                dirty_total if isinstance(dirty_total, int) else len(dirty_paths),
+            )
+            if dirty is not None
+            else None
+        )
         summary = worktree_summary.build_work_summary(
             source_git_root=record.get("sourceGitRoot")
             if isinstance(record.get("sourceGitRoot"), str)
@@ -417,6 +426,7 @@ def decorate_record(
             creation_context=record.get("creationContext")
             if isinstance(record.get("creationContext"), dict)
             else None,
+            prefetched_changed_files=prefetched_changed_files,
         )
         if summary is not None:
             output["workSummary"] = summary
@@ -629,21 +639,28 @@ def show_worktree(
         record,
         include_detached=include_detached,
         include_work_summary=True,
+        include_porcelain_cache=True,
     )
     execution_cwd = entry.get("executionCwd")
+    cached_porcelain = entry.pop("_porcelainStatusLines", None)
+    cached_porcelain_total = entry.pop("_porcelainStatusTotalLines", None)
+    cached_porcelain_warnings = entry.pop("_porcelainStatusWarnings", [])
     porcelain: list[str] | None = None
     porcelain_total = 0
     porcelain_truncated = False
     if entry.get("worktreeStatus") in (STATUS_PRESENT, STATUS_UNKNOWN) and isinstance(
         execution_cwd, str
     ):
-        lines, total, warnings = porcelain_status(execution_cwd, limit=50)
-        if lines is not None:
-            porcelain = lines
-            porcelain_total = int(total or 0)
-            porcelain_truncated = porcelain_total > len(lines)
-        elif warnings:
-            entry["warnings"] = [*(entry.get("warnings") or []), *warnings]
+        if isinstance(cached_porcelain, list):
+            porcelain = cached_porcelain[:50]
+            porcelain_total = (
+                cached_porcelain_total
+                if isinstance(cached_porcelain_total, int)
+                else len(cached_porcelain)
+            )
+            porcelain_truncated = porcelain_total > len(porcelain)
+        elif isinstance(cached_porcelain_warnings, list) and cached_porcelain_warnings:
+            entry["warnings"] = [*(entry.get("warnings") or []), *cached_porcelain_warnings]
     entry["schema"] = SCHEMA_SHOW
     entry["ok"] = True
     entry["creationContext"] = record.get("creationContext") or {}
@@ -654,7 +671,6 @@ def show_worktree(
     entry["suggestedCommands"] = suggested_commands(
         record,
         str(entry.get("worktreeStatus")),
-        dirty=entry.get("dirty") if isinstance(entry.get("dirty"), bool) else None,
         ahead_behind_payload=entry.get("aheadBehind")
         if isinstance(entry.get("aheadBehind"), dict)
         else None,

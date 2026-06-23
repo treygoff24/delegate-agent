@@ -1,3 +1,4 @@
+import inspect
 import io
 import json
 import tempfile
@@ -70,6 +71,66 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
             self.assertIn("safeRemove", payload["suggestedCommands"])
             self.assertEqual(payload["workSummary"]["commitsCreatedCount"], 1)
             self.assertEqual(payload["workSummary"]["changedFilesCount"], 1)
+
+    def test_worktree_show_reuses_prefetched_porcelain_status(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            base_oid = git("rev-parse", "HEAD", cwd=path).stdout.strip()
+            branch = "delegate/cursor-porcelain-cache"
+            wt_path = str(Path(fake_home) / "wt" / "cursor-porcelain-cache")
+            self._seed_persistent_run(
+                path,
+                alias="cursor-porcelain-cache",
+                branch=branch,
+                execution_cwd=wt_path,
+                creation_oid=base_oid,
+            )
+            self._create_worktree_at(path, branch, wt_path)
+            (Path(wt_path) / "scratch.txt").write_text("scratch\n", encoding="utf-8")
+
+            porcelain_calls = []
+            summary_status_calls = 0
+            original_porcelain_status = self.delegate.worktree_mgmt.porcelain_status
+            original_summary_run_git = self.delegate.worktree_mgmt.worktree_summary.run_git
+
+            def counting_porcelain_status(execution_cwd, *, limit=None):
+                porcelain_calls.append((execution_cwd, limit))
+                return original_porcelain_status(execution_cwd, limit=limit)
+
+            def counting_summary_run_git(cwd, args, *, timeout_seconds):
+                nonlocal summary_status_calls
+                if args[:2] == ["status", "--porcelain=v1"]:
+                    summary_status_calls += 1
+                return original_summary_run_git(cwd, args, timeout_seconds=timeout_seconds)
+
+            with (
+                mock.patch.object(
+                    self.delegate.worktree_mgmt,
+                    "porcelain_status",
+                    counting_porcelain_status,
+                ),
+                mock.patch.object(
+                    self.delegate.worktree_mgmt.worktree_summary,
+                    "run_git",
+                    counting_summary_run_git,
+                ),
+            ):
+                payload = self.delegate.worktree_mgmt.show_worktree(
+                    self._registry_root(path),
+                    handle="cursor-porcelain-cache",
+                )
+
+            self.assertEqual(porcelain_calls, [(wt_path, None)])
+            self.assertEqual(summary_status_calls, 0)
+            self.assertTrue(payload["dirty"])
+            self.assertEqual(payload["porcelainStatus"], ["?? scratch.txt"])
+            self.assertEqual(payload["porcelainStatusTotalLines"], 1)
+            self.assertFalse(payload["porcelainStatusTruncated"])
+            self.assertEqual(payload["workSummary"]["changedFilesCount"], 1)
+            self.assertEqual(
+                payload["workSummary"]["changedFiles"],
+                [{"status": "??", "path": "scratch.txt"}],
+            )
 
     def test_worktree_show_unknown_status_still_includes_inspection_data(self):
         _repo, path = self._make_repo()
@@ -603,6 +664,10 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
             self.assertEqual(len(result["entries"]), 1)
             self.assertNotIn("workSummary", result["entries"][0])
             summary_mock.assert_not_called()
+
+    def test_suggested_commands_signature_drops_dead_dirty_parameter(self):
+        params = inspect.signature(self.delegate.worktree_mgmt.suggested_commands).parameters
+        self.assertNotIn("dirty", params)
 
 
 if __name__ == "__main__":
