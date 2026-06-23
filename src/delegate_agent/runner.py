@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import shlex
 import shutil
@@ -39,8 +40,8 @@ PROGRESS_PERSIST_LINE_INTERVAL = 10
 PROGRESS_PERSIST_TIME_INTERVAL_SEC = 0.5
 DRAIN_JOIN_TIMEOUT_SEC = 5.0
 MILLISECONDS_PER_SECOND = 1000
-PROGRESS_INITIAL_DELAY_SEC = 30.0
-PROGRESS_HEARTBEAT_INTERVAL_SEC = 60.0
+PROGRESS_INITIAL_DELAY_SEC = delegate_config.default_progress_initial_delay_sec()
+PROGRESS_HEARTBEAT_INTERVAL_SEC = delegate_config.default_progress_interval_sec()
 PROGRESS_INITIAL_DELAY_ENV = "DELEGATE_PROGRESS_INITIAL_DELAY_SEC"
 PROGRESS_INTERVAL_ENV = "DELEGATE_PROGRESS_INTERVAL_SEC"
 
@@ -134,6 +135,26 @@ def format_duration(duration_ms: int) -> str:
 
 def status_from_exit(exit_code: int) -> str:
     return "succeeded" if exit_code == 0 else "failed"
+
+
+def _merge_extra(payload: JsonObject, extra: JsonObject) -> None:
+    for key, value in extra.items():
+        if (
+            key == "warnings"
+            and isinstance(payload.get("warnings"), list)
+            and isinstance(value, list)
+        ):
+            merged: list[object] = []
+            seen: set[str] = set()
+            for warning in [*payload["warnings"], *value]:
+                if isinstance(warning, str):
+                    if warning in seen:
+                        continue
+                    seen.add(warning)
+                merged.append(warning)
+            payload[key] = merged
+        else:
+            payload[key] = value
 
 
 def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
@@ -257,7 +278,7 @@ def build_snapshot(
             "command": run_registry.run_output_command(ctx.alias, completion_report=True),
         }
     if extra is not None:
-        snapshot.update(extra)
+        _merge_extra(snapshot, extra)
     return snapshot
 
 
@@ -421,12 +442,10 @@ def completion_json_payload(
     if cleanup is not None:
         payload["worktreeCleanupCommands"] = cleanup
     if extra is not None:
-        payload.update(extra)
+        _merge_extra(payload, extra)
 
     if not ok:
-        if extra is not None and (
-            extra.get("commitPolicyViolated") is True or extra.get("commitPolicyUnverified") is True
-        ):
+        if extra is not None and extra.get("commitPolicyCausedFailure") is True:
             payload["error"] = str(extra.get("error") or "commit_policy_violated")
             payload["message"] = str(extra.get("message") or "Commit policy failed.")
         else:
@@ -580,18 +599,22 @@ def _final_extra(ctx: RunContext, capture_exit_code: int) -> tuple[int, JsonObje
         if unverified:
             extra["commitPolicyUnverified"] = True
             extra["childExitCode"] = capture_exit_code
-            extra["error"] = "commit_policy_unverified"
-            extra["message"] = (
-                "Delegate could not verify --forbid-commit because final Git inspection failed."
-            )
             if capture_exit_code == 0:
+                extra["error"] = "commit_policy_unverified"
+                extra["message"] = (
+                    "Delegate could not verify --forbid-commit because final Git inspection failed."
+                )
+                extra["commitPolicyCausedFailure"] = True
                 return 1, extra
         if violated:
             extra["commitPolicyViolated"] = True
             extra["childExitCode"] = capture_exit_code
-            extra["error"] = "commit_policy_violated"
-            extra["message"] = "Child command created commits even though --forbid-commit was set."
             if capture_exit_code == 0:
+                extra["error"] = "commit_policy_violated"
+                extra["message"] = (
+                    "Child command created commits even though --forbid-commit was set."
+                )
+                extra["commitPolicyCausedFailure"] = True
                 return 1, extra
     return capture_exit_code, extra
 
@@ -608,6 +631,8 @@ def _progress_interval_from_env(name: str, default: float) -> float:
     try:
         value = float(raw)
     except ValueError:
+        return default
+    if not math.isfinite(value) or value <= 0:
         return default
     return max(value, 0.01)
 
@@ -792,7 +817,11 @@ def _capture_tracked_process(
         # via the OS/run-management surface, while quick metadata probes
         # elsewhere use explicit timeouts.
         if progress_stderr is not None:
-            _emit_progress_started(ctx, progress_stderr)
+            emit_progress = True
+            try:
+                _emit_progress_started(ctx, progress_stderr)
+            except (BrokenPipeError, OSError):
+                emit_progress = False
             initial_delay = _progress_interval_from_env(
                 PROGRESS_INITIAL_DELAY_ENV,
                 progress_initial_delay_sec,
@@ -803,17 +832,23 @@ def _capture_tracked_process(
             )
             next_progress_at = time.monotonic() + initial_delay
             while True:
+                if not emit_progress:
+                    exit_code = process.wait()
+                    break
                 timeout = max(next_progress_at - time.monotonic(), 0.01)
                 try:
                     exit_code = process.wait(timeout=timeout)
                     break
                 except subprocess.TimeoutExpired:
-                    _emit_progress_heartbeat(
-                        ctx,
-                        accumulator,
-                        started=started,
-                        stderr=progress_stderr,
-                    )
+                    try:
+                        _emit_progress_heartbeat(
+                            ctx,
+                            accumulator,
+                            started=started,
+                            stderr=progress_stderr,
+                        )
+                    except (BrokenPipeError, OSError):
+                        emit_progress = False
                     next_progress_at = time.monotonic() + interval
         else:
             exit_code = process.wait()

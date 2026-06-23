@@ -727,6 +727,179 @@ class RunnerCaptureTests(unittest.TestCase):
         cleanup = payload["worktreeCleanupCommands"]
         self.assertEqual(cleanup["force"], "delegate worktree remove cursor-1 --force")
 
+    def test_persistent_worktree_payload_and_snapshot_merge_ctx_and_extra_warnings(self):
+        ctx = self.runner.RunContext(
+            registry_root=Path("/tmp"),
+            run_id="run-1",
+            alias="cursor-1",
+            harness="cursor",
+            engine="cursor",
+            mode="work",
+            model="composer-2.5",
+            source_cwd="/repo",
+            execution_cwd="/wt",
+            workspace_kind="git",
+            isolated_workspace=True,
+            started_at="2026-05-20T21:42:33Z",
+            source_git_root="/repo",
+            isolation_lifecycle="persistent",
+            branch="delegate/cursor-1",
+            warnings=("ctx warning", "duplicate warning"),
+        )
+        extra = {"warnings": ["extra warning", "ctx warning"]}
+
+        payload = self.runner.completion_json_payload(
+            ctx,
+            ok=True,
+            status="succeeded",
+            exit_code=0,
+            duration_ms=100,
+            stdout_bytes=0,
+            stderr_bytes=0,
+            extra=extra,
+        )
+        snapshot = self.runner.build_snapshot(
+            ctx,
+            accumulator=self.runner.harness_events.StreamAccumulator(),
+            exit_code=0,
+            extra=extra,
+        )
+
+        expected = ["ctx warning", "duplicate warning", "extra warning"]
+        self.assertEqual(payload["warnings"], expected)
+        self.assertEqual(snapshot["warnings"], expected)
+
+    def test_forbid_commit_unverified_does_not_mask_child_failure(self):
+        ctx = self.runner.RunContext(
+            registry_root=Path("/tmp"),
+            run_id="run-1",
+            alias="cursor-1",
+            harness="cursor",
+            engine="cursor",
+            mode="work",
+            model="composer-2.5",
+            source_cwd="/repo",
+            execution_cwd="/wt",
+            workspace_kind="git",
+            isolated_workspace=True,
+            started_at="2026-05-20T21:42:33Z",
+            source_git_root="/repo",
+            isolation_lifecycle="persistent",
+            branch="delegate/cursor-1",
+            forbid_commit=True,
+        )
+        with mock.patch.object(
+            self.runner,
+            "_persistent_work_summary",
+            return_value={"commitsCreatedCount": None, "commitInspectionStatus": "unverified"},
+        ):
+            exit_code, extra = self.runner._final_extra(ctx, 7)
+
+        self.assertEqual(exit_code, 7)
+        self.assertTrue(extra["commitPolicyUnverified"])
+        self.assertFalse(extra["commitPolicy"]["verified"])
+        self.assertIsNone(extra["commitPolicy"]["commitsCreatedCount"])
+        self.assertEqual(extra["childExitCode"], 7)
+        self.assertNotIn("commitPolicyCausedFailure", extra)
+        self.assertNotIn("error", extra)
+        payload = self.runner.completion_json_payload(
+            ctx,
+            ok=False,
+            status="failed",
+            exit_code=exit_code,
+            duration_ms=100,
+            stdout_bytes=0,
+            stderr_bytes=0,
+            extra=extra,
+        )
+        self.assertEqual(payload["error"], "child_failed")
+        self.assertTrue(payload["commitPolicyUnverified"])
+        self.assertIn("commitPolicy", payload)
+
+    def test_forbid_commit_violation_after_child_success_causes_failure(self):
+        ctx = self.runner.RunContext(
+            registry_root=Path("/tmp"),
+            run_id="run-1",
+            alias="cursor-1",
+            harness="cursor",
+            engine="cursor",
+            mode="work",
+            model="composer-2.5",
+            source_cwd="/repo",
+            execution_cwd="/wt",
+            workspace_kind="git",
+            isolated_workspace=True,
+            started_at="2026-05-20T21:42:33Z",
+            source_git_root="/repo",
+            isolation_lifecycle="persistent",
+            branch="delegate/cursor-1",
+            forbid_commit=True,
+        )
+        with mock.patch.object(
+            self.runner,
+            "_persistent_work_summary",
+            return_value={"commitsCreatedCount": 1, "commitInspectionStatus": "verified"},
+        ):
+            exit_code, extra = self.runner._final_extra(ctx, 0)
+
+        self.assertEqual(exit_code, 1)
+        self.assertTrue(extra["commitPolicyViolated"])
+        self.assertTrue(extra["commitPolicyCausedFailure"])
+        self.assertEqual(extra["error"], "commit_policy_violated")
+        payload = self.runner.completion_json_payload(
+            ctx,
+            ok=False,
+            status="failed",
+            exit_code=exit_code,
+            duration_ms=100,
+            stdout_bytes=0,
+            stderr_bytes=0,
+            extra=extra,
+        )
+        self.assertEqual(payload["error"], "commit_policy_violated")
+        self.assertTrue(payload["commitPolicyCausedFailure"])
+
+    def test_forbid_commit_violation_does_not_mask_child_failure(self):
+        ctx = self.runner.RunContext(
+            registry_root=Path("/tmp"),
+            run_id="run-1",
+            alias="cursor-1",
+            harness="cursor",
+            engine="cursor",
+            mode="work",
+            model="composer-2.5",
+            source_cwd="/repo",
+            execution_cwd="/wt",
+            workspace_kind="git",
+            isolated_workspace=True,
+            started_at="2026-05-20T21:42:33Z",
+            source_git_root="/repo",
+            isolation_lifecycle="persistent",
+            branch="delegate/cursor-1",
+            forbid_commit=True,
+        )
+        with mock.patch.object(
+            self.runner,
+            "_persistent_work_summary",
+            return_value={"commitsCreatedCount": 1, "commitInspectionStatus": "verified"},
+        ):
+            exit_code, extra = self.runner._final_extra(ctx, 7)
+
+        self.assertEqual(exit_code, 7)
+        self.assertTrue(extra["commitPolicyViolated"])
+        self.assertNotIn("commitPolicyCausedFailure", extra)
+        payload = self.runner.completion_json_payload(
+            ctx,
+            ok=False,
+            status="failed",
+            exit_code=exit_code,
+            duration_ms=100,
+            stdout_bytes=0,
+            stderr_bytes=0,
+            extra=extra,
+        )
+        self.assertEqual(payload["error"], "child_failed")
+
     def test_join_drain_thread_completes_after_pipe_drained(self):
         reader, writer = os.pipe()
         os.write(writer, b"line\n")
@@ -889,6 +1062,85 @@ class RunnerCaptureTests(unittest.TestCase):
                 self.runner._progress_interval_from_env(env_name, config_default),
                 config_default,
             )
+
+    def test_progress_interval_from_env_rejects_non_finite_and_non_positive(self):
+        env_name = self.runner.PROGRESS_INTERVAL_ENV
+        config_default = 60.0
+        for raw in ("nan", "inf", "-inf", "0", "-5"):
+            with self.subTest(raw=raw), mock.patch.dict(os.environ, {env_name: raw}, clear=False):
+                self.assertEqual(
+                    self.runner._progress_interval_from_env(env_name, config_default),
+                    config_default,
+                )
+        with mock.patch.dict(os.environ, {env_name: "12.5"}, clear=False):
+            self.assertEqual(
+                self.runner._progress_interval_from_env(env_name, config_default),
+                12.5,
+            )
+
+    def test_progress_heartbeat_broken_pipe_does_not_abort_tracked_run(self):
+        class BrokenHeartbeatStderr(io.StringIO):
+            def write(self, text):
+                if "delegate: still running" in text:
+                    raise BrokenPipeError("consumer closed")
+                return super().write(text)
+
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        script = Path(temp.name) / "slow_child.py"
+        script.write_text(
+            "import time\n"
+            'print(\'{"type":"message","role":"assistant","content":"starting"}\', flush=True)\n'
+            "time.sleep(0.15)\n"
+            'print(\'{"type":"completion","finalText":"done"}\', flush=True)\n',
+            encoding="utf-8",
+        )
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-05-20T21:42:33Z",
+            )
+            code, payload = self.runner.execute_tracked(
+                [sys.executable, str(script)],
+                workspace,
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=BrokenHeartbeatStderr(),
+                progress=True,
+                progress_initial_delay_sec=0.01,
+                progress_interval_sec=0.01,
+            )
+
+            self.assertEqual(code, 0)
+            self.assertIsNotNone(payload)
+            self.assertTrue(payload["ok"])
+            state = json.loads((root / "runs" / run_id / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["status"], "succeeded")
+
+    def test_progress_defaults_are_sourced_from_config(self):
+        from delegate_agent import config as delegate_config
+
+        self.assertEqual(
+            self.runner.PROGRESS_INITIAL_DELAY_SEC,
+            delegate_config.default_progress_initial_delay_sec(),
+        )
+        self.assertEqual(
+            self.runner.PROGRESS_HEARTBEAT_INTERVAL_SEC,
+            delegate_config.default_progress_interval_sec(),
+        )
 
     def test_emit_bounded_text_summary_uses_shared_cleanup_renderer(self):
         with tempfile.TemporaryDirectory() as workspace:

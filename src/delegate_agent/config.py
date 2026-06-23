@@ -125,6 +125,24 @@ def embedded_default_config() -> JsonObject:
     return copy.deepcopy(_EMBEDDED_DEFAULT_CONFIG)
 
 
+def _embedded_progress_default(key: str) -> float:
+    progress = _EMBEDDED_DEFAULT_CONFIG["progress"]
+    if not isinstance(progress, dict):
+        raise AssertionError("embedded progress defaults must be an object")
+    value = progress[key]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise AssertionError(f"embedded progress.{key} must be numeric")
+    return float(value)
+
+
+def default_progress_initial_delay_sec() -> float:
+    return _embedded_progress_default("initialDelaySec")
+
+
+def default_progress_interval_sec() -> float:
+    return _embedded_progress_default("intervalSec")
+
+
 DEFAULT_CONFIG: JsonObject = embedded_default_config()
 
 

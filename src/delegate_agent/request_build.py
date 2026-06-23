@@ -110,20 +110,13 @@ def resolve_effective_progress(intent: ProgressIntent, config: JsonObject) -> bo
 
 
 def resolve_progress_timing(config: JsonObject) -> tuple[float, float]:
+    default_initial = delegate_config.default_progress_initial_delay_sec()
+    default_interval = delegate_config.default_progress_interval_sec()
     progress_section = config.get("progress")
     if not isinstance(progress_section, dict):
-        return (
-            delegate_runner.PROGRESS_INITIAL_DELAY_SEC,
-            delegate_runner.PROGRESS_HEARTBEAT_INTERVAL_SEC,
-        )
-    initial = progress_section.get(
-        "initialDelaySec",
-        delegate_runner.PROGRESS_INITIAL_DELAY_SEC,
-    )
-    interval = progress_section.get(
-        "intervalSec",
-        delegate_runner.PROGRESS_HEARTBEAT_INTERVAL_SEC,
-    )
+        return (default_initial, default_interval)
+    initial = progress_section.get("initialDelaySec", default_initial)
+    interval = progress_section.get("intervalSec", default_interval)
     return float(initial), float(interval)
 
 
