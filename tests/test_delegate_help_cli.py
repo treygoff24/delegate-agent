@@ -181,6 +181,40 @@ class HelpSubcommandTests(HelpCliTestBase):
         self.assertIsInstance(payload["commands"], list)
         self.assertTrue(payload["commands"])
 
+    def test_models_and_describe_help_include_summary_discovery_flags(self):
+        for command in ("models", "describe"):
+            with self.subTest(command=command):
+                code, out, _err = self.run_main([command, "--help"])
+                self.assertEqual(code, self.delegate.EXIT_OK)
+                self.assertIn("--summary", out)
+                self.assertNotIn("--redacted", out)
+                self.assertIn(f"delegate --json {command} --summary", out)
+
+    def test_engine_help_includes_progress_and_commit_policy_launch_options(self):
+        for command in ("cursor", "claude", "codex", "droid", "kimi", "dry-run"):
+            with self.subTest(command=command):
+                code, out, _err = self.run_main([command, "--help"])
+                self.assertEqual(code, self.delegate.EXIT_OK)
+                self.assertIn("--progress", out)
+                self.assertIn("stderr", out)
+                self.assertIn("--forbid-commit", out)
+                self.assertIn("persistent worktree", out)
+
+    def test_describe_summary_lists_launch_options(self):
+        code, out, _err = self.run_main(["--json", "describe", "--summary"])
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        payload = json.loads(out)
+        self.assertIn("--progress", payload["launchOptions"])
+        self.assertIn("--no-progress", payload["launchOptions"])
+        self.assertIn("--forbid-commit", payload["launchOptions"])
+
+    def test_describe_summary_text_renders_without_full_payload_keys(self):
+        code, out, _err = self.run_main(["describe", "--summary"])
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertIn("delegate", out)
+        self.assertIn("launch options:", out)
+        self.assertIn("recommended discovery:", out)
+
 
 class JsonPositionIndependenceTests(HelpCliTestBase):
     """`--json` anywhere in a help invocation yields the same focused help (D3)."""
@@ -285,6 +319,28 @@ class RegressionGuardTests(HelpCliTestBase):
                 self.assertTrue(parsed.global_options.json_mode)
 
 
+class RunOutputHelpTests(HelpCliTestBase):
+    """run-output help documents bounded output and raw incompatibilities."""
+
+    def test_run_output_help_mentions_max_chars_and_raw_limits(self):
+        code, out, _err = self.run_main(["run-output", "--help"])
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertIn("--max-chars", out)
+        self.assertIn("60000", out)
+        self.assertIn("--raw", out)
+        self.assertIn("--tail", out)
+        self.assertIn("incompatible", out.lower())
+
+    def test_run_output_json_help_documents_max_chars(self):
+        code, out, _err = self.run_main(["--json", "run-output", "--help"])
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        payload = json.loads(out)
+        flags = {opt["flag"] for opt in payload["options"]}
+        self.assertIn("--max-chars", flags)
+        raw_option = next(opt for opt in payload["options"] if opt["flag"] == "--raw")
+        self.assertIn("--max-chars", raw_option["description"])
+
+
 class UnknownTopicTests(HelpCliTestBase):
     """Unknown help topics error cleanly with exit 2 (m3)."""
 
@@ -320,6 +376,12 @@ class SparseArgsNoIndexErrorTests(HelpCliTestBase):
 
 class KimiHelpTests(HelpCliTestBase):
     """Kimi harness surfaces in discovery commands."""
+
+    def test_kimi_help_matches_no_yolo_argv_policy(self):
+        code, out, _err = self.run_main(["kimi", "--help"])
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertNotIn("--yolo by default", out)
+        self.assertIn("does not emit --yolo", out)
 
     def test_kimi_in_describe_engines(self):
         code, out, _err = self.run_main(["--json", "describe"])

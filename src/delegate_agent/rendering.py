@@ -285,10 +285,19 @@ def render_run_output_text(
         print(content, end="" if content.endswith("\n") else "\n", file=stdout)
 
 
+def _render_tri_state_flag(label: str, value: object, stdout: TextIO) -> None:
+    if value is True:
+        print(f"{label}: yes", file=stdout)
+    elif value is False:
+        print(f"{label}: no", file=stdout)
+    else:
+        print(f"{label}: unknown", file=stdout)
+
+
 def render_worktree_list_text(payload: JsonObject, stdout: TextIO) -> None:
     entries = payload.get("entries")
     print(
-        "alias        status   harness  age      branch                                      dirty merged",
+        "alias        status   harness  age      branch                                      dirty branch-merged integrated",
         file=stdout,
     )
     if isinstance(entries, list):
@@ -309,10 +318,20 @@ def render_worktree_list_text(payload: JsonObject, stdout: TextIO) -> None:
                 branch_label = branch_label[:39] + "..."
             dirty_value = entry.get("dirty")
             dirty = "yes" if dirty_value is True else "no" if dirty_value is False else "-"
-            merged_value = entry.get("mergedIntoSource")
-            merged = "yes" if merged_value is True else "no" if merged_value is False else "-"
+            branch_merged_value = entry.get("branchMergedIntoSource")
+            branch_merged = (
+                "yes"
+                if branch_merged_value is True
+                else "no"
+                if branch_merged_value is False
+                else "-"
+            )
+            integrated_value = entry.get("fullyIntegrated")
+            integrated = (
+                "yes" if integrated_value is True else "no" if integrated_value is False else "-"
+            )
             print(
-                f"{alias!s:<12} {status!s:<8} {harness!s:<8} {age:<8} {branch_label:<43} {dirty:<5} {merged}",
+                f"{alias!s:<12} {status!s:<8} {harness!s:<8} {age:<8} {branch_label:<43} {dirty:<5} {branch_merged:<13} {integrated}",
                 file=stdout,
             )
     auto_prune = payload.get("autoPrune")
@@ -381,22 +400,15 @@ def render_worktree_show_text(payload: JsonObject, stdout: TextIO) -> None:
             )
 
     # Dirty flag (tri-state: yes / no / unknown)
-    dirty_value = payload.get("dirty")
-    if dirty_value is True:
-        print("dirty: yes", file=stdout)
-    elif dirty_value is False:
-        print("dirty: no", file=stdout)
-    else:
-        print("dirty: unknown", file=stdout)
+    _render_tri_state_flag("dirty", payload.get("dirty"), stdout)
 
-    # Merged flag (tri-state: yes / no / unknown)
-    merged_value = payload.get("mergedIntoSource")
-    if merged_value is True:
-        print("merged: yes", file=stdout)
-    elif merged_value is False:
-        print("merged: no", file=stdout)
-    else:
-        print("merged: unknown", file=stdout)
+    # Backward-compatible branch merge flag, followed by more explicit integration fields.
+    _render_tri_state_flag("merged", payload.get("mergedIntoSource"), stdout)
+    _render_tri_state_flag("branch merged", payload.get("branchMergedIntoSource"), stdout)
+    _render_tri_state_flag("fully integrated", payload.get("fullyIntegrated"), stdout)
+    integration_status = payload.get("integrationStatus")
+    if isinstance(integration_status, str) and integration_status:
+        print(f"integration status: {integration_status}", file=stdout)
 
     ahead = payload.get("aheadBehind")
     if isinstance(ahead, dict):

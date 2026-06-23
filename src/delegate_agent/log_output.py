@@ -3,11 +3,40 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+RUN_OUTPUT_DEFAULT_MAX_CHARS = 60_000
+
 
 @dataclass(frozen=True)
 class LogOutput:
     content: str
     truncated: bool
+
+
+@dataclass(frozen=True)
+class CharCapResult:
+    content: str
+    char_truncated: bool
+    returned_chars: int
+    omitted_chars: int
+
+
+def cap_content_by_chars(content: str, max_chars: int) -> CharCapResult:
+    if max_chars < 1:
+        raise ValueError("max_chars must be at least 1")
+    if len(content) <= max_chars:
+        return CharCapResult(
+            content=content,
+            char_truncated=False,
+            returned_chars=len(content),
+            omitted_chars=0,
+        )
+    omitted = len(content) - max_chars
+    return CharCapResult(
+        content=content[-max_chars:],
+        char_truncated=True,
+        returned_chars=max_chars,
+        omitted_chars=omitted,
+    )
 
 
 def tail_file_output(path: Path, lines: int) -> LogOutput:

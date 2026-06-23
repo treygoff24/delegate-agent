@@ -5,3 +5,7 @@ f50b9d15300a288443e70a3082ccc4fc05e0beb4:tests/test_snapshot_commands.py:generic
 f50b9d15300a288443e70a3082ccc4fc05e0beb4:tests/test_snapshot_commands.py:stripe-access-token:235
 56700caa2f8ac691ef94122cc72d6c144c30d736:tests/test_snapshot_commands.py:generic-api-key:211
 56700caa2f8ac691ef94122cc72d6c144c30d736:tests/test_snapshot_commands.py:gcp-api-key:218
+# Fake redaction-test tokens in commit 8b22247; the current tree builds these
+# samples at runtime so the working tree and post-squash history stay clean.
+8b22247be1e865efed0e9cb20a31c7382d87ec48:tests/test_runner_capture.py:curl-auth-header:816
+8b22247be1e865efed0e9cb20a31c7382d87ec48:tests/test_capability_commands.py:generic-api-key:155

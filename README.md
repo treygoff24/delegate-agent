@@ -68,6 +68,8 @@ Inspect what Delegate sees:
 
 ```bash
 delegate --version       # installed version — include this in bug reports
+delegate --json describe --summary
+delegate --json models --summary
 delegate --json describe
 delegate --json models
 delegate --json capabilities
@@ -101,6 +103,16 @@ Run an edit-capable task in a workspace you trust:
 delegate cursor work "Fix the parser bug. Run python3 -m unittest tests.test_delegate_parser. Report changed files."
 delegate claude work "Implement the scoped change and run the named check. Report changed files."
 delegate kimi work "Implement the scoped change and run the named check. Report changed files."
+```
+
+For long foreground runs, add `--progress` to emit bounded parent heartbeats to
+stderr while keeping final stdout machine-readable, or set `progress.enabled`
+to `true` in config. Use `--no-progress` to override config for one launch.
+Heartbeat labels are credential-scrubbed before printing but are still
+operational metadata, not raw child output:
+
+```bash
+delegate --json claude safe --progress "Review this repository. Do not edit files."
 ```
 
 Run through JSON input for agent callers after copying an example and setting a real `cwd`:
@@ -144,19 +156,25 @@ Delegate separates three ideas:
 Defaults are intentionally conservative for review paths:
 
 - `delegate cursor safe`, `delegate codex safe`, `delegate claude safe`, `delegate droid ALIAS safe`, and `delegate kimi safe` run in an isolated temporary workspace.
-- Claude safe mode invokes `claude -p` with prompt text on stdin, `--permission-mode plan`, `--strict-mcp-config`, Read/Grep/Glob plus selected read-only Bash tools, and `--no-session-persistence` by default.
+- Claude safe mode invokes `claude -p` with prompt text on stdin, `--permission-mode plan`, `--strict-mcp-config`, Read/Grep/Glob plus selected read-only Bash tools, and `--no-session-persistence` by default. Delegate does not currently prove that Claude Code hooks, plugins, user settings, or other non-MCP customization surfaces are disabled.
 - `work` mode can edit. By default it runs in the real workspace for backward compatibility.
 
 For edit-capable isolation, use a persistent Git worktree:
 
 ```bash
 delegate --isolation worktree cursor work "Implement the scoped change and run the named check."
+delegate --isolation worktree cursor work --forbid-commit "Implement the scoped change without creating commits."
 delegate worktree list
 delegate worktree show <alias-or-runId>
 delegate worktree remove <alias-or-runId>
 ```
 
 Worktree isolation protects the source checkout from ordinary relative-path edits. It is **not** a full security sandbox; the child process can still use its runtime permissions, credentials, network access, and absolute paths according to the environment and runtime policy.
+
+Persistent worktree completions and `worktree list/show` include a work summary
+with dirty state, changed file counts, diff stat, and commits created by the
+child where that summary is available. `--forbid-commit` fails the run if
+commits remain ahead of the creation base when the child exits.
 
 Temporary safe isolation preserves internal symlinks, but replaces symlinks that point outside the source workspace with inert placeholder files inside the isolated workspace. Delegate reports a warning listing the relative symlink paths it blocked. In Git repositories with no commits yet, Cursor/Codex/Claude/Droid/Kimi safe isolation falls back to a directory copy because Git cannot create a detached worktree from an unborn `HEAD`.
 

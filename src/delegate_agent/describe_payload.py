@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import TextIO
 
-from delegate_agent import VERSION, command_help
+from delegate_agent import VERSION, command_help, reasoning, redaction
 from delegate_agent import config as delegate_config
 from delegate_agent import rendering as delegate_rendering
 from delegate_agent.argv_builders import (
@@ -33,6 +33,39 @@ from delegate_agent.prompt_transport import (
 from delegate_agent.request_build import _resolve_default_model
 
 CONFIG_ENV = delegate_config.CONFIG_ENV
+
+
+def _scrub_discovery_payload(payload: JsonObject) -> JsonObject:
+    scrubbed = redaction.redact_value(payload)
+    return scrubbed if isinstance(scrubbed, dict) else {"ok": False}
+
+
+def _text_or_none(value: object) -> str:
+    return value if isinstance(value, str) and value else "(none)"
+
+
+def _text_argv_prefix_label(value: object) -> str:
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        return "(none)"
+    return " ".join(value) if value else "(none)"
+
+
+def _global_options() -> list[str]:
+    return [
+        "--cwd",
+        "--json",
+        "--isolation",
+        "--pass-through",
+        "--completion-report",
+        "--no-completion-report",
+    ]
+
+
+def _commands_catalog() -> list[JsonObject]:
+    return [
+        {"command": spec.name, "summary": spec.summary}
+        for spec in command_help.COMMAND_SPECS.values()
+    ]
 
 
 def runtime_payload() -> JsonObject:
@@ -96,11 +129,13 @@ def models_payload(
     config_source: str,
     workspace: Path | None = None,
 ) -> JsonObject:
+    cache = reasoning.load_reasoning_capability_cache(workspace) if workspace is not None else None
     return {
         "ok": True,
         "configSource": config_source,
         "configResolution": config_resolution_payload(config_source, workspace),
         "runtime": runtime_payload(),
+        "reasoningAliases": reasoning.build_alias_reasoning_summaries(config, cache),
         "cursor": {
             "defaultModel": config["cursor"]["defaultModel"],
             "argvPrefix": config["cursor"]["argvPrefix"],
@@ -129,6 +164,127 @@ def models_payload(
             "binary": config["kimi"]["binary"],
             "defaultModel": config["kimi"]["defaultModel"],
             "defaultReasoningEffort": config["kimi"].get("defaultReasoningEffort"),
+        },
+    }
+
+
+def _reasoning_for_alias(reasoning_aliases: JsonObject, engine: str, alias: str) -> JsonObject:
+    engine_payload = reasoning_aliases.get(engine)
+    if not isinstance(engine_payload, dict):
+        return {}
+    payload = engine_payload.get(alias)
+    return payload if isinstance(payload, dict) else {}
+
+
+def _summary_reasoning_fields(reasoning_payload: JsonObject) -> JsonObject:
+    output: JsonObject = {}
+    supported = reasoning_payload.get("supported")
+    if isinstance(supported, list) and all(isinstance(item, str) for item in supported):
+        output["reasoningEfforts"] = supported
+    elif supported is None and reasoning_payload:
+        output["reasoningEfforts"] = None
+    default = reasoning_payload.get("default")
+    if isinstance(default, str):
+        output["defaultReasoningEffort"] = default
+    config_default = reasoning_payload.get("configDefault")
+    if isinstance(config_default, str):
+        output["configuredReasoningEffort"] = config_default
+    source = reasoning_payload.get("source")
+    if isinstance(source, str):
+        output["reasoningCapabilitySource"] = source
+    routing = reasoning_payload.get("effortModelRouting")
+    if isinstance(routing, list):
+        routed: list[JsonObject] = []
+        for item in routing:
+            if not isinstance(item, dict):
+                continue
+            effort = item.get("effort")
+            model = item.get("model")
+            if not isinstance(effort, str) or not effort:
+                continue
+            route: JsonObject = {"effort": effort}
+            route["model"] = model if isinstance(model, str) and model else None
+            routed.append(route)
+        if routed:
+            output["reasoningEffortRouting"] = routed
+    warning = reasoning_payload.get("warning")
+    if isinstance(warning, str):
+        output["warnings"] = [warning]
+    return output
+
+
+def models_summary_payload(
+    config: JsonObject,
+    config_source: str,
+    workspace: Path | None = None,
+) -> JsonObject:
+    cache = reasoning.load_reasoning_capability_cache(workspace) if workspace is not None else None
+    reasoning_aliases = reasoning.build_alias_reasoning_summaries(config, cache)
+    aliases: list[JsonObject] = []
+
+    for engine in ("cursor", "codex", "claude", "kimi"):
+        section = config.get(engine)
+        if not isinstance(section, dict):
+            continue
+        default_model = section.get("defaultModel")
+        entry: JsonObject = {
+            "alias": engine,
+            "provider": engine,
+            "command": f"delegate {engine} {{safe,work}}",
+            "available": True,
+            "safeSupported": True,
+            "workSupported": True,
+            "defaultModel": default_model
+            if isinstance(default_model, str) and default_model
+            else None,
+        }
+        reason_key = (
+            default_model if isinstance(default_model, str) and default_model else "(default)"
+        )
+        entry.update(
+            _summary_reasoning_fields(
+                _reasoning_for_alias(reasoning_aliases, engine, reason_key),
+            )
+        )
+        aliases.append(entry)
+
+    droid = config.get("droid")
+    if isinstance(droid, dict):
+        models = droid.get("models")
+        if isinstance(models, dict):
+            for alias, model_id in sorted(models.items()):
+                if not isinstance(alias, str) or not alias:
+                    continue
+                entry = {
+                    "alias": alias,
+                    "provider": "droid",
+                    "command": f"delegate droid {alias} {{safe,work}}",
+                    "available": isinstance(model_id, str) and bool(model_id),
+                    "safeSupported": True,
+                    "workSupported": True,
+                    "model": model_id if isinstance(model_id, str) else None,
+                }
+                entry.update(
+                    _summary_reasoning_fields(
+                        _reasoning_for_alias(reasoning_aliases, "droid", alias),
+                    )
+                )
+                aliases.append(entry)
+
+    return {
+        "ok": True,
+        "summary": True,
+        "configSource": config_source,
+        "version": VERSION,
+        "aliases": aliases,
+        "counts": {
+            "aliases": len(aliases),
+            "providers": len({str(item.get("provider")) for item in aliases}),
+        },
+        "discovery": {
+            "fullModels": "delegate --json models",
+            "safeSummary": "delegate --json models --summary",
+            "reasoningCapabilities": "delegate --json capabilities",
         },
     }
 
@@ -264,14 +420,7 @@ def describe_payload(
             "kimi": PROMPT_TRANSPORT_ARGV,
             "claude": PROMPT_TRANSPORT_STDIN,
         },
-        "globalOptions": [
-            "--cwd",
-            "--json",
-            "--isolation",
-            "--pass-through",
-            "--completion-report",
-            "--no-completion-report",
-        ],
+        "globalOptions": _global_options(),
         "completionReportModes": list(delegate_config.COMPLETION_REPORT_MODES),
         "promptTransforms": [
             "Always prepends mandatory skill review instructions before the operator prompt.",
@@ -382,6 +531,7 @@ def describe_payload(
                     "Runs in an isolated temporary workspace (detached git worktree or directory copy).",
                     "Uses Claude Code -p with --permission-mode plan, --strict-mcp-config, Read/Grep/Glob, and selected read-only Bash tools.",
                     "Prompt is delivered on stdin; dry-run argv and manifests do not contain the prompt.",
+                    "Delegate does not prove Claude hooks, plugins, or user settings are disabled; keep safe-mode work review-only.",
                 ],
                 "work": claude_work_argv,
                 "workNotes": [
@@ -421,11 +571,93 @@ def describe_payload(
                 ],
             },
         },
-        "commands": [
-            {"command": spec.name, "summary": spec.summary}
-            for spec in command_help.COMMAND_SPECS.values()
+        "commands": _commands_catalog(),
+    }
+
+
+def describe_summary_payload(
+    config: JsonObject,
+    config_source: str,
+    workspace: Path | None = None,
+) -> JsonObject:
+    return {
+        "ok": True,
+        "summary": True,
+        "version": VERSION,
+        "configSource": config_source,
+        "configResolution": config_resolution_payload(config_source, workspace),
+        "engines": list(KNOWN_ENGINES),
+        "modes": [MODE_SAFE, MODE_WORK],
+        "isolationValues": list(delegate_config.VALID_ISOLATION_VALUES),
+        "globalOptions": _global_options(),
+        "launchOptions": [
+            "--prompt-file",
+            "--reasoning-effort",
+            "--progress",
+            "--no-progress",
+            "--forbid-commit",
+        ],
+        "commands": _commands_catalog(),
+        "recommendedDiscovery": [
+            "delegate --json describe --summary",
+            "delegate --json models --summary",
+            "delegate --json help <command>",
         ],
     }
+
+
+def _emit_models_text(payload: JsonObject, config_source: str, stdout: TextIO) -> None:
+    if config_source == "embedded-default":
+        print("warning: using embedded default config", file=stdout)
+    cursor = payload.get("cursor")
+    if isinstance(cursor, dict):
+        print(
+            "cursor: "
+            f"{_text_or_none(cursor.get('defaultModel'))} "
+            f"({_text_argv_prefix_label(cursor.get('argvPrefix'))})",
+            file=stdout,
+        )
+    print("droid:", file=stdout)
+    droid = payload.get("droid")
+    if isinstance(droid, dict):
+        models = droid.get("models")
+        if isinstance(models, dict):
+            for alias, model_id in sorted(models.items()):
+                print(f"  {alias} -> {_text_or_none(model_id)}", file=stdout)
+    codex = payload.get("codex")
+    if isinstance(codex, dict):
+        profile = codex.get("profile")
+        profile_label = _text_or_none(profile)
+        print(
+            "codex: "
+            f"binary={_text_or_none(codex.get('binary'))} "
+            f"defaultModel={_text_or_none(codex.get('defaultModel'))} "
+            f"profile={profile_label}",
+            file=stdout,
+        )
+    claude = payload.get("claude")
+    if isinstance(claude, dict):
+        print(
+            "claude: "
+            f"binary={_text_or_none(claude.get('binary'))} "
+            f"defaultModel={_text_or_none(claude.get('defaultModel'))} "
+            f"workPermissionMode={claude.get('workPermissionMode')}",
+            file=stdout,
+        )
+    kimi = payload.get("kimi")
+    if isinstance(kimi, dict):
+        print(
+            "kimi: "
+            f"binary={_text_or_none(kimi.get('binary'))} "
+            f"defaultModel={_text_or_none(kimi.get('defaultModel'))}",
+            file=stdout,
+        )
+    runtime = payload.get("runtime")
+    if isinstance(runtime, dict):
+        print(
+            f"runtime: {_text_or_none(runtime.get('modulePath'))}",
+            file=stdout,
+        )
 
 
 def emit_models(
@@ -435,53 +667,30 @@ def emit_models(
     stdout: TextIO,
     *,
     workspace: Path | None = None,
+    summary: bool = False,
 ) -> int:
-    if json_mode:
-        delegate_rendering.print_json(models_payload(config, config_source, workspace), stdout)
+    if summary:
+        payload = _scrub_discovery_payload(models_summary_payload(config, config_source, workspace))
+        if json_mode:
+            delegate_rendering.print_json(payload, stdout)
+        else:
+            aliases = payload.get("aliases")
+            if isinstance(aliases, list):
+                for item in aliases:
+                    if not isinstance(item, dict):
+                        continue
+                    warnings = item.get("warnings")
+                    suffix = f" warnings={len(warnings)}" if isinstance(warnings, list) else ""
+                    print(
+                        f"{item['provider']}:{item['alias']} safe={item['safeSupported']} work={item['workSupported']}{suffix}",
+                        file=stdout,
+                    )
         return EXIT_OK
-    if config_source == "embedded-default":
-        print("warning: using embedded default config", file=stdout)
-    print(
-        f"cursor: {config['cursor']['defaultModel']} ({' '.join(config['cursor']['argvPrefix'])})",
-        file=stdout,
-    )
-    print("droid:", file=stdout)
-    for alias, model_id in sorted(config["droid"]["models"].items()):
-        print(f"  {alias} -> {model_id}", file=stdout)
-    codex = config["codex"]
-    default_model = codex.get("defaultModel")
-    model_label = default_model if isinstance(default_model, str) and default_model else "(none)"
-    profile = codex.get("profile")
-    profile_label = profile if isinstance(profile, str) and profile else "(none)"
-    print(
-        f"codex: binary={codex['binary']} defaultModel={model_label} profile={profile_label}",
-        file=stdout,
-    )
-    claude = config["claude"]
-    claude_default_model = claude.get("defaultModel")
-    claude_model_label = (
-        claude_default_model
-        if isinstance(claude_default_model, str) and claude_default_model
-        else "(none)"
-    )
-    print(
-        "claude: "
-        f"binary={claude['binary']} defaultModel={claude_model_label} "
-        f"workPermissionMode={claude['workPermissionMode']}",
-        file=stdout,
-    )
-    kimi = config["kimi"]
-    kimi_default_model = kimi.get("defaultModel")
-    kimi_model_label = (
-        kimi_default_model
-        if isinstance(kimi_default_model, str) and kimi_default_model
-        else "(none)"
-    )
-    print(
-        f"kimi: binary={kimi['binary']} defaultModel={kimi_model_label}",
-        file=stdout,
-    )
-    print(f"runtime: {runtime_payload()['modulePath']}", file=stdout)
+    payload = _scrub_discovery_payload(models_payload(config, config_source, workspace))
+    if json_mode:
+        delegate_rendering.print_json(payload, stdout)
+        return EXIT_OK
+    _emit_models_text(payload, config_source, stdout)
     return EXIT_OK
 
 
@@ -492,10 +701,26 @@ def emit_describe(
     stdout: TextIO,
     *,
     workspace: Path | None = None,
+    summary: bool = False,
 ) -> int:
-    payload = describe_payload(config, config_source, workspace)
+    raw_payload = (
+        describe_summary_payload(config, config_source, workspace)
+        if summary
+        else describe_payload(config, config_source, workspace)
+    )
+    payload = _scrub_discovery_payload(raw_payload)
     if json_mode:
         delegate_rendering.print_json(payload, stdout)
+        return EXIT_OK
+    if summary:
+        print(f"delegate {payload['version']} summary", file=stdout)
+        print(f"config: {payload['configSource']}", file=stdout)
+        print(f"engines: {', '.join(payload['engines'])}", file=stdout)
+        print(f"modes: {', '.join(payload['modes'])}", file=stdout)
+        print(f"launch options: {', '.join(payload['launchOptions'])}", file=stdout)
+        print("recommended discovery:", file=stdout)
+        for command in payload["recommendedDiscovery"]:
+            print(f"  {command}", file=stdout)
         return EXIT_OK
     print(f"delegate {VERSION}", file=stdout)
     print(f"config: {payload['configPath']} ({payload['configSource']})", file=stdout)
@@ -558,6 +783,8 @@ Claude:
   - Uses Claude Code headless mode: claude -p with prompt delivered on stdin.
   - Safe mode runs in an isolated temporary workspace with --permission-mode plan,
     --strict-mcp-config, Read/Grep/Glob, and selected read-only Bash tools.
+    Delegate does not currently prove that Claude Code hooks, plugins, user
+    settings, or other non-MCP customization surfaces are disabled.
   - Work mode uses claude.workPermissionMode, or bypassPermissions only when
     Delegate policy explicitly enables policy.harness.claude.work.bypassApprovalsAndSandbox.
   - Reasoning effort maps to Claude Code --effort (low, medium, high, xhigh, max).
@@ -580,6 +807,7 @@ Rules for agents:
   - Always review diffs after work mode when Git is available; outside Git, manually review changed files.
   - Do not use delegate for production deploys or repository publishing unless the operator explicitly asks.
   - Launch normally; do not pipe delegate launches through tail just to suppress noise.
+  - For long tracked foreground runs, add --progress before prompt text to get bounded, redacted stderr heartbeats.
   - After a tracked run, use delegate snapshot/runs/run-output; do not tail launch output or .delegate log files.
   - Default output is bounded; use --pass-through only when raw harness streaming is required.
   - If you intentionally pipe delegate output in a shell script, use set -o pipefail.
@@ -599,8 +827,10 @@ Prefer:
   delegate run-output cursor --completion-report
 
 Discovery:
-  delegate --json models
-  delegate --json describe
+  delegate --json models --summary
+  delegate --json describe --summary
+  delegate --json models        # full/raw details when needed
+  delegate --json describe      # full/raw details when needed
   delegate agent-help
 """.rstrip(),
         file=stdout,

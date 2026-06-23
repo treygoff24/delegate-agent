@@ -10,6 +10,7 @@ import select
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -410,6 +411,52 @@ class EndToEndTrackingTests(unittest.TestCase):
             stdout, stderr = process.communicate(timeout=10)
             self.assertEqual(process.returncode, 0, stderr)
             self.assertIn("alias: droid", stdout)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate()
+
+    def test_progress_emits_stderr_heartbeats_and_preserves_json_stdout(self):
+        self.write_fake_binaries(sleeping=True)
+        started_fifo = self.workspace / "progress-started.fifo"
+        release_fifo = self.workspace / "progress-release.fifo"
+        os.mkfifo(started_fifo)
+        os.mkfifo(release_fifo)
+        env = self.delegate_env()
+        env["FAKE_STARTED_FIFO"] = str(started_fifo)
+        env["FAKE_RELEASE_FIFO"] = str(release_fifo)
+        env["DELEGATE_PROGRESS_INITIAL_DELAY_SEC"] = "0.05"
+        env["DELEGATE_PROGRESS_INTERVAL_SEC"] = "0.05"
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                str(CLI_PATH),
+                "--json",
+                "--cwd",
+                str(self.workspace),
+                "droid",
+                "minimax",
+                "safe",
+                "--progress",
+                "silent work",
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+        )
+        try:
+            self.assertEqual(read_fifo_line(started_fifo, timeout=5), "started")
+            time.sleep(0.2)
+            with release_fifo.open("w", encoding="utf-8") as release:
+                release.write("go\n")
+            stdout, stderr = process.communicate(timeout=10)
+            self.assertEqual(process.returncode, 0, stderr)
+            payload = json.loads(stdout)
+            self.assertTrue(payload["ok"])
+            self.assertIn("delegate: run started", stderr)
+            self.assertIn("delegate: still running", stderr)
+            self.assertNotIn(ASSISTANT_MARKER, stderr)
         finally:
             if process.poll() is None:
                 process.kill()

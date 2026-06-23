@@ -348,6 +348,7 @@ class RunRegistryTests(unittest.TestCase):
         warnings = self.registry.large_log_warnings(self.registry.LARGE_LOG_WARN_BYTES + 1, 0)
         self.assertEqual(len(warnings), 1)
         self.assertIn("stdout.log", warnings[0])
+        self.assertIn("50 MiB", warnings[0])
 
     def test_effective_status_stale_when_running_without_pid(self):
         status = self.registry.effective_status({"status": "running"})

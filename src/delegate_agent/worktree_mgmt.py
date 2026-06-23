@@ -19,9 +19,10 @@ from __future__ import annotations
 from contextlib import suppress
 from pathlib import Path
 
-from delegate_agent import run_registry
+from delegate_agent import run_registry, worktree_summary
 from delegate_agent.git_utils import (
     GIT_QUICK_TIMEOUT_SECONDS,
+    rev_parse_verify,
 )
 from delegate_agent.git_utils import (
     run_git as _run_git,
@@ -199,14 +200,12 @@ def merged_into_source(
 
 
 def _rev_parse(source_git_root: str, rev: str) -> str | None:
-    result = _run_git(
+    return rev_parse_verify(
         source_git_root,
-        ["rev-parse", "--verify", rev],
+        rev,
         timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
+        git_runner=_run_git,
     )
-    if result.returncode != 0:
-        return None
-    return result.stdout.strip()
 
 
 def _symbolic_ref(source_git_root: str, rev: str) -> str | None:
@@ -267,7 +266,69 @@ def ahead_behind(record: PersistentWorktreeRecord, status: str) -> JsonObject | 
     }
 
 
-def suggested_commands(record: PersistentWorktreeRecord, status: str) -> JsonObject:
+def _integration_status(
+    *,
+    branch_merged: bool | None,
+    has_uncommitted_changes: bool | None,
+) -> str | None:
+    if branch_merged is None or has_uncommitted_changes is None:
+        return "unknown"
+    if branch_merged:
+        return "branch-merged-worktree-dirty" if has_uncommitted_changes else "fully-integrated"
+    return "branch-unmerged-worktree-dirty" if has_uncommitted_changes else "branch-unmerged"
+
+
+def integration_fields(
+    *,
+    branch_merged: bool | None,
+    has_uncommitted_changes: bool | None,
+) -> JsonObject:
+    fully_integrated = (
+        branch_merged is True and has_uncommitted_changes is False
+        if branch_merged is not None and has_uncommitted_changes is not None
+        else None
+    )
+    uncommitted_changes_integrated = (
+        None if has_uncommitted_changes is None else not has_uncommitted_changes
+    )
+    return {
+        "branchMergedIntoSource": branch_merged,
+        "hasUncommittedChanges": has_uncommitted_changes,
+        # Backward compatibility: v1 exposed mergedIntoSource as the branch
+        # ancestry check. Keep that meaning and expose the aggregate state under
+        # a new field instead of silently repurposing the old one.
+        "mergedIntoSource": branch_merged,
+        "fullyIntegrated": fully_integrated,
+        "integrationStatus": _integration_status(
+            branch_merged=branch_merged,
+            has_uncommitted_changes=has_uncommitted_changes,
+        ),
+        "uncommittedChangesIntegrated": uncommitted_changes_integrated,
+    }
+
+
+def _suppress_merge_suggestions(
+    *,
+    status: str,
+    ahead_behind_payload: JsonObject | None,
+) -> bool:
+    if status not in (STATUS_PRESENT, STATUS_UNKNOWN):
+        return False
+    if not isinstance(ahead_behind_payload, dict):
+        return False
+    vs_current = ahead_behind_payload.get("vsCurrentHead")
+    if not isinstance(vs_current, dict):
+        return False
+    ahead = vs_current.get("ahead")
+    return ahead == 0
+
+
+def suggested_commands(
+    record: PersistentWorktreeRecord,
+    status: str,
+    *,
+    ahead_behind_payload: JsonObject | None = None,
+) -> JsonObject:
     alias = record.get("alias") or record.get("runId") or "<handle>"
     execution_cwd = record.get("executionCwd")
     source_git_root = record.get("sourceGitRoot")
@@ -282,7 +343,11 @@ def suggested_commands(record: PersistentWorktreeRecord, status: str) -> JsonObj
         review_diff = _shell(["git", "-C", execution_cwd, "diff", "--stat", "HEAD"])
         if isinstance(base, str) and base:
             review_diff_base = _shell(["git", "-C", execution_cwd, "diff", "--stat", base])
-    if isinstance(source_git_root, str) and isinstance(branch, str):
+    suppress_merge = _suppress_merge_suggestions(
+        status=status,
+        ahead_behind_payload=ahead_behind_payload,
+    )
+    if not suppress_merge and isinstance(source_git_root, str) and isinstance(branch, str):
         merge = _shell(["git", "-C", source_git_root, "merge", "--no-ff", branch])
         if isinstance(base, str) and base:
             cherry = _shell(["git", "-C", source_git_root, "cherry-pick", f"{base}..{branch}"])
@@ -297,11 +362,15 @@ def suggested_commands(record: PersistentWorktreeRecord, status: str) -> JsonObj
 
 
 def decorate_record(
-    record: PersistentWorktreeRecord, *, include_detached: bool = False
+    record: PersistentWorktreeRecord,
+    *,
+    include_detached: bool = False,
+    include_work_summary: bool = False,
+    include_porcelain_cache: bool = False,
 ) -> JsonObject:
     status, warnings = detect_worktree_status(record)
     dirty, dirty_paths, dirty_total, dirty_warnings = dirty_info(record, status)
-    merged, merged_warnings = merged_into_source(
+    branch_merged, merged_warnings = merged_into_source(
         record,
         status,
         include_detached=include_detached,
@@ -319,7 +388,10 @@ def decorate_record(
         "registryWorktreeStatus": record.get("registryWorktreeStatus"),
         "worktreeStatus": status,
         "dirty": dirty,
-        "mergedIntoSource": merged,
+        **integration_fields(
+            branch_merged=branch_merged,
+            has_uncommitted_changes=dirty,
+        ),
     }
     registry_status = record.get("registryWorktreeStatus")
     if isinstance(registry_status, str) and registry_status != status:
@@ -330,6 +402,34 @@ def decorate_record(
     if dirty_paths:
         output["dirtyPaths"] = dirty_paths[:MAX_DIRTY_PATHS_REPORTED]
         output["dirtyPathsTotal"] = dirty_total
+    if include_porcelain_cache:
+        output["_porcelainStatusLines"] = dirty_paths if dirty is not None else None
+        output["_porcelainStatusTotalLines"] = dirty_total
+        output["_porcelainStatusWarnings"] = dirty_warnings
+    if include_work_summary and status in (STATUS_PRESENT, STATUS_UNKNOWN):
+        prefetched_changed_files = (
+            worktree_summary.changed_files_from_porcelain_lines(
+                dirty_paths,
+                dirty_total if isinstance(dirty_total, int) else len(dirty_paths),
+            )
+            if dirty is not None
+            else None
+        )
+        summary = worktree_summary.build_work_summary(
+            source_git_root=record.get("sourceGitRoot")
+            if isinstance(record.get("sourceGitRoot"), str)
+            else None,
+            execution_cwd=record.get("executionCwd")
+            if isinstance(record.get("executionCwd"), str)
+            else "",
+            branch=record.get("branch") if isinstance(record.get("branch"), str) else None,
+            creation_context=record.get("creationContext")
+            if isinstance(record.get("creationContext"), dict)
+            else None,
+            prefetched_changed_files=prefetched_changed_files,
+        )
+        if summary is not None:
+            output["workSummary"] = summary
     return output
 
 
@@ -399,6 +499,9 @@ def _error_payload(
     next_actions: list[str] | None = None,
     retry_safe: bool = False,
     warnings: list[str] | None = None,
+    suggestions: list[str] | None = None,
+    suggestion_scope: str | None = None,
+    list_command: str | None = None,
 ) -> JsonObject:
     payload: JsonObject = {
         "ok": False,
@@ -423,7 +526,37 @@ def _error_payload(
         payload["nextActions"] = next_actions
     if warnings is not None:
         payload["warnings"] = warnings
+    if suggestions is not None:
+        payload["suggestions"] = suggestions
+    if suggestion_scope is not None:
+        payload["suggestionScope"] = suggestion_scope
+    if list_command is not None:
+        payload["listCommand"] = list_command
     return payload
+
+
+def suggest_worktree_handles(
+    registry_root: Path,
+    handle: str,
+    *,
+    limit: int = 8,
+) -> list[str]:
+    records = load_persistent_records(registry_root)
+    scoped_index: JsonObject = {"aliases": {}, "runs": {}}
+    aliases = scoped_index["aliases"]
+    runs = scoped_index["runs"]
+    if not isinstance(aliases, dict) or not isinstance(runs, dict):
+        return []
+    for record in records:
+        alias = record.get("alias")
+        run_id = record.get("runId")
+        if not isinstance(alias, str) or not alias:
+            continue
+        if not isinstance(run_id, str) or not run_id:
+            continue
+        aliases[alias] = run_id
+        runs[run_id] = {"alias": alias}
+    return run_registry.suggest_handles(scoped_index, handle, limit=limit)
 
 
 def resolve_record(
@@ -455,7 +588,7 @@ def resolve_record(
             )
         resolved = run_registry.resolve_handle(index, handle)
         if resolved.run_id is None:
-            suggestions = list(resolved.suggestions)
+            suggestions = suggest_worktree_handles(registry_root, handle)
             next_actions = (
                 [f"delegate worktree show {suggestions[0]}"]
                 if suggestions
@@ -469,6 +602,9 @@ def resolve_record(
                         f"{', '.join(suggestions) if suggestions else '(none)'}"
                     ),
                     next_actions=next_actions,
+                    suggestions=suggestions,
+                    suggestion_scope="worktrees",
+                    list_command="delegate worktree list",
                 )
             )
         run_id = resolved.run_id
@@ -499,21 +635,32 @@ def show_worktree(
     include_detached: bool = False,
 ) -> JsonObject:
     record = resolve_record(registry_root, handle=handle, latest_harness=latest_harness)
-    entry = decorate_record(record, include_detached=include_detached)
+    entry = decorate_record(
+        record,
+        include_detached=include_detached,
+        include_work_summary=True,
+        include_porcelain_cache=True,
+    )
     execution_cwd = entry.get("executionCwd")
+    cached_porcelain = entry.pop("_porcelainStatusLines", None)
+    cached_porcelain_total = entry.pop("_porcelainStatusTotalLines", None)
+    cached_porcelain_warnings = entry.pop("_porcelainStatusWarnings", [])
     porcelain: list[str] | None = None
     porcelain_total = 0
     porcelain_truncated = False
     if entry.get("worktreeStatus") in (STATUS_PRESENT, STATUS_UNKNOWN) and isinstance(
         execution_cwd, str
     ):
-        lines, total, warnings = porcelain_status(execution_cwd, limit=50)
-        if lines is not None:
-            porcelain = lines
-            porcelain_total = int(total or 0)
-            porcelain_truncated = porcelain_total > len(lines)
-        elif warnings:
-            entry["warnings"] = [*(entry.get("warnings") or []), *warnings]
+        if isinstance(cached_porcelain, list):
+            porcelain = cached_porcelain[:50]
+            porcelain_total = (
+                cached_porcelain_total
+                if isinstance(cached_porcelain_total, int)
+                else len(cached_porcelain)
+            )
+            porcelain_truncated = porcelain_total > len(porcelain)
+        elif isinstance(cached_porcelain_warnings, list) and cached_porcelain_warnings:
+            entry["warnings"] = [*(entry.get("warnings") or []), *cached_porcelain_warnings]
     entry["schema"] = SCHEMA_SHOW
     entry["ok"] = True
     entry["creationContext"] = record.get("creationContext") or {}
@@ -521,7 +668,13 @@ def show_worktree(
     entry["porcelainStatusTotalLines"] = porcelain_total
     entry["porcelainStatusTruncated"] = porcelain_truncated
     entry["aheadBehind"] = ahead_behind(record, str(entry.get("worktreeStatus")))
-    entry["suggestedCommands"] = suggested_commands(record, str(entry.get("worktreeStatus")))
+    entry["suggestedCommands"] = suggested_commands(
+        record,
+        str(entry.get("worktreeStatus")),
+        ahead_behind_payload=entry.get("aheadBehind")
+        if isinstance(entry.get("aheadBehind"), dict)
+        else None,
+    )
     source_git_root = record.get("sourceGitRoot")
     entry["currentSourceHeadRef"] = (
         _symbolic_ref(source_git_root, "HEAD") if isinstance(source_git_root, str) else None

@@ -38,12 +38,19 @@ class LaunchOptions:
     prompt_parts: list[str] | None = None
     prompt_file: str | None = None
     reasoning_effort: str | None = None
+    progress_intent: str | None = None
+    forbid_commit: bool = False
     dry_run: bool = False
 
 
 @dataclass
 class RunJsonOptions:
     input_json: str
+
+
+@dataclass
+class InspectionOptions:
+    summary: bool = False
 
 
 @dataclass(init=False)
@@ -58,6 +65,7 @@ class ParsedCommand:
     run_output: run_output_commands.RunOutputCommand | None = None
     worktree: worktree_commands.WorktreeCommand | None = None
     capabilities: capability_commands.CapabilitiesCommand | None = None
+    inspection: InspectionOptions | None = None
 
     def __init__(
         self,
@@ -72,6 +80,7 @@ class ParsedCommand:
         run_output: run_output_commands.RunOutputCommand | None = None,
         worktree: worktree_commands.WorktreeCommand | None = None,
         capabilities: capability_commands.CapabilitiesCommand | None = None,
+        inspection: InspectionOptions | None = None,
     ) -> None:
         self.subcommand = subcommand
         self.global_options = global_options or GlobalOptions()
@@ -83,6 +92,7 @@ class ParsedCommand:
         self.run_output = run_output
         self.worktree = worktree
         self.capabilities = capabilities
+        self.inspection = inspection
 
 
 @dataclass(frozen=True)
@@ -107,6 +117,10 @@ class Request:
     reasoning_effort_source: str | None = None
     reasoning_capability_source: str | None = None
     reasoning_transport: str | None = None
+    progress: bool = False
+    progress_initial_delay_sec: float = 30.0
+    progress_interval_sec: float = 60.0
+    forbid_commit: bool = False
     warnings: tuple[str, ...] = ()
     stdin_text: str | None = None
     prompt_file_text: str | None = None

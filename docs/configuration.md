@@ -210,7 +210,7 @@ Controls local run recording.
 - `defaultReasoningEffort`: not supported in v1; must be `null`.
 - Kimi's thinking/effort level is configured in `~/.kimi-code/config.toml`, not through Delegate.
 - Kimi safe mode uses Delegate's read-only safety prompt and isolated workspace. Kimi prompt mode auto-approves tool actions, so the isolated workspace is the effective write boundary.
-- Kimi work mode emits `--yolo` by default.
+- Kimi work mode uses prompt mode. Delegate does not emit `--yolo` because Kimi rejects combining `--yolo` with `--prompt`.
 
 ### `reasoning`
 
@@ -307,3 +307,23 @@ Embedded defaults:
 - `autoPrune.mergedOlderThanDays`: non-negative integer.
 
 See [Worktrees](worktrees.md) for lifecycle details.
+
+### `progress`
+
+```json
+{
+  "progress": {
+    "enabled": false,
+    "initialDelaySec": 30,
+    "intervalSec": 60
+  }
+}
+```
+
+Controls parent progress heartbeats for tracked foreground runs. Heartbeats are written to stderr so `--json` stdout stays machine-readable.
+
+- `enabled`: must be a boolean. When `true`, tracked foreground runs emit heartbeats unless a launch passes `--no-progress`. When `false` (the default), runs are silent unless a launch passes `--progress`. The per-launch flag always wins over config.
+- `initialDelaySec`: delay before the first heartbeat. Must be a positive, finite number. Default `30`.
+- `intervalSec`: spacing between subsequent heartbeats. Must be a positive, finite number. Default `60`.
+
+Timing resolves as environment override, then config, then embedded default. Non-positive, non-finite, or non-numeric `initialDelaySec`/`intervalSec`, and a non-boolean `enabled`, are rejected at config load. See [CLI reference](cli-reference.md) for the `--progress` / `--no-progress` launch flags.

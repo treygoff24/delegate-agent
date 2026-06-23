@@ -1,3 +1,4 @@
+import inspect
 import io
 import json
 import tempfile
@@ -68,6 +69,68 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
             self.assertGreaterEqual(payload["aheadBehind"]["vsCreationBase"]["ahead"], 1)
             self.assertIn("?? scratch.txt", payload["porcelainStatus"])
             self.assertIn("safeRemove", payload["suggestedCommands"])
+            self.assertEqual(payload["workSummary"]["commitsCreatedCount"], 1)
+            self.assertEqual(payload["workSummary"]["changedFilesCount"], 1)
+
+    def test_worktree_show_reuses_prefetched_porcelain_status(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            base_oid = git("rev-parse", "HEAD", cwd=path).stdout.strip()
+            branch = "delegate/cursor-porcelain-cache"
+            wt_path = str(Path(fake_home) / "wt" / "cursor-porcelain-cache")
+            self._seed_persistent_run(
+                path,
+                alias="cursor-porcelain-cache",
+                branch=branch,
+                execution_cwd=wt_path,
+                creation_oid=base_oid,
+            )
+            self._create_worktree_at(path, branch, wt_path)
+            (Path(wt_path) / "scratch.txt").write_text("scratch\n", encoding="utf-8")
+
+            porcelain_calls = []
+            summary_status_calls = 0
+            original_porcelain_status = self.delegate.worktree_mgmt.porcelain_status
+            original_summary_run_git = self.delegate.worktree_mgmt.worktree_summary.run_git
+
+            def counting_porcelain_status(execution_cwd, *, limit=None):
+                porcelain_calls.append((execution_cwd, limit))
+                return original_porcelain_status(execution_cwd, limit=limit)
+
+            def counting_summary_run_git(cwd, args, *, timeout_seconds):
+                nonlocal summary_status_calls
+                if args[:2] == ["status", "--porcelain=v1"]:
+                    summary_status_calls += 1
+                return original_summary_run_git(cwd, args, timeout_seconds=timeout_seconds)
+
+            with (
+                mock.patch.object(
+                    self.delegate.worktree_mgmt,
+                    "porcelain_status",
+                    counting_porcelain_status,
+                ),
+                mock.patch.object(
+                    self.delegate.worktree_mgmt.worktree_summary,
+                    "run_git",
+                    counting_summary_run_git,
+                ),
+            ):
+                payload = self.delegate.worktree_mgmt.show_worktree(
+                    self._registry_root(path),
+                    handle="cursor-porcelain-cache",
+                )
+
+            self.assertEqual(porcelain_calls, [(wt_path, None)])
+            self.assertEqual(summary_status_calls, 0)
+            self.assertTrue(payload["dirty"])
+            self.assertEqual(payload["porcelainStatus"], ["?? scratch.txt"])
+            self.assertEqual(payload["porcelainStatusTotalLines"], 1)
+            self.assertFalse(payload["porcelainStatusTruncated"])
+            self.assertEqual(payload["workSummary"]["changedFilesCount"], 1)
+            self.assertEqual(
+                payload["workSummary"]["changedFiles"],
+                [{"status": "??", "path": "scratch.txt"}],
+            )
 
     def test_worktree_show_unknown_status_still_includes_inspection_data(self):
         _repo, path = self._make_repo()
@@ -303,6 +366,29 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
 
             self.assertEqual(result.get("alias"), "droid-worktree")
 
+    def test_worktree_unknown_handle_suggestions_are_scoped_to_worktrees(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory():
+            self._seed_plain_run(path, harness="cursor")
+            self._seed_persistent_run(path, alias="cursor-worktree", harness="cursor")
+
+            with self.assertRaises(self.delegate.worktree_mgmt.WorktreeManagementError) as ctx:
+                self.delegate.worktree_mgmt.show_worktree(
+                    self._registry_root(path),
+                    handle="cursorx",
+                )
+
+            payload = ctx.exception.payload
+            self.assertEqual(payload["code"], "unknown_handle")
+            self.assertEqual(payload["suggestionScope"], "worktrees")
+            self.assertEqual(payload["suggestions"], ["cursor-worktree"])
+            self.assertEqual(
+                payload["nextActions"],
+                ["delegate worktree show cursor-worktree"],
+            )
+            self.assertEqual(payload["listCommand"], "delegate worktree list")
+            self.assertNotIn("cursor, ", payload["message"])
+
     def test_worktree_show_text_render_order(self):
         """render_worktree_show_text outputs lines in spec L621 order:
         creation-context → dirty → merged → ahead/behind → porcelain → suggested-commands → trailing metadata."""
@@ -334,7 +420,10 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
                 },
                 "currentSourceHeadRef": "refs/heads/main",
                 "dirty": True,
+                "branchMergedIntoSource": False,
                 "mergedIntoSource": False,
+                "fullyIntegrated": False,
+                "integrationStatus": "branch-unmerged-worktree-dirty",
                 "aheadBehind": {
                     "vsCreationBase": {"ahead": 3, "behind": 0, "baseOid": base_oid},
                     "vsCurrentHead": {"ahead": 3, "behind": 2, "baseOid": base_oid},
@@ -356,6 +445,9 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
             idx_creation = lines.find("created from")
             idx_dirty = lines.find("dirty: yes")
             idx_merged = lines.find("merged: no")
+            idx_branch_merged = lines.find("branch merged: no")
+            idx_fully_integrated = lines.find("fully integrated: no")
+            idx_integration_status = lines.find("integration status:")
             idx_ahead = lines.find("vs creation base")
             idx_porcelain = lines.find("porcelain: clean")
             idx_suggested = lines.find("suggested commands")
@@ -363,7 +455,10 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
 
             self.assertGreater(idx_creation, -1, "creation-context line missing")
             self.assertGreater(idx_dirty, -1, "dirty line missing")
-            self.assertGreater(idx_merged, -1, "merged line missing")
+            self.assertGreater(idx_merged, -1, "legacy merged line missing")
+            self.assertGreater(idx_branch_merged, -1, "branch merged line missing")
+            self.assertGreater(idx_fully_integrated, -1, "fully integrated line missing")
+            self.assertGreater(idx_integration_status, -1, "integration status line missing")
             self.assertGreater(idx_ahead, -1, "ahead/behind line missing")
             self.assertGreater(idx_porcelain, -1, "porcelain: clean line missing")
             self.assertGreater(idx_suggested, -1, "suggested commands missing")
@@ -372,7 +467,10 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
             # Assert each section appears after the previous one.
             self.assertLess(idx_creation, idx_dirty)
             self.assertLess(idx_dirty, idx_merged)
-            self.assertLess(idx_merged, idx_ahead)
+            self.assertLess(idx_merged, idx_branch_merged)
+            self.assertLess(idx_branch_merged, idx_fully_integrated)
+            self.assertLess(idx_fully_integrated, idx_integration_status)
+            self.assertLess(idx_integration_status, idx_ahead)
             self.assertLess(idx_ahead, idx_porcelain)
             self.assertLess(idx_porcelain, idx_suggested)
             # Trailing metadata should come AFTER suggested commands (spec L621 order).
@@ -414,6 +512,162 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
                 result["vsCreationBase"]["baseOid"],
                 result["vsCurrentHead"]["baseOid"],
             )
+
+    def test_branch_merged_dirty_worktree_reports_partial_integration(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            base_oid = git("rev-parse", "HEAD", cwd=path).stdout.strip()
+            branch = "delegate/cursor-merged-dirty"
+            wt_path = str(Path(fake_home) / "wt" / "cursor-merged-dirty")
+            self._seed_persistent_run(
+                path,
+                alias="cursor-merged-dirty",
+                branch=branch,
+                execution_cwd=wt_path,
+                creation_oid=base_oid,
+            )
+            self._create_worktree_at(path, branch, wt_path)
+            (Path(wt_path) / "feature.txt").write_text("feature\n", encoding="utf-8")
+            git("add", "feature.txt", cwd=wt_path)
+            git("commit", "-m", "feature", cwd=wt_path)
+            git("merge", "--no-ff", branch, cwd=path, check=False)
+            (Path(wt_path) / "scratch.txt").write_text("scratch\n", encoding="utf-8")
+
+            payload = self.delegate.worktree_mgmt.show_worktree(
+                self._registry_root(path),
+                handle="cursor-merged-dirty",
+            )
+
+            self.assertTrue(payload["branchMergedIntoSource"])
+            self.assertTrue(payload["mergedIntoSource"])
+            self.assertFalse(payload["fullyIntegrated"])
+            self.assertTrue(payload["hasUncommittedChanges"])
+            self.assertFalse(payload["uncommittedChangesIntegrated"])
+            self.assertEqual(payload["integrationStatus"], "branch-merged-worktree-dirty")
+            self.assertEqual(payload["aheadBehind"]["vsCurrentHead"]["ahead"], 0)
+            commands = payload["suggestedCommands"]
+            self.assertIsNotNone(commands["reviewDiff"])
+            self.assertIsNone(commands["mergeIntoSource"])
+            self.assertIsNone(commands["cherryPickRange"])
+
+    def test_branch_merged_clean_worktree_reports_fully_integrated(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            base_oid = git("rev-parse", "HEAD", cwd=path).stdout.strip()
+            branch = "delegate/cursor-merged-clean"
+            wt_path = str(Path(fake_home) / "wt" / "cursor-merged-clean")
+            self._seed_persistent_run(
+                path,
+                alias="cursor-merged-clean",
+                branch=branch,
+                execution_cwd=wt_path,
+                creation_oid=base_oid,
+            )
+            self._create_worktree_at(path, branch, wt_path)
+            (Path(wt_path) / "feature.txt").write_text("feature\n", encoding="utf-8")
+            git("add", "feature.txt", cwd=wt_path)
+            git("commit", "-m", "feature", cwd=wt_path)
+            git("merge", "--no-ff", branch, cwd=path, check=False)
+
+            payload = self.delegate.worktree_mgmt.show_worktree(
+                self._registry_root(path),
+                handle="cursor-merged-clean",
+            )
+
+            self.assertTrue(payload["branchMergedIntoSource"])
+            self.assertTrue(payload["mergedIntoSource"])
+            self.assertTrue(payload["fullyIntegrated"])
+            self.assertFalse(payload["hasUncommittedChanges"])
+            self.assertTrue(payload["uncommittedChangesIntegrated"])
+            self.assertEqual(payload["integrationStatus"], "fully-integrated")
+            commands = payload["suggestedCommands"]
+            self.assertIsNone(commands["mergeIntoSource"])
+            self.assertIsNone(commands["cherryPickRange"])
+
+    def test_list_entry_exposes_branch_and_full_integration_fields(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            branch = "delegate/cursor-list-integration"
+            wt_path = str(Path(fake_home) / "wt" / "cursor-list-integration")
+            self._seed_persistent_run(
+                path,
+                alias="cursor-list-integration",
+                branch=branch,
+                execution_cwd=wt_path,
+            )
+            self._create_worktree_at(path, branch, wt_path)
+            (Path(wt_path) / "feature.txt").write_text("feature\n", encoding="utf-8")
+            git("add", "feature.txt", cwd=wt_path)
+            git("commit", "-m", "feature", cwd=wt_path)
+            (Path(wt_path) / "local.txt").write_text("dirty\n", encoding="utf-8")
+
+            result = self.delegate.worktree_mgmt.list_worktrees(self._registry_root(path))
+            entry = result["entries"][0]
+
+            self.assertFalse(entry["branchMergedIntoSource"])
+            self.assertFalse(entry["mergedIntoSource"])
+            self.assertFalse(entry["fullyIntegrated"])
+            self.assertTrue(entry["hasUncommittedChanges"])
+            self.assertEqual(entry["integrationStatus"], "branch-unmerged-worktree-dirty")
+
+    def test_branch_unmerged_clean_worktree_reports_review_ready_state(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            base_oid = git("rev-parse", "HEAD", cwd=path).stdout.strip()
+            branch = "delegate/cursor-unmerged-clean"
+            wt_path = str(Path(fake_home) / "wt" / "cursor-unmerged-clean")
+            self._seed_persistent_run(
+                path,
+                alias="cursor-unmerged-clean",
+                branch=branch,
+                execution_cwd=wt_path,
+                creation_oid=base_oid,
+            )
+            self._create_worktree_at(path, branch, wt_path)
+            (Path(wt_path) / "feature.txt").write_text("feature\n", encoding="utf-8")
+            git("add", "feature.txt", cwd=wt_path)
+            git("commit", "-m", "feature", cwd=wt_path)
+
+            payload = self.delegate.worktree_mgmt.show_worktree(
+                self._registry_root(path),
+                handle="cursor-unmerged-clean",
+            )
+
+            self.assertFalse(payload["branchMergedIntoSource"])
+            self.assertFalse(payload["mergedIntoSource"])
+            self.assertFalse(payload["fullyIntegrated"])
+            self.assertFalse(payload["hasUncommittedChanges"])
+            self.assertTrue(payload["uncommittedChangesIntegrated"])
+            self.assertEqual(payload["integrationStatus"], "branch-unmerged")
+            self.assertIsNotNone(payload["suggestedCommands"]["mergeIntoSource"])
+            self.assertIsNotNone(payload["suggestedCommands"]["cherryPickRange"])
+
+    def test_worktree_list_does_not_build_deep_work_summaries(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            branch = "delegate/cursor-list-light"
+            wt_path = str(Path(fake_home) / "wt" / "cursor-list-light")
+            self._seed_persistent_run(
+                path,
+                alias="cursor-list-light",
+                branch=branch,
+                execution_cwd=wt_path,
+            )
+            self._create_worktree_at(path, branch, wt_path)
+
+            with mock.patch.object(
+                self.delegate.worktree_mgmt.worktree_summary,
+                "build_work_summary",
+            ) as summary_mock:
+                result = self.delegate.worktree_mgmt.list_worktrees(self._registry_root(path))
+
+            self.assertEqual(len(result["entries"]), 1)
+            self.assertNotIn("workSummary", result["entries"][0])
+            summary_mock.assert_not_called()
+
+    def test_suggested_commands_signature_drops_dead_dirty_parameter(self):
+        params = inspect.signature(self.delegate.worktree_mgmt.suggested_commands).parameters
+        self.assertNotIn("dirty", params)
 
 
 if __name__ == "__main__":

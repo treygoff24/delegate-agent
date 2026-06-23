@@ -132,6 +132,15 @@ class UtilityModuleTests(unittest.TestCase):
                 (4, 6),
             )
             self.assertIsNone(archived_logs.state_log_byte_sizes({"stdoutBytes": True}))
+            self.assertIsNone(
+                archived_logs.state_log_byte_sizes({"stdoutBytes": 4, "stderrBytes": True})
+            )
+            self.assertIsNone(
+                archived_logs.state_log_byte_sizes({"stdoutBytes": -1, "stderrBytes": 6})
+            )
+            self.assertIsNone(
+                archived_logs.state_log_byte_sizes({"stdoutBytes": 4, "stderrBytes": -6})
+            )
 
     def test_runner_launch_error_carries_code_and_message(self):
         error = runner.RunnerLaunchError("child_launch_failed", "nope")

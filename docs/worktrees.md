@@ -22,6 +22,18 @@ delegate --isolation worktree droid implementer work "Implement the scoped chang
 delegate --isolation worktree kimi work "Implement the scoped change and report changed files."
 ```
 
+Add `--forbid-commit` when the child should leave only uncommitted edits for
+the orchestrator to inspect:
+
+```bash
+delegate --isolation worktree cursor work --forbid-commit "Implement the scoped change without creating commits."
+```
+
+With `--forbid-commit`, Delegate adds a no-commit prompt note and marks the run
+failed if commits remain ahead of the creation base when the child exits.
+Without it, commits are allowed but still reported in the work summary with a
+warning and suggested review commands.
+
 For work mode, `--isolation worktree` creates a persistent worktree under the Delegate data home. The default is:
 
 ```text
@@ -53,6 +65,10 @@ delegate --json --isolation worktree dry-run cursor work "Implement only."
 
 Delegate prepends a note telling the child agent that it is running in a Delegate-created isolated Git worktree, that it should make changes only in that execution workspace, and that the orchestrator manages merge and cleanup.
 
+When `--forbid-commit` is active, the note also tells the child not to run
+`git commit` because Delegate will fail the run if commits remain ahead of the
+creation base at exit.
+
 ## Inspect
 
 ```bash
@@ -63,7 +79,37 @@ delegate worktree show --latest cursor
 
 `worktree show --latest HARNESS` resolves the most recent persistent worktree for that harness. It intentionally ignores newer non-worktree runs from the same harness.
 
-`worktree show` reports status, path, branch, dirty state, ahead/behind counts, and suggested review or cleanup commands. `worktree list` is read-only unless an enabled auto-prune pass runs before listing; JSON output includes `summary.autoPruneMode` (`disabled`, `attempted`, or `suppressed`) and `summary.readOnly`.
+`worktree show` reports status, path, branch, dirty state, branch merge vs full integration state, ahead/behind counts, work summary, and suggested review or cleanup commands. `worktree list` is read-only unless an enabled auto-prune pass runs before listing; JSON output includes `summary.autoPruneMode` (`disabled`, `attempted`, or `suppressed`) and `summary.readOnly`.
+
+`workSummary` includes dirty state, changed file count, diff stat, and commits
+created by the child (`commitsCreatedCount` and `commitsCreated`). It is present
+on `worktree show` and run completion payloads when Delegate can inspect the
+persistent worktree; `worktree list` keeps this deep summary out of overview
+entries for responsiveness.
+
+### Integration state semantics
+
+Worktree list/show JSON distinguishes branch merge from full integration:
+
+| Field | Meaning |
+| --- | --- |
+| `branchMergedIntoSource` | Branch tip is an ancestor of current source `HEAD` (Git graph only). |
+| `mergedIntoSource` | Backward-compatible branch-graph merge state; same meaning as `branchMergedIntoSource`. |
+| `fullyIntegrated` | Branch merged **and** the worktree has no uncommitted changes. |
+| `hasUncommittedChanges` | Same tri-state as `dirty`. |
+| `integrationStatus` | Summary enum such as `fully-integrated`, `branch-merged-worktree-dirty`, `branch-unmerged`, or `branch-unmerged-worktree-dirty`. |
+| `uncommittedChangesIntegrated` | `false` when uncommitted edits remain; `true` when the worktree is clean. |
+
+Automation that needs safe retirement should require `fullyIntegrated: true` or
+inspect `integrationStatus`; use `mergedIntoSource` / `branchMergedIntoSource`
+when you only need the branch-graph meaning (for example, matching `worktree
+remove` / `worktree prune --merged` behavior).
+
+When a branch is merged but the worktree still has local edits, `worktree show` keeps review/diff guidance but omits no-op `mergeIntoSource` / `cherryPickRange` suggestions (ahead vs current `HEAD` is zero and remaining work is uncommitted files).
+
+Unknown handle suggestions for `worktree show/remove` are scoped to persistent
+worktrees and include `delegate worktree list` guidance. Run handles from
+non-worktree launches are not suggested for worktree management commands.
 
 Common statuses:
 

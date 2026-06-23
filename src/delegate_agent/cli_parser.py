@@ -25,6 +25,7 @@ from delegate_agent.constants import ENGINES_PROSE, KNOWN_ENGINES, validate_mode
 from delegate_agent.errors import DelegateError
 from delegate_agent.request_models import (
     GlobalOptions,
+    InspectionOptions,
     LaunchOptions,
     ParsedCommand,
     RunJsonOptions,
@@ -42,6 +43,8 @@ MISPLACED_GLOBAL_OPTIONS = frozenset(
     }
 )
 
+VALUE_GLOBAL_OPTIONS = frozenset({"--cwd", "--isolation", "--completion-report"})
+
 
 def infer_global_json(argv: list[str]) -> bool:
     i = 0
@@ -49,8 +52,11 @@ def infer_global_json(argv: list[str]) -> bool:
         token = argv[i]
         if token == "--json":
             return True
-        if token == "--cwd":
+        if token in VALUE_GLOBAL_OPTIONS:
             i += 2
+            continue
+        if token in MISPLACED_GLOBAL_OPTIONS:
+            i += 1
             continue
         if token in ("--help", "-h", "--version"):
             return False
@@ -120,6 +126,7 @@ def parse_help_subcommand(rest: list[str], json_mode: bool) -> ParsedCommand:
 
 
 SIMPLE_INSPECTION_SUBCOMMANDS = frozenset({"models", "describe", "agent-help"})
+INSPECTION_OPTION_SUBCOMMANDS = frozenset({"models", "describe"})
 
 
 def parse_simple_inspection_subcommand(
@@ -135,7 +142,15 @@ def parse_simple_inspection_subcommand(
     rest, json_mode = consume_json_option(rest, json_mode)
     if any(command_help.is_help_token(token) for token in rest):
         return help_command(json_mode, name)
-    require_no_extra(rest, name)
+    summary = False
+    if name in INSPECTION_OPTION_SUBCOMMANDS:
+        for token in rest:
+            if token == "--summary":
+                summary = True
+                continue
+            require_no_extra([token], name)
+    else:
+        require_no_extra(rest, name)
     return ParsedCommand(
         name,
         global_options=GlobalOptions(
@@ -145,6 +160,7 @@ def parse_simple_inspection_subcommand(
             completion_report=completion_report,
             isolation=isolation,
         ),
+        inspection=InspectionOptions(summary=summary),
     )
 
 
@@ -416,7 +432,9 @@ def parse_modeless_engine(
     # prompt text (`cursor work explain --help`).
     if len(rest) >= 2 and command_help.is_help_token(rest[1]):
         return help_command(json_mode, topic)
-    prompt_file, reasoning_effort, prompt_parts = parse_prompt_tail(rest[1:])
+    prompt_file, reasoning_effort, progress_intent, forbid_commit, prompt_parts = parse_prompt_tail(
+        rest[1:]
+    )
     return ParsedCommand(
         engine,
         global_options=GlobalOptions(
@@ -432,6 +450,8 @@ def parse_modeless_engine(
             prompt_parts=prompt_parts,
             prompt_file=prompt_file,
             reasoning_effort=reasoning_effort,
+            progress_intent=progress_intent,
+            forbid_commit=forbid_commit,
             dry_run=dry_run,
         ),
     )
@@ -471,7 +491,9 @@ def parse_droid(
     # Help wins after the mode, before prompt capture: `droid x safe --help`.
     if len(rest) >= 3 and command_help.is_help_token(rest[2]):
         return help_command(json_mode, topic)
-    prompt_file, reasoning_effort, prompt_parts = parse_prompt_tail(rest[2:])
+    prompt_file, reasoning_effort, progress_intent, forbid_commit, prompt_parts = parse_prompt_tail(
+        rest[2:]
+    )
     return ParsedCommand(
         "droid",
         global_options=GlobalOptions(
@@ -488,6 +510,8 @@ def parse_droid(
             prompt_parts=prompt_parts,
             prompt_file=prompt_file,
             reasoning_effort=reasoning_effort,
+            progress_intent=progress_intent,
+            forbid_commit=forbid_commit,
             dry_run=dry_run,
         ),
     )
@@ -543,9 +567,13 @@ def parse_dry_run(
     )
 
 
-def parse_prompt_tail(rest: list[str]) -> tuple[str | None, str | None, list[str]]:
+def parse_prompt_tail(
+    rest: list[str],
+) -> tuple[str | None, str | None, str | None, bool, list[str]]:
     prompt_file: str | None = None
     reasoning_effort: str | None = None
+    progress_intent: str | None = None
+    forbid_commit = False
     prompt_parts: list[str] = []
     i = 0
     while i < len(rest):
@@ -586,6 +614,43 @@ def parse_prompt_tail(rest: list[str]) -> tuple[str | None, str | None, list[str
                 raise DelegateError(exc.error, exc.message) from exc
             i += 2
             continue
+        if token == "--progress":
+            if progress_intent == "on":
+                raise DelegateError(
+                    "invalid_option_combination",
+                    "Only one --progress flag is allowed.",
+                )
+            if progress_intent == "off":
+                raise DelegateError(
+                    "invalid_option_combination",
+                    "--progress and --no-progress cannot be combined.",
+                )
+            progress_intent = "on"
+            i += 1
+            continue
+        if token == "--no-progress":
+            if progress_intent == "off":
+                raise DelegateError(
+                    "invalid_option_combination",
+                    "Only one --no-progress flag is allowed.",
+                )
+            if progress_intent == "on":
+                raise DelegateError(
+                    "invalid_option_combination",
+                    "--progress and --no-progress cannot be combined.",
+                )
+            progress_intent = "off"
+            i += 1
+            continue
+        if token == "--forbid-commit":
+            if forbid_commit:
+                raise DelegateError(
+                    "invalid_option_combination",
+                    "Only one --forbid-commit flag is allowed.",
+                )
+            forbid_commit = True
+            i += 1
+            continue
         prompt_parts = rest[i:]
         break
     if "--prompt-file" in prompt_parts:
@@ -596,7 +661,7 @@ def parse_prompt_tail(rest: list[str]) -> tuple[str | None, str | None, list[str
         raise_misplaced_global_option(
             "Global options must appear before the subcommand; use --prompt-file for literal flag text.",
         )
-    return prompt_file, reasoning_effort, prompt_parts
+    return prompt_file, reasoning_effort, progress_intent, forbid_commit, prompt_parts
 
 
 def parse_snapshot(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
@@ -741,6 +806,7 @@ def parse_run_output(rest: list[str], json_mode: bool, cwd: str | None) -> Parse
     stdout_flag = False
     stderr_flag = False
     tail: int | None = None
+    max_chars: int | None = None
     raw = False
     no_redact = False
     i = 1
@@ -776,6 +842,16 @@ def parse_run_output(rest: list[str], json_mode: bool, cwd: str | None) -> Parse
                 missing_value_description="a line count",
             )
             continue
+        if token == "--max-chars":
+            max_chars, i = parse_required_positive_int_option(
+                rest,
+                i,
+                option_label="run-output --max-chars",
+                missing_error="missing_max_chars",
+                invalid_error="invalid_max_chars",
+                missing_value_description="a positive integer",
+            )
+            continue
         raise DelegateError("unknown_option", f"run-output does not support option: {token}")
     default_output = not (completion_report or stdout_flag or stderr_flag or raw)
     if default_output:
@@ -784,6 +860,11 @@ def parse_run_output(rest: list[str], json_mode: bool, cwd: str | None) -> Parse
         raise DelegateError(
             "invalid_option_combination",
             "run-output --raw cannot be combined with --tail.",
+        )
+    if raw and max_chars is not None:
+        raise DelegateError(
+            "invalid_option_combination",
+            "run-output --raw cannot be combined with --max-chars.",
         )
     if (stdout_flag or stderr_flag) and not raw and tail is None:
         tail = RUN_OUTPUT_DEFAULT_TAIL_LINES
@@ -797,6 +878,7 @@ def parse_run_output(rest: list[str], json_mode: bool, cwd: str | None) -> Parse
             stdout=stdout_flag,
             stderr=stderr_flag,
             tail=tail,
+            max_chars=max_chars,
             raw=raw,
             no_redact=no_redact,
             default=default_output,

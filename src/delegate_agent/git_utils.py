@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 GIT_QUICK_TIMEOUT_SECONDS = 10
@@ -43,6 +44,45 @@ def run_git(
             exc,
             timeout_seconds=timeout_seconds,
         )
+
+
+def git_stdout_or_warn(
+    cwd: str,
+    args: list[str],
+    *,
+    warnings: list[str],
+    timeout_seconds: int,
+    git_runner: Callable[..., subprocess.CompletedProcess[str]] = run_git,
+) -> str | None:
+    result = git_runner(cwd, args, timeout_seconds=timeout_seconds)
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
+        warnings.append(f"git {' '.join(args)} failed: {detail}")
+        return None
+    return result.stdout.strip()
+
+
+def rev_parse_verify(
+    cwd: str,
+    rev: str,
+    *,
+    warnings: list[str] | None = None,
+    timeout_seconds: int = GIT_QUICK_TIMEOUT_SECONDS,
+    git_runner: Callable[..., subprocess.CompletedProcess[str]] = run_git,
+) -> str | None:
+    args = ["rev-parse", "--verify", rev]
+    if warnings is not None:
+        return git_stdout_or_warn(
+            cwd,
+            args,
+            warnings=warnings,
+            timeout_seconds=timeout_seconds,
+            git_runner=git_runner,
+        )
+    result = git_runner(cwd, args, timeout_seconds=timeout_seconds)
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
 
 
 def timeout_completed_process_bytes(

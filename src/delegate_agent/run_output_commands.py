@@ -6,10 +6,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, TextIO
 
-from delegate_agent import command_errors, harness_events, redaction, run_registry
+from delegate_agent import command_errors, harness_events, log_output, redaction, run_registry
 from delegate_agent import rendering as delegate_rendering
 from delegate_agent import retention as delegate_retention
 from delegate_agent.json_types import JsonObject
+from delegate_agent.log_output import RUN_OUTPUT_DEFAULT_MAX_CHARS
 
 RECOVERY_STDOUT_TAIL_LINES = 2000
 RECOVERY_STDOUT_TAIL_BYTES = 1_000_000
@@ -26,6 +27,7 @@ class RunOutputCommand:
     stdout: bool = False
     stderr: bool = False
     tail: int | None = None
+    max_chars: int | None = None
     raw: bool = False
     no_redact: bool = False
     default: bool = False
@@ -45,6 +47,12 @@ class RunOutputError(command_errors.CommandError):
         self.next_actions = next_actions
 
 
+def _effective_max_chars(command: RunOutputCommand) -> int | None:
+    if command.raw:
+        return None
+    return command.max_chars if command.max_chars is not None else RUN_OUTPUT_DEFAULT_MAX_CHARS
+
+
 def _add_log_output_section(
     *,
     registry_root: Path,
@@ -53,6 +61,7 @@ def _add_log_output_section(
     section_name: str,
     tail: int | None,
     raw: bool,
+    max_chars: int | None,
     sections: JsonObject,
     text_sections: dict[str, str],
 ) -> None:
@@ -63,15 +72,25 @@ def _add_log_output_section(
         tail=tail,
         raw=raw,
     )
+    content = output.content
     meta: JsonObject = {
         "bytes": delegate_retention.log_file_byte_size(registry_root, run_id, log_name),
         "truncated": output.truncated,
         "archived": delegate_retention.raw_logs_archived(registry_root, run_id),
     }
+    if raw:
+        meta["rawOutputBytes"] = meta["bytes"]
     if tail is not None and not raw:
         meta["tailLines"] = tail
+    if max_chars is not None:
+        capped = log_output.cap_content_by_chars(content, max_chars)
+        content = capped.content
+        meta["maxChars"] = max_chars
+        meta["charTruncated"] = capped.char_truncated
+        meta["returnedChars"] = capped.returned_chars
+        meta["omittedChars"] = capped.omitted_chars
     sections[section_name] = meta
-    text_sections[section_name] = output.content
+    text_sections[section_name] = content
 
 
 def _decode_recovery_tail(data: bytes, *, truncated: bool) -> tuple[str, bool]:
@@ -137,7 +156,7 @@ def _recover_completion_report_from_stdout(
     run_id: str,
     *,
     allow_last_assistant: bool = False,
-) -> tuple[str, bool]:
+) -> tuple[str, bool, harness_events.RecoveryQuality | None]:
     # The completion is the final turn's closing message, which lives at the end of
     # the stream, so a bounded tail is sufficient and avoids loading a possibly
     # huge stdout.log into memory on a routine run-output call. The byte bound is
@@ -145,15 +164,16 @@ def _recover_completion_report_from_stdout(
     # output inside a single physical line.
     stdout_text, truncated = _read_recovery_stdout_tail(registry_root, run_id)
     if not stdout_text:
-        return "", truncated
+        return "", truncated, None
     accumulator = harness_events.StreamAccumulator()
     for line in stdout_text.split("\n"):
         accumulator.ingest_line(line)
     if accumulator.completion_text:
-        return accumulator.completion_text.strip(), truncated
+        return accumulator.completion_text.strip(), truncated, "explicit_completion"
     if allow_last_assistant and accumulator.recoverable_assistant_text:
-        return accumulator.recoverable_assistant_text.strip(), truncated
-    return "", truncated
+        quality = accumulator.assistant_recovery_quality()
+        return accumulator.recoverable_assistant_text.strip(), truncated, quality
+    return "", truncated, None
 
 
 def _run_output_next_actions(handle: str) -> list[str]:
@@ -180,6 +200,7 @@ def _run_output_diagnostics(
     *,
     recovery_attempted: bool = False,
     recovery_truncated: bool = False,
+    recovery_quality: harness_events.RecoveryQuality | None = None,
 ) -> JsonObject:
     run_path = run_registry.run_directory(registry_root, run_id)
     state = run_registry.load_run_state(registry_root, run_id)
@@ -195,13 +216,16 @@ def _run_output_diagnostics(
         "stderr": _log_section_info(registry_root, run_id, run_registry.STDERR_LOG),
     }
     if recovery_attempted:
-        diagnostics["recovery"] = {
+        recovery_meta: JsonObject = {
             "attempted": True,
             "source": run_registry.STDOUT_LOG,
             "tailLines": RECOVERY_STDOUT_TAIL_LINES,
             "tailBytes": RECOVERY_STDOUT_TAIL_BYTES,
             "truncated": recovery_truncated,
         }
+        if recovery_quality is not None:
+            recovery_meta["quality"] = recovery_quality
+        diagnostics["recovery"] = recovery_meta
     return diagnostics
 
 
@@ -217,6 +241,8 @@ def _format_run_output_diagnostics(diagnostics: JsonObject, next_actions: list[s
     ]
     if recovery:
         lines.append(f"recovery: truncated={recovery.get('truncated', False)}")
+        if recovery.get("quality"):
+            lines.append(f"recovery quality: {recovery.get('quality')}")
     lines.append("next actions:")
     lines.extend(f"  - {action}" for action in next_actions)
     return "\n".join(lines) + "\n"
@@ -231,12 +257,14 @@ def _add_default_run_output_fallback(
     text_sections: dict[str, str],
     recovery_attempted: bool,
     recovery_truncated: bool,
+    recovery_quality: harness_events.RecoveryQuality | None = None,
 ) -> None:
     diagnostics = _run_output_diagnostics(
         registry_root,
         run_id,
         recovery_attempted=recovery_attempted,
         recovery_truncated=recovery_truncated,
+        recovery_quality=recovery_quality,
     )
     for log_name, section_name in (
         (run_registry.STDOUT_LOG, "stdout"),
@@ -252,6 +280,7 @@ def _add_default_run_output_fallback(
             section_name=section_name,
             tail=RUN_OUTPUT_DEFAULT_TAIL_LINES,
             raw=False,
+            max_chars=RUN_OUTPUT_DEFAULT_MAX_CHARS,
             sections=sections,
             text_sections=text_sections,
         )
@@ -286,18 +315,19 @@ def _add_completion_report_section(
     text = ""
     recovery_truncated = False
     recovery_attempted = False
+    recovery_quality: harness_events.RecoveryQuality | None = None
     if status != run_registry.STATUS_RUNNING:
         manifest = run_registry.load_run_manifest(registry_root, run_id)
         harness = manifest.get("harness") if isinstance(manifest, dict) else None
         allow_last_assistant = harness in harness_events.ASSISTANT_RECOVERY_HARNESSES
         recovery_attempted = True
-        text, recovery_truncated = _recover_completion_report_from_stdout(
+        text, recovery_truncated, recovery_quality = _recover_completion_report_from_stdout(
             registry_root,
             run_id,
             allow_last_assistant=allow_last_assistant,
         )
-    if text:
-        sections["completionReport"] = {
+    if text and recovery_quality != "housekeeping_fallback":
+        report_meta: JsonObject = {
             "bytes": len(text.encode("utf-8")),
             "source": run_registry.STDOUT_LOG,
             "synthetic": True,
@@ -305,6 +335,9 @@ def _add_completion_report_section(
             "tailBytes": RECOVERY_STDOUT_TAIL_BYTES,
             "truncated": recovery_truncated,
         }
+        if recovery_quality is not None:
+            report_meta["recoveryQuality"] = recovery_quality
+        sections["completionReport"] = report_meta
         text_sections["completionReport"] = text
         return
 
@@ -317,6 +350,7 @@ def _add_completion_report_section(
             text_sections=text_sections,
             recovery_attempted=recovery_attempted,
             recovery_truncated=recovery_truncated,
+            recovery_quality=recovery_quality,
         )
         return
 
@@ -326,6 +360,7 @@ def _add_completion_report_section(
         run_id,
         recovery_attempted=recovery_attempted,
         recovery_truncated=recovery_truncated,
+        recovery_quality=recovery_quality,
     )
     raise RunOutputError(
         "missing_completion_report",
@@ -426,6 +461,7 @@ def emit(command: RunOutputCommand, *, workspace_path: str, stdout: TextIO) -> i
         sections=sections,
         text_sections=text_sections,
     )
+    max_chars = _effective_max_chars(command)
     try:
         if command.stdout or command.raw:
             _add_log_output_section(
@@ -435,6 +471,7 @@ def emit(command: RunOutputCommand, *, workspace_path: str, stdout: TextIO) -> i
                 section_name="stdout",
                 tail=command.tail,
                 raw=command.raw,
+                max_chars=None if command.raw else max_chars,
                 sections=sections,
                 text_sections=text_sections,
             )
@@ -446,6 +483,7 @@ def emit(command: RunOutputCommand, *, workspace_path: str, stdout: TextIO) -> i
                 section_name="stderr",
                 tail=command.tail,
                 raw=command.raw,
+                max_chars=None if command.raw else max_chars,
                 sections=sections,
                 text_sections=text_sections,
             )

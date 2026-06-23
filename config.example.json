@@ -65,5 +65,10 @@
       "enabled": false,
       "mergedOlderThanDays": 7
     }
+  },
+  "progress": {
+    "enabled": false,
+    "initialDelaySec": 30,
+    "intervalSec": 60
   }
 }

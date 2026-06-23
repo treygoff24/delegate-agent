@@ -24,14 +24,15 @@ from delegate_agent.prompt_transport import (
     PROMPT_TRANSPORT_STDIN,
 )
 
-# Each engine's safe-review prefix is one shared body behind a per-engine label
-# (cursor uses "Delegate review mode"; the rest "Delegate <Engine> safe mode").
-# Resolved strings are byte-identical to the historical per-engine literals.
+# Each engine's safe-review prefix is one shared body behind a per-engine label.
+# Cursor uses "Delegate review mode"; the rest use "Delegate <Engine> safe mode".
 _SAFE_REVIEW_BODY = (
-    "(code review/investigation only): "
-    "Do not edit, create, or delete files. "
-    "Report findings with file path, line reference, severity, and rationale. "
-    "If a write is blocked, do not retry it.\n\n"
+    "(read-only review/investigation): "
+    "Inspect, map, and reason about the workspace. "
+    "You may propose patches or commands in text, but do not edit, create, delete, "
+    "format, commit, or otherwise mutate files or repo state. "
+    "If a write is blocked, do not retry or work around it; continue with a "
+    "text-only report.\n\n"
 )
 _SAFE_REVIEW_LABEL_BY_ENGINE = {
     "cursor": "Delegate review mode",

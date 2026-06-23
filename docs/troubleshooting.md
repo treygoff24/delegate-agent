@@ -126,6 +126,23 @@ delegate codex safe --pass-through "Review only."
 Some inspection commands accept trailing `--json` for convenience, such as
 `delegate describe --json` and `delegate run-output <alias> --json`.
 
+## Long foreground run looks silent
+
+Tracked launches buffer child output so Delegate can return a bounded final
+summary and preserve JSON stdout. For long-running foreground jobs, add
+`--progress` after the mode and before prompt text, or set `progress.enabled`
+to `true` in config and use `--no-progress` to override for one launch:
+
+```bash
+delegate --json claude safe --progress "Review only. Do not edit."
+delegate --json droid reviewer work --progress "Implement the scoped change."
+```
+
+Progress messages go to stderr. They are intentionally bounded, credential-scrubbed
+labels before printing, and do not include raw child output.
+`--progress` is incompatible with `--pass-through`, which already streams raw
+child output.
+
 ## Safe-mode isolation fails
 
 Cursor, Droid, Codex, Claude, and Kimi safe create an isolated temporary
@@ -162,6 +179,21 @@ shows the planned branch/path but does not run the full launch preflight. If the
 source checkout is dirty, commit, stash, or choose a different isolation mode
 before launching.
 
+## Persistent worktree run failed with `commit_policy_violated`
+
+`--forbid-commit` is valid only for `work` mode with persistent worktree
+isolation. When enabled, Delegate fails the run if commits remain ahead of the
+creation base when the child exits:
+
+```bash
+delegate --json --isolation worktree cursor work --forbid-commit "Implement without committing."
+```
+
+The worktree and branch are preserved. Inspect `workSummary` in the completion
+JSON or `delegate worktree show <alias-or-runId>` to see changed files, diff
+stat, and created commits. If commits were intentional, review the worktree and
+rerun without `--forbid-commit` or integrate the branch manually.
+
 ## `--pass-through` rejected
 
 `--pass-through` is incompatible with `--json` and with persistent worktree
@@ -177,7 +209,14 @@ delegate snapshot <alias-or-runId>
 delegate run-output <alias-or-runId>
 delegate run-output <alias-or-runId> --completion-report
 delegate run-output <alias-or-runId> --stderr --tail 100
+delegate run-output <alias-or-runId> --stdout --tail 80 --max-chars 20000
 ```
+
+Non-raw stdout/stderr output is bounded by both line tail and character cap.
+Use `--raw` only when you intentionally need the full stream; it is incompatible
+with `--tail` and `--max-chars`, may print very large output, and includes
+`rawOutputBytes` in JSON metadata so callers can see how much raw output was
+returned.
 
 If your prompt requires an exact structured final answer such as bare JSON, use
 `--no-completion-report` today so Delegate does not inject completion-report

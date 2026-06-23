@@ -103,7 +103,12 @@ class ExecutionTestBase(unittest.TestCase):
         for name in ("droid", "agent"):
             path = bin_dir / name
             path.write_text(
-                '#!/usr/bin/env bash\nprintf \'OUT:%s\\n\' "$*"\nprintf \'ERR:%s\\n\' "$*" >&2\nexit "${FAKE_EXIT:-0}"\n'
+                "#!/usr/bin/env bash\n"
+                'if [ "${FAKE_ECHO_ARGS:-0}" = "1" ]; then\n'
+                "  printf 'OUT:%s\\n' \"$*\"\n"
+                "  printf 'ERR:%s\\n' \"$*\" >&2\n"
+                "fi\n"
+                'exit "${FAKE_EXIT:-0}"\n'
             )
             path.chmod(0o755)
         return bin_dir
@@ -116,7 +121,9 @@ class ExecutionTestBase(unittest.TestCase):
         path.write_text(
             "#!/usr/bin/env bash\n"
             "touch mutated-by-agent.txt\n"
-            "printf 'OUT:%s\\n' \"$*\"\n"
+            'if [ "${FAKE_ECHO_ARGS:-0}" = "1" ]; then\n'
+            "  printf 'OUT:%s\\n' \"$*\"\n"
+            "fi\n"
             'exit "${FAKE_EXIT:-0}"\n'
         )
         path.chmod(0o755)

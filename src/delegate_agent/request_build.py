@@ -33,7 +33,13 @@ from delegate_agent.argv_builders import (
     prefix_droid_safe_prompt,
     redacted_prompt_argv,
 )
-from delegate_agent.constants import ENGINES_PROSE, KNOWN_ENGINES, MODE_SAFE, validate_mode
+from delegate_agent.constants import (
+    ENGINES_PROSE,
+    KNOWN_ENGINES,
+    MODE_SAFE,
+    MODE_WORK,
+    validate_mode,
+)
 from delegate_agent.errors import DelegateError
 from delegate_agent.git_utils import GIT_QUICK_TIMEOUT_SECONDS, capture_git_metadata
 from delegate_agent.git_utils import run_git as _run_git
@@ -55,7 +61,17 @@ from delegate_agent.request_models import (
     ResolvedWorkspace,
 )
 
-RUN_INPUT_KEYS = {"engine", "mode", "model", "cwd", "prompt", "isolation", "reasoningEffort"}
+RUN_INPUT_KEYS = {
+    "engine",
+    "mode",
+    "model",
+    "cwd",
+    "prompt",
+    "isolation",
+    "reasoningEffort",
+    "progress",
+    "forbidCommit",
+}
 
 
 def load_config(
@@ -75,6 +91,33 @@ def validate_config(config: JsonObject) -> None:
         delegate_config.validate_config(config)
     except delegate_config.ConfigError as exc:
         raise DelegateError(exc.error, exc.message) from exc
+
+
+ProgressIntent = str | None
+
+
+def resolve_effective_progress(intent: ProgressIntent, config: JsonObject) -> bool:
+    if intent == "off":
+        return False
+    if intent == "on":
+        return True
+    progress_section = config.get("progress")
+    if isinstance(progress_section, dict):
+        enabled = progress_section.get("enabled", False)
+        if isinstance(enabled, bool):
+            return enabled
+    return False
+
+
+def resolve_progress_timing(config: JsonObject) -> tuple[float, float]:
+    default_initial = delegate_config.default_progress_initial_delay_sec()
+    default_interval = delegate_config.default_progress_interval_sec()
+    progress_section = config.get("progress")
+    if not isinstance(progress_section, dict):
+        return (default_initial, default_interval)
+    initial = progress_section.get("initialDelaySec", default_initial)
+    interval = progress_section.get("intervalSec", default_interval)
+    return float(initial), float(interval)
 
 
 def resolve_workspace(global_cwd: str | None, json_cwd: str | None = None) -> ResolvedWorkspace:
@@ -209,6 +252,26 @@ def effective_prompt(
     return prompt
 
 
+def _validate_forbid_commit(
+    *,
+    forbid_commit: bool,
+    mode: str,
+    isolation_context: IsolationContext | None,
+) -> None:
+    if not forbid_commit:
+        return
+    if mode != MODE_WORK:
+        raise DelegateError(
+            "invalid_option_combination",
+            "--forbid-commit requires work mode with persistent worktree isolation.",
+        )
+    if isolation_context is None or isolation_context.isolation_lifecycle != "persistent":
+        raise DelegateError(
+            "invalid_option_combination",
+            "--forbid-commit requires --isolation worktree so Delegate can enforce the policy.",
+        )
+
+
 def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO) -> Request:
     validate_config(config)
     if parsed.subcommand == "run":
@@ -219,6 +282,13 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         raise DelegateError("invalid_command", "Command does not map to an execution request.")
     if launch.mode is None:
         raise DelegateError("invalid_command", "Command does not map to an execution request.")
+    effective_progress = resolve_effective_progress(launch.progress_intent, config)
+    if effective_progress and global_options.pass_through:
+        raise DelegateError(
+            "invalid_option_combination",
+            "--progress is incompatible with --pass-through.",
+        )
+    progress_initial_delay_sec, progress_interval_sec = resolve_progress_timing(config)
     workspace = resolve_workspace(global_options.cwd)
     prompt = resolve_prompt(launch.prompt_parts, launch.prompt_file, stdin)
 
@@ -252,6 +322,11 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         source_head_ref=git_head_ref,
         source_branch=git_branch,
     )
+    _validate_forbid_commit(
+        forbid_commit=launch.forbid_commit,
+        mode=launch.mode,
+        isolation_context=isolation_context,
+    )
 
     completion_report_mode = resolve_completion_report_mode(parsed, config)
     prompt = effective_prompt(
@@ -272,6 +347,10 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         isolation_context=isolation_context,
         reasoning_effort=launch.reasoning_effort,
         reasoning_effort_source="cli" if launch.reasoning_effort is not None else None,
+        progress=effective_progress,
+        progress_initial_delay_sec=progress_initial_delay_sec,
+        progress_interval_sec=progress_interval_sec,
+        forbid_commit=launch.forbid_commit,
     )
 
 
@@ -325,6 +404,24 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
             raise DelegateError(exc.error, "reasoningEffort must be a non-empty string.") from exc
     else:
         reasoning_effort = None
+    raw_progress_intent: ProgressIntent
+    if "progress" in raw:
+        raw_progress = raw["progress"]
+        if not isinstance(raw_progress, bool):
+            raise DelegateError("invalid_progress", "progress must be true or false.")
+        raw_progress_intent = "on" if raw_progress else "off"
+    else:
+        raw_progress_intent = None
+    effective_progress = resolve_effective_progress(raw_progress_intent, config)
+    if effective_progress and global_options.pass_through:
+        raise DelegateError(
+            "invalid_option_combination",
+            "progress is incompatible with --pass-through.",
+        )
+    progress_initial_delay_sec, progress_interval_sec = resolve_progress_timing(config)
+    raw_forbid_commit = raw.get("forbidCommit", False)
+    if not isinstance(raw_forbid_commit, bool):
+        raise DelegateError("invalid_forbid_commit", "forbidCommit must be true or false.")
     if engine == "droid":
         if not isinstance(model_alias, str) or not model_alias:
             raise DelegateError("missing_model", "droid run input requires model alias.")
@@ -389,6 +486,11 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         source_head_ref=git_head_ref,
         source_branch=git_branch,
     )
+    _validate_forbid_commit(
+        forbid_commit=raw_forbid_commit,
+        mode=str(mode),
+        isolation_context=isolation_context,
+    )
 
     completion_report_mode = resolve_completion_report_mode(parsed, config)
     prompt = effective_prompt(
@@ -409,6 +511,10 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         isolation_context=isolation_context,
         reasoning_effort=reasoning_effort,
         reasoning_effort_source="input-json" if reasoning_effort is not None else None,
+        progress=effective_progress,
+        progress_initial_delay_sec=progress_initial_delay_sec,
+        progress_interval_sec=progress_interval_sec,
+        forbid_commit=raw_forbid_commit,
     )
 
 
@@ -425,6 +531,10 @@ def build_request(
     isolation_context: IsolationContext | None = None,
     reasoning_effort: str | None = None,
     reasoning_effort_source: str | None = None,
+    progress: bool = False,
+    progress_initial_delay_sec: float = delegate_runner.PROGRESS_INITIAL_DELAY_SEC,
+    progress_interval_sec: float = delegate_runner.PROGRESS_HEARTBEAT_INTERVAL_SEC,
+    forbid_commit: bool = False,
 ) -> Request:
     if not isinstance(workspace, ResolvedWorkspace):
         raise TypeError(
@@ -450,6 +560,10 @@ def build_request(
         isolation_context=isolation_context,
         requested_effort=requested_effort,
         effort_source=effort_source,
+        progress=progress,
+        progress_initial_delay_sec=progress_initial_delay_sec,
+        progress_interval_sec=progress_interval_sec,
+        forbid_commit=forbid_commit,
     )
 
 
@@ -505,6 +619,7 @@ def _droid_request_parts(build: EngineBuildInput) -> EngineRequestParts:
             requested_effort=build.requested_effort,
             config=build.config,
             cache=build.cache,
+            alias=build.model_alias,
         ),
         engine="droid",
         effort_source=build.effort_source,
@@ -552,6 +667,7 @@ def _codex_request_parts(build: EngineBuildInput) -> EngineRequestParts:
             requested_effort=build.requested_effort,
             config=build.config,
             cache=build.cache,
+            alias=build.model_alias or model,
         ),
         engine="codex",
         effort_source=build.effort_source,
@@ -591,7 +707,11 @@ def _claude_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     warnings: tuple[str, ...] = ()
     if build.requested_effort is not None:
         try:
-            effort = reasoning.resolve_claude_native_effort(build.requested_effort)
+            effort = reasoning.resolve_claude_native_effort(
+                build.requested_effort,
+                alias=build.model_alias,
+                model=model,
+            )
         except reasoning.ReasoningCapabilityError as exc:
             if build.effort_source != "config":
                 raise DelegateError(exc.error, exc.message) from exc
@@ -620,9 +740,18 @@ def _claude_request_parts(build: EngineBuildInput) -> EngineRequestParts:
 def _kimi_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     _ = build.effort_source, build.cache
     if build.requested_effort is not None:
+        kimi = build.config.get("kimi")
+        default_model = kimi.get("defaultModel") if isinstance(kimi, dict) else None
+        model = default_model if isinstance(default_model, str) and default_model else None
         raise DelegateError(
             "unsupported_reasoning_effort",
-            "Reasoning effort is not supported for harness: kimi.",
+            reasoning.format_explicit_reasoning_effort_error(
+                harness="kimi",
+                alias=build.model_alias,
+                model=model,
+                effort=build.requested_effort,
+                detail="reasoning effort is not supported",
+            ),
         )
     kimi = build.config["kimi"]
     if isinstance(build.model_alias, str) and build.model_alias:
@@ -684,6 +813,10 @@ def _build_request_for_workspace(
     isolation_context: IsolationContext | None,
     requested_effort: str | None,
     effort_source: str | None,
+    progress: bool,
+    progress_initial_delay_sec: float,
+    progress_interval_sec: float,
+    forbid_commit: bool,
 ) -> Request:
     cache = (
         reasoning.load_reasoning_capability_cache(resolved.path)
@@ -719,6 +852,10 @@ def _build_request_for_workspace(
         reasoning_effort_source=parts.reasoning_effort_source,
         reasoning_capability_source=parts.reasoning_capability_source,
         reasoning_transport=parts.reasoning_transport,
+        progress=progress,
+        progress_initial_delay_sec=progress_initial_delay_sec,
+        progress_interval_sec=progress_interval_sec,
+        forbid_commit=forbid_commit,
         warnings=parts.warnings,
         stdin_text=parts.stdin_text,
         prompt_file_text=parts.prompt_file_text,
@@ -782,17 +919,37 @@ def resolve_cursor_reasoning_capability(
 ) -> reasoning.ReasoningCapability | None:
     if requested_effort is None:
         return None
+    default_model = cursor_config.get("defaultModel")
+    alias = default_model if isinstance(default_model, str) and default_model else None
     mappings = cursor_config.get("reasoningEffortModels")
     if not isinstance(mappings, dict):
         raise DelegateError(
             "unsupported_reasoning_effort",
-            "Cursor reasoning effort requires cursor.reasoningEffortModels.",
+            reasoning.format_explicit_reasoning_effort_error(
+                harness="cursor",
+                alias=alias,
+                model=alias,
+                effort=requested_effort,
+                detail="requires cursor.reasoningEffortModels",
+            ),
         )
     model = mappings.get(requested_effort)
     if not isinstance(model, str) or not model:
+        supported = sorted(
+            effort
+            for effort, mapped_model in mappings.items()
+            if isinstance(effort, str) and effort and isinstance(mapped_model, str) and mapped_model
+        )
         raise DelegateError(
             "unsupported_reasoning_effort",
-            f"Cursor reasoning effort {requested_effort!r} requires a configured model mapping.",
+            reasoning.format_explicit_reasoning_effort_error(
+                harness="cursor",
+                alias=alias,
+                model=alias,
+                effort=requested_effort,
+                supported=supported or None,
+                detail="requires a configured model mapping",
+            ),
         )
     return reasoning.ReasoningCapability(
         harness="cursor",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import shlex
 import shutil
@@ -19,9 +20,11 @@ from delegate_agent import (
     harness_events,
     prompt_instructions,
     reasoning,
+    redaction,
     rendering,
     run_metadata,
     run_registry,
+    worktree_summary,
 )
 from delegate_agent.json_types import JsonObject
 
@@ -37,6 +40,10 @@ PROGRESS_PERSIST_LINE_INTERVAL = 10
 PROGRESS_PERSIST_TIME_INTERVAL_SEC = 0.5
 DRAIN_JOIN_TIMEOUT_SEC = 5.0
 MILLISECONDS_PER_SECOND = 1000
+PROGRESS_INITIAL_DELAY_SEC = delegate_config.default_progress_initial_delay_sec()
+PROGRESS_HEARTBEAT_INTERVAL_SEC = delegate_config.default_progress_interval_sec()
+PROGRESS_INITIAL_DELAY_ENV = "DELEGATE_PROGRESS_INITIAL_DELAY_SEC"
+PROGRESS_INTERVAL_ENV = "DELEGATE_PROGRESS_INTERVAL_SEC"
 
 SKILL_REVIEW_PREFIX = prompt_instructions.SKILL_REVIEW_PREFIX
 COMPLETION_REPORT_SUFFIX = prompt_instructions.COMPLETION_REPORT_SUFFIX
@@ -80,6 +87,9 @@ class RunContext:
     reasoning_capability_source: str | None = None
     reasoning_transport: str | None = None
     prompt_transport: str = "argv"
+    forbid_commit: bool = False
+    progress_initial_delay_sec: float = PROGRESS_INITIAL_DELAY_SEC
+    progress_interval_sec: float = PROGRESS_HEARTBEAT_INTERVAL_SEC
 
 
 def write_manifest(run_path: Path, manifest: JsonObject) -> None:
@@ -127,6 +137,26 @@ def status_from_exit(exit_code: int) -> str:
     return "succeeded" if exit_code == 0 else "failed"
 
 
+def _merge_extra(payload: JsonObject, extra: JsonObject) -> None:
+    for key, value in extra.items():
+        if (
+            key == "warnings"
+            and isinstance(payload.get("warnings"), list)
+            and isinstance(value, list)
+        ):
+            merged: list[object] = []
+            seen: set[str] = set()
+            for warning in [*payload["warnings"], *value]:
+                if isinstance(warning, str):
+                    if warning in seen:
+                        continue
+                    seen.add(warning)
+                merged.append(warning)
+            payload[key] = merged
+        else:
+            payload[key] = value
+
+
 def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
     payload: JsonObject = {
         "schema": run_registry.MANIFEST_SCHEMA,
@@ -145,6 +175,8 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
     }
     run_metadata.add_run_metadata_payload_fields(payload, ctx)
     reasoning.add_reasoning_payload_fields(payload, ctx)
+    if ctx.forbid_commit:
+        payload["commitPolicy"] = {"forbidCommit": True}
     return payload
 
 
@@ -209,6 +241,7 @@ def build_snapshot(
     accumulator: harness_events.StreamAccumulator,
     exit_code: int | None = None,
     completion_report_written: bool = False,
+    extra: JsonObject | None = None,
 ) -> JsonObject:
     _assistant_text, assistant_meta = accumulator.bounded_assistant_text()
     recent_events, events_meta = accumulator.bounded_recent_events()
@@ -244,6 +277,8 @@ def build_snapshot(
             "path": report_path,
             "command": run_registry.run_output_command(ctx.alias, completion_report=True),
         }
+    if extra is not None:
+        _merge_extra(snapshot, extra)
     return snapshot
 
 
@@ -258,6 +293,7 @@ def persist_progress(
     stderr_bytes: int = 0,
     pid: int | None = None,
     completion_report_written: bool = False,
+    extra: JsonObject | None = None,
 ) -> None:
     write_state(
         run_path,
@@ -269,6 +305,7 @@ def persist_progress(
             stderr_bytes=stderr_bytes,
             current=accumulator.current,
             pid=pid,
+            extra=extra,
         ),
     )
     write_snapshot(
@@ -278,6 +315,7 @@ def persist_progress(
             accumulator=accumulator,
             exit_code=exit_code,
             completion_report_written=completion_report_written,
+            extra=extra,
         ),
     )
 
@@ -297,6 +335,7 @@ def emit_bounded_text_summary(
     status: str,
     duration_ms: int,
     stdout: TextIO,
+    extra: JsonObject | None = None,
 ) -> None:
     harness_label = ctx.harness
     print(
@@ -320,6 +359,27 @@ def emit_bounded_text_summary(
         print(f"safe workspace method: {ctx.safe_workspace_method}", file=stdout)
     for warning in ctx.warnings:
         print(f"warning: {warning}", file=stdout)
+    if extra is not None:
+        work_summary = extra.get("workSummary")
+        if isinstance(work_summary, dict):
+            commits_created = work_summary.get("commitsCreatedCount", 0)
+            print(
+                "work summary: "
+                f"{work_summary.get('changedFilesCount', 0)} changed files, "
+                f"{commits_created} commits",
+                file=stdout,
+            )
+            if commits_created:
+                print(
+                    "warning: child created commits; review them before integration",
+                    file=stdout,
+                )
+            if work_summary.get("noChanges") is True:
+                print("work summary: no file changes or commits detected", file=stdout)
+        if extra.get("commitPolicyViolated") is True:
+            print("commit policy: violated (--forbid-commit)", file=stdout)
+        if extra.get("commitPolicyUnverified") is True:
+            print("commit policy: unverified (--forbid-commit)", file=stdout)
     print(f"snapshot: {run_registry.snapshot_command(ctx.alias)}", file=stdout)
     print(
         f"completion report: {run_registry.run_output_command(ctx.alias, completion_report=True)}",
@@ -350,6 +410,7 @@ def completion_json_payload(
     stdout_bytes: int,
     stderr_bytes: int,
     completion_report_written: bool = False,
+    extra: JsonObject | None = None,
 ) -> JsonObject:
     payload: JsonObject = {
         "ok": ok,
@@ -380,10 +441,16 @@ def completion_json_payload(
     cleanup = _worktree_cleanup_commands(ctx)
     if cleanup is not None:
         payload["worktreeCleanupCommands"] = cleanup
+    if extra is not None:
+        _merge_extra(payload, extra)
 
     if not ok:
-        payload["error"] = "child_failed"
-        payload["message"] = "Child command failed."
+        if extra is not None and extra.get("commitPolicyCausedFailure") is True:
+            payload["error"] = str(extra.get("error") or "commit_policy_violated")
+            payload["message"] = str(extra.get("message") or "Commit policy failed.")
+        else:
+            payload["error"] = "child_failed"
+            payload["message"] = "Child command failed."
     return payload
 
 
@@ -484,12 +551,124 @@ class TrackedCaptureResult:
 @dataclass(frozen=True)
 class TrackedFinalization:
     status: str
+    exit_code: int
     report_written: bool
+    extra: JsonObject
+
+
+def _persistent_work_summary(ctx: RunContext) -> JsonObject | None:
+    if ctx.isolation_lifecycle != "persistent":
+        return None
+    return worktree_summary.build_work_summary(
+        source_git_root=ctx.source_git_root,
+        execution_cwd=ctx.execution_cwd,
+        branch=ctx.branch,
+        creation_context=ctx.creation_context,
+    )
+
+
+def _final_extra(ctx: RunContext, capture_exit_code: int) -> tuple[int, JsonObject]:
+    extra: JsonObject = {}
+    summary = _persistent_work_summary(ctx)
+    if summary is not None:
+        extra["workSummary"] = summary
+    commits_created = worktree_summary.commits_created_count(summary)
+    if (
+        summary is not None
+        and commits_created is not None
+        and commits_created > 0
+        and not ctx.forbid_commit
+    ):
+        extra["warnings"] = [
+            "Child command created commits; review the persistent worktree before integration."
+        ]
+        extra["nextActions"] = [
+            f"delegate worktree show {ctx.alias}",
+            f"git -C {shlex.quote(ctx.execution_cwd)} log --oneline --decorate --max-count=5 HEAD",
+        ]
+        extra["commitsCreatedByChild"] = True
+    if ctx.forbid_commit:
+        unverified = commits_created is None
+        violated = commits_created is not None and commits_created > 0
+        extra["commitPolicy"] = {
+            "forbidCommit": True,
+            "violated": violated,
+            "verified": not unverified,
+            "commitsCreatedCount": commits_created,
+        }
+        if unverified:
+            extra["commitPolicyUnverified"] = True
+            extra["childExitCode"] = capture_exit_code
+            if capture_exit_code == 0:
+                extra["error"] = "commit_policy_unverified"
+                extra["message"] = (
+                    "Delegate could not verify --forbid-commit because final Git inspection failed."
+                )
+                extra["commitPolicyCausedFailure"] = True
+                return 1, extra
+        if violated:
+            extra["commitPolicyViolated"] = True
+            extra["childExitCode"] = capture_exit_code
+            if capture_exit_code == 0:
+                extra["error"] = "commit_policy_violated"
+                extra["message"] = (
+                    "Child command created commits even though --forbid-commit was set."
+                )
+                extra["commitPolicyCausedFailure"] = True
+                return 1, extra
+    return capture_exit_code, extra
 
 
 @dataclass
 class ByteCounter:
     total: int = 0
+
+
+def _progress_interval_from_env(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    if not math.isfinite(value) or value <= 0:
+        return default
+    return max(value, 0.01)
+
+
+def _progress_current_label(accumulator: harness_events.StreamAccumulator) -> str:
+    current = (accumulator.current or "").strip()
+    if not current:
+        return "waiting for child output"
+    return redaction.redact_progress_label(current)[:160]
+
+
+def _emit_progress_started(ctx: RunContext, stderr: TextIO) -> None:
+    print(
+        "delegate: run started "
+        f"alias={ctx.alias} handle={ctx.alias} "
+        f"snapshot={run_registry.snapshot_command(ctx.alias)!r}",
+        file=stderr,
+        flush=True,
+    )
+
+
+def _emit_progress_heartbeat(
+    ctx: RunContext,
+    accumulator: harness_events.StreamAccumulator,
+    *,
+    started: float,
+    stderr: TextIO,
+) -> None:
+    elapsed_ms = int((time.monotonic() - started) * MILLISECONDS_PER_SECOND)
+    print(
+        "delegate: still running "
+        f"alias={ctx.alias} elapsed={format_duration(elapsed_ms)} "
+        f"last_event={_progress_current_label(accumulator)!r}",
+        file=stderr,
+        flush=True,
+    )
 
 
 def _prepare_tracked_run(
@@ -553,6 +732,9 @@ def _capture_tracked_process(
     *,
     started: float,
     stdin_text: str | None,
+    progress_stderr: TextIO | None = None,
+    progress_initial_delay_sec: float = PROGRESS_INITIAL_DELAY_SEC,
+    progress_interval_sec: float = PROGRESS_HEARTBEAT_INTERVAL_SEC,
 ) -> TrackedCaptureResult:
     accumulator = harness_events.StreamAccumulator()
     persist_progress(files.run_path, ctx, accumulator, status="running", pid=process.pid)
@@ -634,7 +816,42 @@ def _capture_tracked_process(
         # Child agent runtimes are intentionally unbounded: callers cancel them
         # via the OS/run-management surface, while quick metadata probes
         # elsewhere use explicit timeouts.
-        exit_code = process.wait()
+        if progress_stderr is not None:
+            emit_progress = True
+            try:
+                _emit_progress_started(ctx, progress_stderr)
+            except (BrokenPipeError, OSError):
+                emit_progress = False
+            initial_delay = _progress_interval_from_env(
+                PROGRESS_INITIAL_DELAY_ENV,
+                progress_initial_delay_sec,
+            )
+            interval = _progress_interval_from_env(
+                PROGRESS_INTERVAL_ENV,
+                progress_interval_sec,
+            )
+            next_progress_at = time.monotonic() + initial_delay
+            while True:
+                if not emit_progress:
+                    exit_code = process.wait()
+                    break
+                timeout = max(next_progress_at - time.monotonic(), 0.01)
+                try:
+                    exit_code = process.wait(timeout=timeout)
+                    break
+                except subprocess.TimeoutExpired:
+                    try:
+                        _emit_progress_heartbeat(
+                            ctx,
+                            accumulator,
+                            started=started,
+                            stderr=progress_stderr,
+                        )
+                    except (BrokenPipeError, OSError):
+                        emit_progress = False
+                    next_progress_at = time.monotonic() + interval
+        else:
+            exit_code = process.wait()
         _join_stdin_thread(stdin_thread, process.stdin)
         _join_drain_thread(stdout_thread, process.stdout)
         _join_drain_thread(stderr_thread, process.stderr)
@@ -688,7 +905,8 @@ def _finalize_tracked_run(
     *,
     completion_report_mode: str,
 ) -> TrackedFinalization:
-    status = status_from_exit(capture.exit_code)
+    exit_code, extra = _final_extra(ctx, capture.exit_code)
+    status = status_from_exit(exit_code)
     report_written = write_completion_report(
         files.run_path,
         _completion_report_source(
@@ -702,12 +920,15 @@ def _finalize_tracked_run(
         ctx,
         capture.accumulator,
         status=status,
-        exit_code=capture.exit_code,
+        exit_code=exit_code,
         stdout_bytes=capture.stdout_bytes,
         stderr_bytes=capture.stderr_bytes,
         completion_report_written=report_written,
+        extra=extra,
     )
-    return TrackedFinalization(status=status, report_written=report_written)
+    return TrackedFinalization(
+        status=status, exit_code=exit_code, report_written=report_written, extra=extra
+    )
 
 
 def _tracked_result(
@@ -718,27 +939,29 @@ def _tracked_result(
     json_mode: bool,
     stdout: TextIO,
 ) -> tuple[int, JsonObject | None]:
-    ok = capture.exit_code == 0
+    ok = finalization.exit_code == 0
     if json_mode:
         payload = completion_json_payload(
             ctx,
             ok=ok,
             status=finalization.status,
-            exit_code=capture.exit_code,
+            exit_code=finalization.exit_code,
             duration_ms=capture.duration_ms,
             stdout_bytes=capture.stdout_bytes,
             stderr_bytes=capture.stderr_bytes,
             completion_report_written=finalization.report_written,
+            extra=finalization.extra,
         )
-        return capture.exit_code, payload
+        return finalization.exit_code, payload
 
     emit_bounded_text_summary(
         ctx,
         status=finalization.status,
         duration_ms=capture.duration_ms,
         stdout=stdout,
+        extra=finalization.extra,
     )
-    return capture.exit_code, None
+    return finalization.exit_code, None
 
 
 def execute_tracked(
@@ -754,6 +977,9 @@ def execute_tracked(
     prompt_file_text: str | None = None,
     prompt_file_placeholder: str | None = None,
     manifest_argv: list[str] | None = None,
+    progress: bool = False,
+    progress_initial_delay_sec: float = PROGRESS_INITIAL_DELAY_SEC,
+    progress_interval_sec: float = PROGRESS_HEARTBEAT_INTERVAL_SEC,
 ) -> tuple[int, JsonObject | None]:
     if stdin_text is not None and prompt_file_text is not None:
         raise ValueError("stdin_text and prompt_file_text are mutually exclusive")
@@ -781,6 +1007,9 @@ def execute_tracked(
             ctx,
             started=started,
             stdin_text=stdin_text,
+            progress_stderr=stderr if progress else None,
+            progress_initial_delay_sec=progress_initial_delay_sec,
+            progress_interval_sec=progress_interval_sec,
         )
     finally:
         _cleanup_prompt_file_dir(prompt_temp_dir)

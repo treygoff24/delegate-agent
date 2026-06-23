@@ -33,6 +33,17 @@ class EngineArgvTests(CommandTestBase):
         self.assertNotIn("--force", argv)
         self.assertNotIn("--approve-mcps", argv)
 
+    def test_safe_review_prefix_is_read_only_text_only(self):
+        for engine, prefix in self.delegate.SAFE_REVIEW_PREFIX_BY_ENGINE.items():
+            with self.subTest(engine=engine):
+                lowered = prefix.lower()
+                self.assertIn("read-only review/investigation", lowered)
+                self.assertIn("propose patches or commands in text", lowered)
+                self.assertIn("do not edit", lowered)
+                self.assertIn("do not", lowered)
+                self.assertNotIn("plan mode", lowered)
+                self.assertNotIn("implement the change", lowered)
+
     def test_cursor_work_argv_cursor_agent_prefix(self):
         argv = self.delegate.build_cursor_argv(
             ["cursor", "agent"], "work", "/repo", "composer-2.5", "hello"

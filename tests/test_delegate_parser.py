@@ -50,8 +50,10 @@ class ParserTests(unittest.TestCase):
             ["--json", "run", "--input-json", "task.json"],
             ["models"],
             ["--json", "models"],
+            ["--json", "models", "--summary"],
             ["describe"],
             ["--json", "describe"],
+            ["--json", "describe", "--summary"],
             ["agent-help"],
             ["dry-run", "cursor", "work", "prompt"],
             ["dry-run", "claude", "safe", "prompt"],
@@ -71,6 +73,40 @@ class ParserTests(unittest.TestCase):
         parsed = self.delegate.parse_cli(["--json", "--cwd", "/tmp/repo", "models"])
         self.assertTrue(parsed.global_options.json_mode)
         self.assertEqual(parsed.global_options.cwd, "/tmp/repo")
+
+    def test_models_and_describe_reject_redacted_flag(self):
+        for subcommand in ("models", "describe"):
+            with self.subTest(subcommand=subcommand):
+                with self.assertRaises(self.delegate.DelegateError) as ctx:
+                    self.delegate.parse_cli([subcommand, "--redacted"])
+                self.assertEqual(ctx.exception.error, "unexpected_argument")
+
+    def test_models_and_describe_parse_summary_option(self):
+        for subcommand in ("models", "describe"):
+            with self.subTest(subcommand=subcommand):
+                parsed = self.delegate.parse_cli([subcommand, "--summary"])
+                self.assertTrue(parsed.inspection.summary)
+
+    def test_models_unknown_option_fails_clearly(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(["models", "--verbose"])
+        self.assertEqual(ctx.exception.error, "unexpected_argument")
+
+    def test_infer_global_json_after_value_taking_globals(self):
+        cases = [
+            ["--isolation", "worktree", "--json", "cursor"],
+            ["--completion-report", "markdown", "--json", "cursor"],
+            ["--cwd", "/tmp/repo", "--completion-report", "none", "--json", "models"],
+        ]
+        for argv in cases:
+            with self.subTest(argv=argv):
+                self.assertTrue(self.delegate.infer_global_json(argv))
+
+    def test_infer_global_json_after_flag_globals(self):
+        self.assertTrue(self.delegate.infer_global_json(["--pass-through", "--json", "cursor"]))
+        self.assertTrue(
+            self.delegate.infer_global_json(["--no-completion-report", "--json", "cursor"])
+        )
 
     def test_trailing_json_is_rejected(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:
@@ -100,6 +136,105 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(parsed.launch.model_alias, "reviewer")
         self.assertEqual(parsed.launch.reasoning_effort, "high")
         self.assertEqual(parsed.launch.prompt_parts, ["review"])
+
+    def test_progress_launch_option_before_prompt(self):
+        parsed = self.delegate.parse_cli(["codex", "safe", "--progress", "review"])
+        self.assertEqual(parsed.launch.progress_intent, "on")
+        self.assertEqual(parsed.launch.prompt_parts, ["review"])
+
+    def test_progress_after_prompt_is_prompt_text(self):
+        parsed = self.delegate.parse_cli(["codex", "safe", "review", "--progress"])
+        self.assertIsNone(parsed.launch.progress_intent)
+        self.assertEqual(parsed.launch.prompt_parts, ["review", "--progress"])
+
+    def test_no_progress_launch_option_before_prompt(self):
+        parsed = self.delegate.parse_cli(["codex", "safe", "--no-progress", "review"])
+        self.assertEqual(parsed.launch.progress_intent, "off")
+        self.assertEqual(parsed.launch.prompt_parts, ["review"])
+
+    def test_no_progress_after_prompt_is_prompt_text(self):
+        parsed = self.delegate.parse_cli(["codex", "safe", "review", "--no-progress"])
+        self.assertIsNone(parsed.launch.progress_intent)
+        self.assertEqual(parsed.launch.prompt_parts, ["review", "--no-progress"])
+
+    def test_progress_and_no_progress_cannot_combine(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(["codex", "safe", "--progress", "--no-progress", "review"])
+        self.assertEqual(ctx.exception.error, "invalid_option_combination")
+
+    def test_forbid_commit_launch_option_before_prompt(self):
+        parsed = self.delegate.parse_cli(["cursor", "work", "--forbid-commit", "fix"])
+        self.assertTrue(parsed.launch.forbid_commit)
+        self.assertEqual(parsed.launch.prompt_parts, ["fix"])
+
+    def test_forbid_commit_after_prompt_is_prompt_text(self):
+        parsed = self.delegate.parse_cli(["cursor", "work", "fix", "--forbid-commit"])
+        self.assertFalse(parsed.launch.forbid_commit)
+        self.assertEqual(parsed.launch.prompt_parts, ["fix", "--forbid-commit"])
+
+    def test_progress_with_pass_through_is_invalid(self):
+        parsed = self.delegate.parse_cli(["--pass-through", "codex", "safe", "--progress", "x"])
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.request_from_parsed(
+                parsed,
+                self.delegate.DEFAULT_CONFIG,
+                io.StringIO(""),
+            )
+        self.assertEqual(ctx.exception.error, "invalid_option_combination")
+
+    def test_config_enabled_progress_conflicts_with_pass_through(self):
+        parsed = self.delegate.parse_cli(["--pass-through", "codex", "safe", "x"])
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["progress"] = {"enabled": True, "initialDelaySec": 30, "intervalSec": 60}
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+        self.assertEqual(ctx.exception.error, "invalid_option_combination")
+
+    def test_config_enabled_progress_cleared_by_no_progress(self):
+        parsed = self.delegate.parse_cli(
+            ["codex", "safe", "--no-progress", "review"],
+        )
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["progress"] = {"enabled": True, "initialDelaySec": 30, "intervalSec": 60}
+        request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+        self.assertFalse(request.progress)
+
+    def test_config_enabled_progress_applies_when_intent_unset(self):
+        parsed = self.delegate.parse_cli(["codex", "safe", "review"])
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["progress"] = {"enabled": True, "initialDelaySec": 45, "intervalSec": 90}
+        request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+        self.assertTrue(request.progress)
+        self.assertEqual(request.progress_initial_delay_sec, 45.0)
+        self.assertEqual(request.progress_interval_sec, 90.0)
+
+    def test_malformed_progress_config_hard_fails(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["progress"] = {"enabled": "yes"}
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.validate_config(config)
+        self.assertEqual(ctx.exception.error, "invalid_progress_config")
+
+    def test_progress_config_rejects_boolean_timing_values(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["progress"] = {"initialDelaySec": True}
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.validate_config(config)
+        self.assertEqual(ctx.exception.error, "invalid_progress_config")
+
+    def test_progress_config_rejects_nan_initial_delay(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["progress"] = {"initialDelaySec": float("nan")}
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.validate_config(config)
+        self.assertEqual(ctx.exception.error, "invalid_progress_config")
+
+    def test_progress_config_rejects_infinite_interval(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["progress"] = {"intervalSec": float("inf")}
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.validate_config(config)
+        self.assertEqual(ctx.exception.error, "invalid_progress_config")
 
     def test_dry_run_droid_reasoning_effort(self):
         parsed = self.delegate.parse_cli(
@@ -355,6 +490,33 @@ class ParserTests(unittest.TestCase):
             self.delegate.parse_cli(["run-output", "cursor", "--stdout", "--raw", "--tail", "5"])
         self.assertEqual(ctx.exception.error, "invalid_option_combination")
 
+    def test_run_output_raw_and_max_chars_are_mutually_exclusive(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(
+                ["run-output", "cursor", "--stdout", "--raw", "--max-chars", "1000"]
+            )
+        self.assertEqual(ctx.exception.error, "invalid_option_combination")
+        self.assertIn("--max-chars", ctx.exception.message)
+
+    def test_run_output_max_chars_must_be_positive_integer(self):
+        with self.assertRaises(self.delegate.DelegateError) as missing:
+            self.delegate.parse_cli(["run-output", "cursor", "--stdout", "--max-chars"])
+        self.assertEqual(missing.exception.error, "missing_max_chars")
+
+        with self.assertRaises(self.delegate.DelegateError) as invalid:
+            self.delegate.parse_cli(["run-output", "cursor", "--stdout", "--max-chars", "nope"])
+        self.assertEqual(invalid.exception.error, "invalid_max_chars")
+
+        with self.assertRaises(self.delegate.DelegateError) as zero:
+            self.delegate.parse_cli(["run-output", "cursor", "--stdout", "--max-chars", "0"])
+        self.assertEqual(zero.exception.error, "invalid_max_chars")
+
+    def test_run_output_max_chars_is_parsed(self):
+        parsed = self.delegate.parse_cli(
+            ["run-output", "cursor", "--stdout", "--max-chars", "12000"]
+        )
+        self.assertEqual(parsed.run_output.max_chars, 12000)
+
     def test_run_output_stdout_without_tail_defaults_to_bounded_tail(self):
         parsed = self.delegate.parse_cli(["run-output", "cursor", "--stdout"])
         self.assertTrue(parsed.run_output.stdout)
@@ -491,6 +653,7 @@ class ParserTests(unittest.TestCase):
 
     def test_run_input_keys_contains_isolation(self):
         self.assertIn("isolation", self.delegate.RUN_INPUT_KEYS)
+        self.assertIn("progress", self.delegate.RUN_INPUT_KEYS)
 
     def test_run_input_json_unknown_key_still_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -630,6 +793,182 @@ class ParserTests(unittest.TestCase):
             self.assertEqual(request.stdin_text, request.prompt)
             self.assertNotIn("SECRET JSON CLAUDE PROMPT", request.argv)
             self.assertEqual(request.reasoning_transport, "claude-effort-flag")
+
+    def test_run_input_json_threads_progress(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "task.json"
+            task.write_text(
+                json.dumps(
+                    {
+                        "engine": "droid",
+                        "mode": "safe",
+                        "model": "minimax",
+                        "cwd": tmp,
+                        "prompt": "hello",
+                        "progress": True,
+                    }
+                )
+            )
+            parsed = self.delegate.ParsedCommand(
+                "run",
+                global_options=self.delegate.GlobalOptions(json_mode=True),
+                run_json=self.delegate.RunJsonOptions(str(task)),
+            )
+            cfg = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+            cfg["droid"]["models"] = {"minimax": "model-id"}
+            request = self.delegate.request_from_input_json(parsed, cfg)
+            self.assertTrue(request.progress)
+
+    def test_run_input_json_missing_progress_uses_config_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "task.json"
+            task.write_text(
+                json.dumps(
+                    {
+                        "engine": "droid",
+                        "mode": "safe",
+                        "model": "minimax",
+                        "cwd": tmp,
+                        "prompt": "hello",
+                    }
+                )
+            )
+            parsed = self.delegate.ParsedCommand(
+                "run",
+                global_options=self.delegate.GlobalOptions(json_mode=True),
+                run_json=self.delegate.RunJsonOptions(str(task)),
+            )
+            cfg = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+            cfg["droid"]["models"] = {"minimax": "model-id"}
+            cfg["progress"] = {"enabled": True, "initialDelaySec": 12, "intervalSec": 34}
+            request = self.delegate.request_from_input_json(parsed, cfg)
+            self.assertTrue(request.progress)
+            self.assertEqual(request.progress_initial_delay_sec, 12.0)
+            self.assertEqual(request.progress_interval_sec, 34.0)
+
+    def test_run_input_json_progress_false_overrides_config_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "task.json"
+            task.write_text(
+                json.dumps(
+                    {
+                        "engine": "droid",
+                        "mode": "safe",
+                        "model": "minimax",
+                        "cwd": tmp,
+                        "prompt": "hello",
+                        "progress": False,
+                    }
+                )
+            )
+            parsed = self.delegate.ParsedCommand(
+                "run",
+                global_options=self.delegate.GlobalOptions(json_mode=True),
+                run_json=self.delegate.RunJsonOptions(str(task)),
+            )
+            cfg = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+            cfg["droid"]["models"] = {"minimax": "model-id"}
+            cfg["progress"] = {"enabled": True, "initialDelaySec": 30, "intervalSec": 60}
+            request = self.delegate.request_from_input_json(parsed, cfg)
+            self.assertFalse(request.progress)
+
+    def test_run_input_json_threads_forbid_commit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            subprocess.run(
+                ["git", "-C", tmp, "init"],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "-C", tmp, "config", "user.email", "test@example.com"],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "-C", tmp, "config", "user.name", "Test User"],
+                check=True,
+                capture_output=True,
+            )
+            Path(tmp, "README.md").write_text("# test\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "-C", tmp, "add", "README.md"],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "-C", tmp, "commit", "-m", "init"],
+                check=True,
+                capture_output=True,
+            )
+            task = Path(tmp) / "task.json"
+            task.write_text(
+                json.dumps(
+                    {
+                        "engine": "cursor",
+                        "mode": "work",
+                        "cwd": tmp,
+                        "isolation": "worktree",
+                        "prompt": "hello",
+                        "forbidCommit": True,
+                    }
+                )
+            )
+            parsed = self.delegate.ParsedCommand(
+                "run",
+                global_options=self.delegate.GlobalOptions(json_mode=True),
+                run_json=self.delegate.RunJsonOptions(str(task)),
+            )
+            request = self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+            self.assertTrue(request.forbid_commit)
+            self.assertEqual(request.isolation_context.isolation_lifecycle, "persistent")
+
+    def test_run_input_json_progress_must_be_boolean(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "task.json"
+            task.write_text(
+                json.dumps(
+                    {
+                        "engine": "droid",
+                        "mode": "safe",
+                        "model": "minimax",
+                        "cwd": tmp,
+                        "prompt": "hello",
+                        "progress": "yes",
+                    }
+                )
+            )
+            parsed = self.delegate.ParsedCommand(
+                "run",
+                global_options=self.delegate.GlobalOptions(json_mode=True),
+                run_json=self.delegate.RunJsonOptions(str(task)),
+            )
+            with self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+            self.assertEqual(ctx.exception.error, "invalid_progress")
+
+    def test_run_input_json_forbid_commit_must_be_boolean(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "task.json"
+            task.write_text(
+                json.dumps(
+                    {
+                        "engine": "cursor",
+                        "mode": "work",
+                        "cwd": tmp,
+                        "isolation": "worktree",
+                        "prompt": "hello",
+                        "forbidCommit": "yes",
+                    }
+                )
+            )
+            parsed = self.delegate.ParsedCommand(
+                "run",
+                global_options=self.delegate.GlobalOptions(json_mode=True),
+                run_json=self.delegate.RunJsonOptions(str(task)),
+            )
+            with self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+            self.assertEqual(ctx.exception.error, "invalid_forbid_commit")
 
     def test_run_input_json_claude_safe_rejects_isolation_none(self):
         with tempfile.TemporaryDirectory() as tmp:

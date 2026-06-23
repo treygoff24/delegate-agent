@@ -1,9 +1,99 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
+from typing import Literal
 
 from delegate_agent.json_types import JsonObject, JsonValue
+
+RecoveryQuality = Literal[
+    "explicit_completion",
+    "substantive_assistant_fallback",
+    "housekeeping_fallback",
+]
+
+_HOUSEKEEPING_PATTERNS = (
+    re.compile(r"plan is up-to-date", re.IGNORECASE),
+    re.compile(r"final report was delivered", re.IGNORECASE),
+    re.compile(r"delivered in the previous message", re.IGNORECASE),
+    re.compile(r"nothing (?:else|more) to (?:do|report)", re.IGNORECASE),
+    re.compile(
+        r"already (?:delivered|sent|provided)(?: the)?(?: final)? report",
+        re.IGNORECASE,
+    ),
+)
+
+_PROGRESS_PATTERNS = (
+    re.compile(r"^I'll start by\b", re.IGNORECASE | re.MULTILINE),
+    re.compile(r"^Working\.{3}$", re.IGNORECASE | re.MULTILINE),
+    re.compile(r"^Let me (?:check|read|look|investigate|start)\b", re.IGNORECASE | re.MULTILINE),
+    re.compile(
+        "^I(?: am|'m|\u2019m)\\s+(?:still\\s+)?(?:checking|investigating|reading|working)\\b",
+        re.IGNORECASE | re.MULTILINE,
+    ),
+)
+
+_STATUS_LINE_PATTERN = re.compile(
+    r"^Status:\s*(?:completed|failed|blocked)\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+_REPORT_HEADER_PATTERN = re.compile(
+    r"^##\s+(?:Summary|What I did|Verification|Files changed)\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def is_housekeeping_assistant_text(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if is_substantive_assistant_text(stripped):
+        return False
+    for pattern in _HOUSEKEEPING_PATTERNS:
+        if pattern.search(stripped):
+            return True
+    return any(pattern.search(stripped) for pattern in _PROGRESS_PATTERNS)
+
+
+def is_substantive_assistant_text(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if _STATUS_LINE_PATTERN.search(stripped):
+        return True
+    if stripped.startswith("Verdict:"):
+        return True
+    if _REPORT_HEADER_PATTERN.search(stripped):
+        return True
+    bullet_lines = [line for line in stripped.splitlines() if line.strip().startswith("- ")]
+    if len(bullet_lines) >= 2:
+        if len(stripped) < 80:
+            for pattern in _HOUSEKEEPING_PATTERNS:
+                if pattern.search(stripped):
+                    return False
+            for pattern in _PROGRESS_PATTERNS:
+                if pattern.search(stripped):
+                    return False
+        return True
+    if len(bullet_lines) == 1 and len(stripped) >= 80:
+        return True
+    if len(stripped) >= 200 and "\n" in stripped:
+        return True
+    for pattern in _HOUSEKEEPING_PATTERNS:
+        if pattern.search(stripped):
+            return False
+    for pattern in _PROGRESS_PATTERNS:
+        if pattern.search(stripped):
+            return False
+    return False
+
+
+def assistant_recovery_quality_for_text(text: str) -> RecoveryQuality:
+    if is_substantive_assistant_text(text):
+        return "substantive_assistant_fallback"
+    return "housekeeping_fallback"
+
 
 ASSISTANT_TEXT_LIMIT = 30_000
 ASSISTANT_TEXT_HEAD = 20_000
@@ -53,6 +143,7 @@ class StreamAccumulator:
     _assistant_text_cache: str | None = field(default=None, repr=False)
     _codex_completion_candidate: str | None = field(default=None, repr=False)
     _last_recoverable_assistant_text: str | None = field(default=None, repr=False)
+    _last_substantive_assistant_text: str | None = field(default=None, repr=False)
     _pending_tool_uses: dict[str, tuple[str, str | None]] = field(default_factory=dict, repr=False)
 
     def _invalidate_assistant_text_cache(self) -> None:
@@ -205,6 +296,8 @@ class StreamAccumulator:
         stripped = self._record_assistant_text(text)
         if stripped:
             self._last_recoverable_assistant_text = stripped
+            if is_substantive_assistant_text(stripped):
+                self._last_substantive_assistant_text = stripped
 
     def _record_successful_completion_text(self, text: str) -> None:
         self._record_assistant_text(text, completion=True)
@@ -235,6 +328,8 @@ class StreamAccumulator:
             if text:
                 stripped = self._record_assistant_text(text)
                 self._codex_completion_candidate = stripped
+            else:
+                self._codex_completion_candidate = None
             return
         if item_type == "command_execution":
             self._ingest_codex_command_execution(item, completed=completed)
@@ -330,7 +425,17 @@ class StreamAccumulator:
 
     @property
     def recoverable_assistant_text(self) -> str | None:
+        if self._last_substantive_assistant_text:
+            return self._last_substantive_assistant_text
         return self._last_recoverable_assistant_text
+
+    def assistant_recovery_quality(self) -> RecoveryQuality | None:
+        if self.completion_text:
+            return "explicit_completion"
+        text = self.recoverable_assistant_text
+        if not text:
+            return None
+        return assistant_recovery_quality_for_text(text)
 
     def bounded_recent_events(self) -> tuple[list[JsonObject], JsonObject]:
         serialized = [event.to_dict() for event in self.events]

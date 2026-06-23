@@ -95,6 +95,7 @@ from delegate_agent.request_build import (  # noqa: F401  # re-exported for test
 )
 from delegate_agent.request_models import (  # noqa: F401  # re-exported for tests / back-compat
     GlobalOptions,
+    InspectionOptions,
     LaunchOptions,
     ParsedCommand,
     Request,
@@ -219,6 +220,10 @@ def dry_run_payload(request: Request) -> JsonObject:
     reasoning.add_reasoning_payload_fields(payload, request)
     if request.warnings:
         payload["warnings"] = list(request.warnings)
+    if request.progress:
+        payload["progressRequested"] = True
+    if request.forbid_commit:
+        payload["commitPolicy"] = {"forbidCommit": True}
 
     # Structured isolation fields from the isolation context.
     if request.isolation_context is not None:
@@ -433,6 +438,9 @@ def make_run_context(
         reasoning_capability_source=request.reasoning_capability_source,
         reasoning_transport=request.reasoning_transport,
         prompt_transport=request.prompt_transport,
+        forbid_commit=request.forbid_commit,
+        progress_initial_delay_sec=request.progress_initial_delay_sec,
+        progress_interval_sec=request.progress_interval_sec,
     )
 
 
@@ -534,6 +542,9 @@ def execute_request(
                 prompt_file_text=isolated_request.prompt_file_text,
                 prompt_file_placeholder=DROID_PROMPT_FILE_ARG_PLACEHOLDER,
                 manifest_argv=public_argv(isolated_request),
+                progress=isolated_request.progress,
+                progress_initial_delay_sec=isolated_request.progress_initial_delay_sec,
+                progress_interval_sec=isolated_request.progress_interval_sec,
             )
         except delegate_runner.RunnerLaunchError as exc:
             raise DelegateError(exc.error, exc.message) from exc
@@ -630,12 +641,24 @@ def main(
             validate_config(config)
 
         if parsed.subcommand == "models":
+            inspection = parsed.inspection or InspectionOptions()
             return emit_models(
-                config, source, global_options.json_mode, stdout, workspace=config_workspace
+                config,
+                source,
+                global_options.json_mode,
+                stdout,
+                workspace=config_workspace,
+                summary=inspection.summary,
             )
         if parsed.subcommand == "describe":
+            inspection = parsed.inspection or InspectionOptions()
             return emit_describe(
-                config, source, global_options.json_mode, stdout, workspace=config_workspace
+                config,
+                source,
+                global_options.json_mode,
+                stdout,
+                workspace=config_workspace,
+                summary=inspection.summary,
             )
         if parsed.subcommand == "agent-help":
             return emit_agent_help(stdout)

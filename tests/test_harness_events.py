@@ -240,6 +240,27 @@ class HarnessEventsTests(unittest.TestCase):
             acc.ingest_line(json.dumps(payload))
         self.assertIsNone(acc.completion_text)
 
+    def test_codex_empty_completed_agent_message_clears_completion_candidate(self):
+        acc = self.events.StreamAccumulator()
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "I'll start by reviewing."},
+                }
+            )
+        )
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "   "},
+                }
+            )
+        )
+        acc.ingest_line(json.dumps({"type": "turn.completed"}))
+        self.assertIsNone(acc.completion_text)
+
     def test_real_codex_stream_fixture_matches_parser_assumptions(self):
         # Guards against Codex changing its event schema: the other codex tests
         # use hand-authored JSON, so they would stay green even if the real
@@ -500,3 +521,129 @@ class HarnessEventsTests(unittest.TestCase):
         )
         completed = [event for event in acc.events if event.kind == "tool.completed"]
         self.assertEqual({event.target for event in completed}, {"a.py", "b.py"})
+
+    def test_substantive_assistant_text_preferred_over_later_housekeeping(self):
+        acc = self.events.StreamAccumulator()
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": "Status: completed\n- fixed parser\n- added tests",
+                }
+            )
+        )
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": "Plan is up-to-date.",
+                }
+            )
+        )
+        self.assertIn("fixed parser", acc.recoverable_assistant_text or "")
+        self.assertNotIn("Plan is up-to-date", acc.recoverable_assistant_text or "")
+        self.assertEqual(acc.assistant_recovery_quality(), "substantive_assistant_fallback")
+
+    def test_substantive_assistant_text_preferred_over_longer_progress_message(self):
+        acc = self.events.StreamAccumulator()
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": "Status: completed\n- shipped the fix",
+                }
+            )
+        )
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": (
+                        "I am still investigating the repository layout, reading files, "
+                        "and running additional checks before I can finalize anything."
+                    ),
+                }
+            )
+        )
+        self.assertIn("shipped the fix", acc.recoverable_assistant_text or "")
+        self.assertNotIn("still investigating", acc.recoverable_assistant_text or "")
+        self.assertEqual(acc.assistant_recovery_quality(), "substantive_assistant_fallback")
+
+    def test_housekeeping_only_assistant_text_is_still_recoverable(self):
+        acc = self.events.StreamAccumulator()
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": "The final report was delivered in the previous message.",
+                }
+            )
+        )
+        self.assertEqual(
+            acc.recoverable_assistant_text,
+            "The final report was delivered in the previous message.",
+        )
+        self.assertEqual(acc.assistant_recovery_quality(), "housekeeping_fallback")
+
+    def test_explicit_completion_wins_over_assistant_recovery_quality(self):
+        acc = self.events.StreamAccumulator()
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": "Status: completed\n- interim report",
+                }
+            )
+        )
+        acc.ingest_line(
+            json.dumps({"type": "completion", "finalText": "Status: completed\n- explicit"})
+        )
+        self.assertEqual(acc.completion_text, "Status: completed\n- explicit")
+        self.assertEqual(acc.assistant_recovery_quality(), "explicit_completion")
+
+    def test_classify_substantive_and_housekeeping_helpers(self):
+        self.assertTrue(self.events.is_substantive_assistant_text("Status: completed\n- did work"))
+        self.assertTrue(self.events.is_housekeeping_assistant_text("Plan is up-to-date."))
+        self.assertTrue(self.events.is_housekeeping_assistant_text("I am still investigating."))
+        self.assertTrue(
+            self.events.is_housekeeping_assistant_text(
+                "I'm still investigating.\n- checking files\n- running tests"
+            )
+        )
+        self.assertFalse(
+            self.events.is_substantive_assistant_text(
+                "I'm still investigating.\n- checking files\n- running tests"
+            )
+        )
+        self.assertTrue(
+            self.events.is_housekeeping_assistant_text(
+                "I\u2019m still investigating.\n- checking files\n- running tests"
+            )
+        )
+        self.assertFalse(
+            self.events.is_substantive_assistant_text(
+                "The final report was delivered in the previous message."
+            )
+        )
+
+    def test_structured_report_with_interior_progress_line_is_substantive(self):
+        report = (
+            "## Summary\n"
+            "- Fixed the recovery classifier.\n"
+            "- Added regression coverage.\n\n"
+            "Let me check the failing case below.\n\n"
+            "## Verification\n"
+            "- python3 -m unittest tests.test_harness_events"
+        )
+        self.assertTrue(self.events.is_substantive_assistant_text(report))
+        self.assertFalse(self.events.is_housekeeping_assistant_text(report))
+
+        acc = self.events.StreamAccumulator()
+        acc.ingest_line(json.dumps({"type": "message", "role": "assistant", "content": report}))
+        self.assertEqual(acc.assistant_recovery_quality(), "substantive_assistant_fallback")

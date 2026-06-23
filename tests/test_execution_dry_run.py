@@ -52,6 +52,108 @@ class ExecutionDryRunTests(ExecutionTestBase):
         self.assertEqual(payload["reasoningCapabilitySource"], "bundled")
         self.assertIn('model_reasoning_effort="high"', payload["argv"])
 
+    def test_dry_run_reports_progress_requested(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parsed = self.delegate.parse_cli(
+                ["--cwd", tmp, "--json", "dry-run", "codex", "safe", "--progress", "review"]
+            )
+            request = self.delegate.request_from_parsed(
+                parsed,
+                self.delegate.DEFAULT_CONFIG,
+                io.StringIO(""),
+            )
+            payload = self.delegate.dry_run_payload(request)
+        self.assertTrue(payload["progressRequested"])
+
+    def test_dry_run_reports_forbid_commit_policy_for_persistent_worktree(self):
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            mock.patch.dict(os.environ, {"HOME": fake_home}),
+            tempfile.TemporaryDirectory() as repo_dir,
+        ):
+            subprocess.run(
+                ["git", "-C", repo_dir, "init"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            subprocess.run(
+                ["git", "-C", repo_dir, "config", "user.name", "Test"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            subprocess.run(
+                ["git", "-C", repo_dir, "config", "user.email", "test@example.com"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            subprocess.run(
+                ["git", "-C", repo_dir, "commit", "--allow-empty", "-m", "init"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            parsed = self.delegate.parse_cli(
+                [
+                    "--cwd",
+                    repo_dir,
+                    "--isolation",
+                    "worktree",
+                    "--json",
+                    "dry-run",
+                    "cursor",
+                    "work",
+                    "--forbid-commit",
+                    "fix",
+                ]
+            )
+            request = self.delegate.request_from_parsed(
+                parsed,
+                self.delegate.DEFAULT_CONFIG,
+                io.StringIO(""),
+            )
+            payload = self.delegate.dry_run_payload(request)
+        self.assertEqual(payload["commitPolicy"], {"forbidCommit": True})
+
+    def test_forbid_commit_requires_persistent_worktree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parsed = self.delegate.parse_cli(
+                ["--cwd", tmp, "--json", "dry-run", "cursor", "work", "--forbid-commit", "fix"]
+            )
+            with self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.delegate.request_from_parsed(
+                    parsed,
+                    self.delegate.DEFAULT_CONFIG,
+                    io.StringIO(""),
+                )
+        self.assertEqual(ctx.exception.error, "invalid_option_combination")
+
+    def test_forbid_commit_rejects_safe_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parsed = self.delegate.parse_cli(
+                [
+                    "--cwd",
+                    tmp,
+                    "--isolation",
+                    "worktree",
+                    "--json",
+                    "dry-run",
+                    "cursor",
+                    "safe",
+                    "--forbid-commit",
+                    "review",
+                ]
+            )
+            with self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.delegate.request_from_parsed(
+                    parsed,
+                    self.delegate.DEFAULT_CONFIG,
+                    io.StringIO(""),
+                )
+        self.assertEqual(ctx.exception.error, "invalid_option_combination")
+
     # -- Wave 2: dry-run structured isolation fields --------------------------------
 
     def test_dry_run_cursor_safe_includes_structured_isolation_fields(self):
@@ -473,10 +575,48 @@ class ExecutionDryRunTests(ExecutionTestBase):
             )
             payload = self.delegate.dry_run_payload(request)
             # Falls back to sentinel placeholders for non-Git workspaces
-            self.assertEqual(payload["plannedExecutionCwd"], "<planned-worktree-path>")
-            self.assertEqual(payload["plannedBranch"], "<planned-branch>")
-            self.assertIn("isolatedWorkspace", payload)
-            self.assertTrue(payload["isolatedWorkspace"])
+        self.assertEqual(payload["plannedExecutionCwd"], "<planned-worktree-path>")
+        self.assertEqual(payload["plannedBranch"], "<planned-branch>")
+        self.assertIn("isolatedWorkspace", payload)
+        self.assertTrue(payload["isolatedWorkspace"])
+
+    def test_dry_run_unsupported_reasoning_effort_includes_discovery_hint(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["codex"] = dict(config["codex"])
+        config["codex"]["defaultModel"] = "gpt-5.5"
+        with self.assertRaises(self.delegate.DelegateError) as caught:
+            self.build_git_request(
+                "codex",
+                "safe",
+                None,
+                "/repo",
+                "review",
+                config,
+                dry_run=True,
+                reasoning_effort="max",
+            )
+        self.assertEqual(caught.exception.error, "unsupported_reasoning_effort")
+        self.assertIn("harness codex", caught.exception.message)
+        self.assertIn("model 'gpt-5.5'", caught.exception.message)
+        self.assertIn("delegate --json capabilities", caught.exception.message)
+
+    def test_dry_run_kimi_reasoning_effort_reports_unsupported_alias_summary(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        with self.assertRaises(self.delegate.DelegateError) as caught:
+            self.build_git_request(
+                "kimi",
+                "safe",
+                None,
+                "/repo",
+                "hello",
+                config,
+                dry_run=True,
+                reasoning_effort="high",
+            )
+        self.assertEqual(caught.exception.error, "unsupported_reasoning_effort")
+        self.assertIn("harness kimi", caught.exception.message)
+        self.assertIn("reasoning effort is not supported", caught.exception.message)
+        self.assertIn("delegate --json models", caught.exception.message)
 
 
 if __name__ == "__main__":

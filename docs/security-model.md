@@ -30,12 +30,12 @@ Safe mode is for review and investigation.
 - Cursor safe, Droid safe, Codex safe, Claude safe, and Kimi safe run in an isolated temporary workspace by default.
 - Cursor safe also writes a read-oriented `.cursor/cli.json` in the isolated workspace only.
 - Codex safe uses `--ask-for-approval never exec --sandbox read-only`.
-- Claude safe uses `claude -p` with stdin prompt transport, `--permission-mode plan`, `--strict-mcp-config`, Read/Grep/Glob, and selected read-only Bash tools.
+- Claude safe uses `claude -p` with stdin prompt transport, `--permission-mode plan`, `--strict-mcp-config`, Read/Grep/Glob, and selected read-only Bash tools. Delegate does not currently prove that Claude Code hooks, plugins, user settings, or other non-MCP customization surfaces are disabled.
 - Droid safe uses Delegate's read-only safety prompt, does not add Droid work-mode unsafe flags, and uses the isolated temporary workspace as a defense-in-depth boundary.
-- Kimi safe uses Delegate's read-only safety prompt and does not enable Kimi `--plan`. Kimi prompt mode auto-approves tool actions even without `--yolo`, so there is no runtime read-only enforcement for Kimi safe; the isolated temporary workspace is the effective boundary and the safety prompt is advisory.
+- Kimi safe uses Delegate's read-only safety prompt and does not enable Kimi `--plan`. Kimi prompt mode auto-approves tool actions, so there is no runtime read-only enforcement for Kimi safe; the isolated temporary workspace is the effective boundary and the safety prompt is advisory.
 - Explicit `--isolation none` is rejected for Cursor, Claude, Droid, and Kimi safe mode because it would remove the isolation/config boundary those safe contracts rely on. Codex safe may opt out of Delegate workspace isolation because the Codex read-only sandbox remains active.
 
-Safe mode is not a proof of zero side effects. Treat it as a defensive default plus prompt/runtime policy. A runtime could still read available files, use configured credentials, or perform actions allowed by its own permissions.
+Safe mode is not a proof of zero side effects. Treat it as a defensive default plus prompt/runtime policy. A runtime could still read available files, use configured credentials, load its own customizations, or perform actions allowed by its own permissions.
 
 ### Work mode
 
@@ -45,7 +45,7 @@ Work mode is edit-capable. Use it only for bounded tasks in workspaces you trust
 - Droid work adds Droid's unsafe skip flag for non-interactive edits.
 - Codex work uses the configured Codex policy and sandbox settings.
 - Claude work uses `claude.workPermissionMode`; Delegate policy can explicitly map `policy.harness.claude.work.bypassApprovalsAndSandbox` to Claude `--permission-mode bypassPermissions`.
-- Kimi work emits Kimi `--yolo` by default for non-interactive edit-capable prompt-mode runs.
+- Kimi work uses edit-capable prompt mode. Delegate does not emit `--yolo` because Kimi rejects combining `--yolo` with `--prompt`.
 
 #### Claude bypass scope
 
@@ -63,7 +63,7 @@ Delegate never auto-commits, pushes, merges, deploys, or publishes work-mode cha
 - Claude permission mode.
 - Droid unsafe/edit flags.
 - Cursor force or MCP approval flags.
-- Kimi plan/yolo behavior.
+- Kimi prompt-mode approval behavior.
 - Network access, credentials, or edit capability.
 
 Unsupported effort/model combinations fail before launch. Treat higher effort as a possible latency/cost change, not as a safety control.
@@ -102,7 +102,9 @@ Persistent worktree isolation is not a security sandbox. It does not prevent:
 
 Newly-created `.delegate/` registry directories and files are made owner-only on POSIX systems.
 
-`snapshot` and `run-output` redact secret-like strings by default, including authorization headers, bearer/basic tokens, JWT-like strings, and common `token=` / `api_key=` / `password=` key-values. Redaction is a last-resort safety feature, not a substitute for keeping secrets out of prompts and logs. Raw local logs and child runtime state can still contain secrets. `--no-redact` intentionally disables display-side redaction.
+Delegate output may contain secrets the child runtime emitted. Credential scrubbing is best-effort defense-in-depth across run-output, snapshot, heartbeat, and discovery surfaces (`describe`/`models`). It catches recognizable shapes such as authorization headers, bearer/basic tokens, JWT-like strings, connection-string passwords, and common `token=` / `api_key=` / `password=` key-values. It does not guarantee removal of every secret (for example, a literal secret split across separate argv elements in config may still appear in discovery output). The real boundary for safe review is safe-mode isolation, not output scrubbing.
+
+`snapshot` and `run-output` apply the same credential scrubbing by default. Raw local logs and child runtime state can still contain secrets. `--no-redact` intentionally disables display-side redaction on run-output and snapshot.
 
 `--pass-through` streams raw child output and is incompatible with JSON mode. Use it only when raw child streaming is required.
 
