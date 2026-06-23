@@ -77,6 +77,18 @@ TRANSPORT_BY_HARNESS = {
 }
 
 
+def _alias_key_for_default_model(default_model: object) -> str:
+    return default_model if isinstance(default_model, str) and default_model else "(default)"
+
+
+def _kimi_unsupported_reasoning_fields() -> JsonObject:
+    return {
+        "supported": None,
+        "source": "none",
+        "warning": KIMI_UNSUPPORTED_REASONING_WARNING,
+    }
+
+
 @dataclass(frozen=True)
 class ReasoningCapability:
     harness: str
@@ -464,7 +476,7 @@ def _model_reasoning_summary(
 
 def _cursor_alias_reasoning_summary(cursor: JsonObject) -> JsonObject:
     default_model = cursor.get("defaultModel")
-    alias = default_model if isinstance(default_model, str) and default_model else "(default)"
+    alias = _alias_key_for_default_model(default_model)
     payload: JsonObject = {"alias": alias}
     if isinstance(default_model, str) and default_model:
         payload["defaultModel"] = default_model
@@ -492,7 +504,7 @@ def _cursor_alias_reasoning_summary(cursor: JsonObject) -> JsonObject:
 
 def _claude_alias_reasoning_summary(claude: JsonObject) -> JsonObject:
     default_model = claude.get("defaultModel")
-    alias = default_model if isinstance(default_model, str) and default_model else "(default)"
+    alias = _alias_key_for_default_model(default_model)
     payload: JsonObject = {
         "alias": alias,
         "supported": list(CLAUDE_NATIVE_EFFORTS),
@@ -509,13 +521,8 @@ def _claude_alias_reasoning_summary(claude: JsonObject) -> JsonObject:
 
 def _kimi_alias_reasoning_summary(kimi: JsonObject) -> JsonObject:
     default_model = kimi.get("defaultModel")
-    alias = default_model if isinstance(default_model, str) and default_model else "(default)"
-    payload: JsonObject = {
-        "alias": alias,
-        "supported": None,
-        "source": "none",
-        "warning": KIMI_UNSUPPORTED_REASONING_WARNING,
-    }
+    alias = _alias_key_for_default_model(default_model)
+    payload: JsonObject = {"alias": alias, **_kimi_unsupported_reasoning_fields()}
     if isinstance(default_model, str) and default_model:
         payload["model"] = default_model
     return payload
@@ -576,9 +583,7 @@ def build_alias_reasoning_summaries(
     cursor = config.get("cursor")
     if isinstance(cursor, dict):
         default_model = cursor.get("defaultModel")
-        alias_key = (
-            default_model if isinstance(default_model, str) and default_model else "(default)"
-        )
+        alias_key = _alias_key_for_default_model(default_model)
         summaries["cursor"] = {alias_key: _cursor_alias_reasoning_summary(cursor)}
     else:
         summaries["cursor"] = {}
@@ -586,9 +591,7 @@ def build_alias_reasoning_summaries(
     claude = config.get("claude")
     if isinstance(claude, dict):
         default_model = claude.get("defaultModel")
-        alias_key = (
-            default_model if isinstance(default_model, str) and default_model else "(default)"
-        )
+        alias_key = _alias_key_for_default_model(default_model)
         summaries["claude"] = {alias_key: _claude_alias_reasoning_summary(claude)}
     else:
         summaries["claude"] = {}
@@ -596,9 +599,7 @@ def build_alias_reasoning_summaries(
     kimi = config.get("kimi")
     if isinstance(kimi, dict):
         default_model = kimi.get("defaultModel")
-        alias_key = (
-            default_model if isinstance(default_model, str) and default_model else "(default)"
-        )
+        alias_key = _alias_key_for_default_model(default_model)
         summaries["kimi"] = {alias_key: _kimi_alias_reasoning_summary(kimi)}
     else:
         summaries["kimi"] = {}
@@ -643,9 +644,7 @@ def build_reasoning_capabilities_payload(
     }
     harnesses["kimi"] = {
         "transport": None,
-        "supported": None,
-        "source": "none",
-        "warning": KIMI_UNSUPPORTED_REASONING_WARNING,
+        **_kimi_unsupported_reasoning_fields(),
         "models": {},
     }
     return {"harnesses": harnesses, "aliases": build_alias_reasoning_summaries(config, cache)}

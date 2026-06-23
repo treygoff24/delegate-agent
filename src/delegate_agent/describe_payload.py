@@ -40,20 +40,32 @@ def _scrub_discovery_payload(payload: JsonObject) -> JsonObject:
     return scrubbed if isinstance(scrubbed, dict) else {"ok": False}
 
 
-def _text_model_label(value: object) -> str:
+def _text_or_none(value: object) -> str:
     return value if isinstance(value, str) and value else "(none)"
-
-
-def _text_path_label(value: object) -> str:
-    if not isinstance(value, str) or not value:
-        return "(none)"
-    return value
 
 
 def _text_argv_prefix_label(value: object) -> str:
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         return "(none)"
     return " ".join(value) if value else "(none)"
+
+
+def _global_options() -> list[str]:
+    return [
+        "--cwd",
+        "--json",
+        "--isolation",
+        "--pass-through",
+        "--completion-report",
+        "--no-completion-report",
+    ]
+
+
+def _commands_catalog() -> list[JsonObject]:
+    return [
+        {"command": spec.name, "summary": spec.summary}
+        for spec in command_help.COMMAND_SPECS.values()
+    ]
 
 
 def runtime_payload() -> JsonObject:
@@ -408,14 +420,7 @@ def describe_payload(
             "kimi": PROMPT_TRANSPORT_ARGV,
             "claude": PROMPT_TRANSPORT_STDIN,
         },
-        "globalOptions": [
-            "--cwd",
-            "--json",
-            "--isolation",
-            "--pass-through",
-            "--completion-report",
-            "--no-completion-report",
-        ],
+        "globalOptions": _global_options(),
         "completionReportModes": list(delegate_config.COMPLETION_REPORT_MODES),
         "promptTransforms": [
             "Always prepends mandatory skill review instructions before the operator prompt.",
@@ -566,10 +571,7 @@ def describe_payload(
                 ],
             },
         },
-        "commands": [
-            {"command": spec.name, "summary": spec.summary}
-            for spec in command_help.COMMAND_SPECS.values()
-        ],
+        "commands": _commands_catalog(),
     }
 
 
@@ -578,19 +580,16 @@ def describe_summary_payload(
     config_source: str,
     workspace: Path | None = None,
 ) -> JsonObject:
-    full = describe_payload(config, config_source, workspace)
-    config_resolution = full.get("configResolution")
-    commands = full.get("commands")
     return {
         "ok": True,
         "summary": True,
         "version": VERSION,
         "configSource": config_source,
-        "configResolution": config_resolution if isinstance(config_resolution, dict) else {},
+        "configResolution": config_resolution_payload(config_source, workspace),
         "engines": list(KNOWN_ENGINES),
         "modes": [MODE_SAFE, MODE_WORK],
         "isolationValues": list(delegate_config.VALID_ISOLATION_VALUES),
-        "globalOptions": full["globalOptions"],
+        "globalOptions": _global_options(),
         "launchOptions": [
             "--prompt-file",
             "--reasoning-effort",
@@ -598,7 +597,7 @@ def describe_summary_payload(
             "--no-progress",
             "--forbid-commit",
         ],
-        "commands": commands if isinstance(commands, list) else [],
+        "commands": _commands_catalog(),
         "recommendedDiscovery": [
             "delegate --json describe --summary",
             "delegate --json models --summary",
@@ -614,7 +613,7 @@ def _emit_models_text(payload: JsonObject, config_source: str, stdout: TextIO) -
     if isinstance(cursor, dict):
         print(
             "cursor: "
-            f"{_text_model_label(cursor.get('defaultModel'))} "
+            f"{_text_or_none(cursor.get('defaultModel'))} "
             f"({_text_argv_prefix_label(cursor.get('argvPrefix'))})",
             file=stdout,
         )
@@ -624,15 +623,15 @@ def _emit_models_text(payload: JsonObject, config_source: str, stdout: TextIO) -
         models = droid.get("models")
         if isinstance(models, dict):
             for alias, model_id in sorted(models.items()):
-                print(f"  {alias} -> {_text_model_label(model_id)}", file=stdout)
+                print(f"  {alias} -> {_text_or_none(model_id)}", file=stdout)
     codex = payload.get("codex")
     if isinstance(codex, dict):
         profile = codex.get("profile")
-        profile_label = profile if isinstance(profile, str) and profile else "(none)"
+        profile_label = _text_or_none(profile)
         print(
             "codex: "
-            f"binary={_text_path_label(codex.get('binary'))} "
-            f"defaultModel={_text_model_label(codex.get('defaultModel'))} "
+            f"binary={_text_or_none(codex.get('binary'))} "
+            f"defaultModel={_text_or_none(codex.get('defaultModel'))} "
             f"profile={profile_label}",
             file=stdout,
         )
@@ -640,8 +639,8 @@ def _emit_models_text(payload: JsonObject, config_source: str, stdout: TextIO) -
     if isinstance(claude, dict):
         print(
             "claude: "
-            f"binary={_text_path_label(claude.get('binary'))} "
-            f"defaultModel={_text_model_label(claude.get('defaultModel'))} "
+            f"binary={_text_or_none(claude.get('binary'))} "
+            f"defaultModel={_text_or_none(claude.get('defaultModel'))} "
             f"workPermissionMode={claude.get('workPermissionMode')}",
             file=stdout,
         )
@@ -649,14 +648,14 @@ def _emit_models_text(payload: JsonObject, config_source: str, stdout: TextIO) -
     if isinstance(kimi, dict):
         print(
             "kimi: "
-            f"binary={_text_path_label(kimi.get('binary'))} "
-            f"defaultModel={_text_model_label(kimi.get('defaultModel'))}",
+            f"binary={_text_or_none(kimi.get('binary'))} "
+            f"defaultModel={_text_or_none(kimi.get('defaultModel'))}",
             file=stdout,
         )
     runtime = payload.get("runtime")
     if isinstance(runtime, dict):
         print(
-            f"runtime: {_text_path_label(runtime.get('modulePath'))}",
+            f"runtime: {_text_or_none(runtime.get('modulePath'))}",
             file=stdout,
         )
 

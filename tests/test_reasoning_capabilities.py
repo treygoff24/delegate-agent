@@ -12,6 +12,7 @@ from delegate_agent.reasoning import (  # noqa: E402
     INSPECT_REASONING_DISCOVERY_HINT,
     KIMI_UNSUPPORTED_REASONING_WARNING,
     ReasoningCapabilityError,
+    _alias_key_for_default_model,
     build_alias_reasoning_summaries,
     build_reasoning_capabilities_payload,
     format_explicit_reasoning_effort_error,
@@ -290,6 +291,113 @@ class ReasoningCapabilityTests(unittest.TestCase):
         kimi = summaries["kimi"]["kimi-code/kimi-for-coding"]
         self.assertIsNone(kimi["supported"])
         self.assertEqual(kimi["warning"], KIMI_UNSUPPORTED_REASONING_WARNING)
+
+    def test_alias_key_for_default_model_preserves_placeholder_semantics(self):
+        self.assertEqual(_alias_key_for_default_model("gpt-5.5"), "gpt-5.5")
+        for value in ("", None, 0, [], object()):
+            with self.subTest(value=value):
+                self.assertEqual(_alias_key_for_default_model(value), "(default)")
+
+    def test_reasoning_summary_payloads_preserve_representative_shape(self):
+        config = {
+            "reasoning": {
+                "capabilities": {
+                    "codex": {
+                        "gpt-5.5": {
+                            "supported": ["low", "high"],
+                            "default": "low",
+                        }
+                    }
+                }
+            },
+            "codex": {
+                "defaultModel": "gpt-5.5",
+                "defaultReasoningEffort": "high",
+            },
+            "cursor": {
+                "defaultModel": "",
+                "reasoningEffortModels": {"high": "cursor-high"},
+            },
+            "droid": {
+                "models": {"glm": "glm-5.1"},
+                "defaultReasoningEffort": "high",
+            },
+            "claude": {
+                "defaultModel": "claude-sonnet-4-6",
+                "defaultReasoningEffort": "medium",
+            },
+            "kimi": {"defaultModel": ""},
+        }
+        expected_aliases = {
+            "droid": {
+                "glm": {
+                    "alias": "glm",
+                    "model": "glm-5.1",
+                    "supported": ["off", "high"],
+                    "source": "bundled",
+                    "default": "high",
+                    "configDefault": "high",
+                }
+            },
+            "codex": {
+                "gpt-5.5": {
+                    "alias": "gpt-5.5",
+                    "model": "gpt-5.5",
+                    "supported": ["low", "high"],
+                    "source": "config",
+                    "default": "low",
+                    "configDefault": "high",
+                }
+            },
+            "cursor": {
+                "(default)": {
+                    "alias": "(default)",
+                    "effortModelRouting": [{"effort": "high", "model": "cursor-high"}],
+                    "source": "config",
+                }
+            },
+            "claude": {
+                "claude-sonnet-4-6": {
+                    "alias": "claude-sonnet-4-6",
+                    "supported": ["low", "medium", "high", "xhigh", "max"],
+                    "source": "static",
+                    "transport": "claude-effort-flag",
+                    "model": "claude-sonnet-4-6",
+                    "configDefault": "medium",
+                }
+            },
+            "kimi": {
+                "(default)": {
+                    "alias": "(default)",
+                    "supported": None,
+                    "source": "none",
+                    "warning": KIMI_UNSUPPORTED_REASONING_WARNING,
+                }
+            },
+        }
+
+        self.assertEqual(build_alias_reasoning_summaries(config, cache=None), expected_aliases)
+
+        capabilities = build_reasoning_capabilities_payload(config, cache=None)
+        self.assertEqual(capabilities["aliases"], expected_aliases)
+        self.assertEqual(
+            capabilities["harnesses"]["kimi"],
+            {
+                "transport": None,
+                "supported": None,
+                "source": "none",
+                "warning": KIMI_UNSUPPORTED_REASONING_WARNING,
+                "models": {},
+            },
+        )
+        self.assertEqual(
+            capabilities["harnesses"]["cursor"]["models"],
+            {"cursor-high": {"supported": ["high"], "source": "config"}},
+        )
+        self.assertEqual(
+            capabilities["harnesses"]["codex"]["models"]["gpt-5.5"],
+            {"supported": ["low", "high"], "source": "config", "default": "low"},
+        )
 
     def test_unsupported_effort_error_includes_context_and_discovery_hint(self):
         with self.assertRaises(ReasoningCapabilityError) as ctx:

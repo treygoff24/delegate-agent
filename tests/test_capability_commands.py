@@ -124,6 +124,43 @@ class CapabilityCommandTests(unittest.TestCase):
                 describe_summary["recommendedDiscovery"],
             )
 
+    def test_describe_summary_matches_full_slice_without_building_argv(self):
+        from delegate_agent import describe_payload as describe_module
+        from delegate_agent.config import embedded_default_config
+
+        config = embedded_default_config()
+        with tempfile.TemporaryDirectory() as workspace:
+            workspace_path = Path(workspace)
+            full = describe_module.describe_payload(
+                config,
+                "/private/test-config.json",
+                workspace_path,
+            )
+
+            def fail_argv_build(*_args, **_kwargs):
+                raise AssertionError("describe --summary must not build harness argv")
+
+            with (
+                mock.patch.object(
+                    describe_module,
+                    "build_codex_argv",
+                    side_effect=fail_argv_build,
+                ),
+                mock.patch.object(
+                    describe_module,
+                    "build_claude_argv",
+                    side_effect=fail_argv_build,
+                ),
+            ):
+                summary = describe_module.describe_summary_payload(
+                    config,
+                    "/private/test-config.json",
+                    workspace_path,
+                )
+
+            self.assertEqual(summary["configResolution"], full["configResolution"])
+            self.assertEqual(summary["commands"], full["commands"])
+
     def _discovery_scrub_config(self):
         from delegate_agent.config import embedded_default_config
 
