@@ -16,11 +16,12 @@ import os
 import select
 import subprocess  # nosec B404 - Delegate inspects git workspaces with shell=False.
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import TextIO
 
+from delegate_agent import codex_auth, reasoning
 from delegate_agent import config as delegate_config
-from delegate_agent import reasoning
 from delegate_agent import runner as delegate_runner
 from delegate_agent.argv_builders import (
     SAFE_REVIEW_PREFIX_BY_ENGINE,
@@ -837,30 +838,47 @@ def _build_request_for_workspace(
             cache=cache,
         ),
     )
-    return Request(
-        engine,
-        mode,
-        resolved.path,
-        prompt,
-        parts.argv,
-        parts.model,
-        model_alias=parts.model_alias,
-        dry_run=dry_run,
-        workspace_kind=resolved.kind,
-        isolation_context=isolation_context,
-        reasoning_effort=parts.reasoning_effort,
-        reasoning_effort_source=parts.reasoning_effort_source,
-        reasoning_capability_source=parts.reasoning_capability_source,
-        reasoning_transport=parts.reasoning_transport,
-        progress=progress,
-        progress_initial_delay_sec=progress_initial_delay_sec,
-        progress_interval_sec=progress_interval_sec,
-        forbid_commit=forbid_commit,
-        warnings=parts.warnings,
-        stdin_text=parts.stdin_text,
-        prompt_file_text=parts.prompt_file_text,
-        prompt_transport=parts.prompt_transport,
-        display_argv=parts.display_argv,
+    return _apply_codex_auth(
+        Request(
+            engine,
+            mode,
+            resolved.path,
+            prompt,
+            parts.argv,
+            parts.model,
+            model_alias=parts.model_alias,
+            dry_run=dry_run,
+            workspace_kind=resolved.kind,
+            isolation_context=isolation_context,
+            reasoning_effort=parts.reasoning_effort,
+            reasoning_effort_source=parts.reasoning_effort_source,
+            reasoning_capability_source=parts.reasoning_capability_source,
+            reasoning_transport=parts.reasoning_transport,
+            progress=progress,
+            progress_initial_delay_sec=progress_initial_delay_sec,
+            progress_interval_sec=progress_interval_sec,
+            forbid_commit=forbid_commit,
+            warnings=parts.warnings,
+            stdin_text=parts.stdin_text,
+            prompt_file_text=parts.prompt_file_text,
+            prompt_transport=parts.prompt_transport,
+            display_argv=parts.display_argv,
+        ),
+        config,
+    )
+
+
+def _apply_codex_auth(request: Request, config: JsonObject) -> Request:
+    if request.engine != "codex":
+        return request
+    overrides, auth_profile, fallback = codex_auth.resolve_codex_auth_for_request(config)
+    if not overrides and auth_profile is None and fallback is None:
+        return request
+    return replace(
+        request,
+        env_overrides=overrides or None,
+        auth_profile=auth_profile,
+        fallback_auth_profile=fallback,
     )
 
 

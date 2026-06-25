@@ -13,6 +13,7 @@ from typing import NoReturn
 
 from delegate_agent import (
     capability_commands,
+    codex_auth_commands,
     command_help,
     inspection_commands,
     reasoning,
@@ -331,6 +332,13 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
                 "--isolation is not supported with delegate worktree commands.",
             )
         return parse_worktree(rest, json_mode, cwd)
+    if subcommand == "codex-auth":
+        if isolation is not None:
+            raise DelegateError(
+                "invalid_option_combination",
+                "--isolation is not supported with delegate codex-auth commands.",
+            )
+        return parse_codex_auth(rest, json_mode, cwd)
 
     raise DelegateError("unknown_subcommand", f"Unknown subcommand: {subcommand}")
 
@@ -1067,5 +1075,70 @@ def parse_worktree(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedC
             action=action,
             json_mode=json_mode,
             **options,
+        ),
+    )
+
+
+def parse_codex_auth(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
+    if rest and command_help.is_help_token(rest[0]):
+        return help_command(json_mode, "codex-auth")
+    if not rest:
+        raise DelegateError(
+            "missing_codex_auth_action",
+            "codex-auth requires show, use, swap, or clear.",
+        )
+    action = rest[0]
+    args = rest[1:]
+    if any(command_help.is_help_token(token) for token in args):
+        topic = (
+            f"codex-auth {action}" if action in {"show", "use", "swap", "clear"} else "codex-auth"
+        )
+        return help_command(json_mode, topic)
+    if action not in {"show", "use", "swap", "clear"}:
+        raise DelegateError("unknown_codex_auth_action", f"Unknown codex-auth action: {action}")
+    profile: str | None = None
+    fallback: str | None = None
+    positional: list[str] = []
+    i = 0
+    while i < len(args):
+        token = args[i]
+        if token in MISPLACED_GLOBAL_OPTIONS:
+            raise_misplaced_global_option(f"{token} must appear before the subcommand.")
+        if token == "--fallback":
+            if action != "use":
+                raise DelegateError(
+                    "invalid_option",
+                    "codex-auth --fallback is only supported with use.",
+                )
+            if i + 1 >= len(args):
+                raise DelegateError("missing_option_value", "--fallback requires a profile name.")
+            fallback = args[i + 1]
+            i += 2
+            continue
+        if token.startswith("--"):
+            raise DelegateError(
+                "unknown_option", f"codex-auth {action} does not support option: {token}"
+            )
+        positional.append(token)
+        i += 1
+    if action == "use":
+        if len(positional) != 1:
+            raise DelegateError(
+                "missing_auth_profile", "codex-auth use requires exactly one profile name."
+            )
+        profile = positional[0]
+    elif positional:
+        raise DelegateError(
+            "unexpected_argument",
+            f"codex-auth {action} does not accept positional arguments.",
+        )
+    return ParsedCommand(
+        "codex-auth",
+        global_options=GlobalOptions(json_mode=json_mode, cwd=cwd),
+        codex_auth=codex_auth_commands.CodexAuthCommand(
+            action=action,
+            json_mode=json_mode,
+            profile=profile,
+            fallback=fallback,
         ),
     )

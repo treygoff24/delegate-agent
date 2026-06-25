@@ -32,7 +32,14 @@ delegate claude work [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [
 
 delegate kimi safe [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 delegate kimi work [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+
+delegate codex-auth show
+delegate codex-auth use PROFILE [--fallback PROFILE]
+delegate codex-auth swap
+delegate codex-auth clear
 ```
+
+`codex-auth` edits `~/.delegate/config.json` unless `DELEGATE_CONFIG` is set. It does not write workspace `.delegate/config.json`.
 
 Prompt sources are direct arguments, `--prompt-file`, or Delegate stdin. After
 Delegate resolves the prompt, Codex and Claude prompts are passed to the child runtime over

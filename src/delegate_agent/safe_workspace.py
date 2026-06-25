@@ -619,6 +619,9 @@ def safe_isolated_request(request: Request) -> Iterator[Request]:
             prompt_file_text=request.prompt_file_text,
             prompt_transport=request.prompt_transport,
             display_argv=isolated_display_argv,
+            env_overrides=request.env_overrides,
+            auth_profile=request.auth_profile,
+            fallback_auth_profile=request.fallback_auth_profile,
         )
     finally:
         cleanup_safe_isolated_workspace(

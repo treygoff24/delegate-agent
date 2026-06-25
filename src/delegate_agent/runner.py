@@ -11,12 +11,12 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import BinaryIO, TextIO
 
-from delegate_agent import config as delegate_config
 from delegate_agent import (
+    codex_auth,
     harness_events,
     prompt_instructions,
     reasoning,
@@ -26,6 +26,7 @@ from delegate_agent import (
     run_registry,
     worktree_summary,
 )
+from delegate_agent import config as delegate_config
 from delegate_agent.json_types import JsonObject
 
 STDOUT_LOG = run_registry.STDOUT_LOG
@@ -90,6 +91,10 @@ class RunContext:
     forbid_commit: bool = False
     progress_initial_delay_sec: float = PROGRESS_INITIAL_DELAY_SEC
     progress_interval_sec: float = PROGRESS_HEARTBEAT_INTERVAL_SEC
+    env_overrides: dict[str, str] = field(default_factory=dict)
+    fallback_env_overrides: dict[str, str] = field(default_factory=dict)
+    auth_profile: str | None = None
+    fallback_auth_profile: str | None = None
 
 
 def write_manifest(run_path: Path, manifest: JsonObject) -> None:
@@ -177,6 +182,10 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
     reasoning.add_reasoning_payload_fields(payload, ctx)
     if ctx.forbid_commit:
         payload["commitPolicy"] = {"forbidCommit": True}
+    if ctx.auth_profile is not None:
+        payload["authProfile"] = ctx.auth_profile
+    if ctx.fallback_auth_profile is not None:
+        payload["fallbackAuthProfile"] = ctx.fallback_auth_profile
     return payload
 
 
@@ -693,10 +702,13 @@ def _launch_tracked_process(
     cwd: str,
     *,
     stdin_text: str | None,
+    env_overrides: dict[str, str] | None = None,
 ) -> subprocess.Popen[bytes]:
+    env = codex_auth.child_environment(overrides=env_overrides)
     return subprocess.Popen(  # nosec B603 - Delegate intentionally launches validated harness argv with shell=False.
         argv,
         cwd=cwd,
+        env=env,
         stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -904,8 +916,11 @@ def _finalize_tracked_run(
     capture: TrackedCaptureResult,
     *,
     completion_report_mode: str,
+    extra: JsonObject | None = None,
 ) -> TrackedFinalization:
-    exit_code, extra = _final_extra(ctx, capture.exit_code)
+    exit_code, merged_extra = _final_extra(ctx, capture.exit_code)
+    if extra:
+        merged_extra = {**merged_extra, **extra}
     status = status_from_exit(exit_code)
     report_written = write_completion_report(
         files.run_path,
@@ -924,10 +939,13 @@ def _finalize_tracked_run(
         stdout_bytes=capture.stdout_bytes,
         stderr_bytes=capture.stderr_bytes,
         completion_report_written=report_written,
-        extra=extra,
+        extra=merged_extra,
     )
     return TrackedFinalization(
-        status=status, exit_code=exit_code, report_written=report_written, extra=extra
+        status=status,
+        exit_code=exit_code,
+        report_written=report_written,
+        extra=merged_extra,
     )
 
 
@@ -964,6 +982,69 @@ def _tracked_result(
     return finalization.exit_code, None
 
 
+def _append_attempt_delimiter(stderr_log: Path, *, label: str) -> None:
+    marker = f"\n--- delegate codex auth attempt: {label} ---\n"
+    with stderr_log.open("ab") as handle:
+        handle.write(marker.encode("utf-8"))
+
+
+def _should_retry_codex_auth(
+    ctx: RunContext,
+    capture: TrackedCaptureResult,
+    *,
+    cwd: str,
+    stderr_log: Path,
+    workspace_baseline: codex_auth.WorkspaceBaseline | None,
+) -> bool:
+    if ctx.engine != "codex" or not ctx.fallback_env_overrides:
+        return False
+    if capture.exit_code == 0:
+        return False
+    stderr_tail = codex_auth.read_bounded_stderr_tail(stderr_log)
+    if not codex_auth.classify_codex_usage_limit(stderr_tail):
+        return False
+    if codex_auth.accumulator_had_tool_events(capture.accumulator):
+        return False
+    return ctx.mode != "work" or codex_auth.work_mode_safe_for_codex_fallback(
+        cwd, workspace_baseline
+    )
+
+
+def _run_single_tracked_attempt(
+    argv: list[str],
+    cwd: str,
+    files: TrackedRunFiles,
+    ctx: RunContext,
+    *,
+    started: float,
+    stdin_text: str | None,
+    env_overrides: dict[str, str] | None,
+    progress: bool,
+    progress_stderr: TextIO | None,
+    progress_initial_delay_sec: float,
+    progress_interval_sec: float,
+    attempt_label: str | None = None,
+) -> TrackedCaptureResult:
+    if attempt_label is not None:
+        _append_attempt_delimiter(files.stderr_log, label=attempt_label)
+    process = _launch_tracked_process(
+        argv,
+        cwd,
+        stdin_text=stdin_text,
+        env_overrides=env_overrides,
+    )
+    return _capture_tracked_process(
+        process,
+        files,
+        ctx,
+        started=started,
+        stdin_text=stdin_text,
+        progress_stderr=progress_stderr,
+        progress_initial_delay_sec=progress_initial_delay_sec,
+        progress_interval_sec=progress_interval_sec,
+    )
+
+
 def execute_tracked(
     argv: list[str],
     cwd: str,
@@ -990,27 +1071,63 @@ def execute_tracked(
         prompt_file_text=prompt_file_text,
         prompt_file_placeholder=prompt_file_placeholder,
     )
+    workspace_baseline = codex_auth.capture_workspace_baseline(cwd) if ctx.mode == "work" else None
+    fallback_extra: JsonObject | None = None
     try:
         try:
-            process = _launch_tracked_process(
+            capture = _run_single_tracked_attempt(
                 launch_argv,
                 cwd,
+                files,
+                ctx,
+                started=started,
                 stdin_text=stdin_text,
+                env_overrides=ctx.env_overrides or None,
+                progress=progress,
+                progress_stderr=stderr if progress else None,
+                progress_initial_delay_sec=progress_initial_delay_sec,
+                progress_interval_sec=progress_interval_sec,
+                attempt_label="primary" if ctx.fallback_env_overrides else None,
             )
         except OSError as exc:
             error = _runner_launch_error(launch_argv, cwd, exc)
             _record_tracked_launch_failure(files, ctx, error)
             raise error from exc
-        capture = _capture_tracked_process(
-            process,
-            files,
+
+        if _should_retry_codex_auth(
             ctx,
-            started=started,
-            stdin_text=stdin_text,
-            progress_stderr=stderr if progress else None,
-            progress_initial_delay_sec=progress_initial_delay_sec,
-            progress_interval_sec=progress_interval_sec,
-        )
+            capture,
+            cwd=cwd,
+            stderr_log=files.stderr_log,
+            workspace_baseline=workspace_baseline,
+        ):
+            primary_exit_code = capture.exit_code
+            primary_stderr_tail = codex_auth.read_bounded_stderr_tail(files.stderr_log)
+            fallback_capture = _run_single_tracked_attempt(
+                launch_argv,
+                cwd,
+                files,
+                ctx,
+                started=started,
+                stdin_text=stdin_text,
+                env_overrides=ctx.fallback_env_overrides,
+                progress=progress,
+                progress_stderr=stderr if progress else None,
+                progress_initial_delay_sec=progress_initial_delay_sec,
+                progress_interval_sec=progress_interval_sec,
+                attempt_label="fallback",
+            )
+            capture = fallback_capture
+            fallback_extra = {
+                "codexAuthFallback": codex_auth.codex_auth_fallback_metadata(
+                    reason="usage_limit",
+                    primary_auth_profile=ctx.auth_profile,
+                    fallback_auth_profile=ctx.fallback_auth_profile,
+                    primary_exit_code=primary_exit_code,
+                    fallback_exit_code=fallback_capture.exit_code,
+                    primary_stderr_tail=primary_stderr_tail,
+                )
+            }
     finally:
         _cleanup_prompt_file_dir(prompt_temp_dir)
 
@@ -1020,6 +1137,7 @@ def execute_tracked(
         ctx,
         capture,
         completion_report_mode=completion_report_mode,
+        extra=fallback_extra,
     )
     return _tracked_result(ctx, capture, finalization, json_mode=json_mode, stdout=stdout)
 
@@ -1031,6 +1149,7 @@ def execute_passthrough(
     stdin_text: str | None = None,
     prompt_file_text: str | None = None,
     prompt_file_placeholder: str | None = None,
+    env_overrides: dict[str, str] | None = None,
 ) -> int:
     """Stream child stdout/stderr to the caller. JSON mode is not supported."""
     if stdin_text is not None and prompt_file_text is not None:
@@ -1040,6 +1159,7 @@ def execute_passthrough(
         prompt_file_text=prompt_file_text,
         prompt_file_placeholder=prompt_file_placeholder,
     )
+    env = codex_auth.child_environment(overrides=env_overrides)
     try:
         # Passthrough mode mirrors the child runtime directly, so Delegate does
         # not impose a separate timeout here.
@@ -1048,6 +1168,7 @@ def execute_passthrough(
                 completed = subprocess.run(  # nosec B603 - passthrough intentionally mirrors validated harness argv with shell=False.
                     launch_argv,
                     cwd=cwd,
+                    env=env,
                     stdin=subprocess.DEVNULL,
                     text=True,
                     check=False,
@@ -1056,6 +1177,7 @@ def execute_passthrough(
                 completed = subprocess.run(  # nosec B603 - passthrough intentionally mirrors validated harness argv with shell=False.
                     launch_argv,
                     cwd=cwd,
+                    env=env,
                     input=stdin_text,
                     text=True,
                     check=False,

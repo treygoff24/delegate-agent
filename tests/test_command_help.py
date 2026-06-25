@@ -29,6 +29,7 @@ TOP_LEVEL_COMMANDS = (
     "cursor",
     "claude",
     "codex",
+    "codex-auth",
     "droid",
     "kimi",
     "dry-run",

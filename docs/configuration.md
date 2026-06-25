@@ -154,6 +154,9 @@ Controls local run recording.
     "defaultModel": null,
     "defaultReasoningEffort": null,
     "profile": null,
+    "authProfile": null,
+    "fallbackAuthProfile": null,
+    "authProfiles": {},
     "workSandbox": "workspace-write",
     "ephemeral": true,
     "ignoreUserConfig": false
@@ -164,6 +167,9 @@ Controls local run recording.
 - `defaultModel`: optional model string. `null` lets Codex choose its own default.
 - `defaultReasoningEffort`: optional non-empty effort string. When a Codex model resolves (run input or `codex.defaultModel`) and supports the level, Delegate emits a Codex config override; otherwise the run proceeds without reasoning effort and records a warning. An explicit `--reasoning-effort` flag still fails closed and requires a resolved model.
 - `profile`: optional Codex profile name. It is config-only; JSON run input cannot set it.
+- `authProfile`: optional private auth account name. When set, Delegate exports `CODEX_HOME` from `codex.authProfiles.<name>.codexHome` for Codex child processes. This overrides a parent-process `CODEX_HOME`.
+- `fallbackAuthProfile`: optional alternate auth account for one quota-limit retry on tracked Codex runs.
+- `authProfiles`: map of profile names to objects with `codexHome` (absolute path or `~/…`). Each selected home must contain readable `auth.json`; when `codex.profile` is set, readable `config.toml` is required too.
 - `workSandbox`: `read-only`, `workspace-write`, or `danger-full-access` for Codex work mode when full bypass is not enabled.
 - `ephemeral`: include Codex `--ephemeral` in JSON-streaming runs.
 - `ignoreUserConfig`: include Codex `--ignore-user-config`.

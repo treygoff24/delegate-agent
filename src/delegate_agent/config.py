@@ -97,6 +97,9 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
         "defaultModel": None,
         "defaultReasoningEffort": None,
         "profile": None,
+        "authProfile": None,
+        "fallbackAuthProfile": None,
+        "authProfiles": {},
         "workSandbox": "workspace-write",
         "ephemeral": True,
         "ignoreUserConfig": False,
@@ -388,6 +391,9 @@ def _validate_codex_section(codex: JsonValue) -> None:
         path="codex.ignoreUserConfig",
         error="invalid_codex_config",
     )
+    from delegate_agent import codex_auth
+
+    codex_auth.validate_codex_auth_config(codex)
 
 
 def _validate_kimi_section(kimi: JsonValue) -> None:

@@ -13,6 +13,8 @@ from delegate_agent import (
     VERSION,
     argv_utils,
     capability_commands,
+    codex_auth,
+    codex_auth_commands,
     command_errors,
     command_help,
     inspection_commands,
@@ -205,6 +207,23 @@ def emit_worktree(
     )
 
 
+def emit_codex_auth(
+    parsed: ParsedCommand,
+    config: JsonObject,
+    config_source: str,
+    stdout: TextIO,
+) -> int:
+    command = parsed.codex_auth
+    if command is None:
+        raise DelegateError("invalid_command", "codex-auth options are required.")
+    return codex_auth_commands.emit(
+        command,
+        config=config,
+        config_source=config_source,
+        stdout=stdout,
+    )
+
+
 def dry_run_payload(request: Request) -> JsonObject:
     payload: JsonObject = {
         "ok": True,
@@ -224,6 +243,10 @@ def dry_run_payload(request: Request) -> JsonObject:
         payload["progressRequested"] = True
     if request.forbid_commit:
         payload["commitPolicy"] = {"forbidCommit": True}
+    if request.auth_profile is not None:
+        payload["authProfile"] = request.auth_profile
+    if request.fallback_auth_profile is not None:
+        payload["fallbackAuthProfile"] = request.fallback_auth_profile
 
     # Structured isolation fields from the isolation context.
     if request.isolation_context is not None:
@@ -375,6 +398,7 @@ def make_run_context(
     alias: str,
     source_workspace: ResolvedWorkspace,
     creation_context: JsonObject | None = None,
+    fallback_env_overrides: dict[str, str] | None = None,
 ) -> delegate_runner.RunContext:
     source_cwd = (
         request.isolation_context.source_workspace
@@ -441,6 +465,10 @@ def make_run_context(
         forbid_commit=request.forbid_commit,
         progress_initial_delay_sec=request.progress_initial_delay_sec,
         progress_interval_sec=request.progress_interval_sec,
+        env_overrides=dict(request.env_overrides or {}),
+        fallback_env_overrides=dict(fallback_env_overrides or {}),
+        auth_profile=request.auth_profile,
+        fallback_auth_profile=request.fallback_auth_profile,
     )
 
 
@@ -456,6 +484,8 @@ def execute_request(
     stdout: TextIO,
     stderr: TextIO,
 ) -> tuple[int, JsonObject | None]:
+    if request.engine == "codex":
+        codex_auth.preflight_codex_auth(config)
     ctx = request.isolation_context
 
     # --- Persistent worktree path (work + worktree) ---
@@ -500,6 +530,7 @@ def execute_request(
                     stdin_text=isolated_request.stdin_text,
                     prompt_file_text=isolated_request.prompt_file_text,
                     prompt_file_placeholder=DROID_PROMPT_FILE_ARG_PLACEHOLDER,
+                    env_overrides=isolated_request.env_overrides,
                 )
             except delegate_runner.RunnerLaunchError as exc:
                 raise DelegateError(exc.error, exc.message) from exc
@@ -528,6 +559,11 @@ def execute_request(
             run_id=run_id,
             alias=alias,
             source_workspace=source_workspace,
+            fallback_env_overrides=(
+                codex_auth.fallback_env_overrides(config)
+                if isolated_request.engine == "codex"
+                else None
+            ),
         )
         try:
             return delegate_runner.execute_tracked(
@@ -638,7 +674,8 @@ def main(
         else:
             config_workspace = workspace_path_for_config(global_options.cwd)
             config, source = load_config(workspace=config_workspace)
-            validate_config(config)
+            if parsed.subcommand != "codex-auth":
+                validate_config(config)
 
         if parsed.subcommand == "models":
             inspection = parsed.inspection or InspectionOptions()
@@ -690,6 +727,9 @@ def main(
             return emit_run_output(parsed, workspace, stdout)
         if parsed.subcommand == "worktree":
             return emit_worktree(parsed, workspace, config, stdout)
+
+        if parsed.subcommand == "codex-auth":
+            return emit_codex_auth(parsed, config, source, stdout)
 
         request = request_from_parsed(parsed, config, stdin)
         if request.dry_run:

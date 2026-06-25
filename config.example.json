@@ -38,6 +38,9 @@
     "defaultModel": null,
     "defaultReasoningEffort": null,
     "profile": null,
+    "authProfile": null,
+    "fallbackAuthProfile": null,
+    "authProfiles": {},
     "workSandbox": "workspace-write",
     "ephemeral": true,
     "ignoreUserConfig": false
