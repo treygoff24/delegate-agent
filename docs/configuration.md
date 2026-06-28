@@ -214,7 +214,10 @@ Controls local run recording.
   regardless of engine. Harness-irrelevant pointers are inert.
 - Profile `env` is for non-secret routing pointers. Secret-looking keys are
   rejected with `secret_in_profile_env`; export real API keys in the parent
-  shell or a harness-native credential store instead.
+  shell or a harness-native credential store instead. Enforcement is by key
+  name only — do not embed credentials in innocuously named values (for example
+  a database URL with an embedded password); keep secrets in shell env or
+  harness-native key files.
 - `--auth-profile NAME` overrides ambient detection for launches, `dry-run`,
   `run --input-json`, and `delegate profiles`. Unknown names fail closed with
   `unknown_profile`.

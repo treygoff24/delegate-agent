@@ -19,6 +19,7 @@ from delegate_agent import (
     profile_commands,
     profiles,
     reasoning,
+    redaction,
     run_output_commands,
     run_registry,
     worktree_commands,
@@ -252,6 +253,8 @@ def dry_run_payload(request: Request) -> JsonObject:
         payload["authProfile"] = request.auth_profile
     if request.fallback_auth_profile is not None:
         payload["fallbackProfile"] = request.fallback_auth_profile
+    if request.profile_resolution.name is not None:
+        payload["profileEnv"] = redaction.redact_env_map(request.profile_resolution.env)
 
     # Structured isolation fields from the isolation context.
     if request.isolation_context is not None:

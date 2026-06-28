@@ -901,7 +901,8 @@ def _apply_profile_resolution(
                 "profile_missing_codex_home",
                 f"Profile {resolution.name!r} is active for a Codex Run but does not define CODEX_HOME.",
             )
-        fallback_profile = profiles.codex_fallback_profile(config)
+        if resolution.name is not None:
+            fallback_profile = profiles.codex_fallback_profile(config)
     return replace(
         request,
         warnings=_dedupe_warnings((*request.warnings, *resolution.warnings)),

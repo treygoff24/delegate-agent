@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -489,6 +490,24 @@ class CodexProfileExecutionTests(unittest.TestCase):
             self.assertNotIn("codexAuthFallback", payload or {})
             self.assertEqual(attempts.read_text(encoding="utf-8").splitlines(), ["attempt"])
 
+    def test_fallback_env_overrides_preserve_non_codex_home_pointers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            personal = write_codex_home(Path(tmp), "personal")
+            work = write_codex_home(Path(tmp), "work")
+            config = base_config(personal=personal, work=work)
+            config["codex"] = dict(config["codex"], fallbackProfile="work")
+            config["profiles"]["definitions"]["personal"]["env"]["CODEX_PROXY_URL"] = (
+                "http://work-proxy"
+            )
+            config["profiles"]["default"] = "personal"
+            config["profiles"]["detectFrom"] = []
+            resolution = self.profiles.resolve_active_profile(config, {})
+            overrides = self.profiles.codex_fallback_env_overrides(resolution)
+            self.assertIsNotNone(overrides)
+            assert overrides is not None
+            self.assertEqual(overrides["CODEX_HOME"], work)
+            self.assertEqual(overrides["CODEX_PROXY_URL"], "http://work-proxy")
+
     def test_fallback_same_account_normalization_handles_home_vars_and_symlinks(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -541,6 +560,218 @@ class CodexProfileExecutionTests(unittest.TestCase):
             payload = self.delegate.dry_run_payload(request)
             payload_warnings = [w for w in payload.get("warnings", []) if "profile mismatch" in w]
             self.assertEqual(len(payload_warnings), 1)
+
+    def _run_codex_fallback_scenario(
+        self,
+        *,
+        mode: str,
+        fake_script: str,
+        tmp: Path,
+        repo,
+        config: dict,
+        env: dict[str, str] | None = None,
+    ) -> tuple[int, dict | None]:
+        fake_bin = tmp / "codex"
+        fake_bin.write_text(fake_script, encoding="utf-8")
+        fake_bin.chmod(0o755)
+        config = dict(config)
+        config["codex"] = dict(config["codex"], binary=str(fake_bin))
+        registry_root = self.registry.ensure_registry(Path(repo.name), workspace_kind="git")
+        build_env = dict(env or {})
+        with mock.patch.dict(os.environ, build_env, clear=False):
+            request = self.delegate.build_request(
+                "codex",
+                mode,
+                None,
+                self.delegate.ResolvedWorkspace(repo.name, "git"),
+                "task",
+                config,
+                dry_run=False,
+            )
+        run_id, alias = self.registry.register_run(registry_root, harness="codex")
+        ctx = self.delegate.make_run_context(
+            registry_root,
+            request,
+            run_id=run_id,
+            alias=alias,
+            source_workspace=self.delegate.ResolvedWorkspace(repo.name, "git"),
+        )
+        exit_code, payload = self.runner.execute_tracked(
+            request.argv,
+            repo.name,
+            ctx,
+            json_mode=True,
+            stdout=io.StringIO(),
+            stderr=io.StringIO(),
+            stdin_text="task",
+        )
+        return exit_code, payload
+
+    def test_work_mode_clean_unchanged_baseline_retries_with_fallback(self):
+        repo = make_git_repo()
+        self.addCleanup(repo.cleanup)
+        with tempfile.TemporaryDirectory() as tmp:
+            personal = write_codex_home(Path(tmp), "personal")
+            work = write_codex_home(Path(tmp), "work")
+            attempts = Path(tmp) / "attempts.txt"
+            fake_script = (
+                "#!/usr/bin/env bash\n"
+                f'echo "${{CODEX_HOME:-}}" >> "{attempts}"\n'
+                f'if [ "${{CODEX_HOME}}" = "{work}" ]; then\n'
+                '  printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}\'\n'
+                "  exit 0\n"
+                "fi\n"
+                'echo "You exceeded your current quota usage limit" >&2\n'
+                "exit 1\n"
+            )
+            config = base_config(personal=personal, work=work)
+            config["codex"] = dict(config["codex"], fallbackProfile="work")
+            config["profiles"]["default"] = "personal"
+            config["profiles"]["detectFrom"] = []
+            exit_code, payload = self._run_codex_fallback_scenario(
+                mode="work",
+                fake_script=fake_script,
+                tmp=Path(tmp),
+                repo=repo,
+                config=config,
+            )
+            self.assertEqual(exit_code, 0)
+            self.assertIsNotNone(payload)
+            assert payload is not None
+            self.assertIn("codexAuthFallback", payload)
+            self.assertEqual(attempts.read_text(encoding="utf-8").splitlines(), [personal, work])
+
+    def test_work_mode_dirty_baseline_skips_fallback_retry(self):
+        repo = make_git_repo()
+        self.addCleanup(repo.cleanup)
+        with tempfile.TemporaryDirectory() as tmp:
+            personal = write_codex_home(Path(tmp), "personal")
+            work = write_codex_home(Path(tmp), "work")
+            attempts = Path(tmp) / "attempts.txt"
+            dirty_marker = Path(repo.name) / "dirty.txt"
+            fake_script = (
+                "#!/usr/bin/env bash\n"
+                f'echo "${{CODEX_HOME:-}}" >> "{attempts}"\n'
+                f'echo dirty > "{dirty_marker}"\n'
+                'echo "You exceeded your current quota usage limit" >&2\n'
+                "exit 1\n"
+            )
+            config = base_config(personal=personal, work=work)
+            config["codex"] = dict(config["codex"], fallbackProfile="work")
+            config["profiles"]["default"] = "personal"
+            config["profiles"]["detectFrom"] = []
+            exit_code, payload = self._run_codex_fallback_scenario(
+                mode="work",
+                fake_script=fake_script,
+                tmp=Path(tmp),
+                repo=repo,
+                config=config,
+            )
+            self.assertEqual(exit_code, 1)
+            self.assertNotIn("codexAuthFallback", payload or {})
+            self.assertEqual(attempts.read_text(encoding="utf-8").splitlines(), [personal])
+
+    def test_tool_events_suppress_codex_fallback_retry(self):
+        repo = make_git_repo()
+        self.addCleanup(repo.cleanup)
+        with tempfile.TemporaryDirectory() as tmp:
+            personal = write_codex_home(Path(tmp), "personal")
+            work = write_codex_home(Path(tmp), "work")
+            attempts = Path(tmp) / "attempts.txt"
+            fake_script = (
+                "#!/usr/bin/env bash\n"
+                f'echo "${{CODEX_HOME:-}}" >> "{attempts}"\n'
+                'printf \'%s\\n\' \'{"type":"item.started","item":{"type":"command_execution","command":"echo hi"}}\'\n'
+                'echo "You exceeded your current quota usage limit" >&2\n'
+                "exit 1\n"
+            )
+            config = base_config(personal=personal, work=work)
+            config["codex"] = dict(config["codex"], fallbackProfile="work")
+            config["profiles"]["default"] = "personal"
+            config["profiles"]["detectFrom"] = []
+            exit_code, payload = self._run_codex_fallback_scenario(
+                mode="safe",
+                fake_script=fake_script,
+                tmp=Path(tmp),
+                repo=repo,
+                config=config,
+            )
+            self.assertEqual(exit_code, 1)
+            self.assertNotIn("codexAuthFallback", payload or {})
+            self.assertEqual(attempts.read_text(encoding="utf-8").splitlines(), [personal])
+
+    def test_dry_run_includes_redacted_profile_env(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work = write_codex_home(Path(tmp), "work")
+            config = base_config(work=work)
+            config["profiles"]["default"] = "work"
+            config["profiles"]["detectFrom"] = []
+            request = self.delegate.build_request(
+                "codex",
+                "safe",
+                None,
+                self.delegate.ResolvedWorkspace(tmp, "directory"),
+                "review",
+                config,
+                dry_run=True,
+            )
+            request = replace(
+                request,
+                profile_resolution=replace(
+                    request.profile_resolution,
+                    env={
+                        "CODEX_HOME": work,
+                        "OPENAI_API_KEY": "sk-test-secret",
+                    },
+                ),
+            )
+            payload = self.delegate.dry_run_payload(request)
+            self.assertIn("profileEnv", payload)
+            self.assertEqual(payload["profileEnv"]["CODEX_HOME"], work)
+            self.assertEqual(payload["profileEnv"]["OPENAI_API_KEY"], "***")
+
+    def test_no_active_profile_omits_fallback_profile_from_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work = write_codex_home(Path(tmp), "work")
+            config = base_config(work=work)
+            config["codex"] = dict(config["codex"], fallbackProfile="work")
+            config["profiles"]["default"] = None
+            config["profiles"]["detectFrom"] = []
+            request = self.delegate.build_request(
+                "codex",
+                "safe",
+                None,
+                self.delegate.ResolvedWorkspace(tmp, "directory"),
+                "review",
+                config,
+                dry_run=True,
+            )
+            self.assertIsNone(request.auth_profile)
+            self.assertIsNone(request.fallback_auth_profile)
+            payload = self.delegate.dry_run_payload(request)
+            self.assertNotIn("fallbackProfile", payload)
+
+
+class CodexUsageLimitClassifierTests(unittest.TestCase):
+    def setUp(self):
+        self.profiles = load_module(
+            ROOT / "src" / "delegate_agent" / "profiles.py", "profiles_classifier_under_test"
+        )
+
+    def test_classify_codex_usage_limit_negative_cases(self):
+        self.assertFalse(self.profiles.classify_codex_usage_limit(""))
+        self.assertFalse(self.profiles.classify_codex_usage_limit("   "))
+        self.assertFalse(self.profiles.classify_codex_usage_limit("command failed: not found"))
+        self.assertFalse(self.profiles.classify_codex_usage_limit("rate limit exceeded, try again"))
+
+    def test_classify_codex_usage_limit_positive_cases(self):
+        self.assertTrue(
+            self.profiles.classify_codex_usage_limit("You exceeded your current quota usage limit")
+        )
+        self.assertTrue(
+            self.profiles.classify_codex_usage_limit("rate limit exceeded for your account")
+        )
+        self.assertTrue(self.profiles.classify_codex_usage_limit("rate limit exceeded for quota"))
 
 
 class ProfilePhase2CliTests(unittest.TestCase):

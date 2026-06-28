@@ -29,7 +29,7 @@ _USAGE_LIMIT_PATTERNS = (
 )
 
 _ACCOUNT_QUOTA_CONTEXT = re.compile(
-    r"(quota|usage|billing|subscription|account|credit|limit)",
+    r"(quota|usage|billing|subscription|account|credit)",
     re.IGNORECASE,
 )
 
@@ -306,7 +306,7 @@ def codex_fallback_env_overrides(resolution: ProfileResolution) -> dict[str, str
         return None
     if codex_homes_same_account(resolution.codex_home, resolution.codex_fallback_home):
         return None
-    return {"CODEX_HOME": resolution.codex_fallback_home}
+    return {**resolution.env, "CODEX_HOME": resolution.codex_fallback_home}
 
 
 def classify_codex_usage_limit(stderr_text: str) -> bool:
