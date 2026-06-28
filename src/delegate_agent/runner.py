@@ -443,6 +443,10 @@ def completion_json_payload(
             ctx.alias, completion_report=True
         )
         payload["completionReportPath"] = completion_report_path(ctx.run_id)
+    if ctx.auth_profile is not None:
+        payload["authProfile"] = ctx.auth_profile
+    if ctx.fallback_auth_profile is not None:
+        payload["fallbackProfile"] = ctx.fallback_auth_profile
     run_metadata.add_run_metadata_payload_fields(payload, ctx)
     reasoning.add_reasoning_payload_fields(payload, ctx)
 

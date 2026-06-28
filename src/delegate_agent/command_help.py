@@ -64,6 +64,11 @@ GLOBAL_OPTIONS: tuple[OptionSpec, ...] = (
         "Override isolation strategy for this run (auto, none, or worktree).",
     ),
     OptionSpec(
+        "--auth-profile",
+        "NAME",
+        "Select a configured profiles.definitions entry for this launch.",
+    ),
+    OptionSpec(
         "--pass-through",
         None,
         "Stream raw child stdout/stderr (incompatible with --json).",
@@ -215,9 +220,10 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "Reasoning effort is validated against the resolved model and emitted as a Codex "
             "config override; --reasoning-effort therefore requires codex.defaultModel "
             "(or a run-input model) to be set.",
-            "Codex profile (codex.profile) is config-only.",
+            "codex.profile is a Codex CLI config overlay; top-level profiles selects "
+            "Delegate-injected auth/env.",
         ),
-        see_also=("cursor", "droid", "models", "agent-help"),
+        see_also=("cursor", "droid", "profiles", "models", "agent-help"),
     ),
     "claude": CommandSpec(
         name="claude",
@@ -371,6 +377,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         notes=("Provide either a handle or --latest HARNESS, not both.",),
         see_also=("runs", "run-output"),
+        unsupported_global_options=("--auth-profile",),
     ),
     "runs": CommandSpec(
         name="runs",
@@ -403,6 +410,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         notes=("--active, --running, --stale, and --recent are mutually exclusive.",),
         see_also=("snapshot", "run-output"),
+        unsupported_global_options=("--auth-profile",),
     ),
     "run-output": CommandSpec(
         name="run-output",
@@ -445,68 +453,27 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "when you intentionally need the full stream.",
         ),
         see_also=("snapshot", "runs"),
+        unsupported_global_options=("--auth-profile",),
     ),
-    "codex-auth": CommandSpec(
-        name="codex-auth",
-        summary="Deprecated Codex auth-profile command; profile-aware auth uses top-level profiles.",
-        usage=(
-            "delegate [--cwd PATH] [--json] codex-auth show",
-            "delegate [--cwd PATH] [--json] codex-auth use PROFILE [--fallback PROFILE]",
-            "delegate [--cwd PATH] [--json] codex-auth swap",
-            "delegate [--cwd PATH] [--json] codex-auth clear",
-        ),
-        arguments=(ArgSpec("action", True, "One of: show, use, swap, clear."),),
-        options=(
-            OptionSpec(
-                "--fallback",
-                "PROFILE",
-                "Optional fallback auth profile for quota retry on Codex runs.",
-            ),
+    "profiles": CommandSpec(
+        name="profiles",
+        summary="Show the detected active auth/env profile and injected env keys.",
+        usage=("delegate [--cwd PATH] [--json] [--auth-profile NAME] profiles",),
+        examples=(
+            "delegate profiles",
+            "delegate --json --auth-profile work profiles",
         ),
         notes=(
-            "This command no longer writes config; the old Codex-only config surface was removed.",
-            "Configure profiles.definitions.<name>.env.CODEX_HOME and codex.fallbackProfile instead.",
-            "The delegate profiles introspection command is Phase 2.",
+            "Selection is read-only: flag > profiles.detectFrom environment order > profiles.default.",
+            "Env values are key-aware redacted; inline profile env must not contain secrets.",
         ),
-        see_also=("codex-auth show", "codex-auth use", "codex-auth swap", "codex-auth clear"),
-        unsupported_global_options=("--isolation",),
-    ),
-    "codex-auth show": CommandSpec(
-        name="codex-auth show",
-        summary="Deprecated; profile introspection is Phase 2.",
-        usage=("delegate [--cwd PATH] [--json] codex-auth show",),
-        see_also=("codex-auth use", "codex-auth swap", "codex-auth clear"),
-        unsupported_global_options=("--isolation",),
-    ),
-    "codex-auth use": CommandSpec(
-        name="codex-auth use",
-        summary="Deprecated; configure top-level profiles instead.",
-        usage=("delegate [--cwd PATH] [--json] codex-auth use PROFILE [--fallback PROFILE]",),
-        arguments=(ArgSpec("PROFILE", True, "Deprecated profile name argument."),),
-        options=(
-            OptionSpec(
-                "--fallback",
-                "PROFILE",
-                "Optional fallback auth profile for quota retry on Codex runs.",
-            ),
+        see_also=("describe", "codex", "models"),
+        unsupported_global_options=(
+            "--isolation",
+            "--pass-through",
+            "--completion-report",
+            "--no-completion-report",
         ),
-        see_also=("codex-auth show", "codex-auth swap", "codex-auth clear"),
-        unsupported_global_options=("--isolation",),
-    ),
-    "codex-auth swap": CommandSpec(
-        name="codex-auth swap",
-        summary="Deprecated; configure top-level profiles instead.",
-        usage=("delegate [--cwd PATH] [--json] codex-auth swap",),
-        notes=("This command no longer writes config; delegate profiles is Phase 2.",),
-        see_also=("codex-auth show", "codex-auth use", "codex-auth clear"),
-        unsupported_global_options=("--isolation",),
-    ),
-    "codex-auth clear": CommandSpec(
-        name="codex-auth clear",
-        summary="Deprecated; configure top-level profiles instead.",
-        usage=("delegate [--cwd PATH] [--json] codex-auth clear",),
-        see_also=("codex-auth show", "codex-auth use", "codex-auth swap"),
-        unsupported_global_options=("--isolation",),
     ),
     "worktree": CommandSpec(
         name="worktree",
@@ -536,7 +503,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "worktree prune",
             "worktree gc",
         ),
-        unsupported_global_options=("--isolation",),
+        unsupported_global_options=("--isolation", "--auth-profile"),
     ),
     "worktree list": CommandSpec(
         name="worktree list",
@@ -564,7 +531,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "delegate worktree list --harness cursor --status present",
         ),
         see_also=("worktree show", "worktree prune", "worktree gc"),
-        unsupported_global_options=("--isolation",),
+        unsupported_global_options=("--isolation", "--auth-profile"),
     ),
     "worktree show": CommandSpec(
         name="worktree show",
@@ -593,7 +560,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         notes=("Provide either a handle or --latest HARNESS, not both.",),
         see_also=("worktree list", "worktree remove"),
-        unsupported_global_options=("--isolation",),
+        unsupported_global_options=("--isolation", "--auth-profile"),
     ),
     "worktree remove": CommandSpec(
         name="worktree remove",
@@ -626,7 +593,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "A --help token anywhere in the args prints help and removes nothing.",
         ),
         see_also=("worktree list", "worktree prune", "worktree gc"),
-        unsupported_global_options=("--isolation",),
+        unsupported_global_options=("--isolation", "--auth-profile"),
     ),
     "worktree prune": CommandSpec(
         name="worktree prune",
@@ -672,7 +639,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         notes=("Run with --dry-run first to preview the affected worktrees.",),
         see_also=("worktree list", "worktree remove", "worktree gc"),
-        unsupported_global_options=("--isolation",),
+        unsupported_global_options=("--isolation", "--auth-profile"),
     ),
     "worktree gc": CommandSpec(
         name="worktree gc",
@@ -688,7 +655,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "delegate worktree gc --dry-run",
         ),
         see_also=("worktree list", "worktree prune", "worktree remove"),
-        unsupported_global_options=("--isolation",),
+        unsupported_global_options=("--isolation", "--auth-profile"),
     ),
     "models": CommandSpec(
         name="models",
@@ -705,6 +672,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "Agent discovery should prefer --summary, then use raw output only when needed.",
         ),
         see_also=("describe", "cursor", "codex", "droid", "kimi", "claude"),
+        unsupported_global_options=("--auth-profile",),
     ),
     "capabilities": CommandSpec(
         name="capabilities",
@@ -722,6 +690,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "refresh may invoke child CLIs and writes .delegate/capabilities/reasoning.json in the workspace.",
         ),
         see_also=("models", "describe", "codex", "droid", "cursor"),
+        unsupported_global_options=("--auth-profile",),
     ),
     "describe": CommandSpec(
         name="describe",
@@ -739,6 +708,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "Agent discovery should start with --summary, then use raw describe only when needed.",
         ),
         see_also=("models", "agent-help", "help"),
+        unsupported_global_options=("--auth-profile",),
     ),
     "agent-help": CommandSpec(
         name="agent-help",
@@ -746,6 +716,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         usage=("delegate agent-help",),
         examples=("delegate agent-help",),
         see_also=("describe", "help"),
+        unsupported_global_options=("--auth-profile",),
     ),
     "help": CommandSpec(
         name="help",
@@ -772,6 +743,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "A --json token anywhere in the help arguments selects JSON output.",
         ),
         see_also=("describe", "agent-help"),
+        unsupported_global_options=("--auth-profile",),
     ),
 }
 
@@ -890,10 +862,7 @@ def render_overview_text() -> str:
         "[--merged] [--older-than DAYS] [--harness HARNESS] [--include-detached] [--dry-run] "
         "[--discard-uncommitted] [--force-branch] [--force]",
         "delegate [--cwd PATH] [--json] worktree gc [--dry-run]",
-        "delegate [--cwd PATH] [--json] codex-auth show",
-        "delegate [--cwd PATH] [--json] codex-auth use PROFILE [--fallback PROFILE]",
-        "delegate [--cwd PATH] [--json] codex-auth swap",
-        "delegate [--cwd PATH] [--json] codex-auth clear",
+        "delegate [--cwd PATH] [--json] [--auth-profile NAME] profiles",
         "delegate [--json] models [--summary]",
         "delegate [--json] capabilities [refresh]",
         "delegate [--json] describe [--summary]",

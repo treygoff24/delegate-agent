@@ -12,8 +12,8 @@ from dataclasses import dataclass, field
 
 from delegate_agent import (
     capability_commands,
-    codex_auth_commands,
     inspection_commands,
+    profile_commands,
     profiles,
     run_output_commands,
     worktree_commands,
@@ -30,6 +30,7 @@ class GlobalOptions:
     pass_through: bool = False
     completion_report: str | None = None
     isolation: str | None = None
+    auth_profile: str | None = None
 
 
 @dataclass
@@ -67,7 +68,7 @@ class ParsedCommand:
     run_output: run_output_commands.RunOutputCommand | None = None
     worktree: worktree_commands.WorktreeCommand | None = None
     capabilities: capability_commands.CapabilitiesCommand | None = None
-    codex_auth: codex_auth_commands.CodexAuthCommand | None = None
+    profiles_command: profile_commands.ProfilesCommand | None = None
     inspection: InspectionOptions | None = None
 
     def __init__(
@@ -83,7 +84,7 @@ class ParsedCommand:
         run_output: run_output_commands.RunOutputCommand | None = None,
         worktree: worktree_commands.WorktreeCommand | None = None,
         capabilities: capability_commands.CapabilitiesCommand | None = None,
-        codex_auth: codex_auth_commands.CodexAuthCommand | None = None,
+        profiles_command: profile_commands.ProfilesCommand | None = None,
         inspection: InspectionOptions | None = None,
     ) -> None:
         self.subcommand = subcommand
@@ -96,7 +97,7 @@ class ParsedCommand:
         self.run_output = run_output
         self.worktree = worktree
         self.capabilities = capabilities
-        self.codex_auth = codex_auth
+        self.profiles_command = profiles_command
         self.inspection = inspection
 
 

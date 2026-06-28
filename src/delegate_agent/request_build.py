@@ -352,6 +352,7 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         progress_initial_delay_sec=progress_initial_delay_sec,
         progress_interval_sec=progress_interval_sec,
         forbid_commit=launch.forbid_commit,
+        auth_profile_override=global_options.auth_profile,
     )
 
 
@@ -516,6 +517,7 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         progress_initial_delay_sec=progress_initial_delay_sec,
         progress_interval_sec=progress_interval_sec,
         forbid_commit=raw_forbid_commit,
+        auth_profile_override=global_options.auth_profile,
     )
 
 
@@ -536,6 +538,7 @@ def build_request(
     progress_initial_delay_sec: float = delegate_runner.PROGRESS_INITIAL_DELAY_SEC,
     progress_interval_sec: float = delegate_runner.PROGRESS_HEARTBEAT_INTERVAL_SEC,
     forbid_commit: bool = False,
+    auth_profile_override: str | None = None,
 ) -> Request:
     if not isinstance(workspace, ResolvedWorkspace):
         raise TypeError(
@@ -565,6 +568,7 @@ def build_request(
         progress_initial_delay_sec=progress_initial_delay_sec,
         progress_interval_sec=progress_interval_sec,
         forbid_commit=forbid_commit,
+        auth_profile_override=auth_profile_override,
     )
 
 
@@ -818,6 +822,7 @@ def _build_request_for_workspace(
     progress_initial_delay_sec: float,
     progress_interval_sec: float,
     forbid_commit: bool,
+    auth_profile_override: str | None,
 ) -> Request:
     cache = (
         reasoning.load_reasoning_capability_cache(resolved.path)
@@ -865,6 +870,7 @@ def _build_request_for_workspace(
             display_argv=parts.display_argv,
         ),
         config,
+        auth_profile_override=auth_profile_override,
     )
 
 
@@ -879,24 +885,27 @@ def _dedupe_warnings(warnings: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(deduped)
 
 
-def _apply_profile_resolution(request: Request, config: JsonObject) -> Request:
-    resolution = profiles.resolve_active_profile(config, os.environ)
-    env_overrides = request.env_overrides
-    auth_profile = request.auth_profile
-    fallback_profile = request.fallback_auth_profile
+def _apply_profile_resolution(
+    request: Request, config: JsonObject, *, auth_profile_override: str | None = None
+) -> Request:
+    resolution = profiles.resolve_active_profile(
+        config, os.environ, cli_override=auth_profile_override
+    )
+    env_overrides = dict(request.env_overrides or {})
+    env_overrides.update(resolution.env)
+    auth_profile = resolution.name
+    fallback_profile = None
     if request.engine == "codex":
         if resolution.name is not None and resolution.codex_home is None:
             raise DelegateError(
                 "profile_missing_codex_home",
                 f"Profile {resolution.name!r} is active for a Codex Run but does not define CODEX_HOME.",
             )
-        env_overrides = resolution.env or None
-        auth_profile = resolution.name
         fallback_profile = profiles.codex_fallback_profile(config)
     return replace(
         request,
         warnings=_dedupe_warnings((*request.warnings, *resolution.warnings)),
-        env_overrides=env_overrides,
+        env_overrides=env_overrides or None,
         auth_profile=auth_profile,
         fallback_auth_profile=fallback_profile,
         profile_resolution=resolution,

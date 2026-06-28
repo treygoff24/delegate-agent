@@ -51,14 +51,7 @@ def _text_argv_prefix_label(value: object) -> str:
 
 
 def _global_options() -> list[str]:
-    return [
-        "--cwd",
-        "--json",
-        "--isolation",
-        "--pass-through",
-        "--completion-report",
-        "--no-completion-report",
-    ]
+    return [option.flag for option in command_help.GLOBAL_OPTIONS]
 
 
 def _commands_catalog() -> list[JsonObject]:
@@ -66,6 +59,27 @@ def _commands_catalog() -> list[JsonObject]:
         {"command": spec.name, "summary": spec.summary}
         for spec in command_help.COMMAND_SPECS.values()
     ]
+
+
+def _profiles_config_payload(config: JsonObject) -> JsonObject:
+    section = config.get("profiles")
+    if not isinstance(section, dict):
+        return {"detectFrom": [], "default": None, "definedProfiles": [], "envKeys": {}}
+    detect_from = section.get("detectFrom")
+    definitions = section.get("definitions")
+    profile_names = sorted(definitions) if isinstance(definitions, dict) else []
+    env_keys: JsonObject = {}
+    if isinstance(definitions, dict):
+        for name in profile_names:
+            entry = definitions.get(name)
+            env = entry.get("env") if isinstance(entry, dict) else None
+            env_keys[name] = sorted(env) if isinstance(env, dict) else []
+    return {
+        "detectFrom": list(detect_from) if isinstance(detect_from, list) else [],
+        "default": section.get("default") if isinstance(section.get("default"), str) else None,
+        "definedProfiles": profile_names,
+        "envKeys": env_keys,
+    }
 
 
 def runtime_payload() -> JsonObject:
@@ -426,6 +440,7 @@ def describe_payload(
             "Always prepends mandatory skill review instructions before the operator prompt.",
             "Optionally appends completion-report instructions unless disabled.",
         ],
+        "profiles": _profiles_config_payload(config),
         "passThrough": "Opt-in raw child stdout/stderr streaming; incompatible with --json.",
         "cwdResolution": "Git directories resolve to the repository root; non-Git directories are used directly.",
         "isolation": {
@@ -589,6 +604,7 @@ def describe_summary_payload(
         "engines": list(KNOWN_ENGINES),
         "modes": [MODE_SAFE, MODE_WORK],
         "isolationValues": list(delegate_config.VALID_ISOLATION_VALUES),
+        "profiles": _profiles_config_payload(config),
         "globalOptions": _global_options(),
         "launchOptions": [
             "--prompt-file",

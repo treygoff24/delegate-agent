@@ -11,6 +11,7 @@ Use `delegate --help` for the exact command list from the installed version. Glo
 --pass-through                Stream raw child stdout/stderr. Incompatible with --json and persistent worktree runs.
 --completion-report MODE      markdown or none.
 --no-completion-report        Disable completion-report prompt injection.
+--auth-profile NAME           Override detected profiles for launches, dry-run, run --input-json, and profiles.
 ```
 
 ## Commands
@@ -32,14 +33,7 @@ delegate claude work [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [
 
 delegate kimi safe [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 delegate kimi work [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
-
-delegate codex-auth show
-delegate codex-auth use PROFILE [--fallback PROFILE]
-delegate codex-auth swap
-delegate codex-auth clear
 ```
-
-`codex-auth` edits `~/.delegate/config.json` unless `DELEGATE_CONFIG` is set. It does not write workspace `.delegate/config.json`.
 
 Prompt sources are direct arguments, `--prompt-file`, or Delegate stdin. After
 Delegate resolves the prompt, Codex and Claude prompts are passed to the child runtime over
@@ -65,6 +59,13 @@ Delegate still reports remaining child commits in the work summary, emits a
 warning plus suggested review commands, but does not fail solely because commits
 exist. Validation rejects `--forbid-commit` outside `work` mode with
 `--isolation worktree`.
+
+`--auth-profile NAME` selects a top-level `profiles.definitions` entry and
+injects that profile's flat env map into child processes. It overrides ambient
+profile detection for launches, `dry-run`, `run --input-json`, and
+`delegate profiles`. Unknown names fail with `unknown_profile`. It is rejected
+for run-inspection and worktree-management commands where no child auth/env
+selection happens.
 
 ### `delegate claude`
 
@@ -155,6 +156,35 @@ Typical dry-run JSON fields:
 
 Persistent worktree dry-runs may also include `plannedBranch` and `plannedExecutionCwd`; those are plans, not created resources. Temporary safe dry-runs usually keep `plannedExecutionCwd` unset because no temporary worktree or directory copy has been created.
 
+### Profiles
+
+```bash
+delegate profiles
+delegate --json --auth-profile work profiles
+```
+
+`delegate profiles` is read-only introspection for the top-level `profiles`
+auth/env system. It reports the detected active profile, its source
+(`flag`, the matching detection variable name, or `default`), and the resolved
+env keys. JSON output is pinned to a small shape:
+
+```json
+{
+  "ok": true,
+  "profile": "work",
+  "source": "flag",
+  "envKeys": ["CODEX_HOME"],
+  "env": {"CODEX_HOME": "/redacted-or-expanded/path"},
+  "warnings": [],
+  "configSource": "/path/to/config.json"
+}
+```
+
+Values in `env` are routed through the same key-aware redaction used for child
+environment diagnostics. Profile env maps are for routing pointers, not
+secrets; secret-like keys in `profiles.definitions.*.env` are rejected during
+config validation.
+
 ### JSON input
 
 ```bash
@@ -189,7 +219,11 @@ Supported input keys:
 - `forbidCommit`: optional boolean. `true` requires `mode: "work"` with persistent worktree isolation and fails the run if the child creates commits.
 - `prompt`: required task prompt.
 
-`profile` is not accepted in run input JSON. Configure Codex profile in `codex.profile` instead.
+`profile` is not accepted in run input JSON. Configure the Codex CLI config
+overlay in `codex.profile` instead. That is separate from the top-level
+`profiles` block, which Delegate resolves once per request and injects as
+auth/env. Use the global `--auth-profile NAME` with `run --input-json` to
+override ambient profile detection for that run.
 
 ### Discovery
 
@@ -203,7 +237,7 @@ delegate --json capabilities refresh
 delegate agent-help
 ```
 
-`describe` reports version, engines, modes, supported isolation values, prompt transforms, effective policy, and representative argv shapes. It also includes a `commands` catalog (each entry has `command` and `summary`) so an agent can enumerate the whole command surface in one call. `models` reports configured Cursor, Droid, Codex, Claude, and Kimi model settings. Discovery output applies best-effort credential scrubbing; model IDs and paths are shown verbatim. Agents should start with `--summary` for a compact inventory, then use raw output only when needed.
+`describe` reports version, engines, modes, supported isolation values, prompt transforms, effective policy, top-level profile config metadata, and representative argv shapes. It also includes a `commands` catalog (each entry has `command` and `summary`) so an agent can enumerate the whole command surface in one call. `models` reports configured Cursor, Droid, Codex, Claude, and Kimi model settings. Discovery output applies best-effort credential scrubbing; model IDs and paths are shown verbatim. Agents should start with `--summary` for a compact inventory, then use raw output only when needed.
 
 Both `describe` and `models` include provenance fields useful for detecting installed-runtime drift:
 

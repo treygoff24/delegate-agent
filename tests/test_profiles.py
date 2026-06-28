@@ -93,6 +93,58 @@ def base_config(*, personal: str | None = None, work: str | None = None) -> dict
     return config
 
 
+def write_json_config(path: Path, config: dict) -> None:
+    path.write_text(json.dumps(config), encoding="utf-8")
+
+
+def make_pointer_config(
+    *,
+    cursor_binary: Path | None = None,
+    work_pointer: str = "work-pointer",
+    personal_pointer: str = "personal-pointer",
+    worktree_data_home: str | None = None,
+) -> dict:
+    config = config_mod.embedded_default_config()
+    if cursor_binary is not None:
+        config["cursor"]["argvPrefix"] = [str(cursor_binary)]
+    config["tracking"]["completionReport"]["defaultMode"] = "none"
+    config["profiles"] = {
+        "detectFrom": ["DELEGATE_PROFILE", "AI_PROFILE"],
+        "default": None,
+        "definitions": {
+            "work": {"env": {"DELEGATE_POINTER": work_pointer}},
+            "personal": {"env": {"DELEGATE_POINTER": personal_pointer}},
+        },
+    }
+    if worktree_data_home is not None:
+        config["worktrees"]["dataHome"] = worktree_data_home
+    return config
+
+
+def make_env_probe_binary(root: Path, name: str = "agent") -> Path:
+    path = root / name
+    path.write_text(
+        "#!/usr/bin/env bash\n"
+        'if [ -n "${DELEGATE_ENV_OUT:-}" ]; then\n'
+        '  printf "%s\\n" "${DELEGATE_POINTER:-}" >> "${DELEGATE_ENV_OUT}"\n'
+        "fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+    return path
+
+
+def main_json(delegate, argv: list[str], *, env: dict[str, str]) -> tuple[int, dict, str]:
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    with mock.patch.dict(os.environ, env, clear=False):
+        code = delegate.main(argv, stdout=stdout, stderr=stderr)
+    text = stdout.getvalue()
+    payload = json.loads(text) if text.strip() else {}
+    return code, payload, stderr.getvalue()
+
+
 class ProfileResolutionTests(unittest.TestCase):
     def setUp(self):
         self.profiles = load_module(
@@ -489,6 +541,308 @@ class CodexProfileExecutionTests(unittest.TestCase):
             payload = self.delegate.dry_run_payload(request)
             payload_warnings = [w for w in payload.get("warnings", []) if "profile mismatch" in w]
             self.assertEqual(len(payload_warnings), 1)
+
+
+class ProfilePhase2CliTests(unittest.TestCase):
+    def setUp(self):
+        self.delegate = load_module(MODULE_PATH, "delegate_profiles_phase2_cli")
+
+    def test_auth_profile_override_reaches_tracked_cursor_child(self):
+        repo = make_git_repo()
+        self.addCleanup(repo.cleanup)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env_out = root / "env.txt"
+            config_path = root / "config.json"
+            config = make_pointer_config(cursor_binary=make_env_probe_binary(root))
+            write_json_config(config_path, config)
+            code, payload, _stderr = main_json(
+                self.delegate,
+                [
+                    "--json",
+                    "--auth-profile",
+                    "work",
+                    "--cwd",
+                    repo.name,
+                    "cursor",
+                    "work",
+                    "task",
+                ],
+                env={
+                    "DELEGATE_CONFIG": str(config_path),
+                    "DELEGATE_ENV_OUT": str(env_out),
+                    "DELEGATE_PROFILE": "",
+                    "AI_PROFILE": "personal",
+                },
+            )
+            self.assertEqual(code, 0)
+            self.assertEqual(payload["authProfile"], "work")
+            self.assertEqual(env_out.read_text(encoding="utf-8").splitlines(), ["work-pointer"])
+
+    def test_auth_profile_override_reaches_passthrough_cursor_child(self):
+        repo = make_git_repo()
+        self.addCleanup(repo.cleanup)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env_out = root / "env.txt"
+            config_path = root / "config.json"
+            config = make_pointer_config(cursor_binary=make_env_probe_binary(root))
+            write_json_config(config_path, config)
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "DELEGATE_CONFIG": str(config_path),
+                    "DELEGATE_ENV_OUT": str(env_out),
+                    "DELEGATE_PROFILE": "",
+                    "AI_PROFILE": "personal",
+                },
+                clear=False,
+            ):
+                code = self.delegate.main(
+                    [
+                        "--auth-profile",
+                        "work",
+                        "--pass-through",
+                        "--cwd",
+                        repo.name,
+                        "cursor",
+                        "work",
+                        "task",
+                    ],
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+            self.assertEqual(code, 0)
+            self.assertEqual(env_out.read_text(encoding="utf-8").splitlines(), ["work-pointer"])
+
+    def test_auth_profile_override_reaches_safe_isolated_cursor_child(self):
+        repo = make_git_repo()
+        self.addCleanup(repo.cleanup)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env_out = root / "env.txt"
+            config_path = root / "config.json"
+            config = make_pointer_config(cursor_binary=make_env_probe_binary(root))
+            write_json_config(config_path, config)
+            code, payload, _stderr = main_json(
+                self.delegate,
+                [
+                    "--json",
+                    "--auth-profile",
+                    "work",
+                    "--cwd",
+                    repo.name,
+                    "cursor",
+                    "safe",
+                    "review",
+                ],
+                env={
+                    "DELEGATE_CONFIG": str(config_path),
+                    "DELEGATE_ENV_OUT": str(env_out),
+                    "DELEGATE_PROFILE": "",
+                    "AI_PROFILE": "personal",
+                },
+            )
+            self.assertEqual(code, 0)
+            self.assertEqual(payload["authProfile"], "work")
+            self.assertTrue(payload["isolatedWorkspace"])
+            self.assertEqual(env_out.read_text(encoding="utf-8").splitlines(), ["work-pointer"])
+
+    def test_auth_profile_override_reaches_persistent_worktree_cursor_child(self):
+        repo = make_git_repo()
+        self.addCleanup(repo.cleanup)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env_out = root / "env.txt"
+            config_path = root / "config.json"
+            config = make_pointer_config(
+                cursor_binary=make_env_probe_binary(root),
+                worktree_data_home=str(root / "worktrees"),
+            )
+            write_json_config(config_path, config)
+            code, payload, _stderr = main_json(
+                self.delegate,
+                [
+                    "--json",
+                    "--auth-profile",
+                    "work",
+                    "--isolation",
+                    "worktree",
+                    "--cwd",
+                    repo.name,
+                    "cursor",
+                    "work",
+                    "task",
+                ],
+                env={
+                    "DELEGATE_CONFIG": str(config_path),
+                    "DELEGATE_ENV_OUT": str(env_out),
+                    "DELEGATE_PROFILE": "",
+                    "AI_PROFILE": "personal",
+                },
+            )
+            self.assertEqual(code, 0)
+            self.assertEqual(payload["authProfile"], "work")
+            self.assertEqual(payload["isolationLifecycle"], "persistent")
+            self.assertEqual(env_out.read_text(encoding="utf-8").splitlines(), ["work-pointer"])
+
+    def test_auth_profile_override_applies_to_dry_run_and_run_input_json(self):
+        repo = make_git_repo()
+        self.addCleanup(repo.cleanup)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env_out = root / "env.txt"
+            config_path = root / "config.json"
+            config = make_pointer_config(cursor_binary=make_env_probe_binary(root))
+            write_json_config(config_path, config)
+            env = {
+                "DELEGATE_CONFIG": str(config_path),
+                "DELEGATE_ENV_OUT": str(env_out),
+                "DELEGATE_PROFILE": "",
+                "AI_PROFILE": "personal",
+            }
+            dry_code, dry_payload, _stderr = main_json(
+                self.delegate,
+                [
+                    "--json",
+                    "--auth-profile",
+                    "work",
+                    "--cwd",
+                    repo.name,
+                    "dry-run",
+                    "cursor",
+                    "work",
+                    "task",
+                ],
+                env=env,
+            )
+            self.assertEqual(dry_code, 0)
+            self.assertEqual(dry_payload["authProfile"], "work")
+
+            input_path = root / "input.json"
+            input_path.write_text(
+                json.dumps(
+                    {
+                        "engine": "cursor",
+                        "mode": "work",
+                        "cwd": repo.name,
+                        "prompt": "task",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            run_code, run_payload, _stderr = main_json(
+                self.delegate,
+                ["--json", "--auth-profile", "work", "run", "--input-json", str(input_path)],
+                env=env,
+            )
+            self.assertEqual(run_code, 0)
+            self.assertEqual(run_payload["authProfile"], "work")
+            self.assertEqual(env_out.read_text(encoding="utf-8").splitlines(), ["work-pointer"])
+
+    def test_auth_profile_rejected_for_inspection_and_worktree_commands(self):
+        for argv in (
+            ["--json", "--auth-profile", "work", "snapshot", "cursor"],
+            ["--json", "--auth-profile", "work", "runs"],
+            ["--json", "--auth-profile", "work", "run-output", "cursor"],
+            ["--json", "--auth-profile", "work", "worktree", "list"],
+        ):
+            with self.subTest(argv=argv):
+                code, payload, _stderr = main_json(self.delegate, argv, env={})
+                self.assertEqual(code, 2)
+                self.assertEqual(payload["error"], "invalid_option_combination")
+                self.assertIn("--auth-profile", payload["message"])
+
+    def test_profiles_command_json_shape_and_secret_failure_redacts_value(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config.json"
+            config = make_pointer_config()
+            write_json_config(config_path, config)
+            code, payload, _stderr = main_json(
+                self.delegate,
+                ["--json", "--auth-profile", "work", "profiles"],
+                env={"DELEGATE_CONFIG": str(config_path), "AI_PROFILE": "personal"},
+            )
+            self.assertEqual(code, 0)
+            self.assertEqual(
+                set(payload),
+                {"ok", "profile", "source", "envKeys", "env", "warnings", "configSource"},
+            )
+            self.assertEqual(payload["profile"], "work")
+            self.assertEqual(payload["source"], "flag")
+            self.assertEqual(payload["envKeys"], ["DELEGATE_POINTER"])
+            self.assertEqual(payload["env"], {"DELEGATE_POINTER": "work-pointer"})
+
+            secret_config = make_pointer_config()
+            secret_config["profiles"]["definitions"]["work"]["env"] = {
+                "OPENAI_API_KEY": "sk-test-secret"
+            }
+            write_json_config(config_path, secret_config)
+            code, payload, stderr = main_json(
+                self.delegate,
+                ["--json", "profiles"],
+                env={"DELEGATE_CONFIG": str(config_path), "AI_PROFILE": "work"},
+            )
+            self.assertEqual(code, 2)
+            self.assertEqual(payload["error"], "secret_in_profile_env")
+            self.assertNotIn("sk-test-secret", json.dumps(payload))
+            self.assertNotIn("sk-test-secret", stderr)
+
+    def test_describe_includes_profiles_and_auth_profile_global_option(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config.json"
+            config = make_pointer_config()
+            config["profiles"]["default"] = "personal"
+            write_json_config(config_path, config)
+            code, payload, _stderr = main_json(
+                self.delegate,
+                ["--json", "describe"],
+                env={"DELEGATE_CONFIG": str(config_path)},
+            )
+            self.assertEqual(code, 0)
+            self.assertIn("--auth-profile", payload["globalOptions"])
+            self.assertEqual(payload["profiles"]["detectFrom"], ["DELEGATE_PROFILE", "AI_PROFILE"])
+            self.assertEqual(payload["profiles"]["default"], "personal")
+            self.assertEqual(payload["profiles"]["definedProfiles"], ["personal", "work"])
+            commands = {entry["command"] for entry in payload["commands"]}
+            self.assertIn("profiles", commands)
+            self.assertNotIn("codex-auth", commands)
+
+    def test_profile_warning_appears_once_end_to_end_with_codex_preflight(self):
+        repo = make_git_repo()
+        self.addCleanup(repo.cleanup)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            work = write_codex_home(root, "work")
+            personal = write_codex_home(root, "personal")
+            fake_codex = root / "codex"
+            fake_codex.write_text(
+                "#!/usr/bin/env bash\n"
+                'printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}\'\n'
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            fake_codex.chmod(0o755)
+            config = base_config(personal=personal, work=work)
+            config["codex"] = dict(config["codex"], binary=str(fake_codex))
+            config_path = root / "config.json"
+            write_json_config(config_path, config)
+            code, payload, _stderr = main_json(
+                self.delegate,
+                ["--json", "--cwd", repo.name, "codex", "safe", "task"],
+                env={
+                    "DELEGATE_CONFIG": str(config_path),
+                    "DELEGATE_PROFILE": "work",
+                    "AI_PROFILE": "personal",
+                },
+            )
+            self.assertEqual(code, 0)
+            warnings = [w for w in payload.get("warnings", []) if "profile mismatch" in w]
+            self.assertEqual(len(warnings), 1)
 
 
 if __name__ == "__main__":

@@ -13,10 +13,10 @@ from delegate_agent import (
     VERSION,
     argv_utils,
     capability_commands,
-    codex_auth_commands,
     command_errors,
     command_help,
     inspection_commands,
+    profile_commands,
     profiles,
     reasoning,
     run_output_commands,
@@ -207,18 +207,23 @@ def emit_worktree(
     )
 
 
-def emit_codex_auth(
+def emit_profiles_command(
     parsed: ParsedCommand,
     config: JsonObject,
     config_source: str,
     stdout: TextIO,
 ) -> int:
-    command = parsed.codex_auth
+    command = parsed.profiles_command
     if command is None:
-        raise DelegateError("invalid_command", "codex-auth options are required.")
-    return codex_auth_commands.emit(
+        raise DelegateError("invalid_command", "profiles options are required.")
+    resolution = profiles.resolve_active_profile(
+        config,
+        os.environ,
+        cli_override=parsed.global_options.auth_profile,
+    )
+    return profile_commands.emit(
         command,
-        config=config,
+        resolution=resolution,
         config_source=config_source,
         stdout=stdout,
     )
@@ -670,8 +675,7 @@ def main(
         else:
             config_workspace = workspace_path_for_config(global_options.cwd)
             config, source = load_config(workspace=config_workspace)
-            if parsed.subcommand != "codex-auth":
-                validate_config(config)
+            validate_config(config)
 
         if parsed.subcommand == "models":
             inspection = parsed.inspection or InspectionOptions()
@@ -724,8 +728,8 @@ def main(
         if parsed.subcommand == "worktree":
             return emit_worktree(parsed, workspace, config, stdout)
 
-        if parsed.subcommand == "codex-auth":
-            return emit_codex_auth(parsed, config, source, stdout)
+        if parsed.subcommand == "profiles":
+            return emit_profiles_command(parsed, config, source, stdout)
 
         request = request_from_parsed(parsed, config, stdin)
         if request.dry_run:

@@ -63,7 +63,20 @@ Copy `config.example.json` and replace placeholders before real Droid runs:
   "codex": {
     "binary": "codex",
     "defaultModel": null,
-    "defaultReasoningEffort": null
+    "defaultReasoningEffort": null,
+    "profile": null,
+    "fallbackProfile": null
+  },
+  "profiles": {
+    "detectFrom": ["DELEGATE_PROFILE", "AI_PROFILE"],
+    "default": null,
+    "definitions": {
+      "work": {
+        "env": {
+          "CODEX_HOME": "~/.ai-profiles/runtime/codex/work"
+        }
+      }
+    }
   },
   "claude": {
     "binary": "claude",
@@ -154,9 +167,7 @@ Controls local run recording.
     "defaultModel": null,
     "defaultReasoningEffort": null,
     "profile": null,
-    "authProfile": null,
-    "fallbackAuthProfile": null,
-    "authProfiles": {},
+    "fallbackProfile": null,
     "workSandbox": "workspace-write",
     "ephemeral": true,
     "ignoreUserConfig": false
@@ -166,14 +177,52 @@ Controls local run recording.
 
 - `defaultModel`: optional model string. `null` lets Codex choose its own default.
 - `defaultReasoningEffort`: optional non-empty effort string. When a Codex model resolves (run input or `codex.defaultModel`) and supports the level, Delegate emits a Codex config override; otherwise the run proceeds without reasoning effort and records a warning. An explicit `--reasoning-effort` flag still fails closed and requires a resolved model.
-- `profile`: optional Codex profile name. It is config-only; JSON run input cannot set it.
-- `authProfile`: optional private auth account name. When set, Delegate exports `CODEX_HOME` from `codex.authProfiles.<name>.codexHome` for Codex child processes. This overrides a parent-process `CODEX_HOME`.
-- `fallbackAuthProfile`: optional alternate auth account for one quota-limit retry on tracked Codex runs.
-- `authProfiles`: map of profile names to objects with `codexHome` (absolute path or `~/…`). Each selected home must contain readable `auth.json`; when `codex.profile` is set, readable `config.toml` is required too.
+- `profile`: optional Codex CLI config overlay name. It is config-only; JSON run input cannot set it.
+- `fallbackProfile`: optional top-level `profiles.definitions` name for one quota-limit retry on tracked Codex runs. The fallback profile must define `env.CODEX_HOME`.
 - `workSandbox`: `read-only`, `workspace-write`, or `danger-full-access` for Codex work mode when full bypass is not enabled.
 - `ephemeral`: include Codex `--ephemeral` in JSON-streaming runs.
 - `ignoreUserConfig`: include Codex `--ignore-user-config`.
 - Codex safe mode always uses `--sandbox read-only` in v1; `codex.safeSandbox` is rejected.
+- `codex.profile` is a Codex CLI config overlay. The top-level `profiles`
+  block below is Delegate-injected auth/env and is a separate concept.
+
+### `profiles`
+
+```json
+{
+  "profiles": {
+    "detectFrom": ["DELEGATE_PROFILE", "AI_PROFILE"],
+    "default": null,
+    "definitions": {
+      "work": {
+        "env": {
+          "CODEX_HOME": "~/.ai-profiles/runtime/codex/work",
+          "SOME_TOOL_HOME": "~/.config/some-tool/work"
+        }
+      }
+    }
+  }
+}
+```
+
+- `detectFrom`: ordered environment variable names checked for an active profile
+  name. The first non-empty defined profile wins.
+- `default`: optional profile name used when no detection variable names a
+  defined profile.
+- `definitions`: map of profile names to `env` maps. The resolved `env` map is
+  expanded for `~` and `$VARS`, then injected into every child process
+  regardless of engine. Harness-irrelevant pointers are inert.
+- Profile `env` is for non-secret routing pointers. Secret-looking keys are
+  rejected with `secret_in_profile_env`; export real API keys in the parent
+  shell or a harness-native credential store instead.
+- `--auth-profile NAME` overrides ambient detection for launches, `dry-run`,
+  `run --input-json`, and `delegate profiles`. Unknown names fail closed with
+  `unknown_profile`.
+- `delegate profiles` reports the detected profile, source, and resolved env
+  keys. JSON output includes redacted values and never emits unredacted
+  secret-keyed values.
+- Codex active profiles must define `CODEX_HOME`; non-Codex engines simply
+  receive the same flat env map.
 
 ### `claude`
 
