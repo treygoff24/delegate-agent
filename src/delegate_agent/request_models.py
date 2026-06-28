@@ -8,12 +8,13 @@ without an import cycle.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from delegate_agent import (
     capability_commands,
     codex_auth_commands,
     inspection_commands,
+    profiles,
     run_output_commands,
     worktree_commands,
 )
@@ -133,6 +134,9 @@ class Request:
     env_overrides: dict[str, str] | None = None
     auth_profile: str | None = None
     fallback_auth_profile: str | None = None
+    profile_resolution: profiles.ProfileResolution = field(
+        default_factory=profiles.empty_profile_resolution
+    )
 
 
 @dataclass(frozen=True)

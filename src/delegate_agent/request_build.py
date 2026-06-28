@@ -20,8 +20,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TextIO
 
-from delegate_agent import codex_auth, reasoning
 from delegate_agent import config as delegate_config
+from delegate_agent import profiles, reasoning
 from delegate_agent import runner as delegate_runner
 from delegate_agent.argv_builders import (
     SAFE_REVIEW_PREFIX_BY_ENGINE,
@@ -838,7 +838,7 @@ def _build_request_for_workspace(
             cache=cache,
         ),
     )
-    return _apply_codex_auth(
+    return _apply_profile_resolution(
         Request(
             engine,
             mode,
@@ -868,17 +868,38 @@ def _build_request_for_workspace(
     )
 
 
-def _apply_codex_auth(request: Request, config: JsonObject) -> Request:
-    if request.engine != "codex":
-        return request
-    overrides, auth_profile, fallback = codex_auth.resolve_codex_auth_for_request(config)
-    if not overrides and auth_profile is None and fallback is None:
-        return request
+def _dedupe_warnings(warnings: tuple[str, ...]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for warning in warnings:
+        if warning in seen:
+            continue
+        seen.add(warning)
+        deduped.append(warning)
+    return tuple(deduped)
+
+
+def _apply_profile_resolution(request: Request, config: JsonObject) -> Request:
+    resolution = profiles.resolve_active_profile(config, os.environ)
+    env_overrides = request.env_overrides
+    auth_profile = request.auth_profile
+    fallback_profile = request.fallback_auth_profile
+    if request.engine == "codex":
+        if resolution.name is not None and resolution.codex_home is None:
+            raise DelegateError(
+                "profile_missing_codex_home",
+                f"Profile {resolution.name!r} is active for a Codex Run but does not define CODEX_HOME.",
+            )
+        env_overrides = resolution.env or None
+        auth_profile = resolution.name
+        fallback_profile = profiles.codex_fallback_profile(config)
     return replace(
         request,
-        env_overrides=overrides or None,
+        warnings=_dedupe_warnings((*request.warnings, *resolution.warnings)),
+        env_overrides=env_overrides,
         auth_profile=auth_profile,
-        fallback_auth_profile=fallback,
+        fallback_auth_profile=fallback_profile,
+        profile_resolution=resolution,
     )
 
 

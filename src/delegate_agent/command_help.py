@@ -448,7 +448,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
     ),
     "codex-auth": CommandSpec(
         name="codex-auth",
-        summary="Switch Codex auth profiles in the private Delegate config.",
+        summary="Deprecated Codex auth-profile command; profile-aware auth uses top-level profiles.",
         usage=(
             "delegate [--cwd PATH] [--json] codex-auth show",
             "delegate [--cwd PATH] [--json] codex-auth use PROFILE [--fallback PROFILE]",
@@ -464,25 +464,25 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             ),
         ),
         notes=(
-            "Writes ~/.delegate/config.json unless DELEGATE_CONFIG is set.",
-            "Does not write workspace .delegate/config.json.",
-            "When codex.authProfile is set, it overrides the parent process CODEX_HOME for Codex runs.",
+            "This command no longer writes config; the old Codex-only config surface was removed.",
+            "Configure profiles.definitions.<name>.env.CODEX_HOME and codex.fallbackProfile instead.",
+            "The delegate profiles introspection command is Phase 2.",
         ),
         see_also=("codex-auth show", "codex-auth use", "codex-auth swap", "codex-auth clear"),
         unsupported_global_options=("--isolation",),
     ),
     "codex-auth show": CommandSpec(
         name="codex-auth show",
-        summary="Show the active Codex auth profile and config write target.",
+        summary="Deprecated; profile introspection is Phase 2.",
         usage=("delegate [--cwd PATH] [--json] codex-auth show",),
         see_also=("codex-auth use", "codex-auth swap", "codex-auth clear"),
         unsupported_global_options=("--isolation",),
     ),
     "codex-auth use": CommandSpec(
         name="codex-auth use",
-        summary="Set the active Codex auth profile (and optional fallback).",
+        summary="Deprecated; configure top-level profiles instead.",
         usage=("delegate [--cwd PATH] [--json] codex-auth use PROFILE [--fallback PROFILE]",),
-        arguments=(ArgSpec("PROFILE", True, "Auth profile name defined in codex.authProfiles."),),
+        arguments=(ArgSpec("PROFILE", True, "Deprecated profile name argument."),),
         options=(
             OptionSpec(
                 "--fallback",
@@ -495,15 +495,15 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
     ),
     "codex-auth swap": CommandSpec(
         name="codex-auth swap",
-        summary="Exchange the active and fallback Codex auth profiles.",
+        summary="Deprecated; configure top-level profiles instead.",
         usage=("delegate [--cwd PATH] [--json] codex-auth swap",),
-        notes=("Requires both codex.authProfile and codex.fallbackAuthProfile to be set.",),
+        notes=("This command no longer writes config; delegate profiles is Phase 2.",),
         see_also=("codex-auth show", "codex-auth use", "codex-auth clear"),
         unsupported_global_options=("--isolation",),
     ),
     "codex-auth clear": CommandSpec(
         name="codex-auth clear",
-        summary="Clear active and fallback Codex auth profile selection.",
+        summary="Deprecated; configure top-level profiles instead.",
         usage=("delegate [--cwd PATH] [--json] codex-auth clear",),
         see_also=("codex-auth show", "codex-auth use", "codex-auth swap"),
         unsupported_global_options=("--isolation",),

@@ -622,6 +622,7 @@ def safe_isolated_request(request: Request) -> Iterator[Request]:
             env_overrides=request.env_overrides,
             auth_profile=request.auth_profile,
             fallback_auth_profile=request.fallback_auth_profile,
+            profile_resolution=request.profile_resolution,
         )
     finally:
         cleanup_safe_isolated_workspace(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 
 from delegate_agent.json_types import JsonValue
 
@@ -107,6 +108,10 @@ _ABSOLUTE_POSIX_PATH_RE = re.compile(
 )
 _TILDE_PATH_RE = re.compile(r"(?<!\S)~(?:/[^\s\"'`<>|;,)]+)+")
 _WINDOWS_PATH_RE = re.compile(r"\b[A-Za-z]:\\[^\s\"'`<>|;,)]+")
+_SECRET_KEY_RE = re.compile(
+    r"(API_KEY|TOKEN|SECRET|PASSWORD|PRIVATE_KEY|CREDENTIAL)",
+    re.IGNORECASE,
+)
 
 
 def _mask_progress_paths_outside_urls(value: str) -> str:
@@ -158,6 +163,20 @@ def redact_string(value: str) -> str:
 def redact_progress_label(value: str) -> str:
     redacted = redact_string(value)
     return _mask_progress_paths_outside_urls(redacted)
+
+
+def key_looks_secret(key: str) -> bool:
+    return _SECRET_KEY_RE.search(key) is not None
+
+
+def redact_mapping_value(key: str, value: JsonValue) -> JsonValue:
+    if key_looks_secret(key):
+        return "***"
+    return redact_value(value)
+
+
+def redact_env_map(mapping: Mapping[str, str]) -> dict[str, JsonValue]:
+    return {key: redact_mapping_value(key, value) for key, value in mapping.items()}
 
 
 def redact_value(value: JsonValue) -> JsonValue:

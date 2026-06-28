@@ -15,9 +15,10 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import BinaryIO, TextIO
 
+from delegate_agent import config as delegate_config
 from delegate_agent import (
-    codex_auth,
     harness_events,
+    profiles,
     prompt_instructions,
     reasoning,
     redaction,
@@ -26,7 +27,6 @@ from delegate_agent import (
     run_registry,
     worktree_summary,
 )
-from delegate_agent import config as delegate_config
 from delegate_agent.json_types import JsonObject
 
 STDOUT_LOG = run_registry.STDOUT_LOG
@@ -185,7 +185,7 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
     if ctx.auth_profile is not None:
         payload["authProfile"] = ctx.auth_profile
     if ctx.fallback_auth_profile is not None:
-        payload["fallbackAuthProfile"] = ctx.fallback_auth_profile
+        payload["fallbackProfile"] = ctx.fallback_auth_profile
     return payload
 
 
@@ -704,7 +704,7 @@ def _launch_tracked_process(
     stdin_text: str | None,
     env_overrides: dict[str, str] | None = None,
 ) -> subprocess.Popen[bytes]:
-    env = codex_auth.child_environment(overrides=env_overrides)
+    env = profiles.child_environment(overrides=env_overrides)
     return subprocess.Popen(  # nosec B603 - Delegate intentionally launches validated harness argv with shell=False.
         argv,
         cwd=cwd,
@@ -988,26 +988,24 @@ def _append_attempt_delimiter(stderr_log: Path, *, label: str) -> None:
         handle.write(marker.encode("utf-8"))
 
 
-def _should_retry_codex_auth(
+def _should_retry_profiles(
     ctx: RunContext,
     capture: TrackedCaptureResult,
     *,
     cwd: str,
     stderr_log: Path,
-    workspace_baseline: codex_auth.WorkspaceBaseline | None,
+    workspace_baseline: profiles.WorkspaceBaseline | None,
 ) -> bool:
     if ctx.engine != "codex" or not ctx.fallback_env_overrides:
         return False
     if capture.exit_code == 0:
         return False
-    stderr_tail = codex_auth.read_bounded_stderr_tail(stderr_log)
-    if not codex_auth.classify_codex_usage_limit(stderr_tail):
+    stderr_tail = profiles.read_bounded_stderr_tail(stderr_log)
+    if not profiles.classify_codex_usage_limit(stderr_tail):
         return False
-    if codex_auth.accumulator_had_tool_events(capture.accumulator):
+    if profiles.accumulator_had_tool_events(capture.accumulator):
         return False
-    return ctx.mode != "work" or codex_auth.work_mode_safe_for_codex_fallback(
-        cwd, workspace_baseline
-    )
+    return ctx.mode != "work" or profiles.work_mode_safe_for_codex_fallback(cwd, workspace_baseline)
 
 
 def _run_single_tracked_attempt(
@@ -1071,7 +1069,7 @@ def execute_tracked(
         prompt_file_text=prompt_file_text,
         prompt_file_placeholder=prompt_file_placeholder,
     )
-    workspace_baseline = codex_auth.capture_workspace_baseline(cwd) if ctx.mode == "work" else None
+    workspace_baseline = profiles.capture_workspace_baseline(cwd) if ctx.mode == "work" else None
     fallback_extra: JsonObject | None = None
     try:
         try:
@@ -1094,7 +1092,7 @@ def execute_tracked(
             _record_tracked_launch_failure(files, ctx, error)
             raise error from exc
 
-        if _should_retry_codex_auth(
+        if _should_retry_profiles(
             ctx,
             capture,
             cwd=cwd,
@@ -1102,7 +1100,7 @@ def execute_tracked(
             workspace_baseline=workspace_baseline,
         ):
             primary_exit_code = capture.exit_code
-            primary_stderr_tail = codex_auth.read_bounded_stderr_tail(files.stderr_log)
+            primary_stderr_tail = profiles.read_bounded_stderr_tail(files.stderr_log)
             fallback_capture = _run_single_tracked_attempt(
                 launch_argv,
                 cwd,
@@ -1119,7 +1117,7 @@ def execute_tracked(
             )
             capture = fallback_capture
             fallback_extra = {
-                "codexAuthFallback": codex_auth.codex_auth_fallback_metadata(
+                "codexAuthFallback": profiles.codex_auth_fallback_metadata(
                     reason="usage_limit",
                     primary_auth_profile=ctx.auth_profile,
                     fallback_auth_profile=ctx.fallback_auth_profile,
@@ -1159,7 +1157,7 @@ def execute_passthrough(
         prompt_file_text=prompt_file_text,
         prompt_file_placeholder=prompt_file_placeholder,
     )
-    env = codex_auth.child_environment(overrides=env_overrides)
+    env = profiles.child_environment(overrides=env_overrides)
     try:
         # Passthrough mode mirrors the child runtime directly, so Delegate does
         # not impose a separate timeout here.

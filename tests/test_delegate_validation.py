@@ -248,7 +248,10 @@ class ValidationTests(unittest.TestCase):
             (local_delegate / "config.json").write_text(
                 json.dumps({"cursor": {"defaultModel": "workspace-model"}})
             )
-            with mock.patch.object(config_mod, "DEFAULT_CONFIG_PATH", global_cfg):
+            with (
+                mock.patch.object(config_mod, "DEFAULT_CONFIG_PATH", global_cfg),
+                mock.patch.dict(os.environ, {config_mod.CONFIG_ENV: ""}, clear=False),
+            ):
                 loaded, source = config_mod.load_config(workspace=workspace)
             self.assertEqual(loaded["cursor"]["defaultModel"], "workspace-model")
             self.assertEqual(source, str(workspace / ".delegate" / "config.json"))
@@ -276,7 +279,10 @@ class ValidationTests(unittest.TestCase):
             global_cfg.write_text(json.dumps({"cursor": {"defaultModel": "global-model"}}))
             workspace = Path(tmp) / "repo"
             workspace.mkdir()
-            with mock.patch.object(config_mod, "DEFAULT_CONFIG_PATH", global_cfg):
+            with (
+                mock.patch.object(config_mod, "DEFAULT_CONFIG_PATH", global_cfg),
+                mock.patch.dict(os.environ, {config_mod.CONFIG_ENV: ""}, clear=False),
+            ):
                 loaded, source = config_mod.load_config(workspace=workspace)
             self.assertEqual(loaded["cursor"]["defaultModel"], "global-model")
             self.assertEqual(source, str(global_cfg))
@@ -292,6 +298,7 @@ class ValidationTests(unittest.TestCase):
             with (
                 mock.patch.object(config_mod, "DEFAULT_CONFIG_PATH", None),
                 mock.patch.object(config_mod.Path, "home", return_value=home),
+                mock.patch.dict(os.environ, {config_mod.CONFIG_ENV: ""}, clear=False),
             ):
                 loaded, source = config_mod.load_config()
         self.assertEqual(loaded["cursor"]["defaultModel"], "home-model")

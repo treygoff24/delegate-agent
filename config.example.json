@@ -38,12 +38,29 @@
     "defaultModel": null,
     "defaultReasoningEffort": null,
     "profile": null,
-    "authProfile": null,
-    "fallbackAuthProfile": null,
-    "authProfiles": {},
+    "fallbackProfile": null,
     "workSandbox": "workspace-write",
     "ephemeral": true,
     "ignoreUserConfig": false
+  },
+  "profiles": {
+    "detectFrom": [
+      "DELEGATE_PROFILE",
+      "AI_PROFILE"
+    ],
+    "default": null,
+    "definitions": {
+      "work": {
+        "env": {
+          "CODEX_HOME": "~/replace-with-work-codex-home"
+        }
+      },
+      "personal": {
+        "env": {
+          "CODEX_HOME": "~/replace-with-personal-codex-home"
+        }
+      }
+    }
   },
   "claude": {
     "binary": "claude",

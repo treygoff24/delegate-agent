@@ -13,11 +13,11 @@ from delegate_agent import (
     VERSION,
     argv_utils,
     capability_commands,
-    codex_auth,
     codex_auth_commands,
     command_errors,
     command_help,
     inspection_commands,
+    profiles,
     reasoning,
     run_output_commands,
     run_registry,
@@ -246,7 +246,7 @@ def dry_run_payload(request: Request) -> JsonObject:
     if request.auth_profile is not None:
         payload["authProfile"] = request.auth_profile
     if request.fallback_auth_profile is not None:
-        payload["fallbackAuthProfile"] = request.fallback_auth_profile
+        payload["fallbackProfile"] = request.fallback_auth_profile
 
     # Structured isolation fields from the isolation context.
     if request.isolation_context is not None:
@@ -398,7 +398,6 @@ def make_run_context(
     alias: str,
     source_workspace: ResolvedWorkspace,
     creation_context: JsonObject | None = None,
-    fallback_env_overrides: dict[str, str] | None = None,
 ) -> delegate_runner.RunContext:
     source_cwd = (
         request.isolation_context.source_workspace
@@ -466,7 +465,9 @@ def make_run_context(
         progress_initial_delay_sec=request.progress_initial_delay_sec,
         progress_interval_sec=request.progress_interval_sec,
         env_overrides=dict(request.env_overrides or {}),
-        fallback_env_overrides=dict(fallback_env_overrides or {}),
+        fallback_env_overrides=dict(
+            profiles.codex_fallback_env_overrides(request.profile_resolution) or {}
+        ),
         auth_profile=request.auth_profile,
         fallback_auth_profile=request.fallback_auth_profile,
     )
@@ -485,7 +486,7 @@ def execute_request(
     stderr: TextIO,
 ) -> tuple[int, JsonObject | None]:
     if request.engine == "codex":
-        codex_auth.preflight_codex_auth(config)
+        profiles.preflight_codex_request(request, config.get("codex", {}))
     ctx = request.isolation_context
 
     # --- Persistent worktree path (work + worktree) ---
@@ -559,11 +560,6 @@ def execute_request(
             run_id=run_id,
             alias=alias,
             source_workspace=source_workspace,
-            fallback_env_overrides=(
-                codex_auth.fallback_env_overrides(config)
-                if isolated_request.engine == "codex"
-                else None
-            ),
         )
         try:
             return delegate_runner.execute_tracked(
