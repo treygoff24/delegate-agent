@@ -191,6 +191,20 @@ class ProfileResolutionTests(unittest.TestCase):
         self.assertEqual(len(resolved.warnings), 1)
         self.assertIn("AI_PROFILE=staging", resolved.warnings[0])
 
+    def test_undefined_secret_keyed_detect_var_value_is_redacted_in_warning(self):
+        # A secret-shaped detectFrom var naming an undefined profile must not leak its
+        # value through the warning (which surfaces via `delegate profiles` / dry-run).
+        config = base_config(work="/tmp/work")
+        config["profiles"]["detectFrom"] = ["GITHUB_TOKEN", "AI_PROFILE"]
+        config["profiles"]["default"] = "work"
+        resolved = self.profiles.resolve_active_profile(
+            config, {"GITHUB_TOKEN": "ghp_super_secret_value", "AI_PROFILE": ""}
+        )
+        self.assertEqual(resolved.name, "work")
+        joined = " ".join(resolved.warnings)
+        self.assertNotIn("ghp_super_secret_value", joined)
+        self.assertIn("GITHUB_TOKEN=***", joined)
+
     def test_detect_mismatch_warns_once_and_locks_first_defined_profile(self):
         config = base_config(personal="/tmp/personal", work="/tmp/work")
         resolved = self.profiles.resolve_active_profile(
@@ -331,6 +345,27 @@ class CodexProfileExecutionTests(unittest.TestCase):
             with self.assertRaises(DelegateError) as ctx:
                 self.profiles.preflight_codex_request(request, config["codex"])
             self.assertEqual(ctx.exception.error, "codex_auth_unavailable")
+
+    def test_relative_codex_home_is_rejected_before_launch(self):
+        # A relative CODEX_HOME resolves against different cwds for preflight vs the
+        # spawned child, so it must fail closed before launch rather than risk the
+        # wrong account.
+        with tempfile.TemporaryDirectory() as tmp:
+            config = base_config(work="relative/codex/home")
+            config["profiles"]["default"] = "work"
+            config["profiles"]["detectFrom"] = []
+            request = self.delegate.build_request(
+                "codex",
+                "safe",
+                None,
+                self.delegate.ResolvedWorkspace(tmp, "directory"),
+                "review",
+                config,
+                dry_run=False,
+            )
+            with self.assertRaises(DelegateError) as ctx:
+                self.profiles.preflight_codex_request(request, config["codex"])
+            self.assertEqual(ctx.exception.error, "codex_home_not_absolute")
 
     def test_fake_codex_sees_profile_codex_home(self):
         repo = make_git_repo()

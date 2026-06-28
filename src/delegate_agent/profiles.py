@@ -136,9 +136,10 @@ def resolve_active_profile(
             if not value:
                 continue
             if value not in definitions:
+                safe_value = redaction.redact_mapping_value(var_name, value)
                 _warn_once(
                     warnings,
-                    f"profile detect var {var_name}={value} is not defined; ignoring it.",
+                    f"profile detect var {var_name}={safe_value} is not defined; ignoring it.",
                 )
                 continue
             if selected is None:
@@ -250,6 +251,13 @@ def _auth_file_readable(path: Path) -> bool:
 
 def preflight_codex_home(codex_home: str, *, codex: JsonObject) -> None:
     home = Path(_expanded_env_value(codex_home))
+    if not home.is_absolute():
+        raise DelegateError(
+            "codex_home_not_absolute",
+            f"Codex auth preflight failed: CODEX_HOME must be absolute after expansion, "
+            f"got {codex_home!r} -> {home}. A relative path resolves against different cwds "
+            "for preflight vs the spawned child and can bill the wrong account.",
+        )
     auth_json = home / "auth.json"
     if not _auth_file_readable(auth_json):
         raise DelegateError(
@@ -297,8 +305,10 @@ def codex_homes_same_account(primary_home: str, fallback_home: str) -> bool:
     fallback_auth = _codex_auth_file(fallback_home)
     try:
         return primary_auth.resolve() == fallback_auth.resolve()
-    except OSError:
-        return primary_auth.expanduser().resolve() == fallback_auth.expanduser().resolve()
+    except (OSError, RuntimeError):
+        # Symlink loop or unresolvable path: compare without re-resolving (which would
+        # raise again) — fall back to a normalized non-resolving path comparison.
+        return os.path.normpath(primary_auth) == os.path.normpath(fallback_auth)
 
 
 def codex_fallback_env_overrides(resolution: ProfileResolution) -> dict[str, str] | None:
