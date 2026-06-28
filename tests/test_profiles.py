@@ -244,7 +244,14 @@ class ProfileConfigAndRedactionTests(unittest.TestCase):
         self.assertEqual(ctx.exception.error, "invalid_profiles_config")
 
     def test_secret_keys_in_profile_env_are_rejected(self):
-        for key in ("CURSOR_API_KEY", "ACCESS_TOKEN", "DB_PASSWORD", "PRIVATE_KEY"):
+        for key in (
+            "CURSOR_API_KEY",
+            "APIKEY",
+            "ACCESS_TOKEN",
+            "DB_PASSWORD",
+            "DB_PASSWD",
+            "PRIVATE_KEY",
+        ):
             with self.subTest(key=key):
                 config = config_mod.deep_merge(
                     config_mod.embedded_default_config(),
@@ -262,9 +269,16 @@ class ProfileConfigAndRedactionTests(unittest.TestCase):
 
     def test_key_aware_redaction_masks_secret_keyed_values(self):
         redacted = redaction.redact_env_map(
-            {"OPENAI_API_KEY": "sk-proj-123456789", "CODEX_HOME": "/tmp/codex"}
+            {
+                "OPENAI_API_KEY": "sk-proj-123456789",
+                "APIKEY": "plain-secret",
+                "DB_PASSWD": "secret",
+                "CODEX_HOME": "/tmp/codex",
+            }
         )
         self.assertEqual(redacted["OPENAI_API_KEY"], "***")
+        self.assertEqual(redacted["APIKEY"], "***")
+        self.assertEqual(redacted["DB_PASSWD"], "***")
         self.assertEqual(redacted["CODEX_HOME"], "/tmp/codex")
 
     def test_fallback_profile_without_codex_home_is_config_error(self):

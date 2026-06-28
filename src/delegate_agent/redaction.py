@@ -109,7 +109,11 @@ _ABSOLUTE_POSIX_PATH_RE = re.compile(
 _TILDE_PATH_RE = re.compile(r"(?<!\S)~(?:/[^\s\"'`<>|;,)]+)+")
 _WINDOWS_PATH_RE = re.compile(r"\b[A-Za-z]:\\[^\s\"'`<>|;,)]+")
 _SECRET_KEY_RE = re.compile(
-    r"(API_KEY|TOKEN|SECRET|PASSWORD|PRIVATE_KEY|CREDENTIAL)",
+    r"("
+    r"API[_-]?KEY|APIKEY|ACCESS[_-]?KEY|SECRET[_-]?KEY|PRIVATE[_-]?KEY|"
+    r"ACCESS[_-]?TOKEN|REFRESH[_-]?TOKEN|AUTH[_-]?TOKEN|AUTHTOKEN|"
+    r"CLIENT[_-]?SECRET|PASSWORD|PASSWD|SECRET|TOKEN|CREDENTIAL"
+    r")",
     re.IGNORECASE,
 )
 

@@ -736,11 +736,17 @@ def parse_codex_models_payload(raw: JsonObject) -> JsonObject:
     return parsed
 
 
-def refresh_reasoning_capabilities(*, cwd: str, codex_binary: str = "codex") -> JsonObject:
+def refresh_reasoning_capabilities(
+    *,
+    cwd: str,
+    codex_binary: str = "codex",
+    env: dict[str, str] | None = None,
+) -> JsonObject:
     try:
         completed = subprocess.run(  # nosec B603 - configured Codex binary is executed with shell=False and a timeout.
             [codex_binary, "debug", "models"],
             cwd=cwd,
+            env=env,
             text=True,
             capture_output=True,
             check=False,

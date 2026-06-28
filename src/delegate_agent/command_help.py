@@ -678,8 +678,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         name="capabilities",
         summary="Report reasoning-effort capabilities from config, workspace cache, and bundled fallback.",
         usage=(
-            "delegate [--json] capabilities",
-            "delegate [--json] capabilities refresh",
+            "delegate [--json] [--auth-profile NAME] capabilities",
+            "delegate [--json] [--auth-profile NAME] capabilities refresh",
         ),
         examples=(
             "delegate --json capabilities",
@@ -690,7 +690,6 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "refresh may invoke child CLIs and writes .delegate/capabilities/reasoning.json in the workspace.",
         ),
         see_also=("models", "describe", "codex", "droid", "cursor"),
-        unsupported_global_options=("--auth-profile",),
     ),
     "describe": CommandSpec(
         name="describe",

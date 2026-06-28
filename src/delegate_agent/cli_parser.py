@@ -48,7 +48,17 @@ MISPLACED_GLOBAL_OPTIONS = frozenset(
 VALUE_GLOBAL_OPTIONS = frozenset({"--cwd", "--isolation", "--completion-report", "--auth-profile"})
 
 AUTH_PROFILE_SUBCOMMANDS = frozenset(
-    {"cursor", "codex", "kimi", "claude", "droid", "dry-run", "run", "profiles"}
+    {
+        "cursor",
+        "codex",
+        "kimi",
+        "claude",
+        "droid",
+        "dry-run",
+        "run",
+        "profiles",
+        "capabilities",
+    }
 )
 
 

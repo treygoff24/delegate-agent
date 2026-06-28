@@ -346,6 +346,7 @@ def _missing_binary_error(
     *,
     engine: str | None = None,
     config_source: str | None = None,
+    search_context: str = "delegate process",
 ) -> DelegateError:
     config_key = _binary_config_key(engine)
     config_path_hint = _binary_config_path(config_source)
@@ -353,7 +354,7 @@ def _missing_binary_error(
 
     parts = [
         f"Missing binary: {binary}",
-        "(searched PATH of the delegate process, not your interactive shell).",
+        f"(searched PATH of the {search_context}, not your interactive shell).",
     ]
     if config_key is not None:
         parts.append(f"Fix: set an absolute path in {config_path_hint} under {config_key!r}.")
@@ -391,11 +392,21 @@ def ensure_binary(
     *,
     engine: str | None = None,
     config_source: str | None = None,
+    env_overrides: dict[str, str] | None = None,
 ) -> None:
     if not argv:
         raise DelegateError("missing_binary", "Empty argv.", EXIT_MISSING_BINARY)
-    if shutil.which(argv[0]) is None:
-        raise _missing_binary_error(argv[0], engine=engine, config_source=config_source)
+    env = profiles.child_environment(overrides=env_overrides) if env_overrides else os.environ
+    if shutil.which(argv[0], path=env.get("PATH")) is None:
+        search_context = (
+            "child environment" if env_overrides and "PATH" in env_overrides else "delegate process"
+        )
+        raise _missing_binary_error(
+            argv[0],
+            engine=engine,
+            config_source=config_source,
+            search_context=search_context,
+        )
 
 
 def make_run_context(
@@ -514,6 +525,7 @@ def execute_request(
                         argv,
                         engine=engine,
                         config_source=config_source,
+                        env_overrides=request.env_overrides,
                     ),
                 )
             )
@@ -525,6 +537,7 @@ def execute_request(
             isolated_request.argv,
             engine=isolated_request.engine,
             config_source=config_source,
+            env_overrides=isolated_request.env_overrides,
         )
         if pass_through:
             if json_mode:
@@ -715,6 +728,7 @@ def main(
                 config=config,
                 config_source=source,
                 workspace=workspace.path,
+                auth_profile_override=global_options.auth_profile,
                 stdout=stdout,
             )
 

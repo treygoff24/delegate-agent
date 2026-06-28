@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests.delegate_commands_test_base import CommandTestBase, make_git_repo
 
@@ -745,6 +746,77 @@ class EngineArgvTests(CommandTestBase):
                 (Path(workspace) / ".delegate" / "capabilities" / "reasoning.json").read_text()
             )
         self.assertIn("gpt-refresh", cache["harnesses"]["codex"]["models"])
+
+    def test_capabilities_refresh_uses_auth_profile_env(self):
+        with tempfile.TemporaryDirectory() as workspace, tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir = root / "bin"
+            empty_path = root / "empty-path"
+            codex_home = root / "codex-home"
+            marker = root / "codex-home-seen"
+            bin_dir.mkdir()
+            empty_path.mkdir()
+            codex_home.mkdir()
+            fake_codex = bin_dir / "codex"
+            marker_literal = str(marker).replace("'", "'\"'\"'")
+            fake_codex.write_text(
+                "#!/bin/sh\n"
+                f"printf '%s' \"${{CODEX_HOME:-}}\" > '{marker_literal}'\n"
+                "printf '%s\\n' "
+                '\'{"models":[{"slug":"gpt-profile","default_reasoning_level":"medium",'
+                '"supported_reasoning_levels":[{"effort":"medium"}]}]}\'\n',
+                encoding="utf-8",
+            )
+            fake_codex.chmod(0o755)
+            config_path = Path(self._config_env["DELEGATE_CONFIG"])
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "profiles": {
+                            "detectFrom": [],
+                            "default": None,
+                            "definitions": {
+                                "work": {
+                                    "env": {
+                                        "CODEX_HOME": str(codex_home),
+                                        "PATH": str(bin_dir),
+                                    }
+                                }
+                            },
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "DELEGATE_CONFIG": str(config_path),
+                    "PATH": str(empty_path),
+                },
+                clear=False,
+            ):
+                code = self.delegate.main(
+                    [
+                        "--cwd",
+                        workspace,
+                        "--auth-profile",
+                        "work",
+                        "--json",
+                        "capabilities",
+                        "refresh",
+                    ],
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+
+            self.assertEqual(code, 0, stderr.getvalue())
+            self.assertEqual(marker.read_text(encoding="utf-8"), str(codex_home))
+            payload = json.loads(stdout.getvalue())
+            self.assertIn("gpt-profile", payload["reasoning"]["harnesses"]["codex"]["models"])
 
     def test_capabilities_refresh_preserves_non_codex_cache_entries(self):
         with tempfile.TemporaryDirectory() as workspace:
