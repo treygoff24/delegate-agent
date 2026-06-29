@@ -145,6 +145,7 @@ class StreamAccumulator:
     _last_recoverable_assistant_text: str | None = field(default=None, repr=False)
     _last_substantive_assistant_text: str | None = field(default=None, repr=False)
     _pending_tool_uses: dict[str, tuple[str, str | None]] = field(default_factory=dict, repr=False)
+    _grok_text_buffer: str = field(default="", repr=False)
 
     def _invalidate_assistant_text_cache(self) -> None:
         self._assistant_text_cache = None
@@ -175,6 +176,14 @@ class StreamAccumulator:
             self._ingest_role_content_message(payload)
             return
         if event_type == "reasoning":
+            return
+        if event_type == "thought":
+            return
+        if event_type == "text":
+            self._ingest_grok_text(payload)
+            return
+        if event_type == "end":
+            self._ingest_grok_end(payload)
             return
         if event_type == "tool_result":
             return
@@ -358,6 +367,28 @@ class StreamAccumulator:
         if self._codex_completion_candidate:
             self.completion_text = self._codex_completion_candidate
 
+    def _ingest_grok_text(self, payload: JsonObject) -> None:
+        data = payload.get("data")
+        if not isinstance(data, str) or not data:
+            return
+        self._grok_text_buffer += data
+        self._invalidate_assistant_text_cache()
+        stripped = self._grok_text_buffer.strip()
+        if stripped:
+            self._last_recoverable_assistant_text = stripped
+            if is_substantive_assistant_text(stripped):
+                self._last_substantive_assistant_text = stripped
+        self.current = _current_from_text(self._grok_text_buffer)
+
+    def _ingest_grok_end(self, payload: JsonObject) -> None:
+        _ = payload
+        text = self._grok_text_buffer.strip()
+        self._grok_text_buffer = ""
+        if text:
+            self._record_successful_completion_text(text)
+        else:
+            self.events.append(NormalizedEvent(kind="run.completed", status="succeeded"))
+
     def _ingest_tool_call(self, payload: JsonObject) -> None:
         tool = _string_field(payload, "tool", "name", "toolName") or "tool"
         target = _tool_target(payload)
@@ -394,9 +425,11 @@ class StreamAccumulator:
     @property
     def assistant_text(self) -> str:
         if self._assistant_text_cache is None:
-            self._assistant_text_cache = "\n\n".join(
-                chunk for chunk in self.assistant_chunks if chunk
-            ).strip()
+            base = "\n\n".join(chunk for chunk in self.assistant_chunks if chunk).strip()
+            grok = self._grok_text_buffer.strip()
+            if grok:
+                base = f"{base}\n\n{grok}" if base else grok
+            self._assistant_text_cache = base
         return self._assistant_text_cache
 
     def bounded_assistant_text(self) -> tuple[str, JsonObject]:

@@ -658,3 +658,22 @@ class HarnessEventsTests(unittest.TestCase):
         completed = [event for event in acc.events if event.kind == "run.completed"]
         self.assertEqual(len(completed), 1)
         self.assertEqual(completed[0].status, "succeeded")
+
+    def test_grok_live_text_chunks_ignore_thought_and_finalize_on_end(self):
+        acc = self.events.StreamAccumulator()
+        acc.ingest_line(json.dumps({"type": "thought", "data": "hidden reasoning"}))
+        acc.ingest_line(json.dumps({"type": "text", "data": "delegate"}))
+        acc.ingest_line(json.dumps({"type": "text", "data": " grok"}))
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "end",
+                    "stopReason": "EndTurn",
+                    "sessionId": "sess",
+                    "requestId": "req",
+                }
+            )
+        )
+        self.assertEqual(acc.assistant_text, "delegate grok")
+        self.assertEqual(acc.completion_text, "delegate grok")
+        self.assertNotIn("hidden reasoning", acc.assistant_text)

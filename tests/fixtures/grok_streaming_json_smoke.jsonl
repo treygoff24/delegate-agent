@@ -1,3 +1,7 @@
-{"type":"assistant","message":{"content":[{"type":"text","text":"Working on the review."}]}}
-{"type":"assistant","message":{"content":[{"type":"text","text":"Status: completed\n\ndelegate grok fixture ok"}]}}
-{"type":"result","subtype":"success","result":"Status: completed\n\ndelegate grok fixture ok"}
+{"type":"thought","data":"reviewing delegate workspace"}
+{"type":"thought","data":" checking grok stream shape"}
+{"type":"text","data":"delegate"}
+{"type":"text","data":" grok"}
+{"type":"text","data":" fixture"}
+{"type":"text","data":" ok"}
+{"type":"end","stopReason":"EndTurn","sessionId":"sess-fixture","requestId":"req-fixture"}
