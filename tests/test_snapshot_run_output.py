@@ -137,10 +137,13 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
         self.assertEqual(stale_run["rawStatus"], "running")
         self.assertEqual(stale_run["effectiveStatus"], "stale")
         self.assertEqual(stale_run["staleReason"], "dead_pid")
-        self.assertIn(f"delegate snapshot {stale_alias}", stale_run["nextActions"])
+        self.assertIn(
+            self.delegate.run_registry.snapshot_command(stale_alias, cwd=str(self.workspace)),
+            stale_run["nextActions"],
+        )
 
     def test_runs_json_shape(self):
-        self.write_run()
+        _, alias = self.write_run()
         stdout = io.StringIO()
         self.delegate.main(
             ["--json", "--cwd", str(self.workspace), "runs", "--limit", "1"], stdout=stdout
@@ -149,7 +152,10 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
         self.assertEqual(payload["schema"], "delegate.runs.v1")
         self.assertEqual(payload["limit"], 1)
         self.assertEqual(len(payload["runs"]), 1)
-        self.assertIn("snapshotCommand", payload["runs"][0])
+        self.assertEqual(
+            payload["runs"][0]["snapshotCommand"],
+            self.delegate.run_registry.snapshot_command(alias, cwd=str(self.workspace)),
+        )
 
     def test_run_output_completion_report(self):
         run_id, alias = self.write_run()
@@ -987,7 +993,10 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
         self.assertIn("stale", output)
         self.assertIn("status detail: raw=running effective=stale", output)
         self.assertIn("stale reason: dead_pid", output)
-        self.assertIn(f"delegate snapshot {alias}", output)
+        self.assertIn(
+            self.delegate.run_registry.snapshot_command(alias, cwd=str(self.workspace)),
+            output,
+        )
 
     def test_snapshot_json_includes_stale_diagnostics(self):
         _, alias = self.write_run(pid=999999999)
@@ -1000,7 +1009,14 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
         self.assertEqual(payload["rawStatus"], "running")
         self.assertEqual(payload["effectiveStatus"], "stale")
         self.assertEqual(payload["staleReason"], "dead_pid")
-        self.assertIn(f"delegate run-output {alias} --completion-report", payload["nextActions"])
+        self.assertIn(
+            self.delegate.run_registry.run_output_command(
+                alias,
+                completion_report=True,
+                cwd=str(self.workspace),
+            ),
+            payload["nextActions"],
+        )
 
     def test_stale_status_when_pid_missing(self):
         run_id, alias = self.write_run()

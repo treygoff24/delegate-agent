@@ -89,6 +89,20 @@ def _kimi_unsupported_reasoning_fields() -> JsonObject:
     }
 
 
+def _resolved_model_required_detail(harness: str) -> str:
+    if harness == "codex":
+        return (
+            "reasoning effort requires a resolved model — set codex.defaultModel "
+            "in config (or pass a model via run-input JSON)"
+        )
+    if harness == "droid":
+        return (
+            "reasoning effort requires a resolved model — configure the selected "
+            "Droid alias in droid.models"
+        )
+    return "reasoning effort requires a resolved model"
+
+
 @dataclass(frozen=True)
 class ReasoningCapability:
     harness: str
@@ -291,7 +305,7 @@ def resolve_reasoning_capability(
             format_explicit_reasoning_effort_error(
                 harness=harness,
                 alias=alias,
-                detail="reasoning effort requires a resolved model",
+                detail=_resolved_model_required_detail(harness),
             ),
         )
 

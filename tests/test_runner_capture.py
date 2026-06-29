@@ -227,8 +227,14 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertTrue(payload["ok"])
             self.assertEqual(payload["alias"], alias)
             self.assertEqual(payload["runId"], run_id)
-            self.assertIn("snapshotCommand", payload)
-            self.assertIn("completionReportCommand", payload)
+            self.assertEqual(
+                payload["snapshotCommand"],
+                f"delegate --cwd {workspace} snapshot {alias}",
+            )
+            self.assertEqual(
+                payload["completionReportCommand"],
+                f"delegate --cwd {workspace} run-output {alias} --completion-report",
+            )
             self.assertEqual(payload["exitCode"], 0)
             self.assertNotIn("stdout", payload)
             self.assertNotIn("stderr", payload)

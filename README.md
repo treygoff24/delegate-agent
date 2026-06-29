@@ -88,13 +88,20 @@ delegate --json dry-run codex safe "Review this repository. Do not edit files."
 delegate --json dry-run claude safe "Review this repository. Do not edit files."
 ```
 
-Run a read-only review in an isolated temporary workspace:
+Run a read-only review in an isolated throwaway workspace:
 
 ```bash
 delegate codex safe "Review this repository for correctness risks. Do not edit files."
 delegate claude safe "Review this repository for correctness risks. Do not edit files."
 delegate cursor safe "Review the current diff for regressions. Do not edit files."
 delegate kimi safe "Review this repository for regressions. Do not edit files."
+```
+
+Review uncommitted local changes without committing first or pasting a diff — safe mode mirrors your working tree into the isolated copy:
+
+```bash
+# Edit files locally, then launch safe review as-is:
+delegate codex safe "Review my uncommitted changes for regressions. Do not edit files."
 ```
 
 Run an edit-capable task in a workspace you trust:
@@ -155,7 +162,7 @@ Delegate separates three ideas:
 
 Defaults are intentionally conservative for review paths:
 
-- `delegate cursor safe`, `delegate codex safe`, `delegate claude safe`, `delegate droid ALIAS safe`, and `delegate kimi safe` run in an isolated temporary workspace.
+- `delegate cursor safe`, `delegate codex safe`, `delegate claude safe`, `delegate droid ALIAS safe`, and `delegate kimi safe` run in an isolated throwaway workspace. Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff.
 - Claude safe mode invokes `claude -p` with prompt text on stdin, `--permission-mode plan`, `--strict-mcp-config`, Read/Grep/Glob plus selected read-only Bash tools, and `--no-session-persistence` by default. Delegate does not currently prove that Claude Code hooks, plugins, user settings, or other non-MCP customization surfaces are disabled.
 - `work` mode can edit. By default it runs in the real workspace for backward compatibility.
 

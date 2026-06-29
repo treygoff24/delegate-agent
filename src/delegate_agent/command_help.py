@@ -51,6 +51,14 @@ class CommandSpec:
     unsupported_global_options: tuple[str, ...] = field(default_factory=tuple)
 
 
+SAFE_WORKSPACE_SYNC_NOTE = (
+    "Safe mode reviews your **current working tree** — uncommitted tracked edits "
+    "and untracked, non-ignored files are mirrored into an isolated throwaway copy "
+    "(only gitignored paths are excluded), so you can review local changes without "
+    "committing first or pasting a diff."
+)
+
+
 # --------------------------------------------------------------------------- #
 # Global options (must appear before the subcommand).
 # --------------------------------------------------------------------------- #
@@ -152,7 +160,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "delegate cursor work --prompt-file task.md",
         ),
         notes=(
-            "safe mode runs read-only in an isolated temporary copy of the workspace.",
+            SAFE_WORKSPACE_SYNC_NOTE,
             "Reasoning effort uses cursor.reasoningEffortModels; no standalone Cursor effort flag is emitted.",
             "Trailing prompt text begins after the mode; a later --help is prompt text, "
             "not a help request.",
@@ -181,7 +189,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "delegate kimi work --prompt-file task.md",
         ),
         notes=(
-            "safe mode runs in an isolated temporary copy of the workspace and uses a read-only safety prompt.",
+            SAFE_WORKSPACE_SYNC_NOTE,
+            "Kimi safe mode also uses a read-only safety prompt.",
             "work mode uses Kimi prompt mode; Delegate does not emit --yolo because "
             "Kimi rejects combining --yolo with --prompt.",
             "Model selection uses kimi.defaultModel in config or the run-input JSON model; "
@@ -215,6 +224,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             'delegate codex work "Implement the scoped fix, run the named check, report changes."',
         ),
         notes=(
+            SAFE_WORKSPACE_SYNC_NOTE,
             "Model selection uses codex.defaultModel in config or the run-input JSON model; "
             "there is no CLI model alias.",
             "Reasoning effort is validated against the resolved model and emitted as a Codex "
@@ -249,7 +259,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         notes=(
             "Uses Claude Code -p with prompt delivery on stdin; dry-run argv and run manifests "
             "do not contain the prompt.",
-            "Safe mode runs in an isolated temporary copy with --permission-mode plan, "
+            SAFE_WORKSPACE_SYNC_NOTE,
+            "Claude safe mode runs with --permission-mode plan, "
             "--strict-mcp-config, Read/Grep/Glob, and selected read-only Bash tools.",
             "Claude safe mode is not hermetic: Delegate does not prove hooks, plugins, "
             "user settings, output styles, or other non-MCP customization surfaces are disabled.",
@@ -289,10 +300,11 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             'delegate droid grok work "Implement this bounded change; run the named check."',
         ),
         notes=(
-            "safe mode stays read-only in an isolated temporary copy; work mode uses "
-            "--skip-permissions-unsafe and is intentionally no-prompt -- use only in "
-            "workspaces you trust.",
+            SAFE_WORKSPACE_SYNC_NOTE,
+            "Droid safe mode stays read-only; work mode uses --skip-permissions-unsafe "
+            "and is intentionally no-prompt -- use only in workspaces you trust.",
             "Reasoning effort is model-specific and never changes safe/work permissions.",
+            "--reasoning-effort requires a resolved Droid model alias from droid.models.",
             "Run delegate models to list available aliases.",
         ),
         see_also=("models", "cursor", "codex", "agent-help"),

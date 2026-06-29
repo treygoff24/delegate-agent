@@ -103,11 +103,11 @@ def effective_log_byte_sizes(registry_root: Path, run_id: str) -> tuple[int, int
     return run_registry.effective_log_byte_sizes(registry_root, run_id)
 
 
-def archived_log_warning(alias: str | None, run_id: str) -> str:
+def archived_log_warning(alias: str | None, run_id: str, *, cwd: str | None = None) -> str:
     handle = alias or run_id
     return (
         f"raw logs archived for {handle}; use "
-        f"{run_registry.run_output_command(handle)} --stdout|--stderr --tail N or --raw"
+        f"{run_registry.run_output_command(handle, cwd=cwd)} --stdout|--stderr --tail N or --raw"
     )
 
 

@@ -87,11 +87,11 @@ def status_fields(state: JsonObject | None) -> JsonObject:
     return fields
 
 
-def stale_next_actions(alias_or_run_id: str) -> list[str]:
+def stale_next_actions(alias_or_run_id: str, *, cwd: str | None = None) -> list[str]:
     return [
-        f"delegate snapshot {alias_or_run_id}",
-        f"delegate run-output {alias_or_run_id} --completion-report",
-        f"delegate run-output {alias_or_run_id} --stderr --tail 100",
+        run_registry.snapshot_command(alias_or_run_id, cwd=cwd),
+        run_registry.run_output_command(alias_or_run_id, completion_report=True, cwd=cwd),
+        f"{run_registry.run_output_command(alias_or_run_id, cwd=cwd)} --stderr --tail 100",
     ]
 
 
@@ -170,6 +170,7 @@ def build_run_summary(
 ) -> JsonObject:
     state = run_registry.load_run_state_or_none(registry_root, run_id)
     manifest = run_registry.load_run_manifest_or_none(registry_root, run_id)
+    source_cwd = _source_workspace(registry_root, index_entry, state, manifest)
 
     stdout_bytes, stderr_bytes = effective_log_byte_sizes(registry_root, run_id, state)
     alias = index_entry.get("alias")
@@ -186,11 +187,11 @@ def build_run_summary(
     }
     summary.update(status_fields(state))
     if summary.get("effectiveStatus") == STATUS_STALE:
-        summary["nextActions"] = stale_next_actions(handle)
+        summary["nextActions"] = stale_next_actions(handle, cwd=source_cwd)
     if state and isinstance(state.get("current"), str):
         summary["current"] = state["current"]
     if isinstance(alias, str):
-        summary["snapshotCommand"] = run_registry.snapshot_command(alias)
+        summary["snapshotCommand"] = run_registry.snapshot_command(alias, cwd=source_cwd)
 
     # Isolation metadata: detect persistent worktree runs.
     worktree_status = None
@@ -207,6 +208,21 @@ def build_run_summary(
             summary["sourceGitRoot"] = source_git_root
 
     return summary
+
+
+def _source_workspace(
+    registry_root: Path,
+    index_entry: JsonObject,
+    state: JsonObject | None,
+    manifest: JsonObject | None,
+) -> str:
+    for source in (manifest, state, index_entry):
+        if not source:
+            continue
+        cwd = source.get("cwd")
+        if isinstance(cwd, str) and cwd:
+            return cwd
+    return str(registry_root.parent)
 
 
 def list_run_summaries(

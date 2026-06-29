@@ -20,6 +20,7 @@ from delegate_agent.argv_builders import (
     build_claude_argv,
     build_codex_argv,
 )
+from delegate_agent.command_help import SAFE_WORKSPACE_SYNC_NOTE
 from delegate_agent.config import config_path
 from delegate_agent.constants import KNOWN_ENGINES, MODE_SAFE, MODE_WORK
 from delegate_agent.errors import EXIT_OK, DelegateError
@@ -474,8 +475,8 @@ def describe_payload(
                     "<read-only-review-prefixed-skill-review-prompt>",
                 ],
                 "safeNotes": [
+                    SAFE_WORKSPACE_SYNC_NOTE,
                     "No --mode=plan, --mode=ask, --force, or --approve-mcps.",
-                    "Runs in an isolated temporary workspace (detached git worktree or directory copy).",
                     "Writes .cursor/cli.json in the isolated workspace (Read(**), read-only shell helpers; no git/find shell).",
                 ],
                 "work": [
@@ -508,7 +509,7 @@ def describe_payload(
                     DROID_PROMPT_FILE_DISPLAY,
                 ],
                 "safeNotes": [
-                    "Runs in an isolated temporary workspace (detached git worktree or directory copy).",
+                    SAFE_WORKSPACE_SYNC_NOTE,
                     "No --auto, --use-spec, or --skip-permissions-unsafe in safe mode.",
                     "Uses a read-only safety prompt; --isolation none is rejected for Droid safe mode.",
                 ],
@@ -529,7 +530,7 @@ def describe_payload(
             "codex": {
                 "safe": codex_safe_argv,
                 "safeNotes": [
-                    "Runs in an isolated temporary workspace (detached git worktree or directory copy).",
+                    SAFE_WORKSPACE_SYNC_NOTE,
                     "Always uses --sandbox read-only; safe sandbox is not configurable in v1.",
                     "Non-interactive: --ask-for-approval never.",
                 ],
@@ -543,7 +544,7 @@ def describe_payload(
             "claude": {
                 "safe": claude_safe_argv,
                 "safeNotes": [
-                    "Runs in an isolated temporary workspace (detached git worktree or directory copy).",
+                    SAFE_WORKSPACE_SYNC_NOTE,
                     "Uses Claude Code -p with --permission-mode plan, --strict-mcp-config, Read/Grep/Glob, and selected read-only Bash tools.",
                     "Prompt is delivered on stdin; dry-run argv and manifests do not contain the prompt.",
                     "Delegate does not prove Claude hooks, plugins, or user settings are disabled; keep safe-mode work review-only.",
@@ -566,7 +567,7 @@ def describe_payload(
                     "<kimi-safe-prefixed-skill-review-prompt>",
                 ],
                 "safeNotes": [
-                    "Runs in an isolated temporary workspace (detached git worktree or directory copy).",
+                    SAFE_WORKSPACE_SYNC_NOTE,
                     "Prompt mode cannot be combined with Kimi --plan; Delegate uses a read-only safety prompt instead.",
                     "Kimi prompt mode auto-approves tool actions; the isolated workspace is the effective write boundary and the safety prompt is advisory.",
                     "No CLI workspace flag; Delegate sets subprocess cwd.",
@@ -772,7 +773,7 @@ def emit_command_help(topic: str | None, json_mode: bool, stdout: TextIO) -> int
 
 def emit_agent_help(stdout: TextIO) -> int:
     print(
-        """Use delegate for bounded execution tasks only.
+        f"""Use delegate for bounded execution tasks only.
 
 Good defaults:
   delegate cursor work "Implement the scoped task; report changed files and tests."
@@ -787,18 +788,21 @@ Good defaults:
   delegate kimi work "Implement the scoped task; report changed files and tests."
 
 Kimi:
+  - {SAFE_WORKSPACE_SYNC_NOTE}
   - Model selection uses kimi.defaultModel in config or optional JSON input model; no CLI model alias in v1.
   - Reasoning effort is unsupported for Kimi in v1.
   - No CLI workspace flag; Delegate sets subprocess cwd.
 
 Codex:
+  - {SAFE_WORKSPACE_SYNC_NOTE}
   - Model selection uses codex.defaultModel in config or optional JSON input model; no CLI model alias in v1.
   - Codex profile (codex.profile) is config-only; run input JSON must not include profile.
 
 Claude:
   - Uses Claude Code headless mode: claude -p with prompt delivered on stdin.
-  - Safe mode runs in an isolated temporary workspace with --permission-mode plan,
-    --strict-mcp-config, Read/Grep/Glob, and selected read-only Bash tools.
+  - {SAFE_WORKSPACE_SYNC_NOTE}
+  - Claude safe mode runs with --permission-mode plan, --strict-mcp-config,
+    Read/Grep/Glob, and selected read-only Bash tools.
     Delegate does not currently prove that Claude Code hooks, plugins, user
     settings, or other non-MCP customization surfaces are disabled.
   - Work mode uses claude.workPermissionMode, or bypassPermissions only when
@@ -806,12 +810,15 @@ Claude:
   - Reasoning effort maps to Claude Code --effort (low, medium, high, xhigh, max).
 
 Droid modes:
-  - Droid safe mode remains read-only in an isolated temporary workspace: no --auto, --use-spec, or unsafe skip.
+  - {SAFE_WORKSPACE_SYNC_NOTE}
+  - Droid safe mode remains read-only: no --auto, --use-spec, or unsafe skip.
   - Uses Factory Droid --skip-permissions-unsafe, not --auto high.
   - Work mode is intentionally no-prompt; use only for bounded tasks in workspaces you trust.
+  - --reasoning-effort requires a resolved Droid model alias from droid.models.
 
 Cursor safe mode:
-  - Uses default Cursor Agent behavior in an isolated temporary workspace, not plan/ask mode.
+  - {SAFE_WORKSPACE_SYNC_NOTE}
+  - Uses default Cursor Agent behavior, not plan/ask mode.
   - The child runs in the isolated copy; tracked runs may still write .delegate metadata in the source workspace.
 
 Rules for agents:

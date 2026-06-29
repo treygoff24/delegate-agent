@@ -284,7 +284,11 @@ def build_snapshot(
         report_path = completion_report_path(ctx.run_id)
         snapshot["completionReport"] = {
             "path": report_path,
-            "command": run_registry.run_output_command(ctx.alias, completion_report=True),
+            "command": run_registry.run_output_command(
+                ctx.alias,
+                completion_report=True,
+                cwd=ctx.source_cwd,
+            ),
         }
     if extra is not None:
         _merge_extra(snapshot, extra)
@@ -389,9 +393,10 @@ def emit_bounded_text_summary(
             print("commit policy: violated (--forbid-commit)", file=stdout)
         if extra.get("commitPolicyUnverified") is True:
             print("commit policy: unverified (--forbid-commit)", file=stdout)
-    print(f"snapshot: {run_registry.snapshot_command(ctx.alias)}", file=stdout)
+    print(f"snapshot: {run_registry.snapshot_command(ctx.alias, cwd=ctx.source_cwd)}", file=stdout)
     print(
-        f"completion report: {run_registry.run_output_command(ctx.alias, completion_report=True)}",
+        "completion report: "
+        f"{run_registry.run_output_command(ctx.alias, completion_report=True, cwd=ctx.source_cwd)}",
         file=stdout,
     )
     if ctx.execution_cwd and (lifecycle == "temporary" or lifecycle == "persistent"):
@@ -434,13 +439,15 @@ def completion_json_payload(
         "executionCwd": ctx.execution_cwd,
         "workspaceKind": ctx.workspace_kind,
         "durationMs": duration_ms,
-        "snapshotCommand": run_registry.snapshot_command(ctx.alias),
+        "snapshotCommand": run_registry.snapshot_command(ctx.alias, cwd=ctx.source_cwd),
         "stdoutBytes": stdout_bytes,
         "stderrBytes": stderr_bytes,
     }
     if completion_report_written:
         payload["completionReportCommand"] = run_registry.run_output_command(
-            ctx.alias, completion_report=True
+            ctx.alias,
+            completion_report=True,
+            cwd=ctx.source_cwd,
         )
         payload["completionReportPath"] = completion_report_path(ctx.run_id)
     if ctx.auth_profile is not None:
@@ -661,7 +668,7 @@ def _emit_progress_started(ctx: RunContext, stderr: TextIO) -> None:
     print(
         "delegate: run started "
         f"alias={ctx.alias} handle={ctx.alias} "
-        f"snapshot={run_registry.snapshot_command(ctx.alias)!r}",
+        f"snapshot={run_registry.snapshot_command(ctx.alias, cwd=ctx.source_cwd)!r}",
         file=stderr,
         flush=True,
     )

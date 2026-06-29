@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import TextIO
 
 from delegate_agent import config as delegate_config
-from delegate_agent import profiles, reasoning
+from delegate_agent import profiles, reasoning, safe_workspace
 from delegate_agent import runner as delegate_runner
 from delegate_agent.argv_builders import (
     SAFE_REVIEW_PREFIX_BY_ENGINE,
@@ -253,6 +253,45 @@ def effective_prompt(
     return prompt
 
 
+def _safe_dirty_tree_note(
+    resolved: ResolvedWorkspace,
+    mode: str,
+    isolation_context: IsolationContext | None,
+) -> str | None:
+    if mode != MODE_SAFE or resolved.kind != "git":
+        return None
+    if isolation_context is None or isolation_context.effective_isolation != "worktree":
+        return None
+    git_root = isolation_context.source_git_root
+    if git_root is None or not safe_workspace.git_head_exists(git_root):
+        return None
+    # ponytail: one bounded git status probe per safe review; cache if this ever shows up hot.
+    changed = safe_workspace.changed_files_vs_head(git_root)
+    if not changed:
+        return None
+    shown = [f"`{path}`" for path in changed[:20]]
+    remaining = len(changed) - len(shown)
+    if remaining > 0:
+        shown.append(f"+{remaining} more")
+    return (
+        f"Note: {len(changed)} file(s) have uncommitted/untracked changes synced into "
+        f"this review copy: {', '.join(shown)}. Run `git diff HEAD` and check "
+        "untracked files in the workspace to see them."
+    )
+
+
+def _append_safe_dirty_tree_note(
+    prompt: str,
+    resolved: ResolvedWorkspace,
+    mode: str,
+    isolation_context: IsolationContext | None,
+) -> str:
+    note = _safe_dirty_tree_note(resolved, mode, isolation_context)
+    if note is None:
+        return prompt
+    return f"{prompt}\n\n{note}"
+
+
 def _validate_forbid_commit(
     *,
     forbid_commit: bool,
@@ -266,10 +305,24 @@ def _validate_forbid_commit(
             "invalid_option_combination",
             "--forbid-commit requires work mode with persistent worktree isolation.",
         )
+    source_workspace = (
+        isolation_context.source_workspace
+        if isolation_context is not None
+        else "the selected workspace"
+    )
+    if isolation_context is not None and isolation_context.source_git_root is None:
+        raise DelegateError(
+            "invalid_option_combination",
+            "--forbid-commit needs worktree isolation, which requires a Git workspace; "
+            f"{source_workspace} is not a Git repo, so no-commit enforcement isn't "
+            "available here. Omit --forbid-commit (the child may commit), or run "
+            "from a Git workspace.",
+        )
     if isolation_context is None or isolation_context.isolation_lifecycle != "persistent":
         raise DelegateError(
             "invalid_option_combination",
-            "--forbid-commit requires --isolation worktree so Delegate can enforce the policy.",
+            "--forbid-commit requires --isolation worktree so Delegate can enforce "
+            "the policy — add --isolation worktree, or omit --forbid-commit.",
         )
 
 
@@ -824,6 +877,7 @@ def _build_request_for_workspace(
     forbid_commit: bool,
     auth_profile_override: str | None,
 ) -> Request:
+    prompt = _append_safe_dirty_tree_note(prompt, resolved, mode, isolation_context)
     cache = (
         reasoning.load_reasoning_capability_cache(resolved.path)
         if requested_effort is not None

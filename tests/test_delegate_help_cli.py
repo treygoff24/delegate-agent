@@ -410,6 +410,28 @@ class KimiHelpTests(HelpCliTestBase):
         self.assertIn("kimi", payload)
         self.assertEqual(payload["kimi"]["binary"], self.delegate.DEFAULT_CONFIG["kimi"]["binary"])
 
+    def test_safe_workspace_sync_note_is_shared_across_help_surfaces(self):
+        note = self.delegate.command_help.SAFE_WORKSPACE_SYNC_NOTE
+        for command in ("cursor", "kimi", "codex", "claude", "droid"):
+            with self.subTest(command=command):
+                code, out, _err = self.run_main([command, "--help"])
+                self.assertEqual(code, self.delegate.EXIT_OK)
+                self.assertIn(note, out)
+                if command == "droid":
+                    self.assertIn("--reasoning-effort requires a resolved Droid model alias", out)
+
+        code, out, _err = self.run_main(["--json", "describe"])
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        payload = json.loads(out)
+        for command in ("cursor", "kimi", "codex", "claude", "droid"):
+            with self.subTest(describe=command):
+                self.assertIn(note, payload["modeMapping"][command]["safeNotes"])
+
+        code, out, _err = self.run_main(["agent-help"])
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertIn(note, out)
+        self.assertIn("--reasoning-effort requires a resolved Droid model alias", out)
+
 
 if __name__ == "__main__":
     unittest.main()

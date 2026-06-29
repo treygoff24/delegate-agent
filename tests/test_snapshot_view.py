@@ -59,14 +59,17 @@ class SnapshotViewTests(unittest.TestCase):
         self.assertEqual(view["effectiveStatus"], "stale")
         self.assertEqual(view["status"], "stale")
         self.assertEqual(view["staleReason"], "missing_pid")
-        self.assertIn(f"delegate snapshot {alias}", view["snapshotCommand"])
+        self.assertEqual(
+            view["snapshotCommand"],
+            run_registry.snapshot_command(alias, cwd=str(workspace)),
+        )
         self.assertIn(
-            f"delegate run-output {alias} --completion-report",
+            run_registry.run_output_command(alias, completion_report=True, cwd=str(workspace)),
             view["nextActions"],
         )
         self.assertEqual(
             view["completionReport"]["command"],
-            f"delegate run-output {alias} --completion-report",
+            run_registry.run_output_command(alias, completion_report=True, cwd=str(workspace)),
         )
 
     def test_merge_snapshot_view_emits_failure_and_metadata_fields(self):

@@ -15,6 +15,41 @@ from delegate_agent import safe_workspace
 
 
 class SafeWorkspaceIsolationTests(CommandTestBase):
+    def make_dirty_repo(self):
+        repo = make_git_repo(with_commit=True)
+        self.addCleanup(repo.cleanup)
+        root = Path(repo.name)
+        tracked = root / "tracked.txt"
+        tracked.write_text("base\n", encoding="utf-8")
+        (root / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", repo.name, "add", "tracked.txt", ".gitignore"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                repo.name,
+                "-c",
+                "user.name=Delegate Test",
+                "-c",
+                "user.email=delegate-test@example.com",
+                "commit",
+                "-m",
+                "tracked",
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        tracked.write_text("dirty\n", encoding="utf-8")
+        (root / "notes.txt").write_text("local-only\n", encoding="utf-8")
+        (root / "ignored.txt").write_text("secret\n", encoding="utf-8")
+        return repo
+
     def test_cursor_safe_dry_run_reports_isolation(self):
         request = self.build_git_request(
             "cursor",
@@ -173,6 +208,82 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
                     isolated_workspace=worktree_path,
                     temp_base=temp_base,
                 )
+
+    def test_git_safe_workspace_syncs_tracked_and_untracked_changes(self):
+        repo = self.make_dirty_repo()
+
+        worktree_path, temp_base = self.delegate.create_git_safe_workspace(repo.name)
+        try:
+            isolated = Path(worktree_path)
+            self.assertEqual((isolated / "tracked.txt").read_text(encoding="utf-8"), "dirty\n")
+            self.assertEqual((isolated / "notes.txt").read_text(encoding="utf-8"), "local-only\n")
+            self.assertFalse((isolated / "ignored.txt").exists())
+        finally:
+            self.delegate.cleanup_safe_isolated_workspace(
+                git_root=repo.name,
+                isolated_workspace=worktree_path,
+                temp_base=temp_base,
+            )
+
+    def test_changed_files_vs_head_lists_tracked_and_untracked_non_ignored(self):
+        repo = self.make_dirty_repo()
+
+        self.assertEqual(
+            safe_workspace.changed_files_vs_head(repo.name),
+            ("tracked.txt", "notes.txt"),
+        )
+
+    def test_safe_dirty_tree_note_reaches_prompt_transport(self):
+        repo = self.make_dirty_repo()
+        workspace = self.delegate.ResolvedWorkspace(repo.name, "git")
+        iso_ctx = self.delegate.build_isolation_context(
+            source_workspace=repo.name,
+            resolved_isolation="auto",
+            engine="codex",
+            mode="safe",
+            source_git_root=repo.name,
+        )
+
+        request = self.delegate.build_request(
+            "codex",
+            "safe",
+            None,
+            workspace,
+            "review",
+            self.delegate.DEFAULT_CONFIG,
+            dry_run=False,
+            isolation_context=iso_ctx,
+        )
+
+        self.assertIn("2 file(s) have uncommitted/untracked changes", request.stdin_text)
+        self.assertIn("`tracked.txt`", request.stdin_text)
+        self.assertIn("`notes.txt`", request.stdin_text)
+        self.assertIn("git diff HEAD", request.stdin_text)
+
+    def test_safe_clean_tree_omits_dirty_tree_note(self):
+        repo = make_git_repo(with_commit=True)
+        self.addCleanup(repo.cleanup)
+        workspace = self.delegate.ResolvedWorkspace(repo.name, "git")
+        iso_ctx = self.delegate.build_isolation_context(
+            source_workspace=repo.name,
+            resolved_isolation="auto",
+            engine="codex",
+            mode="safe",
+            source_git_root=repo.name,
+        )
+
+        request = self.delegate.build_request(
+            "codex",
+            "safe",
+            None,
+            workspace,
+            "review",
+            self.delegate.DEFAULT_CONFIG,
+            dry_run=False,
+            isolation_context=iso_ctx,
+        )
+
+        self.assertNotIn("uncommitted/untracked changes synced", request.stdin_text or "")
 
     def test_create_git_safe_workspace_reports_worktree_timeout(self):
         timeout = subprocess.CompletedProcess(

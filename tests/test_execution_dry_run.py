@@ -129,6 +129,62 @@ class ExecutionDryRunTests(ExecutionTestBase):
                     io.StringIO(""),
                 )
         self.assertEqual(ctx.exception.error, "invalid_option_combination")
+        self.assertIn("not a Git repo", ctx.exception.message)
+
+    def test_git_forbid_commit_without_worktree_names_fix(self):
+        with tempfile.TemporaryDirectory() as repo_dir:
+            subprocess.run(
+                ["git", "-C", repo_dir, "init"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            parsed = self.delegate.parse_cli(
+                [
+                    "--cwd",
+                    repo_dir,
+                    "--isolation",
+                    "none",
+                    "--json",
+                    "dry-run",
+                    "cursor",
+                    "work",
+                    "--forbid-commit",
+                    "fix",
+                ]
+            )
+            with self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.delegate.request_from_parsed(
+                    parsed,
+                    self.delegate.DEFAULT_CONFIG,
+                    io.StringIO(""),
+                )
+        self.assertEqual(ctx.exception.error, "invalid_option_combination")
+        self.assertIn("add --isolation worktree, or omit --forbid-commit", ctx.exception.message)
+
+    def test_codex_reasoning_without_model_names_default_model_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parsed = self.delegate.parse_cli(
+                [
+                    "--cwd",
+                    tmp,
+                    "--json",
+                    "dry-run",
+                    "codex",
+                    "safe",
+                    "--reasoning-effort",
+                    "high",
+                    "review",
+                ]
+            )
+            with self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.delegate.request_from_parsed(
+                    parsed,
+                    self.delegate.DEFAULT_CONFIG,
+                    io.StringIO(""),
+                )
+        self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
+        self.assertIn("codex.defaultModel", ctx.exception.message)
 
     def test_forbid_commit_rejects_safe_mode(self):
         with tempfile.TemporaryDirectory() as tmp:
