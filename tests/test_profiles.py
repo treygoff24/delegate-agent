@@ -272,9 +272,13 @@ class ProfileConfigAndRedactionTests(unittest.TestCase):
                 self.assertEqual(ctx.exception.error, "secret_in_profile_env")
 
     def test_key_aware_redaction_masks_secret_keyed_values(self):
+        # Build the secret-shaped sample at runtime so no literal token lands in
+        # the tree; keeps release-surface gitleaks scans clean (see .gitleaksignore).
+        # Masking here is key-driven, so the value content is otherwise immaterial.
+        openai_key = "sk-proj-" + "0123456789ab"
         redacted = redaction.redact_env_map(
             {
-                "OPENAI_API_KEY": "sk-proj-123456789",
+                "OPENAI_API_KEY": openai_key,
                 "APIKEY": "plain-secret",
                 "DB_PASSWD": "secret",
                 "CODEX_HOME": "/tmp/codex",
