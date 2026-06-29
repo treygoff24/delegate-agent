@@ -130,6 +130,8 @@ $EDITOR /tmp/delegate-task.json
 delegate --json run --input-json /tmp/delegate-task.json
 ```
 
+For Codex fan-outs that must return machine-parseable records, add `--output-schema` (or JSON `outputSchema`); Delegate suppresses completion-report injection so the schema owns the final message.
+
 Reasoning effort is provider-aware. Unsupported combinations fail before launch. It changes only the requested model thinking depth/cost/latency; it does not change safe/work mode, sandboxing, approvals, or edit capability. Codex/Droid validate effort against a resolved model capability table, Cursor maps effort to configured model selection, and Claude maps directly to Claude Code `--effort` (`low`, `medium`, `high`, `xhigh`, `max`). For example, after configuring `codex.defaultModel`:
 
 ```bash

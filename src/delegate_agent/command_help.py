@@ -105,6 +105,11 @@ _REASONING_EFFORT_OPTION = OptionSpec(
     "LEVEL",
     "Request model-specific reasoning depth; unsupported model/level pairs fail closed.",
 )
+_OUTPUT_SCHEMA_OPTION = OptionSpec(
+    "--output-schema",
+    "FILE",
+    "Codex-only JSON Schema for the final message; also suppresses the completion-report instruction.",
+)
 _PROGRESS_OPTION = OptionSpec(
     "--progress",
     None,
@@ -207,11 +212,12 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         usage=(
             "delegate [--json] [--isolation auto|none|worktree] "
             "codex {safe,work} [--reasoning-effort LEVEL] [--progress] "
-            "[--forbid-commit] [--prompt-file PATH] [prompt...]",
+            "[--output-schema FILE] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         ),
         arguments=(_MODE_ARG, _PROMPT_ARG),
         options=(
             _REASONING_EFFORT_OPTION,
+            _OUTPUT_SCHEMA_OPTION,
             _PROGRESS_OPTION,
             _NO_PROGRESS_OPTION,
             _FORBID_COMMIT_OPTION,
@@ -230,6 +236,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "Reasoning effort is validated against the resolved model and emitted as a Codex "
             "config override; --reasoning-effort therefore requires codex.defaultModel "
             "(or a run-input model) to be set.",
+            "--output-schema resolves relative paths from the launch cwd and is native Codex "
+            "schema enforcement for the final message.",
             "codex.profile is a Codex CLI config overlay; top-level profiles selects "
             "Delegate-injected auth/env.",
         ),
@@ -314,7 +322,10 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         summary="Resolve a cursor/codex/droid/kimi/claude invocation and print the planned argv without running it.",
         usage=(
             "delegate [--json] [--isolation auto|none|worktree] "
-            "dry-run {cursor,codex,kimi,claude} {safe,work} [--reasoning-effort LEVEL] "
+            "dry-run {cursor,kimi,claude} {safe,work} [--reasoning-effort LEVEL] "
+            "[--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+            "delegate [--json] [--isolation auto|none|worktree] "
+            "dry-run codex {safe,work} [--reasoning-effort LEVEL] [--output-schema FILE] "
             "[--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
             "delegate [--json] [--isolation auto|none|worktree] "
             "dry-run droid MODEL_ALIAS {safe,work} [--reasoning-effort LEVEL] "
@@ -326,6 +337,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         options=(
             _REASONING_EFFORT_OPTION,
+            _OUTPUT_SCHEMA_OPTION,
             _PROGRESS_OPTION,
             _NO_PROGRESS_OPTION,
             _FORBID_COMMIT_OPTION,
@@ -339,6 +351,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         notes=(
             "dry-run shares the full engine grammar but launches no child process.",
+            "--output-schema is accepted only for codex dry-runs.",
             "Reasoning effort is resolved from config/cache/bundled capabilities without invoking child binaries.",
         ),
         see_also=("cursor", "codex", "droid", "kimi", "claude", "describe"),
@@ -359,7 +372,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         examples=("delegate run --input-json task.json",),
         notes=(
             "Accepted JSON keys: engine, mode, model, cwd, prompt, isolation, "
-            "reasoningEffort, progress, forbidCommit.",
+            "reasoningEffort, outputSchema, progress, forbidCommit.",
             "Use this for long prompts or programmatic invocation.",
         ),
         see_also=("cursor", "codex", "droid", "claude", "agent-help"),
@@ -848,12 +861,12 @@ def render_overview_text() -> str:
     usage_lines = [
         f"delegate [--cwd PATH] [--json] {iso} cursor {{safe,work}} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} droid MODEL_ALIAS {{safe,work}} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} codex {{safe,work}} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} codex {{safe,work}} [--reasoning-effort LEVEL] [--output-schema FILE] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} claude {{safe,work}} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} kimi {{safe,work}} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} dry-run cursor {{safe,work}} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} dry-run droid MODEL_ALIAS {{safe,work}} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} dry-run codex {{safe,work}} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} dry-run codex {{safe,work}} [--reasoning-effort LEVEL] [--output-schema FILE] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} dry-run claude {{safe,work}} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} dry-run kimi {{safe,work}} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} run --input-json FILE",

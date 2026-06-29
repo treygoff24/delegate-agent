@@ -489,9 +489,14 @@ def parse_modeless_engine(
     # prompt text (`cursor work explain --help`).
     if len(rest) >= 2 and command_help.is_help_token(rest[1]):
         return help_command(json_mode, topic)
-    prompt_file, reasoning_effort, progress_intent, forbid_commit, prompt_parts = parse_prompt_tail(
-        rest[1:]
-    )
+    (
+        prompt_file,
+        output_schema,
+        reasoning_effort,
+        progress_intent,
+        forbid_commit,
+        prompt_parts,
+    ) = parse_prompt_tail(rest[1:])
     return ParsedCommand(
         engine,
         global_options=GlobalOptions(
@@ -507,6 +512,7 @@ def parse_modeless_engine(
             mode=mode,
             prompt_parts=prompt_parts,
             prompt_file=prompt_file,
+            output_schema=output_schema,
             reasoning_effort=reasoning_effort,
             progress_intent=progress_intent,
             forbid_commit=forbid_commit,
@@ -550,9 +556,14 @@ def parse_droid(
     # Help wins after the mode, before prompt capture: `droid x safe --help`.
     if len(rest) >= 3 and command_help.is_help_token(rest[2]):
         return help_command(json_mode, topic)
-    prompt_file, reasoning_effort, progress_intent, forbid_commit, prompt_parts = parse_prompt_tail(
-        rest[2:]
-    )
+    (
+        prompt_file,
+        output_schema,
+        reasoning_effort,
+        progress_intent,
+        forbid_commit,
+        prompt_parts,
+    ) = parse_prompt_tail(rest[2:])
     return ParsedCommand(
         "droid",
         global_options=GlobalOptions(
@@ -569,6 +580,7 @@ def parse_droid(
             model_alias=model_alias,
             prompt_parts=prompt_parts,
             prompt_file=prompt_file,
+            output_schema=output_schema,
             reasoning_effort=reasoning_effort,
             progress_intent=progress_intent,
             forbid_commit=forbid_commit,
@@ -632,8 +644,9 @@ def parse_dry_run(
 
 def parse_prompt_tail(
     rest: list[str],
-) -> tuple[str | None, str | None, str | None, bool, list[str]]:
+) -> tuple[str | None, str | None, str | None, str | None, bool, list[str]]:
     prompt_file: str | None = None
+    output_schema: str | None = None
     reasoning_effort: str | None = None
     progress_intent: str | None = None
     forbid_commit = False
@@ -652,6 +665,14 @@ def parse_prompt_tail(
             if i + 1 >= len(rest):
                 raise DelegateError("missing_prompt_file", "--prompt-file requires a path.")
             prompt_file = rest[i + 1]
+            i += 2
+            continue
+        if token == "--output-schema":
+            if output_schema is not None:
+                raise DelegateError("invalid_output_schema", "Only one --output-schema is allowed.")
+            if i + 1 >= len(rest):
+                raise DelegateError("missing_output_schema", "--output-schema requires a path.")
+            output_schema = rest[i + 1]
             i += 2
             continue
         if token == "--reasoning-effort":
@@ -720,11 +741,22 @@ def parse_prompt_tail(
         raise DelegateError(
             "ambiguous_prompt_source", "--prompt-file must appear before direct prompt text."
         )
+    if "--output-schema" in prompt_parts:
+        raise DelegateError(
+            "invalid_output_schema", "--output-schema must appear before direct prompt text."
+        )
     if has_misplaced_global_option(prompt_parts):
         raise_misplaced_global_option(
             "Global options must appear before the subcommand; use --prompt-file for literal flag text.",
         )
-    return prompt_file, reasoning_effort, progress_intent, forbid_commit, prompt_parts
+    return (
+        prompt_file,
+        output_schema,
+        reasoning_effort,
+        progress_intent,
+        forbid_commit,
+        prompt_parts,
+    )
 
 
 def parse_snapshot(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:

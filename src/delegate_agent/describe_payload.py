@@ -323,6 +323,10 @@ def _policy_field_support_matrix() -> JsonObject:
     }
 
 
+def _engine_capabilities() -> JsonObject:
+    return {engine: {"outputSchema": engine == "codex"} for engine in KNOWN_ENGINES}
+
+
 def _claude_runtime_policy(config: JsonObject, mode: str) -> JsonObject:
     policy = {key: False for key in delegate_config.POLICY_MODE_KEYS}
     if mode == MODE_WORK:
@@ -416,6 +420,7 @@ def describe_payload(
         "engines": list(KNOWN_ENGINES),
         "policyProfiles": list(delegate_config.POLICY_PROFILES),
         "policyFieldSupport": _policy_field_support_matrix(),
+        "engineCapabilities": _engine_capabilities(),
         "effectivePolicy": {
             "codex": {
                 "safe": codex_safe_policy,

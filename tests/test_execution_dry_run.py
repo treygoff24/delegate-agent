@@ -1,3 +1,4 @@
+import contextlib
 import io
 import json
 import os
@@ -64,6 +65,47 @@ class ExecutionDryRunTests(ExecutionTestBase):
             )
             payload = self.delegate.dry_run_payload(request)
         self.assertTrue(payload["progressRequested"])
+
+    def test_dry_run_codex_output_schema_uses_launch_cwd_absolute_path(self):
+        with (
+            tempfile.TemporaryDirectory() as launch_dir,
+            tempfile.TemporaryDirectory() as repo_dir,
+        ):
+            subprocess.run(
+                ["git", "-C", repo_dir, "init"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            nested = Path(repo_dir) / "nested"
+            nested.mkdir()
+            schema = Path(launch_dir) / "schema.json"
+            schema.write_text("{}", encoding="utf-8")
+            with contextlib.chdir(launch_dir):
+                parsed = self.delegate.parse_cli(
+                    [
+                        "--cwd",
+                        str(nested),
+                        "--json",
+                        "dry-run",
+                        "codex",
+                        "safe",
+                        "--output-schema",
+                        "schema.json",
+                        "review",
+                    ]
+                )
+                request = self.delegate.request_from_parsed(
+                    parsed,
+                    self.delegate.DEFAULT_CONFIG,
+                    io.StringIO(""),
+                )
+            payload = self.delegate.dry_run_payload(request)
+        argv = payload["argv"]
+        schema_index = argv.index("--output-schema")
+        self.assertGreater(schema_index, argv.index("exec"))
+        self.assertEqual(argv[schema_index + 1], str(schema.resolve()))
+        self.assertEqual(argv[argv.index("--cd") + 1], str(Path(repo_dir).resolve()))
 
     def test_dry_run_reports_forbid_commit_policy_for_persistent_worktree(self):
         with (

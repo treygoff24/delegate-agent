@@ -224,9 +224,24 @@ with `--tail` and `--max-chars`, may print very large output, and includes
 `rawOutputBytes` in JSON metadata so callers can see how much raw output was
 returned.
 
-If your prompt requires an exact structured final answer such as bare JSON, use
-`--no-completion-report` today so Delegate does not inject completion-report
-instructions into the child prompt.
+## Structured / JSON-only final output
+
+For a bare machine-parseable final message on Codex, use `--output-schema FILE`
+(codex-only). OpenAI enforces the JSON Schema on Codex's final message; Delegate
+suppresses the completion-report prompt injection for that run, so the report
+will not precede or wrap your payload. Relative schema paths resolve against the
+launch cwd, like `--prompt-file`.
+
+For Cursor, Droid, Kimi, and Claude there is no native schema enforcement.
+Embed the schema in the prompt and parse the final message yourself. Delegate
+still injects completion-report instructions unless you pass
+`--no-completion-report`; when present, the report precedes any operator-requested
+payload (payload-last ordering).
+
+```bash
+delegate --json codex safe --output-schema findings.schema.json "Audit auth handlers."
+delegate --json cursor safe --no-completion-report "Return bare JSON matching the schema in the prompt."
+```
 
 ## Worktree cleanup refused
 

@@ -25,8 +25,8 @@ delegate cursor work [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [
 delegate droid MODEL_ALIAS safe [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 delegate droid MODEL_ALIAS work [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 
-delegate codex safe [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate codex work [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate codex safe [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [--output-schema FILE] [prompt...]
+delegate codex work [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [--output-schema FILE] [prompt...]
 
 delegate claude safe [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 delegate claude work [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
@@ -66,6 +66,28 @@ profile detection for launches, `dry-run`, `run --input-json`, and
 `delegate profiles`. Unknown names fail with `unknown_profile`. It is rejected
 for run-inspection and worktree-management commands where no child auth/env
 selection happens.
+
+### `delegate codex`
+
+Usage:
+
+```bash
+delegate [--json] [--isolation auto|none|worktree] codex {safe,work} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [--output-schema FILE] [prompt...]
+```
+
+- Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff. Codex safe always uses `--sandbox read-only`. Under `--isolation auto`, Codex safe is the only safe harness that may opt out with `--isolation none`, because Codex still keeps its read-only sandbox active.
+- Prompt text is delivered on stdin to `codex exec`; dry-run argv and tracked run manifests do not contain the prompt.
+- `--reasoning-effort` maps to a Codex `model_reasoning_effort` config override after the model is resolved.
+- `--output-schema FILE` is **codex-only**. Cursor, Droid, Kimi, and Claude reject it. `FILE` is a path to a JSON Schema that OpenAI enforces on Codex's final message, for machine-parseable output in fan-outs and JSON run input. Relative paths resolve against the process launch cwd, the same rule as `--prompt-file`. When set, Delegate suppresses the completion-report prompt injection for that run so the schema owns the whole final message. Missing or unreadable files fail fast before launch.
+
+Examples:
+
+```bash
+delegate codex safe "Review this repo for regressions; report file/line/severity."
+delegate codex work "Implement the scoped task; report changed files and tests."
+delegate --json codex safe --output-schema findings.schema.json "Return one record per finding."
+delegate --isolation worktree codex work "Implement the feature in a persistent worktree."
+```
 
 ### `delegate claude`
 
@@ -205,6 +227,7 @@ Supported input keys:
   "reasoningEffort": "high",
   "progress": true,
   "forbidCommit": true,
+  "outputSchema": "/path/to/schema.json",
   "prompt": "Implement the scoped task and report changed files."
 }
 ```
@@ -217,6 +240,7 @@ Supported input keys:
 - `reasoningEffort`: optional non-empty effort string. It overrides provider `defaultReasoningEffort` for that JSON run.
 - `progress`: optional boolean. `true` enables parent progress heartbeats on stderr; `false` disables them even when `progress.enabled` is true in config. When omitted, config `progress.enabled` applies (default `false`).
 - `forbidCommit`: optional boolean. `true` requires `mode: "work"` with persistent worktree isolation and fails the run if the child creates commits.
+- `outputSchema`: optional path to a JSON Schema for Codex's final message. Codex-only; same semantics as `--output-schema`. Other engines fail with `unsupported_output_schema`.
 - `prompt`: required task prompt.
 
 `profile` is not accepted in run input JSON. Configure the Codex CLI config

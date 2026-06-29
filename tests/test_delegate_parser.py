@@ -118,6 +118,23 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(parsed.launch.prompt_file, "task.md")
         self.assertEqual(parsed.launch.prompt_parts, [])
 
+    def test_output_schema_before_prompt_text(self):
+        parsed = self.delegate.parse_cli(["codex", "safe", "--output-schema", "schema.json", "x"])
+        self.assertEqual(parsed.launch.output_schema, "schema.json")
+        self.assertEqual(parsed.launch.prompt_parts, ["x"])
+
+    def test_output_schema_duplicate_rejected(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(
+                ["codex", "safe", "--output-schema", "a.json", "--output-schema", "b.json", "x"]
+            )
+        self.assertEqual(ctx.exception.error, "invalid_output_schema")
+
+    def test_output_schema_requires_value(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(["codex", "safe", "--output-schema"])
+        self.assertEqual(ctx.exception.error, "missing_output_schema")
+
     def test_prompt_file_after_prompt_text_is_rejected(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:
             self.delegate.parse_cli(["cursor", "safe", "hello", "--prompt-file", "task.md"])

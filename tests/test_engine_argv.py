@@ -246,6 +246,27 @@ class EngineArgvTests(CommandTestBase):
         )
         self.assertNotIn("--model", argv)
 
+    def test_codex_output_schema_argv_after_exec(self):
+        policy = self.delegate.delegate_config.effective_policy(
+            self.delegate.DEFAULT_CONFIG,
+            engine="codex",
+            mode="safe",
+        )
+        argv = self.delegate.build_codex_argv(
+            self.delegate.DEFAULT_CONFIG["codex"],
+            "safe",
+            "/repo",
+            None,
+            "hello",
+            policy,
+            workspace_kind="git",
+            output_schema="/tmp/schema.json",
+        )
+        exec_index = argv.index("exec")
+        schema_index = argv.index("--output-schema")
+        self.assertGreater(schema_index, exec_index)
+        self.assertEqual(argv[schema_index + 1], "/tmp/schema.json")
+
     def test_codex_dry_run_model_null_is_allowed(self):
         request = self.build_git_request(
             "codex",
@@ -641,6 +662,63 @@ class EngineArgvTests(CommandTestBase):
         self.assertEqual(request.reasoning_effort_source, "input-json")
         self.assertIn('model_reasoning_effort="high"', request.argv)
 
+    def test_request_from_input_json_threads_output_schema(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            schema = Path(tmp) / "schema.json"
+            schema.write_text("{}", encoding="utf-8")
+            task = Path(tmp) / "task.json"
+            task.write_text(
+                json.dumps(
+                    {
+                        "engine": "codex",
+                        "mode": "safe",
+                        "cwd": tmp,
+                        "outputSchema": str(schema),
+                        "prompt": "review",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            parsed = self.delegate.ParsedCommand(
+                "run",
+                global_options=self.delegate.GlobalOptions(json_mode=True),
+                run_json=self.delegate.RunJsonOptions(str(task)),
+            )
+            request = self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+        self.assertEqual(request.output_schema, str(schema.resolve()))
+        schema_index = request.argv.index("--output-schema")
+        self.assertEqual(request.argv[schema_index + 1], str(schema.resolve()))
+        self.assertNotIn(
+            self.delegate.delegate_runner.COMPLETION_REPORT_SUFFIX.strip(), request.prompt
+        )
+        self.assertTrue(any("JSON-only final message" in warning for warning in request.warnings))
+
+    def test_request_from_input_json_rejects_output_schema_for_non_codex(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            schema = Path(tmp) / "schema.json"
+            schema.write_text("{}", encoding="utf-8")
+            task = Path(tmp) / "task.json"
+            task.write_text(
+                json.dumps(
+                    {
+                        "engine": "cursor",
+                        "mode": "safe",
+                        "cwd": tmp,
+                        "outputSchema": str(schema),
+                        "prompt": "review",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            parsed = self.delegate.ParsedCommand(
+                "run",
+                global_options=self.delegate.GlobalOptions(json_mode=True),
+                run_json=self.delegate.RunJsonOptions(str(task)),
+            )
+            with self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+        self.assertEqual(ctx.exception.error, "unsupported_output_schema")
+
     def test_input_json_effort_overrides_provider_default(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
         config["codex"]["defaultReasoningEffort"] = "medium"
@@ -942,6 +1020,10 @@ class EngineArgvTests(CommandTestBase):
     def test_describe_preserves_safe_read_only_modes(self):
         payload = self.delegate.describe_payload(self.delegate.DEFAULT_CONFIG, "embedded-default")
         self.assertIn("promptTransforms", payload)
+        self.assertTrue(payload["engineCapabilities"]["codex"]["outputSchema"])
+        for engine in ("cursor", "droid", "kimi", "claude"):
+            with self.subTest(engine=engine):
+                self.assertFalse(payload["engineCapabilities"][engine]["outputSchema"])
         self.assertIn("skill review", payload["promptTransforms"][0])
         cursor_safe = payload["modeMapping"]["cursor"]["safe"]
         self.assertNotIn("--mode=plan", cursor_safe)

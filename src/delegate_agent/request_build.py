@@ -70,9 +70,15 @@ RUN_INPUT_KEYS = {
     "prompt",
     "isolation",
     "reasoningEffort",
+    "outputSchema",
     "progress",
     "forbidCommit",
 }
+
+OUTPUT_SCHEMA_COMPLETION_REPORT_WARNING = (
+    "--output-schema enforces a JSON-only final message; completion-report instruction "
+    "suppressed for this run."
+)
 
 
 def load_config(
@@ -222,6 +228,50 @@ def validate_prompt(prompt: str) -> str:
     return prompt
 
 
+def resolve_output_schema(engine: str, output_schema: object) -> str | None:
+    if output_schema is None:
+        return None
+    if engine != "codex":
+        raise DelegateError(
+            "unsupported_output_schema",
+            "--output-schema/outputSchema is only supported by the codex engine; "
+            f"{engine} has no native schema enforcement.",
+        )
+    if not isinstance(output_schema, str) or not output_schema:
+        raise DelegateError("invalid_output_schema", "outputSchema must be a non-empty string.")
+    path = Path(output_schema).expanduser()
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    path = path.resolve()
+    if not path.exists():
+        raise DelegateError("output_schema_not_found", f"Output schema not found: {path}")
+    if not path.is_file():
+        raise DelegateError("invalid_output_schema", f"Output schema is not a file: {path}")
+    try:
+        with path.open("rb"):
+            pass
+    except OSError as exc:
+        raise DelegateError(
+            "invalid_output_schema", f"Output schema is not readable: {path}"
+        ) from exc
+    return str(path)
+
+
+def _completion_report_prompt_mode(
+    completion_report_mode: str,
+    output_schema: str | None,
+) -> tuple[str, tuple[str, ...]]:
+    if (
+        output_schema is not None
+        and completion_report_mode == delegate_config.COMPLETION_REPORT_MODE_MARKDOWN
+    ):
+        return (
+            delegate_config.COMPLETION_REPORT_MODE_NONE,
+            (OUTPUT_SCHEMA_COMPLETION_REPORT_WARNING,),
+        )
+    return completion_report_mode, ()
+
+
 def resolve_completion_report_mode(parsed: ParsedCommand, config: JsonObject) -> str:
     global_options = parsed.global_options
     if global_options.pass_through:
@@ -343,6 +393,7 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
             "--progress is incompatible with --pass-through.",
         )
     progress_initial_delay_sec, progress_interval_sec = resolve_progress_timing(config)
+    output_schema = resolve_output_schema(launch.engine, launch.output_schema)
     workspace = resolve_workspace(global_options.cwd)
     prompt = resolve_prompt(launch.prompt_parts, launch.prompt_file, stdin)
 
@@ -383,11 +434,15 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
     )
 
     completion_report_mode = resolve_completion_report_mode(parsed, config)
+    completion_report_prompt_mode, output_schema_warnings = _completion_report_prompt_mode(
+        completion_report_mode,
+        output_schema,
+    )
     prompt = effective_prompt(
         prompt,
         engine=launch.engine,
         mode=launch.mode,
-        completion_report_mode=completion_report_mode,
+        completion_report_mode=completion_report_prompt_mode,
     )
     return build_request(
         launch.engine,
@@ -406,6 +461,8 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         progress_interval_sec=progress_interval_sec,
         forbid_commit=launch.forbid_commit,
         auth_profile_override=global_options.auth_profile,
+        output_schema=output_schema,
+        warnings=output_schema_warnings,
     )
 
 
@@ -491,6 +548,7 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         raise DelegateError(
             "invalid_model", "cursor model override must match configured Composer model."
         )
+    output_schema = resolve_output_schema(str(engine), raw.get("outputSchema"))
 
     # Pre-read cwd and isolation from JSON for config discovery (already done in main() for
     # config loading, but re-validate and resolve here for the request).
@@ -548,11 +606,15 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
     )
 
     completion_report_mode = resolve_completion_report_mode(parsed, config)
+    completion_report_prompt_mode, output_schema_warnings = _completion_report_prompt_mode(
+        completion_report_mode,
+        output_schema,
+    )
     prompt = effective_prompt(
         validate_prompt(prompt),
         engine=str(engine),
         mode=str(mode),
-        completion_report_mode=completion_report_mode,
+        completion_report_mode=completion_report_prompt_mode,
     )
     return build_request(
         str(engine),
@@ -571,6 +633,8 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         progress_interval_sec=progress_interval_sec,
         forbid_commit=raw_forbid_commit,
         auth_profile_override=global_options.auth_profile,
+        output_schema=output_schema,
+        warnings=output_schema_warnings,
     )
 
 
@@ -592,6 +656,8 @@ def build_request(
     progress_interval_sec: float = delegate_runner.PROGRESS_HEARTBEAT_INTERVAL_SEC,
     forbid_commit: bool = False,
     auth_profile_override: str | None = None,
+    output_schema: str | None = None,
+    warnings: tuple[str, ...] = (),
 ) -> Request:
     if not isinstance(workspace, ResolvedWorkspace):
         raise TypeError(
@@ -604,6 +670,7 @@ def build_request(
         reasoning_effort,
         reasoning_effort_source=reasoning_effort_source,
     )
+    output_schema = resolve_output_schema(engine, output_schema)
 
     return _build_request_for_workspace(
         engine,
@@ -622,6 +689,8 @@ def build_request(
         progress_interval_sec=progress_interval_sec,
         forbid_commit=forbid_commit,
         auth_profile_override=auth_profile_override,
+        output_schema=output_schema,
+        warnings=warnings,
     )
 
 
@@ -741,6 +810,7 @@ def _codex_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         stream_capture=build.stream_capture,
         reasoning_capability=capability,
         prompt_transport=PROMPT_TRANSPORT_STDIN,
+        output_schema=build.output_schema,
     )
     return EngineRequestParts(
         model=model,
@@ -876,6 +946,8 @@ def _build_request_for_workspace(
     progress_interval_sec: float,
     forbid_commit: bool,
     auth_profile_override: str | None,
+    output_schema: str | None,
+    warnings: tuple[str, ...],
 ) -> Request:
     prompt = _append_safe_dirty_tree_note(prompt, resolved, mode, isolation_context)
     cache = (
@@ -895,6 +967,7 @@ def _build_request_for_workspace(
             requested_effort=requested_effort,
             effort_source=effort_source,
             cache=cache,
+            output_schema=output_schema,
         ),
     )
     return _apply_profile_resolution(
@@ -906,6 +979,7 @@ def _build_request_for_workspace(
             parts.argv,
             parts.model,
             model_alias=parts.model_alias,
+            output_schema=output_schema,
             dry_run=dry_run,
             workspace_kind=resolved.kind,
             isolation_context=isolation_context,
@@ -917,7 +991,7 @@ def _build_request_for_workspace(
             progress_initial_delay_sec=progress_initial_delay_sec,
             progress_interval_sec=progress_interval_sec,
             forbid_commit=forbid_commit,
-            warnings=parts.warnings,
+            warnings=(*warnings, *parts.warnings),
             stdin_text=parts.stdin_text,
             prompt_file_text=parts.prompt_file_text,
             prompt_transport=parts.prompt_transport,

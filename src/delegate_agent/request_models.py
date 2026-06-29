@@ -40,6 +40,7 @@ class LaunchOptions:
     model_alias: str | None = None
     prompt_parts: list[str] | None = None
     prompt_file: str | None = None
+    output_schema: str | None = None
     reasoning_effort: str | None = None
     progress_intent: str | None = None
     forbid_commit: bool = False
@@ -116,6 +117,7 @@ class Request:
     argv: list[str]
     model: str | None
     model_alias: str | None = None
+    output_schema: str | None = None
     dry_run: bool = False
     workspace_kind: str = "git"
     isolation_context: IsolationContext | None = None
@@ -167,3 +169,4 @@ class EngineBuildInput:
     requested_effort: str | None
     effort_source: str | None
     cache: JsonObject | None
+    output_schema: str | None = None
