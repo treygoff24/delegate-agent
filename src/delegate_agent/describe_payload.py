@@ -24,7 +24,7 @@ from delegate_agent.argv_builders import (
 )
 from delegate_agent.command_help import SAFE_WORKSPACE_SYNC_NOTE
 from delegate_agent.config import config_path
-from delegate_agent.constants import KNOWN_ENGINES, MODE_SAFE, MODE_WORK
+from delegate_agent.constants import KNOWN_ENGINES, MODE_SAFE, MODE_WORK, MODEL_SUMMARY_ENGINES
 from delegate_agent.errors import EXIT_OK, DelegateError
 from delegate_agent.json_types import JsonObject
 from delegate_agent.prompt_transport import (
@@ -252,7 +252,7 @@ def models_summary_payload(
     reasoning_aliases = reasoning.build_alias_reasoning_summaries(config, cache)
     aliases: list[JsonObject] = []
 
-    for engine in ("cursor", "codex", "claude", "grok", "kimi"):
+    for engine in MODEL_SUMMARY_ENGINES:
         section = config.get(engine)
         if not isinstance(section, dict):
             continue
@@ -346,22 +346,22 @@ def _engine_capabilities() -> JsonObject:
     return {engine: {"outputSchema": engine == "codex"} for engine in KNOWN_ENGINES}
 
 
-def _claude_runtime_policy(config: JsonObject, mode: str) -> JsonObject:
+def _runtime_policy(config: JsonObject, mode: str, engine: str, bypass_check) -> JsonObject:
     policy = {key: False for key in delegate_config.POLICY_MODE_KEYS}
+    if engine == "grok":
+        policy = delegate_config.effective_policy(config, engine=engine, mode=mode)
     if mode == MODE_WORK:
-        policy["bypassApprovalsAndSandbox"] = _claude_harness_bypass_enabled(
-            config,
-            mode,
-        )
+        policy = dict(policy)
+        policy["bypassApprovalsAndSandbox"] = bypass_check(config, mode)
     return policy
+
+
+def _claude_runtime_policy(config: JsonObject, mode: str) -> JsonObject:
+    return _runtime_policy(config, mode, "claude", _claude_harness_bypass_enabled)
 
 
 def _grok_runtime_policy(config: JsonObject, mode: str) -> JsonObject:
-    policy = delegate_config.effective_policy(config, engine="grok", mode=mode)
-    if mode == MODE_WORK:
-        policy = dict(policy)
-        policy["bypassApprovalsAndSandbox"] = _grok_harness_bypass_enabled(config, mode)
-    return policy
+    return _runtime_policy(config, mode, "grok", _grok_harness_bypass_enabled)
 
 
 def _codex_describe_argv(
@@ -666,6 +666,7 @@ def describe_payload(
                     SAFE_WORKSPACE_SYNC_NOTE,
                     "Uses Grok --prompt-file with Delegate temp prompt materialization; dry-run argv shows <prompt file>.",
                     "Safe mode uses Delegate isolated copy plus Grok read-only sandbox/permission controls; it does not use Grok plan mode.",
+                    "Grok safe mode disables web search by default; explicit policy.harness.grok.safe.webSearch=true re-enables network egress, and Delegate safe-mode isolation is filesystem-only.",
                     "The isolated workspace is the effective write boundary; Grok sandbox/permission flags are advisory defense-in-depth.",
                 ],
                 "work": grok_work_argv,

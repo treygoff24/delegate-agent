@@ -1089,6 +1089,23 @@ class EngineArgvTests(CommandTestBase):
         self.assertIn(self.delegate.PROMPT_FILE_DISPLAY, request.display_argv or [])
         self.assertNotIn("review task", request.display_argv or [])
 
+    def test_grok_reasoning_effort_reports_static_capability_source(self):
+        request = self.build_git_request(
+            "grok",
+            "safe",
+            None,
+            "/repo",
+            "review task",
+            self.delegate.DEFAULT_CONFIG,
+            dry_run=True,
+            reasoning_effort="high",
+        )
+        self.assertIn("--effort", request.argv)
+        self.assertIn("high", request.argv)
+        self.assertEqual(request.reasoning_capability_source, "static")
+        payload = self.delegate.dry_run_payload(request)
+        self.assertEqual(payload["reasoningCapabilitySource"], "static")
+
     def test_grok_work_harness_bypass_requires_harness_scoped_policy(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
         config["policy"]["profile"] = "external-sandbox"
@@ -1114,6 +1131,19 @@ class EngineArgvTests(CommandTestBase):
         )
         self.assertIn("bypassPermissions", request.argv)
         self.assertIn("--always-approve", request.argv)
+
+    def test_grok_work_bypass_also_requires_effective_policy_true(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        argv = self.delegate.build_grok_argv(
+            config["grok"],
+            "work",
+            "/repo",
+            None,
+            {},
+            allow_bypass_permissions=True,
+        )
+        self.assertNotIn("bypassPermissions", argv)
+        self.assertNotIn("--always-approve", argv)
 
     def test_grok_output_schema_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:

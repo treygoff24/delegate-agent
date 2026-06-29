@@ -65,7 +65,7 @@ TRANSPORT_CURSOR_MODEL_SELECTION = "cursor-model-selection"
 TRANSPORT_CLAUDE_EFFORT_FLAG = "claude-effort-flag"
 CLAUDE_NATIVE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 TRANSPORT_GROK_EFFORT_FLAG = "grok-effort-flag"
-GROK_NATIVE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+GROK_NATIVE_EFFORTS = CLAUDE_NATIVE_EFFORTS
 INSPECT_REASONING_DISCOVERY_HINT = (
     "Inspect `delegate --json models --summary` or "
     "`delegate --json capabilities` for reasoning-effort support."
@@ -214,6 +214,34 @@ def format_explicit_reasoning_effort_error(
     return " ".join(parts)
 
 
+def resolve_native_effort(
+    harness: str,
+    requested_effort: str | None,
+    *,
+    alias: str | None = None,
+    model: str | None = None,
+) -> str | None:
+    """Validate static native --effort values for harnesses that expose one."""
+    if requested_effort is None:
+        return None
+    profile = REASONING_PROFILES[harness]
+    supported = profile.static_efforts or ()
+    effort = normalize_effort(requested_effort)
+    if effort not in supported:
+        raise ReasoningCapabilityError(
+            "unsupported_reasoning_effort",
+            format_explicit_reasoning_effort_error(
+                harness=harness,
+                alias=alias,
+                model=model,
+                effort=effort,
+                supported=supported,
+                detail="does not support reasoning effort",
+            ),
+        )
+    return effort
+
+
 def resolve_claude_native_effort(
     requested_effort: str | None,
     *,
@@ -227,22 +255,7 @@ def resolve_claude_native_effort(
     ``resolve_reasoning_capability`` so user/cache model capability tables do
     not imply Claude model catalog support.
     """
-    if requested_effort is None:
-        return None
-    effort = normalize_effort(requested_effort)
-    if effort not in REASONING_PROFILES["claude"].static_efforts:
-        raise ReasoningCapabilityError(
-            "unsupported_reasoning_effort",
-            format_explicit_reasoning_effort_error(
-                harness="claude",
-                alias=alias,
-                model=model,
-                effort=effort,
-                supported=REASONING_PROFILES["claude"].static_efforts,
-                detail="does not support reasoning effort",
-            ),
-        )
-    return effort
+    return resolve_native_effort("claude", requested_effort, alias=alias, model=model)
 
 
 def resolve_grok_native_effort(
@@ -252,22 +265,7 @@ def resolve_grok_native_effort(
     model: str | None = None,
 ) -> str | None:
     """Validate Grok Build CLI native --effort values."""
-    if requested_effort is None:
-        return None
-    effort = normalize_effort(requested_effort)
-    if effort not in GROK_NATIVE_EFFORTS:
-        raise ReasoningCapabilityError(
-            "unsupported_reasoning_effort",
-            format_explicit_reasoning_effort_error(
-                harness="grok",
-                alias=alias,
-                model=model,
-                effort=effort,
-                supported=GROK_NATIVE_EFFORTS,
-                detail="does not support reasoning effort",
-            ),
-        )
-    return effort
+    return resolve_native_effort("grok", requested_effort, alias=alias, model=model)
 
 
 def _as_models_map(source: JsonValue) -> dict[str, JsonObject]:
@@ -599,9 +597,9 @@ def _grok_alias_reasoning_summary(grok: JsonObject) -> JsonObject:
     alias = _alias_key_for_default_model(default_model)
     payload: JsonObject = {
         "alias": alias,
-        "supported": list(GROK_NATIVE_EFFORTS),
-        "source": "native-static",
-        "transport": TRANSPORT_GROK_EFFORT_FLAG,
+        "supported": list(REASONING_PROFILES["grok"].static_efforts),
+        "source": "static",
+        "transport": REASONING_PROFILES["grok"].transport,
     }
     if isinstance(default_model, str) and default_model:
         payload["model"] = default_model
@@ -743,9 +741,9 @@ def build_reasoning_capabilities_payload(
         "models": {},
     }
     harnesses["grok"] = {
-        "transport": TRANSPORT_GROK_EFFORT_FLAG,
-        "source": "native-static",
-        "supported": list(GROK_NATIVE_EFFORTS),
+        "transport": REASONING_PROFILES["grok"].transport,
+        "source": "static",
+        "supported": list(REASONING_PROFILES["grok"].static_efforts),
         "models": {},
     }
     harnesses["kimi"] = {

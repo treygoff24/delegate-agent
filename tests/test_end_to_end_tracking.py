@@ -120,7 +120,7 @@ def make_codex_streaming_script(*, include_completion: bool = True) -> str:
 
 def make_grok_streaming_script(*, include_completion: bool = True) -> str:
     fixture = ROOT / "tests" / "fixtures" / "grok_streaming_json_smoke.jsonl"
-    _ = include_completion
+    stream_command = f"cat {fixture}\n" if include_completion else f"sed '$d' {fixture}\n"
     return (
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
@@ -133,7 +133,7 @@ def make_grok_streaming_script(*, include_completion: bool = True) -> str:
         "  fi\n"
         "  shift\n"
         "done\n"
-        f"cat {fixture}\n"
+        f"{stream_command}"
         f'printf "{STDERR_MARKER}\\n" >&2\n'
         'exit "${FAKE_EXIT:-0}"\n'
     )
@@ -937,6 +937,21 @@ class EndToEndTrackingTests(unittest.TestCase):
         report = self.run_cli(["run-output", alias, "--completion-report"])
         self.assertEqual(report.returncode, 0, report.stderr)
         self.assertIn("delegate grok fixture ok", report.stdout)
+
+    def test_tracked_grok_without_end_recovers_completion_report_from_stream(self):
+        self.write_fake_binaries(include_completion=False)
+        completed = self.run_cli(["grok", "safe", "Recover streamed Grok text."])
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        alias = parse_alias_from_bounded_stdout(completed.stdout)
+        run_id, run_path = self.lookup_run(alias)
+        self.assert_registry_files(run_id)
+
+        stdout_text = (run_path / "stdout.log").read_text(encoding="utf-8")
+        self.assertIn('"type":"text","data":"delegate"', stdout_text)
+        self.assertIn('"type":"text","data":" ok"', stdout_text)
+        self.assertNotIn('"type":"end"', stdout_text)
+        report = (run_path / "completion-report.md").read_text(encoding="utf-8")
+        self.assertIn("delegate grok fixture ok", report)
 
 
 if __name__ == "__main__":

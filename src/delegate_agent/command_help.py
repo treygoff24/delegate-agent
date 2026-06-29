@@ -308,6 +308,9 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "pass-through uses plain.",
             "Safe mode uses Delegate isolated copy plus Grok read-only sandbox/permission controls; "
             "it does not use Grok plan mode.",
+            "Grok safe mode disables web search by default; explicit "
+            "policy.harness.grok.safe.webSearch=true re-enables network egress, and Delegate "
+            "safe-mode isolation is filesystem-only.",
             "Work mode uses grok.workPermissionMode, unless Delegate policy explicitly "
             "enables policy.harness.grok.work.bypassApprovalsAndSandbox.",
             "Reasoning effort maps to Grok --effort (low, medium, high, xhigh, max).",

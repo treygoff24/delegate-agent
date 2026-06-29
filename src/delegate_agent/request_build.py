@@ -42,6 +42,8 @@ from delegate_agent.constants import (
     KNOWN_ENGINES,
     MODE_SAFE,
     MODE_WORK,
+    MODELESS_NONCURSOR_ENGINES,
+    SAFE_REVIEW_PREFIX_INJECTED_HERE_ENGINES,
     validate_mode,
 )
 from delegate_agent.errors import DelegateError
@@ -313,7 +315,7 @@ def effective_prompt(
     prompt = delegate_runner.prepend_skill_review_instructions(prompt)
     safe_prefix = (
         SAFE_REVIEW_PREFIX_BY_ENGINE.get(engine)
-        if engine in {"codex", "droid", "claude", "grok"}
+        if engine in SAFE_REVIEW_PREFIX_INJECTED_HERE_ENGINES
         else None
     )
     if mode == MODE_SAFE and safe_prefix is not None and safe_prefix not in prompt:
@@ -562,7 +564,7 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
     if engine == "droid":
         if not isinstance(model_alias, str) or not model_alias:
             raise DelegateError("missing_model", "droid run input requires model alias.")
-    elif engine in ("codex", "kimi", "claude", "grok"):
+    elif engine in MODELESS_NONCURSOR_ENGINES:
         if model_alias is not None and not isinstance(model_alias, str):
             raise DelegateError("invalid_model", f"model must be a string or null for {engine}.")
         if model_alias == "":
@@ -1227,6 +1229,23 @@ def reasoning_request_kwargs(
     }
 
 
+def _native_reasoning_request_kwargs(
+    effort: str | None,
+    source: str | None,
+    *,
+    transport: str,
+    capability_source: str,
+) -> JsonObject:
+    if effort is None:
+        return {}
+    return {
+        "reasoning_effort": effort,
+        "reasoning_effort_source": source,
+        "reasoning_capability_source": capability_source,
+        "reasoning_transport": transport,
+    }
+
+
 def claude_reasoning_request_kwargs(effort: str | None, source: str | None) -> JsonObject:
     """Reasoning payload fields for Claude's static native-effort flag.
 
@@ -1234,25 +1253,21 @@ def claude_reasoning_request_kwargs(effort: str | None, source: str | None) -> J
     flag (``--effort``) rather than a ``ReasoningCapability`` object. Returns
     ``{}`` when no effort applies so the request-parts defaults stand.
     """
-    if effort is None:
-        return {}
-    return {
-        "reasoning_effort": effort,
-        "reasoning_effort_source": source,
-        "reasoning_capability_source": "static",
-        "reasoning_transport": reasoning.TRANSPORT_CLAUDE_EFFORT_FLAG,
-    }
+    return _native_reasoning_request_kwargs(
+        effort,
+        source,
+        transport=reasoning.TRANSPORT_CLAUDE_EFFORT_FLAG,
+        capability_source="static",
+    )
 
 
 def grok_reasoning_request_kwargs(effort: str | None, source: str | None) -> JsonObject:
-    if effort is None:
-        return {}
-    return {
-        "reasoning_effort": effort,
-        "reasoning_effort_source": source,
-        "reasoning_capability_source": "native-static",
-        "reasoning_transport": reasoning.TRANSPORT_GROK_EFFORT_FLAG,
-    }
+    return _native_reasoning_request_kwargs(
+        effort,
+        source,
+        transport=reasoning.TRANSPORT_GROK_EFFORT_FLAG,
+        capability_source="static",
+    )
 
 
 def _resolve_default_model(section: JsonObject) -> str | None:

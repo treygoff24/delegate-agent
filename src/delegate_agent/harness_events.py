@@ -136,6 +136,7 @@ class NormalizedEvent:
 
 @dataclass
 class StreamAccumulator:
+    harness: str | None = None
     assistant_chunks: list[str] = field(default_factory=list)
     events: list[NormalizedEvent] = field(default_factory=list)
     completion_text: str | None = None
@@ -146,6 +147,7 @@ class StreamAccumulator:
     _last_substantive_assistant_text: str | None = field(default=None, repr=False)
     _pending_tool_uses: dict[str, tuple[str, str | None]] = field(default_factory=dict, repr=False)
     _grok_text_buffer: str = field(default="", repr=False)
+    _grok_current_line: str = field(default="", repr=False)
 
     def _invalidate_assistant_text_cache(self) -> None:
         self._assistant_text_cache = None
@@ -179,10 +181,10 @@ class StreamAccumulator:
             return
         if event_type == "thought":
             return
-        if event_type == "text":
+        if event_type == "text" and self.harness == "grok":
             self._ingest_grok_text(payload)
             return
-        if event_type == "end":
+        if event_type == "end" and self.harness == "grok":
             self._ingest_grok_end(payload)
             return
         if event_type == "tool_result":
@@ -372,21 +374,28 @@ class StreamAccumulator:
         if not isinstance(data, str) or not data:
             return
         self._grok_text_buffer += data
+        if "\n" in data:
+            self._grok_current_line = data.rsplit("\n", 1)[1]
+        else:
+            self._grok_current_line += data
+        self.current = _bounded_current_line(self._grok_current_line.strip())
         self._invalidate_assistant_text_cache()
-        stripped = self._grok_text_buffer.strip()
-        if stripped:
-            self._last_recoverable_assistant_text = stripped
-            if is_substantive_assistant_text(stripped):
-                self._last_substantive_assistant_text = stripped
-        self.current = _current_from_text(self._grok_text_buffer)
 
     def _ingest_grok_end(self, payload: JsonObject) -> None:
-        _ = payload
         text = self._grok_text_buffer.strip()
         self._grok_text_buffer = ""
+        self._grok_current_line = ""
+        self._invalidate_assistant_text_cache()
         if text:
-            self._record_successful_completion_text(text)
-        else:
+            # The thought/text/end stream shape and the "EndTurn" success spelling
+            # are validated against grok 0.2.73; non-success stopReason spellings
+            # (MaxTokens/Refusal/etc.) are best-effort, so classification is
+            # conservative — anything not recognized as success stays recoverable.
+            if _grok_stop_reason_succeeded(payload.get("stopReason")):
+                self._record_successful_completion_text(text)
+            else:
+                self._record_recoverable_assistant_text(text)
+        elif _grok_stop_reason_succeeded(payload.get("stopReason")):
             self.events.append(NormalizedEvent(kind="run.completed", status="succeeded"))
 
     def _ingest_tool_call(self, payload: JsonObject) -> None:
@@ -458,9 +467,18 @@ class StreamAccumulator:
 
     @property
     def recoverable_assistant_text(self) -> str | None:
+        self._refresh_grok_recovery_text()
         if self._last_substantive_assistant_text:
             return self._last_substantive_assistant_text
         return self._last_recoverable_assistant_text
+
+    def _refresh_grok_recovery_text(self) -> None:
+        text = self._grok_text_buffer.strip()
+        if not text:
+            return
+        self._last_recoverable_assistant_text = text
+        if is_substantive_assistant_text(text):
+            self._last_substantive_assistant_text = text
 
     def assistant_recovery_quality(self) -> RecoveryQuality | None:
         if self.completion_text:
@@ -518,6 +536,13 @@ def _string_field(payload: JsonObject, *keys: str) -> str | None:
     return None
 
 
+def _grok_stop_reason_succeeded(value: JsonValue) -> bool:
+    if not isinstance(value, str):
+        return False
+    normalized = re.sub(r"[^a-z]", "", value.lower())
+    return normalized in {"endturn", "stop", "complete", "done"}
+
+
 def _codex_command_status(status: str | None, *, completed: bool) -> str | None:
     if not completed:
         return status
@@ -559,4 +584,8 @@ def _tool_current(tool: str, target: str | None) -> str:
 
 def _current_from_text(text: str) -> str:
     line = text.strip().splitlines()[-1] if text.strip() else ""
+    return _bounded_current_line(line)
+
+
+def _bounded_current_line(line: str) -> str:
     return (line[:120] + "…") if len(line) > 120 else line

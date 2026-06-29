@@ -105,6 +105,11 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(parsed.global_options.auth_profile, "work")
         self.assertTrue(parsed.capabilities.refresh)
 
+    def test_auth_profile_accepted_for_grok_launch(self):
+        parsed = self.delegate.parse_cli(["--auth-profile", "work", "grok", "safe", "x"])
+        self.assertEqual(parsed.global_options.auth_profile, "work")
+        self.assertEqual(parsed.launch.engine, "grok")
+
     def test_infer_global_json_after_value_taking_globals(self):
         cases = [
             ["--isolation", "worktree", "--json", "cursor"],

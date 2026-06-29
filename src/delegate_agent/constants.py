@@ -21,6 +21,23 @@ KNOWN_ENGINES = ("cursor", "droid", "codex", "kimi", "claude", "grok")
 # "cursor, droid, codex, kimi, claude, or grok" — for error messages and help text.
 ENGINES_PROSE = f"{', '.join(KNOWN_ENGINES[:-1])}, or {KNOWN_ENGINES[-1]}"
 
+# Engines launched without a model-alias positional argument.
+MODELESS_ENGINES = tuple(engine for engine in KNOWN_ENGINES if engine != "droid")
+# Engines whose binary is a simple <engine>.binary config key.
+BINARY_CONFIG_ENGINES = tuple(engine for engine in KNOWN_ENGINES if engine != "cursor")
+# Modeless engines accepted by input JSON's optional model field.
+MODELESS_NONCURSOR_ENGINES = tuple(
+    engine for engine in KNOWN_ENGINES if engine not in {"cursor", "droid"}
+)
+# Engines whose safe-review prompt prefix is injected by request_build.effective_prompt.
+SAFE_REVIEW_PREFIX_INJECTED_HERE_ENGINES = tuple(
+    engine for engine in KNOWN_ENGINES if engine in {"codex", "droid", "claude", "grok"}
+)
+# Stable public summary order; membership is still derived from the modeless engine set.
+MODEL_SUMMARY_ENGINES = tuple(
+    engine for engine in ("cursor", "codex", "claude", "grok", "kimi") if engine in MODELESS_ENGINES
+)
+
 
 def validate_mode(mode: str) -> None:
     if mode not in VALID_MODES:

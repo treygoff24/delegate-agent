@@ -227,7 +227,7 @@ class ReasoningCapabilityTests(unittest.TestCase):
         payload = build_reasoning_capabilities_payload({}, cache=None)
         grok = payload["harnesses"]["grok"]
         self.assertEqual(grok["transport"], "grok-effort-flag")
-        self.assertEqual(grok["source"], "native-static")
+        self.assertEqual(grok["source"], "static")
         self.assertEqual(grok["supported"], ["low", "medium", "high", "xhigh", "max"])
 
     def test_cursor_capabilities_aggregate_efforts_by_model(self):

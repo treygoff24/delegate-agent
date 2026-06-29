@@ -155,6 +155,7 @@ def _recover_completion_report_from_stdout(
     registry_root: Path,
     run_id: str,
     *,
+    harness: str | None = None,
     allow_last_assistant: bool = False,
 ) -> tuple[str, bool, harness_events.RecoveryQuality | None]:
     # The completion is the final turn's closing message, which lives at the end of
@@ -165,7 +166,7 @@ def _recover_completion_report_from_stdout(
     stdout_text, truncated = _read_recovery_stdout_tail(registry_root, run_id)
     if not stdout_text:
         return "", truncated, None
-    accumulator = harness_events.StreamAccumulator()
+    accumulator = harness_events.StreamAccumulator(harness=harness)
     for line in stdout_text.split("\n"):
         accumulator.ingest_line(line)
     if accumulator.completion_text:
@@ -324,6 +325,7 @@ def _add_completion_report_section(
         text, recovery_truncated, recovery_quality = _recover_completion_report_from_stdout(
             registry_root,
             run_id,
+            harness=harness if isinstance(harness, str) else None,
             allow_last_assistant=allow_last_assistant,
         )
     if text and recovery_quality != "housekeeping_fallback":

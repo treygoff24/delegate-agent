@@ -92,12 +92,12 @@ def prefix_droid_safe_prompt(prompt: str) -> str:
     return f"{safe_prefix}{prompt}"
 
 
-def _claude_harness_bypass_enabled(config: JsonObject, mode: str) -> bool:
-    """Return true only for explicit Claude-scoped bypass policy.
+def _harness_bypass_enabled(config: JsonObject, mode: str, engine: str) -> bool:
+    """Return true only for explicit harness-scoped bypass policy.
 
     Delegate's historical policy profiles were Codex-oriented. Requiring the
-    Claude bypass to live under policy.harness.claude.work prevents a global
-    external-sandbox profile from silently broadening Claude Code permissions.
+    bypass to live under policy.harness.<engine>.work prevents a global
+    external-sandbox profile from silently broadening native harness permissions.
     """
     if mode != MODE_WORK:
         return False
@@ -107,27 +107,19 @@ def _claude_harness_bypass_enabled(config: JsonObject, mode: str) -> bool:
     harnesses = policy.get("harness")
     if not isinstance(harnesses, dict):
         return False
-    claude_policy = harnesses.get("claude")
-    if not isinstance(claude_policy, dict):
+    engine_policy = harnesses.get(engine)
+    if not isinstance(engine_policy, dict):
         return False
-    work_policy = claude_policy.get(MODE_WORK)
+    work_policy = engine_policy.get(MODE_WORK)
     return isinstance(work_policy, dict) and work_policy.get("bypassApprovalsAndSandbox") is True
+
+
+def _claude_harness_bypass_enabled(config: JsonObject, mode: str) -> bool:
+    return _harness_bypass_enabled(config, mode, "claude")
 
 
 def _grok_harness_bypass_enabled(config: JsonObject, mode: str) -> bool:
-    if mode != MODE_WORK:
-        return False
-    policy = config.get("policy")
-    if not isinstance(policy, dict):
-        return False
-    harnesses = policy.get("harness")
-    if not isinstance(harnesses, dict):
-        return False
-    grok_policy = harnesses.get("grok")
-    if not isinstance(grok_policy, dict):
-        return False
-    work_policy = grok_policy.get(MODE_WORK)
-    return isinstance(work_policy, dict) and work_policy.get("bypassApprovalsAndSandbox") is True
+    return _harness_bypass_enabled(config, mode, "grok")
 
 
 def build_cursor_argv(
@@ -288,7 +280,7 @@ def build_grok_argv(
             ]
         )
     elif mode == MODE_WORK:
-        if allow_bypass_permissions:
+        if allow_bypass_permissions and policy.get("bypassApprovalsAndSandbox") is True:
             argv.extend(["--permission-mode", "bypassPermissions", "--always-approve"])
         else:
             argv.extend(["--permission-mode", str(grok.get("workPermissionMode", "auto"))])

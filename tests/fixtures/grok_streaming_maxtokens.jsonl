@@ -1,0 +1,6 @@
+{"type":"thought","data":"synthetic fixture; no live grok binary available"}
+{"type":"text","data":"delegate"}
+{"type":"text","data":" grok"}
+{"type":"text","data":" fixture"}
+{"type":"text","data":" ok"}
+{"type":"end","stopReason":"MaxTokens","sessionId":"sess-fixture","requestId":"req-fixture"}

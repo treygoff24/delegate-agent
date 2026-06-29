@@ -53,7 +53,7 @@ from delegate_agent.cli_parser import (  # noqa: F401  # re-exported for tests /
     parse_cli,
     parse_required_positive_int_option,
 )
-from delegate_agent.constants import KNOWN_ENGINES, MODE_SAFE
+from delegate_agent.constants import BINARY_CONFIG_ENGINES, KNOWN_ENGINES, MODE_SAFE
 from delegate_agent.describe_payload import (  # noqa: F401  # re-exported for tests / back-compat
     _claude_runtime_policy,
     describe_payload,
@@ -334,7 +334,7 @@ def dry_run_payload(request: Request) -> JsonObject:
 def _binary_config_key(engine: str | None) -> str | None:
     if engine == "cursor":
         return "cursor.argvPrefix"
-    if engine in {"codex", "droid", "kimi", "claude", "grok"}:
+    if engine in BINARY_CONFIG_ENGINES:
         return f"{engine}.binary"
     return None
 

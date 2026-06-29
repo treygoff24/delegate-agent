@@ -348,7 +348,7 @@ def _record_persistent_worktree_creation_failure(
 
     failed_snapshot = delegate_runner.build_snapshot(
         registration.pre_ctx,
-        accumulator=harness_events.StreamAccumulator(),
+        accumulator=harness_events.StreamAccumulator(harness=registration.pre_ctx.harness),
     )
     failed_snapshot["ok"] = False
     failed_snapshot["error"] = exc.error
