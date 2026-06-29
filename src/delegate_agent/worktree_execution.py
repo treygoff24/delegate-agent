@@ -32,7 +32,7 @@ from delegate_agent.isolation import (
 )
 from delegate_agent.json_types import JsonObject
 from delegate_agent.prompt_transport import (
-    DROID_PROMPT_FILE_ARG_PLACEHOLDER,
+    PROMPT_FILE_ARG_PLACEHOLDER,
     PROMPT_TRANSPORT_FILE,
     PROMPT_TRANSPORT_STDIN,
 )
@@ -473,7 +473,7 @@ def _launch_child_in_persistent_worktree(
             completion_report_mode=execution.completion_report_mode,
             stdin_text=execution_request.stdin_text,
             prompt_file_text=execution_request.prompt_file_text,
-            prompt_file_placeholder=DROID_PROMPT_FILE_ARG_PLACEHOLDER,
+            prompt_file_placeholder=PROMPT_FILE_ARG_PLACEHOLDER,
             manifest_argv=execution_request.display_argv,
             progress=request.progress,
             progress_initial_delay_sec=request.progress_initial_delay_sec,

@@ -19,6 +19,7 @@ from delegate_agent.prompt_instructions import SKILL_REVIEW_PREFIX
 from delegate_agent.prompt_transport import (
     CURSOR_PROMPT_REDACTION,
     DROID_PROMPT_FILE_ARG_PLACEHOLDER,
+    PROMPT_FILE_ARG_PLACEHOLDER,
     PROMPT_TRANSPORT_ARGV,
     PROMPT_TRANSPORT_FILE,
     PROMPT_TRANSPORT_STDIN,
@@ -38,6 +39,7 @@ _SAFE_REVIEW_LABEL_BY_ENGINE = {
     "cursor": "Delegate review mode",
     "codex": "Delegate Codex safe mode",
     "claude": "Delegate Claude safe mode",
+    "grok": "Delegate Grok safe mode",
     "droid": "Delegate Droid safe mode",
     "kimi": "Delegate Kimi safe mode",
 }
@@ -109,6 +111,22 @@ def _claude_harness_bypass_enabled(config: JsonObject, mode: str) -> bool:
     if not isinstance(claude_policy, dict):
         return False
     work_policy = claude_policy.get(MODE_WORK)
+    return isinstance(work_policy, dict) and work_policy.get("bypassApprovalsAndSandbox") is True
+
+
+def _grok_harness_bypass_enabled(config: JsonObject, mode: str) -> bool:
+    if mode != MODE_WORK:
+        return False
+    policy = config.get("policy")
+    if not isinstance(policy, dict):
+        return False
+    harnesses = policy.get("harness")
+    if not isinstance(harnesses, dict):
+        return False
+    grok_policy = harnesses.get("grok")
+    if not isinstance(grok_policy, dict):
+        return False
+    work_policy = grok_policy.get(MODE_WORK)
     return isinstance(work_policy, dict) and work_policy.get("bypassApprovalsAndSandbox") is True
 
 
@@ -240,6 +258,59 @@ def build_claude_argv(
         argv.extend(["--model", model])
     if reasoning_effort is not None:
         argv.extend(["--effort", reasoning_effort])
+    return argv
+
+
+def build_grok_argv(
+    grok: JsonObject,
+    mode: str,
+    workspace: str,
+    model: str | None,
+    policy: JsonObject,
+    *,
+    stream_capture: bool = True,
+    reasoning_effort: str | None = None,
+    allow_bypass_permissions: bool = False,
+    prompt_transport: str = PROMPT_TRANSPORT_FILE,
+) -> list[str]:
+    argv = [str(grok["binary"]), "--cwd", workspace]
+    if stream_capture:
+        argv.extend(["--output-format", "streaming-json"])
+    else:
+        argv.extend(["--output-format", "plain"])
+    if mode == MODE_SAFE:
+        argv.extend(
+            [
+                "--permission-mode",
+                str(grok.get("safePermissionMode", "dontAsk")),
+                "--sandbox",
+                str(grok.get("safeSandbox", "read-only")),
+            ]
+        )
+    elif mode == MODE_WORK:
+        if allow_bypass_permissions:
+            argv.extend(["--permission-mode", "bypassPermissions", "--always-approve"])
+        else:
+            argv.extend(["--permission-mode", str(grok.get("workPermissionMode", "auto"))])
+        work_sandbox = grok.get("workSandbox")
+        if isinstance(work_sandbox, str) and work_sandbox:
+            argv.extend(["--sandbox", work_sandbox])
+    else:
+        validate_mode(mode)
+    if policy.get("webSearch") is not True and grok.get("disableWebSearch", True) is True:
+        argv.append("--disable-web-search")
+    if grok.get("noSubagents", False) is True:
+        argv.append("--no-subagents")
+    if model:
+        argv.extend(["--model", model])
+    if reasoning_effort is not None:
+        argv.extend(["--effort", reasoning_effort])
+    if prompt_transport != PROMPT_TRANSPORT_FILE:
+        raise DelegateError(
+            "invalid_prompt_transport",
+            f"Unsupported Grok prompt transport: {prompt_transport}",
+        )
+    argv.extend(["--prompt-file", PROMPT_FILE_ARG_PLACEHOLDER])
     return argv
 
 

@@ -93,6 +93,17 @@ layers. This is read-only observability; inspecting it does not modify
     "noSessionPersistence": true,
     "bare": false
   },
+  "grok": {
+    "binary": "grok",
+    "defaultModel": null,
+    "defaultReasoningEffort": null,
+    "workPermissionMode": "auto",
+    "safePermissionMode": "dontAsk",
+    "safeSandbox": "read-only",
+    "workSandbox": null,
+    "disableWebSearch": true,
+    "noSubagents": false
+  },
   "kimi": {
     "binary": "kimi",
     "defaultModel": "kimi-code/kimi-for-coding",
@@ -261,6 +272,36 @@ Controls local run recording.
 - `bare`: opt-in `--bare` mode for runs that should skip Claude Code customizations and auto-discovery. Defaults to `false`, which is consistent with how the other harnesses use their own installed configuration. Be aware of the footprint: with `bare: false`, a delegated run loads the operator's full Claude Code environment — hooks, skills, plugins, output styles, and auto-memory. `--strict-mcp-config` suppresses MCP servers, but nothing else, so each run carries that ambient system-prompt context (extra latency and token cost) and is not hermetic. Set `bare: true` for cost-sensitive or reproducible runs that should ignore local customizations.
 - Claude safe mode uses `claude -p`, stdin prompt delivery, `--permission-mode plan`, `--strict-mcp-config`, Read/Grep/Glob, and selected read-only Bash tools.
 
+### `grok`
+
+```json
+{
+  "grok": {
+    "binary": "grok",
+    "defaultModel": null,
+    "defaultReasoningEffort": null,
+    "workPermissionMode": "auto",
+    "safePermissionMode": "dontAsk",
+    "safeSandbox": "read-only",
+    "workSandbox": null,
+    "disableWebSearch": true,
+    "noSubagents": false
+  }
+}
+```
+
+- `binary`: path to the Grok Build CLI executable. Delegate also searches `~/.grok/bin`.
+- `defaultModel`: optional Grok model string. `null` lets Grok choose its own default.
+- `defaultReasoningEffort`: optional Grok effort string: `low`, `medium`, `high`, `xhigh`, or `max`. Delegate emits it as `--effort`.
+- `workPermissionMode`: Grok permission mode for work runs. Allowed values include `acceptEdits`, `auto`, `default`, and `dontAsk`.
+- `workPermissionMode` cannot be `bypassPermissions`; use `policy.harness.grok.work.bypassApprovalsAndSandbox` when you explicitly want Delegate to emit Grok `--permission-mode bypassPermissions`.
+- `safePermissionMode`: Grok permission mode for safe runs. Allowed values are `dontAsk`, `default`, and `auto`. Defaults to `dontAsk`.
+- `safeSandbox`: Grok sandbox profile for safe runs. Defaults to `read-only`.
+- `workSandbox`: optional Grok sandbox profile for work runs: `workspace`, `devbox`, `read-only`, `strict`, or `null` (omit `--sandbox` when `null`).
+- `disableWebSearch`: defaults to `true`. Delegate adds `--disable-web-search` only when this is `true` and effective `policy.webSearch` is not `true`. Set `policy.work.webSearch` to `true` or `grok.disableWebSearch` to `false` to allow web search.
+- `noSubagents`: defaults to `false`. When `true`, Delegate adds `--no-subagents` to Grok argv.
+- Grok safe mode uses prompt-file transport, `--sandbox read-only`, and `--permission-mode dontAsk` by default, plus Delegate's isolated throwaway workspace.
+
 ### `kimi`
 
 ```json
@@ -330,7 +371,7 @@ Profiles:
 - `external-sandbox`: permits Codex approval/sandbox bypass and hook-trust bypass for work mode. Use only inside a separate sandbox you control.
 - `custom`: no profile defaults; use explicit per-mode/per-harness settings.
 
-Supported boolean policy keys: `networkAccess`, `webSearch`, `bypassApprovalsAndSandbox`, and `bypassHookTrust`. Only Codex currently consumes all of these fields. Claude consumes `bypassApprovalsAndSandbox` only from the harness-scoped `policy.harness.claude.work` block, mapping it to `--permission-mode bypassPermissions`. Cursor, Droid, and Kimi ignore unsupported policy fields rather than translating them to runtime flags.
+Supported boolean policy keys: `networkAccess`, `webSearch`, `bypassApprovalsAndSandbox`, and `bypassHookTrust`. Only Codex currently consumes all of these fields. Claude and Grok consume `bypassApprovalsAndSandbox` only from harness-scoped `policy.harness.<engine>.work` blocks, mapping it to `--permission-mode bypassPermissions`. Grok emits `--disable-web-search` when effective `policy.webSearch` is not `true` and `grok.disableWebSearch` is `true` (the default). Cursor, Droid, and Kimi ignore unsupported policy fields rather than translating them to runtime flags.
 
 `bypassApprovalsAndSandbox` and `bypassHookTrust` are work-mode escalations. Setting either to `true` under a safe-mode policy block (`policy.safe` or `policy.harness.<engine>.safe`) is rejected at config load with `invalid_policy_config`, because safe mode is read-only by contract.
 

@@ -64,6 +64,8 @@ TRANSPORT_DROID_FLAG = "droid-flag"
 TRANSPORT_CURSOR_MODEL_SELECTION = "cursor-model-selection"
 TRANSPORT_CLAUDE_EFFORT_FLAG = "claude-effort-flag"
 CLAUDE_NATIVE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+TRANSPORT_GROK_EFFORT_FLAG = "grok-effort-flag"
+GROK_NATIVE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 INSPECT_REASONING_DISCOVERY_HINT = (
     "Inspect `delegate --json models --summary` or "
     "`delegate --json capabilities` for reasoning-effort support."
@@ -91,6 +93,11 @@ REASONING_PROFILES: dict[str, ReasoningProfile] = {
         TRANSPORT_CLAUDE_EFFORT_FLAG,
         "static-enum",
         static_efforts=CLAUDE_NATIVE_EFFORTS,
+    ),
+    "grok": ReasoningProfile(
+        TRANSPORT_GROK_EFFORT_FLAG,
+        "static-enum",
+        static_efforts=GROK_NATIVE_EFFORTS,
     ),
     "kimi": ReasoningProfile(
         None,
@@ -232,6 +239,31 @@ def resolve_claude_native_effort(
                 model=model,
                 effort=effort,
                 supported=REASONING_PROFILES["claude"].static_efforts,
+                detail="does not support reasoning effort",
+            ),
+        )
+    return effort
+
+
+def resolve_grok_native_effort(
+    requested_effort: str | None,
+    *,
+    alias: str | None = None,
+    model: str | None = None,
+) -> str | None:
+    """Validate Grok Build CLI native --effort values."""
+    if requested_effort is None:
+        return None
+    effort = normalize_effort(requested_effort)
+    if effort not in GROK_NATIVE_EFFORTS:
+        raise ReasoningCapabilityError(
+            "unsupported_reasoning_effort",
+            format_explicit_reasoning_effort_error(
+                harness="grok",
+                alias=alias,
+                model=model,
+                effort=effort,
+                supported=GROK_NATIVE_EFFORTS,
                 detail="does not support reasoning effort",
             ),
         )
@@ -562,6 +594,23 @@ def _claude_alias_reasoning_summary(claude: JsonObject) -> JsonObject:
     return payload
 
 
+def _grok_alias_reasoning_summary(grok: JsonObject) -> JsonObject:
+    default_model = grok.get("defaultModel")
+    alias = _alias_key_for_default_model(default_model)
+    payload: JsonObject = {
+        "alias": alias,
+        "supported": list(GROK_NATIVE_EFFORTS),
+        "source": "native-static",
+        "transport": TRANSPORT_GROK_EFFORT_FLAG,
+    }
+    if isinstance(default_model, str) and default_model:
+        payload["model"] = default_model
+    default_effort = grok.get("defaultReasoningEffort")
+    if isinstance(default_effort, str):
+        payload["configDefault"] = default_effort
+    return payload
+
+
 def _kimi_alias_reasoning_summary(kimi: JsonObject) -> JsonObject:
     default_model = kimi.get("defaultModel")
     alias = _alias_key_for_default_model(default_model)
@@ -639,6 +688,14 @@ def build_alias_reasoning_summaries(
     else:
         summaries["claude"] = {}
 
+    grok = config.get("grok")
+    if isinstance(grok, dict):
+        default_model = grok.get("defaultModel")
+        alias_key = _alias_key_for_default_model(default_model)
+        summaries["grok"] = {alias_key: _grok_alias_reasoning_summary(grok)}
+    else:
+        summaries["grok"] = {}
+
     kimi = config.get("kimi")
     if isinstance(kimi, dict):
         default_model = kimi.get("defaultModel")
@@ -683,6 +740,12 @@ def build_reasoning_capabilities_payload(
         "transport": REASONING_PROFILES["claude"].transport,
         "source": "static",
         "supported": list(REASONING_PROFILES["claude"].static_efforts),
+        "models": {},
+    }
+    harnesses["grok"] = {
+        "transport": TRANSPORT_GROK_EFFORT_FLAG,
+        "source": "native-static",
+        "supported": list(GROK_NATIVE_EFFORTS),
         "models": {},
     }
     harnesses["kimi"] = {

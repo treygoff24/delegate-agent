@@ -1,0 +1,7 @@
+{
+  "engine": "grok",
+  "mode": "safe",
+  "model": null,
+  "cwd": ".",
+  "prompt": "Review this repository for correctness risks. Do not edit files."
+}

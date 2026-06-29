@@ -1021,7 +1021,7 @@ class EngineArgvTests(CommandTestBase):
         payload = self.delegate.describe_payload(self.delegate.DEFAULT_CONFIG, "embedded-default")
         self.assertIn("promptTransforms", payload)
         self.assertTrue(payload["engineCapabilities"]["codex"]["outputSchema"])
-        for engine in ("cursor", "droid", "kimi", "claude"):
+        for engine in ("cursor", "droid", "kimi", "claude", "grok"):
             with self.subTest(engine=engine):
                 self.assertFalse(payload["engineCapabilities"][engine]["outputSchema"])
         self.assertIn("skill review", payload["promptTransforms"][0])
@@ -1058,6 +1058,78 @@ class EngineArgvTests(CommandTestBase):
         self.assertNotIn("--yolo", kimi_work)
         self.assertIn("--prompt", kimi_work)
         self.assertNotIn("--auto", kimi_work)
+
+    def test_grok_safe_argv_uses_prompt_file_and_read_only_controls(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        prompt = self.delegate.effective_prompt(
+            "review task",
+            engine="grok",
+            mode="safe",
+            completion_report_mode="none",
+        )
+        request = self.delegate.build_request(
+            "grok",
+            "safe",
+            None,
+            self.delegate.ResolvedWorkspace("/repo", "git"),
+            prompt,
+            config,
+            dry_run=True,
+        )
+        self.assertEqual(request.prompt_transport, "file")
+        self.assertIn("Delegate Grok safe mode", request.prompt_file_text or "")
+        self.assertIn("--prompt-file", request.argv)
+        self.assertIn("--output-format", request.argv)
+        self.assertIn("streaming-json", request.argv)
+        self.assertIn("--permission-mode", request.argv)
+        self.assertIn("dontAsk", request.argv)
+        self.assertIn("--sandbox", request.argv)
+        self.assertIn("read-only", request.argv)
+        self.assertIn("--disable-web-search", request.argv)
+        self.assertIn(self.delegate.PROMPT_FILE_DISPLAY, request.display_argv or [])
+        self.assertNotIn("review task", request.display_argv or [])
+
+    def test_grok_work_harness_bypass_requires_harness_scoped_policy(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["policy"]["profile"] = "external-sandbox"
+        request = self.delegate.build_request(
+            "grok",
+            "work",
+            None,
+            self.delegate.ResolvedWorkspace("/repo", "git"),
+            "implement",
+            config,
+            dry_run=True,
+        )
+        self.assertNotIn("bypassPermissions", request.argv)
+        config["policy"]["harness"] = {"grok": {"work": {"bypassApprovalsAndSandbox": True}}}
+        request = self.delegate.build_request(
+            "grok",
+            "work",
+            None,
+            self.delegate.ResolvedWorkspace("/repo", "git"),
+            "implement",
+            config,
+            dry_run=True,
+        )
+        self.assertIn("bypassPermissions", request.argv)
+        self.assertIn("--always-approve", request.argv)
+
+    def test_grok_output_schema_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            schema = Path(tmp) / "schema.json"
+            schema.write_text("{}", encoding="utf-8")
+            parsed = self.delegate.parse_cli(
+                ["--cwd", tmp, "grok", "work", "--output-schema", str(schema), "task"],
+            )
+            with self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.delegate.request_from_parsed(
+                    parsed,
+                    self.delegate.DEFAULT_CONFIG,
+                    io.StringIO(""),
+                )
+        self.assertEqual(ctx.exception.error, "unsupported_output_schema")
+        self.assertIn("grok", ctx.exception.message.lower())
 
     def test_describe_and_models_include_runtime_and_config_provenance(self):
         workspace = Path("/tmp/delegate-provenance-test")

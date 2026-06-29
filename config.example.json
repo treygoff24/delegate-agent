@@ -70,6 +70,17 @@
     "noSessionPersistence": true,
     "bare": false
   },
+  "grok": {
+    "binary": "grok",
+    "defaultModel": null,
+    "defaultReasoningEffort": null,
+    "workPermissionMode": "auto",
+    "safePermissionMode": "dontAsk",
+    "safeSandbox": "read-only",
+    "workSandbox": null,
+    "disableWebSearch": true,
+    "noSubagents": false
+  },
   "kimi": {
     "binary": "kimi",
     "defaultModel": "kimi-code/kimi-for-coding",

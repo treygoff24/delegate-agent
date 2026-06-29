@@ -400,7 +400,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
         return parse_run(
             rest, json_mode, cwd, pass_through, completion_report, isolation, auth_profile
         )
-    if subcommand in ("cursor", "codex", "kimi", "claude"):
+    if subcommand in ("cursor", "codex", "kimi", "claude", "grok"):
         return parse_modeless_engine(
             subcommand,
             rest,
@@ -666,14 +666,14 @@ def parse_dry_run(
     if not rest:
         raise DelegateError(
             "missing_engine",
-            "dry-run requires cursor, droid, codex, kimi, or claude.",
+            "dry-run requires cursor, droid, codex, kimi, claude, or grok.",
         )
     engine = rest[0]
     if engine.startswith("-"):
         raise DelegateError(
             "misplaced_global_option", "Global options must appear before the subcommand."
         )
-    if engine in ("cursor", "codex", "kimi", "claude"):
+    if engine in ("cursor", "codex", "kimi", "claude", "grok"):
         return parse_modeless_engine(
             engine,
             rest[1:],

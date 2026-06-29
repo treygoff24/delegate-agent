@@ -324,6 +324,25 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(parsed.launch.reasoning_effort, "high")
         self.assertEqual(parsed.launch.prompt_parts, ["review"])
 
+    def test_grok_direct_commands_parse(self):
+        parsed = self.delegate.parse_cli(["grok", "safe", "review"])
+        self.assertEqual(parsed.subcommand, "grok")
+        self.assertEqual(parsed.launch.engine, "grok")
+        self.assertEqual(parsed.launch.mode, "safe")
+        parsed = self.delegate.parse_cli(
+            ["grok", "safe", "--prompt-file", "task.md"],
+        )
+        self.assertEqual(parsed.launch.prompt_file, "task.md")
+
+    def test_dry_run_grok_parses(self):
+        parsed = self.delegate.parse_cli(["dry-run", "grok", "work", "fix"])
+        self.assertEqual(parsed.subcommand, "grok")
+        self.assertTrue(parsed.launch.dry_run)
+        parsed = self.delegate.parse_cli(
+            ["dry-run", "grok", "safe", "--prompt-file", "task.md"],
+        )
+        self.assertEqual(parsed.launch.prompt_file, "task.md")
+
     def test_dry_run_codex_parses(self):
         parsed = self.delegate.parse_cli(["dry-run", "codex", "safe", "review"])
         self.assertEqual(parsed.subcommand, "codex")
@@ -343,6 +362,7 @@ class ParserTests(unittest.TestCase):
         self.assertIn("claude", payload["modeMapping"])
         self.assertIn("codex", payload["modeMapping"])
         self.assertIn("claude", payload["engines"])
+        self.assertIn("grok", payload["engines"])
         self.assertIn("codex", payload["engines"])
         self.assertIn("policyProfiles", payload)
         self.assertIn("policyFieldSupport", payload)

@@ -28,6 +28,7 @@ command_help = load_module(COMMAND_HELP_PATH, "delegate_command_help_test")
 TOP_LEVEL_COMMANDS = (
     "cursor",
     "claude",
+    "grok",
     "codex",
     "droid",
     "kimi",

@@ -647,3 +647,14 @@ class HarnessEventsTests(unittest.TestCase):
         acc = self.events.StreamAccumulator()
         acc.ingest_line(json.dumps({"type": "message", "role": "assistant", "content": report}))
         self.assertEqual(acc.assistant_recovery_quality(), "substantive_assistant_fallback")
+
+    def test_grok_streaming_fixture_populates_assistant_and_completion(self):
+        fixture = ROOT / "tests" / "fixtures" / "grok_streaming_json_smoke.jsonl"
+        acc = self.events.StreamAccumulator()
+        for line in fixture.read_text(encoding="utf-8").splitlines():
+            acc.ingest_line(line)
+        self.assertIn("delegate grok fixture ok", acc.assistant_text)
+        self.assertIn("delegate grok fixture ok", acc.completion_text or "")
+        completed = [event for event in acc.events if event.kind == "run.completed"]
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(completed[0].status, "succeeded")

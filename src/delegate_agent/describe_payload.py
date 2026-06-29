@@ -17,8 +17,10 @@ from delegate_agent import config as delegate_config
 from delegate_agent import rendering as delegate_rendering
 from delegate_agent.argv_builders import (
     _claude_harness_bypass_enabled,
+    _grok_harness_bypass_enabled,
     build_claude_argv,
     build_codex_argv,
+    build_grok_argv,
 )
 from delegate_agent.command_help import SAFE_WORKSPACE_SYNC_NOTE
 from delegate_agent.config import config_path
@@ -27,6 +29,8 @@ from delegate_agent.errors import EXIT_OK, DelegateError
 from delegate_agent.json_types import JsonObject
 from delegate_agent.prompt_transport import (
     DROID_PROMPT_FILE_DISPLAY,
+    PROMPT_FILE_ARG_PLACEHOLDER,
+    PROMPT_FILE_DISPLAY,
     PROMPT_TRANSPORT_ARGV,
     PROMPT_TRANSPORT_FILE,
     PROMPT_TRANSPORT_STDIN,
@@ -180,6 +184,17 @@ def models_payload(
             "defaultModel": config["kimi"]["defaultModel"],
             "defaultReasoningEffort": config["kimi"].get("defaultReasoningEffort"),
         },
+        "grok": {
+            "binary": config["grok"]["binary"],
+            "defaultModel": config["grok"]["defaultModel"],
+            "defaultReasoningEffort": config["grok"].get("defaultReasoningEffort"),
+            "workPermissionMode": config["grok"]["workPermissionMode"],
+            "safePermissionMode": config["grok"]["safePermissionMode"],
+            "safeSandbox": config["grok"]["safeSandbox"],
+            "workSandbox": config["grok"]["workSandbox"],
+            "disableWebSearch": config["grok"]["disableWebSearch"],
+            "noSubagents": config["grok"]["noSubagents"],
+        },
     }
 
 
@@ -237,7 +252,7 @@ def models_summary_payload(
     reasoning_aliases = reasoning.build_alias_reasoning_summaries(config, cache)
     aliases: list[JsonObject] = []
 
-    for engine in ("cursor", "codex", "claude", "kimi"):
+    for engine in ("cursor", "codex", "claude", "grok", "kimi"):
         section = config.get(engine)
         if not isinstance(section, dict):
             continue
@@ -314,9 +329,13 @@ def _policy_field_support_matrix() -> JsonObject:
     unsupported = {key: False for key in delegate_config.POLICY_MODE_KEYS}
     claude_supported = dict(unsupported)
     claude_supported["bypassApprovalsAndSandbox"] = True
+    grok_supported = dict(unsupported)
+    grok_supported["webSearch"] = True
+    grok_supported["bypassApprovalsAndSandbox"] = True
     return {
         "codex": codex_supported,
         "claude": claude_supported,
+        "grok": grok_supported,
         "cursor": unsupported,
         "droid": unsupported,
         "kimi": unsupported,
@@ -334,6 +353,14 @@ def _claude_runtime_policy(config: JsonObject, mode: str) -> JsonObject:
             config,
             mode,
         )
+    return policy
+
+
+def _grok_runtime_policy(config: JsonObject, mode: str) -> JsonObject:
+    policy = delegate_config.effective_policy(config, engine="grok", mode=mode)
+    if mode == MODE_WORK:
+        policy = dict(policy)
+        policy["bypassApprovalsAndSandbox"] = _grok_harness_bypass_enabled(config, mode)
     return policy
 
 
@@ -373,6 +400,25 @@ def _claude_describe_argv(
     )
 
 
+def _grok_describe_argv(
+    config: JsonObject,
+    grok: JsonObject,
+    *,
+    mode: str,
+    workspace: str,
+    policy: JsonObject,
+) -> list[str]:
+    argv = build_grok_argv(
+        grok,
+        mode,
+        workspace,
+        _resolve_default_model(grok),
+        policy,
+        allow_bypass_permissions=_grok_harness_bypass_enabled(config, mode),
+    )
+    return [PROMPT_FILE_DISPLAY if item == PROMPT_FILE_ARG_PLACEHOLDER else item for item in argv]
+
+
 def describe_payload(
     config: JsonObject,
     config_source: str,
@@ -380,10 +426,13 @@ def describe_payload(
 ) -> JsonObject:
     codex = config["codex"]
     claude = config["claude"]
+    grok = config["grok"]
     codex_safe_policy = delegate_config.effective_policy(config, engine="codex", mode=MODE_SAFE)
     codex_work_policy = delegate_config.effective_policy(config, engine="codex", mode=MODE_WORK)
     claude_safe_policy = _claude_runtime_policy(config, MODE_SAFE)
     claude_work_policy = _claude_runtime_policy(config, MODE_WORK)
+    grok_safe_policy = _grok_runtime_policy(config, MODE_SAFE)
+    grok_work_policy = _grok_runtime_policy(config, MODE_WORK)
     codex_safe_argv = _codex_describe_argv(
         codex,
         mode=MODE_SAFE,
@@ -410,6 +459,20 @@ def describe_payload(
         mode=MODE_WORK,
         policy=claude_work_policy,
     )
+    grok_safe_argv = _grok_describe_argv(
+        config,
+        grok,
+        mode=MODE_SAFE,
+        workspace="<isolated-workspace>",
+        policy=grok_safe_policy,
+    )
+    grok_work_argv = _grok_describe_argv(
+        config,
+        grok,
+        mode=MODE_WORK,
+        workspace="<workspace>",
+        policy=grok_work_policy,
+    )
     return {
         "ok": True,
         "version": VERSION,
@@ -430,6 +493,10 @@ def describe_payload(
                 "safe": claude_safe_policy,
                 "work": claude_work_policy,
             },
+            "grok": {
+                "safe": grok_safe_policy,
+                "work": grok_work_policy,
+            },
         },
         "modes": [MODE_SAFE, MODE_WORK],
         "promptSources": ["direct", "prompt-file", "stdin"],
@@ -439,6 +506,7 @@ def describe_payload(
             "codex": PROMPT_TRANSPORT_STDIN,
             "kimi": PROMPT_TRANSPORT_ARGV,
             "claude": PROMPT_TRANSPORT_STDIN,
+            "grok": PROMPT_TRANSPORT_FILE,
         },
         "globalOptions": _global_options(),
         "completionReportModes": list(delegate_config.COMPLETION_REPORT_MODES),
@@ -458,6 +526,7 @@ def describe_payload(
                 "codex": True,
                 "kimi": False,
                 "claude": False,
+                "grok": False,
             },
         },
         "worktrees": {
@@ -591,6 +660,21 @@ def describe_payload(
                     "No CLI workspace flag; Delegate sets subprocess cwd.",
                 ],
             },
+            "grok": {
+                "safe": grok_safe_argv,
+                "safeNotes": [
+                    SAFE_WORKSPACE_SYNC_NOTE,
+                    "Uses Grok --prompt-file with Delegate temp prompt materialization; dry-run argv shows <prompt file>.",
+                    "Safe mode uses Delegate isolated copy plus Grok read-only sandbox/permission controls; it does not use Grok plan mode.",
+                    "The isolated workspace is the effective write boundary; Grok sandbox/permission flags are advisory defense-in-depth.",
+                ],
+                "work": grok_work_argv,
+                "workNotes": [
+                    "Uses grok.workPermissionMode unless policy.harness.grok.work.bypassApprovalsAndSandbox explicitly requests bypassPermissions.",
+                    "Reasoning effort maps to Grok --effort (low, medium, high, xhigh, max).",
+                    "Tracked runs use --output-format streaming-json; pass-through uses plain.",
+                ],
+            },
         },
         "commands": _commands_catalog(),
     }
@@ -664,6 +748,15 @@ def _emit_models_text(payload: JsonObject, config_source: str, stdout: TextIO) -
             f"binary={_text_or_none(claude.get('binary'))} "
             f"defaultModel={_text_or_none(claude.get('defaultModel'))} "
             f"workPermissionMode={claude.get('workPermissionMode')}",
+            file=stdout,
+        )
+    grok = payload.get("grok")
+    if isinstance(grok, dict):
+        print(
+            "grok: "
+            f"binary={_text_or_none(grok.get('binary'))} "
+            f"defaultModel={_text_or_none(grok.get('defaultModel'))} "
+            f"workPermissionMode={grok.get('workPermissionMode')}",
             file=stdout,
         )
     kimi = payload.get("kimi")
@@ -747,7 +840,7 @@ def emit_describe(
     print(f"delegate {VERSION}", file=stdout)
     print(f"config: {payload['configPath']} ({payload['configSource']})", file=stdout)
     print(f"runtime: {payload['runtime']['modulePath']}", file=stdout)
-    print("engines: cursor, droid, codex, kimi, claude", file=stdout)
+    print("engines: cursor, droid, codex, kimi, claude, grok", file=stdout)
     print("modes: safe, work", file=stdout)
     print("prompt sources: direct, --prompt-file, stdin", file=stdout)
     print("global options must appear before the subcommand", file=stdout)
@@ -789,6 +882,8 @@ Good defaults:
   delegate codex work "Implement the scoped fix, run the named check, and report changed files."
   delegate claude safe "Review this workspace. Do not edit files."
   delegate claude work "Implement the scoped fix, run the named check, and report changed files."
+  delegate grok safe "Review this workspace. Do not edit files."
+  delegate grok work "Implement the scoped fix, run the named check, and report changed files."
   delegate kimi safe "Review this repo for regressions; report file/line/severity."
   delegate kimi work "Implement the scoped task; report changed files and tests."
 
@@ -813,6 +908,16 @@ Claude:
   - Work mode uses claude.workPermissionMode, or bypassPermissions only when
     Delegate policy explicitly enables policy.harness.claude.work.bypassApprovalsAndSandbox.
   - Reasoning effort maps to Claude Code --effort (low, medium, high, xhigh, max).
+
+Grok:
+  - Uses Grok Build CLI with --prompt-file; Delegate materializes the effective prompt in a temp file.
+  - {SAFE_WORKSPACE_SYNC_NOTE}
+  - Safe mode uses Delegate isolated copy plus Grok read-only sandbox/permission controls; not Grok plan mode.
+  - Work mode uses grok.workPermissionMode, or bypassPermissions only when
+    Delegate policy explicitly enables policy.harness.grok.work.bypassApprovalsAndSandbox.
+  - Reasoning effort maps to Grok --effort (low, medium, high, xhigh, max).
+  - Tracked runs use streaming-json; pass-through uses plain output.
+  - --output-schema is unsupported in v1 because Grok --json-schema forces final json output.
 
 Droid modes:
   - {SAFE_WORKSPACE_SYNC_NOTE}

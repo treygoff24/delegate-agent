@@ -35,10 +35,12 @@ from delegate_agent import runner as delegate_runner
 from delegate_agent.argv_builders import (  # noqa: F401  # re-exported for tests / back-compat
     SAFE_REVIEW_PREFIX_BY_ENGINE,
     _claude_harness_bypass_enabled,
+    _grok_harness_bypass_enabled,
     build_claude_argv,
     build_codex_argv,
     build_cursor_argv,
     build_droid_argv,
+    build_grok_argv,
     build_kimi_argv,
     prefix_cursor_safe_prompt,
     prefix_droid_safe_prompt,
@@ -78,6 +80,8 @@ from delegate_agent.prompt_transport import (  # noqa: F401  # CURSOR_PROMPT_RED
     DROID_PROMPT_FILE_ARG_PLACEHOLDER,
     DROID_PROMPT_FILE_DISPLAY,
     KIMI_PROMPT_REDACTION,
+    PROMPT_FILE_ARG_PLACEHOLDER,
+    PROMPT_FILE_DISPLAY,
     PROMPT_TRANSPORT_ARGV,
     PROMPT_TRANSPORT_FILE,
     PROMPT_TRANSPORT_STDIN,
@@ -130,6 +134,7 @@ CONFIG_ENV = delegate_config.CONFIG_ENV
 
 MISSING_BINARY_PROBE_DIRS = (
     "~/.claude/local",
+    "~/.grok/bin",
     "~/.kimi-code/bin",
     "~/.local/bin",
     "~/bin",
@@ -329,7 +334,7 @@ def dry_run_payload(request: Request) -> JsonObject:
 def _binary_config_key(engine: str | None) -> str | None:
     if engine == "cursor":
         return "cursor.argvPrefix"
-    if engine in {"codex", "droid", "kimi", "claude"}:
+    if engine in {"codex", "droid", "kimi", "claude", "grok"}:
         return f"{engine}.binary"
     return None
 
@@ -560,7 +565,7 @@ def execute_request(
                     isolated_request.workspace,
                     stdin_text=isolated_request.stdin_text,
                     prompt_file_text=isolated_request.prompt_file_text,
-                    prompt_file_placeholder=DROID_PROMPT_FILE_ARG_PLACEHOLDER,
+                    prompt_file_placeholder=PROMPT_FILE_ARG_PLACEHOLDER,
                     env_overrides=isolated_request.env_overrides,
                 )
             except delegate_runner.RunnerLaunchError as exc:
@@ -602,7 +607,7 @@ def execute_request(
                 completion_report_mode=completion_report_mode,
                 stdin_text=isolated_request.stdin_text,
                 prompt_file_text=isolated_request.prompt_file_text,
-                prompt_file_placeholder=DROID_PROMPT_FILE_ARG_PLACEHOLDER,
+                prompt_file_placeholder=PROMPT_FILE_ARG_PLACEHOLDER,
                 manifest_argv=public_argv(isolated_request),
                 progress=isolated_request.progress,
                 progress_initial_delay_sec=isolated_request.progress_initial_delay_sec,
