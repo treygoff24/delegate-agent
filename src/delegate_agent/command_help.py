@@ -500,6 +500,49 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "--no-completion-report",
         ),
     ),
+    "config": CommandSpec(
+        name="config",
+        summary="Manage the user Delegate config file.",
+        usage=("delegate [--json] config <action>",),
+        arguments=(ArgSpec("action", True, "Currently: init."),),
+        notes=(
+            "config init writes an editable starter config to ~/.delegate/config.json, "
+            "or to DELEGATE_CONFIG when that environment variable is set.",
+            "Run delegate config init --force to overwrite an existing config.",
+        ),
+        see_also=("config init", "profiles", "models", "describe"),
+        unsupported_global_options=(
+            "--cwd",
+            "--isolation",
+            "--auth-profile",
+            "--pass-through",
+            "--completion-report",
+            "--no-completion-report",
+        ),
+    ),
+    "config init": CommandSpec(
+        name="config init",
+        summary="Write an editable starter config file.",
+        usage=("delegate [--json] config init [--force]",),
+        options=(OptionSpec("--force", None, "Overwrite an existing config file."),),
+        examples=(
+            "delegate config init",
+            "delegate --json config init --force",
+        ),
+        notes=(
+            "The starter config includes placeholder Droid aliases and placeholder CODEX_HOME profile pointers.",
+            "Use POSIX paths inside WSL; convert Windows paths with wslpath before putting them in config.",
+        ),
+        see_also=("config", "profiles", "models"),
+        unsupported_global_options=(
+            "--cwd",
+            "--isolation",
+            "--auth-profile",
+            "--pass-through",
+            "--completion-report",
+            "--no-completion-report",
+        ),
+    ),
     "worktree": CommandSpec(
         name="worktree",
         summary="Manage persistent isolation worktrees (list, show, remove, prune, gc).",

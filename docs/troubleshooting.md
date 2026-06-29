@@ -43,11 +43,10 @@ Droid uses local aliases from config:
 delegate --json models
 ```
 
-Copy `config.example.json` and replace placeholder IDs:
+Initialize config and replace placeholder IDs:
 
 ```bash
-mkdir -p ~/.delegate
-cp config.example.json ~/.delegate/config.json
+delegate config init
 $EDITOR ~/.delegate/config.json
 ```
 
@@ -108,6 +107,31 @@ ls -la ~/.delegate/config.json .delegate/config.json 2>/dev/null || true
 ```
 
 When `DELEGATE_CONFIG` is set, the file must exist.
+
+## WSL path or Git warnings
+
+Inside WSL, use Linux paths and Linux-installed tools:
+
+```bash
+command -v git
+wslpath -u 'C:\Users\you\repo'
+```
+
+Delegate rejects Windows-style paths such as `C:\Users\...` or
+`%USERPROFILE%\...` in `--cwd`, `DELEGATE_CONFIG`, `CODEX_HOME`, prompt/schema
+paths, and `worktrees.dataHome`. Convert them first with `wslpath -u`, or use a
+native WSL path under `/home/<user>/...`.
+
+If Delegate reports `windows_git_in_wsl`, `git` resolved to Windows `git.exe`.
+Install Git inside WSL, for example:
+
+```bash
+sudo apt install git
+```
+
+If a dry-run or launch warns that the workspace is under `/mnt/c`, the run can
+still work, but WSL filesystem performance and private-file permissions are
+better under `/home/<user>/...`.
 
 ## Global options rejected
 

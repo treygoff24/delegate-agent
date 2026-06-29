@@ -42,15 +42,26 @@ This guide covers both human setup and non-interactive setup for agents or CI jo
 
    The Claude harness requires Claude Code 2.1.x or newer (verified on 2.1.181) for `--effort`, `--permission-mode auto`, and `--no-session-persistence`.
 
-4. Copy and edit config:
+4. Initialize and edit config:
 
    ```bash
-   mkdir -p ~/.delegate
-   cp config.example.json ~/.delegate/config.json
+   delegate config init
    $EDITOR ~/.delegate/config.json
    ```
 
    Replace placeholder Droid model IDs. Use local aliases such as `reviewer` and `implementer`; the alias names are yours and do not need to reveal the provider.
+
+   In a development checkout, `cp config.example.json ~/.delegate/config.json`
+   is still fine. Installed users should prefer `delegate config init`.
+
+### WSL setup
+
+When running on Windows through WSL, treat Delegate as a Linux CLI:
+
+- Install Python, Git, Delegate, and child CLIs inside the WSL distro.
+- Keep repos under `/home/<user>/...` for best performance and private-file semantics.
+- Use POSIX paths. Convert copied Windows paths with `wslpath -u` before using them in `--cwd`, `DELEGATE_CONFIG`, `CODEX_HOME`, or `worktrees.dataHome`.
+- If `command -v git` points to Windows `git.exe`, install WSL-native Git (`sudo apt install git`) or put it earlier in `PATH`.
 
 5. Inspect loaded config and aliases:
 

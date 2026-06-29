@@ -14,6 +14,7 @@ import io
 import json
 import os
 import select
+import shutil
 import subprocess  # nosec B404 - Delegate inspects git workspaces with shell=False.
 from collections.abc import Callable
 from dataclasses import replace
@@ -21,7 +22,7 @@ from pathlib import Path
 from typing import TextIO
 
 from delegate_agent import config as delegate_config
-from delegate_agent import profiles, reasoning, safe_workspace
+from delegate_agent import profiles, reasoning, safe_workspace, wsl
 from delegate_agent import runner as delegate_runner
 from delegate_agent.argv_builders import (
     SAFE_REVIEW_PREFIX_BY_ENGINE,
@@ -79,6 +80,11 @@ OUTPUT_SCHEMA_COMPLETION_REPORT_WARNING = (
     "--output-schema enforces a JSON-only final message; completion-report instruction "
     "suppressed for this run."
 )
+
+
+def _reject_windows_path(value: str, field: str) -> None:
+    if wsl.should_reject_windows_path(value):
+        raise DelegateError("windows_path", wsl.windows_path_message(field, value))
 
 
 def load_config(
@@ -144,6 +150,7 @@ def resolve_workspace(global_cwd: str | None, json_cwd: str | None = None) -> Re
 
 
 def workspace_for(path_text: str) -> ResolvedWorkspace:
+    _reject_windows_path(path_text, "cwd")
     path = Path(path_text).expanduser().resolve()
     if not path.exists() or not path.is_dir():
         raise DelegateError("invalid_cwd", f"cwd does not exist or is not a directory: {path}")
@@ -154,6 +161,9 @@ def workspace_for(path_text: str) -> ResolvedWorkspace:
 
 
 def git_root_for(path: Path) -> str | None:
+    message = wsl.windows_git_message(shutil.which("git"))
+    if message is not None:
+        raise DelegateError("windows_git_in_wsl", message)
     try:
         result = _run_git(
             str(path),
@@ -188,6 +198,7 @@ def resolve_prompt(
         prompt_file_path = prompt_file
         if prompt_file_path is None:
             raise DelegateError("missing_prompt_file", "--prompt-file requires a path.")
+        _reject_windows_path(prompt_file_path, "--prompt-file")
         path = Path(prompt_file_path).expanduser()
         try:
             return validate_prompt(path.read_text(encoding="utf-8"))
@@ -239,6 +250,7 @@ def resolve_output_schema(engine: str, output_schema: object) -> str | None:
         )
     if not isinstance(output_schema, str) or not output_schema:
         raise DelegateError("invalid_output_schema", "outputSchema must be a non-empty string.")
+    _reject_windows_path(output_schema, "outputSchema")
     path = Path(output_schema).expanduser()
     if not path.is_absolute():
         path = Path.cwd() / path
@@ -483,6 +495,7 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
     if run_json is None:
         raise DelegateError("invalid_command", "run --input-json options are required.")
     global_options = parsed.global_options
+    _reject_windows_path(run_json.input_json, "--input-json")
     path = Path(run_json.input_json).expanduser()
     raw = _load_input_json_object(path)
 
@@ -950,6 +963,9 @@ def _build_request_for_workspace(
     warnings: tuple[str, ...],
 ) -> Request:
     prompt = _append_safe_dirty_tree_note(prompt, resolved, mode, isolation_context)
+    workspace_warning = wsl.drivefs_workspace_warning(resolved.path)
+    if workspace_warning is not None:
+        warnings = (*warnings, workspace_warning)
     cache = (
         reasoning.load_reasoning_capability_cache(resolved.path)
         if requested_effort is not None

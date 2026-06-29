@@ -14,6 +14,13 @@ From lowest to highest precedence:
 
 If `DELEGATE_CONFIG` is set, the file must exist. Delegate fails closed instead of silently falling back to another config.
 
+Create an editable user config from an installed Delegate:
+
+```bash
+delegate config init
+$EDITOR ~/.delegate/config.json
+```
+
 Config objects are deep-merged. That means an explicit config can override a
 specific key, but nested maps such as `droid.models` are merged with lower layers
 rather than cleared. For a deterministic automation run with no user-level
@@ -39,7 +46,7 @@ layers. This is read-only observability; inspecting it does not modify
 
 ## Example
 
-Copy `config.example.json` and replace placeholders before real Droid runs:
+`delegate config init` writes a starter config like this. Replace placeholders before real Droid runs:
 
 ```json
 {

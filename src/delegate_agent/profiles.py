@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from delegate_agent import redaction
+from delegate_agent import redaction, wsl
 from delegate_agent.errors import DelegateError
 from delegate_agent.git_utils import GIT_QUICK_TIMEOUT_SECONDS
 from delegate_agent.git_utils import run_git as _run_git
@@ -201,6 +201,8 @@ def _auth_file_readable(path: Path) -> bool:
 
 
 def preflight_codex_home(codex_home: str, *, codex: JsonObject) -> None:
+    if wsl.should_reject_windows_path(codex_home):
+        raise DelegateError("windows_path", wsl.windows_path_message("CODEX_HOME", codex_home))
     home = Path(_expanded_env_value(codex_home))
     if not home.is_absolute():
         raise DelegateError(

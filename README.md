@@ -56,11 +56,10 @@ command -v kimi    # Kimi Code CLI, used by delegate kimi ...
 
 Runtime authentication is owned by each child CLI. Delegate cannot log in for you. Dry-runs and CI tests do not require the real child binaries.
 
-Copy the example config and replace placeholder Droid model IDs before real Droid runs:
+Initialize a starter config and replace placeholder Droid model IDs before real Droid runs:
 
 ```bash
-mkdir -p ~/.delegate
-cp config.example.json ~/.delegate/config.json
+delegate config init
 $EDITOR ~/.delegate/config.json
 ```
 
@@ -78,6 +77,15 @@ delegate --json capabilities
 Discover commands as you go: `delegate <command> --help` prints focused help for any command path, and `delegate --json <command> --help` returns an agent-friendly spec of its usage, arguments, and options. `delegate --json describe` includes a `commands` catalog of the whole surface. `delegate --json capabilities` reports reasoning-effort support without launching a child runtime.
 
 From this development checkout, use `python3 bin/delegate.py ...` instead of an installed `delegate` shim.
+
+### WSL setup notes
+
+Delegate is a POSIX/Linux CLI and works best in WSL when everything is WSL-native:
+
+- Install Python, Git, Delegate, and child CLIs inside the WSL distro.
+- Keep projects under `/home/<user>/...`; `/mnt/c/...` works but can be slower and has weaker private-file permission semantics.
+- Pass POSIX paths (`/home/...` or `/mnt/c/...`), not Windows paths like `C:\Users\...`; use `wslpath -u` to convert.
+- If `git` resolves to Windows `git.exe`, Delegate fails with a targeted hint. Install WSL Git, for example `sudo apt install git`.
 
 ## Quickstart
 

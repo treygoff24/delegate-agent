@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Final
 
-from delegate_agent import reasoning, redaction
+from delegate_agent import reasoning, redaction, wsl
 from delegate_agent.json_types import JsonObject, JsonValue, is_non_negative_int
 
 DEFAULT_CONFIG_PATH: Path | None = None
@@ -129,6 +129,25 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
 def embedded_default_config() -> JsonObject:
     """Return a fresh copy of Delegate's embedded default configuration."""
     return copy.deepcopy(_EMBEDDED_DEFAULT_CONFIG)
+
+
+def example_config() -> JsonObject:
+    """Return an editable starter config equivalent to config.example.json."""
+
+    config = embedded_default_config()
+    droid = config["droid"]
+    if isinstance(droid, dict):
+        droid["models"] = {
+            "reviewer": "replace-with-read-only-model-id",
+            "implementer": "replace-with-edit-capable-model-id",
+        }
+    profiles = config["profiles"]
+    if isinstance(profiles, dict):
+        profiles["definitions"] = {
+            "work": {"env": {"CODEX_HOME": "~/replace-with-work-codex-home"}},
+            "personal": {"env": {"CODEX_HOME": "~/replace-with-personal-codex-home"}},
+        }
+    return config
 
 
 def _embedded_progress_default(key: str) -> float:
@@ -333,6 +352,11 @@ def _validate_worktrees_section(worktrees: JsonValue) -> None:
             "worktrees.dataHome must be null or a non-empty string.",
         )
     if isinstance(data_home, str) and data_home:
+        if wsl.should_reject_windows_path(data_home):
+            raise ConfigError(
+                "windows_path",
+                wsl.windows_path_message("worktrees.dataHome", data_home),
+            )
         expanded = Path(data_home).expanduser()
         if not expanded.is_absolute():
             raise ConfigError(
@@ -440,6 +464,8 @@ def _validate_profiles_section(profiles: JsonValue) -> None:
                     "invalid_profiles_config",
                     f"{path} must be a non-empty string.",
                 )
+            if key.strip() == "CODEX_HOME" and wsl.should_reject_windows_path(value):
+                raise ConfigError("windows_path", wsl.windows_path_message(path, value))
     default = profiles.get("default")
     if default is not None and (not isinstance(default, str) or default not in normalized_names):
         raise ConfigError(
@@ -796,7 +822,8 @@ def default_config_path() -> Path:
 
 
 def config_path() -> Path:
-    return Path(os.environ.get(CONFIG_ENV, str(default_config_path()))).expanduser()
+    raw = os.environ.get(CONFIG_ENV, str(default_config_path()))
+    return Path(raw).expanduser()
 
 
 def workspace_config_path(workspace: Path) -> Path:
@@ -840,6 +867,8 @@ def load_config(
 
     explicit = os.environ.get(CONFIG_ENV)
     if explicit:
+        if wsl.should_reject_windows_path(explicit):
+            raise ConfigError("windows_path", wsl.windows_path_message(CONFIG_ENV, explicit))
         explicit_path = Path(explicit).expanduser()
         if not explicit_path.exists():
             # Explicit path was requested; do not discard lower-precedence merges.

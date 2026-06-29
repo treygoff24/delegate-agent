@@ -210,6 +210,17 @@ environment diagnostics. Profile env maps are for routing pointers, not
 secrets; secret-like keys in `profiles.definitions.*.env` are rejected during
 config validation.
 
+### Config init
+
+```bash
+delegate config init
+delegate --json config init --force
+```
+
+`delegate config init` writes an editable starter config to
+`~/.delegate/config.json`, or to `DELEGATE_CONFIG` when set. It refuses to
+overwrite an existing file unless `--force` is passed.
+
 ### JSON input
 
 ```bash

@@ -54,6 +54,8 @@ class ParserTests(unittest.TestCase):
             ["describe"],
             ["--json", "describe"],
             ["--json", "describe", "--summary"],
+            ["config", "init"],
+            ["--json", "config", "init", "--force"],
             ["agent-help"],
             ["dry-run", "cursor", "work", "prompt"],
             ["dry-run", "claude", "safe", "prompt"],

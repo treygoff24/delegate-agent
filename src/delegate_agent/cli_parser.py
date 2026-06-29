@@ -14,6 +14,7 @@ from typing import NoReturn
 from delegate_agent import (
     capability_commands,
     command_help,
+    config_commands,
     inspection_commands,
     profile_commands,
     reasoning,
@@ -223,6 +224,51 @@ def parse_capabilities_subcommand(
     )
 
 
+def parse_config_subcommand(
+    rest: list[str],
+    *,
+    json_mode: bool,
+    cwd: str | None,
+    pass_through: bool,
+    completion_report: str | None,
+    isolation: str | None,
+    auth_profile: str | None,
+) -> ParsedCommand:
+    rest, json_mode = consume_json_option(rest, json_mode)
+    if not rest or command_help.is_help_token(rest[0]):
+        return help_command(json_mode, "config")
+    if cwd is not None or pass_through or completion_report is not None or isolation is not None:
+        raise DelegateError(
+            "invalid_option_combination",
+            "delegate config does not use --cwd, --isolation, --pass-through, or completion-report options.",
+        )
+    if auth_profile is not None:
+        raise DelegateError(
+            "invalid_option_combination",
+            "--auth-profile is not supported with delegate config.",
+        )
+    action = rest[0]
+    if action != "init":
+        raise DelegateError("unknown_config_action", f"Unknown config action: {action}")
+    force = False
+    for token in rest[1:]:
+        if command_help.is_help_token(token):
+            return help_command(json_mode, "config init")
+        if token == "--force":
+            force = True
+            continue
+        require_no_extra([token], "config init")
+    return ParsedCommand(
+        "config",
+        global_options=GlobalOptions(json_mode=json_mode),
+        config_command=config_commands.ConfigCommand(
+            action="init",
+            force=force,
+            json_mode=json_mode,
+        ),
+    )
+
+
 def parse_cli(argv: list[str]) -> ParsedCommand:
     if not argv or argv[0] in ("--help", "-h"):
         return ParsedCommand("help")
@@ -332,6 +378,16 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
         )
     if subcommand == "capabilities":
         return parse_capabilities_subcommand(
+            rest,
+            json_mode=json_mode,
+            cwd=cwd,
+            pass_through=pass_through,
+            completion_report=completion_report,
+            isolation=isolation,
+            auth_profile=auth_profile,
+        )
+    if subcommand == "config":
+        return parse_config_subcommand(
             rest,
             json_mode=json_mode,
             cwd=cwd,

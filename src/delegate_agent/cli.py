@@ -15,6 +15,7 @@ from delegate_agent import (
     capability_commands,
     command_errors,
     command_help,
+    config_commands,
     inspection_commands,
     profile_commands,
     profiles,
@@ -25,6 +26,7 @@ from delegate_agent import (
     worktree_commands,
     worktree_execution,
     worktree_mgmt,
+    wsl,
 )
 from delegate_agent import config as delegate_config
 from delegate_agent import rendering as delegate_rendering
@@ -228,6 +230,13 @@ def emit_profiles_command(
         config_source=config_source,
         stdout=stdout,
     )
+
+
+def emit_config_command(parsed: ParsedCommand, stdout: TextIO) -> int:
+    command = parsed.config_command
+    if command is None:
+        raise DelegateError("invalid_command", "config options are required.")
+    return config_commands.emit(command, stdout)
 
 
 def dry_run_payload(request: Request) -> JsonObject:
@@ -612,6 +621,10 @@ def pre_read_run_json_for_config(
 ) -> tuple[ResolvedWorkspace, JsonObject, str]:
     """Pre-read run input JSON for config discovery: extract cwd/isolation, resolve workspace,
     load config from that workspace, validate config. Returns (workspace, config, source)."""
+    if wsl.should_reject_windows_path(input_json_path):
+        raise DelegateError(
+            "windows_path", wsl.windows_path_message("--input-json", input_json_path)
+        )
     path = Path(input_json_path).expanduser()
     raw = _load_input_json_object(path)
 
@@ -677,6 +690,8 @@ def main(
         if parsed.subcommand == "version":
             print(VERSION, file=stdout)
             return EXIT_OK
+        if parsed.subcommand == "config":
+            return emit_config_command(parsed, stdout)
 
         # For run --input-json, pre-read the JSON to discover config from the
         # JSON-resolved workspace before loading/finalizing config.

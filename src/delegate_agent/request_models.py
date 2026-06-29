@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 
 from delegate_agent import (
     capability_commands,
+    config_commands,
     inspection_commands,
     profile_commands,
     profiles,
@@ -68,6 +69,7 @@ class ParsedCommand:
     runs: inspection_commands.RunsCommand | None = None
     run_output: run_output_commands.RunOutputCommand | None = None
     worktree: worktree_commands.WorktreeCommand | None = None
+    config_command: config_commands.ConfigCommand | None = None
     capabilities: capability_commands.CapabilitiesCommand | None = None
     profiles_command: profile_commands.ProfilesCommand | None = None
     inspection: InspectionOptions | None = None
@@ -84,6 +86,7 @@ class ParsedCommand:
         runs: inspection_commands.RunsCommand | None = None,
         run_output: run_output_commands.RunOutputCommand | None = None,
         worktree: worktree_commands.WorktreeCommand | None = None,
+        config_command: config_commands.ConfigCommand | None = None,
         capabilities: capability_commands.CapabilitiesCommand | None = None,
         profiles_command: profile_commands.ProfilesCommand | None = None,
         inspection: InspectionOptions | None = None,
@@ -97,6 +100,7 @@ class ParsedCommand:
         self.runs = runs
         self.run_output = run_output
         self.worktree = worktree
+        self.config_command = config_command
         self.capabilities = capabilities
         self.profiles_command = profiles_command
         self.inspection = inspection
