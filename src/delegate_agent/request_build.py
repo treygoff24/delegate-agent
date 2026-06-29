@@ -16,11 +16,12 @@ import os
 import select
 import subprocess  # nosec B404 - Delegate inspects git workspaces with shell=False.
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import TextIO
 
 from delegate_agent import config as delegate_config
-from delegate_agent import reasoning
+from delegate_agent import profiles, reasoning, safe_workspace
 from delegate_agent import runner as delegate_runner
 from delegate_agent.argv_builders import (
     SAFE_REVIEW_PREFIX_BY_ENGINE,
@@ -69,9 +70,15 @@ RUN_INPUT_KEYS = {
     "prompt",
     "isolation",
     "reasoningEffort",
+    "outputSchema",
     "progress",
     "forbidCommit",
 }
+
+OUTPUT_SCHEMA_COMPLETION_REPORT_WARNING = (
+    "--output-schema enforces a JSON-only final message; completion-report instruction "
+    "suppressed for this run."
+)
 
 
 def load_config(
@@ -221,6 +228,50 @@ def validate_prompt(prompt: str) -> str:
     return prompt
 
 
+def resolve_output_schema(engine: str, output_schema: object) -> str | None:
+    if output_schema is None:
+        return None
+    if engine != "codex":
+        raise DelegateError(
+            "unsupported_output_schema",
+            "--output-schema/outputSchema is only supported by the codex engine; "
+            f"{engine} has no native schema enforcement.",
+        )
+    if not isinstance(output_schema, str) or not output_schema:
+        raise DelegateError("invalid_output_schema", "outputSchema must be a non-empty string.")
+    path = Path(output_schema).expanduser()
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    path = path.resolve()
+    if not path.exists():
+        raise DelegateError("output_schema_not_found", f"Output schema not found: {path}")
+    if not path.is_file():
+        raise DelegateError("invalid_output_schema", f"Output schema is not a file: {path}")
+    try:
+        with path.open("rb"):
+            pass
+    except OSError as exc:
+        raise DelegateError(
+            "invalid_output_schema", f"Output schema is not readable: {path}"
+        ) from exc
+    return str(path)
+
+
+def _completion_report_prompt_mode(
+    completion_report_mode: str,
+    output_schema: str | None,
+) -> tuple[str, tuple[str, ...]]:
+    if (
+        output_schema is not None
+        and completion_report_mode == delegate_config.COMPLETION_REPORT_MODE_MARKDOWN
+    ):
+        return (
+            delegate_config.COMPLETION_REPORT_MODE_NONE,
+            (OUTPUT_SCHEMA_COMPLETION_REPORT_WARNING,),
+        )
+    return completion_report_mode, ()
+
+
 def resolve_completion_report_mode(parsed: ParsedCommand, config: JsonObject) -> str:
     global_options = parsed.global_options
     if global_options.pass_through:
@@ -252,6 +303,45 @@ def effective_prompt(
     return prompt
 
 
+def _safe_dirty_tree_note(
+    resolved: ResolvedWorkspace,
+    mode: str,
+    isolation_context: IsolationContext | None,
+) -> str | None:
+    if mode != MODE_SAFE or resolved.kind != "git":
+        return None
+    if isolation_context is None or isolation_context.effective_isolation != "worktree":
+        return None
+    git_root = isolation_context.source_git_root
+    if git_root is None or not safe_workspace.git_head_exists(git_root):
+        return None
+    # ponytail: one bounded git status probe per safe review; cache if this ever shows up hot.
+    changed = safe_workspace.changed_files_vs_head(git_root)
+    if not changed:
+        return None
+    shown = [f"`{path}`" for path in changed[:20]]
+    remaining = len(changed) - len(shown)
+    if remaining > 0:
+        shown.append(f"+{remaining} more")
+    return (
+        f"Note: {len(changed)} file(s) have uncommitted/untracked changes synced into "
+        f"this review copy: {', '.join(shown)}. Run `git diff HEAD` and check "
+        "untracked files in the workspace to see them."
+    )
+
+
+def _append_safe_dirty_tree_note(
+    prompt: str,
+    resolved: ResolvedWorkspace,
+    mode: str,
+    isolation_context: IsolationContext | None,
+) -> str:
+    note = _safe_dirty_tree_note(resolved, mode, isolation_context)
+    if note is None:
+        return prompt
+    return f"{prompt}\n\n{note}"
+
+
 def _validate_forbid_commit(
     *,
     forbid_commit: bool,
@@ -265,10 +355,24 @@ def _validate_forbid_commit(
             "invalid_option_combination",
             "--forbid-commit requires work mode with persistent worktree isolation.",
         )
+    source_workspace = (
+        isolation_context.source_workspace
+        if isolation_context is not None
+        else "the selected workspace"
+    )
+    if isolation_context is not None and isolation_context.source_git_root is None:
+        raise DelegateError(
+            "invalid_option_combination",
+            "--forbid-commit needs worktree isolation, which requires a Git workspace; "
+            f"{source_workspace} is not a Git repo, so no-commit enforcement isn't "
+            "available here. Omit --forbid-commit (the child may commit), or run "
+            "from a Git workspace.",
+        )
     if isolation_context is None or isolation_context.isolation_lifecycle != "persistent":
         raise DelegateError(
             "invalid_option_combination",
-            "--forbid-commit requires --isolation worktree so Delegate can enforce the policy.",
+            "--forbid-commit requires --isolation worktree so Delegate can enforce "
+            "the policy — add --isolation worktree, or omit --forbid-commit.",
         )
 
 
@@ -289,6 +393,7 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
             "--progress is incompatible with --pass-through.",
         )
     progress_initial_delay_sec, progress_interval_sec = resolve_progress_timing(config)
+    output_schema = resolve_output_schema(launch.engine, launch.output_schema)
     workspace = resolve_workspace(global_options.cwd)
     prompt = resolve_prompt(launch.prompt_parts, launch.prompt_file, stdin)
 
@@ -329,11 +434,15 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
     )
 
     completion_report_mode = resolve_completion_report_mode(parsed, config)
+    completion_report_prompt_mode, output_schema_warnings = _completion_report_prompt_mode(
+        completion_report_mode,
+        output_schema,
+    )
     prompt = effective_prompt(
         prompt,
         engine=launch.engine,
         mode=launch.mode,
-        completion_report_mode=completion_report_mode,
+        completion_report_mode=completion_report_prompt_mode,
     )
     return build_request(
         launch.engine,
@@ -351,6 +460,9 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         progress_initial_delay_sec=progress_initial_delay_sec,
         progress_interval_sec=progress_interval_sec,
         forbid_commit=launch.forbid_commit,
+        auth_profile_override=global_options.auth_profile,
+        output_schema=output_schema,
+        warnings=output_schema_warnings,
     )
 
 
@@ -436,6 +548,7 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         raise DelegateError(
             "invalid_model", "cursor model override must match configured Composer model."
         )
+    output_schema = resolve_output_schema(str(engine), raw.get("outputSchema"))
 
     # Pre-read cwd and isolation from JSON for config discovery (already done in main() for
     # config loading, but re-validate and resolve here for the request).
@@ -493,11 +606,15 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
     )
 
     completion_report_mode = resolve_completion_report_mode(parsed, config)
+    completion_report_prompt_mode, output_schema_warnings = _completion_report_prompt_mode(
+        completion_report_mode,
+        output_schema,
+    )
     prompt = effective_prompt(
         validate_prompt(prompt),
         engine=str(engine),
         mode=str(mode),
-        completion_report_mode=completion_report_mode,
+        completion_report_mode=completion_report_prompt_mode,
     )
     return build_request(
         str(engine),
@@ -515,6 +632,9 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         progress_initial_delay_sec=progress_initial_delay_sec,
         progress_interval_sec=progress_interval_sec,
         forbid_commit=raw_forbid_commit,
+        auth_profile_override=global_options.auth_profile,
+        output_schema=output_schema,
+        warnings=output_schema_warnings,
     )
 
 
@@ -535,6 +655,9 @@ def build_request(
     progress_initial_delay_sec: float = delegate_runner.PROGRESS_INITIAL_DELAY_SEC,
     progress_interval_sec: float = delegate_runner.PROGRESS_HEARTBEAT_INTERVAL_SEC,
     forbid_commit: bool = False,
+    auth_profile_override: str | None = None,
+    output_schema: str | None = None,
+    warnings: tuple[str, ...] = (),
 ) -> Request:
     if not isinstance(workspace, ResolvedWorkspace):
         raise TypeError(
@@ -547,6 +670,7 @@ def build_request(
         reasoning_effort,
         reasoning_effort_source=reasoning_effort_source,
     )
+    output_schema = resolve_output_schema(engine, output_schema)
 
     return _build_request_for_workspace(
         engine,
@@ -564,6 +688,9 @@ def build_request(
         progress_initial_delay_sec=progress_initial_delay_sec,
         progress_interval_sec=progress_interval_sec,
         forbid_commit=forbid_commit,
+        auth_profile_override=auth_profile_override,
+        output_schema=output_schema,
+        warnings=warnings,
     )
 
 
@@ -683,6 +810,7 @@ def _codex_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         stream_capture=build.stream_capture,
         reasoning_capability=capability,
         prompt_transport=PROMPT_TRANSPORT_STDIN,
+        output_schema=build.output_schema,
     )
     return EngineRequestParts(
         model=model,
@@ -817,7 +945,11 @@ def _build_request_for_workspace(
     progress_initial_delay_sec: float,
     progress_interval_sec: float,
     forbid_commit: bool,
+    auth_profile_override: str | None,
+    output_schema: str | None,
+    warnings: tuple[str, ...],
 ) -> Request:
+    prompt = _append_safe_dirty_tree_note(prompt, resolved, mode, isolation_context)
     cache = (
         reasoning.load_reasoning_capability_cache(resolved.path)
         if requested_effort is not None
@@ -835,32 +967,77 @@ def _build_request_for_workspace(
             requested_effort=requested_effort,
             effort_source=effort_source,
             cache=cache,
+            output_schema=output_schema,
         ),
     )
-    return Request(
-        engine,
-        mode,
-        resolved.path,
-        prompt,
-        parts.argv,
-        parts.model,
-        model_alias=parts.model_alias,
-        dry_run=dry_run,
-        workspace_kind=resolved.kind,
-        isolation_context=isolation_context,
-        reasoning_effort=parts.reasoning_effort,
-        reasoning_effort_source=parts.reasoning_effort_source,
-        reasoning_capability_source=parts.reasoning_capability_source,
-        reasoning_transport=parts.reasoning_transport,
-        progress=progress,
-        progress_initial_delay_sec=progress_initial_delay_sec,
-        progress_interval_sec=progress_interval_sec,
-        forbid_commit=forbid_commit,
-        warnings=parts.warnings,
-        stdin_text=parts.stdin_text,
-        prompt_file_text=parts.prompt_file_text,
-        prompt_transport=parts.prompt_transport,
-        display_argv=parts.display_argv,
+    return _apply_profile_resolution(
+        Request(
+            engine,
+            mode,
+            resolved.path,
+            prompt,
+            parts.argv,
+            parts.model,
+            model_alias=parts.model_alias,
+            output_schema=output_schema,
+            dry_run=dry_run,
+            workspace_kind=resolved.kind,
+            isolation_context=isolation_context,
+            reasoning_effort=parts.reasoning_effort,
+            reasoning_effort_source=parts.reasoning_effort_source,
+            reasoning_capability_source=parts.reasoning_capability_source,
+            reasoning_transport=parts.reasoning_transport,
+            progress=progress,
+            progress_initial_delay_sec=progress_initial_delay_sec,
+            progress_interval_sec=progress_interval_sec,
+            forbid_commit=forbid_commit,
+            warnings=(*warnings, *parts.warnings),
+            stdin_text=parts.stdin_text,
+            prompt_file_text=parts.prompt_file_text,
+            prompt_transport=parts.prompt_transport,
+            display_argv=parts.display_argv,
+        ),
+        config,
+        auth_profile_override=auth_profile_override,
+    )
+
+
+def _dedupe_warnings(warnings: tuple[str, ...]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for warning in warnings:
+        if warning in seen:
+            continue
+        seen.add(warning)
+        deduped.append(warning)
+    return tuple(deduped)
+
+
+def _apply_profile_resolution(
+    request: Request, config: JsonObject, *, auth_profile_override: str | None = None
+) -> Request:
+    resolution = profiles.resolve_active_profile(
+        config, os.environ, cli_override=auth_profile_override
+    )
+    env_overrides = dict(request.env_overrides or {})
+    env_overrides.update(resolution.env)
+    auth_profile = resolution.name
+    fallback_profile = None
+    if request.engine == "codex":
+        if resolution.name is not None and resolution.codex_home is None:
+            raise DelegateError(
+                "profile_missing_codex_home",
+                f"Profile {resolution.name!r} is active for a Codex Run but does not define CODEX_HOME.",
+            )
+        if resolution.name is not None:
+            fallback_profile = profiles.codex_fallback_profile(config)
+    return replace(
+        request,
+        warnings=_dedupe_warnings((*request.warnings, *resolution.warnings)),
+        env_overrides=env_overrides or None,
+        auth_profile=auth_profile,
+        fallback_auth_profile=fallback_profile,
+        profile_resolution=resolution,
     )
 
 

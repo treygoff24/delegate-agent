@@ -8,11 +8,13 @@ without an import cycle.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from delegate_agent import (
     capability_commands,
     inspection_commands,
+    profile_commands,
+    profiles,
     run_output_commands,
     worktree_commands,
 )
@@ -28,6 +30,7 @@ class GlobalOptions:
     pass_through: bool = False
     completion_report: str | None = None
     isolation: str | None = None
+    auth_profile: str | None = None
 
 
 @dataclass
@@ -37,6 +40,7 @@ class LaunchOptions:
     model_alias: str | None = None
     prompt_parts: list[str] | None = None
     prompt_file: str | None = None
+    output_schema: str | None = None
     reasoning_effort: str | None = None
     progress_intent: str | None = None
     forbid_commit: bool = False
@@ -65,6 +69,7 @@ class ParsedCommand:
     run_output: run_output_commands.RunOutputCommand | None = None
     worktree: worktree_commands.WorktreeCommand | None = None
     capabilities: capability_commands.CapabilitiesCommand | None = None
+    profiles_command: profile_commands.ProfilesCommand | None = None
     inspection: InspectionOptions | None = None
 
     def __init__(
@@ -80,6 +85,7 @@ class ParsedCommand:
         run_output: run_output_commands.RunOutputCommand | None = None,
         worktree: worktree_commands.WorktreeCommand | None = None,
         capabilities: capability_commands.CapabilitiesCommand | None = None,
+        profiles_command: profile_commands.ProfilesCommand | None = None,
         inspection: InspectionOptions | None = None,
     ) -> None:
         self.subcommand = subcommand
@@ -92,6 +98,7 @@ class ParsedCommand:
         self.run_output = run_output
         self.worktree = worktree
         self.capabilities = capabilities
+        self.profiles_command = profiles_command
         self.inspection = inspection
 
 
@@ -110,6 +117,7 @@ class Request:
     argv: list[str]
     model: str | None
     model_alias: str | None = None
+    output_schema: str | None = None
     dry_run: bool = False
     workspace_kind: str = "git"
     isolation_context: IsolationContext | None = None
@@ -126,6 +134,12 @@ class Request:
     prompt_file_text: str | None = None
     prompt_transport: str = PROMPT_TRANSPORT_ARGV
     display_argv: list[str] | None = None
+    env_overrides: dict[str, str] | None = None
+    auth_profile: str | None = None
+    fallback_auth_profile: str | None = None
+    profile_resolution: profiles.ProfileResolution = field(
+        default_factory=profiles.empty_profile_resolution
+    )
 
 
 @dataclass(frozen=True)
@@ -155,3 +169,4 @@ class EngineBuildInput:
     requested_effort: str | None
     effort_source: str | None
     cache: JsonObject | None
+    output_schema: str | None = None

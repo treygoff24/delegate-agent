@@ -9,3 +9,9 @@ f50b9d15300a288443e70a3082ccc4fc05e0beb4:tests/test_snapshot_commands.py:stripe-
 # samples at runtime so the working tree and post-squash history stay clean.
 8b22247be1e865efed0e9cb20a31c7382d87ec48:tests/test_runner_capture.py:curl-auth-header:816
 8b22247be1e865efed0e9cb20a31c7382d87ec48:tests/test_capability_commands.py:generic-api-key:155
+# Fake profile-redaction fixture (sk-proj-... under OPENAI_API_KEY) that lived in
+# tests/test_profiles.py across the profile-aware-auth branch. The current tree
+# constructs it at runtime (commit a96f470), but the --no-ff merge preserves the
+# historical commits that carried the literal, so pin those two fingerprints.
+9e976345a1273855b2e2ed6aa7ceb9f42dbb43bb:tests/test_profiles.py:generic-api-key:198
+efc8ad8fe936aaddca6154a7b0a866eeedcae228:tests/test_profiles.py:generic-api-key:273

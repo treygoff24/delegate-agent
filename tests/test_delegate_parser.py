@@ -92,6 +92,17 @@ class ParserTests(unittest.TestCase):
             self.delegate.parse_cli(["models", "--verbose"])
         self.assertEqual(ctx.exception.error, "unexpected_argument")
 
+    def test_auth_profile_rejected_for_non_refresh_capabilities(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(["--auth-profile", "work", "capabilities"])
+        self.assertEqual(ctx.exception.error, "invalid_option_combination")
+        self.assertIn("refresh", ctx.exception.message)
+
+    def test_auth_profile_accepted_for_capabilities_refresh(self):
+        parsed = self.delegate.parse_cli(["--auth-profile", "work", "capabilities", "refresh"])
+        self.assertEqual(parsed.global_options.auth_profile, "work")
+        self.assertTrue(parsed.capabilities.refresh)
+
     def test_infer_global_json_after_value_taking_globals(self):
         cases = [
             ["--isolation", "worktree", "--json", "cursor"],
@@ -117,6 +128,23 @@ class ParserTests(unittest.TestCase):
         parsed = self.delegate.parse_cli(["cursor", "safe", "--prompt-file", "task.md"])
         self.assertEqual(parsed.launch.prompt_file, "task.md")
         self.assertEqual(parsed.launch.prompt_parts, [])
+
+    def test_output_schema_before_prompt_text(self):
+        parsed = self.delegate.parse_cli(["codex", "safe", "--output-schema", "schema.json", "x"])
+        self.assertEqual(parsed.launch.output_schema, "schema.json")
+        self.assertEqual(parsed.launch.prompt_parts, ["x"])
+
+    def test_output_schema_duplicate_rejected(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(
+                ["codex", "safe", "--output-schema", "a.json", "--output-schema", "b.json", "x"]
+            )
+        self.assertEqual(ctx.exception.error, "invalid_output_schema")
+
+    def test_output_schema_requires_value(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(["codex", "safe", "--output-schema"])
+        self.assertEqual(ctx.exception.error, "missing_output_schema")
 
     def test_prompt_file_after_prompt_text_is_rejected(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:

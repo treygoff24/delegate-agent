@@ -15,6 +15,7 @@ from delegate_agent import (
     capability_commands,
     command_help,
     inspection_commands,
+    profile_commands,
     reasoning,
     run_output_commands,
     worktree_commands,
@@ -40,10 +41,25 @@ MISPLACED_GLOBAL_OPTIONS = frozenset(
         "--pass-through",
         "--completion-report",
         "--no-completion-report",
+        "--auth-profile",
     }
 )
 
-VALUE_GLOBAL_OPTIONS = frozenset({"--cwd", "--isolation", "--completion-report"})
+VALUE_GLOBAL_OPTIONS = frozenset({"--cwd", "--isolation", "--completion-report", "--auth-profile"})
+
+AUTH_PROFILE_SUBCOMMANDS = frozenset(
+    {
+        "cursor",
+        "codex",
+        "kimi",
+        "claude",
+        "droid",
+        "dry-run",
+        "run",
+        "profiles",
+        "capabilities",
+    }
+)
 
 
 def infer_global_json(argv: list[str]) -> bool:
@@ -138,6 +154,7 @@ def parse_simple_inspection_subcommand(
     pass_through: bool,
     completion_report: str | None,
     isolation: str | None,
+    auth_profile: str | None,
 ) -> ParsedCommand:
     rest, json_mode = consume_json_option(rest, json_mode)
     if any(command_help.is_help_token(token) for token in rest):
@@ -159,6 +176,7 @@ def parse_simple_inspection_subcommand(
             pass_through=pass_through,
             completion_report=completion_report,
             isolation=isolation,
+            auth_profile=auth_profile,
         ),
         inspection=InspectionOptions(summary=summary),
     )
@@ -172,6 +190,7 @@ def parse_capabilities_subcommand(
     pass_through: bool,
     completion_report: str | None,
     isolation: str | None,
+    auth_profile: str | None,
 ) -> ParsedCommand:
     rest, json_mode = consume_json_option(rest, json_mode)
     if any(command_help.is_help_token(token) for token in rest):
@@ -181,6 +200,12 @@ def parse_capabilities_subcommand(
         refresh = True
     elif rest:
         require_no_extra(rest, "capabilities")
+    if auth_profile is not None and not refresh:
+        raise DelegateError(
+            "invalid_option_combination",
+            "--auth-profile is only supported with capabilities refresh; "
+            "the cached capabilities report does not spawn a harness.",
+        )
     return ParsedCommand(
         "capabilities",
         global_options=GlobalOptions(
@@ -189,6 +214,7 @@ def parse_capabilities_subcommand(
             pass_through=pass_through,
             completion_report=completion_report,
             isolation=isolation,
+            auth_profile=auth_profile,
         ),
         capabilities=capability_commands.CapabilitiesCommand(
             refresh=refresh,
@@ -208,6 +234,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
     pass_through = False
     completion_report: str | None = None
     isolation: str | None = None
+    auth_profile: str | None = None
     i = 0
     while i < len(argv):
         token = argv[i]
@@ -253,6 +280,18 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
                 )
             i += 2
             continue
+        if token == "--auth-profile":
+            if i + 1 >= len(argv):
+                raise DelegateError(
+                    "missing_auth_profile", "--auth-profile requires a profile name."
+                )
+            auth_profile = argv[i + 1]
+            if not auth_profile or auth_profile.startswith("-"):
+                raise DelegateError(
+                    "missing_auth_profile", "--auth-profile requires a profile name."
+                )
+            i += 2
+            continue
         break
 
     if json_mode and pass_through:
@@ -270,6 +309,12 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
         raise DelegateError(
             "unknown_option", f"Unknown global option before subcommand: {subcommand}"
         )
+    if auth_profile is not None and subcommand not in AUTH_PROFILE_SUBCOMMANDS:
+        raise DelegateError(
+            "invalid_option_combination",
+            f"--auth-profile is not supported with delegate {subcommand}; "
+            "use it with launches, dry-run, run --input-json, profiles, or capabilities refresh.",
+        )
 
     if subcommand == "help":
         return parse_help_subcommand(rest, json_mode)
@@ -283,6 +328,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             pass_through=pass_through,
             completion_report=completion_report,
             isolation=isolation,
+            auth_profile=auth_profile,
         )
     if subcommand == "capabilities":
         return parse_capabilities_subcommand(
@@ -292,9 +338,12 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             pass_through=pass_through,
             completion_report=completion_report,
             isolation=isolation,
+            auth_profile=auth_profile,
         )
     if subcommand == "run":
-        return parse_run(rest, json_mode, cwd, pass_through, completion_report, isolation)
+        return parse_run(
+            rest, json_mode, cwd, pass_through, completion_report, isolation, auth_profile
+        )
     if subcommand in ("cursor", "codex", "kimi", "claude"):
         return parse_modeless_engine(
             subcommand,
@@ -305,6 +354,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             pass_through=pass_through,
             completion_report=completion_report,
             isolation=isolation,
+            auth_profile=auth_profile,
         )
     if subcommand == "droid":
         return parse_droid(
@@ -315,9 +365,12 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             pass_through=pass_through,
             completion_report=completion_report,
             isolation=isolation,
+            auth_profile=auth_profile,
         )
     if subcommand == "dry-run":
-        return parse_dry_run(rest, json_mode, cwd, pass_through, completion_report, isolation)
+        return parse_dry_run(
+            rest, json_mode, cwd, pass_through, completion_report, isolation, auth_profile
+        )
     if subcommand == "snapshot":
         return parse_snapshot(rest, json_mode, cwd)
     if subcommand == "runs":
@@ -331,6 +384,13 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
                 "--isolation is not supported with delegate worktree commands.",
             )
         return parse_worktree(rest, json_mode, cwd)
+    if subcommand == "profiles":
+        if isolation is not None:
+            raise DelegateError(
+                "invalid_option_combination",
+                "--isolation is not supported with delegate profiles.",
+            )
+        return parse_profiles(rest, json_mode, cwd, auth_profile)
 
     raise DelegateError("unknown_subcommand", f"Unknown subcommand: {subcommand}")
 
@@ -381,6 +441,7 @@ def parse_run(
     pass_through: bool,
     completion_report: str | None,
     isolation: str | None,
+    auth_profile: str | None,
 ) -> ParsedCommand:
     # Help wins before required-arg validation: `run --help` needs no --input-json.
     if any(command_help.is_help_token(token) for token in rest):
@@ -397,6 +458,7 @@ def parse_run(
             pass_through=pass_through,
             completion_report=completion_report,
             isolation=isolation,
+            auth_profile=auth_profile,
         ),
         run_json=RunJsonOptions(rest[1]),
     )
@@ -411,6 +473,7 @@ def parse_modeless_engine(
     pass_through: bool,
     completion_report: str | None,
     isolation: str | None,
+    auth_profile: str | None,
     *,
     help_topic: str | None = None,
 ) -> ParsedCommand:
@@ -432,9 +495,14 @@ def parse_modeless_engine(
     # prompt text (`cursor work explain --help`).
     if len(rest) >= 2 and command_help.is_help_token(rest[1]):
         return help_command(json_mode, topic)
-    prompt_file, reasoning_effort, progress_intent, forbid_commit, prompt_parts = parse_prompt_tail(
-        rest[1:]
-    )
+    (
+        prompt_file,
+        output_schema,
+        reasoning_effort,
+        progress_intent,
+        forbid_commit,
+        prompt_parts,
+    ) = parse_prompt_tail(rest[1:])
     return ParsedCommand(
         engine,
         global_options=GlobalOptions(
@@ -443,12 +511,14 @@ def parse_modeless_engine(
             pass_through=pass_through,
             completion_report=completion_report,
             isolation=isolation,
+            auth_profile=auth_profile,
         ),
         launch=LaunchOptions(
             engine=engine,
             mode=mode,
             prompt_parts=prompt_parts,
             prompt_file=prompt_file,
+            output_schema=output_schema,
             reasoning_effort=reasoning_effort,
             progress_intent=progress_intent,
             forbid_commit=forbid_commit,
@@ -465,6 +535,7 @@ def parse_droid(
     pass_through: bool,
     completion_report: str | None,
     isolation: str | None,
+    auth_profile: str | None,
     *,
     help_topic: str | None = None,
 ) -> ParsedCommand:
@@ -491,9 +562,14 @@ def parse_droid(
     # Help wins after the mode, before prompt capture: `droid x safe --help`.
     if len(rest) >= 3 and command_help.is_help_token(rest[2]):
         return help_command(json_mode, topic)
-    prompt_file, reasoning_effort, progress_intent, forbid_commit, prompt_parts = parse_prompt_tail(
-        rest[2:]
-    )
+    (
+        prompt_file,
+        output_schema,
+        reasoning_effort,
+        progress_intent,
+        forbid_commit,
+        prompt_parts,
+    ) = parse_prompt_tail(rest[2:])
     return ParsedCommand(
         "droid",
         global_options=GlobalOptions(
@@ -502,6 +578,7 @@ def parse_droid(
             pass_through=pass_through,
             completion_report=completion_report,
             isolation=isolation,
+            auth_profile=auth_profile,
         ),
         launch=LaunchOptions(
             engine="droid",
@@ -509,6 +586,7 @@ def parse_droid(
             model_alias=model_alias,
             prompt_parts=prompt_parts,
             prompt_file=prompt_file,
+            output_schema=output_schema,
             reasoning_effort=reasoning_effort,
             progress_intent=progress_intent,
             forbid_commit=forbid_commit,
@@ -524,6 +602,7 @@ def parse_dry_run(
     pass_through: bool,
     completion_report: str | None,
     isolation: str | None,
+    auth_profile: str | None,
 ) -> ParsedCommand:
     # Help wins before the engine is consumed: `dry-run --help`.
     if rest and command_help.is_help_token(rest[0]):
@@ -548,6 +627,7 @@ def parse_dry_run(
             pass_through=pass_through,
             completion_report=completion_report,
             isolation=isolation,
+            auth_profile=auth_profile,
             help_topic="dry-run",
         )
     if engine == "droid":
@@ -559,6 +639,7 @@ def parse_dry_run(
             pass_through=pass_through,
             completion_report=completion_report,
             isolation=isolation,
+            auth_profile=auth_profile,
             help_topic="dry-run",
         )
     raise DelegateError(
@@ -569,8 +650,9 @@ def parse_dry_run(
 
 def parse_prompt_tail(
     rest: list[str],
-) -> tuple[str | None, str | None, str | None, bool, list[str]]:
+) -> tuple[str | None, str | None, str | None, str | None, bool, list[str]]:
     prompt_file: str | None = None
+    output_schema: str | None = None
     reasoning_effort: str | None = None
     progress_intent: str | None = None
     forbid_commit = False
@@ -589,6 +671,14 @@ def parse_prompt_tail(
             if i + 1 >= len(rest):
                 raise DelegateError("missing_prompt_file", "--prompt-file requires a path.")
             prompt_file = rest[i + 1]
+            i += 2
+            continue
+        if token == "--output-schema":
+            if output_schema is not None:
+                raise DelegateError("invalid_output_schema", "Only one --output-schema is allowed.")
+            if i + 1 >= len(rest):
+                raise DelegateError("missing_output_schema", "--output-schema requires a path.")
+            output_schema = rest[i + 1]
             i += 2
             continue
         if token == "--reasoning-effort":
@@ -657,11 +747,22 @@ def parse_prompt_tail(
         raise DelegateError(
             "ambiguous_prompt_source", "--prompt-file must appear before direct prompt text."
         )
+    if "--output-schema" in prompt_parts:
+        raise DelegateError(
+            "invalid_output_schema", "--output-schema must appear before direct prompt text."
+        )
     if has_misplaced_global_option(prompt_parts):
         raise_misplaced_global_option(
             "Global options must appear before the subcommand; use --prompt-file for literal flag text.",
         )
-    return prompt_file, reasoning_effort, progress_intent, forbid_commit, prompt_parts
+    return (
+        prompt_file,
+        output_schema,
+        reasoning_effort,
+        progress_intent,
+        forbid_commit,
+        prompt_parts,
+    )
 
 
 def parse_snapshot(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
@@ -1068,4 +1169,21 @@ def parse_worktree(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedC
             json_mode=json_mode,
             **options,
         ),
+    )
+
+
+def parse_profiles(
+    rest: list[str],
+    json_mode: bool,
+    cwd: str | None,
+    auth_profile: str | None,
+) -> ParsedCommand:
+    rest, json_mode = consume_json_option(rest, json_mode)
+    if any(command_help.is_help_token(token) for token in rest):
+        return help_command(json_mode, "profiles")
+    require_no_extra(rest, "profiles")
+    return ParsedCommand(
+        "profiles",
+        global_options=GlobalOptions(json_mode=json_mode, cwd=cwd, auth_profile=auth_profile),
+        profiles_command=profile_commands.ProfilesCommand(json_mode=json_mode),
     )

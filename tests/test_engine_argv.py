@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests.delegate_commands_test_base import CommandTestBase, make_git_repo
 
@@ -244,6 +245,27 @@ class EngineArgvTests(CommandTestBase):
             workspace_kind="git",
         )
         self.assertNotIn("--model", argv)
+
+    def test_codex_output_schema_argv_after_exec(self):
+        policy = self.delegate.delegate_config.effective_policy(
+            self.delegate.DEFAULT_CONFIG,
+            engine="codex",
+            mode="safe",
+        )
+        argv = self.delegate.build_codex_argv(
+            self.delegate.DEFAULT_CONFIG["codex"],
+            "safe",
+            "/repo",
+            None,
+            "hello",
+            policy,
+            workspace_kind="git",
+            output_schema="/tmp/schema.json",
+        )
+        exec_index = argv.index("exec")
+        schema_index = argv.index("--output-schema")
+        self.assertGreater(schema_index, exec_index)
+        self.assertEqual(argv[schema_index + 1], "/tmp/schema.json")
 
     def test_codex_dry_run_model_null_is_allowed(self):
         request = self.build_git_request(
@@ -640,6 +662,63 @@ class EngineArgvTests(CommandTestBase):
         self.assertEqual(request.reasoning_effort_source, "input-json")
         self.assertIn('model_reasoning_effort="high"', request.argv)
 
+    def test_request_from_input_json_threads_output_schema(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            schema = Path(tmp) / "schema.json"
+            schema.write_text("{}", encoding="utf-8")
+            task = Path(tmp) / "task.json"
+            task.write_text(
+                json.dumps(
+                    {
+                        "engine": "codex",
+                        "mode": "safe",
+                        "cwd": tmp,
+                        "outputSchema": str(schema),
+                        "prompt": "review",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            parsed = self.delegate.ParsedCommand(
+                "run",
+                global_options=self.delegate.GlobalOptions(json_mode=True),
+                run_json=self.delegate.RunJsonOptions(str(task)),
+            )
+            request = self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+        self.assertEqual(request.output_schema, str(schema.resolve()))
+        schema_index = request.argv.index("--output-schema")
+        self.assertEqual(request.argv[schema_index + 1], str(schema.resolve()))
+        self.assertNotIn(
+            self.delegate.delegate_runner.COMPLETION_REPORT_SUFFIX.strip(), request.prompt
+        )
+        self.assertTrue(any("JSON-only final message" in warning for warning in request.warnings))
+
+    def test_request_from_input_json_rejects_output_schema_for_non_codex(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            schema = Path(tmp) / "schema.json"
+            schema.write_text("{}", encoding="utf-8")
+            task = Path(tmp) / "task.json"
+            task.write_text(
+                json.dumps(
+                    {
+                        "engine": "cursor",
+                        "mode": "safe",
+                        "cwd": tmp,
+                        "outputSchema": str(schema),
+                        "prompt": "review",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            parsed = self.delegate.ParsedCommand(
+                "run",
+                global_options=self.delegate.GlobalOptions(json_mode=True),
+                run_json=self.delegate.RunJsonOptions(str(task)),
+            )
+            with self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+        self.assertEqual(ctx.exception.error, "unsupported_output_schema")
+
     def test_input_json_effort_overrides_provider_default(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
         config["codex"]["defaultReasoningEffort"] = "medium"
@@ -745,6 +824,77 @@ class EngineArgvTests(CommandTestBase):
                 (Path(workspace) / ".delegate" / "capabilities" / "reasoning.json").read_text()
             )
         self.assertIn("gpt-refresh", cache["harnesses"]["codex"]["models"])
+
+    def test_capabilities_refresh_uses_auth_profile_env(self):
+        with tempfile.TemporaryDirectory() as workspace, tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir = root / "bin"
+            empty_path = root / "empty-path"
+            codex_home = root / "codex-home"
+            marker = root / "codex-home-seen"
+            bin_dir.mkdir()
+            empty_path.mkdir()
+            codex_home.mkdir()
+            fake_codex = bin_dir / "codex"
+            marker_literal = str(marker).replace("'", "'\"'\"'")
+            fake_codex.write_text(
+                "#!/bin/sh\n"
+                f"printf '%s' \"${{CODEX_HOME:-}}\" > '{marker_literal}'\n"
+                "printf '%s\\n' "
+                '\'{"models":[{"slug":"gpt-profile","default_reasoning_level":"medium",'
+                '"supported_reasoning_levels":[{"effort":"medium"}]}]}\'\n',
+                encoding="utf-8",
+            )
+            fake_codex.chmod(0o755)
+            config_path = Path(self._config_env["DELEGATE_CONFIG"])
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "profiles": {
+                            "detectFrom": [],
+                            "default": None,
+                            "definitions": {
+                                "work": {
+                                    "env": {
+                                        "CODEX_HOME": str(codex_home),
+                                        "PATH": str(bin_dir),
+                                    }
+                                }
+                            },
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "DELEGATE_CONFIG": str(config_path),
+                    "PATH": str(empty_path),
+                },
+                clear=False,
+            ):
+                code = self.delegate.main(
+                    [
+                        "--cwd",
+                        workspace,
+                        "--auth-profile",
+                        "work",
+                        "--json",
+                        "capabilities",
+                        "refresh",
+                    ],
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+
+            self.assertEqual(code, 0, stderr.getvalue())
+            self.assertEqual(marker.read_text(encoding="utf-8"), str(codex_home))
+            payload = json.loads(stdout.getvalue())
+            self.assertIn("gpt-profile", payload["reasoning"]["harnesses"]["codex"]["models"])
 
     def test_capabilities_refresh_preserves_non_codex_cache_entries(self):
         with tempfile.TemporaryDirectory() as workspace:
@@ -870,6 +1020,10 @@ class EngineArgvTests(CommandTestBase):
     def test_describe_preserves_safe_read_only_modes(self):
         payload = self.delegate.describe_payload(self.delegate.DEFAULT_CONFIG, "embedded-default")
         self.assertIn("promptTransforms", payload)
+        self.assertTrue(payload["engineCapabilities"]["codex"]["outputSchema"])
+        for engine in ("cursor", "droid", "kimi", "claude"):
+            with self.subTest(engine=engine):
+                self.assertFalse(payload["engineCapabilities"][engine]["outputSchema"])
         self.assertIn("skill review", payload["promptTransforms"][0])
         cursor_safe = payload["modeMapping"]["cursor"]["safe"]
         self.assertNotIn("--mode=plan", cursor_safe)

@@ -142,7 +142,9 @@ class InspectionCommandTests(unittest.TestCase):
         self.assertEqual(caught.exception.error, "unknown_handle")
         self.assertEqual(
             caught.exception.message,
-            "Unknown run handle: missing. Suggestions: (none)",
+            "Unknown run handle: missing. Suggestions: (none). Runs are recorded "
+            "per-workspace under <workspace>/.delegate; if this run was launched "
+            "elsewhere, pass --cwd <that workspace>.",
         )
 
     def test_missing_registry_snapshot_missing_handle_keeps_snapshot_message(self):

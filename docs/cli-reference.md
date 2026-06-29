@@ -11,6 +11,7 @@ Use `delegate --help` for the exact command list from the installed version. Glo
 --pass-through                Stream raw child stdout/stderr. Incompatible with --json and persistent worktree runs.
 --completion-report MODE      markdown or none.
 --no-completion-report        Disable completion-report prompt injection.
+--auth-profile NAME           Override detected profiles for launches, dry-run, run --input-json, profiles, and capabilities refresh.
 ```
 
 ## Commands
@@ -24,8 +25,8 @@ delegate cursor work [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [
 delegate droid MODEL_ALIAS safe [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 delegate droid MODEL_ALIAS work [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 
-delegate codex safe [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate codex work [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate codex safe [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [--output-schema FILE] [prompt...]
+delegate codex work [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [--output-schema FILE] [prompt...]
 
 delegate claude safe [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 delegate claude work [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
@@ -59,6 +60,36 @@ warning plus suggested review commands, but does not fail solely because commits
 exist. Validation rejects `--forbid-commit` outside `work` mode with
 `--isolation worktree`.
 
+`--auth-profile NAME` selects a top-level `profiles.definitions` entry and
+injects that profile's flat env map into child processes. It overrides ambient
+profile detection for launches, `dry-run`, `run --input-json`, `delegate profiles`,
+and `capabilities refresh` (which spawns a Codex probe). Unknown names fail with
+`unknown_profile`. It is rejected for run-inspection, worktree-management, and
+discovery commands, and for the cached `capabilities` report, where no child
+auth/env selection happens.
+
+### `delegate codex`
+
+Usage:
+
+```bash
+delegate [--json] [--isolation auto|none|worktree] codex {safe,work} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [--output-schema FILE] [prompt...]
+```
+
+- Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff. Codex safe always uses `--sandbox read-only`. Under `--isolation auto`, Codex safe is the only safe harness that may opt out with `--isolation none`, because Codex still keeps its read-only sandbox active.
+- Prompt text is delivered on stdin to `codex exec`; dry-run argv and tracked run manifests do not contain the prompt.
+- `--reasoning-effort` maps to a Codex `model_reasoning_effort` config override after the model is resolved.
+- `--output-schema FILE` is **codex-only**. Cursor, Droid, Kimi, and Claude reject it. `FILE` is a path to a JSON Schema that OpenAI enforces on Codex's final message, for machine-parseable output in fan-outs and JSON run input. Relative paths resolve against the process launch cwd, the same rule as `--prompt-file`. When set, Delegate suppresses the completion-report prompt injection for that run so the schema owns the whole final message. Missing or unreadable files fail fast before launch.
+
+Examples:
+
+```bash
+delegate codex safe "Review this repo for regressions; report file/line/severity."
+delegate codex work "Implement the scoped task; report changed files and tests."
+delegate --json codex safe --output-schema findings.schema.json "Return one record per finding."
+delegate --isolation worktree codex work "Implement the feature in a persistent worktree."
+```
+
 ### `delegate claude`
 
 Usage:
@@ -67,7 +98,7 @@ Usage:
 delegate [--json] [--isolation auto|none|worktree] claude {safe,work} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 ```
 
-- Safe mode runs in an isolated temporary copy of the workspace (under `--isolation auto`) and uses Claude Code `--permission-mode plan`, `--strict-mcp-config`, Read/Grep/Glob, and selected read-only Bash tools such as `git diff`/`git status`.
+- Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff. Under `--isolation auto`, Claude safe uses `--permission-mode plan`, `--strict-mcp-config`, Read/Grep/Glob, and selected read-only Bash tools such as `git diff`/`git status`.
 - Claude safe mode is not hermetic: Delegate does not prove hooks, plugins, user settings, output styles, or other non-MCP customization surfaces are disabled. Use `claude.bare: true` for a more minimal/reproducible Claude invocation, and keep safe-mode work review-only.
 - Prompt text is delivered on stdin to `claude -p`; dry-run argv and tracked run manifests do not contain the prompt.
 - JSON-streaming runs use `--output-format stream-json --input-format text`; pass-through runs use `--output-format text`.
@@ -90,7 +121,7 @@ Usage:
 delegate [--json] [--isolation auto|none|worktree] kimi {safe,work} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 ```
 
-- Safe mode runs in an isolated temporary copy of the workspace (under `--isolation auto`) and uses a read-only safety prompt. Delegate intentionally avoids Kimi `--plan` in safe mode. Kimi prompt mode auto-approves tool actions, so the isolation is the effective write boundary; the safety prompt is advisory.
+- Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff. Under `--isolation auto`, Kimi safe uses a read-only safety prompt. Delegate intentionally avoids Kimi `--plan` in safe mode. Kimi prompt mode auto-approves tool actions, so the isolation is the effective write boundary; the safety prompt is advisory.
 - Work mode uses Kimi prompt mode and runs in the real workspace unless you opt into worktree isolation. Delegate does not emit `--yolo` because Kimi rejects combining `--yolo` with `--prompt`.
 - Model selection comes from `kimi.defaultModel` config or the `model` key in JSON run input; there is no CLI model alias.
 - `--reasoning-effort` is unsupported for Kimi in v1.
@@ -113,7 +144,7 @@ delegate --json dry-run cursor work --prompt-file task.md
 delegate --json dry-run droid reviewer safe "Investigate only."  # needs a configured 'reviewer' alias
 ```
 
-Dry-run builds the request and child argv but does not launch a child runtime, create a registry run, create a branch, or create a worktree. It does not require the real child binary. It does validate config shape and model aliases, so the Droid example above only succeeds once `reviewer` maps to a real model ID — the shipped `config.example.json` uses `replace-with-` placeholders that dry-run rejects with `unconfigured_model`. For temporary safe isolation, the dry-run argv is the planned command shape and may still show the source workspace because the temporary isolated workspace is not materialized until a real run.
+Dry-run builds the request and child argv but does not launch a child runtime, create a registry run, create a branch, or create a worktree. It does not require the real child binary. It does validate config shape and model aliases, so the Droid example above only succeeds once `reviewer` maps to a real model ID — the shipped `config.example.json` uses `replace-with-` placeholders that dry-run rejects with `unconfigured_model`. For temporary safe isolation, the dry-run argv is the planned command shape and may still show the source workspace because the throwaway copy is not materialized until a real run — and safe mode's working-tree sync (uncommitted tracked edits and untracked, non-ignored files mirrored into the isolated copy; only gitignored paths excluded) happens only on a real launch, not in dry-run.
 
 Typical dry-run JSON fields:
 
@@ -144,9 +175,40 @@ Typical dry-run JSON fields:
 
 `isolation` is a human-readable summary combining `effectiveIsolation` and `isolationLifecycle` (e.g. `"worktree temporary"`, `"worktree persistent"`, `"none"`). Depend on the structured fields rather than parsing it.
 
+When a profile is active, dry-run and completion payloads add `authProfile` (the resolved profile name) and, when a Codex fallback profile is configured, `fallbackProfile`. Dry-run also adds `profileEnv` (the injected env map, with values redacted). These keys are omitted when no profile is active.
+
 `--isolation none` is rejected for Cursor, Claude, Droid, and Kimi safe mode because it would remove the temporary workspace/config boundary those safe contracts depend on. Codex safe can use `none` because Codex still runs with its read-only sandbox.
 
 Persistent worktree dry-runs may also include `plannedBranch` and `plannedExecutionCwd`; those are plans, not created resources. Temporary safe dry-runs usually keep `plannedExecutionCwd` unset because no temporary worktree or directory copy has been created.
+
+### Profiles
+
+```bash
+delegate profiles
+delegate --json --auth-profile work profiles
+```
+
+`delegate profiles` is read-only introspection for the top-level `profiles`
+auth/env system. It reports the detected active profile, its source
+(`flag`, the matching detection variable name, or `default`), and the resolved
+env keys. JSON output is pinned to a small shape:
+
+```json
+{
+  "ok": true,
+  "profile": "work",
+  "source": "flag",
+  "envKeys": ["CODEX_HOME"],
+  "env": {"CODEX_HOME": "/redacted-or-expanded/path"},
+  "warnings": [],
+  "configSource": "/path/to/config.json"
+}
+```
+
+Values in `env` are routed through the same key-aware redaction used for child
+environment diagnostics. Profile env maps are for routing pointers, not
+secrets; secret-like keys in `profiles.definitions.*.env` are rejected during
+config validation.
 
 ### JSON input
 
@@ -168,6 +230,7 @@ Supported input keys:
   "reasoningEffort": "high",
   "progress": true,
   "forbidCommit": true,
+  "outputSchema": "/path/to/schema.json",
   "prompt": "Implement the scoped task and report changed files."
 }
 ```
@@ -180,9 +243,14 @@ Supported input keys:
 - `reasoningEffort`: optional non-empty effort string. It overrides provider `defaultReasoningEffort` for that JSON run.
 - `progress`: optional boolean. `true` enables parent progress heartbeats on stderr; `false` disables them even when `progress.enabled` is true in config. When omitted, config `progress.enabled` applies (default `false`).
 - `forbidCommit`: optional boolean. `true` requires `mode: "work"` with persistent worktree isolation and fails the run if the child creates commits.
+- `outputSchema`: optional path to a JSON Schema for Codex's final message. Codex-only; same semantics as `--output-schema`. Other engines fail with `unsupported_output_schema`.
 - `prompt`: required task prompt.
 
-`profile` is not accepted in run input JSON. Configure Codex profile in `codex.profile` instead.
+`profile` is not accepted in run input JSON. Configure the Codex CLI config
+overlay in `codex.profile` instead. That is separate from the top-level
+`profiles` block, which Delegate resolves once per request and injects as
+auth/env. Use the global `--auth-profile NAME` with `run --input-json` to
+override ambient profile detection for that run.
 
 ### Discovery
 
@@ -196,7 +264,7 @@ delegate --json capabilities refresh
 delegate agent-help
 ```
 
-`describe` reports version, engines, modes, supported isolation values, prompt transforms, effective policy, and representative argv shapes. It also includes a `commands` catalog (each entry has `command` and `summary`) so an agent can enumerate the whole command surface in one call. `models` reports configured Cursor, Droid, Codex, Claude, and Kimi model settings. Discovery output applies best-effort credential scrubbing; model IDs and paths are shown verbatim. Agents should start with `--summary` for a compact inventory, then use raw output only when needed.
+`describe` reports version, engines, modes, supported isolation values, prompt transforms, effective policy, top-level profile config metadata, and representative argv shapes. It also includes a `commands` catalog (each entry has `command` and `summary`) so an agent can enumerate the whole command surface in one call. `models` reports configured Cursor, Droid, Codex, Claude, and Kimi model settings. Discovery output applies best-effort credential scrubbing; model IDs and paths are shown verbatim. Agents should start with `--summary` for a compact inventory, then use raw output only when needed.
 
 Both `describe` and `models` include provenance fields useful for detecting installed-runtime drift:
 
@@ -298,7 +366,10 @@ Common JSON fields for tracked run completion:
 
 Persistent worktree completions also include `branch`, `worktree`, a
 `workSummary`, and (when requested) `commitPolicy`. `workSummary` reports dirty
-state, changed file count, diff stat, and commits created by the child.
+state, changed file count, diff stat, and commits created by the child. When a
+Codex usage-limit fallback fires, the completion payload also includes
+`codexAuthFallback` metadata (reason, the primary and fallback profile names,
+both exit codes, and a redacted primary stderr tail).
 
 Snapshot JSON uses schema `delegate.snapshot.v1` and includes fields such as `alias`, `runId`, `harness`, `status`, `rawStatus`, `effectiveStatus`, `staleReason`, `nextActions`, `cwd`, `executionCwd`, `assistantText`, `recentEvents`, `warnings`, `exitCode`, reasoning metadata, and isolation/worktree metadata when applicable. Inspection commands do not rewrite a stale run's recorded state; they expose the raw recorded status plus the effective status computed from the current PID check.
 

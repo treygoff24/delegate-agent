@@ -114,6 +114,20 @@ def _write_completion_report_contract(
     return None
 
 
+def _source_workspace(
+    registry_root: Path,
+    snapshot: JsonObject | None,
+    state: JsonObject | None,
+    manifest: JsonObject | None,
+) -> str:
+    return first_string(
+        manifest.get("cwd") if manifest else None,
+        state.get("cwd") if state else None,
+        _snapshot_value(snapshot, "cwd"),
+        str(registry_root.parent),
+    ) or str(registry_root.parent)
+
+
 def merge_snapshot_view(
     registry_root: Path,
     run_id: str,
@@ -140,6 +154,7 @@ def merge_snapshot_view(
     )
     effective_status = _write_status_contract(view, state)
     completion_report = _write_completion_report_contract(view, snapshot)
+    source_cwd = _source_workspace(registry_root, snapshot, state, manifest)
     view["stdoutBytes"] = stdout_bytes
     view["stderrBytes"] = stderr_bytes
     if state:
@@ -178,19 +193,21 @@ def merge_snapshot_view(
         archive_warning = delegate_retention.archived_log_warning(
             alias if isinstance(alias, str) else None,
             run_id,
+            cwd=source_cwd,
         )
         if archive_warning not in warnings:
             warnings.append(archive_warning)
     if warnings:
         view["warnings"] = warnings
     if isinstance(alias, str):
-        view.setdefault("snapshotCommand", run_registry.snapshot_command(alias))
+        view["snapshotCommand"] = run_registry.snapshot_command(alias, cwd=source_cwd)
         if effective_status == run_registry.STATUS_STALE:
-            view.setdefault("nextActions", run_registry.stale_next_actions(alias))
+            view["nextActions"] = run_registry.stale_next_actions(alias, cwd=source_cwd)
         if completion_report is not None:
-            completion_report.setdefault(
-                "command",
-                run_registry.run_output_command(alias, completion_report=True),
+            completion_report["command"] = run_registry.run_output_command(
+                alias,
+                completion_report=True,
+                cwd=source_cwd,
             )
     if redact:
         view = cast(SnapshotView, redact_value(view))

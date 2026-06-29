@@ -88,13 +88,20 @@ delegate --json dry-run codex safe "Review this repository. Do not edit files."
 delegate --json dry-run claude safe "Review this repository. Do not edit files."
 ```
 
-Run a read-only review in an isolated temporary workspace:
+Run a read-only review in an isolated throwaway workspace:
 
 ```bash
 delegate codex safe "Review this repository for correctness risks. Do not edit files."
 delegate claude safe "Review this repository for correctness risks. Do not edit files."
 delegate cursor safe "Review the current diff for regressions. Do not edit files."
 delegate kimi safe "Review this repository for regressions. Do not edit files."
+```
+
+Review uncommitted local changes without committing first or pasting a diff — safe mode mirrors your working tree into the isolated copy:
+
+```bash
+# Edit files locally, then launch safe review as-is:
+delegate codex safe "Review my uncommitted changes for regressions. Do not edit files."
 ```
 
 Run an edit-capable task in a workspace you trust:
@@ -122,6 +129,8 @@ cp examples/task.codex.json /tmp/delegate-task.json
 $EDITOR /tmp/delegate-task.json
 delegate --json run --input-json /tmp/delegate-task.json
 ```
+
+For Codex fan-outs that must return machine-parseable records, add `--output-schema` (or JSON `outputSchema`); Delegate suppresses completion-report injection so the schema owns the final message.
 
 Reasoning effort is provider-aware. Unsupported combinations fail before launch. It changes only the requested model thinking depth/cost/latency; it does not change safe/work mode, sandboxing, approvals, or edit capability. Codex/Droid validate effort against a resolved model capability table, Cursor maps effort to configured model selection, and Claude maps directly to Claude Code `--effort` (`low`, `medium`, `high`, `xhigh`, `max`). For example, after configuring `codex.defaultModel`:
 
@@ -155,7 +164,7 @@ Delegate separates three ideas:
 
 Defaults are intentionally conservative for review paths:
 
-- `delegate cursor safe`, `delegate codex safe`, `delegate claude safe`, `delegate droid ALIAS safe`, and `delegate kimi safe` run in an isolated temporary workspace.
+- `delegate cursor safe`, `delegate codex safe`, `delegate claude safe`, `delegate droid ALIAS safe`, and `delegate kimi safe` run in an isolated throwaway workspace. Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff.
 - Claude safe mode invokes `claude -p` with prompt text on stdin, `--permission-mode plan`, `--strict-mcp-config`, Read/Grep/Glob plus selected read-only Bash tools, and `--no-session-persistence` by default. Delegate does not currently prove that Claude Code hooks, plugins, user settings, or other non-MCP customization surfaces are disabled.
 - `work` mode can edit. By default it runs in the real workspace for backward compatibility.
 
@@ -179,6 +188,17 @@ commits remain ahead of the creation base when the child exits.
 Temporary safe isolation preserves internal symlinks, but replaces symlinks that point outside the source workspace with inert placeholder files inside the isolated workspace. Delegate reports a warning listing the relative symlink paths it blocked. In Git repositories with no commits yet, Cursor/Codex/Claude/Droid/Kimi safe isolation falls back to a directory copy because Git cannot create a detached worktree from an unborn `HEAD`.
 
 Snapshots and `run-output` redact common credential shapes by default, including authorization headers, bearer/basic tokens, JWT-like strings, and common `token=` / `api_key=` / `password=` values. Use `--no-redact` only when exact output is necessary and safe to display.
+
+## Profile-aware auth and env
+
+A **profile** selects which credentials and environment every delegated harness inherits, so one session can run under, say, a work account and another under a personal account without editing config between runs. Define profiles under the top-level `profiles` block, then either let Delegate detect the active one from an environment variable (`profiles.detectFrom`) or pin it explicitly with `--auth-profile NAME`:
+
+```bash
+delegate --json --auth-profile work profiles    # inspect the resolved profile (read-only)
+delegate --auth-profile work codex safe "Review this diff."
+```
+
+Delegate resolves the profile once per request and injects its env into every spawned child across tracked, pass-through, safe-isolation, and persistent-worktree paths. Profile `env` holds **non-secret routing pointers only** (for example `CODEX_HOME`); secret-shaped keys are rejected at config load, so real credentials stay in your shell or a harness-native key store. See [Configuration](docs/configuration.md#profiles) for the full schema.
 
 ## Useful docs
 

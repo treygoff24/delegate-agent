@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TextIO
 
-from delegate_agent import command_errors, reasoning
+from delegate_agent import command_errors, profiles, reasoning
 from delegate_agent import rendering as delegate_rendering
 from delegate_agent.config import harness_binary
 from delegate_agent.json_types import JsonObject
@@ -29,12 +29,23 @@ def capabilities_payload(config: JsonObject, config_source: str, workspace: str)
     }
 
 
-def _refresh_payload(config: JsonObject, workspace: str) -> JsonObject:
+def _refresh_payload(
+    config: JsonObject,
+    workspace: str,
+    *,
+    auth_profile_override: str | None = None,
+) -> JsonObject:
+    profile = profiles.resolve_active_profile(
+        config,
+        profiles.child_environment(),
+        cli_override=auth_profile_override,
+    )
     try:
         existing_cache = reasoning.load_reasoning_capability_cache(workspace)
         refreshed_cache = reasoning.refresh_reasoning_capabilities(
             cwd=workspace,
             codex_binary=harness_binary(config, "codex"),
+            env=profiles.child_environment(overrides=profile.env),
         )
         cache = reasoning.merge_reasoning_capability_cache(existing_cache, refreshed_cache)
         cache_path = reasoning.write_reasoning_capability_cache(workspace, cache)
@@ -54,10 +65,11 @@ def emit(
     config: JsonObject,
     config_source: str,
     workspace: str,
+    auth_profile_override: str | None = None,
     stdout: TextIO,
 ) -> int:
     payload = (
-        _refresh_payload(config, workspace)
+        _refresh_payload(config, workspace, auth_profile_override=auth_profile_override)
         if command.refresh
         else capabilities_payload(config, config_source, workspace)
     )

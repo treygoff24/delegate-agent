@@ -92,6 +92,76 @@ class ValidationTests(unittest.TestCase):
         self.addCleanup(lambda: Path(path).unlink(missing_ok=True))
         self.assertEqual(self.delegate.resolve_prompt([], path, TtyStdin()), "from file")
 
+    def test_output_schema_missing_file_fails_fast(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parsed = self.delegate.parse_cli(
+                [
+                    "--cwd",
+                    tmp,
+                    "codex",
+                    "safe",
+                    "--output-schema",
+                    str(Path(tmp) / "missing.json"),
+                    "review",
+                ]
+            )
+            with self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.delegate.request_from_parsed(
+                    parsed,
+                    self.delegate.DEFAULT_CONFIG,
+                    TtyStdin(),
+                )
+        self.assertEqual(ctx.exception.error, "output_schema_not_found")
+
+    def test_output_schema_directory_is_invalid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parsed = self.delegate.parse_cli(
+                ["--cwd", tmp, "codex", "safe", "--output-schema", tmp, "review"]
+            )
+            with self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.delegate.request_from_parsed(
+                    parsed,
+                    self.delegate.DEFAULT_CONFIG,
+                    TtyStdin(),
+                )
+        self.assertEqual(ctx.exception.error, "invalid_output_schema")
+
+    def test_output_schema_is_codex_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            schema = Path(tmp) / "schema.json"
+            schema.write_text("{}", encoding="utf-8")
+            cases = (
+                ["cursor", "safe", "--output-schema", str(schema), "review"],
+                ["droid", "minimax", "safe", "--output-schema", str(schema), "review"],
+            )
+            for argv in cases:
+                with self.subTest(argv=argv):
+                    parsed = self.delegate.parse_cli(["--cwd", tmp, *argv])
+                    with self.assertRaises(self.delegate.DelegateError) as ctx:
+                        self.delegate.request_from_parsed(
+                            parsed,
+                            self.delegate.DEFAULT_CONFIG,
+                            TtyStdin(),
+                        )
+                    self.assertEqual(ctx.exception.error, "unsupported_output_schema")
+
+    def test_output_schema_suppresses_completion_report_prompt_and_warns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            schema = Path(tmp) / "schema.json"
+            schema.write_text("{}", encoding="utf-8")
+            parsed = self.delegate.parse_cli(
+                ["--cwd", tmp, "codex", "safe", "--output-schema", str(schema), "review"]
+            )
+            request = self.delegate.request_from_parsed(
+                parsed,
+                self.delegate.DEFAULT_CONFIG,
+                TtyStdin(),
+            )
+        self.assertNotIn(
+            self.delegate.delegate_runner.COMPLETION_REPORT_SUFFIX.strip(), request.prompt
+        )
+        self.assertTrue(any("JSON-only final message" in warning for warning in request.warnings))
+
     def test_stdin_works(self):
         self.assertEqual(
             self.delegate.resolve_prompt([], None, NonTtyStdin("from stdin")), "from stdin"
@@ -248,7 +318,10 @@ class ValidationTests(unittest.TestCase):
             (local_delegate / "config.json").write_text(
                 json.dumps({"cursor": {"defaultModel": "workspace-model"}})
             )
-            with mock.patch.object(config_mod, "DEFAULT_CONFIG_PATH", global_cfg):
+            with (
+                mock.patch.object(config_mod, "DEFAULT_CONFIG_PATH", global_cfg),
+                mock.patch.dict(os.environ, {config_mod.CONFIG_ENV: ""}, clear=False),
+            ):
                 loaded, source = config_mod.load_config(workspace=workspace)
             self.assertEqual(loaded["cursor"]["defaultModel"], "workspace-model")
             self.assertEqual(source, str(workspace / ".delegate" / "config.json"))
@@ -276,7 +349,10 @@ class ValidationTests(unittest.TestCase):
             global_cfg.write_text(json.dumps({"cursor": {"defaultModel": "global-model"}}))
             workspace = Path(tmp) / "repo"
             workspace.mkdir()
-            with mock.patch.object(config_mod, "DEFAULT_CONFIG_PATH", global_cfg):
+            with (
+                mock.patch.object(config_mod, "DEFAULT_CONFIG_PATH", global_cfg),
+                mock.patch.dict(os.environ, {config_mod.CONFIG_ENV: ""}, clear=False),
+            ):
                 loaded, source = config_mod.load_config(workspace=workspace)
             self.assertEqual(loaded["cursor"]["defaultModel"], "global-model")
             self.assertEqual(source, str(global_cfg))
@@ -292,6 +368,7 @@ class ValidationTests(unittest.TestCase):
             with (
                 mock.patch.object(config_mod, "DEFAULT_CONFIG_PATH", None),
                 mock.patch.object(config_mod.Path, "home", return_value=home),
+                mock.patch.dict(os.environ, {config_mod.CONFIG_ENV: ""}, clear=False),
             ):
                 loaded, source = config_mod.load_config()
         self.assertEqual(loaded["cursor"]["defaultModel"], "home-model")

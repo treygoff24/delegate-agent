@@ -747,6 +747,34 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertEqual(error.diagnostics["configPath"], config_path)
         self.assertEqual(error.diagnostics["configKey"], "claude.binary")
 
+    def test_ensure_binary_uses_profiled_child_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir = root / "profile-bin"
+            empty_path = root / "empty-path"
+            bin_dir.mkdir()
+            empty_path.mkdir()
+            binary = bin_dir / "profile-agent"
+            binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            binary.chmod(0o755)
+
+            with mock.patch.dict(os.environ, {"PATH": str(empty_path)}):
+                self.delegate.ensure_binary(
+                    ["profile-agent"],
+                    env_overrides={"PATH": str(bin_dir)},
+                )
+
+            with (
+                mock.patch.dict(os.environ, {"PATH": str(bin_dir)}),
+                self.assertRaises(self.delegate.DelegateError) as ctx,
+            ):
+                self.delegate.ensure_binary(
+                    ["profile-agent"],
+                    env_overrides={"PATH": str(empty_path)},
+                )
+            self.assertEqual(ctx.exception.error, "missing_binary")
+            self.assertIn("searched PATH of the child environment", ctx.exception.message)
+
     def test_missing_binary_json_includes_candidate_path(self):
         with tempfile.TemporaryDirectory() as home:
             config_path = Path(home) / "config.json"

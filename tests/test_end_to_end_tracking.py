@@ -775,7 +775,10 @@ class EndToEndTrackingTests(unittest.TestCase):
         completed = self.run_cli(["codex", "work", "codex e2e"])
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("delegate run codex completed", completed.stdout)
-        self.assertIn("snapshot: delegate snapshot codex", completed.stdout)
+        self.assertIn(
+            f"snapshot: delegate --cwd {self.workspace.resolve()} snapshot codex",
+            completed.stdout,
+        )
 
         snapshot = self.run_cli(["snapshot", "codex"])
         self.assertEqual(snapshot.returncode, 0, snapshot.stderr)

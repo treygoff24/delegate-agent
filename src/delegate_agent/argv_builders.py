@@ -255,6 +255,7 @@ def build_codex_argv(
     stream_capture: bool = True,
     reasoning_capability: reasoning.ReasoningCapability | None = None,
     prompt_transport: str = PROMPT_TRANSPORT_ARGV,
+    output_schema: str | None = None,
 ) -> list[str]:
     binary = str(codex["binary"])
     argv = [binary]
@@ -281,6 +282,8 @@ def build_codex_argv(
         )
     argv.append("exec")
     argv.extend(["--cd", workspace])
+    if output_schema is not None:
+        argv.extend(["--output-schema", output_schema])
     if codex.get("ignoreUserConfig") is True:
         argv.append("--ignore-user-config")
     if workspace_kind != "git":

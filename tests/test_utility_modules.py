@@ -23,6 +23,7 @@ import delegate_agent.reasoning as reasoning  # noqa: E402
 import delegate_agent.redaction as redaction  # noqa: E402
 import delegate_agent.run_metadata as run_metadata  # noqa: E402
 import delegate_agent.run_output_commands as run_output_commands  # noqa: E402
+import delegate_agent.run_registry as run_registry  # noqa: E402
 import delegate_agent.runner as runner  # noqa: E402
 import delegate_agent.worktree_commands as worktree_commands  # noqa: E402
 import delegate_agent.worktree_execution as worktree_execution  # noqa: E402
@@ -104,6 +105,23 @@ class UtilityModuleTests(unittest.TestCase):
             prompt_transport.DROID_PROMPT_FILE_ARG_PLACEHOLDER, "<delegate-prompt-file>"
         )
         self.assertEqual(prompt_transport.DROID_PROMPT_FILE_DISPLAY, "<prompt file>")
+
+    def test_run_registry_commands_can_include_cwd(self):
+        self.assertEqual(run_registry.snapshot_command("codex"), "delegate snapshot codex")
+        self.assertEqual(
+            run_registry.run_output_command("codex", completion_report=True),
+            "delegate run-output codex --completion-report",
+        )
+        self.assertEqual(
+            run_registry.snapshot_command("codex 1", cwd="/tmp/work tree"),
+            "delegate --cwd '/tmp/work tree' snapshot 'codex 1'",
+        )
+        self.assertEqual(
+            run_registry.run_output_command(
+                "codex 1", completion_report=True, cwd="/tmp/work tree"
+            ),
+            "delegate --cwd '/tmp/work tree' run-output 'codex 1' --completion-report",
+        )
 
     def test_archived_log_paths_and_byte_sizes(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -161,6 +161,37 @@ def apply_git_tracked_diff(worktree_path: str, diff: bytes) -> None:
         )
 
 
+def _git_lines(git_root: str, args: list[str], *, error: str) -> list[str]:
+    result = _run_git(
+        git_root,
+        args,
+        timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
+    )
+    if result.returncode != 0:
+        raise DelegateError("safe_workspace_sync_failed", f"{error}: {result.stderr.strip()}")
+    return [line for line in result.stdout.splitlines() if line]
+
+
+def changed_files_vs_head(git_root: str) -> tuple[str, ...]:
+    """Return tracked HEAD diff paths plus untracked non-ignored paths."""
+    paths: list[str] = []
+    seen: set[str] = set()
+    for line in _git_lines(
+        git_root,
+        ["diff", "HEAD", "--name-only"],
+        error="Failed to list tracked changes",
+    ) + _git_lines(
+        git_root,
+        ["ls-files", "--others", "--exclude-standard"],
+        error="Failed to list untracked files",
+    ):
+        if line in seen:
+            continue
+        seen.add(line)
+        paths.append(line)
+    return tuple(paths)
+
+
 def _is_relative_to(path: Path, root: Path) -> bool:
     try:
         path.relative_to(root)
@@ -619,6 +650,10 @@ def safe_isolated_request(request: Request) -> Iterator[Request]:
             prompt_file_text=request.prompt_file_text,
             prompt_transport=request.prompt_transport,
             display_argv=isolated_display_argv,
+            env_overrides=request.env_overrides,
+            auth_profile=request.auth_profile,
+            fallback_auth_profile=request.fallback_auth_profile,
+            profile_resolution=request.profile_resolution,
         )
     finally:
         cleanup_safe_isolated_workspace(

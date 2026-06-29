@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, TextIO
 
-from delegate_agent import harness_events, retention, run_registry
+from delegate_agent import harness_events, profiles, retention, run_registry
 from delegate_agent import runner as delegate_runner
 from delegate_agent.argv_utils import replace_workspace_arg_in_argv
 from delegate_agent.git_utils import (
@@ -68,6 +68,10 @@ class PersistentExecutionRequest(Protocol):
     prompt_file_text: str | None
     prompt_transport: str
     display_argv: list[str] | None
+    env_overrides: dict[str, str] | None
+    auth_profile: str | None
+    fallback_auth_profile: str | None
+    profile_resolution: profiles.ProfileResolution
 
 
 class SourceWorkspace(Protocol):
@@ -175,6 +179,9 @@ def _validate_persistent_worktree_request(
 
     execution.binary_validator(request.argv, request.engine)
 
+    if request.engine == "codex":
+        profiles.preflight_codex_request(request, execution.config.get("codex", {}))
+
     registry_root = run_registry.ensure_registry(
         Path(execution.source_workspace.path),
         workspace_kind=execution.source_workspace.kind,
@@ -235,6 +242,12 @@ def _build_persistent_worktree_run_context(
         forbid_commit=request.forbid_commit,
         progress_initial_delay_sec=request.progress_initial_delay_sec,
         progress_interval_sec=request.progress_interval_sec,
+        env_overrides=dict(request.env_overrides or {}),
+        fallback_env_overrides=dict(
+            profiles.codex_fallback_env_overrides(request.profile_resolution) or {}
+        ),
+        auth_profile=request.auth_profile,
+        fallback_auth_profile=request.fallback_auth_profile,
     )
 
 

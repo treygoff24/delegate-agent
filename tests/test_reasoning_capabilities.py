@@ -9,8 +9,15 @@ if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
 from delegate_agent.reasoning import (  # noqa: E402
+    CLAUDE_NATIVE_EFFORTS,
     INSPECT_REASONING_DISCOVERY_HINT,
     KIMI_UNSUPPORTED_REASONING_WARNING,
+    REASONING_PROFILES,
+    TRANSPORT_BY_HARNESS,
+    TRANSPORT_CLAUDE_EFFORT_FLAG,
+    TRANSPORT_CODEX_CONFIG,
+    TRANSPORT_CURSOR_MODEL_SELECTION,
+    TRANSPORT_DROID_FLAG,
     ReasoningCapabilityError,
     _alias_key_for_default_model,
     build_alias_reasoning_summaries,
@@ -424,6 +431,28 @@ class ReasoningCapabilityTests(unittest.TestCase):
         )
         self.assertIn("alias 'gpt-5.5'", message)
         self.assertIn(INSPECT_REASONING_DISCOVERY_HINT, message)
+
+    def test_reasoning_profiles_table_rows(self):
+        # transport + strategy per harness
+        self.assertEqual(REASONING_PROFILES["codex"].transport, TRANSPORT_CODEX_CONFIG)
+        self.assertEqual(REASONING_PROFILES["droid"].transport, TRANSPORT_DROID_FLAG)
+        self.assertEqual(REASONING_PROFILES["cursor"].transport, TRANSPORT_CURSOR_MODEL_SELECTION)
+        self.assertEqual(REASONING_PROFILES["claude"].transport, TRANSPORT_CLAUDE_EFFORT_FLAG)
+        self.assertIsNone(REASONING_PROFILES["kimi"].transport)
+        self.assertEqual(REASONING_PROFILES["claude"].strategy, "static-enum")
+        self.assertEqual(REASONING_PROFILES["claude"].static_efforts, CLAUDE_NATIVE_EFFORTS)
+        self.assertEqual(
+            REASONING_PROFILES["kimi"].unsupported_warning,
+            KIMI_UNSUPPORTED_REASONING_WARNING,
+        )
+
+    def test_transport_by_harness_derived_set(self):
+        # catches a strategy flip that changes membership (e.g. claude -> model-table
+        # would inject claude into the derived dict)
+        self.assertEqual(set(TRANSPORT_BY_HARNESS), {"codex", "droid", "cursor"})
+        self.assertEqual(TRANSPORT_BY_HARNESS["codex"], TRANSPORT_CODEX_CONFIG)
+        self.assertEqual(TRANSPORT_BY_HARNESS["droid"], TRANSPORT_DROID_FLAG)
+        self.assertEqual(TRANSPORT_BY_HARNESS["cursor"], TRANSPORT_CURSOR_MODEL_SELECTION)
 
 
 if __name__ == "__main__":

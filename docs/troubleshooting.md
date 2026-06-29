@@ -145,23 +145,29 @@ child output.
 
 ## Safe-mode isolation fails
 
-Cursor, Droid, Codex, Claude, and Kimi safe create an isolated temporary
-workspace by default. In Git repositories, Delegate first tries a detached
-worktree; for non-Git directories and some Git fallback cases, it uses a
-directory copy. Codex safe is the only safe harness that may opt out with
-`--isolation none`, because Codex still keeps its read-only sandbox active.
-Cursor, Droid, Claude, and Kimi safe reject `--isolation none` because their
-safe contracts depend on Delegate's temporary workspace boundary.
+Cursor, Droid, Codex, Claude, and Kimi safe create an isolated throwaway
+workspace by default. Safe mode reviews your **current working tree** —
+uncommitted tracked edits and untracked, non-ignored files are mirrored into
+that copy (only gitignored paths are excluded), so you do **not** need to
+commit or stash before a safe review. In Git repositories, Delegate first tries
+a detached worktree and syncs the dirty tree into it; for non-Git directories
+and some Git fallback cases, it uses a directory copy. Codex safe is the only
+safe harness that may opt out with `--isolation none`, because Codex still
+keeps its read-only sandbox active. Cursor, Droid, Claude, and Kimi safe
+reject `--isolation none` because their safe contracts depend on Delegate's
+temporary workspace boundary.
 
 Dry-run can inspect the planned argv and isolation mode, but it does not
 materialize the temporary workspace, create the detached worktree, copy files,
-or apply a dirty diff. To troubleshoot actual isolation failures, check Git
-state and then reproduce with a real run only in a disposable workspace:
+or apply the working-tree sync. To troubleshoot actual isolation failures,
+check Git state and then reproduce with a real run only in a disposable
+workspace:
 
 ```bash
 git status --short
 git rev-parse --verify HEAD
 python3 bin/delegate.py --json dry-run codex safe "Review only."
+python3 bin/delegate.py codex safe "Review my uncommitted changes. Do not edit."
 ```
 
 ## Persistent worktree run refused
@@ -218,9 +224,24 @@ with `--tail` and `--max-chars`, may print very large output, and includes
 `rawOutputBytes` in JSON metadata so callers can see how much raw output was
 returned.
 
-If your prompt requires an exact structured final answer such as bare JSON, use
-`--no-completion-report` today so Delegate does not inject completion-report
-instructions into the child prompt.
+## Structured / JSON-only final output
+
+For a bare machine-parseable final message on Codex, use `--output-schema FILE`
+(codex-only). OpenAI enforces the JSON Schema on Codex's final message; Delegate
+suppresses the completion-report prompt injection for that run, so the report
+will not precede or wrap your payload. Relative schema paths resolve against the
+launch cwd, like `--prompt-file`.
+
+For Cursor, Droid, Kimi, and Claude there is no native schema enforcement.
+Embed the schema in the prompt and parse the final message yourself. Delegate
+still injects completion-report instructions unless you pass
+`--no-completion-report`; when present, the report precedes any operator-requested
+payload (payload-last ordering).
+
+```bash
+delegate --json codex safe --output-schema findings.schema.json "Audit auth handlers."
+delegate --json cursor safe --no-completion-report "Return bare JSON matching the schema in the prompt."
+```
 
 ## Worktree cleanup refused
 

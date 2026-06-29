@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Final
 
-from delegate_agent import reasoning
+from delegate_agent import reasoning, redaction
 from delegate_agent.json_types import JsonObject, JsonValue, is_non_negative_int
 
 DEFAULT_CONFIG_PATH: Path | None = None
@@ -97,9 +97,15 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
         "defaultModel": None,
         "defaultReasoningEffort": None,
         "profile": None,
+        "fallbackProfile": None,
         "workSandbox": "workspace-write",
         "ephemeral": True,
         "ignoreUserConfig": False,
+    },
+    "profiles": {
+        "detectFrom": ["DELEGATE_PROFILE", "AI_PROFILE"],
+        "default": None,
+        "definitions": {},
     },
     "isolation": {
         "safe": ISOLATION_AUTO,
@@ -360,6 +366,88 @@ def _validate_worktrees_section(worktrees: JsonValue) -> None:
             )
 
 
+def _profiles_definitions(profiles: JsonValue) -> dict[str, JsonObject]:
+    if not isinstance(profiles, dict):
+        return {}
+    definitions = profiles.get("definitions")
+    if not isinstance(definitions, dict):
+        return {}
+    return {
+        name.strip(): entry
+        for name, entry in definitions.items()
+        if isinstance(name, str) and name.strip() and isinstance(entry, dict)
+    }
+
+
+def _validate_profiles_section(profiles: JsonValue) -> None:
+    if profiles is None:
+        return
+    if not isinstance(profiles, dict):
+        raise ConfigError("invalid_profiles_config", "profiles config must be an object.")
+    detect_from = profiles.get("detectFrom", [])
+    if not isinstance(detect_from, list) or not all(
+        isinstance(item, str) and item.strip() for item in detect_from
+    ):
+        raise ConfigError(
+            "invalid_profiles_config",
+            "profiles.detectFrom must be an array of non-empty strings.",
+        )
+    definitions = profiles.get("definitions", {})
+    if not isinstance(definitions, dict):
+        raise ConfigError("invalid_profiles_config", "profiles.definitions must be an object.")
+    normalized_names: set[str] = set()
+    for name, entry in definitions.items():
+        if not isinstance(name, str) or not name.strip():
+            raise ConfigError(
+                "invalid_profiles_config",
+                "profiles.definitions keys must be non-empty strings.",
+            )
+        normalized_name = name.strip()
+        normalized_names.add(normalized_name)
+        if not isinstance(entry, dict):
+            raise ConfigError(
+                "invalid_profiles_config",
+                f"profiles.definitions.{normalized_name} must be an object.",
+            )
+        unknown = set(entry) - {"env"}
+        if unknown:
+            raise ConfigError(
+                "invalid_profiles_config",
+                f"profiles.definitions.{normalized_name} has unknown keys: "
+                f"{', '.join(sorted(unknown))}.",
+            )
+        env = entry.get("env", {})
+        if not isinstance(env, dict):
+            raise ConfigError(
+                "invalid_profiles_config",
+                f"profiles.definitions.{normalized_name}.env must be an object.",
+            )
+        for key, value in env.items():
+            path = f"profiles.definitions.{normalized_name}.env.{key}"
+            if not isinstance(key, str) or not key.strip():
+                raise ConfigError(
+                    "invalid_profiles_config",
+                    f"profiles.definitions.{normalized_name}.env keys must be non-empty strings.",
+                )
+            if redaction.key_looks_secret(key):
+                raise ConfigError(
+                    "secret_in_profile_env",
+                    f"{path} looks like a secret. Export secrets in the shell; Phase-2 envFile "
+                    "will support secret files.",
+                )
+            if not isinstance(value, str) or not value.strip():
+                raise ConfigError(
+                    "invalid_profiles_config",
+                    f"{path} must be a non-empty string.",
+                )
+    default = profiles.get("default")
+    if default is not None and (not isinstance(default, str) or default not in normalized_names):
+        raise ConfigError(
+            "invalid_profiles_config",
+            "profiles.default must be null or a defined profile name.",
+        )
+
+
 def _validate_codex_section(codex: JsonValue) -> None:
     if not isinstance(codex, dict):
         raise ConfigError("invalid_codex_config", "codex config must be an object.")
@@ -371,6 +459,9 @@ def _validate_codex_section(codex: JsonValue) -> None:
         error="invalid_codex_config",
     )
     optional_str(codex.get("profile"), path="codex.profile", error="invalid_codex_config")
+    optional_str(
+        codex.get("fallbackProfile"), path="codex.fallbackProfile", error="invalid_codex_config"
+    )
     work_sandbox = codex.get("workSandbox", "workspace-write")
     if work_sandbox not in CODEX_WORK_SANDBOX_VALUES:
         raise ConfigError(
@@ -388,6 +479,35 @@ def _validate_codex_section(codex: JsonValue) -> None:
         path="codex.ignoreUserConfig",
         error="invalid_codex_config",
     )
+
+
+def _validate_codex_profile_references(config: JsonObject) -> None:
+    codex = config.get("codex")
+    if not isinstance(codex, dict):
+        return
+    fallback = codex.get("fallbackProfile")
+    if fallback is None:
+        return
+    if not isinstance(fallback, str) or not fallback.strip():
+        return
+    fallback = fallback.strip()
+    definitions = _profiles_definitions(config.get("profiles"))
+    profile = definitions.get(fallback)
+    if profile is None:
+        raise ConfigError(
+            "invalid_codex_config",
+            f"codex.fallbackProfile {fallback!r} is not defined in profiles.definitions.",
+        )
+    env = profile.get("env")
+    if (
+        not isinstance(env, dict)
+        or not isinstance(env.get("CODEX_HOME"), str)
+        or not env["CODEX_HOME"].strip()
+    ):
+        raise ConfigError(
+            "profile_missing_codex_home",
+            f"codex.fallbackProfile {fallback!r} must define profiles.definitions.{fallback}.env.CODEX_HOME.",
+        )
 
 
 def _validate_kimi_section(kimi: JsonValue) -> None:
@@ -819,7 +939,9 @@ def validate_config(config: JsonObject) -> None:
                     error="invalid_tracking_config",
                 )
     _validate_policy_section(config.get("policy"))
+    _validate_profiles_section(config.get("profiles"))
     _validate_codex_section(config.get("codex"))
+    _validate_codex_profile_references(config)
     _validate_kimi_section(config.get("kimi"))
     _validate_claude_section(config.get("claude"))
     _validate_reasoning_section(config.get("reasoning"))

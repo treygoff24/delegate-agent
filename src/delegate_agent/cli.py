@@ -16,7 +16,10 @@ from delegate_agent import (
     command_errors,
     command_help,
     inspection_commands,
+    profile_commands,
+    profiles,
     reasoning,
+    redaction,
     run_output_commands,
     run_registry,
     worktree_commands,
@@ -205,6 +208,28 @@ def emit_worktree(
     )
 
 
+def emit_profiles_command(
+    parsed: ParsedCommand,
+    config: JsonObject,
+    config_source: str,
+    stdout: TextIO,
+) -> int:
+    command = parsed.profiles_command
+    if command is None:
+        raise DelegateError("invalid_command", "profiles options are required.")
+    resolution = profiles.resolve_active_profile(
+        config,
+        os.environ,
+        cli_override=parsed.global_options.auth_profile,
+    )
+    return profile_commands.emit(
+        command,
+        resolution=resolution,
+        config_source=config_source,
+        stdout=stdout,
+    )
+
+
 def dry_run_payload(request: Request) -> JsonObject:
     payload: JsonObject = {
         "ok": True,
@@ -224,6 +249,12 @@ def dry_run_payload(request: Request) -> JsonObject:
         payload["progressRequested"] = True
     if request.forbid_commit:
         payload["commitPolicy"] = {"forbidCommit": True}
+    if request.auth_profile is not None:
+        payload["authProfile"] = request.auth_profile
+    if request.fallback_auth_profile is not None:
+        payload["fallbackProfile"] = request.fallback_auth_profile
+    if request.profile_resolution.name is not None:
+        payload["profileEnv"] = redaction.redact_env_map(request.profile_resolution.env)
 
     # Structured isolation fields from the isolation context.
     if request.isolation_context is not None:
@@ -315,6 +346,7 @@ def _missing_binary_error(
     *,
     engine: str | None = None,
     config_source: str | None = None,
+    search_context: str = "delegate process",
 ) -> DelegateError:
     config_key = _binary_config_key(engine)
     config_path_hint = _binary_config_path(config_source)
@@ -322,7 +354,7 @@ def _missing_binary_error(
 
     parts = [
         f"Missing binary: {binary}",
-        "(searched PATH of the delegate process, not your interactive shell).",
+        f"(searched PATH of the {search_context}, not your interactive shell).",
     ]
     if config_key is not None:
         parts.append(f"Fix: set an absolute path in {config_path_hint} under {config_key!r}.")
@@ -360,11 +392,21 @@ def ensure_binary(
     *,
     engine: str | None = None,
     config_source: str | None = None,
+    env_overrides: dict[str, str] | None = None,
 ) -> None:
     if not argv:
         raise DelegateError("missing_binary", "Empty argv.", EXIT_MISSING_BINARY)
-    if shutil.which(argv[0]) is None:
-        raise _missing_binary_error(argv[0], engine=engine, config_source=config_source)
+    env = profiles.child_environment(overrides=env_overrides) if env_overrides else os.environ
+    if shutil.which(argv[0], path=env.get("PATH")) is None:
+        search_context = (
+            "child environment" if env_overrides and "PATH" in env_overrides else "delegate process"
+        )
+        raise _missing_binary_error(
+            argv[0],
+            engine=engine,
+            config_source=config_source,
+            search_context=search_context,
+        )
 
 
 def make_run_context(
@@ -441,6 +483,12 @@ def make_run_context(
         forbid_commit=request.forbid_commit,
         progress_initial_delay_sec=request.progress_initial_delay_sec,
         progress_interval_sec=request.progress_interval_sec,
+        env_overrides=dict(request.env_overrides or {}),
+        fallback_env_overrides=dict(
+            profiles.codex_fallback_env_overrides(request.profile_resolution) or {}
+        ),
+        auth_profile=request.auth_profile,
+        fallback_auth_profile=request.fallback_auth_profile,
     )
 
 
@@ -456,6 +504,8 @@ def execute_request(
     stdout: TextIO,
     stderr: TextIO,
 ) -> tuple[int, JsonObject | None]:
+    if request.engine == "codex":
+        profiles.preflight_codex_request(request, config.get("codex", {}))
     ctx = request.isolation_context
 
     # --- Persistent worktree path (work + worktree) ---
@@ -475,6 +525,7 @@ def execute_request(
                         argv,
                         engine=engine,
                         config_source=config_source,
+                        env_overrides=request.env_overrides,
                     ),
                 )
             )
@@ -486,6 +537,7 @@ def execute_request(
             isolated_request.argv,
             engine=isolated_request.engine,
             config_source=config_source,
+            env_overrides=isolated_request.env_overrides,
         )
         if pass_through:
             if json_mode:
@@ -500,6 +552,7 @@ def execute_request(
                     stdin_text=isolated_request.stdin_text,
                     prompt_file_text=isolated_request.prompt_file_text,
                     prompt_file_placeholder=DROID_PROMPT_FILE_ARG_PLACEHOLDER,
+                    env_overrides=isolated_request.env_overrides,
                 )
             except delegate_runner.RunnerLaunchError as exc:
                 raise DelegateError(exc.error, exc.message) from exc
@@ -675,6 +728,7 @@ def main(
                 config=config,
                 config_source=source,
                 workspace=workspace.path,
+                auth_profile_override=global_options.auth_profile,
                 stdout=stdout,
             )
 
@@ -690,6 +744,9 @@ def main(
             return emit_run_output(parsed, workspace, stdout)
         if parsed.subcommand == "worktree":
             return emit_worktree(parsed, workspace, config, stdout)
+
+        if parsed.subcommand == "profiles":
+            return emit_profiles_command(parsed, config, source, stdout)
 
         request = request_from_parsed(parsed, config, stdin)
         if request.dry_run:

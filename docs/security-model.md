@@ -27,7 +27,7 @@ Delegate does not control:
 
 Safe mode is for review and investigation.
 
-- Cursor safe, Droid safe, Codex safe, Claude safe, and Kimi safe run in an isolated temporary workspace by default.
+- Cursor safe, Droid safe, Codex safe, Claude safe, and Kimi safe run in an isolated throwaway workspace by default, with your current working tree mirrored into that copy (see [What safe review can and cannot see](#what-safe-review-can-and-cannot-see) below).
 - Cursor safe also writes a read-oriented `.cursor/cli.json` in the isolated workspace only.
 - Codex safe uses `--ask-for-approval never exec --sandbox read-only`.
 - Claude safe uses `claude -p` with stdin prompt transport, `--permission-mode plan`, `--strict-mcp-config`, Read/Grep/Glob, and selected read-only Bash tools. Delegate does not currently prove that Claude Code hooks, plugins, user settings, or other non-MCP customization surfaces are disabled.
@@ -36,6 +36,19 @@ Safe mode is for review and investigation.
 - Explicit `--isolation none` is rejected for Cursor, Claude, Droid, and Kimi safe mode because it would remove the isolation/config boundary those safe contracts rely on. Codex safe may opt out of Delegate workspace isolation because the Codex read-only sandbox remains active.
 
 Safe mode is not a proof of zero side effects. Treat it as a defensive default plus prompt/runtime policy. A runtime could still read available files, use configured credentials, load its own customizations, or perform actions allowed by its own permissions.
+
+#### What safe review can and cannot see
+
+Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff.
+
+| Visible in the review copy | Not synced |
+| --- | --- |
+| Uncommitted tracked edits (vs `HEAD`) | Gitignored paths (`.env`, build artifacts, local secrets) |
+| Untracked, non-ignored files | |
+
+**Gitignored files are not synced** by design — that keeps secrets and build junk out of the throwaway copy. If a review needs an ignored file, commit it elsewhere, copy it in explicitly, or paste the relevant content into the prompt.
+
+**Edge case:** a change staged then reverted in the working tree is not captured. Sync uses `git diff HEAD` (HEAD↔working tree), not the index, so index-only staging history can be invisible to the reviewer.
 
 ### Work mode
 
@@ -72,7 +85,7 @@ Unsupported effort/model combinations fail before launch. Treat higher effort as
 
 ### Temporary safe isolation
 
-Cursor safe, Droid safe, Codex safe, Claude safe, and Kimi safe normally run in a temporary Git worktree or directory copy. This protects the source checkout from ordinary relative-path edits made inside the execution workspace. Delegate may still write `.delegate/` metadata in the source workspace for tracked runs.
+Cursor safe, Droid safe, Codex safe, Claude safe, and Kimi safe normally run in a temporary Git worktree or directory copy, with uncommitted tracked edits and untracked, non-ignored files synced from the source working tree (gitignored paths excluded). This protects the source checkout from ordinary relative-path edits made inside the execution workspace. Delegate may still write `.delegate/` metadata in the source workspace for tracked runs.
 
 Git repositories with commits use a detached temporary Git worktree. Non-Git directories use a temporary directory copy. Git repositories with no commits fall back to a temporary directory copy because Git cannot create a detached worktree from an unborn `HEAD`; Delegate reports that fallback in run metadata.
 
@@ -97,6 +110,7 @@ Persistent worktree isolation is not a security sandbox. It does not prevent:
 - Do not commit provider API keys, tokens, private model IDs that should not be public, local logs, or `.delegate/runs/` data.
 - Keep `config.example.json` placeholder-only.
 - Run secret and path scans before publishing.
+- Profiles never store secrets. `profiles.definitions.*.env` is for non-secret routing pointers only (for example `CODEX_HOME`); secret-shaped keys are rejected at config load with `secret_in_profile_env`. Enforcement is by key name, so do not embed a credential in an innocuously named value or interpolate one via `$VAR` — keep real credentials in shell env or harness-native key stores. Resolved profile env is injected into child processes; only profile *names* are persisted in run state, and `delegate profiles` / dry-run echo env values through the same best-effort credential scrubbing as other surfaces.
 
 ## Output and redaction
 

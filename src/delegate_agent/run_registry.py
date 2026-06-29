@@ -5,6 +5,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import subprocess
 import time
 from collections.abc import Iterator
@@ -273,11 +274,23 @@ def parse_utc_timestamp(value: str | None) -> datetime | None:
         return None
 
 
-def snapshot_command(alias: str) -> str:
-    return f"delegate snapshot {alias}"
+def snapshot_command(alias: str, *, cwd: str | None = None) -> str:
+    if cwd is None:
+        return f"delegate snapshot {alias}"
+    return shlex.join(["delegate", "--cwd", cwd, "snapshot", alias])
 
 
-def run_output_command(handle: str, *, completion_report: bool = False) -> str:
+def run_output_command(
+    handle: str,
+    *,
+    completion_report: bool = False,
+    cwd: str | None = None,
+) -> str:
+    if cwd is not None:
+        argv = ["delegate", "--cwd", cwd, "run-output", handle]
+        if completion_report:
+            argv.append("--completion-report")
+        return shlex.join(argv)
     base = f"delegate run-output {handle}"
     if completion_report:
         return f"{base} --completion-report"
@@ -388,7 +401,9 @@ def resolve_run_target(
         suggestions = ", ".join(resolved.suggestions) if resolved.suggestions else "(none)"
         return RunTargetLookupError(
             "unknown_handle",
-            f"Unknown run handle: {handle}. Suggestions: {suggestions}",
+            f"Unknown run handle: {handle}. Suggestions: {suggestions}. "
+            "Runs are recorded per-workspace under <workspace>/.delegate; "
+            "if this run was launched elsewhere, pass --cwd <that workspace>.",
         )
     return RunTarget(resolved.run_id, resolved.alias)
 
