@@ -70,10 +70,39 @@ INSPECT_REASONING_DISCOVERY_HINT = (
 )
 KIMI_UNSUPPORTED_REASONING_WARNING = "reasoning effort is not supported for kimi."
 
+
+@dataclass(frozen=True)
+class ReasoningProfile:
+    transport: str | None
+    strategy: str  # "model-table" | "static-enum" | "effort-routing" | "unsupported"
+    static_efforts: tuple[str, ...] | None = None  # static-enum (claude)
+    unsupported_warning: str | None = None  # unsupported (kimi)
+
+
+# Single source of truth for per-harness reasoning facts; the renderers below
+# read from this table instead of re-encoding each fact. Row order matters:
+# codex precedes droid so the derived model-table loop emits byte-identical
+# output.
+REASONING_PROFILES: dict[str, ReasoningProfile] = {
+    "codex": ReasoningProfile(TRANSPORT_CODEX_CONFIG, "model-table"),
+    "droid": ReasoningProfile(TRANSPORT_DROID_FLAG, "model-table"),
+    "cursor": ReasoningProfile(TRANSPORT_CURSOR_MODEL_SELECTION, "effort-routing"),
+    "claude": ReasoningProfile(
+        TRANSPORT_CLAUDE_EFFORT_FLAG,
+        "static-enum",
+        static_efforts=CLAUDE_NATIVE_EFFORTS,
+    ),
+    "kimi": ReasoningProfile(
+        None,
+        "unsupported",
+        unsupported_warning=KIMI_UNSUPPORTED_REASONING_WARNING,
+    ),
+}
+
 TRANSPORT_BY_HARNESS = {
-    "codex": TRANSPORT_CODEX_CONFIG,
-    "droid": TRANSPORT_DROID_FLAG,
-    "cursor": TRANSPORT_CURSOR_MODEL_SELECTION,
+    h: p.transport
+    for h, p in REASONING_PROFILES.items()
+    if p.transport is not None and p.strategy != "static-enum"
 }
 
 
@@ -85,7 +114,7 @@ def _kimi_unsupported_reasoning_fields() -> JsonObject:
     return {
         "supported": None,
         "source": "none",
-        "warning": KIMI_UNSUPPORTED_REASONING_WARNING,
+        "warning": REASONING_PROFILES["kimi"].unsupported_warning,
     }
 
 
@@ -194,7 +223,7 @@ def resolve_claude_native_effort(
     if requested_effort is None:
         return None
     effort = normalize_effort(requested_effort)
-    if effort not in CLAUDE_NATIVE_EFFORTS:
+    if effort not in REASONING_PROFILES["claude"].static_efforts:
         raise ReasoningCapabilityError(
             "unsupported_reasoning_effort",
             format_explicit_reasoning_effort_error(
@@ -202,7 +231,7 @@ def resolve_claude_native_effort(
                 alias=alias,
                 model=model,
                 effort=effort,
-                supported=CLAUDE_NATIVE_EFFORTS,
+                supported=REASONING_PROFILES["claude"].static_efforts,
                 detail="does not support reasoning effort",
             ),
         )
@@ -521,9 +550,9 @@ def _claude_alias_reasoning_summary(claude: JsonObject) -> JsonObject:
     alias = _alias_key_for_default_model(default_model)
     payload: JsonObject = {
         "alias": alias,
-        "supported": list(CLAUDE_NATIVE_EFFORTS),
+        "supported": list(REASONING_PROFILES["claude"].static_efforts),
         "source": "static",
-        "transport": TRANSPORT_CLAUDE_EFFORT_FLAG,
+        "transport": REASONING_PROFILES["claude"].transport,
     }
     if isinstance(default_model, str) and default_model:
         payload["model"] = default_model
@@ -626,7 +655,7 @@ def build_reasoning_capabilities_payload(
     cache: JsonObject | None,
 ) -> JsonObject:
     harnesses: JsonObject = {}
-    for harness in ("codex", "droid"):
+    for harness in [h for h, p in REASONING_PROFILES.items() if p.strategy == "model-table"]:
         models_payload: JsonObject = {}
         _overlay_payload_models(
             models_payload,
@@ -651,13 +680,13 @@ def build_reasoning_capabilities_payload(
         "models": _cursor_reasoning_models_payload(mappings),
     }
     harnesses["claude"] = {
-        "transport": TRANSPORT_CLAUDE_EFFORT_FLAG,
+        "transport": REASONING_PROFILES["claude"].transport,
         "source": "static",
-        "supported": list(CLAUDE_NATIVE_EFFORTS),
+        "supported": list(REASONING_PROFILES["claude"].static_efforts),
         "models": {},
     }
     harnesses["kimi"] = {
-        "transport": None,
+        "transport": REASONING_PROFILES["kimi"].transport,
         **_kimi_unsupported_reasoning_fields(),
         "models": {},
     }
