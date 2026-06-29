@@ -110,6 +110,7 @@ Persistent worktree isolation is not a security sandbox. It does not prevent:
 - Do not commit provider API keys, tokens, private model IDs that should not be public, local logs, or `.delegate/runs/` data.
 - Keep `config.example.json` placeholder-only.
 - Run secret and path scans before publishing.
+- Profiles never store secrets. `profiles.definitions.*.env` is for non-secret routing pointers only (for example `CODEX_HOME`); secret-shaped keys are rejected at config load with `secret_in_profile_env`. Enforcement is by key name, so do not embed a credential in an innocuously named value or interpolate one via `$VAR` — keep real credentials in shell env or harness-native key stores. Resolved profile env is injected into child processes; only profile *names* are persisted in run state, and `delegate profiles` / dry-run echo env values through the same best-effort credential scrubbing as other surfaces.
 
 ## Output and redaction
 

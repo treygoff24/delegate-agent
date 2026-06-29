@@ -189,6 +189,17 @@ Temporary safe isolation preserves internal symlinks, but replaces symlinks that
 
 Snapshots and `run-output` redact common credential shapes by default, including authorization headers, bearer/basic tokens, JWT-like strings, and common `token=` / `api_key=` / `password=` values. Use `--no-redact` only when exact output is necessary and safe to display.
 
+## Profile-aware auth and env
+
+A **profile** selects which credentials and environment every delegated harness inherits, so one session can run under, say, a work account and another under a personal account without editing config between runs. Define profiles under the top-level `profiles` block, then either let Delegate detect the active one from an environment variable (`profiles.detectFrom`) or pin it explicitly with `--auth-profile NAME`:
+
+```bash
+delegate --json --auth-profile work profiles    # inspect the resolved profile (read-only)
+delegate --auth-profile work codex safe "Review this diff."
+```
+
+Delegate resolves the profile once per request and injects its env into every spawned child across tracked, pass-through, safe-isolation, and persistent-worktree paths. Profile `env` holds **non-secret routing pointers only** (for example `CODEX_HOME`); secret-shaped keys are rejected at config load, so real credentials stay in your shell or a harness-native key store. See [Configuration](docs/configuration.md#profiles) for the full schema.
+
 ## Useful docs
 
 - [Agent setup](docs/agent-setup.md): human and non-interactive setup flows.

@@ -11,7 +11,7 @@ Use `delegate --help` for the exact command list from the installed version. Glo
 --pass-through                Stream raw child stdout/stderr. Incompatible with --json and persistent worktree runs.
 --completion-report MODE      markdown or none.
 --no-completion-report        Disable completion-report prompt injection.
---auth-profile NAME           Override detected profiles for launches, dry-run, run --input-json, and profiles.
+--auth-profile NAME           Override detected profiles for launches, dry-run, run --input-json, profiles, and capabilities refresh.
 ```
 
 ## Commands
@@ -62,10 +62,11 @@ exist. Validation rejects `--forbid-commit` outside `work` mode with
 
 `--auth-profile NAME` selects a top-level `profiles.definitions` entry and
 injects that profile's flat env map into child processes. It overrides ambient
-profile detection for launches, `dry-run`, `run --input-json`, and
-`delegate profiles`. Unknown names fail with `unknown_profile`. It is rejected
-for run-inspection and worktree-management commands where no child auth/env
-selection happens.
+profile detection for launches, `dry-run`, `run --input-json`, `delegate profiles`,
+and `capabilities refresh` (which spawns a Codex probe). Unknown names fail with
+`unknown_profile`. It is rejected for run-inspection, worktree-management, and
+discovery commands, and for the cached `capabilities` report, where no child
+auth/env selection happens.
 
 ### `delegate codex`
 
@@ -173,6 +174,8 @@ Typical dry-run JSON fields:
 ```
 
 `isolation` is a human-readable summary combining `effectiveIsolation` and `isolationLifecycle` (e.g. `"worktree temporary"`, `"worktree persistent"`, `"none"`). Depend on the structured fields rather than parsing it.
+
+When a profile is active, dry-run and completion payloads add `authProfile` (the resolved profile name) and, when a Codex fallback profile is configured, `fallbackProfile`. Dry-run also adds `profileEnv` (the injected env map, with values redacted). These keys are omitted when no profile is active.
 
 `--isolation none` is rejected for Cursor, Claude, Droid, and Kimi safe mode because it would remove the temporary workspace/config boundary those safe contracts depend on. Codex safe can use `none` because Codex still runs with its read-only sandbox.
 
@@ -363,7 +366,10 @@ Common JSON fields for tracked run completion:
 
 Persistent worktree completions also include `branch`, `worktree`, a
 `workSummary`, and (when requested) `commitPolicy`. `workSummary` reports dirty
-state, changed file count, diff stat, and commits created by the child.
+state, changed file count, diff stat, and commits created by the child. When a
+Codex usage-limit fallback fires, the completion payload also includes
+`codexAuthFallback` metadata (reason, the primary and fallback profile names,
+both exit codes, and a redacted primary stderr tail).
 
 Snapshot JSON uses schema `delegate.snapshot.v1` and includes fields such as `alias`, `runId`, `harness`, `status`, `rawStatus`, `effectiveStatus`, `staleReason`, `nextActions`, `cwd`, `executionCwd`, `assistantText`, `recentEvents`, `warnings`, `exitCode`, reasoning metadata, and isolation/worktree metadata when applicable. Inspection commands do not rewrite a stale run's recorded state; they expose the raw recorded status plus the effective status computed from the current PID check.
 

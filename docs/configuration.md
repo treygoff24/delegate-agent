@@ -216,11 +216,14 @@ Controls local run recording.
   rejected with `secret_in_profile_env`; export real API keys in the parent
   shell or a harness-native credential store instead. Enforcement is by key
   name only — do not embed credentials in innocuously named values (for example
-  a database URL with an embedded password); keep secrets in shell env or
+  a database URL with an embedded password), and do not interpolate a secret via
+  `$VAR` (for example `"PROVIDER_REF": "$OPENAI_API_KEY"`): expansion resolves
+  the live secret into the value, and an opaque secret would print verbatim in
+  `delegate profiles` and dry-run output. Keep secrets in shell env or
   harness-native key files.
 - `--auth-profile NAME` overrides ambient detection for launches, `dry-run`,
-  `run --input-json`, and `delegate profiles`. Unknown names fail closed with
-  `unknown_profile`.
+  `run --input-json`, `delegate profiles`, and `capabilities refresh`. Unknown
+  names fail closed with `unknown_profile`.
 - `delegate profiles` reports the detected profile, source, and resolved env
   keys. JSON output includes redacted values and never emits unredacted
   secret-keyed values.
