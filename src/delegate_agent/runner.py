@@ -1096,7 +1096,9 @@ def execute_tracked(
                 progress_stderr=stderr if progress else None,
                 progress_initial_delay_sec=progress_initial_delay_sec,
                 progress_interval_sec=progress_interval_sec,
-                attempt_label="primary" if ctx.fallback_env_overrides else None,
+                attempt_label="primary"
+                if (ctx.engine == "codex" and ctx.fallback_env_overrides)
+                else None,
             )
         except OSError as exc:
             error = _runner_launch_error(launch_argv, cwd, exc)

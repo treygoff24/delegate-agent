@@ -200,6 +200,12 @@ def parse_capabilities_subcommand(
         refresh = True
     elif rest:
         require_no_extra(rest, "capabilities")
+    if auth_profile is not None and not refresh:
+        raise DelegateError(
+            "invalid_option_combination",
+            "--auth-profile is only supported with capabilities refresh; "
+            "the cached capabilities report does not spawn a harness.",
+        )
     return ParsedCommand(
         "capabilities",
         global_options=GlobalOptions(
@@ -307,7 +313,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
         raise DelegateError(
             "invalid_option_combination",
             f"--auth-profile is not supported with delegate {subcommand}; "
-            "use it with launches, dry-run, run --input-json, or profiles.",
+            "use it with launches, dry-run, run --input-json, profiles, or capabilities refresh.",
         )
 
     if subcommand == "help":

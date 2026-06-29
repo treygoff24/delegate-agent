@@ -945,6 +945,7 @@ def _argument_payload(arg: ArgSpec) -> JsonObject:
 def command_help_payload(spec: CommandSpec) -> JsonObject:
     """Return the stable, agent-facing JSON help contract for one command (D4)."""
 
+    unsupported = set(spec.unsupported_global_options)
     return {
         "ok": True,
         "command": spec.name,
@@ -952,6 +953,10 @@ def command_help_payload(spec: CommandSpec) -> JsonObject:
         "usage": list(spec.usage),
         "arguments": [_argument_payload(arg) for arg in spec.arguments],
         "options": [_option_payload(opt) for opt in spec.options],
+        "globalOptions": [
+            _option_payload(opt) for opt in GLOBAL_OPTIONS if opt.flag not in unsupported
+        ],
+        "unsupportedGlobalOptions": list(spec.unsupported_global_options),
         "examples": list(spec.examples),
         "notes": list(spec.notes),
         "seeAlso": list(spec.see_also),

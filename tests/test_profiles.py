@@ -181,6 +181,10 @@ class ProfileResolutionTests(unittest.TestCase):
         with self.assertRaises(DelegateError) as ctx:
             self.profiles.resolve_active_profile(config, {}, cli_override="missing")
         self.assertEqual(ctx.exception.error, "unknown_profile")
+        # The message must be actionable: list defined profiles and point at the
+        # read-only introspection command.
+        self.assertIn("work", ctx.exception.message)
+        self.assertIn("delegate profiles", ctx.exception.message)
 
     def test_unknown_ambient_warns_and_falls_to_default(self):
         config = base_config(work="/tmp/work")
@@ -821,6 +825,19 @@ class CodexUsageLimitClassifierTests(unittest.TestCase):
             self.profiles.classify_codex_usage_limit("rate limit exceeded for your account")
         )
         self.assertTrue(self.profiles.classify_codex_usage_limit("rate limit exceeded for quota"))
+
+    def test_read_bounded_stderr_tail_does_not_read_whole_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stderr_log = Path(tmp) / "stderr.log"
+            stderr_log.write_bytes(b"prefix-" + (b"x" * 32) + b"tail-end")
+
+            with mock.patch.object(
+                Path, "read_bytes", side_effect=AssertionError("unbounded read")
+            ):
+                self.assertEqual(
+                    self.profiles.read_bounded_stderr_tail(stderr_log, limit=8),
+                    "tail-end",
+                )
 
 
 class ProfilePhase2CliTests(unittest.TestCase):

@@ -826,6 +826,12 @@ Cursor safe mode:
   - Uses default Cursor Agent behavior, not plan/ask mode.
   - The child runs in the isolated copy; tracked runs may still write .delegate metadata in the source workspace.
 
+Profiles (auth/env switching):
+  - A profile selects which credentials/env every spawned harness inherits; the active profile is detected from env (profiles.detectFrom) or set explicitly with --auth-profile NAME before the subcommand.
+  - --auth-profile applies to launches, dry-run, run, profiles, and capabilities refresh; it is rejected for run-inspection, worktree, discovery, and the cached capabilities report.
+  - delegate profiles (optionally with --json) reports the resolved profile, source, and non-secret env keys; it never mutates config.
+  - profiles.definitions.<name>.env holds non-secret pointers only (e.g. CODEX_HOME); secret-shaped keys are rejected at config load, and values must not interpolate secrets via $VAR. Export real credentials in the shell instead.
+
 Rules for agents:
   - Keep prompts bounded: task, scope, verification, report format.
   - Delegate always prepends a mandatory skill-review instruction before your prompt.

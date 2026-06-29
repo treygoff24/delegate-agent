@@ -9,7 +9,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from delegate_agent import config as delegate_config
 from delegate_agent import redaction
 from delegate_agent.errors import DelegateError
 from delegate_agent.git_utils import GIT_QUICK_TIMEOUT_SECONDS
@@ -68,11 +67,23 @@ def _expanded_env_value(value: str) -> str:
     return os.path.expanduser(os.path.expandvars(value.strip()))
 
 
+def _unknown_profile_error(name: str, definitions: Mapping[str, JsonObject]) -> DelegateError:
+    defined = sorted(definitions)
+    if defined:
+        hint = f"Defined profiles: {', '.join(defined)}."
+    else:
+        hint = "No profiles are defined; add a profiles.definitions entry to config."
+    return DelegateError(
+        "unknown_profile",
+        f"Unknown auth profile: {name}. {hint} Run delegate profiles to inspect the active profile.",
+    )
+
+
 def profile_env(config: JsonObject, name: str) -> dict[str, str]:
     definitions = profile_definitions(config)
     profile = definitions.get(name)
     if profile is None:
-        raise DelegateError("unknown_profile", f"Unknown auth profile: {name}.")
+        raise _unknown_profile_error(name, definitions)
     env = profile.get("env")
     if not isinstance(env, dict):
         return {}
@@ -122,7 +133,7 @@ def resolve_active_profile(
     if cli_override is not None:
         selected = cli_override.strip()
         if not selected or selected not in definitions:
-            raise DelegateError("unknown_profile", f"Unknown auth profile: {cli_override}.")
+            raise _unknown_profile_error(cli_override, definitions)
         source = "flag"
     elif not definitions:
         return empty_profile_resolution()
@@ -182,66 +193,6 @@ def child_environment(
     return env
 
 
-def codex_auth_write_target() -> Path:
-    explicit = os.environ.get(delegate_config.CONFIG_ENV)
-    if explicit:
-        return Path(explicit).expanduser()
-    return delegate_config.default_config_path()
-
-
-def _git_root_for(path: Path) -> Path | None:
-    try:
-        result = _run_git(
-            str(path.parent if path.is_file() else path),
-            ["rev-parse", "--show-toplevel"],
-            timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
-        )
-    except (FileNotFoundError, subprocess.SubprocessError):
-        return None
-    if result.returncode != 0:
-        return None
-    return Path(result.stdout.strip()).resolve()
-
-
-def refuse_tracked_config_write(target: Path) -> None:
-    resolved = target.expanduser().resolve()
-    git_root = _git_root_for(resolved)
-    if git_root is None:
-        return
-    try:
-        relative = resolved.relative_to(git_root)
-    except ValueError:
-        return
-    try:
-        result = _run_git(
-            str(git_root),
-            ["ls-files", "--error-unmatch", str(relative)],
-            timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
-        )
-    except (FileNotFoundError, subprocess.SubprocessError):
-        return
-    if result.returncode == 0:
-        raise DelegateError(
-            "unsafe_config_target",
-            f"Refusing to write profile settings to tracked repo file: {resolved}. "
-            "Use ~/.delegate/config.json or an untracked DELEGATE_CONFIG path.",
-        )
-
-
-def read_raw_config_object(path: Path) -> JsonObject:
-    if path.exists():
-        return delegate_config.read_config_file(path)
-    return {}
-
-
-def write_raw_config_object(path: Path, payload: JsonObject) -> None:
-    from delegate_agent.private_io import write_json_atomic
-
-    refuse_tracked_config_write(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    write_json_atomic(path, payload)
-
-
 def _auth_file_readable(path: Path) -> bool:
     try:
         return path.is_file() and os.access(path, os.R_OK)
@@ -284,7 +235,8 @@ def preflight_codex_request(request: object, codex_config: JsonObject) -> None:
     if resolution.name is not None and resolution.codex_home is None:
         raise DelegateError(
             "profile_missing_codex_home",
-            f"Profile {resolution.name!r} is active for a Codex Run but does not define CODEX_HOME.",
+            f"Profile {resolution.name!r} is active for a Codex Run but does not define CODEX_HOME. "
+            f"Add it under profiles.definitions.{resolution.name}.env.CODEX_HOME.",
         )
     if resolution.codex_home is None:
         return
@@ -334,11 +286,12 @@ def classify_codex_usage_limit(stderr_text: str) -> bool:
 def read_bounded_stderr_tail(stderr_log: Path, *, limit: int = STDERR_TAIL_LIMIT) -> str:
     if not stderr_log.exists():
         return ""
-    data = stderr_log.read_bytes()
-    if len(data) <= limit:
-        text = data.decode("utf-8", errors="replace")
-    else:
-        text = data[-limit:].decode("utf-8", errors="replace")
+    if limit <= 0:
+        return ""
+    with stderr_log.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        handle.seek(max(handle.tell() - limit, 0), os.SEEK_SET)
+        text = handle.read(limit).decode("utf-8", errors="replace")
     return redaction.redact_string(text)
 
 

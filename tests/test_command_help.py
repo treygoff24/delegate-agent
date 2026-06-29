@@ -52,6 +52,8 @@ PAYLOAD_KEYS = {
     "usage",
     "arguments",
     "options",
+    "globalOptions",
+    "unsupportedGlobalOptions",
     "examples",
     "notes",
     "seeAlso",
@@ -94,7 +96,16 @@ class CommandPayloadShapeTests(unittest.TestCase):
         self.assertEqual(payload["command"], "worktree remove")
         self.assertEqual(payload["summary"], spec.summary)
 
-        for list_key in ("usage", "arguments", "options", "examples", "notes", "seeAlso"):
+        for list_key in (
+            "usage",
+            "arguments",
+            "options",
+            "globalOptions",
+            "unsupportedGlobalOptions",
+            "examples",
+            "notes",
+            "seeAlso",
+        ):
             self.assertIsInstance(payload[list_key], list, f"{list_key} must be a list")
 
         for arg in payload["arguments"]:
@@ -103,11 +114,16 @@ class CommandPayloadShapeTests(unittest.TestCase):
             self.assertIsInstance(arg["required"], bool)
             self.assertIsInstance(arg["description"], str)
 
-        for opt in payload["options"]:
+        for opt in payload["options"] + payload["globalOptions"]:
             self.assertEqual(set(opt.keys()), {"flag", "argument", "description"})
             self.assertIsInstance(opt["flag"], str)
             self.assertTrue(opt["argument"] is None or isinstance(opt["argument"], str))
             self.assertIsInstance(opt["description"], str)
+
+        # worktree remove rejects --auth-profile: it must surface in the unsupported
+        # list and be filtered out of the advertised global options.
+        self.assertIn("--auth-profile", payload["unsupportedGlobalOptions"])
+        self.assertNotIn("--auth-profile", {opt["flag"] for opt in payload["globalOptions"]})
 
     def test_all_payloads_shape_and_serializable(self):
         for key, spec in command_help.COMMAND_SPECS.items():
@@ -120,6 +136,8 @@ class CommandPayloadShapeTests(unittest.TestCase):
                     "usage",
                     "arguments",
                     "options",
+                    "globalOptions",
+                    "unsupportedGlobalOptions",
                     "examples",
                     "notes",
                     "seeAlso",
@@ -127,8 +145,10 @@ class CommandPayloadShapeTests(unittest.TestCase):
                     self.assertIsInstance(payload[list_key], list)
                 for arg in payload["arguments"]:
                     self.assertEqual(set(arg.keys()), {"name", "required", "description"})
-                for opt in payload["options"]:
+                for opt in payload["options"] + payload["globalOptions"]:
                     self.assertEqual(set(opt.keys()), {"flag", "argument", "description"})
+                for flag in payload["unsupportedGlobalOptions"]:
+                    self.assertIsInstance(flag, str)
                 # Must survive a JSON round-trip without raising.
                 json.dumps(payload)
 

@@ -92,6 +92,17 @@ class ParserTests(unittest.TestCase):
             self.delegate.parse_cli(["models", "--verbose"])
         self.assertEqual(ctx.exception.error, "unexpected_argument")
 
+    def test_auth_profile_rejected_for_non_refresh_capabilities(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(["--auth-profile", "work", "capabilities"])
+        self.assertEqual(ctx.exception.error, "invalid_option_combination")
+        self.assertIn("refresh", ctx.exception.message)
+
+    def test_auth_profile_accepted_for_capabilities_refresh(self):
+        parsed = self.delegate.parse_cli(["--auth-profile", "work", "capabilities", "refresh"])
+        self.assertEqual(parsed.global_options.auth_profile, "work")
+        self.assertTrue(parsed.capabilities.refresh)
+
     def test_infer_global_json_after_value_taking_globals(self):
         cases = [
             ["--isolation", "worktree", "--json", "cursor"],
