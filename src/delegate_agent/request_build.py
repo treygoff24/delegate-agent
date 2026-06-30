@@ -27,10 +27,12 @@ from delegate_agent import runner as delegate_runner
 from delegate_agent.argv_builders import (
     SAFE_REVIEW_PREFIX_BY_ENGINE,
     _claude_harness_bypass_enabled,
+    _grok_harness_bypass_enabled,
     build_claude_argv,
     build_codex_argv,
     build_cursor_argv,
     build_droid_argv,
+    build_grok_argv,
     build_kimi_argv,
     prefix_droid_safe_prompt,
     redacted_prompt_argv,
@@ -40,6 +42,8 @@ from delegate_agent.constants import (
     KNOWN_ENGINES,
     MODE_SAFE,
     MODE_WORK,
+    MODELESS_NONCURSOR_ENGINES,
+    SAFE_REVIEW_PREFIX_INJECTED_HERE_ENGINES,
     validate_mode,
 )
 from delegate_agent.errors import DelegateError
@@ -51,6 +55,8 @@ from delegate_agent.prompt_transport import (
     DROID_PROMPT_FILE_ARG_PLACEHOLDER,
     DROID_PROMPT_FILE_DISPLAY,
     KIMI_PROMPT_REDACTION,
+    PROMPT_FILE_ARG_PLACEHOLDER,
+    PROMPT_FILE_DISPLAY,
     PROMPT_TRANSPORT_ARGV,
     PROMPT_TRANSPORT_FILE,
     PROMPT_TRANSPORT_STDIN,
@@ -242,6 +248,12 @@ def validate_prompt(prompt: str) -> str:
 def resolve_output_schema(engine: str, output_schema: object) -> str | None:
     if output_schema is None:
         return None
+    if engine == "grok":
+        raise DelegateError(
+            "unsupported_output_schema",
+            "Grok --json-schema forces final json output, which breaks Delegate tracked "
+            "streaming snapshots; --output-schema is not supported for grok in v1.",
+        )
     if engine != "codex":
         raise DelegateError(
             "unsupported_output_schema",
@@ -302,7 +314,9 @@ def effective_prompt(
 ) -> str:
     prompt = delegate_runner.prepend_skill_review_instructions(prompt)
     safe_prefix = (
-        SAFE_REVIEW_PREFIX_BY_ENGINE.get(engine) if engine in {"codex", "droid", "claude"} else None
+        SAFE_REVIEW_PREFIX_BY_ENGINE.get(engine)
+        if engine in SAFE_REVIEW_PREFIX_INJECTED_HERE_ENGINES
+        else None
     )
     if mode == MODE_SAFE and safe_prefix is not None and safe_prefix not in prompt:
         # prepend_skill_review_instructions guarantees SKILL_REVIEW_PREFIX at index 0,
@@ -550,7 +564,7 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
     if engine == "droid":
         if not isinstance(model_alias, str) or not model_alias:
             raise DelegateError("missing_model", "droid run input requires model alias.")
-    elif engine in ("codex", "kimi", "claude"):
+    elif engine in MODELESS_NONCURSOR_ENGINES:
         if model_alias is not None and not isinstance(model_alias, str):
             raise DelegateError("invalid_model", f"model must be a string or null for {engine}.")
         if model_alias == "":
@@ -878,6 +892,51 @@ def _claude_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     )
 
 
+def _grok_request_parts(build: EngineBuildInput) -> EngineRequestParts:
+    grok = build.config["grok"]
+    if isinstance(build.model_alias, str) and build.model_alias:
+        model = build.model_alias
+    else:
+        model = _resolve_default_model(grok)
+    policy = delegate_config.effective_policy(build.config, engine="grok", mode=build.mode)
+    effort: str | None = None
+    warnings: tuple[str, ...] = ()
+    if build.requested_effort is not None:
+        try:
+            effort = reasoning.resolve_grok_native_effort(
+                build.requested_effort,
+                alias=build.model_alias,
+                model=model,
+            )
+        except reasoning.ReasoningCapabilityError as exc:
+            if build.effort_source != "config":
+                raise DelegateError(exc.error, exc.message) from exc
+            warnings = (f"ignoring grok.defaultReasoningEffort: {exc.message}",)
+    argv = build_grok_argv(
+        grok,
+        build.mode,
+        build.resolved.path,
+        model,
+        policy,
+        stream_capture=build.stream_capture,
+        reasoning_effort=effort,
+        allow_bypass_permissions=_grok_harness_bypass_enabled(build.config, build.mode),
+    )
+    display_argv = [
+        PROMPT_FILE_DISPLAY if item == PROMPT_FILE_ARG_PLACEHOLDER else item for item in argv
+    ]
+    return EngineRequestParts(
+        model=model,
+        argv=argv,
+        model_alias=build.model_alias,
+        prompt_transport=PROMPT_TRANSPORT_FILE,
+        prompt_file_text=build.prompt,
+        display_argv=display_argv,
+        warnings=warnings,
+        **grok_reasoning_request_kwargs(effort, build.effort_source),
+    )
+
+
 def _kimi_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     _ = build.effort_source, build.cache
     if build.requested_effort is not None:
@@ -923,6 +982,7 @@ ENGINE_REQUEST_PARTS_BUILDERS: dict[str, EngineRequestPartsBuilder] = {
     "droid": _droid_request_parts,
     "codex": _codex_request_parts,
     "claude": _claude_request_parts,
+    "grok": _grok_request_parts,
     "kimi": _kimi_request_parts,
 }
 
@@ -1169,6 +1229,23 @@ def reasoning_request_kwargs(
     }
 
 
+def _native_reasoning_request_kwargs(
+    effort: str | None,
+    source: str | None,
+    *,
+    transport: str,
+    capability_source: str,
+) -> JsonObject:
+    if effort is None:
+        return {}
+    return {
+        "reasoning_effort": effort,
+        "reasoning_effort_source": source,
+        "reasoning_capability_source": capability_source,
+        "reasoning_transport": transport,
+    }
+
+
 def claude_reasoning_request_kwargs(effort: str | None, source: str | None) -> JsonObject:
     """Reasoning payload fields for Claude's static native-effort flag.
 
@@ -1176,14 +1253,21 @@ def claude_reasoning_request_kwargs(effort: str | None, source: str | None) -> J
     flag (``--effort``) rather than a ``ReasoningCapability`` object. Returns
     ``{}`` when no effort applies so the request-parts defaults stand.
     """
-    if effort is None:
-        return {}
-    return {
-        "reasoning_effort": effort,
-        "reasoning_effort_source": source,
-        "reasoning_capability_source": "static",
-        "reasoning_transport": reasoning.TRANSPORT_CLAUDE_EFFORT_FLAG,
-    }
+    return _native_reasoning_request_kwargs(
+        effort,
+        source,
+        transport=reasoning.TRANSPORT_CLAUDE_EFFORT_FLAG,
+        capability_source="static",
+    )
+
+
+def grok_reasoning_request_kwargs(effort: str | None, source: str | None) -> JsonObject:
+    return _native_reasoning_request_kwargs(
+        effort,
+        source,
+        transport=reasoning.TRANSPORT_GROK_EFFORT_FLAG,
+        capability_source="static",
+    )
 
 
 def _resolve_default_model(section: JsonObject) -> str | None:

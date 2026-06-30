@@ -118,6 +118,27 @@ def make_codex_streaming_script(*, include_completion: bool = True) -> str:
     )
 
 
+def make_grok_streaming_script(*, include_completion: bool = True) -> str:
+    fixture = ROOT / "tests" / "fixtures" / "grok_streaming_json_smoke.jsonl"
+    stream_command = f"cat {fixture}\n" if include_completion else f"sed '$d' {fixture}\n"
+    return (
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'printf "%s\\n" "$@" > "${GROK_ARGV_LOG:-/dev/null}"\n'
+        "while [ $# -gt 0 ]; do\n"
+        '  if [ "$1" = "--prompt-file" ]; then\n'
+        "    shift\n"
+        '    grep -q "Delegate Grok safe mode" "$1" || exit 11\n'
+        "    break\n"
+        "  fi\n"
+        "  shift\n"
+        "done\n"
+        f"{stream_command}"
+        f'printf "{STDERR_MARKER}\\n" >&2\n'
+        'exit "${FAKE_EXIT:-0}"\n'
+    )
+
+
 class EndToEndTrackingTests(unittest.TestCase):
     def setUp(self):
         self.delegate = load_module(MODULE_PATH, "delegate_cli_e2e_test")
@@ -157,6 +178,11 @@ class EndToEndTrackingTests(unittest.TestCase):
         codex_path = self.bin_dir / "codex"
         codex_path.write_text(codex_script, encoding="utf-8")
         codex_path.chmod(0o755)
+        grok_path = self.bin_dir / "grok"
+        grok_path.write_text(
+            make_grok_streaming_script(include_completion=include_completion), encoding="utf-8"
+        )
+        grok_path.chmod(0o755)
 
     def write_workspace_config(self, *, raw_log_days: int = 7) -> Path:
         config_path = self.registry.delegate_root(self.workspace) / "config.json"
@@ -175,6 +201,9 @@ class EndToEndTrackingTests(unittest.TestCase):
                     "droid": {
                         "binary": "droid",
                         "models": {"minimax": "e2e-model-id"},
+                    },
+                    "grok": {
+                        "binary": "grok",
                     },
                 }
             ),
@@ -868,6 +897,61 @@ class EndToEndTrackingTests(unittest.TestCase):
         self.assertEqual(json_tail.returncode, 0, json_tail.stderr)
         payload = json.loads(json_tail.stdout)
         self.assertFalse(payload["sections"]["stdout"]["truncated"])
+
+    def test_tracked_grok_safe_run_records_prompt_file_and_snapshot(self):
+        argv_log = self.workspace / "grok-argv.log"
+        self.write_fake_binaries()
+        env = self.delegate_env()
+        env["GROK_ARGV_LOG"] = str(argv_log)
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(CLI_PATH),
+                "--json",
+                "--cwd",
+                str(self.workspace),
+                "grok",
+                "safe",
+                "Review this workspace. Do not edit files.",
+            ],
+            text=True,
+            capture_output=True,
+            env=env,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+        payload = json.loads(completed.stdout)
+        alias = payload["alias"]
+        run_id, run_path = self.lookup_run(alias)
+        manifest = json.loads((run_path / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["promptTransport"], "file")
+        self.assertNotIn("Review this workspace", json.dumps(manifest.get("argv", [])))
+        self.assertTrue(argv_log.exists())
+        recorded = argv_log.read_text(encoding="utf-8")
+        self.assertIn("--prompt-file", recorded)
+        self.assertIn("streaming-json", recorded)
+        self.assert_registry_files(run_id)
+        snapshot_payload = json.loads((run_path / "snapshot.json").read_text(encoding="utf-8"))
+        self.assertEqual(snapshot_payload["harness"], "grok")
+        self.assertIn("delegate grok fixture ok", snapshot_payload.get("assistantText", ""))
+        report = self.run_cli(["run-output", alias, "--completion-report"])
+        self.assertEqual(report.returncode, 0, report.stderr)
+        self.assertIn("delegate grok fixture ok", report.stdout)
+
+    def test_tracked_grok_without_end_recovers_completion_report_from_stream(self):
+        self.write_fake_binaries(include_completion=False)
+        completed = self.run_cli(["grok", "safe", "Recover streamed Grok text."])
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        alias = parse_alias_from_bounded_stdout(completed.stdout)
+        run_id, run_path = self.lookup_run(alias)
+        self.assert_registry_files(run_id)
+
+        stdout_text = (run_path / "stdout.log").read_text(encoding="utf-8")
+        self.assertIn('"type":"text","data":"delegate"', stdout_text)
+        self.assertIn('"type":"text","data":" ok"', stdout_text)
+        self.assertNotIn('"type":"end"', stdout_text)
+        report = (run_path / "completion-report.md").read_text(encoding="utf-8")
+        self.assertIn("delegate grok fixture ok", report)
 
 
 if __name__ == "__main__":

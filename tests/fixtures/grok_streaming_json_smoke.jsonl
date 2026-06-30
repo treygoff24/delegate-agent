@@ -1,0 +1,7 @@
+{"type":"thought","data":"reviewing delegate workspace"}
+{"type":"thought","data":" checking grok stream shape"}
+{"type":"text","data":"delegate"}
+{"type":"text","data":" grok"}
+{"type":"text","data":" fixture"}
+{"type":"text","data":" ok"}
+{"type":"end","stopReason":"EndTurn","sessionId":"sess-fixture","requestId":"req-fixture"}

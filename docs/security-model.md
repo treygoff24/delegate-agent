@@ -6,7 +6,7 @@ Delegate is a launcher and run recorder for other agent runtimes. It improves co
 
 Delegate controls:
 
-- Which child argv is built for Cursor, Droid, Codex, Claude, or Kimi.
+- Which child argv is built for Cursor, Droid, Codex, Claude, Grok, or Kimi.
 - Whether the child is launched in `safe` or `work` mode.
 - Whether a requested reasoning effort is translated into the supported child-runtime mechanism for the resolved harness/model.
 - Whether the execution workspace is the source checkout, a temporary isolated workspace, or a persistent Git worktree.
@@ -27,13 +27,14 @@ Delegate does not control:
 
 Safe mode is for review and investigation.
 
-- Cursor safe, Droid safe, Codex safe, Claude safe, and Kimi safe run in an isolated throwaway workspace by default, with your current working tree mirrored into that copy (see [What safe review can and cannot see](#what-safe-review-can-and-cannot-see) below).
+- Cursor safe, Droid safe, Codex safe, Claude safe, Grok safe, and Kimi safe run in an isolated throwaway workspace by default, with your current working tree mirrored into that copy (see [What safe review can and cannot see](#what-safe-review-can-and-cannot-see) below).
 - Cursor safe also writes a read-oriented `.cursor/cli.json` in the isolated workspace only.
 - Codex safe uses `--ask-for-approval never exec --sandbox read-only`.
 - Claude safe uses `claude -p` with stdin prompt transport, `--permission-mode plan`, `--strict-mcp-config`, Read/Grep/Glob, and selected read-only Bash tools. Delegate does not currently prove that Claude Code hooks, plugins, user settings, or other non-MCP customization surfaces are disabled.
 - Droid safe uses Delegate's read-only safety prompt, does not add Droid work-mode unsafe flags, and uses the isolated temporary workspace as a defense-in-depth boundary.
 - Kimi safe uses Delegate's read-only safety prompt and does not enable Kimi `--plan`. Kimi prompt mode auto-approves tool actions, so there is no runtime read-only enforcement for Kimi safe; the isolated temporary workspace is the effective boundary and the safety prompt is advisory.
-- Explicit `--isolation none` is rejected for Cursor, Claude, Droid, and Kimi safe mode because it would remove the isolation/config boundary those safe contracts rely on. Codex safe may opt out of Delegate workspace isolation because the Codex read-only sandbox remains active.
+- Grok safe uses Delegate's read-only safety prompt plus Grok `--sandbox read-only` and `--permission-mode dontAsk`. Delegate does not use Grok `plan` mode for safe review. Prompts are delivered via Grok `--prompt-file`.
+- Explicit `--isolation none` is rejected for Cursor, Claude, Grok, Droid, and Kimi safe mode because it would remove the isolation/config boundary those safe contracts rely on. Codex safe may opt out of Delegate workspace isolation because the Codex read-only sandbox remains active.
 
 Safe mode is not a proof of zero side effects. Treat it as a defensive default plus prompt/runtime policy. A runtime could still read available files, use configured credentials, load its own customizations, or perform actions allowed by its own permissions.
 
@@ -58,11 +59,14 @@ Work mode is edit-capable. Use it only for bounded tasks in workspaces you trust
 - Droid work adds Droid's unsafe skip flag for non-interactive edits.
 - Codex work uses the configured Codex policy and sandbox settings.
 - Claude work uses `claude.workPermissionMode`; Delegate policy can explicitly map `policy.harness.claude.work.bypassApprovalsAndSandbox` to Claude `--permission-mode bypassPermissions`.
+- Grok work uses `grok.workPermissionMode` and `grok.workSandbox`; Delegate policy can explicitly map `policy.harness.grok.work.bypassApprovalsAndSandbox` to Grok `--permission-mode bypassPermissions`.
 - Kimi work uses edit-capable prompt mode. Delegate does not emit `--yolo` because Kimi rejects combining `--yolo` with `--prompt`.
 
 #### Claude bypass scope
 
 `describe`'s `policyFieldSupport` marks Claude as supporting `bypassApprovalsAndSandbox`, but the Claude harness honors that field only when set at `policy.harness.claude.work.bypassApprovalsAndSandbox`. Unlike Codex, the global `policy.work` scope and the `external-sandbox` profile do not grant Claude bypass. This is deliberate: it prevents a Codex-oriented global profile from silently broadening Claude Code permissions.
+
+Grok bypass follows the same harness-scoped pattern at `policy.harness.grok.work.bypassApprovalsAndSandbox`.
 
 Delegate never auto-commits, pushes, merges, deploys, or publishes work-mode changes.
 

@@ -270,6 +270,68 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             worktrees = list(worktree_root.glob("*/*"))
             self.assertTrue(len(worktrees) > 0)
 
+    def test_grok_work_persistent_worktree_rewrites_cwd_and_redacts_prompt_file(self):
+        """Grok work --isolation worktree rewrites --cwd and keeps prompt-file redaction."""
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            mock.patch.dict(os.environ, {"HOME": fake_home}),
+        ):
+            repo, _git_cd = self._make_git_repo_with_commit()
+            log_file = str(Path(fake_home) / "child-argv.log")
+            fake_bin = self._make_logging_fake_bin("grok", log_file)
+            workspace = self.delegate.resolve_workspace(repo.name)
+            request = self._make_persistent_worktree_request(
+                "grok",
+                "work",
+                repo.name,
+                self.delegate.DEFAULT_CONFIG,
+            )
+            secret_prompt = "TOP SECRET GROK PROMPT TEXT"
+            request = self.delegate.Request(
+                request.engine,
+                request.mode,
+                request.workspace,
+                secret_prompt,
+                [str(fake_bin / "grok"), *request.argv[1:]],
+                request.model,
+                dry_run=False,
+                workspace_kind=request.workspace_kind,
+                isolation_context=request.isolation_context,
+                prompt_transport=request.prompt_transport,
+                prompt_file_text=secret_prompt,
+                display_argv=request.display_argv,
+            )
+            with mock.patch.dict(
+                os.environ, {"PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", "")}
+            ):
+                code, _payload = self.delegate.execute_request(
+                    request,
+                    json_mode=True,
+                    config=self.delegate.DEFAULT_CONFIG,
+                    pass_through=False,
+                    completion_report_mode="none",
+                    source_workspace=workspace,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+            self.assertEqual(code, 0)
+            logged = Path(log_file).read_text() if Path(log_file).exists() else ""
+            cwd_index = logged.split().index("--cwd")
+            logged_cwd = logged.split()[cwd_index + 1]
+            self.assertIn("/worktrees/", logged_cwd)
+            self.assertNotEqual(logged_cwd, repo.name)
+
+            runs_dir = Path(repo.name) / ".delegate" / "runs"
+            run_dirs = list(runs_dir.glob("del_*"))
+            self.assertTrue(run_dirs)
+            manifest = self.delegate.json.loads((run_dirs[0] / "manifest.json").read_text())
+            manifest_argv = manifest["argv"]
+            manifest_cwd = manifest_argv[manifest_argv.index("--cwd") + 1]
+            self.assertIn("/worktrees/", manifest_cwd)
+            self.assertNotEqual(manifest_cwd, repo.name)
+            self.assertIn(self.delegate.PROMPT_FILE_DISPLAY, manifest_argv)
+            self.assertNotIn(secret_prompt, manifest_argv)
+
     # -- Safe + worktree passthrough allowed and cleans up --------------------
 
     def test_safe_worktree_passthrough_allowed_and_cleans_up(self):

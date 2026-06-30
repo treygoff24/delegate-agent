@@ -82,7 +82,7 @@ class WslGuardrailTests(unittest.TestCase):
             ),
             self.assertRaises(self.cli.DelegateError) as ctx,
         ):
-            self.request_build.git_root_for(Path("/home/trey/repo"))
+            self.request_build.git_root_for(Path("/home/user/repo"))
         self.assertEqual(ctx.exception.error, "windows_git_in_wsl")
         self.assertIn("Install Git inside WSL", ctx.exception.message)
 

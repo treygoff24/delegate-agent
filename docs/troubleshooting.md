@@ -16,6 +16,7 @@ command -v agent
 command -v droid
 command -v codex
 command -v claude
+command -v grok
 command -v kimi
 ```
 
@@ -31,7 +32,7 @@ binary may work in a terminal and still be invisible to Delegate from an agent,
 cron, launchd, or another non-interactive subprocess.
 
 The durable fix is to set an absolute binary path in the active config, for
-example `codex.binary`, `claude.binary`, `droid.binary`, `kimi.binary`, or `cursor.argvPrefix`.
+example `codex.binary`, `claude.binary`, `grok.binary`, `droid.binary`, `kimi.binary`, or `cursor.argvPrefix`.
 JSON errors include `configPath`, `configKey`, and, when Delegate sees a likely
 user-local install, `suggestedBinaryPath`.
 

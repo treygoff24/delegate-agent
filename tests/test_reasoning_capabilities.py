@@ -25,6 +25,7 @@ from delegate_agent.reasoning import (  # noqa: E402
     format_explicit_reasoning_effort_error,
     normalize_effort,
     resolve_claude_native_effort,
+    resolve_grok_native_effort,
     resolve_reasoning_capability,
 )
 
@@ -205,6 +206,30 @@ class ReasoningCapabilityTests(unittest.TestCase):
             resolve_claude_native_effort("off")
         self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
 
+    def test_grok_native_effort_accepts_static_cli_levels(self):
+        for effort in ("low", "medium", "high", "xhigh", "max"):
+            with self.subTest(effort=effort):
+                self.assertEqual(resolve_grok_native_effort(effort), effort)
+
+    def test_grok_native_effort_rejects_invalid_levels(self):
+        with self.assertRaises(ReasoningCapabilityError) as ctx:
+            resolve_grok_native_effort("off")
+        self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
+
+    def test_grok_native_effort_rejects_malformed_values(self):
+        for bad in ("", 'hi"gh', "hi\\gh", "hi gh"):
+            with self.subTest(effort=bad):
+                with self.assertRaises(ReasoningCapabilityError) as ctx:
+                    resolve_grok_native_effort(bad)
+                self.assertEqual(ctx.exception.error, "invalid_reasoning_effort")
+
+    def test_capabilities_payload_includes_static_grok_efforts(self):
+        payload = build_reasoning_capabilities_payload({}, cache=None)
+        grok = payload["harnesses"]["grok"]
+        self.assertEqual(grok["transport"], "grok-effort-flag")
+        self.assertEqual(grok["source"], "static")
+        self.assertEqual(grok["supported"], ["low", "medium", "high", "xhigh", "max"])
+
     def test_cursor_capabilities_aggregate_efforts_by_model(self):
         payload = build_reasoning_capabilities_payload(
             {
@@ -381,6 +406,7 @@ class ReasoningCapabilityTests(unittest.TestCase):
                     "warning": KIMI_UNSUPPORTED_REASONING_WARNING,
                 }
             },
+            "grok": {},
         }
 
         self.assertEqual(build_alias_reasoning_summaries(config, cache=None), expected_aliases)

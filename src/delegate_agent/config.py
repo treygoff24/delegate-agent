@@ -25,7 +25,7 @@ ISOLATION_AUTO = "auto"
 ISOLATION_NONE = "none"
 ISOLATION_WORKTREE = "worktree"
 VALID_ISOLATION_VALUES = (ISOLATION_AUTO, ISOLATION_NONE, ISOLATION_WORKTREE)
-SAFE_ISOLATION_REQUIRED_ENGINES = frozenset({"cursor", "droid", "kimi", "claude"})
+SAFE_ISOLATION_REQUIRED_ENGINES = frozenset({"cursor", "droid", "kimi", "claude", "grok"})
 
 POLICY_PROFILES = ("safe", "trusted-hooks", "external-sandbox", "custom")
 POLICY_MODE_KEYS = frozenset(
@@ -41,6 +41,10 @@ POLICY_MODE_KEYS = frozenset(
 SAFE_FORBIDDEN_BYPASS_KEYS = ("bypassApprovalsAndSandbox", "bypassHookTrust")
 CODEX_WORK_SANDBOX_VALUES = ("read-only", "workspace-write", "danger-full-access")
 CLAUDE_WORK_PERMISSION_MODES = ("acceptEdits", "auto", "default", "dontAsk", "plan")
+GROK_PERMISSION_MODES = CLAUDE_WORK_PERMISSION_MODES
+GROK_BYPASS_PERMISSION_MODE = "bypassPermissions"
+GROK_SAFE_SANDBOX_VALUES = ("read-only", "strict")
+GROK_WORK_SANDBOX_VALUES = ("workspace", "devbox", "read-only", "strict")
 
 DEFAULT_MODE_POLICY: JsonObject = {
     "networkAccess": False,
@@ -85,6 +89,17 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
         "workPermissionMode": "auto",
         "noSessionPersistence": True,
         "bare": False,
+    },
+    "grok": {
+        "binary": "grok",
+        "defaultModel": None,
+        "defaultReasoningEffort": None,
+        "workPermissionMode": "auto",
+        "safePermissionMode": "dontAsk",
+        "safeSandbox": "read-only",
+        "workSandbox": None,
+        "disableWebSearch": True,
+        "noSubagents": False,
     },
     "policy": {
         "profile": "safe",
@@ -590,6 +605,72 @@ def _validate_claude_section(claude: JsonValue) -> None:
     require_bool(claude.get("bare", False), path="claude.bare", error="invalid_claude_config")
 
 
+def _validate_grok_section(grok: JsonValue) -> None:
+    if not isinstance(grok, dict):
+        raise ConfigError("invalid_grok_config", "grok config must be an object.")
+    require_non_empty_str(grok.get("binary"), path="grok.binary", error="invalid_grok_config")
+    optional_str(grok.get("defaultModel"), path="grok.defaultModel", error="invalid_grok_config")
+    default_effort = grok.get("defaultReasoningEffort")
+    if default_effort is not None:
+        if not isinstance(default_effort, str):
+            raise ConfigError(
+                "invalid_grok_config",
+                "grok.defaultReasoningEffort must be a string or null.",
+            )
+        try:
+            reasoning.resolve_grok_native_effort(default_effort)
+        except reasoning.ReasoningCapabilityError as exc:
+            raise ConfigError(
+                "invalid_grok_config",
+                f"grok.defaultReasoningEffort: {exc.message}",
+            ) from exc
+    safe_permission = grok.get("safePermissionMode", "dontAsk")
+    if safe_permission == "plan":
+        raise ConfigError(
+            "invalid_grok_config",
+            "grok.safePermissionMode cannot be plan; Delegate safe mode uses isolated "
+            "workspace plus read-only sandbox controls instead of Grok plan mode.",
+        )
+    if safe_permission not in ("dontAsk", "default", "auto"):
+        raise ConfigError(
+            "invalid_grok_config",
+            "grok.safePermissionMode must be dontAsk, default, or auto.",
+        )
+    work_permission = grok.get("workPermissionMode", "auto")
+    if work_permission == GROK_BYPASS_PERMISSION_MODE:
+        raise ConfigError(
+            "invalid_grok_config",
+            "grok.workPermissionMode cannot be bypassPermissions; "
+            "use policy.harness.grok.work.bypassApprovalsAndSandbox "
+            "for explicit Delegate-controlled bypass.",
+        )
+    if work_permission not in GROK_PERMISSION_MODES:
+        raise ConfigError(
+            "invalid_grok_config",
+            f"grok.workPermissionMode must be one of: {', '.join(GROK_PERMISSION_MODES)}.",
+        )
+    safe_sandbox = grok.get("safeSandbox", "read-only")
+    if safe_sandbox not in GROK_SAFE_SANDBOX_VALUES:
+        raise ConfigError(
+            "invalid_grok_config",
+            f"grok.safeSandbox must be one of: {', '.join(GROK_SAFE_SANDBOX_VALUES)}.",
+        )
+    work_sandbox = grok.get("workSandbox")
+    if work_sandbox is not None and work_sandbox not in GROK_WORK_SANDBOX_VALUES:
+        raise ConfigError(
+            "invalid_grok_config",
+            f"grok.workSandbox must be null or one of: {', '.join(GROK_WORK_SANDBOX_VALUES)}.",
+        )
+    require_bool(
+        grok.get("disableWebSearch", True),
+        path="grok.disableWebSearch",
+        error="invalid_grok_config",
+    )
+    require_bool(
+        grok.get("noSubagents", False), path="grok.noSubagents", error="invalid_grok_config"
+    )
+
+
 def _validate_provider_default_reasoning_effort(
     value: JsonValue,
     *,
@@ -815,6 +896,34 @@ def deep_merge(base: JsonObject, override: JsonObject) -> JsonObject:
     return merged
 
 
+def _replace_profile_definitions(merged: JsonObject, override: JsonObject) -> None:
+    override_profiles = override.get("profiles")
+    if not isinstance(override_profiles, dict):
+        return
+    override_definitions = override_profiles.get("definitions")
+    if not isinstance(override_definitions, dict):
+        return
+    profiles = merged.get("profiles")
+    if not isinstance(profiles, dict):
+        return
+    definitions = profiles.get("definitions")
+    if not isinstance(definitions, dict):
+        return
+    for name, entry in override_definitions.items():
+        definitions[name] = copy.deepcopy(entry)
+
+
+def merge_config_layer(base: JsonObject, override: JsonObject) -> JsonObject:
+    """Merge one config file or CLI override layer onto ``base``.
+
+    Profile definitions are replaced atomically per profile name so a higher layer
+    cannot inherit stale ``env`` keys from lower layers.
+    """
+    merged = deep_merge(base, override)
+    _replace_profile_definitions(merged, override)
+    return merged
+
+
 def default_config_path() -> Path:
     if DEFAULT_CONFIG_PATH is not None:
         return DEFAULT_CONFIG_PATH.expanduser()
@@ -856,13 +965,13 @@ def load_config(
 
     global_path = default_config_path()
     if global_path.exists():
-        merged = deep_merge(merged, read_config_file(global_path))
+        merged = merge_config_layer(merged, read_config_file(global_path))
         primary_source = str(global_path)
 
     if workspace is not None:
         local_path = workspace_config_path(workspace)
         if local_path.exists():
-            merged = deep_merge(merged, read_config_file(local_path))
+            merged = merge_config_layer(merged, read_config_file(local_path))
             primary_source = str(local_path)
 
     explicit = os.environ.get(CONFIG_ENV)
@@ -876,14 +985,14 @@ def load_config(
                 "config_not_found",
                 f"{CONFIG_ENV} points to a missing file: {explicit_path}",
             )
-        merged = deep_merge(merged, read_config_file(explicit_path))
+        merged = merge_config_layer(merged, read_config_file(explicit_path))
         primary_source = str(explicit_path)
     elif path is not None and path != global_path and path.exists():
-        merged = deep_merge(merged, read_config_file(path))
+        merged = merge_config_layer(merged, read_config_file(path))
         primary_source = str(path)
 
     if cli_overrides:
-        merged = deep_merge(merged, cli_overrides)
+        merged = merge_config_layer(merged, cli_overrides)
         primary_source = "cli-overrides"
 
     return merged, primary_source
@@ -973,6 +1082,7 @@ def validate_config(config: JsonObject) -> None:
     _validate_codex_profile_references(config)
     _validate_kimi_section(config.get("kimi"))
     _validate_claude_section(config.get("claude"))
+    _validate_grok_section(config.get("grok"))
     _validate_reasoning_section(config.get("reasoning"))
     _validate_isolation_section(config.get("isolation"))
     _validate_worktrees_section(config.get("worktrees"))

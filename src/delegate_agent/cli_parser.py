@@ -23,7 +23,12 @@ from delegate_agent import (
     worktree_mgmt,
 )
 from delegate_agent import config as delegate_config
-from delegate_agent.constants import ENGINES_PROSE, KNOWN_ENGINES, validate_mode
+from delegate_agent.constants import (
+    ENGINES_PROSE,
+    KNOWN_ENGINES,
+    MODELESS_ENGINES,
+    validate_mode,
+)
 from delegate_agent.errors import DelegateError
 from delegate_agent.request_models import (
     GlobalOptions,
@@ -48,18 +53,8 @@ MISPLACED_GLOBAL_OPTIONS = frozenset(
 
 VALUE_GLOBAL_OPTIONS = frozenset({"--cwd", "--isolation", "--completion-report", "--auth-profile"})
 
-AUTH_PROFILE_SUBCOMMANDS = frozenset(
-    {
-        "cursor",
-        "codex",
-        "kimi",
-        "claude",
-        "droid",
-        "dry-run",
-        "run",
-        "profiles",
-        "capabilities",
-    }
+AUTH_PROFILE_SUBCOMMANDS = frozenset(KNOWN_ENGINES) | frozenset(
+    {"dry-run", "run", "profiles", "capabilities"}
 )
 
 
@@ -400,7 +395,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
         return parse_run(
             rest, json_mode, cwd, pass_through, completion_report, isolation, auth_profile
         )
-    if subcommand in ("cursor", "codex", "kimi", "claude"):
+    if subcommand in MODELESS_ENGINES:
         return parse_modeless_engine(
             subcommand,
             rest,
@@ -666,14 +661,14 @@ def parse_dry_run(
     if not rest:
         raise DelegateError(
             "missing_engine",
-            "dry-run requires cursor, droid, codex, kimi, or claude.",
+            "dry-run requires cursor, droid, codex, kimi, claude, or grok.",
         )
     engine = rest[0]
     if engine.startswith("-"):
         raise DelegateError(
             "misplaced_global_option", "Global options must appear before the subcommand."
         )
-    if engine in ("cursor", "codex", "kimi", "claude"):
+    if engine in MODELESS_ENGINES:
         return parse_modeless_engine(
             engine,
             rest[1:],

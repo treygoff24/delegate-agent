@@ -741,7 +741,9 @@ def _record_tracked_launch_failure(
 ) -> None:
     extra: JsonObject = {"error": error.error, "message": error.message}
     write_state(files.run_path, build_state(ctx, status="failed", extra=extra))
-    snapshot = build_snapshot(ctx, accumulator=harness_events.StreamAccumulator())
+    snapshot = build_snapshot(
+        ctx, accumulator=harness_events.StreamAccumulator(harness=ctx.harness)
+    )
     snapshot["ok"] = False
     snapshot["status"] = "failed"
     snapshot.update(extra)
@@ -759,7 +761,7 @@ def _capture_tracked_process(
     progress_initial_delay_sec: float = PROGRESS_INITIAL_DELAY_SEC,
     progress_interval_sec: float = PROGRESS_HEARTBEAT_INTERVAL_SEC,
 ) -> TrackedCaptureResult:
-    accumulator = harness_events.StreamAccumulator()
+    accumulator = harness_events.StreamAccumulator(harness=ctx.harness)
     persist_progress(files.run_path, ctx, accumulator, status="running", pid=process.pid)
 
     line_buffer = ""

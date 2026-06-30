@@ -289,6 +289,40 @@ class ProfileConfigAndRedactionTests(unittest.TestCase):
         self.assertEqual(redacted["DB_PASSWD"], "***")
         self.assertEqual(redacted["CODEX_HOME"], "/tmp/codex")
 
+    def test_merge_config_layer_replaces_profile_definitions_atomically(self):
+        # Profile definitions replace atomically per name so a higher layer cannot
+        # inherit stale env keys (for example credential routing pointers) from
+        # lower layers.
+        base = {
+            "profiles": {
+                "definitions": {
+                    "work": {
+                        "env": {
+                            "CODEX_HOME": "/lower/codex",
+                            "STALE_POINTER": "/should-not-survive",
+                        }
+                    }
+                }
+            }
+        }
+        override = {
+            "profiles": {
+                "definitions": {
+                    "work": {
+                        "env": {
+                            "CODEX_HOME": "/higher/codex",
+                        }
+                    }
+                }
+            }
+        }
+        merged = config_mod.merge_config_layer(base, override)
+        work_def = merged["profiles"]["definitions"]["work"]
+        # The entire profile definition is replaced, not deep-merged env-by-env.
+        self.assertEqual(work_def, override["profiles"]["definitions"]["work"])
+        self.assertEqual(work_def["env"], {"CODEX_HOME": "/higher/codex"})
+        self.assertNotIn("STALE_POINTER", work_def["env"])
+
     def test_fallback_profile_without_codex_home_is_config_error(self):
         config = config_mod.deep_merge(
             config_mod.embedded_default_config(),

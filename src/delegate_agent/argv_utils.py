@@ -11,6 +11,7 @@ WORKSPACE_FLAG_BY_ENGINE: dict[str, str | None] = {
     "droid": "--cwd",
     "kimi": None,
     "claude": None,
+    "grok": "--cwd",
 }
 
 

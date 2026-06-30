@@ -31,19 +31,22 @@ delegate codex work [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [-
 delegate claude safe [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 delegate claude work [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 
+delegate grok safe [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate grok work [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+
 delegate kimi safe [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 delegate kimi work [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 ```
 
 Prompt sources are direct arguments, `--prompt-file`, or Delegate stdin. After
 Delegate resolves the prompt, Codex and Claude prompts are passed to the child runtime over
-stdin. Droid prompts are written to a private temporary prompt file and passed
-with Droid's documented `--file` option. Cursor Agent currently only exposes
+stdin. Droid and Grok prompts are written to a private temporary prompt file and passed
+with Droid's documented `--file` option or Grok's `--prompt-file`. Cursor Agent currently only exposes
 positional prompt input, and Kimi Code prompt mode currently uses `--prompt`,
 so those launches still use argv transport; Delegate redacts Cursor and Kimi
 prompt argv in dry-run output and run manifests.
 
-`--reasoning-effort LEVEL` is optional and parsed only before prompt text begins. Unsupported model/effort pairs fail closed before launch with `unsupported_reasoning_effort`. It affects only model reasoning depth, cost, or latency; it does not change `safe`/`work` permissions, sandboxing, approvals, network policy, or edit capability. Cursor effort is model-selection based and requires `cursor.reasoningEffortModels`; Droid emits `--reasoning-effort LEVEL`; Codex emits a `model_reasoning_effort` config override after the model is resolved; Claude emits Claude Code `--effort LEVEL`. Kimi does not support reasoning effort in v1.
+`--reasoning-effort LEVEL` is optional and parsed only before prompt text begins. Unsupported model/effort pairs fail closed before launch with `unsupported_reasoning_effort`. It affects only model reasoning depth, cost, or latency; it does not change `safe`/`work` permissions, sandboxing, approvals, network policy, or edit capability. Cursor effort is model-selection based and requires `cursor.reasoningEffortModels`; Droid emits `--reasoning-effort LEVEL`; Codex emits a `model_reasoning_effort` config override after the model is resolved; Claude emits Claude Code `--effort LEVEL`; Grok emits Grok `--effort LEVEL` (`low`, `medium`, `high`, `xhigh`, `max`). Kimi does not support reasoning effort in v1.
 
 `--progress` enables parent progress heartbeats on stderr for tracked foreground
 runs. `--no-progress` disables them even when `progress.enabled` is true in
@@ -113,6 +116,28 @@ delegate claude work "Implement the scoped task; report changed files and tests.
 delegate --isolation worktree claude work "Implement the feature in a persistent worktree."
 ```
 
+### `delegate grok`
+
+Usage:
+
+```bash
+delegate [--json] [--isolation auto|none|worktree] grok {safe,work} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+```
+
+- Safe mode reviews your **current working tree** in an isolated throwaway copy plus Grok read-only controls (`--sandbox read-only`, `--permission-mode dontAsk` by default). Delegate does not use Grok `plan` mode for safe review.
+- Prompt text is delivered via Grok `--prompt-file` from a Delegate temp file; dry-run argv and tracked run manifests do not contain the prompt.
+- Work mode uses `grok.workPermissionMode` and `grok.workSandbox` from config, unless Delegate policy explicitly enables `policy.harness.grok.work.bypassApprovalsAndSandbox`, which maps to Grok `--permission-mode bypassPermissions`.
+- `--reasoning-effort` maps to Grok `--effort` and accepts `low`, `medium`, `high`, `xhigh`, or `max`.
+- `--output-schema` is unsupported for Grok in v1 because Grok `--json-schema` forces final JSON output and weakens live snapshot parity.
+
+Examples:
+
+```bash
+delegate grok safe "Review this repo for regressions; report file/line/severity."
+delegate grok work "Implement the scoped task; report changed files and tests."
+delegate --isolation worktree grok work "Implement the feature in a persistent worktree."
+```
+
 ### `delegate kimi`
 
 Usage:
@@ -140,6 +165,7 @@ delegate --isolation worktree kimi work "Implement the feature in a persistent w
 ```bash
 delegate --json dry-run codex safe --reasoning-effort high "Review only."  # requires codex.defaultModel
 delegate --json dry-run claude safe --reasoning-effort high "Review only."
+delegate --json dry-run grok safe --reasoning-effort high "Review only."
 delegate --json dry-run cursor work --prompt-file task.md
 delegate --json dry-run droid reviewer safe "Investigate only."  # needs a configured 'reviewer' alias
 ```
@@ -246,7 +272,7 @@ Supported input keys:
 }
 ```
 
-- `engine`: `cursor`, `droid`, `codex`, `claude`, or `kimi`.
+- `engine`: `cursor`, `droid`, `codex`, `claude`, `grok`, or `kimi`.
 - `mode`: `safe` or `work`.
 - `model`: Droid requires a configured local alias; Codex, Claude, and Kimi treat a non-empty string as a model override; Cursor does not accept per-run model aliases in v1.
 - `cwd`: optional workspace path. Git directories resolve to the repo root.

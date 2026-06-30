@@ -5,13 +5,27 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-06-29
+
+### Added
+
+- First-class `delegate grok {safe,work}` for xAI Grok Build CLI: prompt-file transport, tracked `streaming-json` snapshots, safe isolation required, worktree `--cwd` rewrite, harness-scoped bypass at `policy.harness.grok.work.bypassApprovalsAndSandbox`, and Grok `--effort` reasoning mapping. Safe mode pairs Delegate's isolated worktree copy with Grok's kernel-enforced `--sandbox read-only` profile, and the streaming `error` event is surfaced into the snapshot. Grok `--output-schema` is unsupported in this release because Grok `--json-schema` forces final JSON output, which breaks tracked streaming snapshots.
+- `delegate config init` command to write an editable starter config from an installed package, so users no longer need a source checkout just to copy `config.example.json`.
+
+### Changed
+
+- WSL setup is now documented explicitly: install Python/Git/child CLIs inside WSL, prefer `/home/<user>/...`, and convert Windows paths with `wslpath -u`.
+
+### Fixed
+
+- Windows-style paths now fail with actionable WSL guidance instead of turning into confusing POSIX relative paths, and WSL runs fail loudly when `git` resolves to Windows `git.exe`. Workspaces under `/mnt/<drive>` now emit a warning about WSL filesystem performance and private-file semantics.
+
 ## [0.7.0] - 2026-06-29
 
 ### Added
 
 - Profile-aware auth and environment switching. A new top-level `profiles` config block (`detectFrom`, `default`, `definitions.<name>.env`) lets one session run under a chosen credential/environment profile and have every spawned harness inherit it. The active profile is detected from an environment variable (`profiles.detectFrom`, e.g. `DELEGATE_PROFILE`/`AI_PROFILE`) or pinned explicitly with the new global `--auth-profile NAME` flag. Delegate resolves the profile once per request and injects its env into every child across tracked, pass-through, safe-isolation, and persistent-worktree paths. Profile `env` holds non-secret routing pointers only — secret-shaped keys are rejected at config load with `secret_in_profile_env`.
 - `delegate profiles` command (with `--json`): read-only introspection of the resolved profile, its source (`flag`, a detection variable name, or `default`), and the non-secret env keys it injects. It never mutates config.
-- `delegate config init` command to write an editable starter config from an installed package, so users no longer need a source checkout just to copy `config.example.json`.
 - `codex.fallbackProfile`: when a Codex run hits a classified usage limit on a clean work-mode baseline with no tool events, Delegate retries once under the fallback profile's account (same env, `CODEX_HOME` swapped). A fallback that resolves to the same account is a no-op. Completions record `codexAuthFallback` metadata.
 - Codex `--output-schema FILE` flag and `outputSchema` run-input field for structured final output. Codex-only; OpenAI enforces the JSON Schema on Codex's final message. Relative paths resolve against the launch cwd and are locked absolute before isolation. When set, the completion-report prompt injection is suppressed so the schema owns the final message. Other engines reject it with `unsupported_output_schema`, and `delegate --json describe` advertises `engineCapabilities.<engine>.outputSchema` for feature detection.
 - `delegate --json <command> --help` payloads now include `globalOptions` and `unsupportedGlobalOptions`, so agents can discover which global options (such as `--auth-profile`) apply to a command without parsing usage strings.
@@ -20,7 +34,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Safe-mode runs over a dirty Git tree now inject a bounded changed-file note into the prompt before the per-engine transport split, so the synced working-tree state reaches the child regardless of stdin/prompt-file/argv transport. Documentation across help, `describe`, `agent-help`, README, security-model, and the CLI reference now states plainly that safe mode mirrors uncommitted tracked edits and untracked non-ignored files into the isolated copy.
 - `--auth-profile` is accepted only where a child auth/env selection actually happens: launches, `dry-run`, `run --input-json`, `delegate profiles`, and `capabilities refresh`. It is rejected for the cached `capabilities` report and for run-inspection, worktree-management, and discovery commands.
-- WSL setup is now documented explicitly: install Python/Git/child CLIs inside WSL, prefer `/home/<user>/...`, and convert Windows paths with `wslpath -u`.
 
 ### Fixed
 
@@ -28,7 +41,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--forbid-commit` and reasoning-effort/model preflight errors are now actionable — they name the corrective flag or config key (`codex.defaultModel` / `droid.models`) and, in a non-Git workspace, explain that no-commit enforcement requires Git rather than demanding an impossible `--isolation worktree`.
 - The codex usage-limit fallback retry now injects the active profile's full env with only `CODEX_HOME` swapped, instead of dropping the profile's other pointers onto a bare environment.
 - The internal "codex auth attempt" delimiter is no longer written to a non-Codex run's stderr log when a profile happens to define both a `CODEX_HOME` and a `codex.fallbackProfile`.
-- Windows-style paths now fail with actionable WSL guidance instead of turning into confusing POSIX relative paths, and WSL runs fail loudly when `git` resolves to Windows `git.exe`. Workspaces under `/mnt/<drive>` now emit a warning about WSL filesystem performance and private-file semantics.
 
 ## [0.6.0] - 2026-06-23
 
@@ -153,6 +165,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Releases before 0.1.3 predate this changelog.
 
+[0.8.0]: https://github.com/treygoff24/delegate-agent/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/treygoff24/delegate-agent/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/treygoff24/delegate-agent/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/treygoff24/delegate-agent/compare/v0.4.0...v0.5.0

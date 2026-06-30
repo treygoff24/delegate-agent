@@ -35,6 +35,7 @@ This guide covers both human setup and non-interactive setup for agents or CI jo
    command -v droid || echo "Factory Droid CLI missing"
    command -v codex || echo "Codex CLI missing"
    command -v claude || echo "Claude Code CLI missing"
+   command -v grok || echo "Grok Build CLI missing"
    command -v kimi || echo "Kimi Code CLI missing"
    ```
 
@@ -87,12 +88,14 @@ When running on Windows through WSL, treat Delegate as a Linux CLI:
    delegate --json dry-run codex safe --reasoning-effort high "Review only. Do not edit files."
    delegate --json dry-run claude safe "Review only. Do not edit files."
    delegate --json dry-run claude safe --reasoning-effort high "Review only. Do not edit files."
+   delegate --json dry-run grok safe "Review only. Do not edit files."
+   delegate --json dry-run grok safe --reasoning-effort high "Review only. Do not edit files."
    delegate --json dry-run cursor safe "Review only. Do not edit files."
    delegate --json dry-run droid reviewer safe "Review only. Do not edit files."
    delegate --json dry-run kimi safe "Review only. Do not edit files."
    ```
 
-   The Codex, Claude, Cursor, and Kimi dry-runs succeed with the unedited example config when no reasoning effort is requested. The Codex reasoning-effort dry-run requires a resolved Codex model from config or JSON input. Claude reasoning effort is static and maps to Claude Code `--effort`. The Droid dry-run validates the alias, so it returns `unconfigured_model` until you replace the `reviewer` placeholder in `config.json` with a real model ID.
+   The Codex, Claude, Grok, Cursor, and Kimi dry-runs succeed with the unedited example config when no reasoning effort is requested. The Codex reasoning-effort dry-run requires a resolved Codex model from config or JSON input. Claude and Grok reasoning effort map to native `--effort` flags. The Droid dry-run validates the alias, so it returns `unconfigured_model` until you replace the `reviewer` placeholder in `config.json` with a real model ID.
 
 ## Non-interactive agent setup
 
@@ -133,6 +136,7 @@ For an orchestrating agent, script, or CI job:
    ```bash
    command -v codex >/dev/null || exit 3
    command -v claude >/dev/null || exit 3
+   command -v grok >/dev/null || exit 3
    command -v kimi >/dev/null || exit 3
    ```
 
