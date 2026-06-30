@@ -187,6 +187,9 @@ class StreamAccumulator:
         if event_type == "end" and self.harness == "grok":
             self._ingest_grok_end(payload)
             return
+        if event_type == "error" and self.harness == "grok":
+            self._ingest_grok_error(payload)
+            return
         if event_type == "tool_result":
             return
         if event_type == "system":
@@ -397,6 +400,23 @@ class StreamAccumulator:
                 self._record_recoverable_assistant_text(text)
         elif _grok_stop_reason_succeeded(payload.get("stopReason")):
             self.events.append(NormalizedEvent(kind="run.completed", status="succeeded"))
+
+    def _ingest_grok_error(self, payload: JsonObject) -> None:
+        # Grok streaming-json emits {"type":"error","message":...} on failure and
+        # then exits nonzero, so the runner already marks the run failed via exit
+        # code. Surface the message (plus any partial buffered text) as recoverable
+        # assistant text so it lands in the snapshot instead of being dropped.
+        partial = self._grok_text_buffer.strip()
+        self._grok_text_buffer = ""
+        self._grok_current_line = ""
+        self._invalidate_assistant_text_cache()
+        if partial:
+            self._record_recoverable_assistant_text(partial)
+        message = payload.get("message")
+        if isinstance(message, str) and message.strip():
+            text = message.strip()
+            self._record_recoverable_assistant_text(text)
+            self.current = _bounded_current_line(text)
 
     def _ingest_tool_call(self, payload: JsonObject) -> None:
         tool = _string_field(payload, "tool", "name", "toolName") or "tool"

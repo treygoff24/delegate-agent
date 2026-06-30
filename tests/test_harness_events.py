@@ -722,6 +722,23 @@ class HarnessEventsTests(unittest.TestCase):
             )
         )
 
+    def test_grok_error_event_surfaces_message_without_success_completion(self):
+        acc = self.events.StreamAccumulator(harness="grok")
+        for payload in [
+            {"type": "text", "data": "partial answer before failure"},
+            {"type": "error", "message": "Couldn't start session: upstream 503"},
+        ]:
+            acc.ingest_line(json.dumps(payload))
+        self.assertIsNone(acc.completion_text)
+        recoverable = acc.recoverable_assistant_text or ""
+        self.assertIn("Couldn't start session: upstream 503", recoverable + acc.assistant_text)
+        self.assertFalse(
+            any(
+                event.kind == "run.completed" and event.status == "succeeded"
+                for event in acc.events
+            )
+        )
+
     def test_grok_multiturn_tool_use_end_does_not_promote_preamble(self):
         acc = self.events.StreamAccumulator(harness="grok")
         for payload in [

@@ -1,4 +1,4 @@
-{"type":"thought","data":"synthetic fixture; no live grok binary available"}
+{"type":"thought","data":"stream shape validated against grok 0.2.73"}
 {"type":"text","data":"delegate"}
 {"type":"text","data":" grok"}
 {"type":"text","data":" fixture"}
