@@ -126,10 +126,29 @@ class ParserTests(unittest.TestCase):
             self.delegate.infer_global_json(["--no-completion-report", "--json", "cursor"])
         )
 
-    def test_trailing_json_is_rejected(self):
+    def test_json_after_inline_prompt_text_is_rejected(self):
+        # Once prompt text starts, a trailing --json could be prompt text -> still ambiguous.
         with self.assertRaises(self.delegate.DelegateError) as ctx:
             self.delegate.parse_cli(["dry-run", "droid", "minimax", "work", "hello", "--json"])
         self.assertEqual(ctx.exception.error, "misplaced_global_option")
+
+    def test_json_in_launch_tail_before_prompt_text_is_accepted(self):
+        # Agents reflexively append --json; before inline prompt text it is unambiguous.
+        for argv in (
+            ["codex", "work", "--prompt-file", "task.md", "--json"],
+            ["codex", "work", "--json", "--prompt-file", "task.md"],
+            ["droid", "minimax", "safe", "--json"],
+            ["dry-run", "codex", "work", "--prompt-file", "task.md", "--json"],
+        ):
+            with self.subTest(argv=argv):
+                parsed = self.delegate.parse_cli(argv)
+                self.assertTrue(parsed.global_options.json_mode)
+                self.assertEqual(parsed.launch.prompt_parts, [])
+
+    def test_json_before_prompt_text_keeps_prompt_intact(self):
+        parsed = self.delegate.parse_cli(["cursor", "safe", "--json", "review", "the", "diff"])
+        self.assertTrue(parsed.global_options.json_mode)
+        self.assertEqual(parsed.launch.prompt_parts, ["review", "the", "diff"])
 
     def test_prompt_file_before_prompt_text(self):
         parsed = self.delegate.parse_cli(["cursor", "safe", "--prompt-file", "task.md"])

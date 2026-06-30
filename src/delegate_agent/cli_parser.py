@@ -553,7 +553,8 @@ def parse_modeless_engine(
         progress_intent,
         forbid_commit,
         prompt_parts,
-    ) = parse_prompt_tail(rest[1:])
+        json_mode,
+    ) = parse_prompt_tail(rest[1:], json_mode)
     return ParsedCommand(
         engine,
         global_options=GlobalOptions(
@@ -620,7 +621,8 @@ def parse_droid(
         progress_intent,
         forbid_commit,
         prompt_parts,
-    ) = parse_prompt_tail(rest[2:])
+        json_mode,
+    ) = parse_prompt_tail(rest[2:], json_mode)
     return ParsedCommand(
         "droid",
         global_options=GlobalOptions(
@@ -701,7 +703,8 @@ def parse_dry_run(
 
 def parse_prompt_tail(
     rest: list[str],
-) -> tuple[str | None, str | None, str | None, str | None, bool, list[str]]:
+    json_mode: bool,
+) -> tuple[str | None, str | None, str | None, str | None, bool, list[str], bool]:
     prompt_file: str | None = None
     output_schema: str | None = None
     reasoning_effort: str | None = None
@@ -711,6 +714,15 @@ def parse_prompt_tail(
     i = 0
     while i < len(rest):
         token = rest[i]
+        # `--json` is unambiguous anywhere before inline prompt text starts (e.g.
+        # after --prompt-file), so accept it here instead of forcing it ahead of the
+        # subcommand. Once prompt text begins it lands in prompt_parts and the
+        # post-loop misplaced-global guard rejects it, since then it could be prompt
+        # text. Mirrors consume_json_option for inspection commands.
+        if token == "--json":
+            json_mode = True
+            i += 1
+            continue
         if token == "--prompt-file":
             if prompt_parts:
                 raise DelegateError(
@@ -813,6 +825,7 @@ def parse_prompt_tail(
         progress_intent,
         forbid_commit,
         prompt_parts,
+        json_mode,
     )
 
 
