@@ -75,7 +75,7 @@ delegate --json models
 delegate --json capabilities
 ```
 
-Discover commands as you go: `delegate <command> --help` prints focused help for any command path, and `delegate --json <command> --help` returns an agent-friendly spec of its usage, arguments, and options. For launch and `dry-run` commands, `--json` may also appear before inline prompt text begins, for example `delegate codex work --prompt-file task.md --json`. `delegate --json describe` includes a `commands` catalog of the whole surface. `delegate --json capabilities` reports reasoning-effort support without launching a child runtime.
+Discover commands as you go: `delegate <command> --help` prints focused help for any command path, and `delegate --json <command> --help` returns an agent-friendly spec of its usage, arguments, and options. For launch and `dry-run` commands, `--json` and `--isolation` may also appear before inline prompt text begins, for example `delegate codex work --prompt-file task.md --json`. `delegate --json describe` includes a `commands` catalog of the whole surface. `delegate --json capabilities` reports reasoning-effort support without launching a child runtime.
 
 From this development checkout, use `python3 bin/delegate.py ...` instead of an installed `delegate` shim.
 
@@ -142,7 +142,14 @@ delegate --json run --input-json /tmp/delegate-task.json
 
 For Codex fan-outs that must return machine-parseable records, add `--output-schema` (or JSON `outputSchema`); Delegate suppresses completion-report injection so the schema owns the final message.
 
-Reasoning effort is provider-aware. Unsupported combinations fail before launch. It changes only the requested model thinking depth/cost/latency; it does not change safe/work mode, sandboxing, approvals, or edit capability. Codex/Droid validate effort against a resolved model capability table, Cursor maps effort to configured model selection, Claude maps to Claude Code `--effort`, and Grok maps to Grok `--effort` (`low`, `medium`, `high`, `xhigh`, `max`). For example, after configuring `codex.defaultModel`:
+For a one-hop prompt that should not see the current repo or create a tracked
+run, use stateless `call` mode:
+
+```bash
+delegate --json codex call "Summarize this context in three bullets."
+```
+
+Reasoning effort is provider-aware. Unsupported combinations fail before launch. It changes only the requested model thinking depth/cost/latency; it does not change safe/work/call mode, sandboxing, approvals, or edit capability. Codex/Droid validate effort against model capability metadata, Cursor maps effort to configured model selection, Claude maps to Claude Code `--effort`, and Grok maps to Grok `--effort` (`low`, `medium`, `high`, `xhigh`, `max`). Explicit Codex effort can target the harness default model even when `codex.defaultModel` is unset:
 
 ```bash
 delegate --json dry-run codex safe --reasoning-effort high "Review this repository. Do not edit files."
@@ -168,7 +175,7 @@ Delegate separates three ideas:
 
 | Concept | Meaning |
 | --- | --- |
-| Mode | `safe` is for review/investigation; `work` is edit-capable. |
+| Mode | `safe` is for review/investigation; `work` is edit-capable; `call` is a stateless one-hop model call. |
 | Isolation | The child runtime can run in the source workspace, a temporary copy/worktree, or a persistent Git worktree. |
 | Runtime policy | Extra flags passed to the child runtime, such as Codex `--sandbox read-only`. |
 

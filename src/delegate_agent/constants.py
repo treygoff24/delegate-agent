@@ -1,7 +1,7 @@
 """Cross-cutting CLI mode vocabulary and validation.
 
 A dependency leaf shared by the parser, request builder, argv builders, and
-execution layers so they agree on the safe/work mode vocabulary without
+execution layers so they agree on the launch mode vocabulary without
 importing ``cli``.
 """
 
@@ -11,7 +11,8 @@ from delegate_agent.errors import DelegateError
 
 MODE_SAFE = "safe"
 MODE_WORK = "work"
-VALID_MODES = {MODE_SAFE, MODE_WORK}
+MODE_CALL = "call"
+VALID_MODES = {MODE_SAFE, MODE_WORK, MODE_CALL}
 
 # Canonical engine/harness vocabulary. This tuple's order is the registry order
 # reused wherever engines are enumerated (the describe payload, help prose, the
@@ -41,4 +42,4 @@ MODEL_SUMMARY_ENGINES = tuple(
 
 def validate_mode(mode: str) -> None:
     if mode not in VALID_MODES:
-        raise DelegateError("invalid_mode", "Mode must be safe or work.")
+        raise DelegateError("invalid_mode", "Mode must be safe, work, or call.")

@@ -11,6 +11,20 @@ from tests.execution_test_base import ExecutionTestBase
 
 
 class ExecutionDryRunTests(ExecutionTestBase):
+    def test_call_dry_run_reports_temporary_call_cwd_not_source_workspace(self):
+        parsed = self.delegate.parse_cli(["--json", "dry-run", "codex", "call", "summarize"])
+        request = self.delegate.request_from_parsed(
+            parsed,
+            self.delegate.DEFAULT_CONFIG,
+            io.StringIO(""),
+        )
+        payload = self.delegate.dry_run_payload(request)
+        self.assertEqual(payload["mode"], "call")
+        self.assertEqual(payload["cwd"], "<delegate-call-temp-cwd>")
+        self.assertEqual(payload["isolation"], "call temporary cwd")
+        self.assertEqual(payload["effectiveIsolation"], "none")
+        self.assertFalse(payload["isolatedWorkspace"])
+
     def test_codex_safe_dry_run_reports_isolated_workspace(self):
         request = self.build_git_request(
             "codex",
@@ -204,7 +218,7 @@ class ExecutionDryRunTests(ExecutionTestBase):
         self.assertEqual(ctx.exception.error, "invalid_option_combination")
         self.assertIn("add --isolation worktree, or omit --forbid-commit", ctx.exception.message)
 
-    def test_codex_reasoning_without_model_names_default_model_config(self):
+    def test_codex_reasoning_without_model_uses_harness_default(self):
         with tempfile.TemporaryDirectory() as tmp:
             parsed = self.delegate.parse_cli(
                 [
@@ -219,14 +233,15 @@ class ExecutionDryRunTests(ExecutionTestBase):
                     "review",
                 ]
             )
-            with self.assertRaises(self.delegate.DelegateError) as ctx:
-                self.delegate.request_from_parsed(
-                    parsed,
-                    self.delegate.DEFAULT_CONFIG,
-                    io.StringIO(""),
-                )
-        self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
-        self.assertIn("codex.defaultModel", ctx.exception.message)
+            request = self.delegate.request_from_parsed(
+                parsed,
+                self.delegate.DEFAULT_CONFIG,
+                io.StringIO(""),
+            )
+        payload = self.delegate.dry_run_payload(request)
+        self.assertIsNone(payload["model"])
+        self.assertIn('model_reasoning_effort="high"', payload["argv"])
+        self.assertEqual(payload["reasoningCapabilitySource"], "harness-default")
 
     def test_forbid_commit_rejects_safe_mode(self):
         with tempfile.TemporaryDirectory() as tmp:

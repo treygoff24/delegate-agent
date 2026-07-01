@@ -7,7 +7,7 @@ Delegate is a launcher and run recorder for other agent runtimes. It improves co
 Delegate controls:
 
 - Which child argv is built for Cursor, Droid, Codex, Claude, Grok, or Kimi.
-- Whether the child is launched in `safe` or `work` mode.
+- Whether the child is launched in `safe`, `work`, or stateless `call` mode.
 - Whether a requested reasoning effort is translated into the supported child-runtime mechanism for the resolved harness/model.
 - Whether the execution workspace is the source checkout, a temporary isolated workspace, or a persistent Git worktree.
 - Prompt framing that tells sub-agents to review available skills and, in safe mode, avoid edits.
@@ -34,7 +34,7 @@ Safe mode is for review and investigation.
 - Droid safe uses Delegate's read-only safety prompt, does not add Droid work-mode unsafe flags, and uses the isolated temporary workspace as a defense-in-depth boundary.
 - Kimi safe uses Delegate's read-only safety prompt and does not enable Kimi `--plan`. Kimi prompt mode auto-approves tool actions, so there is no runtime read-only enforcement for Kimi safe; the isolated temporary workspace is the effective boundary and the safety prompt is advisory.
 - Grok safe uses Delegate's read-only safety prompt plus Grok `--sandbox read-only` and `--permission-mode dontAsk`. Delegate does not use Grok `plan` mode for safe review. Prompts are delivered via Grok `--prompt-file`.
-- Explicit `--isolation none` is rejected for Cursor, Claude, Grok, Droid, and Kimi safe mode because it would remove the isolation/config boundary those safe contracts rely on. Codex safe may opt out of Delegate workspace isolation because the Codex read-only sandbox remains active.
+- Explicit `--isolation none` is normalized to `auto` with a warning for Cursor, Claude, Grok, Droid, and Kimi safe mode because it would remove the isolation/config boundary those safe contracts rely on. Codex safe may opt out of Delegate workspace isolation because the Codex read-only sandbox remains active.
 
 Safe mode is not a proof of zero side effects. Treat it as a defensive default plus prompt/runtime policy. A runtime could still read available files, use configured credentials, load its own customizations, or perform actions allowed by its own permissions.
 
@@ -70,11 +70,23 @@ Grok bypass follows the same harness-scoped pattern at `policy.harness.grok.work
 
 Delegate never auto-commits, pushes, merges, deploys, or publishes work-mode changes.
 
+### Call mode
+
+Call mode is a stateless one-hop model call. It runs the child in an empty
+temporary cwd, captures assistant text when available, deletes the temporary cwd,
+and does not write a run registry entry, snapshot, or completion report. It also
+does not inject safe/work skill framing.
+
+Call mode is not a security sandbox. The child runtime may still use configured
+credentials, network access, absolute paths, and harness-native settings
+available to that process. Use `safe` or `work` instead when the child should
+see the project tree or when you need registry inspection.
+
 ## Reasoning-effort boundary
 
 `--reasoning-effort LEVEL` and JSON `reasoningEffort` request model thinking depth only. They do not change:
 
-- Delegate `safe` or `work` mode.
+- Delegate `safe`, `work`, or `call` mode.
 - Temporary or persistent workspace isolation.
 - Codex sandbox or approval policy.
 - Claude permission mode.
@@ -89,7 +101,7 @@ Unsupported effort/model combinations fail before launch. Treat higher effort as
 
 ### Temporary safe isolation
 
-Cursor safe, Droid safe, Codex safe, Claude safe, and Kimi safe normally run in a temporary Git worktree or directory copy, with uncommitted tracked edits and untracked, non-ignored files synced from the source working tree (gitignored paths excluded). This protects the source checkout from ordinary relative-path edits made inside the execution workspace. Delegate may still write `.delegate/` metadata in the source workspace for tracked runs.
+Cursor safe, Droid safe, Codex safe, Claude safe, Grok safe, and Kimi safe normally run in a temporary Git worktree or directory copy, with uncommitted tracked edits and untracked, non-ignored files synced from the source working tree (gitignored paths excluded). This protects the source checkout from ordinary relative-path edits made inside the execution workspace. Delegate may still write `.delegate/` metadata in the source workspace for tracked runs.
 
 Git repositories with commits use a detached temporary Git worktree. Non-Git directories use a temporary directory copy. Git repositories with no commits fall back to a temporary directory copy because Git cannot create a detached worktree from an unborn `HEAD`; Delegate reports that fallback in run metadata.
 

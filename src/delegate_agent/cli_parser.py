@@ -534,7 +534,7 @@ def parse_modeless_engine(
     if rest and command_help.is_help_token(rest[0]):
         return help_command(json_mode, topic)
     if not rest:
-        raise DelegateError("missing_mode", f"{engine} requires mode: safe or work.")
+        raise DelegateError("missing_mode", f"{engine} requires mode: safe, work, or call.")
     mode = rest[0]
     if mode.startswith("-"):
         raise DelegateError(
@@ -554,7 +554,8 @@ def parse_modeless_engine(
         forbid_commit,
         prompt_parts,
         json_mode,
-    ) = parse_prompt_tail(rest[1:], json_mode)
+        isolation,
+    ) = parse_prompt_tail(rest[1:], json_mode, isolation)
     return ParsedCommand(
         engine,
         global_options=GlobalOptions(
@@ -622,7 +623,8 @@ def parse_droid(
         forbid_commit,
         prompt_parts,
         json_mode,
-    ) = parse_prompt_tail(rest[2:], json_mode)
+        isolation,
+    ) = parse_prompt_tail(rest[2:], json_mode, isolation)
     return ParsedCommand(
         "droid",
         global_options=GlobalOptions(
@@ -704,7 +706,17 @@ def parse_dry_run(
 def parse_prompt_tail(
     rest: list[str],
     json_mode: bool,
-) -> tuple[str | None, str | None, str | None, str | None, bool, list[str], bool]:
+    isolation: str | None,
+) -> tuple[
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+    bool,
+    list[str],
+    bool,
+    str | None,
+]:
     prompt_file: str | None = None
     output_schema: str | None = None
     reasoning_effort: str | None = None
@@ -734,6 +746,17 @@ def parse_prompt_tail(
             if i + 1 >= len(rest):
                 raise DelegateError("missing_prompt_file", "--prompt-file requires a path.")
             prompt_file = rest[i + 1]
+            i += 2
+            continue
+        if token == "--isolation":
+            if i + 1 >= len(rest):
+                raise DelegateError("missing_isolation_value", "--isolation requires a value.")
+            isolation = rest[i + 1]
+            if isolation not in delegate_config.VALID_ISOLATION_VALUES:
+                raise DelegateError(
+                    "invalid_isolation",
+                    "--isolation must be auto, none, or worktree.",
+                )
             i += 2
             continue
         if token == "--output-schema":
@@ -826,6 +849,7 @@ def parse_prompt_tail(
         forbid_commit,
         prompt_parts,
         json_mode,
+        isolation,
     )
 
 

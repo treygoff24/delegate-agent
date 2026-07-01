@@ -141,6 +141,7 @@ class Request:
     env_overrides: dict[str, str] | None = None
     auth_profile: str | None = None
     fallback_auth_profile: str | None = None
+    cleanup_workspace: bool = False
     profile_resolution: profiles.ProfileResolution = field(
         default_factory=profiles.empty_profile_resolution
     )

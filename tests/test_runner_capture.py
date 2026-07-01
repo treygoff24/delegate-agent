@@ -85,6 +85,23 @@ class RunnerCaptureTests(unittest.TestCase):
         self.runner = load_module(RUNNER_PATH, "delegate_runner_under_test")
         self.registry = load_module(REGISTRY_PATH, "delegate_registry_runner_test")
 
+    def test_execute_call_bounds_plain_stdout_fallback_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "plain_stdout.py"
+            raw_len = self.runner.harness_events.ASSISTANT_TEXT_LIMIT + 1000
+            script.write_text(
+                f"import sys\nsys.stdout.write('x' * {raw_len})\n",
+                encoding="utf-8",
+            )
+            result = self.runner.execute_call(
+                [sys.executable, str(script)],
+                tmp,
+                harness="cursor",
+            )
+        self.assertEqual(result.exit_code, 0)
+        self.assertLess(len(result.text), raw_len)
+        self.assertIn("chars omitted", result.text)
+
     def test_write_stdin_records_delivery_failure(self):
         read_fd, write_fd = os.pipe()
         os.close(read_fd)

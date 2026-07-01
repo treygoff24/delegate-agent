@@ -299,19 +299,21 @@ class EngineArgvTests(CommandTestBase):
         self.assertIn('model_reasoning_effort="high"', request.argv[:exec_index])
         self.assertEqual(request.reasoning_transport, "codex-config")
 
-    def test_codex_reasoning_effort_fails_without_model(self):
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.build_git_request(
-                "codex",
-                "safe",
-                None,
-                "/repo",
-                "hello",
-                self.delegate.DEFAULT_CONFIG,
-                True,
-                reasoning_effort="high",
-            )
-        self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
+    def test_codex_reasoning_effort_without_model_uses_harness_default(self):
+        request = self.build_git_request(
+            "codex",
+            "safe",
+            None,
+            "/repo",
+            "hello",
+            self.delegate.DEFAULT_CONFIG,
+            True,
+            reasoning_effort="high",
+        )
+        self.assertIsNone(request.model)
+        self.assertNotIn("--model", request.argv)
+        self.assertIn('model_reasoning_effort="high"', request.argv)
+        self.assertEqual(request.reasoning_capability_source, "harness-default")
 
     def test_droid_reasoning_effort_argv_uses_flag(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
@@ -553,21 +555,21 @@ class EngineArgvTests(CommandTestBase):
         self.assertEqual(len(request.warnings), 1)
         self.assertIn("defaultReasoningEffort", request.warnings[0])
 
-    def test_explicit_effort_still_fails_closed_without_model(self):
+    def test_explicit_effort_without_model_uses_harness_default(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
         self.assertIsNone(config["codex"]["defaultModel"])
-        with self.assertRaises(self.delegate.DelegateError) as caught:
-            self.build_git_request(
-                "codex",
-                "safe",
-                None,
-                "/repo",
-                "hello",
-                config,
-                True,
-                reasoning_effort="high",
-            )
-        self.assertEqual(caught.exception.error, "unsupported_reasoning_effort")
+        request = self.build_git_request(
+            "codex",
+            "safe",
+            None,
+            "/repo",
+            "hello",
+            config,
+            True,
+            reasoning_effort="high",
+        )
+        self.assertIn('model_reasoning_effort="high"', request.argv)
+        self.assertEqual(request.reasoning_capability_source, "harness-default")
 
     def test_corrupt_capability_cache_does_not_block_bundled_resolution(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))

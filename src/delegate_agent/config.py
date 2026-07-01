@@ -787,18 +787,15 @@ class InvalidIsolationError(Exception):
         super().__init__(message)
 
 
-def _validate_resolved_isolation_boundary(
+def _normalize_resolved_isolation_boundary(
     value: str,
     *,
     engine: str,
     mode: str,
-    source: str,
-) -> None:
+) -> str:
     if mode == "safe" and engine in SAFE_ISOLATION_REQUIRED_ENGINES and value == ISOLATION_NONE:
-        raise InvalidIsolationError(
-            f"{source} cannot be 'none' for {engine} safe mode; "
-            "use 'auto' or 'worktree' so safe mode runs in a temporary isolated workspace."
-        )
+        return ISOLATION_AUTO
+    return value
 
 
 def resolve_isolation(
@@ -813,25 +810,21 @@ def resolve_isolation(
             raise InvalidIsolationError(
                 f"--isolation must be one of: {', '.join(VALID_ISOLATION_VALUES)}."
             )
-        _validate_resolved_isolation_boundary(
+        return _normalize_resolved_isolation_boundary(
             cli_value,
             engine=engine,
             mode=mode,
-            source="--isolation",
         )
-        return cli_value
     if input_json_value is not None:
         if input_json_value not in VALID_ISOLATION_VALUES:
             raise InvalidIsolationError(
                 f"isolation must be one of: {', '.join(VALID_ISOLATION_VALUES)}."
             )
-        _validate_resolved_isolation_boundary(
+        return _normalize_resolved_isolation_boundary(
             input_json_value,
             engine=engine,
             mode=mode,
-            source="input JSON isolation",
         )
-        return input_json_value
     if isinstance(loaded_config, dict):
         isolation_cfg = loaded_config.get("isolation")
         if "isolation" in loaded_config and not isinstance(isolation_cfg, dict):
@@ -848,13 +841,11 @@ def resolve_isolation(
                     raise InvalidIsolationError(
                         f"config isolation.{mode} must be one of: {', '.join(VALID_ISOLATION_VALUES)}."
                     )
-                _validate_resolved_isolation_boundary(
+                return _normalize_resolved_isolation_boundary(
                     value,
                     engine=engine,
                     mode=mode,
-                    source=f"config isolation.{mode}",
                 )
-                return value
     # Embedded defaults
     if mode == "work":
         return ISOLATION_NONE

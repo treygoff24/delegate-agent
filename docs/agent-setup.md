@@ -95,7 +95,7 @@ When running on Windows through WSL, treat Delegate as a Linux CLI:
    delegate --json dry-run kimi safe "Review only. Do not edit files."
    ```
 
-   The Codex, Claude, Grok, Cursor, and Kimi dry-runs succeed with the unedited example config when no reasoning effort is requested. The Codex reasoning-effort dry-run requires a resolved Codex model from config or JSON input. Claude and Grok reasoning effort map to native `--effort` flags. The Droid dry-run validates the alias, so it returns `unconfigured_model` until you replace the `reviewer` placeholder in `config.json` with a real model ID.
+   The Codex, Claude, Grok, Cursor, and Kimi dry-runs succeed with the unedited example config when no reasoning effort is requested. Explicit Codex reasoning-effort dry-runs can target the harness default model when no default model is configured. Claude and Grok reasoning effort map to native `--effort` flags. The Droid dry-run validates the alias, so it returns `unconfigured_model` until you replace the `reviewer` placeholder in `config.json` with a real model ID.
 
 ## Non-interactive agent setup
 

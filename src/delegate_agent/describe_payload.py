@@ -24,7 +24,13 @@ from delegate_agent.argv_builders import (
 )
 from delegate_agent.command_help import SAFE_WORKSPACE_SYNC_NOTE
 from delegate_agent.config import config_path
-from delegate_agent.constants import KNOWN_ENGINES, MODE_SAFE, MODE_WORK, MODEL_SUMMARY_ENGINES
+from delegate_agent.constants import (
+    KNOWN_ENGINES,
+    MODE_CALL,
+    MODE_SAFE,
+    MODE_WORK,
+    MODEL_SUMMARY_ENGINES,
+)
 from delegate_agent.errors import EXIT_OK, DelegateError
 from delegate_agent.json_types import JsonObject
 from delegate_agent.prompt_transport import (
@@ -260,7 +266,7 @@ def models_summary_payload(
         entry: JsonObject = {
             "alias": engine,
             "provider": engine,
-            "command": f"delegate {engine} {{safe,work}}",
+            "command": f"delegate {engine} {{safe,work,call}}",
             "available": True,
             "safeSupported": True,
             "workSupported": True,
@@ -288,7 +294,7 @@ def models_summary_payload(
                 entry = {
                     "alias": alias,
                     "provider": "droid",
-                    "command": f"delegate droid {alias} {{safe,work}}",
+                    "command": f"delegate droid {alias} {{safe,work,call}}",
                     "available": isinstance(model_id, str) and bool(model_id),
                     "safeSupported": True,
                     "workSupported": True,
@@ -498,7 +504,7 @@ def describe_payload(
                 "work": grok_work_policy,
             },
         },
-        "modes": [MODE_SAFE, MODE_WORK],
+        "modes": [MODE_SAFE, MODE_WORK, MODE_CALL],
         "promptSources": ["direct", "prompt-file", "stdin"],
         "promptTransports": {
             "cursor": PROMPT_TRANSPORT_ARGV,
@@ -585,7 +591,7 @@ def describe_payload(
                 "safeNotes": [
                     SAFE_WORKSPACE_SYNC_NOTE,
                     "No --auto, --use-spec, or --skip-permissions-unsafe in safe mode.",
-                    "Uses a read-only safety prompt; --isolation none is rejected for Droid safe mode.",
+                    "Uses a read-only safety prompt; --isolation none is normalized to auto for Droid safe mode.",
                 ],
                 "work": [
                     config["droid"]["binary"],
@@ -693,7 +699,7 @@ def describe_summary_payload(
         "configSource": config_source,
         "configResolution": config_resolution_payload(config_source, workspace),
         "engines": list(KNOWN_ENGINES),
-        "modes": [MODE_SAFE, MODE_WORK],
+        "modes": [MODE_SAFE, MODE_WORK, MODE_CALL],
         "isolationValues": list(delegate_config.VALID_ISOLATION_VALUES),
         "profiles": _profiles_config_payload(config),
         "globalOptions": _global_options(),

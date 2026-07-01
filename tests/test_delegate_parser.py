@@ -340,6 +340,131 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(parsed.launch.engine, "codex")
         self.assertEqual(parsed.launch.mode, "work")
 
+    def test_modeless_call_mode_parses(self):
+        for engine in ("cursor", "codex", "kimi", "claude", "grok"):
+            with self.subTest(engine=engine):
+                parsed = self.delegate.parse_cli([engine, "call", "summarize"])
+                self.assertEqual(parsed.subcommand, engine)
+                self.assertEqual(parsed.launch.engine, engine)
+                self.assertEqual(parsed.launch.mode, "call")
+                self.assertEqual(parsed.launch.prompt_parts, ["summarize"])
+
+    def test_droid_call_mode_parses_with_model_alias(self):
+        parsed = self.delegate.parse_cli(["droid", "reviewer", "call", "summarize"])
+        self.assertEqual(parsed.launch.engine, "droid")
+        self.assertEqual(parsed.launch.model_alias, "reviewer")
+        self.assertEqual(parsed.launch.mode, "call")
+
+    def test_dry_run_call_mode_parses(self):
+        parsed = self.delegate.parse_cli(["dry-run", "codex", "call", "summarize"])
+        self.assertTrue(parsed.launch.dry_run)
+        self.assertEqual(parsed.launch.mode, "call")
+
+    def test_run_input_json_call_rejects_global_isolation_in_pre_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "task.json"
+            task.write_text(
+                json.dumps(
+                    {
+                        "engine": "codex",
+                        "mode": "call",
+                        "prompt": "hello",
+                    }
+                )
+            )
+            with self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.delegate.pre_read_run_json_for_config(str(task), None, "none")
+            self.assertEqual(ctx.exception.error, "invalid_option_combination")
+            self.assertIn("call mode does not use --isolation", ctx.exception.message)
+
+    def test_call_cli_rejects_incompatible_options(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cases = (
+                (["--cwd", tmp, "codex", "call", "hello"], "--cwd"),
+                (["codex", "call", "--isolation", "none", "hello"], "--isolation"),
+                (["--pass-through", "codex", "call", "hello"], "--pass-through"),
+                (
+                    ["--completion-report", "markdown", "codex", "call", "hello"],
+                    "--completion-report",
+                ),
+                (["codex", "call", "--progress", "hello"], "--progress"),
+                (["codex", "call", "--forbid-commit", "hello"], "--forbid-commit"),
+            )
+            for argv, message in cases:
+                with self.subTest(argv=argv):
+                    parsed = self.delegate.parse_cli(argv)
+                    with self.assertRaises(self.delegate.DelegateError) as ctx:
+                        self.delegate.request_from_parsed(
+                            parsed,
+                            self.delegate.DEFAULT_CONFIG,
+                            io.StringIO(""),
+                        )
+                    self.assertEqual(ctx.exception.error, "invalid_option_combination")
+                    self.assertIn(message, ctx.exception.message)
+
+    def test_call_run_input_json_rejects_incompatible_options(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = {"engine": "codex", "mode": "call", "prompt": "hello"}
+
+            def parsed_for(raw, global_options=None):
+                task = Path(tmp) / "task.json"
+                task.write_text(json.dumps(raw), encoding="utf-8")
+                return self.delegate.ParsedCommand(
+                    "run",
+                    global_options=global_options or self.delegate.GlobalOptions(json_mode=True),
+                    run_json=self.delegate.RunJsonOptions(str(task)),
+                )
+
+            cases = (
+                (base, self.delegate.GlobalOptions(json_mode=True, cwd=tmp), "--cwd"),
+                (
+                    base,
+                    self.delegate.GlobalOptions(json_mode=True, isolation="none"),
+                    "--isolation",
+                ),
+                (
+                    base,
+                    self.delegate.GlobalOptions(json_mode=True, pass_through=True),
+                    "--pass-through",
+                ),
+                (
+                    base,
+                    self.delegate.GlobalOptions(
+                        json_mode=True,
+                        completion_report=self.delegate.delegate_config.COMPLETION_REPORT_MODE_MARKDOWN,
+                    ),
+                    "--completion-report",
+                ),
+                ({**base, "cwd": tmp}, None, "must not include cwd"),
+                ({**base, "isolation": "none"}, None, "must not include isolation"),
+                ({**base, "progress": True}, None, "progress is not supported"),
+                ({**base, "forbidCommit": True}, None, "forbidCommit requires work mode"),
+            )
+            for raw, global_options, message in cases:
+                with self.subTest(raw=raw, global_options=global_options):
+                    with self.assertRaises(self.delegate.DelegateError) as ctx:
+                        self.delegate.request_from_input_json(
+                            parsed_for(raw, global_options),
+                            self.delegate.DEFAULT_CONFIG,
+                        )
+                    self.assertEqual(ctx.exception.error, "invalid_option_combination")
+                    self.assertIn(message, ctx.exception.message)
+
+    def test_cli_safe_isolation_none_warns_after_normalization(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parsed = self.delegate.parse_cli(
+                ["--cwd", tmp, "cursor", "safe", "--isolation", "none", "hello"]
+            )
+            request = self.delegate.request_from_parsed(
+                parsed,
+                self.delegate.DEFAULT_CONFIG,
+                io.StringIO(""),
+            )
+            self.assertEqual(request.isolation_context.effective_isolation, "worktree")
+            self.assertTrue(request.warnings)
+            self.assertIn("isolation none", request.warnings[0])
+            self.assertNotIn("--isolation", request.warnings[0])
+
     def test_claude_direct_commands_parse(self):
         parsed = self.delegate.parse_cli(["claude", "safe", "--reasoning-effort", "high", "review"])
         self.assertEqual(parsed.subcommand, "claude")
@@ -720,10 +845,31 @@ class ParserTests(unittest.TestCase):
             self.delegate.parse_cli(["--isolation"])
         self.assertEqual(ctx.exception.error, "missing_isolation_value")
 
-    def test_isolation_after_subcommand_is_misplaced(self):
+    def test_isolation_in_launch_tail_before_prompt_text_is_accepted(self):
+        parsed = self.delegate.parse_cli(["cursor", "work", "--isolation", "worktree", "fix"])
+        self.assertEqual(parsed.global_options.isolation, "worktree")
+        self.assertEqual(parsed.launch.prompt_parts, ["fix"])
+
+    def test_isolation_after_inline_prompt_text_is_rejected(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.parse_cli(["cursor", "work", "--isolation", "worktree", "fix"])
+            self.delegate.parse_cli(["cursor", "work", "fix", "--isolation", "worktree"])
         self.assertEqual(ctx.exception.error, "misplaced_global_option")
+
+    def test_isolation_launch_tail_rejects_unknown_value(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(["codex", "work", "--isolation", "bananas", "fix"])
+        self.assertEqual(ctx.exception.error, "invalid_isolation")
+
+    def test_isolation_launch_tail_requires_value(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(["codex", "work", "--isolation"])
+        self.assertEqual(ctx.exception.error, "missing_isolation_value")
+
+    def test_isolation_launch_tail_wins_over_global_value(self):
+        parsed = self.delegate.parse_cli(
+            ["--isolation", "none", "codex", "work", "--isolation", "worktree", "fix"]
+        )
+        self.assertEqual(parsed.global_options.isolation, "worktree")
 
     def test_run_input_keys_contains_isolation(self):
         self.assertIn("isolation", self.delegate.RUN_INPUT_KEYS)
@@ -1044,7 +1190,7 @@ class ParserTests(unittest.TestCase):
                 self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
             self.assertEqual(ctx.exception.error, "invalid_forbid_commit")
 
-    def test_run_input_json_claude_safe_rejects_isolation_none(self):
+    def test_run_input_json_claude_safe_none_normalizes_to_temporary_isolation(self):
         with tempfile.TemporaryDirectory() as tmp:
             task = Path(tmp) / "task.json"
             task.write_text(
@@ -1063,9 +1209,10 @@ class ParserTests(unittest.TestCase):
                 global_options=self.delegate.GlobalOptions(json_mode=True),
                 run_json=self.delegate.RunJsonOptions(str(task)),
             )
-            with self.assertRaises(self.delegate.DelegateError) as ctx:
-                self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
-            self.assertEqual(ctx.exception.error, "invalid_isolation")
+            request = self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+            self.assertEqual(request.isolation_context.effective_isolation, "worktree")
+            self.assertIn("isolation none", request.warnings[0])
+            self.assertNotIn("--isolation", request.warnings[0])
 
     def test_run_input_json_claude_work_accepts_model_override(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1156,22 +1303,28 @@ class ParserTests(unittest.TestCase):
             self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
         self.assertEqual(ctx.exception.error, "ambiguous_cwd")
 
-    # -- Missing coverage: misplaced_global_option for --isolation on codex, droid, dry-run --
+    # -- Missing coverage: launch-tail --isolation on codex, droid, dry-run --
 
-    def test_isolation_after_subcommand_codex_work_is_misplaced(self):
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.parse_cli(["codex", "work", "--isolation", "worktree", "fix"])
-        self.assertEqual(ctx.exception.error, "misplaced_global_option")
+    def test_isolation_after_subcommand_codex_work_is_accepted(self):
+        parsed = self.delegate.parse_cli(["codex", "work", "--isolation", "worktree", "fix"])
+        self.assertEqual(parsed.global_options.isolation, "worktree")
 
-    def test_isolation_after_subcommand_droid_work_is_misplaced(self):
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.parse_cli(["droid", "minimax", "work", "--isolation", "worktree", "fix"])
-        self.assertEqual(ctx.exception.error, "misplaced_global_option")
+    def test_isolation_after_subcommand_droid_work_is_accepted(self):
+        parsed = self.delegate.parse_cli(
+            ["droid", "minimax", "work", "--isolation", "worktree", "fix"]
+        )
+        self.assertEqual(parsed.global_options.isolation, "worktree")
 
     def test_isolation_after_subcommand_dry_run_cursor_is_misplaced(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:
             self.delegate.parse_cli(["dry-run", "--isolation", "worktree", "cursor", "work", "fix"])
         self.assertEqual(ctx.exception.error, "misplaced_global_option")
+
+    def test_isolation_after_dry_run_engine_mode_is_accepted(self):
+        parsed = self.delegate.parse_cli(
+            ["dry-run", "codex", "work", "--isolation", "worktree", "fix"]
+        )
+        self.assertEqual(parsed.global_options.isolation, "worktree")
 
     # -- Missing coverage: isolation.work unknown value --
 

@@ -16,6 +16,7 @@ import os
 import select
 import shutil
 import subprocess  # nosec B404 - Delegate inspects git workspaces with shell=False.
+import tempfile
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -40,6 +41,7 @@ from delegate_agent.argv_builders import (
 from delegate_agent.constants import (
     ENGINES_PROSE,
     KNOWN_ENGINES,
+    MODE_CALL,
     MODE_SAFE,
     MODE_WORK,
     MODELESS_NONCURSOR_ENGINES,
@@ -86,6 +88,8 @@ OUTPUT_SCHEMA_COMPLETION_REPORT_WARNING = (
     "--output-schema enforces a JSON-only final message; completion-report instruction "
     "suppressed for this run."
 )
+CALL_TEMP_CWD_PLACEHOLDER = "<delegate-call-temp-cwd>"
+CODEX_HARNESS_DEFAULT_REASONING_EFFORTS = ("low", "medium", "high", "xhigh")
 
 
 def _reject_windows_path(value: str, field: str) -> None:
@@ -236,13 +240,10 @@ def read_stdin_source(stdin: TextIO, *, block: bool = False) -> str | None:
 
 
 def validate_prompt(prompt: str) -> str:
-    if not prompt.strip():
+    cleaned = "".join(ch for ch in prompt if ord(ch) >= 0x20 or ch in ("\n", "\r", "\t"))
+    if not cleaned.strip():
         raise DelegateError("empty_prompt", "Prompt is empty.")
-    for ch in prompt:
-        code = ord(ch)
-        if ch == "\x00" or (code < 0x20 and ch not in ("\n", "\r", "\t")):
-            raise DelegateError("invalid_prompt", "Prompt contains disallowed control characters.")
-    return prompt
+    return cleaned
 
 
 def resolve_output_schema(engine: str, output_schema: object) -> str | None:
@@ -312,6 +313,8 @@ def effective_prompt(
     mode: str = "",
     completion_report_mode: str,
 ) -> str:
+    if mode == MODE_CALL:
+        return prompt
     prompt = delegate_runner.prepend_skill_review_instructions(prompt)
     safe_prefix = (
         SAFE_REVIEW_PREFIX_BY_ENGINE.get(engine)
@@ -402,6 +405,109 @@ def _validate_forbid_commit(
         )
 
 
+def _call_workspace(dry_run: bool) -> tuple[ResolvedWorkspace, bool]:
+    if dry_run:
+        return ResolvedWorkspace(CALL_TEMP_CWD_PLACEHOLDER, "directory"), False
+    temp_dir = tempfile.mkdtemp(prefix="delegate-call-")
+    return ResolvedWorkspace(temp_dir, "directory"), True
+
+
+def _validate_call_cli_options(global_options: object, launch: object) -> None:
+    cwd = getattr(global_options, "cwd", None)
+    isolation = getattr(global_options, "isolation", None)
+    pass_through = getattr(global_options, "pass_through", False)
+    completion_report = getattr(global_options, "completion_report", None)
+    progress_intent = getattr(launch, "progress_intent", None)
+    forbid_commit = getattr(launch, "forbid_commit", False)
+    if cwd is not None:
+        raise DelegateError("invalid_option_combination", "call mode does not use --cwd.")
+    if isolation is not None:
+        raise DelegateError("invalid_option_combination", "call mode does not use --isolation.")
+    if pass_through:
+        raise DelegateError(
+            "invalid_option_combination",
+            "--pass-through is not supported with call mode; call already returns synchronously.",
+        )
+    if completion_report == delegate_config.COMPLETION_REPORT_MODE_MARKDOWN:
+        raise DelegateError(
+            "invalid_option_combination",
+            "--completion-report is not supported with call mode.",
+        )
+    if progress_intent == "on":
+        raise DelegateError(
+            "invalid_option_combination", "--progress is not supported with call mode."
+        )
+    if forbid_commit:
+        raise DelegateError(
+            "invalid_option_combination",
+            "--forbid-commit requires work mode with persistent worktree isolation.",
+        )
+
+
+def _validate_call_input_json_options(
+    global_options: object,
+    raw: JsonObject,
+    *,
+    raw_progress_intent: ProgressIntent,
+    raw_forbid_commit: bool,
+) -> None:
+    if getattr(global_options, "cwd", None) is not None:
+        raise DelegateError("invalid_option_combination", "call mode does not use --cwd.")
+    if getattr(global_options, "isolation", None) is not None:
+        raise DelegateError("invalid_option_combination", "call mode does not use --isolation.")
+    if getattr(global_options, "pass_through", False):
+        raise DelegateError(
+            "invalid_option_combination",
+            "--pass-through is not supported with call mode; call already returns synchronously.",
+        )
+    if (
+        getattr(global_options, "completion_report", None)
+        == delegate_config.COMPLETION_REPORT_MODE_MARKDOWN
+    ):
+        raise DelegateError(
+            "invalid_option_combination",
+            "--completion-report is not supported with call mode.",
+        )
+    if raw.get("cwd") is not None:
+        raise DelegateError(
+            "invalid_option_combination", "call mode input JSON must not include cwd."
+        )
+    if "isolation" in raw:
+        raise DelegateError(
+            "invalid_option_combination",
+            "call mode input JSON must not include isolation.",
+        )
+    if raw_progress_intent == "on":
+        raise DelegateError(
+            "invalid_option_combination", "progress is not supported with call mode."
+        )
+    if raw_forbid_commit:
+        raise DelegateError(
+            "invalid_option_combination",
+            "forbidCommit requires work mode with persistent worktree isolation.",
+        )
+
+
+def _safe_none_normalization_warnings(
+    *,
+    engine: str,
+    mode: str,
+    requested: str | None,
+    effective: str,
+) -> tuple[str, ...]:
+    if (
+        mode == MODE_SAFE
+        and requested == delegate_config.ISOLATION_NONE
+        and effective == delegate_config.ISOLATION_AUTO
+        and engine in delegate_config.SAFE_ISOLATION_REQUIRED_ENGINES
+    ):
+        return (
+            f"isolation none is not used for {engine} safe mode; using auto "
+            "temporary isolation instead.",
+        )
+    return ()
+
+
 def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO) -> Request:
     validate_config(config)
     if parsed.subcommand == "run":
@@ -412,6 +518,29 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         raise DelegateError("invalid_command", "Command does not map to an execution request.")
     if launch.mode is None:
         raise DelegateError("invalid_command", "Command does not map to an execution request.")
+    if launch.mode == MODE_CALL:
+        _validate_call_cli_options(global_options, launch)
+        output_schema = resolve_output_schema(launch.engine, launch.output_schema)
+        prompt = resolve_prompt(launch.prompt_parts, launch.prompt_file, stdin)
+        workspace, cleanup_workspace = _call_workspace(launch.dry_run)
+        return build_request(
+            launch.engine,
+            launch.mode,
+            launch.model_alias,
+            workspace,
+            prompt,
+            config,
+            launch.dry_run,
+            stream_capture=True,
+            isolation_context=None,
+            reasoning_effort=launch.reasoning_effort,
+            reasoning_effort_source="cli" if launch.reasoning_effort is not None else None,
+            progress=False,
+            forbid_commit=False,
+            auth_profile_override=global_options.auth_profile,
+            output_schema=output_schema,
+            cleanup_workspace=cleanup_workspace,
+        )
     effective_progress = resolve_effective_progress(launch.progress_intent, config)
     if effective_progress and global_options.pass_through:
         raise DelegateError(
@@ -438,6 +567,12 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         )
     except delegate_config.InvalidIsolationError as exc:
         raise DelegateError("invalid_isolation", str(exc)) from exc
+    isolation_warnings = _safe_none_normalization_warnings(
+        engine=launch.engine,
+        mode=launch.mode,
+        requested=global_options.isolation,
+        effective=effective_isolation,
+    )
 
     isolation_context = build_isolation_context(
         source_workspace=workspace.path,
@@ -488,7 +623,7 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         forbid_commit=launch.forbid_commit,
         auth_profile_override=global_options.auth_profile,
         output_schema=output_schema,
-        warnings=output_schema_warnings,
+        warnings=(*output_schema_warnings, *isolation_warnings),
     )
 
 
@@ -530,7 +665,7 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
             f"engine must be {ENGINES_PROSE}.",
         )
     if not isinstance(mode, str):
-        raise DelegateError("invalid_mode", "mode must be safe or work.")
+        raise DelegateError("invalid_mode", "mode must be safe, work, or call.")
     validate_mode(mode)
     if not isinstance(prompt, str):
         raise DelegateError("invalid_prompt", "prompt must be a string.")
@@ -577,6 +712,38 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         )
     output_schema = resolve_output_schema(str(engine), raw.get("outputSchema"))
 
+    if mode == MODE_CALL:
+        _validate_call_input_json_options(
+            global_options,
+            raw,
+            raw_progress_intent=raw_progress_intent,
+            raw_forbid_commit=raw_forbid_commit,
+        )
+        workspace, cleanup_workspace = _call_workspace(False)
+        return build_request(
+            str(engine),
+            str(mode),
+            model_alias,
+            workspace,
+            effective_prompt(
+                validate_prompt(prompt),
+                engine=str(engine),
+                mode=str(mode),
+                completion_report_mode=delegate_config.COMPLETION_REPORT_MODE_NONE,
+            ),
+            config,
+            dry_run=False,
+            stream_capture=True,
+            isolation_context=None,
+            reasoning_effort=reasoning_effort,
+            reasoning_effort_source="input-json" if reasoning_effort is not None else None,
+            progress=False,
+            forbid_commit=False,
+            auth_profile_override=global_options.auth_profile,
+            output_schema=output_schema,
+            cleanup_workspace=cleanup_workspace,
+        )
+
     # Pre-read cwd and isolation from JSON for config discovery (already done in main() for
     # config loading, but re-validate and resolve here for the request).
     json_cwd = raw.get("cwd")
@@ -611,6 +778,12 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         )
     except delegate_config.InvalidIsolationError as exc:
         raise DelegateError("invalid_isolation", str(exc)) from exc
+    isolation_warnings = _safe_none_normalization_warnings(
+        engine=str(engine),
+        mode=str(mode),
+        requested=global_options.isolation or json_isolation,
+        effective=effective_isolation,
+    )
 
     isolation_context = build_isolation_context(
         source_workspace=workspace.path,
@@ -661,7 +834,7 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         forbid_commit=raw_forbid_commit,
         auth_profile_override=global_options.auth_profile,
         output_schema=output_schema,
-        warnings=output_schema_warnings,
+        warnings=(*output_schema_warnings, *isolation_warnings),
     )
 
 
@@ -685,6 +858,7 @@ def build_request(
     auth_profile_override: str | None = None,
     output_schema: str | None = None,
     warnings: tuple[str, ...] = (),
+    cleanup_workspace: bool = False,
 ) -> Request:
     if not isinstance(workspace, ResolvedWorkspace):
         raise TypeError(
@@ -718,6 +892,7 @@ def build_request(
         auth_profile_override=auth_profile_override,
         output_schema=output_schema,
         warnings=warnings,
+        cleanup_workspace=cleanup_workspace,
     )
 
 
@@ -814,18 +989,44 @@ def _codex_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     else:
         model = _resolve_default_model(codex)
     policy = delegate_config.effective_policy(build.config, engine="codex", mode=build.mode)
-    capability, reasoning_warnings = _capability_with_config_fallback(
-        lambda: reasoning.resolve_reasoning_capability(
+    if model is None and build.requested_effort is not None and build.effort_source != "config":
+        effort = reasoning.normalize_effort(build.requested_effort)
+        if effort not in CODEX_HARNESS_DEFAULT_REASONING_EFFORTS:
+            raise DelegateError(
+                "unsupported_reasoning_effort",
+                reasoning.format_explicit_reasoning_effort_error(
+                    harness="codex",
+                    effort=effort,
+                    supported=CODEX_HARNESS_DEFAULT_REASONING_EFFORTS,
+                    detail="does not support reasoning effort with the harness default model",
+                ),
+            )
+        capability = reasoning.ReasoningCapability(
             harness="codex",
-            model=model,
-            requested_effort=build.requested_effort,
-            config=build.config,
-            cache=build.cache,
-            alias=build.model_alias or model,
-        ),
-        engine="codex",
-        effort_source=build.effort_source,
-    )
+            model="",
+            effort=effort,
+            supported_efforts=CODEX_HARNESS_DEFAULT_REASONING_EFFORTS,
+            default_effort=None,
+            transport=reasoning.TRANSPORT_BY_HARNESS["codex"],
+            source="harness-default",
+        )
+        reasoning_warnings = (
+            "codex.defaultModel is unset; applying --reasoning-effort to the Codex "
+            "harness default model.",
+        )
+    else:
+        capability, reasoning_warnings = _capability_with_config_fallback(
+            lambda: reasoning.resolve_reasoning_capability(
+                harness="codex",
+                model=model,
+                requested_effort=build.requested_effort,
+                config=build.config,
+                cache=build.cache,
+                alias=build.model_alias or model,
+            ),
+            engine="codex",
+            effort_source=build.effort_source,
+        )
     argv = build_codex_argv(
         codex,
         build.mode,
@@ -1021,6 +1222,7 @@ def _build_request_for_workspace(
     auth_profile_override: str | None,
     output_schema: str | None,
     warnings: tuple[str, ...],
+    cleanup_workspace: bool,
 ) -> Request:
     prompt = _append_safe_dirty_tree_note(prompt, resolved, mode, isolation_context)
     workspace_warning = wsl.drivefs_workspace_warning(resolved.path)
@@ -1072,6 +1274,7 @@ def _build_request_for_workspace(
             prompt_file_text=parts.prompt_file_text,
             prompt_transport=parts.prompt_transport,
             display_argv=parts.display_argv,
+            cleanup_workspace=cleanup_workspace,
         ),
         config,
         auth_profile_override=auth_profile_override,

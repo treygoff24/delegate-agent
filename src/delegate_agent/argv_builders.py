@@ -12,7 +12,7 @@ read-only flag sets. Preserve those branches exactly.
 from __future__ import annotations
 
 from delegate_agent import reasoning
-from delegate_agent.constants import MODE_SAFE, MODE_WORK, validate_mode
+from delegate_agent.constants import MODE_CALL, MODE_SAFE, MODE_WORK, validate_mode
 from delegate_agent.errors import DelegateError
 from delegate_agent.json_types import JsonObject
 from delegate_agent.prompt_instructions import SKILL_REVIEW_PREFIX
@@ -136,6 +136,8 @@ def build_cursor_argv(
         argv.extend(["--approve-mcps", "--force"])
     elif mode == MODE_SAFE:
         prompt = prefix_cursor_safe_prompt(prompt)
+    elif mode == MODE_CALL:
+        pass
     else:
         validate_mode(mode)
     if stream_capture:
@@ -161,6 +163,8 @@ def build_droid_argv(
         argv.append("--skip-permissions-unsafe")
     elif mode == MODE_SAFE:
         prompt = prefix_droid_safe_prompt(prompt)
+    elif mode == MODE_CALL:
+        pass
     else:
         validate_mode(mode)
     if reasoning_capability is not None:
@@ -193,7 +197,7 @@ def build_kimi_argv(
     argv = [str(kimi["binary"])]
     if mode == MODE_SAFE:
         prompt = prefix_kimi_safe_prompt(prompt)
-    elif mode != MODE_WORK:
+    elif mode not in (MODE_WORK, MODE_CALL):
         validate_mode(mode)
     if model:
         argv.extend(["--model", model])
@@ -240,6 +244,8 @@ def build_claude_argv(
             else str(claude.get("workPermissionMode", "auto"))
         )
         argv.extend(["--permission-mode", permission_mode])
+    elif mode == MODE_CALL:
+        argv.extend(["--permission-mode", "plan"])
     else:
         validate_mode(mode)
     if claude.get("noSessionPersistence", True) is True:
@@ -287,6 +293,8 @@ def build_grok_argv(
         work_sandbox = grok.get("workSandbox")
         if isinstance(work_sandbox, str) and work_sandbox:
             argv.extend(["--sandbox", work_sandbox])
+    elif mode == MODE_CALL:
+        argv.extend(["--permission-mode", "dontAsk", "--sandbox", "read-only"])
     else:
         validate_mode(mode)
     if policy.get("webSearch") is not True and grok.get("disableWebSearch", True) is True:

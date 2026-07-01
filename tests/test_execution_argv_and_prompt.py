@@ -18,6 +18,65 @@ from tests.execution_test_base import (
 
 
 class ExecutionArgvAndPromptTests(ExecutionTestBase):
+    def test_call_json_returns_text_without_registry(self):
+        fake_bin = self.make_fake_bin()
+        env_path = str(fake_bin) + os.pathsep + os.environ.get("PATH", "")
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["droid"]["models"] = {"reviewer": "model-id"}
+        parsed = self.delegate.parse_cli(["droid", "reviewer", "call", "hello"])
+        request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+        call_workspace = Path(request.workspace)
+        self.assertEqual(request.mode, "call")
+        self.assertTrue(request.cleanup_workspace)
+        self.assertTrue(call_workspace.is_dir())
+
+        with mock.patch.dict(os.environ, {"PATH": env_path, "FAKE_ECHO_ARGS": "1"}):
+            code, payload = self.delegate.execute_request(
+                request,
+                json_mode=True,
+                config=config,
+                pass_through=False,
+                completion_report_mode="none",
+                source_workspace=self.delegate.ResolvedWorkspace("<call-temp-cwd>", "directory"),
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+
+        self.assertEqual(code, 0)
+        self.assertIsNotNone(payload)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["mode"], "call")
+        self.assertIn("OUT:", payload["text"])
+        self.assertNotIn("alias", payload)
+        self.assertNotIn("runId", payload)
+        self.assertNotIn("snapshotCommand", payload)
+        self.assertFalse(call_workspace.exists())
+
+    def test_call_missing_binary_cleans_temp_workspace(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["droid"]["models"] = {"reviewer": "model-id"}
+        parsed = self.delegate.parse_cli(["droid", "reviewer", "call", "hello"])
+        request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+        call_workspace = Path(request.workspace)
+        self.assertTrue(call_workspace.is_dir())
+        with (
+            tempfile.TemporaryDirectory() as empty_path,
+            mock.patch.dict(os.environ, {"PATH": empty_path}),
+            self.assertRaises(self.delegate.DelegateError) as ctx,
+        ):
+            self.delegate.execute_request(
+                request,
+                json_mode=True,
+                config=config,
+                pass_through=False,
+                completion_report_mode="none",
+                source_workspace=self.delegate.ResolvedWorkspace("<call-temp-cwd>", "directory"),
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+        self.assertEqual(ctx.exception.error, "missing_binary")
+        self.assertFalse(call_workspace.exists())
+
     def test_json_success_shape_with_fake_binary(self):
         repo = make_git_repo()
         fake_bin = self.make_fake_bin()
