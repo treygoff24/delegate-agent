@@ -555,6 +555,7 @@ def parse_modeless_engine(
         prompt_parts,
         json_mode,
         isolation,
+        read_only,
     ) = parse_prompt_tail(rest[1:], json_mode, isolation)
     return ParsedCommand(
         engine,
@@ -575,6 +576,7 @@ def parse_modeless_engine(
             reasoning_effort=reasoning_effort,
             progress_intent=progress_intent,
             forbid_commit=forbid_commit,
+            read_only=read_only,
             dry_run=dry_run,
         ),
     )
@@ -624,6 +626,7 @@ def parse_droid(
         prompt_parts,
         json_mode,
         isolation,
+        read_only,
     ) = parse_prompt_tail(rest[2:], json_mode, isolation)
     return ParsedCommand(
         "droid",
@@ -645,6 +648,7 @@ def parse_droid(
             reasoning_effort=reasoning_effort,
             progress_intent=progress_intent,
             forbid_commit=forbid_commit,
+            read_only=read_only,
             dry_run=dry_run,
         ),
     )
@@ -716,12 +720,14 @@ def parse_prompt_tail(
     list[str],
     bool,
     str | None,
+    bool,
 ]:
     prompt_file: str | None = None
     output_schema: str | None = None
     reasoning_effort: str | None = None
     progress_intent: str | None = None
     forbid_commit = False
+    read_only = False
     prompt_parts: list[str] = []
     i = 0
     while i < len(rest):
@@ -827,6 +833,10 @@ def parse_prompt_tail(
             forbid_commit = True
             i += 1
             continue
+        if token == "--read-only":
+            read_only = True
+            i += 1
+            continue
         prompt_parts = rest[i:]
         break
     if "--prompt-file" in prompt_parts:
@@ -850,6 +860,7 @@ def parse_prompt_tail(
         prompt_parts,
         json_mode,
         isolation,
+        read_only,
     )
 
 

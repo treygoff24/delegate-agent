@@ -587,6 +587,8 @@ class CallResult:
     duration_ms: int
     stdout_bytes: int
     stderr_bytes: int
+    text_chars: int
+    text_truncated: bool
 
 
 @dataclass(frozen=True)
@@ -1226,15 +1228,24 @@ def execute_call(
     accumulator = harness_events.StreamAccumulator(harness=harness)
     for line in stdout_text.splitlines():
         accumulator.ingest_line(line)
-    text, _meta = accumulator.bounded_assistant_text()
-    if not text:
-        text = _bounded_call_fallback_text(stdout_text.strip())
+    text, meta = accumulator.bounded_assistant_text()
+    if text:
+        text_chars = int(meta.get("assistantTextChars", len(text)))
+        text_truncated = bool(meta.get("assistantTextTruncated", False))
+    else:
+        # No structured assistant events parsed: fall back to raw stdout, bounded.
+        raw = stdout_text.strip()
+        text = _bounded_call_fallback_text(raw)
+        text_chars = len(raw)
+        text_truncated = len(raw) > harness_events.ASSISTANT_TEXT_LIMIT
     return CallResult(
         text=text,
         exit_code=completed.returncode,
         duration_ms=int((time.monotonic() - started) * MILLISECONDS_PER_SECOND),
         stdout_bytes=stdout_bytes,
         stderr_bytes=stderr_bytes,
+        text_chars=text_chars,
+        text_truncated=text_truncated,
     )
 
 

@@ -21,27 +21,27 @@ Use `delegate --help` for the exact command list from the installed version. Glo
 ```bash
 delegate cursor safe [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 delegate cursor work [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate cursor call [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+delegate cursor call [--read-only] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 
 delegate droid MODEL_ALIAS safe [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 delegate droid MODEL_ALIAS work [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate droid MODEL_ALIAS call [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+delegate droid MODEL_ALIAS call [--read-only] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 
 delegate codex safe [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [--output-schema FILE] [prompt...]
 delegate codex work [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [--output-schema FILE] [prompt...]
-delegate codex call [--reasoning-effort LEVEL] [--prompt-file PATH] [--output-schema FILE] [prompt...]
+delegate codex call [--read-only] [--reasoning-effort LEVEL] [--prompt-file PATH] [--output-schema FILE] [prompt...]
 
 delegate claude safe [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 delegate claude work [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate claude call [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+delegate claude call [--read-only] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 
 delegate grok safe [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 delegate grok work [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate grok call [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+delegate grok call [--read-only] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 
 delegate kimi safe [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 delegate kimi work [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate kimi call [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+delegate kimi call [--read-only] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 ```
 
 Prompt sources are direct arguments, `--prompt-file`, or Delegate stdin. Raw C0 control characters other than newline, carriage return, and tab are stripped before launch; a prompt that becomes empty fails fast. After
@@ -180,13 +180,16 @@ delegate --isolation worktree kimi work "Implement the feature in a persistent w
 
 ### Stateless `call` mode
 
-`call` is the one-hop model-call form of Delegate. It gives a child runtime a
-prompt, captures the final assistant text when the runtime exposes it, and exits
-without creating a tracked run:
+`call` is the one-hop model-call form of Delegate: "work mode minus a repo." It
+gives a child runtime a prompt with no project tree to resolve, captures the
+final assistant text, and exits without creating a tracked run — so you can call
+a model to *do something* (or to *judge something*) from anywhere, including a
+non-git directory.
 
 ```bash
-delegate codex call "Summarize this context."
-delegate --json droid reviewer call --prompt-file prompt.md
+delegate codex call "Write a Python script that finds the 500th prime and run it."
+delegate --json grok call --read-only --prompt-file rubric.md
+delegate --json codex call --read-only --output-schema verdict.json --prompt-file rubric.md
 ```
 
 Call mode uses an empty temporary cwd instead of resolving the current repo, and
@@ -194,9 +197,26 @@ it deletes that cwd after the child exits. It does not write `.delegate/runs`,
 create snapshots, inject safe/work skill or completion-report framing, emit
 progress heartbeats, or honor persistent worktree/commit policy options. JSON
 output returns fields such as `ok`, `status`, `exitCode`, `engine`, `mode`,
-`model`, `text`, `stdoutBytes`, `stderrBytes`, reasoning metadata, and
-`warnings`.
+`model`, `text`, `textChars`, `textTruncated`, `stdoutBytes`, `stderrBytes`,
+reasoning metadata, and `warnings`. `textTruncated` is `true` when the returned
+`text` was bounded (large outputs keep the head and tail); `textChars` is the
+full untruncated character count.
 
+**Default call is work-level.** A bare `call` grants the child the same
+capability as `work` (it can write files, run commands, and use the network in
+the temporary cwd) — it just skips the git/worktree ceremony. It is **not** a
+security sandbox: the harness is not confined to the temp cwd, so treat a
+default call like a `work` run and only give it prompts you trust.
+
+**`--read-only` is the stateless judge/completion contract.** It drops the child
+to read-only capability (matching each engine's `safe`-mode restriction) and
+prepends a short evaluator preamble telling the model there is no repository to
+inspect — which stops non-Codex engines from derailing into "let me inspect the
+changed files…" on a repo-flavored prompt. Pair it with `--output-schema` (Codex)
+for structured verdicts. Use `--read-only` for any LLM-as-judge, grader, or
+oracle use where the text is the product and the model must not act.
+
+`--read-only` applies only to `call`; passing it with `safe`/`work` is rejected.
 Because call mode is stateless, `--cwd`, `--isolation`, `--pass-through`,
 `--progress`, `--forbid-commit`, and markdown completion reports are rejected.
 Use `safe` or `work` when the child should see the project tree or when you need

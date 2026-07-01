@@ -77,10 +77,20 @@ temporary cwd, captures assistant text when available, deletes the temporary cwd
 and does not write a run registry entry, snapshot, or completion report. It also
 does not inject safe/work skill framing.
 
-Call mode is not a security sandbox. The child runtime may still use configured
-credentials, network access, absolute paths, and harness-native settings
-available to that process. Use `safe` or `work` instead when the child should
-see the project tree or when you need registry inspection.
+Call mode is **write-capable by default** — it inherits work-level harness
+permissions (sandbox/approval settings), just without a project tree to act on.
+Pass `--read-only` to drop the child to read-only capability matching each
+engine's `safe`-mode restriction; that variant also prepends a neutralizing
+preamble telling the model there is nothing to inspect or mutate, which is the
+intended contract for LLM-as-judge and grader use. `--read-only` applies only to
+`call`.
+
+Call mode is not a security sandbox. Even with `--read-only`, the child runtime
+may still use configured credentials, network access, absolute paths, and
+harness-native settings available to that process; on engines without a native
+read-only sandbox (Cursor, Droid, Kimi) the preamble is the only restriction.
+Use `safe` or `work` instead when the child should see the project tree or when
+you need registry inspection.
 
 ## Reasoning-effort boundary
 

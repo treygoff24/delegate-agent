@@ -1,0 +1,7 @@
+{
+  "engine": "grok",
+  "mode": "call",
+  "readOnly": true,
+  "reasoningEffort": "high",
+  "prompt": "Score the candidate answer against the rubric on a 1-5 scale. Return ONLY a JSON object: {\"score\": <int 1-5>, \"rationale\": \"<one sentence>\"}.\n\n=== RUBRIC ===\n<paste rubric>\n\n=== CANDIDATE ===\n<paste candidate answer>"
+}

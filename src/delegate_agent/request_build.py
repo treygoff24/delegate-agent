@@ -82,6 +82,7 @@ RUN_INPUT_KEYS = {
     "outputSchema",
     "progress",
     "forbidCommit",
+    "readOnly",
 }
 
 OUTPUT_SCHEMA_COMPLETION_REPORT_WARNING = (
@@ -90,6 +91,36 @@ OUTPUT_SCHEMA_COMPLETION_REPORT_WARNING = (
 )
 CALL_TEMP_CWD_PLACEHOLDER = "<delegate-call-temp-cwd>"
 CODEX_HARNESS_DEFAULT_REASONING_EFFORTS = ("low", "medium", "high", "xhigh")
+
+# Read-only call is the stateless "judge/completion" contract: text in, text out,
+# no tree. These harnesses default to a coding-agent framing ("inspect the
+# workspace") that derails a judge prompt on an empty cwd, so neutralize that
+# framing. The no-mutation clause is load-bearing for cursor/droid/kimi, whose
+# read-only call has no CLI sandbox — the prompt is the only write boundary there
+# (codex/claude/grok also get a real read-only sandbox flag). Work-level call is
+# left raw — it may legitimately act in the cwd.
+CALL_READONLY_PREAMBLE = (
+    "You are being called to respond to the following prompt directly. There is "
+    "no repository, working tree, or codebase to inspect, open, or review, and "
+    "you must not create, edit, delete, or execute anything — produce your answer "
+    "from the prompt text alone.\n\n"
+)
+
+
+def _call_effective_prompt(prompt: str, *, read_only: bool) -> str:
+    if read_only and not prompt.startswith(CALL_READONLY_PREAMBLE):
+        return f"{CALL_READONLY_PREAMBLE}{prompt}"
+    return prompt
+
+
+def _policy_mode(build: EngineBuildInput) -> str:
+    """Resolve which policy tier a call inherits: default call is work-level, a
+    read-only call is safe-level. Bypass flags stay bound to real work mode via
+    the argv builders' own ``mode == MODE_WORK`` gates, so borrowing the work
+    policy tier here only carries webSearch/networkAccess, never a bypass."""
+    if build.mode == MODE_CALL:
+        return MODE_SAFE if build.call_read_only else MODE_WORK
+    return build.mode
 
 
 def _reject_windows_path(value: str, field: str) -> None:
@@ -520,26 +551,41 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         raise DelegateError("invalid_command", "Command does not map to an execution request.")
     if launch.mode == MODE_CALL:
         _validate_call_cli_options(global_options, launch)
+        read_only = getattr(launch, "read_only", False)
         output_schema = resolve_output_schema(launch.engine, launch.output_schema)
-        prompt = resolve_prompt(launch.prompt_parts, launch.prompt_file, stdin)
+        prompt = _call_effective_prompt(
+            resolve_prompt(launch.prompt_parts, launch.prompt_file, stdin),
+            read_only=read_only,
+        )
         workspace, cleanup_workspace = _call_workspace(launch.dry_run)
-        return build_request(
-            launch.engine,
-            launch.mode,
-            launch.model_alias,
-            workspace,
-            prompt,
-            config,
-            launch.dry_run,
-            stream_capture=True,
-            isolation_context=None,
-            reasoning_effort=launch.reasoning_effort,
-            reasoning_effort_source="cli" if launch.reasoning_effort is not None else None,
-            progress=False,
-            forbid_commit=False,
-            auth_profile_override=global_options.auth_profile,
-            output_schema=output_schema,
-            cleanup_workspace=cleanup_workspace,
+        try:
+            return build_request(
+                launch.engine,
+                launch.mode,
+                launch.model_alias,
+                workspace,
+                prompt,
+                config,
+                launch.dry_run,
+                stream_capture=True,
+                isolation_context=None,
+                reasoning_effort=launch.reasoning_effort,
+                reasoning_effort_source="cli" if launch.reasoning_effort is not None else None,
+                progress=False,
+                forbid_commit=False,
+                auth_profile_override=global_options.auth_profile,
+                output_schema=output_schema,
+                cleanup_workspace=cleanup_workspace,
+                call_read_only=read_only,
+            )
+        except BaseException:
+            if cleanup_workspace:
+                shutil.rmtree(workspace.path, ignore_errors=True)
+            raise
+    if getattr(launch, "read_only", False):
+        raise DelegateError(
+            "invalid_option_combination",
+            "--read-only only applies to call mode.",
         )
     effective_progress = resolve_effective_progress(launch.progress_intent, config)
     if effective_progress and global_options.pass_through:
@@ -696,6 +742,14 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
     raw_forbid_commit = raw.get("forbidCommit", False)
     if not isinstance(raw_forbid_commit, bool):
         raise DelegateError("invalid_forbid_commit", "forbidCommit must be true or false.")
+    raw_read_only = raw.get("readOnly", False)
+    if not isinstance(raw_read_only, bool):
+        raise DelegateError("invalid_read_only", "readOnly must be true or false.")
+    if raw_read_only and mode != MODE_CALL:
+        raise DelegateError(
+            "invalid_option_combination",
+            "readOnly only applies to call mode.",
+        )
     if engine == "droid":
         if not isinstance(model_alias, str) or not model_alias:
             raise DelegateError("missing_model", "droid run input requires model alias.")
@@ -720,29 +774,30 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
             raw_forbid_commit=raw_forbid_commit,
         )
         workspace, cleanup_workspace = _call_workspace(False)
-        return build_request(
-            str(engine),
-            str(mode),
-            model_alias,
-            workspace,
-            effective_prompt(
-                validate_prompt(prompt),
-                engine=str(engine),
-                mode=str(mode),
-                completion_report_mode=delegate_config.COMPLETION_REPORT_MODE_NONE,
-            ),
-            config,
-            dry_run=False,
-            stream_capture=True,
-            isolation_context=None,
-            reasoning_effort=reasoning_effort,
-            reasoning_effort_source="input-json" if reasoning_effort is not None else None,
-            progress=False,
-            forbid_commit=False,
-            auth_profile_override=global_options.auth_profile,
-            output_schema=output_schema,
-            cleanup_workspace=cleanup_workspace,
-        )
+        try:
+            return build_request(
+                str(engine),
+                str(mode),
+                model_alias,
+                workspace,
+                _call_effective_prompt(validate_prompt(prompt), read_only=raw_read_only),
+                config,
+                dry_run=False,
+                stream_capture=True,
+                isolation_context=None,
+                reasoning_effort=reasoning_effort,
+                reasoning_effort_source="input-json" if reasoning_effort is not None else None,
+                progress=False,
+                forbid_commit=False,
+                auth_profile_override=global_options.auth_profile,
+                output_schema=output_schema,
+                cleanup_workspace=cleanup_workspace,
+                call_read_only=raw_read_only,
+            )
+        except BaseException:
+            if cleanup_workspace:
+                shutil.rmtree(workspace.path, ignore_errors=True)
+            raise
 
     # Pre-read cwd and isolation from JSON for config discovery (already done in main() for
     # config loading, but re-validate and resolve here for the request).
@@ -859,6 +914,7 @@ def build_request(
     output_schema: str | None = None,
     warnings: tuple[str, ...] = (),
     cleanup_workspace: bool = False,
+    call_read_only: bool = False,
 ) -> Request:
     if not isinstance(workspace, ResolvedWorkspace):
         raise TypeError(
@@ -893,6 +949,7 @@ def build_request(
         output_schema=output_schema,
         warnings=warnings,
         cleanup_workspace=cleanup_workspace,
+        call_read_only=call_read_only,
     )
 
 
@@ -912,6 +969,7 @@ def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         model,
         build.prompt,
         stream_capture=build.stream_capture,
+        call_read_only=build.call_read_only,
     )
     return EngineRequestParts(
         model=model,
@@ -965,6 +1023,7 @@ def _droid_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         stream_capture=build.stream_capture,
         reasoning_capability=capability,
         prompt_transport=PROMPT_TRANSPORT_FILE,
+        call_read_only=build.call_read_only,
     )
     display_argv = [
         DROID_PROMPT_FILE_DISPLAY if item == DROID_PROMPT_FILE_ARG_PLACEHOLDER else item
@@ -988,7 +1047,9 @@ def _codex_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         model = build.model_alias
     else:
         model = _resolve_default_model(codex)
-    policy = delegate_config.effective_policy(build.config, engine="codex", mode=build.mode)
+    policy = delegate_config.effective_policy(
+        build.config, engine="codex", mode=_policy_mode(build)
+    )
     if model is None and build.requested_effort is not None and build.effort_source != "config":
         effort = reasoning.normalize_effort(build.requested_effort)
         if effort not in CODEX_HARNESS_DEFAULT_REASONING_EFFORTS:
@@ -1039,6 +1100,7 @@ def _codex_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         reasoning_capability=capability,
         prompt_transport=PROMPT_TRANSPORT_STDIN,
         output_schema=build.output_schema,
+        call_read_only=build.call_read_only,
     )
     return EngineRequestParts(
         model=model,
@@ -1058,7 +1120,9 @@ def _claude_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         model = build.model_alias
     else:
         model = _resolve_default_model(claude)
-    policy = delegate_config.effective_policy(build.config, engine="claude", mode=build.mode)
+    policy = delegate_config.effective_policy(
+        build.config, engine="claude", mode=_policy_mode(build)
+    )
     effort: str | None = None
     warnings: tuple[str, ...] = ()
     if build.requested_effort is not None:
@@ -1080,6 +1144,7 @@ def _claude_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         stream_capture=build.stream_capture,
         reasoning_effort=effort,
         allow_bypass_permissions=_claude_harness_bypass_enabled(build.config, build.mode),
+        call_read_only=build.call_read_only,
     )
     return EngineRequestParts(
         model=model,
@@ -1099,7 +1164,7 @@ def _grok_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         model = build.model_alias
     else:
         model = _resolve_default_model(grok)
-    policy = delegate_config.effective_policy(build.config, engine="grok", mode=build.mode)
+    policy = delegate_config.effective_policy(build.config, engine="grok", mode=_policy_mode(build))
     effort: str | None = None
     warnings: tuple[str, ...] = ()
     if build.requested_effort is not None:
@@ -1122,6 +1187,7 @@ def _grok_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         stream_capture=build.stream_capture,
         reasoning_effort=effort,
         allow_bypass_permissions=_grok_harness_bypass_enabled(build.config, build.mode),
+        call_read_only=build.call_read_only,
     )
     display_argv = [
         PROMPT_FILE_DISPLAY if item == PROMPT_FILE_ARG_PLACEHOLDER else item for item in argv
@@ -1223,6 +1289,7 @@ def _build_request_for_workspace(
     output_schema: str | None,
     warnings: tuple[str, ...],
     cleanup_workspace: bool,
+    call_read_only: bool = False,
 ) -> Request:
     prompt = _append_safe_dirty_tree_note(prompt, resolved, mode, isolation_context)
     workspace_warning = wsl.drivefs_workspace_warning(resolved.path)
@@ -1246,6 +1313,7 @@ def _build_request_for_workspace(
             effort_source=effort_source,
             cache=cache,
             output_schema=output_schema,
+            call_read_only=call_read_only,
         ),
     )
     return _apply_profile_resolution(

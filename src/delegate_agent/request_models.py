@@ -45,6 +45,7 @@ class LaunchOptions:
     reasoning_effort: str | None = None
     progress_intent: str | None = None
     forbid_commit: bool = False
+    read_only: bool = False
     dry_run: bool = False
 
 
@@ -175,3 +176,4 @@ class EngineBuildInput:
     effort_source: str | None
     cache: JsonObject | None
     output_schema: str | None = None
+    call_read_only: bool = False

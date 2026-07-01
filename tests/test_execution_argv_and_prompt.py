@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -76,6 +77,168 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
             )
         self.assertEqual(ctx.exception.error, "missing_binary")
         self.assertFalse(call_workspace.exists())
+
+    def _call_temp_dirs(self):
+        return set(Path(tempfile.gettempdir()).glob("delegate-call-*"))
+
+    def test_call_build_failure_cleans_temp_workspace(self):
+        # A request-build failure AFTER _call_workspace() (e.g. unknown alias) must
+        # not orphan the freshly created temp cwd.
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["droid"]["models"] = {"reviewer": "model-id"}
+        parsed = self.delegate.parse_cli(["droid", "nonexistent-alias", "call", "hello"])
+        before = self._call_temp_dirs()
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+        self.assertEqual(ctx.exception.error, "invalid_alias")
+        self.assertEqual(self._call_temp_dirs() - before, set())
+
+    def test_codex_call_default_is_work_level_sandbox(self):
+        argv = self.delegate.build_codex_argv(
+            self.delegate.DEFAULT_CONFIG["codex"],
+            "call",
+            "/tmp/call",
+            None,
+            "do this",
+            {},
+            workspace_kind="directory",
+        )
+        self.assertEqual(
+            argv[argv.index("--sandbox") + 1],
+            self.delegate.DEFAULT_CONFIG["codex"]["workSandbox"],
+        )
+        self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", argv)
+
+    def test_codex_call_read_only_is_read_only_sandbox(self):
+        argv = self.delegate.build_codex_argv(
+            self.delegate.DEFAULT_CONFIG["codex"],
+            "call",
+            "/tmp/call",
+            None,
+            "score",
+            {},
+            workspace_kind="directory",
+            call_read_only=True,
+        )
+        self.assertEqual(argv[argv.index("--sandbox") + 1], "read-only")
+
+    def test_grok_call_default_vs_read_only(self):
+        default_argv = self.delegate.build_grok_argv(
+            self.delegate.DEFAULT_CONFIG["grok"], "call", "/tmp/call", None, {}
+        )
+        self.assertIn("auto", default_argv)
+        self.assertNotIn("read-only", default_argv)
+        ro_argv = self.delegate.build_grok_argv(
+            self.delegate.DEFAULT_CONFIG["grok"],
+            "call",
+            "/tmp/call",
+            None,
+            {},
+            call_read_only=True,
+        )
+        self.assertIn("read-only", ro_argv)
+        self.assertIn("dontAsk", ro_argv)
+
+    def test_claude_call_default_vs_read_only(self):
+        default_argv = self.delegate.build_claude_argv(
+            self.delegate.DEFAULT_CONFIG["claude"], "call", None, {}
+        )
+        self.assertIn("auto", default_argv)
+        self.assertNotIn("plan", default_argv)
+        ro_argv = self.delegate.build_claude_argv(
+            self.delegate.DEFAULT_CONFIG["claude"], "call", None, {}, call_read_only=True
+        )
+        self.assertIn("plan", ro_argv)
+        self.assertIn("--strict-mcp-config", ro_argv)
+
+    def test_cursor_and_droid_call_write_flags_only_when_not_read_only(self):
+        cursor_default = self.delegate.build_cursor_argv(
+            ["cursor-agent"], "call", "/ws", "model", "prompt"
+        )
+        self.assertIn("--force", cursor_default)
+        cursor_ro = self.delegate.build_cursor_argv(
+            ["cursor-agent"], "call", "/ws", "model", "prompt", call_read_only=True
+        )
+        self.assertNotIn("--force", cursor_ro)
+        droid_default = self.delegate.build_droid_argv("droid", "call", "/ws", "m", "p")
+        self.assertIn("--skip-permissions-unsafe", droid_default)
+        droid_ro = self.delegate.build_droid_argv(
+            "droid", "call", "/ws", "m", "p", call_read_only=True
+        )
+        self.assertNotIn("--skip-permissions-unsafe", droid_ro)
+
+    def test_read_only_call_prepends_neutralizing_preamble_default_call_is_raw(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        ro = self.delegate.request_from_parsed(
+            self.delegate.parse_cli(["codex", "call", "--read-only", "Score this diff."]),
+            config,
+            io.StringIO(""),
+        )
+        self.addCleanup(shutil.rmtree, ro.workspace, ignore_errors=True)
+        self.assertTrue(ro.stdin_text.startswith("You are being called"))
+        raw = self.delegate.request_from_parsed(
+            self.delegate.parse_cli(["codex", "call", "Score this diff."]),
+            config,
+            io.StringIO(""),
+        )
+        self.addCleanup(shutil.rmtree, raw.workspace, ignore_errors=True)
+        self.assertEqual(raw.stdin_text, "Score this diff.")
+
+    def test_default_call_inherits_work_policy_read_only_call_inherits_safe(self):
+        # Default call is work-level, so it must inherit work-tier policy
+        # (webSearch); read-only call is safe-level and must not.
+        config = self.delegate.delegate_config.deep_merge(
+            self.delegate.DEFAULT_CONFIG,
+            {"policy": {"work": {"webSearch": True}}},
+        )
+        default_req = self.delegate.request_from_parsed(
+            self.delegate.parse_cli(["codex", "call", "do this"]), config, io.StringIO("")
+        )
+        self.addCleanup(shutil.rmtree, default_req.workspace, ignore_errors=True)
+        self.assertIn("--search", default_req.argv)
+        # ...but never a bypass, even at work-tier policy.
+        self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", default_req.argv)
+        ro_req = self.delegate.request_from_parsed(
+            self.delegate.parse_cli(["codex", "call", "--read-only", "score"]),
+            config,
+            io.StringIO(""),
+        )
+        self.addCleanup(shutil.rmtree, ro_req.workspace, ignore_errors=True)
+        self.assertNotIn("--search", ro_req.argv)
+
+    def test_read_only_flag_rejected_outside_call_mode(self):
+        for mode in ("safe", "work"):
+            with self.subTest(mode=mode):
+                parsed = self.delegate.parse_cli(["codex", mode, "--read-only", "x"])
+                with self.assertRaises(self.delegate.DelegateError) as ctx:
+                    self.delegate.request_from_parsed(
+                        parsed, self.delegate.DEFAULT_CONFIG, io.StringIO("")
+                    )
+                self.assertEqual(ctx.exception.error, "invalid_option_combination")
+
+    def test_call_json_surfaces_truncation_fields(self):
+        fake_bin = self.make_fake_bin()
+        env_path = str(fake_bin) + os.pathsep + os.environ.get("PATH", "")
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["droid"]["models"] = {"reviewer": "model-id"}
+        parsed = self.delegate.parse_cli(["droid", "reviewer", "call", "hello"])
+        request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+        with mock.patch.dict(os.environ, {"PATH": env_path, "FAKE_ECHO_ARGS": "1"}):
+            code, payload = self.delegate.execute_request(
+                request,
+                json_mode=True,
+                config=config,
+                pass_through=False,
+                completion_report_mode="none",
+                source_workspace=self.delegate.ResolvedWorkspace("<call-temp-cwd>", "directory"),
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+        self.assertEqual(code, 0)
+        self.assertIn("textChars", payload)
+        self.assertIn("textTruncated", payload)
+        self.assertIsInstance(payload["textChars"], int)
+        self.assertFalse(payload["textTruncated"])
 
     def test_json_success_shape_with_fake_binary(self):
         repo = make_git_repo()

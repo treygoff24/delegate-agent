@@ -1,6 +1,7 @@
 import importlib.util
 import io
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -376,6 +377,50 @@ class ParserTests(unittest.TestCase):
                 self.delegate.pre_read_run_json_for_config(str(task), None, "none")
             self.assertEqual(ctx.exception.error, "invalid_option_combination")
             self.assertIn("call mode does not use --isolation", ctx.exception.message)
+
+    def test_call_read_only_flag_parses_in_tail(self):
+        parsed = self.delegate.parse_cli(["codex", "call", "--read-only", "score"])
+        self.assertEqual(parsed.launch.mode, "call")
+        self.assertTrue(parsed.launch.read_only)
+        default = self.delegate.parse_cli(["codex", "call", "score"])
+        self.assertFalse(default.launch.read_only)
+
+    def test_call_run_input_json_read_only_accepted_and_validated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+
+            def parsed_for(raw):
+                task = Path(tmp) / "task.json"
+                task.write_text(json.dumps(raw), encoding="utf-8")
+                return self.delegate.ParsedCommand(
+                    "run",
+                    global_options=self.delegate.GlobalOptions(json_mode=True),
+                    run_json=self.delegate.RunJsonOptions(str(task)),
+                )
+
+            ok = self.delegate.request_from_input_json(
+                parsed_for({"engine": "codex", "mode": "call", "prompt": "s", "readOnly": True}),
+                self.delegate.DEFAULT_CONFIG,
+            )
+            self.addCleanup(shutil.rmtree, ok.workspace, ignore_errors=True)
+            self.assertTrue(ok.stdin_text.startswith("You are being called"))
+
+            with self.assertRaises(self.delegate.DelegateError) as bad_type:
+                self.delegate.request_from_input_json(
+                    parsed_for(
+                        {"engine": "codex", "mode": "call", "prompt": "s", "readOnly": "yes"}
+                    ),
+                    self.delegate.DEFAULT_CONFIG,
+                )
+            self.assertEqual(bad_type.exception.error, "invalid_read_only")
+
+            with self.assertRaises(self.delegate.DelegateError) as bad_mode:
+                self.delegate.request_from_input_json(
+                    parsed_for(
+                        {"engine": "codex", "mode": "work", "prompt": "s", "readOnly": True}
+                    ),
+                    self.delegate.DEFAULT_CONFIG,
+                )
+            self.assertEqual(bad_mode.exception.error, "invalid_option_combination")
 
     def test_call_cli_rejects_incompatible_options(self):
         with tempfile.TemporaryDirectory() as tmp:

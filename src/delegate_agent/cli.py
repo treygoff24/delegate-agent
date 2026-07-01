@@ -563,6 +563,8 @@ def execute_request(
                     "mode": request.mode,
                     "model": request.model,
                     "text": result.text,
+                    "textChars": result.text_chars,
+                    "textTruncated": result.text_truncated,
                     "stdoutBytes": result.stdout_bytes,
                     "stderrBytes": result.stderr_bytes,
                     "durationMs": result.duration_ms,
@@ -885,6 +887,8 @@ def main(
                 # worktree isolation is active; otherwise use the source request.argv.
                 display_argv = payload.get("argv", request.argv)
                 print(f"argv: {shell_join(display_argv)}", file=stdout)
+                for warning in payload.get("warnings", ()):
+                    print(f"warning: {warning}", file=stdout)
             return EXIT_OK
 
         completion_report_mode = resolve_completion_report_mode(parsed, config)

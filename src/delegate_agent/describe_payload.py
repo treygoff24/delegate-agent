@@ -709,6 +709,7 @@ def describe_summary_payload(
             "--progress",
             "--no-progress",
             "--forbid-commit",
+            "--read-only",
         ],
         "commands": _commands_catalog(),
         "recommendedDiscovery": [

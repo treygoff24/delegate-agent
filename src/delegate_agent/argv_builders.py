@@ -130,6 +130,7 @@ def build_cursor_argv(
     prompt: str,
     *,
     stream_capture: bool = True,
+    call_read_only: bool = False,
 ) -> list[str]:
     argv = [*prefix, "--workspace", workspace, "-p", "--trust"]
     if mode == MODE_WORK:
@@ -137,7 +138,10 @@ def build_cursor_argv(
     elif mode == MODE_SAFE:
         prompt = prefix_cursor_safe_prompt(prompt)
     elif mode == MODE_CALL:
-        pass
+        # Call defaults to work-level capability ("work minus a repo"); --read-only
+        # drops the write flags for the stateless judge/completion contract.
+        if not call_read_only:
+            argv.extend(["--approve-mcps", "--force"])
     else:
         validate_mode(mode)
     if stream_capture:
@@ -157,6 +161,7 @@ def build_droid_argv(
     stream_capture: bool = True,
     reasoning_capability: reasoning.ReasoningCapability | None = None,
     prompt_transport: str = PROMPT_TRANSPORT_ARGV,
+    call_read_only: bool = False,
 ) -> list[str]:
     argv = [binary, "exec", "--cwd", workspace]
     if mode == MODE_WORK:
@@ -164,7 +169,8 @@ def build_droid_argv(
     elif mode == MODE_SAFE:
         prompt = prefix_droid_safe_prompt(prompt)
     elif mode == MODE_CALL:
-        pass
+        if not call_read_only:
+            argv.append("--skip-permissions-unsafe")
     else:
         validate_mode(mode)
     if reasoning_capability is not None:
@@ -216,6 +222,7 @@ def build_claude_argv(
     stream_capture: bool = True,
     reasoning_effort: str | None = None,
     allow_bypass_permissions: bool = False,
+    call_read_only: bool = False,
 ) -> list[str]:
     argv = [
         str(claude["binary"]),
@@ -245,7 +252,20 @@ def build_claude_argv(
         )
         argv.extend(["--permission-mode", permission_mode])
     elif mode == MODE_CALL:
-        argv.extend(["--permission-mode", "plan"])
+        if call_read_only:
+            argv.extend(
+                [
+                    "--permission-mode",
+                    "plan",
+                    "--tools",
+                    CLAUDE_SAFE_TOOLS,
+                    "--allowedTools",
+                    CLAUDE_SAFE_ALLOWED_TOOLS,
+                    "--strict-mcp-config",
+                ]
+            )
+        else:
+            argv.extend(["--permission-mode", str(claude.get("workPermissionMode", "auto"))])
     else:
         validate_mode(mode)
     if claude.get("noSessionPersistence", True) is True:
@@ -270,6 +290,7 @@ def build_grok_argv(
     reasoning_effort: str | None = None,
     allow_bypass_permissions: bool = False,
     prompt_transport: str = PROMPT_TRANSPORT_FILE,
+    call_read_only: bool = False,
 ) -> list[str]:
     argv = [str(grok["binary"]), "--cwd", workspace]
     if stream_capture:
@@ -294,7 +315,20 @@ def build_grok_argv(
         if isinstance(work_sandbox, str) and work_sandbox:
             argv.extend(["--sandbox", work_sandbox])
     elif mode == MODE_CALL:
-        argv.extend(["--permission-mode", "dontAsk", "--sandbox", "read-only"])
+        if call_read_only:
+            argv.extend(
+                [
+                    "--permission-mode",
+                    str(grok.get("safePermissionMode", "dontAsk")),
+                    "--sandbox",
+                    str(grok.get("safeSandbox", "read-only")),
+                ]
+            )
+        else:
+            argv.extend(["--permission-mode", str(grok.get("workPermissionMode", "auto"))])
+            work_sandbox = grok.get("workSandbox")
+            if isinstance(work_sandbox, str) and work_sandbox:
+                argv.extend(["--sandbox", work_sandbox])
     else:
         validate_mode(mode)
     if policy.get("webSearch") is not True and grok.get("disableWebSearch", True) is True:
@@ -327,13 +361,18 @@ def build_codex_argv(
     reasoning_capability: reasoning.ReasoningCapability | None = None,
     prompt_transport: str = PROMPT_TRANSPORT_ARGV,
     output_schema: str | None = None,
+    call_read_only: bool = False,
 ) -> list[str]:
     binary = str(codex["binary"])
     argv = [binary]
     # Safe mode is read-only by contract: never emit the dangerous bypass flags,
     # even if a policy block somehow carries them. Config validation rejects such
     # configs up front, but enforce the invariant structurally here too.
+    # Work-level call ("work minus a repo") gets the workSandbox but never the
+    # bypass flags — those stay bound to real work mode.
     elevated = mode == MODE_WORK
+    call_write = mode == MODE_CALL and not call_read_only
+    write_sandbox = mode == MODE_WORK or call_write
     bypass_sandbox = elevated and policy.get("bypassApprovalsAndSandbox") is True
     bypass_hook_trust = elevated and policy.get("bypassHookTrust") is True
     if policy.get("webSearch") is True:
@@ -362,13 +401,9 @@ def build_codex_argv(
     if bypass_sandbox:
         argv.append("--dangerously-bypass-approvals-and-sandbox")
     else:
-        sandbox = codex["workSandbox"] if mode == MODE_WORK else "read-only"
+        sandbox = codex["workSandbox"] if write_sandbox else "read-only"
         argv.extend(["--sandbox", str(sandbox)])
-        if (
-            mode == MODE_WORK
-            and sandbox == "workspace-write"
-            and policy.get("networkAccess") is True
-        ):
+        if write_sandbox and sandbox == "workspace-write" and policy.get("networkAccess") is True:
             argv.extend(["-c", "sandbox_workspace_write.network_access=true"])
     if bypass_hook_trust:
         argv.append("--dangerously-bypass-hook-trust")
