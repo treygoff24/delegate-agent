@@ -53,7 +53,7 @@ from delegate_agent.cli_parser import (  # noqa: F401  # re-exported for tests /
     parse_cli,
     parse_required_positive_int_option,
 )
-from delegate_agent.constants import BINARY_CONFIG_ENGINES, KNOWN_ENGINES, MODE_SAFE
+from delegate_agent.constants import BINARY_CONFIG_ENGINES, KNOWN_ENGINES, MODE_CALL, MODE_SAFE
 from delegate_agent.describe_payload import (  # noqa: F401  # re-exported for tests / back-compat
     _claude_runtime_policy,
     describe_payload,
@@ -87,6 +87,7 @@ from delegate_agent.prompt_transport import (  # noqa: F401  # CURSOR_PROMPT_RED
     PROMPT_TRANSPORT_STDIN,
 )
 from delegate_agent.request_build import (  # noqa: F401  # re-exported for tests / back-compat
+    CALL_TEMP_CWD_PLACEHOLDER,
     RUN_INPUT_KEYS,
     _load_input_json_object,
     _resolve_default_model,
@@ -308,7 +309,14 @@ def dry_run_payload(request: Request) -> JsonObject:
     else:
         # Fallback when no isolation context is provided (e.g. direct build_request calls in tests).
         # Use embedded-default logic: safe local harnesses -> worktree temporary, others -> none.
-        if request.engine in KNOWN_ENGINES and request.mode == MODE_SAFE:
+        if request.mode == MODE_CALL:
+            payload["isolatedWorkspace"] = False
+            payload["isolation"] = "call temporary cwd"
+            payload["isolationMode"] = "none"
+            payload["effectiveIsolation"] = "none"
+            payload["isolationLifecycle"] = "none"
+            payload["preservedWorkspace"] = False
+        elif request.engine in KNOWN_ENGINES and request.mode == MODE_SAFE:
             payload["isolatedWorkspace"] = True
             payload["isolation"] = (
                 "Execution uses a temporary detached git worktree or directory copy; "
@@ -518,6 +526,62 @@ def execute_request(
     stdout: TextIO,
     stderr: TextIO,
 ) -> tuple[int, JsonObject | None]:
+    if request.mode == MODE_CALL:
+        try:
+            if request.engine == "codex":
+                profiles.preflight_codex_request(request, config.get("codex", {}))
+            if pass_through:
+                raise DelegateError(
+                    "invalid_option_combination",
+                    "--pass-through is not supported with call mode.",
+                )
+            ensure_binary(
+                request.argv,
+                engine=request.engine,
+                config_source=config_source,
+                env_overrides=request.env_overrides,
+            )
+            try:
+                result = delegate_runner.execute_call(
+                    request.argv,
+                    request.workspace,
+                    harness=request.engine,
+                    stdin_text=request.stdin_text,
+                    prompt_file_text=request.prompt_file_text,
+                    prompt_file_placeholder=PROMPT_FILE_ARG_PLACEHOLDER,
+                    env_overrides=request.env_overrides,
+                )
+            except delegate_runner.RunnerLaunchError as exc:
+                raise DelegateError(exc.error, exc.message) from exc
+            status = delegate_runner.status_from_exit(result.exit_code)
+            if json_mode:
+                payload: JsonObject = {
+                    "ok": result.exit_code == 0,
+                    "status": status,
+                    "exitCode": result.exit_code,
+                    "engine": request.engine,
+                    "mode": request.mode,
+                    "model": request.model,
+                    "text": result.text,
+                    "textChars": result.text_chars,
+                    "textTruncated": result.text_truncated,
+                    "stdoutBytes": result.stdout_bytes,
+                    "stderrBytes": result.stderr_bytes,
+                    "durationMs": result.duration_ms,
+                }
+                if request.warnings:
+                    payload["warnings"] = list(request.warnings)
+                reasoning.add_reasoning_payload_fields(payload, request)
+                if result.exit_code != 0:
+                    payload["error"] = "child_failed"
+                    payload["message"] = "Child command failed."
+                return result.exit_code, payload
+            if result.text:
+                print(result.text, file=stdout)
+            return result.exit_code, None
+        finally:
+            if request.cleanup_workspace:
+                shutil.rmtree(request.workspace, ignore_errors=True)
     if request.engine == "codex":
         profiles.preflight_codex_request(request, config.get("codex", {}))
     ctx = request.isolation_context
@@ -622,7 +686,9 @@ def shell_join(argv: list[str]) -> str:
 
 
 def pre_read_run_json_for_config(
-    input_json_path: str, cli_cwd: str | None
+    input_json_path: str,
+    cli_cwd: str | None,
+    cli_isolation: str | None = None,
 ) -> tuple[ResolvedWorkspace, JsonObject, str]:
     """Pre-read run input JSON for config discovery: extract cwd/isolation, resolve workspace,
     load config from that workspace, validate config. Returns (workspace, config, source)."""
@@ -632,6 +698,26 @@ def pre_read_run_json_for_config(
         )
     path = Path(input_json_path).expanduser()
     raw = _load_input_json_object(path)
+    if raw.get("mode") == MODE_CALL:
+        if cli_cwd is not None:
+            raise DelegateError("invalid_option_combination", "call mode does not use --cwd.")
+        if cli_isolation is not None:
+            raise DelegateError(
+                "invalid_option_combination",
+                "call mode does not use --isolation.",
+            )
+        if raw.get("cwd") is not None:
+            raise DelegateError(
+                "invalid_option_combination", "call mode input JSON must not include cwd."
+            )
+        if "isolation" in raw:
+            raise DelegateError(
+                "invalid_option_combination",
+                "call mode input JSON must not include isolation.",
+            )
+        config, source = load_config(workspace=None)
+        validate_config(config)
+        return ResolvedWorkspace(CALL_TEMP_CWD_PLACEHOLDER, "directory"), config, source
 
     # Read ONLY cwd and isolation for config discovery.
     json_cwd = raw.get("cwd")
@@ -705,11 +791,21 @@ def main(
             if run_json is None:
                 raise DelegateError("invalid_command", "run --input-json options are required.")
             workspace, config, source = pre_read_run_json_for_config(
-                run_json.input_json, global_options.cwd
+                run_json.input_json,
+                global_options.cwd,
+                global_options.isolation,
             )
             config_workspace = Path(workspace.path)
         else:
-            config_workspace = workspace_path_for_config(global_options.cwd)
+            if parsed.launch is not None and parsed.launch.mode == MODE_CALL:
+                if global_options.cwd is not None:
+                    raise DelegateError(
+                        "invalid_option_combination",
+                        "call mode does not use --cwd.",
+                    )
+                config_workspace = None
+            else:
+                config_workspace = workspace_path_for_config(global_options.cwd)
             config, source = load_config(workspace=config_workspace)
             validate_config(config)
 
@@ -737,7 +833,10 @@ def main(
             return emit_agent_help(stdout)
 
         if parsed.subcommand != "run":
-            workspace = resolve_workspace(global_options.cwd)
+            if parsed.launch is not None and parsed.launch.mode == MODE_CALL:
+                workspace = ResolvedWorkspace(CALL_TEMP_CWD_PLACEHOLDER, "directory")
+            else:
+                workspace = resolve_workspace(global_options.cwd)
 
         if parsed.subcommand == "capabilities":
             command = parsed.capabilities
@@ -788,6 +887,8 @@ def main(
                 # worktree isolation is active; otherwise use the source request.argv.
                 display_argv = payload.get("argv", request.argv)
                 print(f"argv: {shell_join(display_argv)}", file=stdout)
+                for warning in payload.get("warnings", ()):
+                    print(f"warning: {warning}", file=stdout)
             return EXIT_OK
 
         completion_report_mode = resolve_completion_report_mode(parsed, config)

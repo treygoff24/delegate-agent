@@ -78,7 +78,7 @@ delegate --json capabilities
 
 Common causes:
 
-- Codex effort was requested but no Codex model was resolved. Set `codex.defaultModel` or pass a Codex model in JSON run input.
+- Codex effort was requested with a label not supported by the resolved model or the harness-default fallback capability.
 - Claude effort must be one of Claude Code's native labels: `low`, `medium`, `high`, `xhigh`, or `max`.
 - Cursor effort was requested but `cursor.reasoningEffortModels.<level>` is missing. Cursor effort uses model selection rather than a standalone effort flag.
 - Droid or Codex model support is not in config, the workspace cache, or bundled fallback data.
@@ -168,9 +168,23 @@ labels before printing, and do not include raw child output.
 `--progress` is incompatible with `--pass-through`, which already streams raw
 child output.
 
+## Need one-hop output instead of a tracked run
+
+Use `call` mode when you just need a prompt answered and do not want Delegate to
+resolve the repo, create `.delegate/runs`, inject completion-report framing, or
+require a later `snapshot`/`run-output` lookup:
+
+```bash
+delegate --json codex call "Summarize this context."
+delegate --json droid reviewer call --prompt-file prompt.md
+```
+
+Call mode returns captured assistant text in JSON `text` when available. Use
+`safe` or `work` for project-aware review/implementation and tracked output.
+
 ## Safe-mode isolation fails
 
-Cursor, Droid, Codex, Claude, and Kimi safe create an isolated throwaway
+Cursor, Droid, Codex, Claude, Grok, and Kimi safe create an isolated throwaway
 workspace by default. Safe mode reviews your **current working tree** —
 uncommitted tracked edits and untracked, non-ignored files are mirrored into
 that copy (only gitignored paths are excluded), so you do **not** need to
@@ -178,9 +192,9 @@ commit or stash before a safe review. In Git repositories, Delegate first tries
 a detached worktree and syncs the dirty tree into it; for non-Git directories
 and some Git fallback cases, it uses a directory copy. Codex safe is the only
 safe harness that may opt out with `--isolation none`, because Codex still
-keeps its read-only sandbox active. Cursor, Droid, Claude, and Kimi safe
-reject `--isolation none` because their safe contracts depend on Delegate's
-temporary workspace boundary.
+keeps its read-only sandbox active. Cursor, Droid, Claude, Grok, and Kimi safe
+normalize `--isolation none` back to `auto` with a warning because their safe
+contracts depend on Delegate's temporary workspace boundary.
 
 Dry-run can inspect the planned argv and isolation mode, but it does not
 materialize the temporary workspace, create the detached worktree, copy files,

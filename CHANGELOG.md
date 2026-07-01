@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-07-01
+
+### Added
+
+- Stateless `call` mode for every engine (`delegate <engine> call "prompt"`, plus `droid MODEL call`). Call mode sends a one-hop prompt to a model and returns its output without a project tree, run registry, snapshot, or completion report — the generic "call a model, get the answer back" path for agents that don't need repo context. It runs in an empty temporary cwd that is always cleaned up, even on build-time failure.
+- Call mode is **write-capable by default**, inheriting work-level harness permissions (the equivalent of `work` mode minus a repo). A new `--read-only` flag (and `readOnly` JSON input field) opts into the LLM-as-judge/grader contract: it drops the child to each engine's `safe`-mode read-only capability and prepends a neutralizing preamble telling the model there is nothing to inspect or mutate. `--read-only` applies only to `call` and is rejected with `safe`/`work`. Pairs with Codex `--output-schema` for structured verdicts. See `examples/task.judge.json`.
+- Call JSON output includes `textChars` and `textTruncated` so callers can detect when bounded assistant text kept only the head and tail of a large response. Human-mode `dry-run` now prints `warning:` lines.
+
+### Security
+
+- Call mode is not a security sandbox. The effective harness policy resolves through the work/safe tiers (default call keeps work-tier web-search/network access; `--read-only` call gets the safe policy), and work-mode approval/sandbox bypass never leaks into call mode. On engines without a native read-only sandbox (Cursor, Droid, Kimi) the neutralizing preamble is the only restriction under `--read-only`; `docs/security-model.md` documents the boundary.
+
 ## [0.8.1] - 2026-07-01
 
 ### Fixed
@@ -171,6 +183,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Releases before 0.1.3 predate this changelog.
 
+[0.9.0]: https://github.com/treygoff24/delegate-agent/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/treygoff24/delegate-agent/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/treygoff24/delegate-agent/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/treygoff24/delegate-agent/compare/v0.6.0...v0.7.0

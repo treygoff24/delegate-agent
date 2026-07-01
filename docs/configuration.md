@@ -194,7 +194,7 @@ Controls local run recording.
 ```
 
 - `defaultModel`: optional model string. `null` lets Codex choose its own default.
-- `defaultReasoningEffort`: optional non-empty effort string. When a Codex model resolves (run input or `codex.defaultModel`) and supports the level, Delegate emits a Codex config override; otherwise the run proceeds without reasoning effort and records a warning. An explicit `--reasoning-effort` flag still fails closed and requires a resolved model.
+- `defaultReasoningEffort`: optional non-empty effort string. When a Codex model resolves (run input or `codex.defaultModel`) and supports the level, Delegate emits a Codex config override; otherwise the run proceeds without reasoning effort and records a warning. An explicit `--reasoning-effort` flag fails closed for unsupported levels, but can target the Codex harness default model when no model is configured.
 - `profile`: optional Codex CLI config overlay name. It is config-only; JSON run input cannot set it.
 - `fallbackProfile`: optional top-level `profiles.definitions` name for one quota-limit retry on tracked Codex runs. The fallback profile must define `env.CODEX_HOME`.
 - `workSandbox`: `read-only`, `workspace-write`, or `danger-full-access` for Codex work mode when full bypass is not enabled.
@@ -386,15 +386,16 @@ Supported boolean policy keys: `networkAccess`, `webSearch`, `bypassApprovalsAnd
 }
 ```
 
-Allowed values are `auto`, `none`, and `worktree`. For Cursor, Claude, Droid, and Kimi
-safe mode, an effective value of `none` is rejected because those safe contracts
-depend on Delegate's temporary workspace/config boundary. Use `auto` or
-`worktree` for those safe-mode harnesses. Codex safe can use `none` because the
-Codex read-only sandbox remains active.
+Allowed values are `auto`, `none`, and `worktree`. For Cursor, Claude, Grok,
+Droid, and Kimi safe mode, an effective value of `none` is normalized to `auto`
+because those safe contracts depend on Delegate's temporary workspace/config
+boundary. Explicit per-run CLI/JSON `none` requests also emit a warning; a
+config default is normalized without a separate per-run warning. Codex safe can
+use `none` because the Codex read-only sandbox remains active.
 
 Embedded defaults:
 
-- `safe`: `auto`. Cursor, Claude, Droid, Codex, and Kimi safe use temporary workspace isolation by default.
+- `safe`: `auto`. Cursor, Claude, Grok, Droid, Codex, and Kimi safe use temporary workspace isolation by default.
 - `work`: `none`. Work mode runs in the real workspace unless you opt into worktree isolation.
 
 ### `worktrees`

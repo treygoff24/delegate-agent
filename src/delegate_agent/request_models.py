@@ -45,6 +45,7 @@ class LaunchOptions:
     reasoning_effort: str | None = None
     progress_intent: str | None = None
     forbid_commit: bool = False
+    read_only: bool = False
     dry_run: bool = False
 
 
@@ -141,6 +142,7 @@ class Request:
     env_overrides: dict[str, str] | None = None
     auth_profile: str | None = None
     fallback_auth_profile: str | None = None
+    cleanup_workspace: bool = False
     profile_resolution: profiles.ProfileResolution = field(
         default_factory=profiles.empty_profile_resolution
     )
@@ -174,3 +176,4 @@ class EngineBuildInput:
     effort_source: str | None
     cache: JsonObject | None
     output_schema: str | None = None
+    call_read_only: bool = False

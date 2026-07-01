@@ -220,10 +220,12 @@ class ValidationTests(unittest.TestCase):
             self.delegate.resolve_prompt([], None, TtyStdin())
         self.assertEqual(ctx.exception.error, "missing_prompt")
 
-    def test_control_characters_fail(self):
-        for bad in ["hello\x00", "hello\x01"]:
-            with self.subTest(bad=repr(bad)), self.assertRaises(self.delegate.DelegateError):
-                self.delegate.validate_prompt(bad)
+    def test_control_characters_are_sanitized(self):
+        self.assertEqual(self.delegate.validate_prompt("he\x00llo\x01"), "hello")
+        self.assertEqual(self.delegate.validate_prompt("a\nb\tc\rd"), "a\nb\tc\rd")
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.validate_prompt("\x00\x01")
+        self.assertEqual(ctx.exception.error, "empty_prompt")
 
     def test_run_input_json_cwd_same_workspace_succeeds(self):
         repo = make_git_repo()
@@ -901,39 +903,42 @@ class ValidationTests(unittest.TestCase):
             )
         self.assertIn("must be one of", str(ctx.exception).lower())
 
-    def test_resolve_isolation_rejects_safe_none_for_prompt_only_harnesses(self):
+    def test_resolve_isolation_normalizes_safe_none_for_isolation_required_harnesses(self):
         config_mod = load_config_module()
-        for engine in ("cursor", "droid", "kimi"):
+        for engine in ("cursor", "droid", "kimi", "claude", "grok"):
             with self.subTest(engine=engine):
-                with self.assertRaises(config_mod.InvalidIsolationError) as ctx:
+                self.assertEqual(
                     config_mod.resolve_isolation(
                         cli_value="none",
                         loaded_config=config_mod.DEFAULT_CONFIG,
                         engine=engine,
                         mode="safe",
-                    )
-                self.assertIn(f"{engine} safe mode", str(ctx.exception))
+                    ),
+                    "auto",
+                )
 
-    def test_resolve_isolation_rejects_input_json_safe_none_for_droid(self):
+    def test_resolve_isolation_normalizes_input_json_safe_none_for_droid(self):
         config_mod = load_config_module()
-        with self.assertRaises(config_mod.InvalidIsolationError) as ctx:
+        self.assertEqual(
             config_mod.resolve_isolation(
                 input_json_value="none",
                 loaded_config=config_mod.DEFAULT_CONFIG,
                 engine="droid",
                 mode="safe",
-            )
-        self.assertIn("input JSON isolation", str(ctx.exception))
+            ),
+            "auto",
+        )
 
-    def test_resolve_isolation_rejects_config_safe_none_for_kimi(self):
+    def test_resolve_isolation_normalizes_config_safe_none_for_kimi(self):
         config_mod = load_config_module()
-        with self.assertRaises(config_mod.InvalidIsolationError) as ctx:
+        self.assertEqual(
             config_mod.resolve_isolation(
                 loaded_config={"isolation": {"safe": "none"}},
                 engine="kimi",
                 mode="safe",
-            )
-        self.assertIn("config isolation.safe", str(ctx.exception))
+            ),
+            "auto",
+        )
 
     def test_resolve_isolation_allows_codex_safe_none_and_work_none(self):
         config_mod = load_config_module()

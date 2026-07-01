@@ -52,6 +52,15 @@ prepend_skill_review_instructions = prompt_instructions.prepend_skill_review_ins
 append_completion_report_instructions = prompt_instructions.append_completion_report_instructions
 
 
+def _bounded_call_fallback_text(text: str) -> str:
+    if len(text) <= harness_events.ASSISTANT_TEXT_LIMIT:
+        return text
+    head = text[: harness_events.ASSISTANT_TEXT_HEAD]
+    tail = text[-harness_events.ASSISTANT_TEXT_TAIL :]
+    omitted = len(text) - harness_events.ASSISTANT_TEXT_HEAD - harness_events.ASSISTANT_TEXT_TAIL
+    return f"{head}\n\n… [{omitted} chars omitted] …\n\n{tail}"
+
+
 class RunnerLaunchError(RuntimeError):
     def __init__(self, error: str, message: str) -> None:
         super().__init__(message)
@@ -424,6 +433,7 @@ def completion_json_payload(
     stdout_bytes: int,
     stderr_bytes: int,
     completion_report_written: bool = False,
+    assistant_meta: JsonObject | None = None,
     extra: JsonObject | None = None,
 ) -> JsonObject:
     payload: JsonObject = {
@@ -456,6 +466,8 @@ def completion_json_payload(
         payload["fallbackProfile"] = ctx.fallback_auth_profile
     run_metadata.add_run_metadata_payload_fields(payload, ctx)
     reasoning.add_reasoning_payload_fields(payload, ctx)
+    if assistant_meta is not None:
+        payload.update(assistant_meta)
 
     # Worktree cleanup commands for persistent worktrees.
     cleanup = _worktree_cleanup_commands(ctx)
@@ -566,6 +578,17 @@ class TrackedCaptureResult:
     stdout_bytes: int
     stderr_bytes: int
     stdin_failures: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class CallResult:
+    text: str
+    exit_code: int
+    duration_ms: int
+    stdout_bytes: int
+    stderr_bytes: int
+    text_chars: int
+    text_truncated: bool
 
 
 @dataclass(frozen=True)
@@ -972,6 +995,7 @@ def _tracked_result(
 ) -> tuple[int, JsonObject | None]:
     ok = finalization.exit_code == 0
     if json_mode:
+        _assistant_text, assistant_meta = capture.accumulator.bounded_assistant_text()
         payload = completion_json_payload(
             ctx,
             ok=ok,
@@ -981,6 +1005,7 @@ def _tracked_result(
             stdout_bytes=capture.stdout_bytes,
             stderr_bytes=capture.stderr_bytes,
             completion_report_written=finalization.report_written,
+            assistant_meta=assistant_meta,
             extra=finalization.extra,
         )
         return finalization.exit_code, payload
@@ -1153,6 +1178,75 @@ def execute_tracked(
         extra=fallback_extra,
     )
     return _tracked_result(ctx, capture, finalization, json_mode=json_mode, stdout=stdout)
+
+
+def execute_call(
+    argv: list[str],
+    cwd: str,
+    *,
+    harness: str,
+    stdin_text: str | None = None,
+    prompt_file_text: str | None = None,
+    prompt_file_placeholder: str | None = None,
+    env_overrides: dict[str, str] | None = None,
+) -> CallResult:
+    """Run a one-shot stateless model call and return parsed assistant text."""
+    if stdin_text is not None and prompt_file_text is not None:
+        raise ValueError("stdin_text and prompt_file_text are mutually exclusive")
+    launch_argv, prompt_temp_dir = _materialize_prompt_file_argv(
+        argv,
+        prompt_file_text=prompt_file_text,
+        prompt_file_placeholder=prompt_file_placeholder,
+    )
+    env = profiles.child_environment(overrides=env_overrides)
+    started = time.monotonic()
+    try:
+        try:
+            run_kwargs: dict[str, object] = {
+                "cwd": cwd,
+                "env": env,
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.PIPE,
+                "check": False,
+            }
+            if stdin_text is None:
+                run_kwargs["stdin"] = subprocess.DEVNULL
+            else:
+                run_kwargs["input"] = stdin_text.encode("utf-8")
+            completed = subprocess.run(  # nosec B603 - Delegate intentionally launches validated harness argv with shell=False.
+                launch_argv,
+                **run_kwargs,
+            )
+        except OSError as exc:
+            raise _runner_launch_error(launch_argv, cwd, exc) from exc
+    finally:
+        _cleanup_prompt_file_dir(prompt_temp_dir)
+
+    stdout_bytes = len(completed.stdout or b"")
+    stderr_bytes = len(completed.stderr or b"")
+    stdout_text = (completed.stdout or b"").decode("utf-8", errors="replace")
+    accumulator = harness_events.StreamAccumulator(harness=harness)
+    for line in stdout_text.splitlines():
+        accumulator.ingest_line(line)
+    text, meta = accumulator.bounded_assistant_text()
+    if text:
+        text_chars = int(meta.get("assistantTextChars", len(text)))
+        text_truncated = bool(meta.get("assistantTextTruncated", False))
+    else:
+        # No structured assistant events parsed: fall back to raw stdout, bounded.
+        raw = stdout_text.strip()
+        text = _bounded_call_fallback_text(raw)
+        text_chars = len(raw)
+        text_truncated = len(raw) > harness_events.ASSISTANT_TEXT_LIMIT
+    return CallResult(
+        text=text,
+        exit_code=completed.returncode,
+        duration_ms=int((time.monotonic() - started) * MILLISECONDS_PER_SECOND),
+        stdout_bytes=stdout_bytes,
+        stderr_bytes=stderr_bytes,
+        text_chars=text_chars,
+        text_truncated=text_truncated,
+    )
 
 
 def execute_passthrough(

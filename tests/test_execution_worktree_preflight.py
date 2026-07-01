@@ -246,24 +246,25 @@ class ExecutionWorktreePreflightTests(ExecutionTestBase):
         self.assertEqual(ctx.exception.error, "pass_through_with_persistent_isolation")
         self.assertIn("persistent worktree runs", ctx.exception.message)
 
-    # -- Cursor safe --isolation none fails closed before source workspace use --
+    # -- Cursor safe --isolation none normalizes before source workspace use --
 
-    def test_cursor_safe_isolation_none_rejected(self):
+    def test_cursor_safe_isolation_none_normalizes_to_auto(self):
         """Cursor safe cannot disable the temporary isolation boundary."""
         repo, _git_cd = self._make_git_repo_with_commit()
         source_cursor_config = Path(repo.name) / ".cursor" / "cli.json"
         self.assertFalse(source_cursor_config.exists())
-        with self.assertRaises(self.delegate.delegate_config.InvalidIsolationError) as ctx:
+        self.assertEqual(
             self.delegate.delegate_config.resolve_isolation(
                 cli_value="none",
                 loaded_config=self.delegate.DEFAULT_CONFIG,
                 engine="cursor",
                 mode="safe",
-            )
-        self.assertIn("cursor safe mode", str(ctx.exception))
+            ),
+            "auto",
+        )
         self.assertFalse(
             source_cursor_config.exists(),
-            "Rejected --isolation none must not write source .cursor/cli.json",
+            "Normalized --isolation none must not write source .cursor/cli.json",
         )
 
     def test_safe_isolated_request_preserves_request_metadata(self):

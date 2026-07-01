@@ -228,7 +228,7 @@ class OverviewTests(unittest.TestCase):
         self.assertEqual(registry_top_level, set(TOP_LEVEL_COMMANDS) | {"help"})
 
     def test_overview_advertises_codex_output_schema(self):
-        self.assertIn("codex {safe,work}", self.overview)
+        self.assertIn("codex {safe,work,call}", self.overview)
         self.assertIn("--output-schema FILE", self.overview)
 
 

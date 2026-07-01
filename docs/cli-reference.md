@@ -1,6 +1,6 @@
 # CLI reference and JSON contracts
 
-Use `delegate --help` for the exact command list from the installed version. Global options must appear before the subcommand, except `--json` is also accepted in launch and `dry-run` option tails before inline prompt text begins.
+Use `delegate --help` for the exact command list from the installed version. Global options must appear before the subcommand, except `--json` and `--isolation` are also accepted in launch and `dry-run` option tails before inline prompt text begins.
 
 ## Global options
 
@@ -21,24 +21,30 @@ Use `delegate --help` for the exact command list from the installed version. Glo
 ```bash
 delegate cursor safe [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 delegate cursor work [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate cursor call [--read-only] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 
 delegate droid MODEL_ALIAS safe [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 delegate droid MODEL_ALIAS work [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate droid MODEL_ALIAS call [--read-only] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 
 delegate codex safe [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [--output-schema FILE] [prompt...]
 delegate codex work [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [--output-schema FILE] [prompt...]
+delegate codex call [--read-only] [--reasoning-effort LEVEL] [--prompt-file PATH] [--output-schema FILE] [prompt...]
 
 delegate claude safe [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 delegate claude work [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate claude call [--read-only] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 
 delegate grok safe [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 delegate grok work [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate grok call [--read-only] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 
 delegate kimi safe [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 delegate kimi work [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate kimi call [--read-only] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 ```
 
-Prompt sources are direct arguments, `--prompt-file`, or Delegate stdin. After
+Prompt sources are direct arguments, `--prompt-file`, or Delegate stdin. Raw C0 control characters other than newline, carriage return, and tab are stripped before launch; a prompt that becomes empty fails fast. After
 Delegate resolves the prompt, Codex and Claude prompts are passed to the child runtime over
 stdin. Droid and Grok prompts are written to a private temporary prompt file and passed
 with Droid's documented `--file` option or Grok's `--prompt-file`. Cursor Agent currently only exposes
@@ -46,13 +52,15 @@ positional prompt input, and Kimi Code prompt mode currently uses `--prompt`,
 so those launches still use argv transport; Delegate redacts Cursor and Kimi
 prompt argv in dry-run output and run manifests.
 
-For launch and `dry-run` commands, `--json` is unambiguous before inline prompt
-text starts and may appear with launch options, such as `delegate codex work
---prompt-file task.md --json`. After prompt text begins, a later `--json`
-still fails with `misplaced_global_option`; use `--prompt-file` or stdin for
-literal flag-like prompt text.
+For launch and `dry-run` commands, `--json` and `--isolation auto|none|worktree`
+are unambiguous before inline prompt text starts and may appear with launch
+options, such as `delegate codex work --prompt-file task.md --json` or
+`delegate codex work --isolation worktree "Implement..."`. After prompt text
+begins, a later `--json` or `--isolation` still fails with
+`misplaced_global_option`; use `--prompt-file` or stdin for literal flag-like
+prompt text.
 
-`--reasoning-effort LEVEL` is optional and parsed only before prompt text begins. Unsupported model/effort pairs fail closed before launch with `unsupported_reasoning_effort`. It affects only model reasoning depth, cost, or latency; it does not change `safe`/`work` permissions, sandboxing, approvals, network policy, or edit capability. Cursor effort is model-selection based and requires `cursor.reasoningEffortModels`; Droid emits `--reasoning-effort LEVEL`; Codex emits a `model_reasoning_effort` config override after the model is resolved; Claude emits Claude Code `--effort LEVEL`; Grok emits Grok `--effort LEVEL` (`low`, `medium`, `high`, `xhigh`, `max`). Kimi does not support reasoning effort in v1.
+`--reasoning-effort LEVEL` is optional and parsed only before prompt text begins. Unsupported model/effort pairs fail closed before launch with `unsupported_reasoning_effort`. It affects only model reasoning depth, cost, or latency; it does not change `safe`/`work`/`call` permissions, sandboxing, approvals, network policy, or edit capability. Cursor effort is model-selection based and requires `cursor.reasoningEffortModels`; Droid emits `--reasoning-effort LEVEL`; Codex emits a `model_reasoning_effort` config override for the resolved model, or for the Codex harness default model when no `codex.defaultModel` is configured and the request was explicit; Claude emits Claude Code `--effort LEVEL`; Grok emits Grok `--effort LEVEL` (`low`, `medium`, `high`, `xhigh`, `max`). Kimi does not support reasoning effort in v1.
 
 `--progress` enables parent progress heartbeats on stderr for tracked foreground
 runs. `--no-progress` disables them even when `progress.enabled` is true in
@@ -82,7 +90,7 @@ auth/env selection happens.
 Usage:
 
 ```bash
-delegate [--json] [--isolation auto|none|worktree] codex {safe,work} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [--output-schema FILE] [prompt...]
+delegate [--json] [--isolation auto|none|worktree] codex {safe,work,call} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [--output-schema FILE] [prompt...]
 ```
 
 - Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff. Codex safe always uses `--sandbox read-only`. Under `--isolation auto`, Codex safe is the only safe harness that may opt out with `--isolation none`, because Codex still keeps its read-only sandbox active.
@@ -95,6 +103,7 @@ Examples:
 ```bash
 delegate codex safe "Review this repo for regressions; report file/line/severity."
 delegate codex work "Implement the scoped task; report changed files and tests."
+delegate codex call "Summarize this context in three bullets."
 delegate --json codex safe --output-schema findings.schema.json "Return one record per finding."
 delegate --isolation worktree codex work "Implement the feature in a persistent worktree."
 ```
@@ -104,7 +113,7 @@ delegate --isolation worktree codex work "Implement the feature in a persistent 
 Usage:
 
 ```bash
-delegate [--json] [--isolation auto|none|worktree] claude {safe,work} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate [--json] [--isolation auto|none|worktree] claude {safe,work,call} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 ```
 
 - Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff. Under `--isolation auto`, Claude safe uses `--permission-mode plan`, `--strict-mcp-config`, Read/Grep/Glob, and selected read-only Bash tools such as `git diff`/`git status`.
@@ -119,6 +128,7 @@ Examples:
 ```bash
 delegate claude safe "Review this repo for regressions; report file/line/severity."
 delegate claude work "Implement the scoped task; report changed files and tests."
+delegate claude call "Summarize this context in three bullets."
 delegate --isolation worktree claude work "Implement the feature in a persistent worktree."
 ```
 
@@ -127,7 +137,7 @@ delegate --isolation worktree claude work "Implement the feature in a persistent
 Usage:
 
 ```bash
-delegate [--json] [--isolation auto|none|worktree] grok {safe,work} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate [--json] [--isolation auto|none|worktree] grok {safe,work,call} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 ```
 
 - Safe mode reviews your **current working tree** in an isolated throwaway copy plus Grok read-only controls (`--sandbox read-only`, `--permission-mode dontAsk` by default). Delegate does not use Grok `plan` mode for safe review.
@@ -141,6 +151,7 @@ Examples:
 ```bash
 delegate grok safe "Review this repo for regressions; report file/line/severity."
 delegate grok work "Implement the scoped task; report changed files and tests."
+delegate grok call "Summarize this context in three bullets."
 delegate --isolation worktree grok work "Implement the feature in a persistent worktree."
 ```
 
@@ -149,7 +160,7 @@ delegate --isolation worktree grok work "Implement the feature in a persistent w
 Usage:
 
 ```bash
-delegate [--json] [--isolation auto|none|worktree] kimi {safe,work} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate [--json] [--isolation auto|none|worktree] kimi {safe,work,call} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 ```
 
 - Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff. Under `--isolation auto`, Kimi safe uses a read-only safety prompt. Delegate intentionally avoids Kimi `--plan` in safe mode. Kimi prompt mode auto-approves tool actions, so the isolation is the effective write boundary; the safety prompt is advisory.
@@ -163,13 +174,59 @@ Examples:
 ```bash
 delegate kimi safe "Review this repo for regressions; report file/line/severity."
 delegate kimi work "Implement the scoped task; report changed files and tests."
+delegate kimi call "Summarize this context in three bullets."
 delegate --isolation worktree kimi work "Implement the feature in a persistent worktree."
 ```
+
+### Stateless `call` mode
+
+`call` is the one-hop model-call form of Delegate: "work mode minus a repo." It
+gives a child runtime a prompt with no project tree to resolve, captures the
+final assistant text, and exits without creating a tracked run — so you can call
+a model to *do something* (or to *judge something*) from anywhere, including a
+non-git directory.
+
+```bash
+delegate codex call "Write a Python script that finds the 500th prime and run it."
+delegate --json grok call --read-only --prompt-file rubric.md
+delegate --json codex call --read-only --output-schema verdict.json --prompt-file rubric.md
+```
+
+Call mode uses an empty temporary cwd instead of resolving the current repo, and
+it deletes that cwd after the child exits. It does not write `.delegate/runs`,
+create snapshots, inject safe/work skill or completion-report framing, emit
+progress heartbeats, or honor persistent worktree/commit policy options. JSON
+output returns fields such as `ok`, `status`, `exitCode`, `engine`, `mode`,
+`model`, `text`, `textChars`, `textTruncated`, `stdoutBytes`, `stderrBytes`,
+reasoning metadata, and `warnings`. `textTruncated` is `true` when the returned
+`text` was bounded (large outputs keep the head and tail); `textChars` is the
+full untruncated character count.
+
+**Default call is work-level.** A bare `call` grants the child the same
+capability as `work` (it can write files, run commands, and use the network in
+the temporary cwd) — it just skips the git/worktree ceremony. It is **not** a
+security sandbox: the harness is not confined to the temp cwd, so treat a
+default call like a `work` run and only give it prompts you trust.
+
+**`--read-only` is the stateless judge/completion contract.** It drops the child
+to read-only capability (matching each engine's `safe`-mode restriction) and
+prepends a short evaluator preamble telling the model there is no repository to
+inspect — which stops non-Codex engines from derailing into "let me inspect the
+changed files…" on a repo-flavored prompt. Pair it with `--output-schema` (Codex)
+for structured verdicts. Use `--read-only` for any LLM-as-judge, grader, or
+oracle use where the text is the product and the model must not act.
+
+`--read-only` applies only to `call`; passing it with `safe`/`work` is rejected.
+Because call mode is stateless, `--cwd`, `--isolation`, `--pass-through`,
+`--progress`, `--forbid-commit`, and markdown completion reports are rejected.
+Use `safe` or `work` when the child should see the project tree or when you need
+run registry inspection.
 
 ### Dry-run
 
 ```bash
-delegate --json dry-run codex safe --reasoning-effort high "Review only."  # requires codex.defaultModel
+delegate --json dry-run codex safe --reasoning-effort high "Review only."
+delegate --json dry-run codex call "Summarize this prompt."
 delegate --json dry-run claude safe --reasoning-effort high "Review only."
 delegate --json dry-run grok safe --reasoning-effort high "Review only."
 delegate --json dry-run cursor work --prompt-file task.md
@@ -209,7 +266,10 @@ Typical dry-run JSON fields:
 
 When a profile is active, dry-run and completion payloads add `authProfile` (the resolved profile name) and, when a Codex fallback profile is configured, `fallbackProfile`. Dry-run also adds `profileEnv` (the injected env map, with values redacted). These keys are omitted when no profile is active.
 
-`--isolation none` is rejected for Cursor, Claude, Droid, and Kimi safe mode because it would remove the temporary workspace/config boundary those safe contracts depend on. Codex safe can use `none` because Codex still runs with its read-only sandbox.
+For Cursor, Claude, Grok, Droid, and Kimi safe mode, an explicit `--isolation none`
+is normalized to `auto` with a warning because those safe contracts depend on
+the temporary workspace/config boundary. Codex safe can use `none` because Codex
+still runs with its read-only sandbox.
 
 Persistent worktree dry-runs may also include `plannedBranch` and `plannedExecutionCwd`; those are plans, not created resources. Temporary safe dry-runs usually keep `plannedExecutionCwd` unset because no temporary worktree or directory copy has been created.
 
@@ -279,13 +339,13 @@ Supported input keys:
 ```
 
 - `engine`: `cursor`, `droid`, `codex`, `claude`, `grok`, or `kimi`.
-- `mode`: `safe` or `work`.
+- `mode`: `safe`, `work`, or `call`.
 - `model`: Droid requires a configured local alias; Codex, Claude, and Kimi treat a non-empty string as a model override; Cursor does not accept per-run model aliases in v1.
-- `cwd`: optional workspace path. Git directories resolve to the repo root.
-- `isolation`: optional `auto`, `none`, or `worktree`. `null` is invalid. `none` is rejected for Cursor, Claude, Droid, and Kimi safe mode; use `auto` or `worktree`.
+- `cwd`: optional workspace path. Git directories resolve to the repo root. Omit it for `mode: "call"`, which always uses an empty temporary cwd.
+- `isolation`: optional `auto`, `none`, or `worktree`. `null` is invalid. `mode: "call"` rejects isolation. For Cursor, Claude, Grok, Droid, and Kimi safe mode, `none` is normalized to `auto` with a warning.
 - `reasoningEffort`: optional non-empty effort string. It overrides provider `defaultReasoningEffort` for that JSON run.
-- `progress`: optional boolean. `true` enables parent progress heartbeats on stderr; `false` disables them even when `progress.enabled` is true in config. When omitted, config `progress.enabled` applies (default `false`).
-- `forbidCommit`: optional boolean. `true` requires `mode: "work"` with persistent worktree isolation and fails the run if the child creates commits.
+- `progress`: optional boolean. `true` enables parent progress heartbeats on stderr; `false` disables them even when `progress.enabled` is true in config. When omitted, config `progress.enabled` applies (default `false`). `mode: "call"` rejects progress.
+- `forbidCommit`: optional boolean. `true` requires `mode: "work"` with persistent worktree isolation and fails the run if the child creates commits. `mode: "call"` rejects commit policy.
 - `outputSchema`: optional path to a JSON Schema for Codex's final message. Codex-only; same semantics as `--output-schema`. Other engines fail with `unsupported_output_schema`.
 - `prompt`: required task prompt.
 
@@ -307,7 +367,7 @@ delegate --json capabilities refresh
 delegate agent-help
 ```
 
-`describe` reports version, engines, modes, supported isolation values, prompt transforms, effective policy, top-level profile config metadata, and representative argv shapes. It also includes a `commands` catalog (each entry has `command` and `summary`) so an agent can enumerate the whole command surface in one call. `models` reports configured Cursor, Droid, Codex, Claude, and Kimi model settings. Discovery output applies best-effort credential scrubbing; model IDs and paths are shown verbatim. Agents should start with `--summary` for a compact inventory, then use raw output only when needed.
+`describe` reports version, engines, modes, supported isolation values, prompt transforms, effective policy, top-level profile config metadata, and representative argv shapes. It also includes a `commands` catalog (each entry has `command` and `summary`) so an agent can enumerate the whole command surface in one call. `models` reports configured Cursor, Droid, Codex, Claude, Grok, and Kimi model settings. Discovery output applies best-effort credential scrubbing; model IDs and paths are shown verbatim. Agents should start with `--summary` for a compact inventory, then use raw output only when needed.
 
 Both `describe` and `models` include provenance fields useful for detecting installed-runtime drift:
 
@@ -402,6 +462,9 @@ Common JSON fields for tracked run completion:
   "isolationLifecycle": "temporary",
   "preservedWorkspace": false,
   "progressRequested": false,
+  "assistantText": "final assistant text when recoverable",
+  "assistantTextChars": 37,
+  "assistantTextTruncated": false,
   "snapshotCommand": "delegate snapshot codex",
   "completionReportCommand": "delegate run-output codex --completion-report"
 }
@@ -491,4 +554,4 @@ JSON error payloads use this shape:
 }
 ```
 
-Fields may grow over time. Agent callers should check `ok`, `error`, `exitCode`, `alias`, `runId`, and documented schema names rather than depending on object key order.
+Fields may grow over time. Agent callers should check `ok`, `error`, `exitCode`, tracked-run fields such as `alias` and `runId`, call-mode fields such as `text`, and documented schema names rather than depending on object key order.
