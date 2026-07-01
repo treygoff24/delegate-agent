@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2026-07-01
+
+### Fixed
+
+- Launch and `dry-run` commands now accept `--json` in the launch option tail before inline prompt text begins, so agent callers can append it after flags such as `--prompt-file` without tripping the misplaced-global guard. A later `--json` after prompt text still fails closed as ambiguous flag-like prompt text.
+
 ## [0.8.0] - 2026-06-29
 
 ### Added
@@ -165,6 +171,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Releases before 0.1.3 predate this changelog.
 
+[0.8.1]: https://github.com/treygoff24/delegate-agent/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/treygoff24/delegate-agent/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/treygoff24/delegate-agent/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/treygoff24/delegate-agent/compare/v0.5.0...v0.6.0

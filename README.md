@@ -75,7 +75,7 @@ delegate --json models
 delegate --json capabilities
 ```
 
-Discover commands as you go: `delegate <command> --help` prints focused help for any command path, and `delegate --json <command> --help` returns an agent-friendly spec of its usage, arguments, and options. `delegate --json describe` includes a `commands` catalog of the whole surface. `delegate --json capabilities` reports reasoning-effort support without launching a child runtime.
+Discover commands as you go: `delegate <command> --help` prints focused help for any command path, and `delegate --json <command> --help` returns an agent-friendly spec of its usage, arguments, and options. For launch and `dry-run` commands, `--json` may also appear before inline prompt text begins, for example `delegate codex work --prompt-file task.md --json`. `delegate --json describe` includes a `commands` catalog of the whole surface. `delegate --json capabilities` reports reasoning-effort support without launching a child runtime.
 
 From this development checkout, use `python3 bin/delegate.py ...` instead of an installed `delegate` shim.
 

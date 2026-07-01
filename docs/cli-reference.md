@@ -1,6 +1,6 @@
 # CLI reference and JSON contracts
 
-Use `delegate --help` for the exact command list from the installed version. Global options must appear before the subcommand.
+Use `delegate --help` for the exact command list from the installed version. Global options must appear before the subcommand, except `--json` is also accepted in launch and `dry-run` option tails before inline prompt text begins.
 
 ## Global options
 
@@ -45,6 +45,12 @@ with Droid's documented `--file` option or Grok's `--prompt-file`. Cursor Agent 
 positional prompt input, and Kimi Code prompt mode currently uses `--prompt`,
 so those launches still use argv transport; Delegate redacts Cursor and Kimi
 prompt argv in dry-run output and run manifests.
+
+For launch and `dry-run` commands, `--json` is unambiguous before inline prompt
+text starts and may appear with launch options, such as `delegate codex work
+--prompt-file task.md --json`. After prompt text begins, a later `--json`
+still fails with `misplaced_global_option`; use `--prompt-file` or stdin for
+literal flag-like prompt text.
 
 `--reasoning-effort LEVEL` is optional and parsed only before prompt text begins. Unsupported model/effort pairs fail closed before launch with `unsupported_reasoning_effort`. It affects only model reasoning depth, cost, or latency; it does not change `safe`/`work` permissions, sandboxing, approvals, network policy, or edit capability. Cursor effort is model-selection based and requires `cursor.reasoningEffortModels`; Droid emits `--reasoning-effort LEVEL`; Codex emits a `model_reasoning_effort` config override after the model is resolved; Claude emits Claude Code `--effort LEVEL`; Grok emits Grok `--effort LEVEL` (`low`, `medium`, `high`, `xhigh`, `max`). Kimi does not support reasoning effort in v1.
 
