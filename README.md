@@ -169,6 +169,14 @@ report when present, a recovered final assistant message when possible, or
 bounded stdout/stderr diagnostics. Use `--completion-report` when you want that
 selector explicitly.
 
+## Task design: cluster related work into fewer, richer delegations
+
+When splitting a project across delegated runs (or any subagents), fewer workers with clustered, related tasks consistently outperform wide fan-outs of narrow siloed tasks. Modern child runtimes carry very large context windows — the scarce resource is coherence across related tasks, not tokens.
+
+- Cluster tasks that share files, schemas, or design trade-offs into one delegation. A single worker that holds the whole entangled cluster can reason about the interactions between its tasks and make globally consistent choices; several siloed workers each make locally reasonable decisions that collide at the seams.
+- Fan out only across genuinely independent units: disjoint file ownership, no shared design decisions, results that do not need to agree with each other.
+- Brief the clustered worker generously. Include the full findings or spec, the decisions already made, and how the tasks relate — context that lets it weigh trade-offs *between* its tasks is the point of clustering.
+
 ## Safe mode, work mode, and worktree isolation
 
 Delegate separates three ideas:
