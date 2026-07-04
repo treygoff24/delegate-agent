@@ -164,10 +164,34 @@ delegate snapshot <alias-or-runId>
 delegate run-output <alias-or-runId>
 ```
 
+Aliases are always numbered (`codex-1`, `cursor-2`); a **bare harness name
+resolves to the latest matching run**, so `delegate run-output codex` reads the
+newest codex run and `delegate run-output codex:glm` the newest matching
+model. Envelopes echo `requestedHandle`/`resolvedHandle`/`resolutionKind` so you
+can confirm which run you addressed.
+
 `run-output` defaults to the best available parent-facing output: a completion
 report when present, a recovered final assistant message when possible, or
 bounded stdout/stderr diagnostics. Use `--completion-report` when you want that
-selector explicitly.
+selector explicitly. Tracked runs also carry a `resultQuality` classification
+(`ok` / `housekeeping_noop` / `empty` / `suspect_short` / `no_assistant_text`),
+and failed or cancelled runs always get a completion report — synthesized when
+the child produced none — so `--completion-report` never dead-ends.
+
+Block on background runs instead of polling, and cancel them cleanly:
+
+```bash
+delegate wait <alias-or-runId>... [--group NAME] [--timeout SEC] [--completion-report]
+delegate cancel <alias-or-runId>
+```
+
+`wait` uses effective status (a dead child is a terminal failure, not a hang)
+and exits `0` when all waited runs succeeded, `1` when any failed or was
+cancelled, and `124` on timeout. `cancel` signals the run's process group
+(SIGTERM, a short grace period, then SIGKILL) with terminal/stale refusal and a
+start-identity check against PID reuse; a cancelled run reports `cancelled`
+rather than a false success. Tag a batch of launches with `--group NAME` and
+`wait`, `runs`, and the worktree commands can select the whole group at once.
 
 ## Task design: cluster related work into fewer, richer delegations
 
@@ -209,9 +233,15 @@ Worktree isolation protects the source checkout from ordinary relative-path edit
 Persistent worktree completions and `worktree list/show` include a work summary
 with dirty state, changed file counts, diff stat, and commits created by the
 child where that summary is available. `--forbid-commit` fails the run if
-commits remain ahead of the creation base when the child exits.
+commits remain ahead of the creation base when the child exits, and it now
+implies `--isolation worktree`.
 
-Temporary safe isolation preserves internal symlinks, but replaces symlinks that point outside the source workspace with inert placeholder files inside the isolated workspace. Delegate reports a warning listing the relative symlink paths it blocked. In Git repositories with no commits yet, Cursor/Codex/Claude/Droid/Kimi safe isolation falls back to a directory copy because Git cannot create a detached worktree from an unborn `HEAD`.
+To carry uncommitted local work into the worktree instead of stashing it, add
+`--include-dirty`: it syncs tracked edits and untracked, non-ignored files into
+the worktree through the same snapshot primitives as safe mode, and tears the
+worktree down before launching the child if that sync fails.
+
+Safe isolation and `--include-dirty` recreate an untracked symlink only when it is relative, resolves inside the source workspace, and its target is not gitignored; any symlink that fails those checks — an absolute target, an escape out of the tree, or a target that is itself a gitignored secret — is replaced with an inert placeholder file, failing closed on any ambiguity. Delegate reports a warning listing the symlink paths it blocked. In Git repositories with no commits yet, Cursor/Codex/Claude/Droid/Kimi safe isolation falls back to a directory copy because Git cannot create a detached worktree from an unborn `HEAD`.
 
 Snapshots and `run-output` redact common credential shapes by default, including authorization headers, bearer/basic tokens, JWT-like strings, and common `token=` / `api_key=` / `password=` values. Use `--no-redact` only when exact output is necessary and safe to display.
 
