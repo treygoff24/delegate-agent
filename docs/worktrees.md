@@ -74,11 +74,11 @@ creation base at exit.
 
 ```bash
 delegate worktree list
-delegate worktree show <alias-or-runId>
+delegate worktree show <handle>
 delegate worktree show --latest cursor
 ```
 
-`worktree show --latest HARNESS` resolves the most recent persistent worktree for that harness. It intentionally ignores newer non-worktree runs from the same harness.
+`worktree show --latest HARNESS` resolves the most recent persistent worktree for that harness. A bare harness handle such as `cursor` does the same in the worktree domain. Both forms intentionally ignore newer non-worktree runs from the same harness. Migration note: old registries that contain a literal bare harness alias remain reachable by run ID for worktree commands.
 
 `worktree show` reports status, path, branch, dirty state, branch merge vs full integration state, ahead/behind counts, work summary, and suggested review or cleanup commands. `worktree list` is read-only unless an enabled auto-prune pass runs before listing; JSON output includes `summary.autoPruneMode` (`disabled`, `attempted`, or `suppressed`) and `summary.readOnly`.
 
@@ -124,7 +124,7 @@ Common statuses:
 Delegate does not merge for you. Use normal Git review and integration from the source checkout:
 
 ```bash
-delegate worktree show <alias-or-runId>
+delegate worktree show <handle>
 git diff <base>..<branch>
 git merge <branch>       # or cherry-pick selected commits
 ```
@@ -134,7 +134,7 @@ Exact branch and diff suggestions are included in `worktree show` output when av
 ## Remove one worktree
 
 ```bash
-delegate worktree remove <alias-or-runId>
+delegate worktree remove <handle>
 ```
 
 Default removal refuses if the worktree has uncommitted changes or the branch is not merged into current source `HEAD`.
@@ -142,10 +142,10 @@ Default removal refuses if the worktree has uncommitted changes or the branch is
 Explicit override flags:
 
 ```bash
-delegate worktree remove <alias-or-runId> --discard-uncommitted
-delegate worktree remove <alias-or-runId> --force-branch
-delegate worktree remove <alias-or-runId> --force
-delegate worktree remove <alias-or-runId> --keep-branch
+delegate worktree remove <handle> --discard-uncommitted
+delegate worktree remove <handle> --force-branch
+delegate worktree remove <handle> --force
+delegate worktree remove <handle> --keep-branch
 ```
 
 - `--discard-uncommitted`: remove even if uncommitted edits would be lost.

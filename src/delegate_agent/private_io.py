@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 from contextlib import suppress
 from pathlib import Path
 
@@ -53,7 +54,7 @@ def write_private_bytes(path: Path, payload: bytes) -> None:
 
 def write_text_atomic(path: Path, text: str, *, encoding: str = "utf-8") -> None:
     """Atomically replace a non-private text file while preserving existing mode."""
-    temp = path.with_name(f".{path.name}.tmp")
+    temp = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
     existing_mode: int | None = None
     try:
         existing_mode = path.stat().st_mode & 0o777
@@ -73,13 +74,18 @@ def write_text_atomic(path: Path, text: str, *, encoding: str = "utf-8") -> None
 
 
 def write_json_atomic(path: Path, payload: JsonObject) -> None:
-    temp = path.with_suffix(path.suffix + ".tmp")
-    write_private_text(
-        temp,
-        json.dumps(payload, indent=2, sort_keys=True) + "\n",
-    )
-    os.replace(temp, path)
-    ensure_private_file(path)
+    temp = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    try:
+        write_private_text(
+            temp,
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        )
+        os.replace(temp, path)
+        ensure_private_file(path)
+    except OSError:
+        with suppress(OSError):
+            os.unlink(temp)
+        raise
 
 
 def read_json_object(path: Path) -> JsonObject | None:

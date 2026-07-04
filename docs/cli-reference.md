@@ -409,10 +409,10 @@ The JSON spec uses these keys:
   "ok": true,
   "command": "worktree remove",
   "summary": "Remove one persistent worktree and, by default, its branch.",
-  "usage": ["delegate [--cwd PATH] [--json] worktree remove <alias-or-runId> [--discard-uncommitted] [--force-branch] [--force] [--keep-branch]"],
-  "arguments": [{"name": "<alias-or-runId>", "required": true, "description": "Worktree handle to remove."}],
+  "usage": ["delegate [--cwd PATH] [--json] worktree remove <handle> [--discard-uncommitted] [--force-branch] [--force] [--keep-branch]"],
+  "arguments": [{"name": "<handle>", "required": true, "description": "Worktree handle to remove."}],
   "options": [{"flag": "--keep-branch", "argument": null, "description": "Remove the worktree but keep its branch."}],
-  "examples": ["delegate worktree remove cursor"],
+  "examples": ["delegate worktree remove cursor-1"],
   "notes": ["A --help token anywhere in the args prints help and removes nothing."],
   "seeAlso": ["worktree list", "worktree prune", "worktree gc"]
 }
@@ -430,11 +430,23 @@ Tracked runs return bounded parent-facing output and store local metadata under 
 
 ```bash
 delegate runs [--active|--running|--stale|--recent] [--harness HARNESS] [--limit N]
-delegate snapshot [--latest HARNESS] [--no-redact] <alias-or-runId>
-delegate run-output <alias-or-runId> [--completion-report] [--stdout] [--stderr] [--tail N] [--max-chars N] [--raw] [--no-redact]
+delegate snapshot [--latest HARNESS] [--no-redact] <handle>
+delegate run-output <handle> [--completion-report] [--stdout] [--stderr] [--tail N] [--max-chars N] [--raw] [--no-redact]
 ```
 
 `delegate runs` defaults to recent runs. `--active` preserves the legacy active view and includes both live `running` runs and `stale` runs. Use `--running` for only live tracked processes and `--stale` for runs recorded as running whose PID is missing or dead. `--active`, `--running`, `--stale`, and `--recent` are mutually exclusive.
+
+Run-scoped handles (`snapshot`, `run-output`, and future wait/cancel commands)
+resolve exact run IDs and numbered aliases first. A bare harness name such as
+`codex` resolves to that harness's latest run, and `harness:modelAlias` (for
+example `droid:glm`) resolves to the latest run for that harness/model alias.
+Generated follow-up commands always use the concrete numbered alias.
+
+v0.10.0 migration note: pre-v0.10 runs that were literally aliased with a bare
+harness name (for example `codex`) are shadowed by the new latest-selector
+semantics, because `delegate snapshot codex` now resolves to the latest `codex`
+run rather than the literal first-run alias. Reach those legacy runs by run ID
+(`delegate snapshot del_20260520T100000Z_abcdef`).
 
 Common JSON fields for tracked run completion:
 
@@ -442,7 +454,7 @@ Common JSON fields for tracked run completion:
 {
   "ok": true,
   "exitCode": 0,
-  "alias": "codex",
+  "alias": "codex-1",
   "runId": "...",
   "harness": "codex",
   "engine": "codex",
@@ -465,8 +477,8 @@ Common JSON fields for tracked run completion:
   "assistantText": "final assistant text when recoverable",
   "assistantTextChars": 37,
   "assistantTextTruncated": false,
-  "snapshotCommand": "delegate snapshot codex",
-  "completionReportCommand": "delegate run-output codex --completion-report"
+  "snapshotCommand": "delegate snapshot codex-1",
+  "completionReportCommand": "delegate run-output codex-1 --completion-report"
 }
 ```
 
@@ -477,9 +489,9 @@ Codex usage-limit fallback fires, the completion payload also includes
 `codexAuthFallback` metadata (reason, the primary and fallback profile names,
 both exit codes, and a redacted primary stderr tail).
 
-Snapshot JSON uses schema `delegate.snapshot.v1` and includes fields such as `alias`, `runId`, `harness`, `status`, `rawStatus`, `effectiveStatus`, `staleReason`, `nextActions`, `cwd`, `executionCwd`, `assistantText`, `recentEvents`, `warnings`, `exitCode`, reasoning metadata, and isolation/worktree metadata when applicable. Inspection commands do not rewrite a stale run's recorded state; they expose the raw recorded status plus the effective status computed from the current PID check.
+Snapshot JSON uses schema `delegate.snapshot.v1` and includes fields such as `alias`, `runId`, `harness`, `status`, `rawStatus`, `effectiveStatus`, `staleReason`, `nextActions`, `cwd`, `executionCwd`, `assistantText`, `recentEvents`, `warnings`, `exitCode`, reasoning metadata, terminal metadata, and isolation/worktree metadata when applicable. Inspection commands do not rewrite a stale run's recorded state; they expose the raw recorded status plus the effective status computed from the current PID check. Run-output and worktree show output include `requestedHandle`, `resolvedHandle`, and `resolutionKind` (`literal`, `latest`, or `latest_model`) when a handle resolves indirectly.
 
-Run-output JSON uses schema `delegate.run-output.v1` and returns selected completion report, stdout, and/or stderr content. By default, secret-like strings are redacted unless `--no-redact` is supplied.
+Run-output JSON uses schema `delegate.run-output.v1` and returns selected completion report, stdout, and/or stderr content. By default, secret-like strings are redacted unless `--no-redact` is supplied. Tracked runs finish in one of the terminal statuses `succeeded`, `failed`, or `cancelled`; explicit harness cancellation/error terminal events override an exit-zero child status.
 
 With no selector, `run-output` prints the best available parent-facing output:
 `completion-report.md` when present, a recovered final assistant message when
@@ -509,9 +521,9 @@ commands before you read raw `.delegate/` files directly.
 
 ```bash
 delegate worktree list [--harness HARNESS] [--status STATUS] [--limit N] [--no-auto-prune]
-delegate worktree show <alias-or-runId>
+delegate worktree show <handle>
 delegate worktree show --latest HARNESS
-delegate worktree remove <alias-or-runId> [--discard-uncommitted] [--force-branch] [--force] [--keep-branch]
+delegate worktree remove <handle> [--discard-uncommitted] [--force-branch] [--force] [--keep-branch]
 delegate worktree prune [--merged] [--older-than DAYS] [--harness HARNESS] [--include-detached] [--dry-run] [--discard-uncommitted] [--force-branch] [--force]
 delegate worktree gc [--dry-run]
 ```
@@ -523,6 +535,11 @@ List/show entry fields include `branchMergedIntoSource` (branch graph only), `me
 Unknown persistent-worktree handles return suggestions scoped to persistent
 worktrees plus a `listCommand` hint (`delegate worktree list`). Run-output and
 snapshot handle suggestions remain scoped to tracked runs.
+
+v0.10.0 migration note: worktree commands (`worktree show/remove/prune`) accept
+a bare harness name (resolves to the latest persistent worktree for that harness)
+or a concrete alias/run ID only. They do not accept `harness:model` selectors,
+unlike `snapshot`/`run-output` which do.
 
 Worktree JSON schemas:
 

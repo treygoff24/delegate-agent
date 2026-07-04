@@ -393,6 +393,10 @@ def decorate_record(
             has_uncommitted_changes=dirty,
         ),
     }
+    if record.get("resolutionKind") in {"latest", "latest_model"}:
+        output["requestedHandle"] = record.get("requestedHandle")
+        output["resolvedHandle"] = record.get("resolvedHandle")
+        output["resolutionKind"] = record.get("resolutionKind")
     registry_status = record.get("registryWorktreeStatus")
     if isinstance(registry_status, str) and registry_status != status:
         output["registryStatusDiffers"] = True
@@ -576,38 +580,62 @@ def resolve_record(
                     next_actions=["delegate worktree list"],
                 )
             )
+        latest_record.update(
+            {
+                "requestedHandle": latest_harness,
+                "resolvedHandle": latest_record.get("alias") or latest_record.get("runId"),
+                "resolutionKind": "latest",
+            }
+        )
         return latest_record
-    else:
-        if handle is None:
-            raise WorktreeManagementError(
-                _error_payload(
-                    "missing_handle",
-                    "A worktree handle is required.",
-                    next_actions=["delegate worktree list"],
-                )
+    if handle is None:
+        raise WorktreeManagementError(
+            _error_payload(
+                "missing_handle",
+                "A worktree handle is required.",
+                next_actions=["delegate worktree list"],
             )
-        resolved = run_registry.resolve_handle(index, handle)
-        if resolved.run_id is None:
-            suggestions = suggest_worktree_handles(registry_root, handle)
-            next_actions = (
-                [f"delegate worktree show {suggestions[0]}"]
-                if suggestions
-                else ["delegate worktree list"]
-            )
+        )
+    if handle in run_registry.HARNESS_NAMES:
+        latest_record = latest_persistent_record_for_harness(registry_root, handle)
+        if latest_record is None:
             raise WorktreeManagementError(
                 _error_payload(
                     "unknown_handle",
-                    (
-                        f"Unknown run handle: {handle}. Suggestions: "
-                        f"{', '.join(suggestions) if suggestions else '(none)'}"
-                    ),
-                    next_actions=next_actions,
-                    suggestions=suggestions,
-                    suggestion_scope="worktrees",
-                    list_command="delegate worktree list",
+                    f"No persistent worktree runs found for harness: {handle}",
+                    next_actions=["delegate worktree list"],
                 )
             )
-        run_id = resolved.run_id
+        latest_record.update(
+            {
+                "requestedHandle": handle,
+                "resolvedHandle": latest_record.get("alias") or latest_record.get("runId"),
+                "resolutionKind": "latest",
+            }
+        )
+        return latest_record
+    resolved = run_registry.resolve_handle(index, handle)
+    if resolved.run_id is None:
+        suggestions = suggest_worktree_handles(registry_root, handle)
+        next_actions = (
+            [f"delegate worktree show {suggestions[0]}"]
+            if suggestions
+            else ["delegate worktree list"]
+        )
+        raise WorktreeManagementError(
+            _error_payload(
+                "unknown_handle",
+                (
+                    f"Unknown run handle: {handle}. Suggestions: "
+                    f"{', '.join(suggestions) if suggestions else '(none)'}"
+                ),
+                next_actions=next_actions,
+                suggestions=suggestions,
+                suggestion_scope="worktrees",
+                list_command="delegate worktree list",
+            )
+        )
+    run_id = resolved.run_id
     index_entry = index.get("runs", {}).get(run_id)
     record = _record_for_run(
         registry_root,

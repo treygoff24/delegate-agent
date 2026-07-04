@@ -298,6 +298,12 @@ class EndToEndTrackingTests(unittest.TestCase):
         self.assertIn(
             COMPLETION_MARKER, (run_path / "completion-report.md").read_text(encoding="utf-8")
         )
+        manifest = json.loads((run_path / "manifest.json").read_text(encoding="utf-8"))
+        index_entry = self.registry.load_index(self.registry_root)["runs"][run_id]
+        self.assertEqual(manifest["modelAlias"], "minimax")
+        self.assertEqual(index_entry["modelAlias"], "minimax")
+        self.assertEqual(manifest["modelResolved"], "e2e-model-id")
+        self.assertEqual(index_entry["modelResolved"], "e2e-model-id")
 
         snapshot = self.run_cli(["snapshot", alias])
         self.assertEqual(snapshot.returncode, 0, snapshot.stderr)
@@ -427,12 +433,12 @@ class EndToEndTrackingTests(unittest.TestCase):
         try:
             self.assertEqual(read_fifo_line(started_fifo, timeout=5), "started")
             index = self.registry.load_index(self.registry_root)
-            run_id = index["aliases"].get("droid")
+            run_id = index["aliases"].get("droid-1")
             self.assertIsNotNone(run_id)
 
             snapshot = self.run_cli(["snapshot", "droid"])
             self.assertEqual(snapshot.returncode, 0, snapshot.stderr)
-            self.assertIn("droid · running", snapshot.stdout)
+            self.assertIn("droid-1 · running", snapshot.stdout)
             self.assertNotIn("stale", snapshot.stdout)
 
             with release_fifo.open("w", encoding="utf-8") as release:
@@ -600,7 +606,7 @@ class EndToEndTrackingTests(unittest.TestCase):
         first = self.run_tracked_droid("first droid")
         self.assertEqual(first.returncode, 0, first.stderr)
         alias1 = parse_alias_from_bounded_stdout(first.stdout)
-        self.assertEqual(alias1, "droid")
+        self.assertEqual(alias1, "droid-1")
 
         second = self.run_tracked_droid("second droid")
         self.assertEqual(second.returncode, 0, second.stderr)
@@ -609,7 +615,7 @@ class EndToEndTrackingTests(unittest.TestCase):
 
         runs = self.run_cli(["runs", "--recent", "--limit", "10"])
         self.assertEqual(runs.returncode, 0, runs.stderr)
-        self.assertIn("droid", runs.stdout)
+        self.assertIn("droid-1", runs.stdout)
         self.assertIn("droid-2", runs.stdout)
 
         snapshot2 = self.run_cli(["snapshot", "droid-2"])
@@ -774,7 +780,7 @@ class EndToEndTrackingTests(unittest.TestCase):
         completed = self.run_cli(["cursor", "work", "cursor e2e"])
         self.assertEqual(completed.returncode, 0, completed.stderr)
         alias = parse_alias_from_bounded_stdout(completed.stdout)
-        self.assertEqual(alias, "cursor")
+        self.assertEqual(alias, "cursor-1")
         run_id, _run_path = self.lookup_run(alias)
         self.assert_registry_files(run_id)
 
@@ -805,7 +811,7 @@ class EndToEndTrackingTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("delegate run codex completed", completed.stdout)
         self.assertIn(
-            f"snapshot: delegate --cwd {self.workspace.resolve()} snapshot codex",
+            f"snapshot: delegate --cwd {self.workspace.resolve()} snapshot codex-1",
             completed.stdout,
         )
 

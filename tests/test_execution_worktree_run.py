@@ -1121,6 +1121,15 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
                     stderr=io.StringIO(),
                 )
             self.assertEqual(code, 0)
+            registry_root = Path(repo.name) / ".delegate"
+            index = self.delegate.run_registry.load_index(registry_root)
+            run_id = next(iter(index["runs"]))
+            index_entry = index["runs"][run_id]
+            manifest = self.delegate.run_registry.load_run_manifest(registry_root, run_id)
+            self.assertEqual(index_entry["modelAlias"], "qwen")
+            self.assertEqual(index_entry["modelResolved"], "real-model-id")
+            self.assertEqual(manifest["modelAlias"], "qwen")
+            self.assertEqual(manifest["modelResolved"], "real-model-id")
             logged = Path(log_file).read_text() if Path(log_file).exists() else ""
             self.assertIn("You are running in a Delegate-created isolated Git worktree", logged)
 

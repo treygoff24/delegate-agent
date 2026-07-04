@@ -448,12 +448,12 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
     "snapshot": CommandSpec(
         name="snapshot",
         summary="Print a bounded snapshot of a tracked run.",
-        usage=("delegate [--json] snapshot [--latest HARNESS] [--no-redact] <alias-or-runId>",),
+        usage=("delegate [--json] snapshot [--latest HARNESS] [--no-redact] <handle>",),
         arguments=(
             ArgSpec(
-                "<alias-or-runId>",
+                "<handle>",
                 False,
-                "Run handle to snapshot. Omit when using --latest.",
+                "Run ID, numbered alias, bare harness latest selector, or harness:modelAlias.",
             ),
         ),
         options=(
@@ -465,10 +465,14 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             OptionSpec("--no-redact", None, "Do not redact secrets in the output."),
         ),
         examples=(
+            "delegate snapshot cursor-1",
             "delegate snapshot cursor",
             "delegate snapshot --latest codex",
         ),
-        notes=("Provide either a handle or --latest HARNESS, not both.",),
+        notes=(
+            "Provide either a handle or --latest HARNESS, not both.",
+            "Bare harness handles resolve to the latest run; generated commands use numbered aliases.",
+        ),
         see_also=("runs", "run-output"),
         unsupported_global_options=("--auth-profile",),
     ),
@@ -509,11 +513,17 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         name="run-output",
         summary="Inspect a tracked run's completion report or captured stdout/stderr.",
         usage=(
-            "delegate [--json] run-output <alias-or-runId> "
+            "delegate [--json] run-output <handle> "
             "[--completion-report] [--stdout] [--stderr] [--tail N] [--max-chars N] "
             "[--raw] [--no-redact]",
         ),
-        arguments=(ArgSpec("<alias-or-runId>", True, "Run handle to inspect."),),
+        arguments=(
+            ArgSpec(
+                "<handle>",
+                True,
+                "Run ID, numbered alias, bare harness latest selector, or harness:modelAlias.",
+            ),
+        ),
         options=(
             OptionSpec("--completion-report", None, "Print the run's completion report."),
             OptionSpec("--stdout", None, "Print captured stdout (defaults to --tail 80)."),
@@ -534,13 +544,14 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             OptionSpec("--no-redact", None, "Do not redact secrets in the output."),
         ),
         examples=(
-            "delegate run-output cursor",
+            "delegate run-output cursor-1",
             "delegate run-output cursor --completion-report",
-            "delegate run-output cursor --stderr --tail 100",
-            "delegate run-output cursor --stdout --max-chars 20000",
+            "delegate run-output cursor-1 --stderr --tail 100",
+            "delegate run-output cursor-1 --stdout --max-chars 20000",
         ),
         notes=(
             "With no selector, prints the best available parent-facing output.",
+            "Bare harness handles resolve to the latest run; generated commands use numbered aliases.",
             "Prefer this over piping launch output through tail.",
             "Non-raw stdout/stderr are bounded by line tail and character cap; use --raw only "
             "when you intentionally need the full stream.",
@@ -673,14 +684,14 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         name="worktree show",
         summary="Show details for one persistent worktree.",
         usage=(
-            "delegate [--cwd PATH] [--json] worktree show <alias-or-runId>",
+            "delegate [--cwd PATH] [--json] worktree show <handle>",
             "delegate [--cwd PATH] [--json] worktree show --latest HARNESS",
         ),
         arguments=(
             ArgSpec(
-                "<alias-or-runId>",
+                "<handle>",
                 False,
-                "Worktree handle to show. Omit when using --latest.",
+                "Worktree run ID, numbered alias, or bare harness latest-worktree selector.",
             ),
         ),
         options=(
@@ -691,10 +702,14 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             ),
         ),
         examples=(
+            "delegate worktree show cursor-1",
             "delegate worktree show cursor",
             "delegate worktree show --latest droid",
         ),
-        notes=("Provide either a handle or --latest HARNESS, not both.",),
+        notes=(
+            "Provide either a handle or --latest HARNESS, not both.",
+            "Bare harness handles resolve to the latest persistent worktree, never a non-worktree run.",
+        ),
         see_also=("worktree list", "worktree remove"),
         unsupported_global_options=("--isolation", "--auth-profile"),
     ),
@@ -702,10 +717,16 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         name="worktree remove",
         summary="Remove one persistent worktree and, by default, its branch.",
         usage=(
-            "delegate [--cwd PATH] [--json] worktree remove <alias-or-runId> "
+            "delegate [--cwd PATH] [--json] worktree remove <handle> "
             "[--discard-uncommitted] [--force-branch] [--force] [--keep-branch]",
         ),
-        arguments=(ArgSpec("<alias-or-runId>", True, "Worktree handle to remove."),),
+        arguments=(
+            ArgSpec(
+                "<handle>",
+                True,
+                "Worktree run ID, numbered alias, or bare harness latest-worktree selector.",
+            ),
+        ),
         options=(
             OptionSpec(
                 "--discard-uncommitted",
@@ -721,8 +742,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             OptionSpec("--keep-branch", None, "Remove the worktree but keep its branch."),
         ),
         examples=(
-            "delegate worktree remove cursor",
-            "delegate worktree remove cursor --keep-branch",
+            "delegate worktree remove cursor-1",
+            "delegate worktree remove cursor-1 --keep-branch",
         ),
         notes=(
             "--keep-branch is mutually exclusive with --force-branch and --force.",
@@ -983,17 +1004,17 @@ def render_overview_text() -> str:
         f"delegate [--cwd PATH] [--json] {iso} dry-run grok {{safe,work,call}} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--read-only] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} dry-run kimi {{safe,work,call}} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--read-only] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} run --input-json FILE",
-        "delegate [--cwd PATH] [--json] snapshot [--latest HARNESS] [--no-redact] <alias-or-runId>",
+        "delegate [--cwd PATH] [--json] snapshot [--latest HARNESS] [--no-redact] <handle>",
         "delegate [--cwd PATH] [--json] runs "
         "[--active|--running|--stale|--recent] [--harness HARNESS] [--limit N]",
-        "delegate [--cwd PATH] [--json] run-output <alias-or-runId> "
+        "delegate [--cwd PATH] [--json] run-output <handle> "
         "[--completion-report] [--stdout] [--stderr] [--tail N] [--max-chars N] "
         "[--raw] [--no-redact]",
         "delegate [--cwd PATH] [--json] worktree list "
         "[--harness HARNESS] [--status STATUS] [--limit N] [--no-auto-prune]",
-        "delegate [--cwd PATH] [--json] worktree show <alias-or-runId>",
+        "delegate [--cwd PATH] [--json] worktree show <handle>",
         "delegate [--cwd PATH] [--json] worktree show --latest HARNESS",
-        "delegate [--cwd PATH] [--json] worktree remove <alias-or-runId> "
+        "delegate [--cwd PATH] [--json] worktree remove <handle> "
         "[--discard-uncommitted] [--force-branch] [--force] [--keep-branch]",
         "delegate [--cwd PATH] [--json] worktree prune "
         "[--merged] [--older-than DAYS] [--harness HARNESS] [--include-detached] [--dry-run] "

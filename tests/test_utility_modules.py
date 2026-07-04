@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import errno
 import sys
 import tarfile
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = str(ROOT / "src")
@@ -17,6 +19,7 @@ import delegate_agent.argv_utils as argv_utils  # noqa: E402
 import delegate_agent.cli as cli  # noqa: E402
 import delegate_agent.json_types as json_types  # noqa: E402
 import delegate_agent.log_output as log_output  # noqa: E402
+import delegate_agent.private_io as private_io  # noqa: E402
 import delegate_agent.prompt_instructions as prompt_instructions  # noqa: E402
 import delegate_agent.prompt_transport as prompt_transport  # noqa: E402
 import delegate_agent.reasoning as reasoning  # noqa: E402
@@ -308,6 +311,24 @@ class UtilityModuleTests(unittest.TestCase):
         self.assertEqual(error.error, "missing_completion_report")
         self.assertEqual(error.diagnostics, {"status": "done"})
         self.assertEqual(error.next_actions, ["delegate run-output del_1 --stdout"])
+
+
+class WriteJsonAtomicCleanupTests(unittest.TestCase):
+    def test_write_json_atomic_unlinks_temp_on_failure(self):
+        """A failed write_json_atomic must not leave .tmp files behind."""
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "state.json"
+
+            def failing_replace(src: str, dst: str) -> None:
+                raise OSError(errno.ENOSPC, "simulated disk full")
+
+            with (
+                mock.patch.object(private_io.os, "replace", failing_replace),
+                self.assertRaises(OSError),
+            ):
+                private_io.write_json_atomic(target, {"ok": True})
+            tmp_files = list(Path(tmp).glob("*.tmp"))
+            self.assertEqual(tmp_files, [], f"left-behind tmp files: {tmp_files}")
 
 
 if __name__ == "__main__":

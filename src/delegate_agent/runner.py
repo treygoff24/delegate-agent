@@ -82,6 +82,8 @@ class RunContext:
     workspace_kind: str
     isolated_workspace: bool
     started_at: str
+    model_alias: str | None = None
+    model_resolved: str | None = None
     creation_context: JsonObject | None = None
     source_git_root: str | None = None
     isolation_mode: str = "none"
@@ -148,7 +150,24 @@ def format_duration(duration_ms: int) -> str:
 
 
 def status_from_exit(exit_code: int) -> str:
-    return "succeeded" if exit_code == 0 else "failed"
+    return run_registry.STATUS_SUCCEEDED if exit_code == 0 else run_registry.STATUS_FAILED
+
+
+def _terminal_override_extra(accumulator: harness_events.StreamAccumulator) -> JsonObject:
+    if accumulator.terminal_status not in {
+        run_registry.STATUS_FAILED,
+        run_registry.STATUS_CANCELLED,
+    }:
+        return {}
+    extra: JsonObject = {
+        "terminalStatus": accumulator.terminal_status,
+        "failureReason": "harness_cancelled"
+        if accumulator.terminal_status == run_registry.STATUS_CANCELLED
+        else "harness_error",
+    }
+    if accumulator.terminal_event is not None:
+        extra["terminalEvent"] = accumulator.terminal_event
+    return extra
 
 
 def _merge_extra(payload: JsonObject, extra: JsonObject) -> None:
@@ -180,6 +199,8 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
         "engine": ctx.engine,
         "mode": ctx.mode,
         "model": ctx.model,
+        "modelAlias": ctx.model_alias,
+        "modelResolved": ctx.model_resolved or ctx.model,
         "cwd": ctx.source_cwd,
         "executionCwd": ctx.execution_cwd,
         "workspaceKind": ctx.workspace_kind,
@@ -226,6 +247,8 @@ def build_state(
         state["current"] = current
     if pid is not None:
         state["pid"] = pid
+        with contextlib.suppress(OSError):
+            state["pgid"] = os.getpgid(pid)
     if extra is not None:
         state.update(extra)
     return state
@@ -289,6 +312,10 @@ def build_snapshot(
 
     if exit_code is not None:
         snapshot["exitCode"] = exit_code
+    if accumulator.terminal_event is not None:
+        snapshot["terminalEvent"] = accumulator.terminal_event
+    if accumulator.terminal_status is not None:
+        snapshot["terminalStatus"] = accumulator.terminal_status
     if completion_report_written:
         report_path = completion_report_path(ctx.run_id)
         snapshot["completionReport"] = {
@@ -445,6 +472,8 @@ def completion_json_payload(
         "engine": ctx.engine,
         "mode": ctx.mode,
         "model": ctx.model,
+        "modelAlias": ctx.model_alias,
+        "modelResolved": ctx.model_resolved or ctx.model,
         "cwd": ctx.source_cwd,
         "executionCwd": ctx.execution_cwd,
         "workspaceKind": ctx.workspace_kind,
@@ -578,6 +607,8 @@ class TrackedCaptureResult:
     stdout_bytes: int
     stderr_bytes: int
     stdin_failures: tuple[str, ...]
+    pid: int
+    pgid: int | None
 
 
 @dataclass(frozen=True)
@@ -746,6 +777,7 @@ def _launch_tracked_process(
         stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        start_new_session=True,
     )
 
 
@@ -785,6 +817,9 @@ def _capture_tracked_process(
     progress_interval_sec: float = PROGRESS_HEARTBEAT_INTERVAL_SEC,
 ) -> TrackedCaptureResult:
     accumulator = harness_events.StreamAccumulator(harness=ctx.harness)
+    pgid = None
+    with contextlib.suppress(OSError):
+        pgid = os.getpgid(process.pid)
     persist_progress(files.run_path, ctx, accumulator, status="running", pid=process.pid)
 
     line_buffer = ""
@@ -914,6 +949,8 @@ def _capture_tracked_process(
         stdout_bytes=stdout_bytes_counter.total,
         stderr_bytes=stderr_bytes_counter.total,
         stdin_failures=tuple(stdin_failures),
+        pid=process.pid,
+        pgid=pgid,
     )
 
 
@@ -957,7 +994,20 @@ def _finalize_tracked_run(
     exit_code, merged_extra = _final_extra(ctx, capture.exit_code)
     if extra:
         merged_extra = {**merged_extra, **extra}
+    merged_extra = {**merged_extra, "pid": capture.pid}
+    if capture.pgid is not None:
+        merged_extra["pgid"] = capture.pgid
+    terminal_extra = _terminal_override_extra(capture.accumulator)
+    if terminal_extra:
+        merged_extra = {**merged_extra, **terminal_extra}
     status = status_from_exit(exit_code)
+    if capture.accumulator.terminal_status in {
+        run_registry.STATUS_FAILED,
+        run_registry.STATUS_CANCELLED,
+    }:
+        status = capture.accumulator.terminal_status
+        if exit_code == 0:
+            exit_code = 1
     report_written = write_completion_report(
         files.run_path,
         _completion_report_source(

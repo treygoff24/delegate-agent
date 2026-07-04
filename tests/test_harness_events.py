@@ -338,7 +338,10 @@ class HarnessEventsTests(unittest.TestCase):
                 }
             )
         )
-        self.assertFalse(any(event.kind == "run.completed" for event in acc.events))
+        completed = [event for event in acc.events if event.kind == "run.completed"]
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(completed[0].status, "failed")
+        self.assertEqual(acc.terminal_status, "failed")
         self.assertIsNone(acc.completion_text)
         self.assertEqual(acc.recoverable_assistant_text, "partial output")
 
@@ -357,6 +360,29 @@ class HarnessEventsTests(unittest.TestCase):
         self.assertEqual(len(completed), 1)
         self.assertEqual(completed[0].status, "succeeded")
         self.assertEqual(acc.completion_text, "Status: completed\n- done")
+
+    def test_grok_cancelled_stop_reason_sets_terminal_cancelled(self):
+        acc = self.events.StreamAccumulator(harness="grok")
+        acc.ingest_line(json.dumps({"type": "text", "data": "partial report"}))
+        acc.ingest_line(json.dumps({"type": "end", "stopReason": "Cancelled"}))
+        self.assertEqual(acc.terminal_status, "cancelled")
+        self.assertEqual(
+            acc.terminal_event, {"event": "grok.end", "status": "cancelled", "reason": "Cancelled"}
+        )
+        self.assertIsNone(acc.completion_text)
+        self.assertEqual(acc.recoverable_assistant_text, "partial report")
+
+    def test_grok_maxtokens_stop_reason_stays_exit_code_derived(self):
+        acc = self.events.StreamAccumulator(harness="grok")
+        acc.ingest_line(json.dumps({"type": "text", "data": "partial report"}))
+        acc.ingest_line(json.dumps({"type": "end", "stopReason": "MaxTokens"}))
+        self.assertIsNone(acc.terminal_status)
+        self.assertEqual(acc.recoverable_assistant_text, "partial report")
+
+    def test_codex_explicit_terminal_error_sets_failed(self):
+        acc = self.events.StreamAccumulator(harness="codex")
+        acc.ingest_line(json.dumps({"type": "turn.failed"}))
+        self.assertEqual(acc.terminal_status, "failed")
 
     def test_claude_tool_result_emits_tool_completed_correlated_by_id(self):
         acc = self.events.StreamAccumulator()

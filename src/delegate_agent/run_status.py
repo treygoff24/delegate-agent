@@ -14,8 +14,12 @@ LARGE_LOG_WARN_MIB = 50
 LARGE_LOG_WARN_BYTES = LARGE_LOG_WARN_MIB * (1 << 20)
 DEFAULT_RUNS_LIMIT = 20
 STATUS_RUNNING = "running"
+STATUS_SUCCEEDED = "succeeded"
+STATUS_FAILED = "failed"
+STATUS_CANCELLED = "cancelled"
 STATUS_STALE = "stale"
 STATUS_UNKNOWN = "unknown"
+TERMINAL_STATUSES = frozenset({STATUS_SUCCEEDED, STATUS_FAILED, STATUS_CANCELLED})
 STATUS_FILTER_ACTIVE = "active"
 STATUS_FILTER_RECENT = "recent"
 STATUS_FILTER_RUNNING = "running"
@@ -185,6 +189,16 @@ def build_run_summary(
         "warnings": large_log_warnings(stdout_bytes, stderr_bytes),
         "activityAt": activity_timestamp(state, manifest),
     }
+    if manifest:
+        for key in ("modelAlias", "modelResolved", "terminalEvent", "terminalStatus"):
+            value = manifest.get(key)
+            if value is not None:
+                summary[key] = value
+    if state:
+        for key in ("terminalEvent", "terminalStatus", "failureReason", "pgid"):
+            value = state.get(key)
+            if value is not None:
+                summary[key] = value
     summary.update(status_fields(state))
     if summary.get("effectiveStatus") == STATUS_STALE:
         summary["nextActions"] = stale_next_actions(handle, cwd=source_cwd)

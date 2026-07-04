@@ -134,6 +134,23 @@ class NormalizedEvent:
         return payload
 
 
+_CANCELLED_REASONS = {"abort", "aborted", "cancel", "cancelled", "canceled", "interrupted"}
+_FAILED_REASONS = {"error", "errored", "fail", "failed", "failure"}
+
+
+def _normalize_terminal_status(value: JsonValue) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    normalized = re.sub(r"[^a-z]", "", value.lower())
+    if normalized in _CANCELLED_REASONS:
+        return "cancelled"
+    if normalized in _FAILED_REASONS:
+        return "failed"
+    if normalized in {"endturn", "stop", "complete", "completed", "done", "success", "succeeded"}:
+        return "succeeded"
+    return None
+
+
 @dataclass
 class StreamAccumulator:
     harness: str | None = None
@@ -148,6 +165,22 @@ class StreamAccumulator:
     _pending_tool_uses: dict[str, tuple[str, str | None]] = field(default_factory=dict, repr=False)
     _grok_text_buffer: str = field(default="", repr=False)
     _grok_current_line: str = field(default="", repr=False)
+    terminal_event: JsonObject | None = None
+    terminal_status: str | None = None
+
+    def _record_terminal_event(
+        self,
+        *,
+        event: str,
+        status: str,
+        reason: str | None = None,
+    ) -> None:
+        self.terminal_status = status
+        payload: JsonObject = {"event": event, "status": status}
+        if reason:
+            payload["reason"] = reason
+        self.terminal_event = payload
+        self.events.append(NormalizedEvent(kind="run.completed", status=status, message=reason))
 
     def _invalidate_assistant_text_cache(self) -> None:
         self._assistant_text_cache = None
@@ -218,6 +251,12 @@ class StreamAccumulator:
             return
         if event_type == "result":
             self._ingest_result_event(payload)
+            return
+        if event_type in ("turn.failed", "turn.error"):
+            self._record_terminal_event(event=event_type, status="failed")
+            return
+        if event_type in ("turn.cancelled", "turn.canceled"):
+            self._record_terminal_event(event=event_type, status="cancelled")
             return
         if event_type in ("item.started", "item.completed"):
             self._ingest_codex_item(payload, completed=event_type == "item.completed")
@@ -315,7 +354,7 @@ class StreamAccumulator:
 
     def _record_successful_completion_text(self, text: str) -> None:
         self._record_assistant_text(text, completion=True)
-        self.events.append(NormalizedEvent(kind="run.completed", status="succeeded"))
+        self._record_terminal_event(event="completion", status="succeeded")
 
     def _ingest_completion(self, payload: JsonObject) -> None:
         final_text = payload.get("finalText")
@@ -326,6 +365,7 @@ class StreamAccumulator:
         result = payload.get("result")
         if isinstance(result, str) and result.strip():
             if payload.get("is_error") is True:
+                self._record_terminal_event(event="result", status="failed")
                 self._record_recoverable_assistant_text(result)
                 return
             self._record_successful_completion_text(result)
@@ -394,12 +434,30 @@ class StreamAccumulator:
             # are validated against grok 0.2.73; non-success stopReason spellings
             # (MaxTokens/Refusal/etc.) are best-effort, so classification is
             # conservative — anything not recognized as success stays recoverable.
-            if _grok_stop_reason_succeeded(payload.get("stopReason")):
+            stop_reason = payload.get("stopReason")
+            terminal_status = _normalize_terminal_status(stop_reason)
+            if _grok_stop_reason_succeeded(stop_reason):
                 self._record_successful_completion_text(text)
+            elif terminal_status in {"cancelled", "failed"}:
+                self._record_terminal_event(
+                    event="grok.end",
+                    status=terminal_status,
+                    reason=stop_reason if isinstance(stop_reason, str) else None,
+                )
+                self._record_recoverable_assistant_text(text)
             else:
                 self._record_recoverable_assistant_text(text)
         elif _grok_stop_reason_succeeded(payload.get("stopReason")):
-            self.events.append(NormalizedEvent(kind="run.completed", status="succeeded"))
+            self._record_terminal_event(event="grok.end", status="succeeded")
+        else:
+            terminal_status = _normalize_terminal_status(payload.get("stopReason"))
+            if terminal_status in {"cancelled", "failed"}:
+                reason = payload.get("stopReason")
+                self._record_terminal_event(
+                    event="grok.end",
+                    status=terminal_status,
+                    reason=reason if isinstance(reason, str) else None,
+                )
 
     def _ingest_grok_error(self, payload: JsonObject) -> None:
         # Grok streaming-json emits {"type":"error","message":...} on failure and
@@ -417,6 +475,7 @@ class StreamAccumulator:
             text = message.strip()
             self._record_recoverable_assistant_text(text)
             self.current = _bounded_current_line(text)
+        self._record_terminal_event(event="grok.error", status="failed")
 
     def _ingest_tool_call(self, payload: JsonObject) -> None:
         tool = _string_field(payload, "tool", "name", "toolName") or "tool"

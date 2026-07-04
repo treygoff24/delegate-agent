@@ -332,7 +332,7 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(code, self.delegate.EXIT_OK)
         help_text = stdout.getvalue()
         self.assertIn("do not pipe delegate launches through tail", help_text)
-        self.assertIn("delegate snapshot cursor", help_text)
+        self.assertIn("delegate snapshot cursor-1", help_text)
         self.assertIn("set -o pipefail", help_text)
 
     def test_codex_direct_commands_parse(self):

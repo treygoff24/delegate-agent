@@ -38,12 +38,14 @@ def emit_snapshot(command: SnapshotCommand, *, workspace_path: str, stdout: Text
         if command.latest_harness is None and command.handle is None:
             raise InspectionError("missing_handle", "snapshot requires a run handle or --latest.")
         registry_root = run_registry.registry_root(workspace)
-    run_id, _alias = command_errors.resolve_run_target(
+    target = run_registry.resolve_run_target(
         registry_root,
         handle=command.handle,
         latest_harness=command.latest_harness,
-        error_cls=InspectionError,
     )
+    if isinstance(target, run_registry.RunTargetLookupError):
+        raise InspectionError(target.error, target.message)
+    run_id, alias = target.run_id, target.alias
     snapshot = run_registry.load_run_snapshot(registry_root, run_id)
     view = snapshot_view.merge_snapshot_view(
         registry_root,
@@ -51,6 +53,10 @@ def emit_snapshot(command: SnapshotCommand, *, workspace_path: str, stdout: Text
         snapshot,
         redact=not command.no_redact,
     )
+    if target.resolution_kind != "literal":
+        view["requestedHandle"] = target.requested_handle
+        view["resolvedHandle"] = target.resolved_handle or alias or run_id
+        view["resolutionKind"] = target.resolution_kind
     if command.json_mode:
         delegate_rendering.print_json(snapshot_view.snapshot_json_payload(view), stdout)
     else:

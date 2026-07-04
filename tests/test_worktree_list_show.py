@@ -366,6 +366,36 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
 
             self.assertEqual(result.get("alias"), "droid-worktree")
 
+    def test_worktree_show_bare_harness_resolves_worktree_domain(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory():
+            from datetime import UTC, datetime, timedelta
+
+            worktree_ts = (datetime.now(UTC) - timedelta(hours=2)).strftime(
+                self.delegate.run_registry.UTC_TIMESTAMP_FORMAT
+            )
+            worktree_run_id, worktree_alias = self._seed_persistent_run(
+                path,
+                alias="cursor-worktree",
+                harness="cursor",
+                last_activity_at=worktree_ts,
+            )
+            plain_ts = (datetime.now(UTC) - timedelta(minutes=5)).strftime(
+                self.delegate.run_registry.UTC_TIMESTAMP_FORMAT
+            )
+            self._seed_plain_run(path, harness="cursor", last_activity_at=plain_ts)
+
+            result = self.delegate.worktree_mgmt.show_worktree(
+                self._registry_root(path),
+                handle="cursor",
+            )
+
+            self.assertEqual(result.get("runId"), worktree_run_id)
+            self.assertEqual(result.get("alias"), worktree_alias)
+            self.assertEqual(result.get("requestedHandle"), "cursor")
+            self.assertEqual(result.get("resolvedHandle"), worktree_alias)
+            self.assertEqual(result.get("resolutionKind"), "latest")
+
     def test_worktree_unknown_handle_suggestions_are_scoped_to_worktrees(self):
         _repo, path = self._make_repo()
         with tempfile.TemporaryDirectory():

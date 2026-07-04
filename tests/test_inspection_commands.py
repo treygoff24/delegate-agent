@@ -72,6 +72,73 @@ class InspectionCommandTests(unittest.TestCase):
         self.assertEqual(run_id, latest_run_id)
         self.assertEqual(alias, latest_alias)
 
+    def test_emit_snapshot_bare_harness_exposes_resolution_fields_in_json(self):
+        self.write_run(
+            harness="codex",
+            assistant_text="first",
+            started_at="2026-05-20T12:00:00Z",
+        )
+        latest_run_id, latest_alias = self.write_run(
+            harness="codex",
+            assistant_text="second",
+            started_at="2026-05-20T12:05:00Z",
+        )
+        stdout = io.StringIO()
+
+        code = inspection_commands.emit_snapshot(
+            inspection_commands.SnapshotCommand(handle="codex", json_mode=True),
+            workspace_path=str(self.workspace),
+            stdout=stdout,
+        )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["runId"], latest_run_id)
+        self.assertEqual(payload["alias"], latest_alias)
+        self.assertEqual(payload["requestedHandle"], "codex")
+        self.assertEqual(payload["resolvedHandle"], latest_alias)
+        self.assertEqual(payload["resolutionKind"], "latest")
+
+    def test_emit_snapshot_bare_harness_renders_resolution_banner_in_text(self):
+        self.write_run(
+            harness="codex",
+            assistant_text="first",
+            started_at="2026-05-20T12:00:00Z",
+        )
+        _, latest_alias = self.write_run(
+            harness="codex",
+            assistant_text="second",
+            started_at="2026-05-20T12:05:00Z",
+        )
+        stdout = io.StringIO()
+
+        code = inspection_commands.emit_snapshot(
+            inspection_commands.SnapshotCommand(handle="codex"),
+            workspace_path=str(self.workspace),
+            stdout=stdout,
+        )
+
+        self.assertEqual(code, 0)
+        output = stdout.getvalue()
+        self.assertIn(f"resolved handle: codex -> {latest_alias} (latest)", output)
+
+    def test_emit_snapshot_literal_handle_omits_resolution_fields(self):
+        run_id, alias = self.write_run(harness="cursor", assistant_text="literal run")
+        stdout = io.StringIO()
+
+        code = inspection_commands.emit_snapshot(
+            inspection_commands.SnapshotCommand(handle=alias, json_mode=True),
+            workspace_path=str(self.workspace),
+            stdout=stdout,
+        )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["runId"], run_id)
+        self.assertNotIn("requestedHandle", payload)
+        self.assertNotIn("resolvedHandle", payload)
+        self.assertNotIn("resolutionKind", payload)
+
     def test_emit_snapshot_json_uses_registry_view(self):
         run_id, alias = self.write_run(assistant_text="adapter output")
         stdout = io.StringIO()

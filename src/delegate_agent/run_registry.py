@@ -54,6 +54,7 @@ PRIVATE_FILE_MODE = private_io.PRIVATE_FILE_MODE
 GIT_INFO_EXCLUDE_TIMEOUT_SECONDS = 5.0
 BYTES_PER_KIB = 1 << 10
 BYTES_PER_MIB = BYTES_PER_KIB * BYTES_PER_KIB
+HARNESS_NAMES = frozenset({"codex", "cursor", "grok", "kimi", "claude", "droid"})
 
 
 def generate_run_id(now: datetime | None = None) -> str:
@@ -155,15 +156,15 @@ def ensure_git_delegate_exclude(git_root: Path) -> None:
 
 def ensure_registry(workspace: Path, *, workspace_kind: str) -> Path:
     root = delegate_root(workspace)
-    ensure_private_dir(root)
-    ensure_private_dir(aliases_dir(root))
-    ensure_private_dir(runs_dir(root))
-    if workspace_kind == "git":
-        ensure_git_delegate_exclude(workspace)
-    if not index_path(root).exists():
-        save_index(root, empty_index())
-    else:
-        ensure_private_file(index_path(root))
+    with registry_lock(root):
+        ensure_private_dir(aliases_dir(root))
+        ensure_private_dir(runs_dir(root))
+        if workspace_kind == "git":
+            ensure_git_delegate_exclude(workspace)
+        if not index_path(root).exists():
+            save_index(root, empty_index())
+        else:
+            ensure_private_file(index_path(root))
     return root
 
 
@@ -172,7 +173,7 @@ def allocate_alias(registry_root: Path, harness: str) -> str:
     ensure_private_dir(claims)
     counter = 1
     while True:
-        alias = harness if counter == 1 else f"{harness}-{counter}"
+        alias = f"{harness}-{counter}"
         claim_path = claims / alias
         try:
             fd = os.open(claim_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, PRIVATE_FILE_MODE)
@@ -240,7 +241,30 @@ def register_run(
         run_dir = runs_dir(registry_root) / run_id
         ensure_private_dir(run_dir)
         index = load_index(registry_root)
-        entry = {"alias": alias, "harness": harness, **(metadata or {})}
+        # Stamp an explicit registration ordinal so the latest-run tiebreaker
+        # survives the persisted round trip. save_index writes with
+        # sort_keys=True, which reorders the ``runs`` mapping lexicographically
+        # by run_id on disk; an in-memory-only insertion index would silently
+        # degrade to random-suffix order after reload. The ordinal is
+        # 1 + max existing ordinal (0 when the index is empty or fully legacy),
+        # so newly registered runs always outrank legacy entries that lack an
+        # ordinal -- which is chronologically correct because new runs ARE
+        # later than any legacy run already in the index.
+        existing_ordinals = (
+            entry.get("registrationOrdinal")
+            for entry in index.get("runs", {}).values()
+            if isinstance(entry, dict)
+        )
+        next_ordinal = 1 + max(
+            (value for value in existing_ordinals if isinstance(value, int)),
+            default=0,
+        )
+        entry = {
+            "alias": alias,
+            "harness": harness,
+            **(metadata or {}),
+            "registrationOrdinal": next_ordinal,
+        }
         index["aliases"][alias] = run_id
         index["runs"][run_id] = entry
         save_index(registry_root, index)
@@ -274,6 +298,52 @@ def parse_utc_timestamp(value: str | None) -> datetime | None:
         return None
 
 
+def _format_age(timestamp: str, *, now: datetime | None = None) -> str:
+    parsed = parse_utc_timestamp(timestamp)
+    if parsed is None:
+        return "unknown age"
+    delta = (now or datetime.now(UTC)) - parsed
+    total_seconds = max(int(delta.total_seconds()), 0)
+    minutes, seconds = divmod(total_seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    days, hours = divmod(hours, 24)
+    if days:
+        return f"{days}d ago"
+    if hours:
+        return f"{hours}h ago"
+    if minutes:
+        return f"{minutes}m ago"
+    return f"{seconds}s ago"
+
+
+def latest_handle_suggestions(
+    index: JsonObject, registry_root: Path, *, limit: int = 8
+) -> list[str]:
+    suggestions: list[str] = []
+    seen: set[str] = set()
+    harnesses = sorted(
+        {
+            entry.get("harness")
+            for entry in index.get("runs", {}).values()
+            if isinstance(entry, dict) and isinstance(entry.get("harness"), str)
+        }
+    )
+    for harness in harnesses:
+        run_id = latest_run_id_for_harness(registry_root, index, str(harness))
+        if run_id is None:
+            continue
+        alias = alias_for_run(index, run_id) or run_id
+        if alias in seen:
+            continue
+        state = load_run_state_or_none(registry_root, run_id)
+        manifest = load_run_manifest_or_none(registry_root, run_id)
+        suggestions.append(f"{alias} ({_format_age(activity_timestamp(state, manifest, run_id))})")
+        seen.add(alias)
+        if len(suggestions) >= limit:
+            break
+    return suggestions
+
+
 def snapshot_command(alias: str, *, cwd: str | None = None) -> str:
     if cwd is None:
         return f"delegate snapshot {alias}"
@@ -302,8 +372,8 @@ def alias_sequence_for_harness(alias: object, harness: str) -> int:
 
     Alias claims are durable and allocated with exclusive creates, so the
     numeric suffix is a better same-timestamp tiebreaker than the random run-id
-    suffix.  ``cursor`` is generation 1, ``cursor-2`` is generation 2, and
-    malformed or foreign aliases rank after valid harness aliases.
+    suffix. ``cursor-1`` is generation 1; pre-v0.10 literal ``cursor`` also
+    ranks as generation 1 so old registries sort sanely.
     """
     if not isinstance(alias, str):
         return 0
@@ -323,12 +393,18 @@ class ResolveResult:
     run_id: str | None
     alias: str | None
     suggestions: tuple[str, ...]
+    requested_handle: str | None = None
+    resolved_handle: str | None = None
+    resolution_kind: str = "literal"
 
 
 @dataclass(frozen=True)
 class RunTarget:
     run_id: str
     alias: str | None
+    requested_handle: str | None = None
+    resolved_handle: str | None = None
+    resolution_kind: str = "literal"
 
 
 @dataclass(frozen=True)
@@ -362,7 +438,30 @@ def suggest_handles(index: JsonObject, handle: str, *, limit: int = 8) -> list[s
     return ordered
 
 
-def resolve_handle(index: JsonObject, handle: str) -> ResolveResult:
+def _alias_for_resolved(index: JsonObject, run_id: str) -> str | None:
+    return alias_for_run(index, run_id)
+
+
+def resolve_handle(
+    index: JsonObject,
+    handle: str,
+    *,
+    registry_root: Path | None = None,
+) -> ResolveResult:
+    if registry_root is not None and handle in HARNESS_NAMES:
+        run_id = latest_run_id_for_harness(registry_root, index, handle)
+        if run_id is None:
+            return ResolveResult(None, None, tuple(suggest_handles(index, handle)))
+        alias = _alias_for_resolved(index, run_id)
+        return ResolveResult(run_id, alias, (), handle, alias or run_id, "latest")
+    if registry_root is not None and ":" in handle:
+        harness, model_alias = handle.split(":", 1)
+        if harness in HARNESS_NAMES and model_alias:
+            run_id = latest_run_id_for_harness_model(registry_root, index, harness, model_alias)
+            if run_id is None:
+                return ResolveResult(None, None, tuple(suggest_handles(index, handle)))
+            alias = _alias_for_resolved(index, run_id)
+            return ResolveResult(run_id, alias, (), handle, alias or run_id, "latest_model")
     run_id = lookup_run_id(index, handle)
     if run_id is None:
         return ResolveResult(None, None, tuple(suggest_handles(index, handle)))
@@ -373,7 +472,7 @@ def resolve_handle(index: JsonObject, handle: str) -> ResolveResult:
             if candidate_id == run_id:
                 alias = candidate
                 break
-    return ResolveResult(run_id, alias, ())
+    return ResolveResult(run_id, alias, (), handle, alias or run_id, "literal")
 
 
 def resolve_run_target(
@@ -384,28 +483,45 @@ def resolve_run_target(
 ) -> RunTarget | RunTargetLookupError:
     index = load_index(registry_root)
     if latest_harness is not None:
-        run_id = latest_run_id_for_harness(registry_root, index, latest_harness)
+        if ":" in latest_harness:
+            harness, model_alias = latest_harness.split(":", 1)
+            run_id = latest_run_id_for_harness_model(registry_root, index, harness, model_alias)
+            resolution_kind = "latest_model"
+        else:
+            run_id = latest_run_id_for_harness(registry_root, index, latest_harness)
+            resolution_kind = "latest"
         if run_id is None:
             return RunTargetLookupError(
                 "no_matching_runs",
                 f"No runs found for harness: {latest_harness}",
             )
-        return RunTarget(run_id, alias_for_run(index, run_id))
+        alias = alias_for_run(index, run_id)
+        return RunTarget(run_id, alias, latest_harness, alias or run_id, resolution_kind)
     if handle is None:
         return RunTargetLookupError(
             "missing_handle",
             "A run handle is required.",
         )
-    resolved = resolve_handle(index, handle)
+    resolved = resolve_handle(index, handle, registry_root=registry_root)
     if resolved.run_id is None:
-        suggestions = ", ".join(resolved.suggestions) if resolved.suggestions else "(none)"
+        suggestion_items = latest_handle_suggestions(index, registry_root)
+        suggestion_items.extend(
+            item for item in resolved.suggestions if item not in suggestion_items
+        )
+        suggestions = ", ".join(suggestion_items[:8]) if suggestion_items else "(none)"
         return RunTargetLookupError(
             "unknown_handle",
             f"Unknown run handle: {handle}. Suggestions: {suggestions}. "
             "Runs are recorded per-workspace under <workspace>/.delegate; "
             "if this run was launched elsewhere, pass --cwd <that workspace>.",
         )
-    return RunTarget(resolved.run_id, resolved.alias)
+    return RunTarget(
+        resolved.run_id,
+        resolved.alias,
+        resolved.requested_handle,
+        resolved.resolved_handle,
+        resolved.resolution_kind,
+    )
 
 
 def load_run_state(registry_root: Path, run_id: str) -> JsonObject | None:
@@ -521,19 +637,82 @@ def set_worktree_status_locked(
 
 
 def latest_run_id_for_harness(registry_root: Path, index: JsonObject, harness: str) -> str | None:
-    matches: list[tuple[str, int, str]] = []
-    for run_id, entry in index.get("runs", {}).items():
+    return _latest_run_id_for_harness(registry_root, index, harness)
+
+
+def latest_run_id_for_harness_model(
+    registry_root: Path,
+    index: JsonObject,
+    harness: str,
+    model_alias: str,
+) -> str | None:
+    return _latest_run_id_for_harness(
+        registry_root,
+        index,
+        harness,
+        model_alias=model_alias,
+    )
+
+
+def _latest_run_id_for_harness(
+    registry_root: Path,
+    index: JsonObject,
+    harness: str,
+    *,
+    model_alias: str | None = None,
+) -> str | None:
+    matches: list[tuple[str, int, int, str]] = []
+    # The chronology source for the exact tie this function resolves (same
+    # activity timestamp, same alias sequence -- e.g. a legacy literal ``codex``
+    # and a v0.10 ``codex-1`` that both rank as alias sequence 1 in the same
+    # second) is the explicit ``registrationOrdinal`` stamped by register_run.
+    # The ordinal is required because save_index persists with sort_keys=True,
+    # which reorders the ``runs`` mapping lexicographically by run_id on disk;
+    # an in-memory-only insertion index would silently degrade to random-suffix
+    # order after a load_index round trip (the production path). For legacy
+    # entries that predate the ordinal field, fall back to the enumeration
+    # insertion index of the loaded mapping. This keeps mixed indexes
+    # consistent: new runs always carry an explicit ordinal >= 1 + max existing
+    # ordinal, so they outrank any legacy tie (whose fallback is the
+    # insertion index of a mapping that, post-reload, is lexicographic -- but
+    # legacy entries have no ordinal at all, so their uniform fallback only
+    # orders legacy entries relative to each other, never above a newer run),
+    # which is chronologically correct because new runs ARE later. Using the
+    # run_id suffix here would be wrong because that suffix is random, so
+    # lexicographic run_id order can rank an older run as latest.
+    for insertion_index, (run_id, entry) in enumerate(index.get("runs", {}).items()):
         if not isinstance(entry, dict) or entry.get("harness") != harness:
+            continue
+        entry_model_alias = entry.get("modelAlias")
+        if (
+            model_alias is not None
+            and entry_model_alias is not None
+            and entry_model_alias != model_alias
+        ):
             continue
         state = load_run_state_or_none(registry_root, run_id)
         manifest = load_run_manifest_or_none(registry_root, run_id)
+        if model_alias is not None and entry_model_alias is None:
+            manifest_model_alias = (
+                manifest.get("modelAlias") if isinstance(manifest, dict) else None
+            )
+            if manifest_model_alias != model_alias:
+                continue
         sort_ts = run_status.activity_timestamp(state, manifest, run_id)
         alias_sequence = alias_sequence_for_harness(entry.get("alias"), harness)
-        matches.append((sort_ts, alias_sequence, run_id))
+        effective_ordinal = entry.get("registrationOrdinal", insertion_index)
+        if not isinstance(effective_ordinal, int):
+            effective_ordinal = insertion_index
+        matches.append((sort_ts, alias_sequence, effective_ordinal, run_id))
     if not matches:
         return None
-    matches.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    return matches[0][2]
+    # Tertiary effective_ordinal makes same-second, same-sequence ties resolve
+    # to the latest-registered run instead of falling to the random run-id
+    # suffix. reverse=True means the greatest (latest) ordinal wins. For legacy
+    # entries the fallback insertion index only ever ranks legacy entries among
+    # themselves; any explicit ordinal from a newer run outranks them.
+    matches.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+    return matches[0][3]
 
 
 from delegate_agent import run_status  # noqa: E402  # facade re-export, placed after core defs
@@ -541,13 +720,17 @@ from delegate_agent.run_status import (  # noqa: E402, F401  # re-exported
     DEFAULT_RUNS_LIMIT,
     LARGE_LOG_WARN_BYTES,
     LARGE_LOG_WARN_MIB,
+    STATUS_CANCELLED,
+    STATUS_FAILED,
     STATUS_FILTER_ACTIVE,
     STATUS_FILTER_RECENT,
     STATUS_FILTER_RUNNING,
     STATUS_FILTER_STALE,
     STATUS_RUNNING,
     STATUS_STALE,
+    STATUS_SUCCEEDED,
     STATUS_UNKNOWN,
+    TERMINAL_STATUSES,
     activity_datetime,
     activity_timestamp,
     build_run_summary,

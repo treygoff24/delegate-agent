@@ -421,6 +421,7 @@ def _emit_run_output_sections(
     run_id: str,
     sections: JsonObject,
     text_sections: dict[str, str],
+    resolution: JsonObject | None,
     stdout: TextIO,
 ) -> None:
     if command.json_mode:
@@ -428,10 +429,16 @@ def _emit_run_output_sections(
             alias=alias,
             run_id=run_id,
             sections=_merge_json_sections(sections, text_sections),
+            resolution=resolution,
         )
         delegate_rendering.print_json(payload, stdout)
         return
-    delegate_rendering.render_run_output_text(text_sections, stdout, section_meta=sections)
+    delegate_rendering.render_run_output_text(
+        text_sections,
+        stdout,
+        section_meta=sections,
+        resolution=resolution,
+    )
 
 
 def emit(command: RunOutputCommand, *, workspace_path: str, stdout: TextIO) -> int:
@@ -439,11 +446,22 @@ def emit(command: RunOutputCommand, *, workspace_path: str, stdout: TextIO) -> i
     registry_root = run_registry.registry_root_if_exists(workspace)
     if registry_root is None:
         registry_root = run_registry.registry_root(workspace)
-    run_id, alias = command_errors.resolve_run_target(
+    target = run_registry.resolve_run_target(
         registry_root,
         handle=command.handle,
         latest_harness=None,
-        error_cls=RunOutputError,
+    )
+    if isinstance(target, run_registry.RunTargetLookupError):
+        raise RunOutputError(target.error, target.message)
+    run_id, alias = target.run_id, target.alias
+    resolution = (
+        {
+            "requestedHandle": target.requested_handle,
+            "resolvedHandle": target.resolved_handle or alias or run_id,
+            "resolutionKind": target.resolution_kind,
+        }
+        if target.resolution_kind != "literal"
+        else None
     )
     sections: JsonObject = {}
     text_sections: dict[str, str] = {}
@@ -498,6 +516,7 @@ def emit(command: RunOutputCommand, *, workspace_path: str, stdout: TextIO) -> i
         run_id=run_id,
         sections=sections,
         text_sections=text_sections,
+        resolution=resolution,
         stdout=stdout,
     )
     return 0

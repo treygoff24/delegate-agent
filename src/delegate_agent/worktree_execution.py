@@ -225,6 +225,8 @@ def _build_persistent_worktree_run_context(
         workspace_kind=execution.source_workspace.kind,
         isolated_workspace=True,
         started_at=run_registry.utc_now_iso(),
+        model_alias=request.model_alias,
+        model_resolved=request.model,
         creation_context=creation_context,
         source_git_root=iso_ctx.source_git_root or preflight.source_git_root,
         isolation_mode=iso_ctx.isolation_mode,
@@ -264,6 +266,8 @@ def _register_persistent_worktree_run(
         metadata={
             "mode": request.mode,
             "model": request.model,
+            "modelAlias": request.model_alias,
+            "modelResolved": request.model,
             "cwd": execution.source_workspace.path,
         },
     )

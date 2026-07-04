@@ -175,6 +175,42 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
         self.assertEqual(code, 0)
         self.assertIn("# done", stdout.getvalue())
 
+    def test_run_output_bare_harness_resolves_latest_with_resolution_fields(self):
+        self.write_run(
+            harness="codex",
+            assistant_text="first",
+            started_at="2026-05-20T12:00:00Z",
+        )
+        latest_run_id, latest_alias = self.write_run(
+            harness="codex",
+            assistant_text="second",
+            started_at="2026-05-20T12:05:00Z",
+        )
+        run_path = self.registry.run_directory(self.registry_root, latest_run_id)
+        (run_path / "completion-report.md").write_text("# latest done\n", encoding="utf-8")
+        stdout = io.StringIO()
+
+        code = self.delegate.main(
+            [
+                "--json",
+                "--cwd",
+                str(self.workspace),
+                "run-output",
+                "codex",
+                "--completion-report",
+            ],
+            stdout=stdout,
+        )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["runId"], latest_run_id)
+        self.assertEqual(payload["alias"], latest_alias)
+        self.assertEqual(payload["requestedHandle"], "codex")
+        self.assertEqual(payload["resolvedHandle"], latest_alias)
+        self.assertEqual(payload["resolutionKind"], "latest")
+        self.assertEqual(payload["sections"]["completionReport"]["content"], "# latest done\n")
+
     def test_run_output_defaults_to_completion_report(self):
         run_id, alias = self.write_run()
         run_path = self.registry.run_directory(self.registry_root, run_id)

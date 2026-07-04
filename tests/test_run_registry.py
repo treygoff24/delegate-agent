@@ -78,11 +78,11 @@ class RunRegistryTests(unittest.TestCase):
         self.assertRegex(run_id, self.registry.RUN_ID_RE)
         self.assertEqual(run_id, "del_20260520T214233Z_" + run_id.split("_")[-1])
 
-    def test_first_cursor_alias_is_cursor(self):
+    def test_first_cursor_alias_is_numbered(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
             run_id, alias = self.registry.register_run(root, harness="cursor")
-            self.assertEqual(alias, "cursor")
+            self.assertEqual(alias, "cursor-1")
             self.assertRegex(run_id, self.registry.RUN_ID_RE)
 
     @unittest.skipUnless(os.name == "posix", "POSIX mode bits only")
@@ -122,7 +122,7 @@ class RunRegistryTests(unittest.TestCase):
             root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
             _, alias1 = self.registry.register_run(root, harness="cursor")
             _, alias2 = self.registry.register_run(root, harness="cursor")
-            self.assertEqual(alias1, "cursor")
+            self.assertEqual(alias1, "cursor-1")
             self.assertEqual(alias2, "cursor-2")
 
     def test_droid_aliases_increment(self):
@@ -130,21 +130,24 @@ class RunRegistryTests(unittest.TestCase):
             root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
             _, alias1 = self.registry.register_run(root, harness="droid")
             _, alias2 = self.registry.register_run(root, harness="droid")
-            self.assertEqual(alias1, "droid")
+            self.assertEqual(alias1, "droid-1")
             self.assertEqual(alias2, "droid-2")
 
     def test_exact_alias_lookup_does_not_guess_latest(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
-            first_id, first_alias = self.registry.register_run(root, harness="cursor")
+            _first_id, first_alias = self.registry.register_run(root, harness="cursor")
             second_id, second_alias = self.registry.register_run(root, harness="cursor")
             index = self.registry.load_index(root)
-            self.assertEqual(first_alias, "cursor")
+            self.assertEqual(first_alias, "cursor-1")
             self.assertEqual(second_alias, "cursor-2")
-            self.assertEqual(self.registry.lookup_run_id(index, "cursor"), first_id)
+            self.assertIsNone(self.registry.lookup_run_id(index, "cursor"))
             self.assertEqual(self.registry.lookup_run_id(index, "cursor-2"), second_id)
             self.assertIsNone(self.registry.lookup_run_id(index, "cursor-3"))
-            self.assertNotEqual(self.registry.lookup_run_id(index, "cursor"), second_id)
+            resolved = self.registry.resolve_handle(index, "cursor", registry_root=root)
+            self.assertEqual(resolved.run_id, second_id)
+            self.assertEqual(resolved.resolution_kind, "latest")
+            self.assertEqual(resolved.resolved_handle, "cursor-2")
 
     def test_lookup_run_id_accepts_exact_run_id(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -212,9 +215,9 @@ class RunRegistryTests(unittest.TestCase):
             self.registry.aliases_dir(root).mkdir(parents=True)
             alias_a = self.registry.allocate_alias(root, "cursor")
             alias_b = self.registry.allocate_alias(root, "cursor")
-            self.assertEqual(alias_a, "cursor")
+            self.assertEqual(alias_a, "cursor-1")
             self.assertEqual(alias_b, "cursor-2")
-            self.assertTrue((self.registry.aliases_dir(root) / "cursor").exists())
+            self.assertTrue((self.registry.aliases_dir(root) / "cursor-1").exists())
             self.assertTrue((self.registry.aliases_dir(root) / "cursor-2").exists())
 
     def test_concurrent_register_run_preserves_all_index_entries(self):
@@ -242,7 +245,35 @@ class RunRegistryTests(unittest.TestCase):
             self.assertEqual(len(index["runs"]), 2)
             self.assertEqual(len(index["aliases"]), 2)
             aliases = {alias for _, alias in results}
-            self.assertEqual(aliases, {"cursor", "cursor-2"})
+            self.assertEqual(aliases, {"cursor-1", "cursor-2"})
+
+    def test_parallel_first_registry_init_preserves_all_index_entries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            barrier = threading.Barrier(4)
+            results: list[tuple[str, str]] = []
+            errors: list[BaseException] = []
+
+            def worker() -> None:
+                try:
+                    barrier.wait(timeout=5)
+                    root = self.registry.ensure_registry(workspace, workspace_kind="directory")
+                    results.append(self.registry.register_run(root, harness="codex"))
+                except BaseException as exc:
+                    errors.append(exc)
+
+            threads = [threading.Thread(target=worker) for _ in range(4)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=10)
+
+            self.assertEqual(errors, [])
+            self.assertEqual(len(results), 4)
+            root = self.registry.registry_root(workspace)
+            index = self.registry.load_index(root)
+            self.assertEqual(len(index["runs"]), 4)
+            self.assertEqual(set(index["aliases"]), {"codex-1", "codex-2", "codex-3", "codex-4"})
 
     def test_resolve_handle_returns_suggestions_when_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -272,6 +303,59 @@ class RunRegistryTests(unittest.TestCase):
             self.assertEqual(
                 self.registry.latest_run_id_for_harness(root, index, "cursor"),
                 newer_id,
+            )
+
+    def test_latest_run_id_for_harness_model_uses_model_alias(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
+            old_glm, _ = self.registry.register_run(
+                root, harness="droid", metadata={"modelAlias": "glm", "modelResolved": "glm-id"}
+            )
+            kimi, _ = self.registry.register_run(
+                root, harness="droid", metadata={"modelAlias": "kimi", "modelResolved": "kimi-id"}
+            )
+            new_glm, _ = self.registry.register_run(
+                root, harness="droid", metadata={"modelAlias": "glm", "modelResolved": "glm-id"}
+            )
+            for run_id, ts in (
+                (old_glm, "2026-05-20T10:00:00Z"),
+                (kimi, "2026-05-20T10:05:00Z"),
+                (new_glm, "2026-05-20T10:10:00Z"),
+            ):
+                self.registry.write_json_atomic(
+                    self.registry.run_directory(root, run_id) / "state.json",
+                    {"status": "succeeded", "lastActivityAt": ts},
+                )
+            index = self.registry.load_index(root)
+            self.assertEqual(
+                self.registry.latest_run_id_for_harness_model(root, index, "droid", "glm"),
+                new_glm,
+            )
+            resolved = self.registry.resolve_handle(index, "droid:glm", registry_root=root)
+            self.assertEqual(resolved.run_id, new_glm)
+            self.assertEqual(resolved.resolution_kind, "latest_model")
+
+    def test_latest_run_id_for_harness_model_falls_back_to_manifest_alias(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
+            run_id, _ = self.registry.register_run(root, harness="droid")
+            run_path = self.registry.run_directory(root, run_id)
+            self.registry.write_json_atomic(
+                run_path / "manifest.json",
+                {
+                    "schema": self.registry.MANIFEST_SCHEMA,
+                    "runId": run_id,
+                    "harness": "droid",
+                    "modelAlias": "glm",
+                    "modelResolved": "glm-id",
+                    "startedAt": "2026-05-20T10:00:00Z",
+                },
+            )
+            index = self.registry.load_index(root)
+
+            self.assertEqual(
+                self.registry.latest_run_id_for_harness_model(root, index, "droid", "glm"),
+                run_id,
             )
 
     def test_bulk_run_readers_tolerate_corrupt_per_run_json(self):
@@ -382,9 +466,9 @@ class RunRegistryTests(unittest.TestCase):
                 )
             index = {
                 "version": self.registry.INDEX_VERSION,
-                "aliases": {"cursor": older_id, "cursor-2": newer_id},
+                "aliases": {"cursor-1": older_id, "cursor-2": newer_id},
                 "runs": {
-                    older_id: {"alias": "cursor", "harness": "cursor"},
+                    older_id: {"alias": "cursor-1", "harness": "cursor"},
                     newer_id: {"alias": "cursor-2", "harness": "cursor"},
                 },
             }
@@ -411,9 +495,9 @@ class RunRegistryTests(unittest.TestCase):
                 )
             index = {
                 "version": self.registry.INDEX_VERSION,
-                "aliases": {"cursor": first_id, "cursor-2": second_id},
+                "aliases": {"cursor-1": first_id, "cursor-2": second_id},
                 "runs": {
-                    first_id: {"alias": "cursor", "harness": "cursor"},
+                    first_id: {"alias": "cursor-1", "harness": "cursor"},
                     second_id: {"alias": "cursor-2", "harness": "cursor"},
                 },
             }
@@ -422,6 +506,156 @@ class RunRegistryTests(unittest.TestCase):
             self.assertEqual(
                 self.registry.latest_run_id_for_harness(root, loaded, "cursor"),
                 second_id,
+            )
+
+    def test_latest_run_id_ties_same_timestamp_and_sequence_by_insertion_order(self):
+        # A pre-v0.10 literal alias ``codex`` (sequence 1) and a v0.10
+        # ``codex-1`` (also sequence 1) with identical activity timestamps and
+        # equal alias sequences form the exact tie the tertiary key resolves.
+        # The later-registered run must win, NOT by run-id string luck: run A is
+        # registered first but gets the lexicographically GREATER random suffix,
+        # while run B is registered second with a suffix that sorts BELOW A's.
+        # If the tiebreaker were lexicographic run_id, A would win. These
+        # hand-built legacy entries carry no ``registrationOrdinal``, so the
+        # insertion-index fallback applies; the runs mapping is enumerated in
+        # dict order, so a higher insertion index is newer here.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
+            first_id = "del_20260520T100000Z_ffffff"  # registered first, alias codex
+            second_id = "del_20260520T100000Z_000000"  # registered second, alias codex-1
+            # Guard: the later-registered run's id sorts lexicographically below
+            # the earlier run's id, so a string-based tiebreaker would pick the
+            # wrong (older) run.
+            self.assertLess(second_id, first_id)
+            for run_id in (first_id, second_id):
+                run_path = self.registry.run_directory(root, run_id)
+                run_path.mkdir(parents=True)
+                self.registry.write_json_atomic(
+                    run_path / "state.json",
+                    {"status": "succeeded", "startedAt": "2026-05-20T10:00:00Z"},
+                )
+            # Build the index in registration order (A first, B second). The
+            # runs mapping is enumerated in dict order, so insertion index is
+            # true chronology here for the legacy (no-ordinal) fallback. Passing
+            # the in-memory index (not a round-tripped load_index) preserves
+            # that insertion order, which is what the fallback relies on.
+            index = {
+                "version": self.registry.INDEX_VERSION,
+                "aliases": {"codex": first_id, "codex-1": second_id},
+                "runs": {
+                    first_id: {"alias": "codex", "harness": "codex"},
+                    second_id: {"alias": "codex-1", "harness": "codex"},
+                },
+            }
+            self.assertEqual(
+                self.registry.latest_run_id_for_harness(root, index, "codex"),
+                second_id,
+            )
+
+    def test_latest_run_id_tie_survives_save_index_reload_round_trip(self):
+        # The insertion-index tiebreaker degrades to random-suffix order after a
+        # save_index/load_index round trip, because save_index persists with
+        # sort_keys=True and reorders the ``runs`` mapping lexicographically by
+        # run_id. The explicit ``registrationOrdinal`` stamped by register_run
+        # is the chronology source that survives reload. Register two runs with
+        # identical activity timestamps and equal alias sequences (both rank as
+        # alias sequence 1, via the legacy literal ``codex`` and ``codex-1``),
+        # adversarial run_id suffixes (the later-registered run gets the
+        # lexicographically SMALLER suffix, so a string tiebreaker would pick
+        # the older run), then reload via the real save_index/load_index cycle
+        # and assert the later-registered run still wins.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
+            # Adversarial suffixes: first-registered gets a LARGE suffix,
+            # second-registered gets a SMALL suffix. After save_index reloads
+            # the runs mapping lexicographically by run_id, the first-registered
+            # run enumerates BEFORE the second-registered run. The ordinal makes
+            # the result independent of suffix luck.
+            first_id = "del_20260520T100000Z_ffffff"
+            second_id = "del_20260520T100000Z_000000"
+            self.assertLess(second_id, first_id)  # later-registered sorts below
+            # Register through the real register_run path so ordinals are
+            # stamped and persisted. Both runs share the same activity second.
+            self.registry.register_run(root, harness="codex", run_id=first_id)
+            self.registry.register_run(root, harness="codex", run_id=second_id)
+            # register_run allocates incrementing aliases (codex-1, codex-2);
+            # override the index entries' aliases to the adversarial
+            # equal-sequence pair (legacy literal ``codex`` and ``codex-1``,
+            # both alias sequence 1) so the tertiary ordinal key is the only
+            # thing that breaks the tie.
+            index = self.registry.load_index(root)
+            index["runs"][first_id]["alias"] = "codex"
+            index["runs"][second_id]["alias"] = "codex-1"
+            # Sanity: ordinals were stamped and are strictly increasing.
+            self.assertEqual(index["runs"][first_id]["registrationOrdinal"], 1)
+            self.assertEqual(index["runs"][second_id]["registrationOrdinal"], 2)
+            self.registry.save_index(root, index)
+            for run_id in (first_id, second_id):
+                self.registry.write_json_atomic(
+                    self.registry.run_directory(root, run_id) / "state.json",
+                    {"status": "succeeded", "startedAt": "2026-05-20T10:00:00Z"},
+                )
+            # Reload from disk: sort_keys=True reorders runs lexicographically.
+            reloaded = self.registry.load_index(root)
+            # Guard: after reload, the LATER-registered run (second_id, smaller
+            # suffix) enumerates FIRST (insertion index 0), and the
+            # earlier-registered run (first_id, larger suffix) enumerates
+            # SECOND (insertion index 1). This proves the round trip does not
+            # preserve in-memory insertion order: a pure insertion-index
+            # fallback would now rank the EARLIER-registered run higher
+            # (insertion index 1 > 0), picking the wrong (older) run. Only the
+            # explicit ordinal rescues the tie.
+            reloaded_order = list(reloaded["runs"].keys())
+            self.assertEqual(reloaded_order[0], second_id)
+            self.assertEqual(reloaded_order[1], first_id)
+            # The later-registered run must still win after reload, by ordinal
+            # (2 > 1), NOT by insertion index (which would pick first_id).
+            self.assertEqual(
+                self.registry.latest_run_id_for_harness(root, reloaded, "codex"),
+                second_id,
+            )
+
+    def test_latest_run_id_legacy_index_without_ordinal_resolves_via_insertion_fallback(self):
+        # Legacy index entries that predate ``registrationOrdinal`` must still
+        # resolve deterministically via the insertion-index fallback. Build a
+        # persisted index with two same-timestamp, same-sequence legacy entries
+        # (no registrationOrdinal field), adversarial suffixes, reload it, and
+        # assert the tie resolves to the run that enumerates later after the
+        # lexicographic reload -- i.e. the lexicographically GREATER run_id,
+        # which is the deterministic legacy behavior.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
+            smaller_id = "del_20260520T100000Z_000000"
+            larger_id = "del_20260520T100000Z_ffffff"
+            self.assertLess(smaller_id, larger_id)
+            for run_id in (smaller_id, larger_id):
+                run_path = self.registry.run_directory(root, run_id)
+                run_path.mkdir(parents=True)
+                self.registry.write_json_atomic(
+                    run_path / "state.json",
+                    {"status": "succeeded", "startedAt": "2026-05-20T10:00:00Z"},
+                )
+            legacy_index = {
+                "version": self.registry.INDEX_VERSION,
+                "aliases": {"codex": smaller_id, "codex-1": larger_id},
+                "runs": {
+                    smaller_id: {"alias": "codex", "harness": "codex"},
+                    larger_id: {"alias": "codex-1", "harness": "codex"},
+                },
+            }
+            # No registrationOrdinal on either entry -- legacy.
+            self.assertNotIn("registrationOrdinal", legacy_index["runs"][smaller_id])
+            self.assertNotIn("registrationOrdinal", legacy_index["runs"][larger_id])
+            self.registry.save_index(root, legacy_index)
+            reloaded = self.registry.load_index(root)
+            # After lexicographic reload, larger_id enumerates after smaller_id,
+            # so its insertion fallback index is greater and it wins the tie.
+            reloaded_order = list(reloaded["runs"].keys())
+            self.assertEqual(reloaded_order[0], smaller_id)
+            self.assertEqual(reloaded_order[1], larger_id)
+            self.assertEqual(
+                self.registry.latest_run_id_for_harness(root, reloaded, "codex"),
+                larger_id,
             )
 
     def test_set_worktree_status_updates_state(self):

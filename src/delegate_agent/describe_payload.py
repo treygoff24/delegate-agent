@@ -970,8 +970,8 @@ Avoid:
 
 Prefer:
   delegate cursor work --prompt-file task.md
-  delegate snapshot cursor
-  delegate run-output cursor --completion-report
+  delegate snapshot cursor-1
+  delegate run-output cursor-1 --completion-report
 
 Discovery:
   delegate --json models --summary

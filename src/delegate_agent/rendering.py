@@ -71,6 +71,11 @@ def _render_snapshot_status_detail(view: SnapshotView, stdout: TextIO) -> None:
         print(f"status detail: raw={raw_status} effective={effective_status}", file=stdout)
     if isinstance(stale_reason, str) and stale_reason:
         print(f"stale reason: {stale_reason}", file=stdout)
+    requested = view.get("requestedHandle")
+    resolved = view.get("resolvedHandle")
+    kind = view.get("resolutionKind")
+    if isinstance(requested, str) and isinstance(resolved, str) and isinstance(kind, str):
+        print(f"resolved handle: {requested} -> {resolved} ({kind})", file=stdout)
 
 
 def _render_snapshot_isolation(view: SnapshotView, stdout: TextIO) -> None:
@@ -227,6 +232,7 @@ def run_output_json_payload(
     alias: str | None,
     run_id: str,
     sections: JsonObject,
+    resolution: JsonObject | None = None,
 ) -> JsonObject:
     payload: JsonObject = {
         "schema": run_registry.RUN_OUTPUT_SCHEMA,
@@ -236,6 +242,8 @@ def run_output_json_payload(
     }
     if alias:
         payload["alias"] = alias
+    if resolution:
+        payload.update(resolution)
     return payload
 
 
@@ -274,7 +282,14 @@ def render_run_output_text(
     stdout: TextIO,
     *,
     section_meta: JsonObject | None = None,
+    resolution: JsonObject | None = None,
 ) -> None:
+    if resolution:
+        requested = resolution.get("requestedHandle")
+        resolved = resolution.get("resolvedHandle")
+        kind = resolution.get("resolutionKind")
+        if isinstance(requested, str) and isinstance(resolved, str) and isinstance(kind, str):
+            print(f"resolved handle: {requested} -> {resolved} ({kind})", file=stdout)
     for name in ("completionReport", "stdout", "stderr", "diagnostics"):
         content = sections.get(name)
         if not content:
@@ -376,6 +391,11 @@ def render_worktree_show_text(payload: JsonObject, stdout: TextIO) -> None:
     alias = payload.get("alias") or payload.get("runId") or "?"
     status = payload.get("worktreeStatus", "unknown")
     print(f"{alias} · {status}", file=stdout)
+    requested = payload.get("requestedHandle")
+    resolved = payload.get("resolvedHandle")
+    kind = payload.get("resolutionKind")
+    if isinstance(requested, str) and isinstance(resolved, str) and isinstance(kind, str):
+        print(f"resolved handle: {requested} -> {resolved} ({kind})", file=stdout)
 
     # Creation-context line: created from <ref>@<oid>; source now at <ref>@<oid>
     creation = payload.get("creationContext")

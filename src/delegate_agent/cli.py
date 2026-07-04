@@ -488,6 +488,8 @@ def make_run_context(
         workspace_kind=source_workspace.kind,
         isolated_workspace=isolated_workspace,
         started_at=run_registry.utc_now_iso(),
+        model_alias=request.model_alias,
+        model_resolved=request.model,
         creation_context=creation_context,
         source_git_root=source_git_root,
         isolation_mode=isolation_mode,
@@ -646,6 +648,8 @@ def execute_request(
             metadata={
                 "mode": isolated_request.mode,
                 "model": isolated_request.model,
+                "modelAlias": isolated_request.model_alias,
+                "modelResolved": isolated_request.model,
                 "cwd": (
                     isolated_request.isolation_context.source_workspace
                     if isolated_request.isolation_context is not None

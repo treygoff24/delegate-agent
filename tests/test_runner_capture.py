@@ -261,6 +261,56 @@ class RunnerCaptureTests(unittest.TestCase):
             stdout_text = (run_path / "stdout.log").read_text()
             self.assertIn("HELLO", stdout_text)
             self.assertNotIn("OUT:", stdout_text)
+            state = json.loads((run_path / "state.json").read_text(encoding="utf-8"))
+            self.assertIsInstance(state.get("pid"), int)
+            self.assertEqual(state.get("pgid"), state.get("pid"))
+
+    def test_grok_cancelled_terminal_event_overrides_exit_zero(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        script = Path(temp.name) / "grok"
+        script.write_text(
+            "#!/usr/bin/env bash\n"
+            'printf \'%s\\n\' \'{"type":"text","data":"partial"}\'\n'
+            'printf \'%s\\n\' \'{"type":"end","stopReason":"Cancelled"}\'\n'
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="grok")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="grok",
+                engine="grok",
+                mode="safe",
+                model="model-id",
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-05-20T21:42:33Z",
+            )
+            code, payload = self.runner.execute_tracked(
+                [str(script)],
+                workspace,
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+            self.assertEqual(code, 1)
+            assert payload is not None
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["status"], "cancelled")
+            self.assertEqual(payload["terminalStatus"], "cancelled")
+            self.assertEqual(payload["failureReason"], "harness_cancelled")
+            state = json.loads((root / "runs" / run_id / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["status"], "cancelled")
+            self.assertEqual(state["terminalStatus"], "cancelled")
 
     def test_tracked_run_gives_child_eof_stdin(self):
         temp = tempfile.TemporaryDirectory()
