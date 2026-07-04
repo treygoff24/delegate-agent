@@ -1066,6 +1066,12 @@ def parse_run_output(rest: list[str], json_mode: bool, cwd: str | None) -> Parse
             "invalid_option_combination",
             "run-output --raw cannot be combined with --max-chars.",
         )
+    if not (stdout_flag or stderr_flag or raw) and (tail is not None or max_chars is not None):
+        raise DelegateError(
+            "invalid_option_combination",
+            "run-output --tail/--max-chars only apply to --stdout or --stderr; "
+            "add --stdout/--stderr or remove the ignored flag.",
+        )
     if (stdout_flag or stderr_flag) and not raw and tail is None:
         tail = RUN_OUTPUT_DEFAULT_TAIL_LINES
     return ParsedCommand(

@@ -17,6 +17,11 @@ RECOVERY_STDOUT_TAIL_BYTES = 1_000_000
 RUN_OUTPUT_DEFAULT_TAIL_LINES = 80
 STREAM_READ_CHUNK_KIB = 64
 STREAM_READ_CHUNK_BYTES = STREAM_READ_CHUNK_KIB * run_registry.BYTES_PER_KIB
+RESULT_QUALITY_OK = harness_events.RESULT_QUALITY_OK
+RESULT_QUALITY_HOUSEKEEPING = harness_events.RESULT_QUALITY_HOUSEKEEPING
+RESULT_QUALITY_EMPTY = harness_events.RESULT_QUALITY_EMPTY
+RESULT_QUALITY_SUSPECT_SHORT = harness_events.RESULT_QUALITY_SUSPECT_SHORT
+RESULT_QUALITY_NO_ASSISTANT_TEXT = harness_events.RESULT_QUALITY_NO_ASSISTANT_TEXT
 
 
 @dataclass(frozen=True)
@@ -186,6 +191,69 @@ def _run_output_next_actions(handle: str) -> list[str]:
     ]
 
 
+def _completion_report_source(registry_root: Path, run_id: str) -> str | None:
+    state = run_registry.load_run_state(registry_root, run_id)
+    source = state.get("completionReportSource")
+    return source if isinstance(source, str) else None
+
+
+def _completion_report_quality(
+    text: str,
+    *,
+    registry_root: Path,
+    run_id: str,
+    report_source: str | None = None,
+) -> str:
+    quality = harness_events.assistant_recovery_quality_for_text(text)
+    if quality == "housekeeping_fallback" and harness_events.is_housekeeping_assistant_text(text):
+        return RESULT_QUALITY_HOUSEKEEPING
+    manifest = run_registry.load_run_manifest(registry_root, run_id)
+    # suspect_short applies ONLY to genuine child reports that are short AND not
+    # substantive: a terse but substantive "Verdict:/Status:" report must NOT be
+    # flagged, while a preamble-only fragment must still flag. Delegate-synthesized
+    # and stdout-recovery reports are never suspect.
+    if (
+        manifest.get("mode") == "safe"
+        and report_source == "child"
+        and len(text.strip()) < 200
+        and not harness_events.is_substantive_assistant_text(text)
+    ):
+        return RESULT_QUALITY_SUSPECT_SHORT
+    return RESULT_QUALITY_OK
+
+
+def _resolve_completion_report_quality(
+    text: str,
+    *,
+    registry_root: Path,
+    run_id: str,
+    report_source: str | None = None,
+) -> str:
+    # Read-time classification prefers the stored state.resultQuality the runner
+    # already computed at write time, and recomputes from disk only when state
+    # lacks it (e.g. older runs persisted before the field existed).
+    state = run_registry.load_run_state(registry_root, run_id)
+    stored = state.get("resultQuality") if isinstance(state, dict) else None
+    if isinstance(stored, str) and stored:
+        return stored
+    return _completion_report_quality(
+        text,
+        registry_root=registry_root,
+        run_id=run_id,
+        report_source=report_source,
+    )
+
+
+# Delegate to the shared helper in harness_events so the runner (write-time) and
+# run-output (read-time) channels emit identical warning text.
+_quality_warning = harness_events.quality_warning
+
+
+def _append_warning(warnings: list[str], warning: str | None) -> None:
+    if warning and warning not in warnings:
+        warnings.append(warning)
+
+
 def _log_section_info(registry_root: Path, run_id: str, log_name: str) -> JsonObject:
     """Probe a stream's presence and byte size once (live file first, then archive)."""
     live_path = run_registry.run_directory(registry_root, run_id) / log_name
@@ -301,6 +369,7 @@ def _add_completion_report_section(
     alias: str | None,
     sections: JsonObject,
     text_sections: dict[str, str],
+    warnings: list[str],
 ) -> None:
     if not command.completion_report:
         return
@@ -308,7 +377,26 @@ def _add_completion_report_section(
     report_path = run_path / run_registry.COMPLETION_REPORT_FILE
     if report_path.exists():
         text = report_path.read_text(encoding="utf-8", errors="replace")
-        sections["completionReport"] = {"bytes": len(text.encode("utf-8"))}
+        manifest = run_registry.load_run_manifest(registry_root, run_id)
+        harness = manifest.get("harness") if isinstance(manifest, dict) else None
+        source = _completion_report_source(registry_root, run_id)
+        result_quality = _resolve_completion_report_quality(
+            text,
+            registry_root=registry_root,
+            run_id=run_id,
+            report_source=source,
+        )
+        _append_warning(
+            warnings,
+            _quality_warning(result_quality, harness=harness if isinstance(harness, str) else None),
+        )
+        meta: JsonObject = {
+            "bytes": len(text.encode("utf-8")),
+            "resultQuality": result_quality,
+        }
+        if source is not None:
+            meta["completionReportSource"] = source
+        sections["completionReport"] = meta
         text_sections["completionReport"] = text
         return
 
@@ -339,6 +427,24 @@ def _add_completion_report_section(
         }
         if recovery_quality is not None:
             report_meta["recoveryQuality"] = recovery_quality
+        result_quality = (
+            RESULT_QUALITY_HOUSEKEEPING
+            if recovery_quality == "housekeeping_fallback"
+            else _resolve_completion_report_quality(
+                text,
+                registry_root=registry_root,
+                run_id=run_id,
+                report_source="stdout_recovery",
+            )
+        )
+        report_meta["resultQuality"] = result_quality
+        report_meta["completionReportSource"] = "stdout_recovery"
+        manifest = run_registry.load_run_manifest(registry_root, run_id)
+        harness = manifest.get("harness") if isinstance(manifest, dict) else None
+        _append_warning(
+            warnings,
+            _quality_warning(result_quality, harness=harness if isinstance(harness, str) else None),
+        )
         sections["completionReport"] = report_meta
         text_sections["completionReport"] = text
         return
@@ -422,6 +528,7 @@ def _emit_run_output_sections(
     sections: JsonObject,
     text_sections: dict[str, str],
     resolution: JsonObject | None,
+    warnings: list[str],
     stdout: TextIO,
 ) -> None:
     if command.json_mode:
@@ -430,6 +537,7 @@ def _emit_run_output_sections(
             run_id=run_id,
             sections=_merge_json_sections(sections, text_sections),
             resolution=resolution,
+            warnings=warnings,
         )
         delegate_rendering.print_json(payload, stdout)
         return
@@ -438,6 +546,7 @@ def _emit_run_output_sections(
         stdout,
         section_meta=sections,
         resolution=resolution,
+        warnings=warnings,
     )
 
 
@@ -465,6 +574,17 @@ def emit(command: RunOutputCommand, *, workspace_path: str, stdout: TextIO) -> i
     )
     sections: JsonObject = {}
     text_sections: dict[str, str] = {}
+    # Seed warnings from persisted state so re-emitted quality warnings dedupe
+    # against warnings the runner already recorded at write time (cross-channel
+    # duplicate suppression).
+    warnings: list[str] = []
+    state = run_registry.load_run_state(registry_root, run_id)
+    if isinstance(state, dict):
+        state_warnings = state.get("warnings")
+        if isinstance(state_warnings, list):
+            for warning in state_warnings:
+                if isinstance(warning, str) and warning not in warnings:
+                    warnings.append(warning)
     _add_completion_report_section(
         command,
         registry_root=registry_root,
@@ -472,6 +592,7 @@ def emit(command: RunOutputCommand, *, workspace_path: str, stdout: TextIO) -> i
         alias=alias,
         sections=sections,
         text_sections=text_sections,
+        warnings=warnings,
     )
     _add_default_fallback_if_requested(
         command,
@@ -517,6 +638,7 @@ def emit(command: RunOutputCommand, *, workspace_path: str, stdout: TextIO) -> i
         sections=sections,
         text_sections=text_sections,
         resolution=resolution,
+        warnings=warnings,
         stdout=stdout,
     )
     return 0

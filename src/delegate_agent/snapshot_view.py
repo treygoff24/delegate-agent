@@ -59,6 +59,9 @@ class SnapshotView(TypedDict, total=False):
     reasoningTransport: str
     snapshotCommand: str
     completionReport: JsonObject
+    completionReportWritten: bool
+    completionReportSource: str
+    resultQuality: str
 
 
 def _snapshot_value(snapshot: JsonObject | None, key: str) -> object:
@@ -158,7 +161,15 @@ def merge_snapshot_view(
     view["stdoutBytes"] = stdout_bytes
     view["stderrBytes"] = stderr_bytes
     if state:
-        for key in ("lastActivityAt", "current", "exitCode", "finishedAt"):
+        for key in (
+            "lastActivityAt",
+            "current",
+            "exitCode",
+            "finishedAt",
+            "completionReportWritten",
+            "completionReportSource",
+            "resultQuality",
+        ):
             if key in state and key not in view:
                 view[key] = state[key]
         # Surface pre-launch failure fields when status is "failed".

@@ -17,6 +17,7 @@ CLI_PATH = ROOT / "bin" / "delegate.py"
 MODULE_PATH = ROOT / "src" / "delegate_agent" / "cli.py"
 RUNNER_PATH = ROOT / "src" / "delegate_agent" / "runner.py"
 REGISTRY_PATH = ROOT / "src" / "delegate_agent" / "run_registry.py"
+RUN_OUTPUT_PATH = ROOT / "src" / "delegate_agent" / "run_output_commands.py"
 
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
@@ -84,6 +85,7 @@ class RunnerCaptureTests(unittest.TestCase):
     def setUp(self):
         self.runner = load_module(RUNNER_PATH, "delegate_runner_under_test")
         self.registry = load_module(REGISTRY_PATH, "delegate_registry_runner_test")
+        self.run_output = load_module(RUN_OUTPUT_PATH, "delegate_run_output_under_test")
 
     def test_execute_call_bounds_plain_stdout_fallback_text(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -101,6 +103,41 @@ class RunnerCaptureTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertLess(len(result.text), raw_len)
         self.assertIn("chars omitted", result.text)
+
+    def test_execute_call_suppresses_structured_noise_without_assistant_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "events_only.py"
+            script.write_text(
+                'print(\'{"type":"thought","data":"internal"}\')\n',
+                encoding="utf-8",
+            )
+            result = self.runner.execute_call(
+                [sys.executable, str(script)],
+                tmp,
+                harness="grok",
+            )
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(result.text, "")
+        self.assertEqual(result.text_chars, 0)
+        self.assertTrue(any("no assistant text" in warning for warning in result.warnings))
+
+    def test_execute_call_captures_redacted_stderr_tail_on_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "fail.py"
+            script.write_text(
+                "import sys\n"
+                "sys.stderr.write('Authorization: Bearer abcdefghijklmnop\\n')\n"
+                "raise SystemExit(9)\n",
+                encoding="utf-8",
+            )
+            result = self.runner.execute_call(
+                [sys.executable, str(script)],
+                tmp,
+                harness="codex",
+            )
+        self.assertEqual(result.exit_code, 9)
+        self.assertIn("Authorization: ***", result.stderr_tail)
+        self.assertNotIn("abcdefghijklmnop", result.stderr_tail)
 
     def test_write_stdin_records_delivery_failure(self):
         read_fd, write_fd = os.pipe()
@@ -264,6 +301,132 @@ class RunnerCaptureTests(unittest.TestCase):
             state = json.loads((run_path / "state.json").read_text(encoding="utf-8"))
             self.assertIsInstance(state.get("pid"), int)
             self.assertEqual(state.get("pgid"), state.get("pid"))
+
+    def test_housekeeping_completion_report_is_classified_from_disk(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        script = Path(temp.name) / "droid"
+        script.write_text(
+            "#!/usr/bin/env bash\n"
+            'printf \'%s\\n\' \'{"type":"message","role":"assistant","content":"Plan is up-to-date."}\'\n'
+            'printf \'%s\\n\' \'{"type":"completion","finalText":"Plan is up-to-date."}\'\n',
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="droid")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="droid",
+                engine="droid",
+                mode="safe",
+                model="model-id",
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-05-20T21:42:33Z",
+            )
+
+            code, payload = self.runner.execute_tracked(
+                [str(script)],
+                workspace,
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+
+            self.assertEqual(code, 0)
+            assert payload is not None
+            self.assertEqual(payload["resultQuality"], "housekeeping_noop")
+            self.assertTrue(payload["completionReportWritten"])
+            self.assertEqual(payload["completionReportSource"], "child")
+            self.assertTrue(any("Droid no-op" in warning for warning in payload["warnings"]))
+            snapshot = json.loads((root / "runs" / run_id / "snapshot.json").read_text())
+            self.assertEqual(snapshot["resultQuality"], "housekeeping_noop")
+
+            out = io.StringIO()
+            command = self.run_output.RunOutputCommand(
+                alias,
+                json_mode=True,
+                completion_report=True,
+            )
+            self.assertEqual(
+                self.run_output.emit(command, workspace_path=workspace, stdout=out),
+                0,
+            )
+            run_output_payload = json.loads(out.getvalue())
+            section = run_output_payload["sections"]["completionReport"]
+            self.assertEqual(section["resultQuality"], "housekeeping_noop")
+            self.assertEqual(section["completionReportSource"], "child")
+
+    def test_failed_run_synthesizes_completion_report_and_auth_reason(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        script = Path(temp.name) / "codex"
+        script.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf 'Error 401: token_expired; refresh token was revoked; sk-secret123456\\n' >&2\n"
+            "exit 7\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-05-20T21:42:33Z",
+            )
+
+            code, payload = self.runner.execute_tracked(
+                [str(script)],
+                workspace,
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+
+            self.assertEqual(code, 7)
+            assert payload is not None
+            self.assertEqual(payload["failureReason"], "auth_failed")
+            self.assertTrue(payload["completionReportWritten"])
+            self.assertEqual(payload["completionReportSource"], "delegate_synthesized")
+            report = (root / "runs" / run_id / "completion-report.md").read_text(encoding="utf-8")
+            self.assertIn("Synthesized by delegate", report)
+            self.assertIn("Failure reason: auth_failed", report)
+            self.assertIn("delegate profiles", report)
+            self.assertIn("codex login", report)
+            self.assertNotIn("sk-secret123456", report)
+
+            out = io.StringIO()
+            command = self.run_output.RunOutputCommand(
+                alias,
+                json_mode=True,
+                completion_report=True,
+            )
+            self.assertEqual(
+                self.run_output.emit(command, workspace_path=workspace, stdout=out),
+                0,
+            )
+            section = json.loads(out.getvalue())["sections"]["completionReport"]
+            self.assertEqual(section["completionReportSource"], "delegate_synthesized")
+            self.assertIn("Synthesized by delegate", section["content"])
 
     def test_grok_cancelled_terminal_event_overrides_exit_zero(self):
         temp = tempfile.TemporaryDirectory()
@@ -842,6 +1005,34 @@ class RunnerCaptureTests(unittest.TestCase):
         self.assertEqual(payload["warnings"], expected)
         self.assertEqual(snapshot["warnings"], expected)
 
+    def test_work_summary_no_changes_becomes_top_level_warning(self):
+        ctx = self.runner.RunContext(
+            registry_root=Path("/tmp"),
+            run_id="run-1",
+            alias="cursor-1",
+            harness="cursor",
+            engine="cursor",
+            mode="work",
+            model="composer-2.5",
+            source_cwd="/repo",
+            execution_cwd="/wt",
+            workspace_kind="git",
+            isolated_workspace=True,
+            started_at="2026-05-20T21:42:33Z",
+            source_git_root="/repo",
+            isolation_lifecycle="persistent",
+            branch="delegate/cursor-1",
+        )
+        with mock.patch.object(
+            self.runner,
+            "_persistent_work_summary",
+            return_value={"noChanges": True, "commitsCreatedCount": 0},
+        ):
+            exit_code, extra = self.runner._final_extra(ctx, 0)
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Work-mode run completed with no file changes", extra["warnings"][0])
+
     def test_forbid_commit_unverified_does_not_mask_child_failure(self):
         ctx = self.runner.RunContext(
             registry_root=Path("/tmp"),
@@ -1311,3 +1502,367 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertIn("read:CLAUDE STDIN PROMPT", snapshot["assistantText"])
             self.assertEqual(manifest["promptTransport"], "stdin")
             self.assertNotIn("CLAUDE STDIN PROMPT", json.dumps(manifest["argv"]))
+
+    def test_substantive_short_child_report_is_not_suspect_short(self):
+        # F1: a terse but substantive "Verdict:/Status:" report must NOT be flagged
+        # suspect_short even though it is under 200 chars in safe mode.
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        script = Path(temp.name) / "codex"
+        script.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            'printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"Verdict: pass"}}\'\n'
+            "printf '%s\\n' '{\"type\":\"turn.completed\"}'\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-05-20T21:42:33Z",
+            )
+            code, payload = self.runner.execute_tracked(
+                [str(script)],
+                workspace,
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+            self.assertEqual(code, 0)
+            assert payload is not None
+            self.assertEqual(payload["completionReportSource"], "child")
+            self.assertEqual(payload["resultQuality"], "ok")
+            self.assertFalse(
+                any("suspect_short" in w for w in payload.get("warnings", [])),
+                f"expected no suspect_short warning, got {payload.get('warnings')}",
+            )
+
+    def test_preamble_only_short_child_report_is_suspect_short(self):
+        # F1: a preamble-only fragment like "Performing an adversarial review..."
+        # that is short and NOT substantive must still flag suspect_short.
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        script = Path(temp.name) / "codex"
+        script.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            'printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"Performing an adversarial review now."}}\'\n'
+            "printf '%s\\n' '{\"type\":\"turn.completed\"}'\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-05-20T21:42:33Z",
+            )
+            code, payload = self.runner.execute_tracked(
+                [str(script)],
+                workspace,
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+            self.assertEqual(code, 0)
+            assert payload is not None
+            self.assertEqual(payload["completionReportSource"], "child")
+            self.assertEqual(payload["resultQuality"], "suspect_short")
+            self.assertTrue(any("suspect_short" in w for w in payload.get("warnings", [])))
+
+    def test_synthesized_report_is_never_suspect_short(self):
+        # F2: a safe-mode failed run with empty stderr tail produces a synthesized
+        # report; resultQuality must NOT be suspect_short (delegate-synthesized
+        # reports are never suspect).
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        script = Path(temp.name) / "codex"
+        script.write_text(
+            "#!/usr/bin/env bash\nexit 7\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-05-20T21:42:33Z",
+            )
+            code, payload = self.runner.execute_tracked(
+                [str(script)],
+                workspace,
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+            self.assertEqual(code, 7)
+            assert payload is not None
+            self.assertEqual(payload["completionReportSource"], "delegate_synthesized")
+            self.assertNotEqual(payload["resultQuality"], "suspect_short")
+            self.assertFalse(
+                any("suspect_short" in w for w in payload.get("warnings", [])),
+            )
+
+    def test_child_report_discussing_401_is_not_auth_failed(self):
+        # F3: a child report that DISCUSSES a 401 in its events/report text, with a
+        # non-auth failure (no auth context in stderr), must NOT be classified
+        # auth_failed. The 401 must appear in the redacted stderr tail with auth
+        # context to count.
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        script = Path(temp.name) / "codex"
+        script.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            'printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"The endpoint returned 401 during the review."}}\'\n'
+            "printf '%s\\n' '{\"type\":\"turn.completed\"}'\n"
+            "printf 'runtime error: something broke\\n' >&2\n"
+            "exit 9\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-05-20T21:42:33Z",
+            )
+            code, payload = self.runner.execute_tracked(
+                [str(script)],
+                workspace,
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+            self.assertEqual(code, 9)
+            assert payload is not None
+            self.assertNotEqual(payload.get("failureReason"), "auth_failed")
+
+    def test_auth_401_with_unauthorized_context_in_stderr_is_auth_failed(self):
+        # F3: a 401 in stderr with auth context (unauthorized nearby) counts as
+        # auth_failed.
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        script = Path(temp.name) / "codex"
+        script.write_text(
+            "#!/usr/bin/env bash\nprintf 'Error 401: unauthorized request\\n' >&2\nexit 7\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-05-20T21:42:33Z",
+            )
+            code, payload = self.runner.execute_tracked(
+                [str(script)],
+                workspace,
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+            self.assertEqual(code, 7)
+            assert payload is not None
+            self.assertEqual(payload["failureReason"], "auth_failed")
+
+    def test_auth_remediation_is_generic_for_non_codex_harness(self):
+        # F6: for a non-codex harness, auth remediation must mention re-authenticating
+        # the <harness> CLI, not codex commands.
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        script = Path(temp.name) / "cursor"
+        script.write_text(
+            "#!/usr/bin/env bash\nprintf 'token_expired: please re-authenticate\\n' >&2\nexit 7\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="cursor")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="cursor",
+                engine="cursor",
+                mode="safe",
+                model="composer-2.5",
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-05-20T21:42:33Z",
+            )
+            code, payload = self.runner.execute_tracked(
+                [str(script)],
+                workspace,
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+            self.assertEqual(code, 7)
+            assert payload is not None
+            self.assertEqual(payload["failureReason"], "auth_failed")
+            next_actions = payload.get("nextActions", [])
+            self.assertTrue(
+                any("re-authenticate the cursor CLI" in a for a in next_actions),
+                f"expected generic re-authenticate action, got {next_actions}",
+            )
+            self.assertFalse(any("codex login" in a for a in next_actions))
+            report = (self.registry.run_directory(root, run_id) / "completion-report.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("re-authenticate the cursor CLI", report)
+            self.assertNotIn("codex login", report)
+
+    def test_auth_remediation_mentions_codex_commands_for_codex_harness(self):
+        # F6: for codex, auth remediation mentions codex login and delegate profiles.
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        script = Path(temp.name) / "codex"
+        script.write_text(
+            "#!/usr/bin/env bash\nprintf 'token_expired: please re-authenticate\\n' >&2\nexit 7\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-05-20T21:42:33Z",
+            )
+            code, payload = self.runner.execute_tracked(
+                [str(script)],
+                workspace,
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+            self.assertEqual(code, 7)
+            assert payload is not None
+            self.assertEqual(payload["failureReason"], "auth_failed")
+            next_actions = payload.get("nextActions", [])
+            self.assertIn("delegate profiles", next_actions)
+            self.assertIn("codex login", next_actions)
+
+    def test_launch_failure_state_and_snapshot_omit_result_quality(self):
+        # F8: a launch failure never ran the child, so both state and snapshot must
+        # omit resultQuality (never ran, no result to classify).
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model="model-id",
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-05-20T21:42:33Z",
+            )
+            missing = str(Path(workspace) / "missing-agent")
+
+            with self.assertRaises(self.runner.RunnerLaunchError):
+                self.runner.execute_tracked(
+                    [missing],
+                    workspace,
+                    ctx,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+
+            run_path = root / "runs" / run_id
+            state = json.loads((run_path / "state.json").read_text(encoding="utf-8"))
+            snapshot = json.loads((run_path / "snapshot.json").read_text(encoding="utf-8"))
+            self.assertNotIn(
+                "resultQuality",
+                state,
+                f"state must omit resultQuality for launch failure, got {state}",
+            )
+            self.assertNotIn(
+                "resultQuality",
+                snapshot,
+                f"snapshot must omit resultQuality for launch failure, got {snapshot}",
+            )

@@ -534,6 +534,11 @@ class EndToEndTrackingTests(unittest.TestCase):
         self.assertEqual(stdout_section["content"], "beta\ngamma\n")
         self.assertGreater(stdout_section["bytes"], 0)
 
+        text_capped = self.run_cli(["run-output", alias, "--stdout", "--max-chars", "5"])
+        self.assertEqual(text_capped.returncode, 0, text_capped.stderr)
+        self.assertIn("last 5 chars", text_capped.stdout)
+        self.assertIn("omitted", text_capped.stdout)
+
         json_raw = subprocess.run(
             [
                 sys.executable,

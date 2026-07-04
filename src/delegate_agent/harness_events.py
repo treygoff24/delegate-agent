@@ -95,6 +95,54 @@ def assistant_recovery_quality_for_text(text: str) -> RecoveryQuality:
     return "housekeeping_fallback"
 
 
+# Result-quality taxonomy shared by the runner (write-time classification) and
+# run-output (read-time classification). Centralized here so both channels emit
+# identical warning text for the same quality verdict.
+RESULT_QUALITY_OK = "ok"
+RESULT_QUALITY_HOUSEKEEPING = "housekeeping_noop"
+RESULT_QUALITY_EMPTY = "empty"
+RESULT_QUALITY_SUSPECT_SHORT = "suspect_short"
+RESULT_QUALITY_NO_ASSISTANT_TEXT = "no_assistant_text"
+
+
+def quality_warning(quality: str, *, harness: str | None = None) -> str | None:
+    """Render a human-readable warning for a result-quality verdict.
+
+    Returns None for ``ok`` so callers can use a truthy check to decide whether
+    to emit anything. The text is shared by the runner and run-output paths so a
+    given verdict produces the same warning regardless of which channel
+    classifies it.
+    """
+    if quality == RESULT_QUALITY_OK:
+        return None
+    if quality == RESULT_QUALITY_HOUSEKEEPING:
+        if harness == "droid":
+            return (
+                "resultQuality=housekeeping_noop: completion report looks like a Droid "
+                "no-op; rerun with a blunter findings-only prompt or reroute to codex/cursor."
+            )
+        return (
+            "resultQuality=housekeeping_noop: completion report looks like housekeeping; "
+            "rerun with a blunter findings-only prompt or inspect stdout/stderr."
+        )
+    if quality == RESULT_QUALITY_EMPTY:
+        return (
+            "resultQuality=empty: child exited 0 but wrote no completion report; "
+            "inspect stdout/stderr or rerun with stricter report instructions."
+        )
+    if quality == RESULT_QUALITY_SUSPECT_SHORT:
+        return (
+            "resultQuality=suspect_short: safe-mode completion report is under 200 chars; "
+            "inspect stdout/stderr or reroute if it lacks findings."
+        )
+    if quality == RESULT_QUALITY_NO_ASSISTANT_TEXT:
+        return (
+            "resultQuality=no_assistant_text: structured stream contained no assistant text; "
+            "inspect stdout/stderr or reroute to a different lane."
+        )
+    return f"resultQuality={quality}"
+
+
 ASSISTANT_TEXT_LIMIT = 30_000
 ASSISTANT_TEXT_HEAD = 20_000
 ASSISTANT_TEXT_TAIL = 10_000
@@ -167,6 +215,7 @@ class StreamAccumulator:
     _grok_current_line: str = field(default="", repr=False)
     terminal_event: JsonObject | None = None
     terminal_status: str | None = None
+    structured_events_seen: int = 0
 
     def _record_terminal_event(
         self,
@@ -197,13 +246,13 @@ class StreamAccumulator:
         if not isinstance(payload, dict):
             self._ingest_text_fallback(stripped)
             return
+        self.structured_events_seen += 1
         self._ingest_object(payload)
 
     def _ingest_text_fallback(self, text: str) -> None:
         bounded = text if len(text) <= 500 else text[:500] + "…"
         self.events.append(NormalizedEvent(kind="text", message=bounded))
-        if len(self.events) == 1:
-            self.current = bounded[:120]
+        self.current = _bounded_current_line(bounded)
 
     def _ingest_object(self, payload: JsonObject) -> None:
         event_type = payload.get("type")

@@ -761,6 +761,13 @@ class ParserTests(unittest.TestCase):
         )
         self.assertEqual(parsed.run_output.max_chars, 12000)
 
+    def test_run_output_tail_and_max_chars_require_stream_selector(self):
+        for flag in ("--tail", "--max-chars"):
+            with self.subTest(flag=flag), self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.delegate.parse_cli(["run-output", "cursor", "--completion-report", flag, "5"])
+            self.assertEqual(ctx.exception.error, "invalid_option_combination")
+            self.assertIn("--stdout/--stderr", ctx.exception.message)
+
     def test_run_output_stdout_without_tail_defaults_to_bounded_tail(self):
         parsed = self.delegate.parse_cli(["run-output", "cursor", "--stdout"])
         self.assertTrue(parsed.run_output.stdout)

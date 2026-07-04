@@ -198,7 +198,8 @@ create snapshots, inject safe/work skill or completion-report framing, emit
 progress heartbeats, or honor persistent worktree/commit policy options. JSON
 output returns fields such as `ok`, `status`, `exitCode`, `engine`, `mode`,
 `model`, `text`, `textChars`, `textTruncated`, `stdoutBytes`, `stderrBytes`,
-reasoning metadata, and `warnings`. `textTruncated` is `true` when the returned
+reasoning metadata, and `warnings`. Failed calls include a redacted `stderrTail`.
+`textTruncated` is `true` when the returned
 `text` was bounded (large outputs keep the head and tail); `textChars` is the
 full untruncated character count.
 
@@ -475,6 +476,9 @@ Common JSON fields for tracked run completion:
   "preservedWorkspace": false,
   "progressRequested": false,
   "assistantText": "final assistant text when recoverable",
+  "resultQuality": "ok",
+  "completionReportWritten": true,
+  "completionReportSource": "child",
   "assistantTextChars": 37,
   "assistantTextTruncated": false,
   "snapshotCommand": "delegate snapshot codex-1",
@@ -491,6 +495,12 @@ both exit codes, and a redacted primary stderr tail).
 
 Snapshot JSON uses schema `delegate.snapshot.v1` and includes fields such as `alias`, `runId`, `harness`, `status`, `rawStatus`, `effectiveStatus`, `staleReason`, `nextActions`, `cwd`, `executionCwd`, `assistantText`, `recentEvents`, `warnings`, `exitCode`, reasoning metadata, terminal metadata, and isolation/worktree metadata when applicable. Inspection commands do not rewrite a stale run's recorded state; they expose the raw recorded status plus the effective status computed from the current PID check. Run-output and worktree show output include `requestedHandle`, `resolvedHandle`, and `resolutionKind` (`literal`, `latest`, or `latest_model`) when a handle resolves indirectly.
 
+Tracked run envelopes include `completionReportWritten`, `completionReportSource`
+(`child`, `delegate_synthesized`, `stdout_recovery`, or `null`), and
+`resultQuality` (`ok`, `housekeeping_noop`, `empty`, `suspect_short`, or
+`no_assistant_text`). Non-`ok` quality adds a warning rather than changing
+exit-code-derived status.
+
 Run-output JSON uses schema `delegate.run-output.v1` and returns selected completion report, stdout, and/or stderr content. By default, secret-like strings are redacted unless `--no-redact` is supplied. Tracked runs finish in one of the terminal statuses `succeeded`, `failed`, or `cancelled`; explicit harness cancellation/error terminal events override an exit-zero child status.
 
 With no selector, `run-output` prints the best available parent-facing output:
@@ -500,7 +510,9 @@ selectors are preserved. `--stdout` or `--stderr` without `--tail` or `--raw`
 defaults to a bounded `--tail 80` and a character cap (default 60000); use
 `--max-chars N` to override the cap. `--raw` returns the full stream with no
 line or character bounds, includes `rawOutputBytes` in JSON metadata, and cannot
-be combined with `--tail` or `--max-chars`.
+be combined with `--tail` or `--max-chars`. `--tail` and `--max-chars` require
+`--stdout` or `--stderr`; Delegate rejects them when only `--completion-report`
+is selected.
 
 When `completion-report.md` is absent, `run-output --completion-report` makes a
 bounded best-effort attempt to recover an explicit final response from the
@@ -511,6 +523,8 @@ JSON output marks recovered reports with `synthetic: true` and
 `source: "stdout.log"`; text output flags them in the section header
 (`=== completionReport (synthetic: recovered from stdout.log tail) ===`), and
 tailed log sections carry a `(last N lines; full log B bytes)` header cue.
+Character-capped text sections also disclose `(last N chars; M omitted)` in text
+headers, matching the JSON `charTruncated` metadata.
 Synthetic recovery may fail when the stdout stream is
 truncated, malformed, or lacks a completed final message. JSON failures for
 explicit `--completion-report` include `diagnostics` (run status and stdout /

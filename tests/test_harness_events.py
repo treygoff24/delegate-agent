@@ -616,6 +616,12 @@ class HarnessEventsTests(unittest.TestCase):
         )
         self.assertEqual(acc.assistant_recovery_quality(), "housekeeping_fallback")
 
+    def test_plaintext_fallback_current_advances_on_each_line(self):
+        acc = self.events.StreamAccumulator()
+        acc.ingest_line("first plaintext progress")
+        acc.ingest_line("second plaintext progress")
+        self.assertEqual(acc.current, "second plaintext progress")
+
     def test_explicit_completion_wins_over_assistant_recovery_quality(self):
         acc = self.events.StreamAccumulator()
         acc.ingest_line(

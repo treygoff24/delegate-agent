@@ -180,13 +180,23 @@ def build_run_summary(
     alias = index_entry.get("alias")
     harness = index_entry.get("harness")
     handle = alias if isinstance(alias, str) else run_id
+    # Merge state-persisted warnings into the runs-table warnings array the same
+    # way snapshot_view does, deduping to avoid repeating the same warning across
+    # channels.
+    warnings: list[str] = list(large_log_warnings(stdout_bytes, stderr_bytes))
+    if isinstance(state, dict):
+        state_warnings = state.get("warnings")
+        if isinstance(state_warnings, list):
+            for warning in state_warnings:
+                if isinstance(warning, str) and warning not in warnings:
+                    warnings.append(warning)
     summary: JsonObject = {
         "runId": run_id,
         "alias": alias if isinstance(alias, str) else None,
         "harness": harness if isinstance(harness, str) else None,
         "stdoutBytes": stdout_bytes,
         "stderrBytes": stderr_bytes,
-        "warnings": large_log_warnings(stdout_bytes, stderr_bytes),
+        "warnings": warnings,
         "activityAt": activity_timestamp(state, manifest),
     }
     if manifest:
@@ -195,7 +205,15 @@ def build_run_summary(
             if value is not None:
                 summary[key] = value
     if state:
-        for key in ("terminalEvent", "terminalStatus", "failureReason", "pgid"):
+        for key in (
+            "terminalEvent",
+            "terminalStatus",
+            "failureReason",
+            "pgid",
+            "completionReportWritten",
+            "completionReportSource",
+            "resultQuality",
+        ):
             value = state.get(key)
             if value is not None:
                 summary[key] = value

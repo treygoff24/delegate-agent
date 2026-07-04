@@ -1,3 +1,4 @@
+import dataclasses
 import io
 import json
 import os
@@ -239,6 +240,64 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertIn("textTruncated", payload)
         self.assertIsInstance(payload["textChars"], int)
         self.assertFalse(payload["textTruncated"])
+
+    def test_call_failure_surfaces_stderr_tail_in_json_and_text(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        bin_dir = Path(temp.name)
+        for name in ("droid", "agent"):
+            path = bin_dir / name
+            path.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf 'Authorization: Bearer abcdefghijklmnop\\n' >&2\n"
+                "exit 7\n",
+                encoding="utf-8",
+            )
+            path.chmod(0o755)
+        env_path = str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["droid"]["models"] = {"reviewer": "model-id"}
+
+        json_request = self.delegate.request_from_parsed(
+            self.delegate.parse_cli(["droid", "reviewer", "call", "hello"]),
+            config,
+            io.StringIO(""),
+        )
+        with mock.patch.dict(os.environ, {"PATH": env_path}):
+            code, payload = self.delegate.execute_request(
+                json_request,
+                json_mode=True,
+                config=config,
+                pass_through=False,
+                completion_report_mode="none",
+                source_workspace=self.delegate.ResolvedWorkspace("<call-temp-cwd>", "directory"),
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+        self.assertEqual(code, 7)
+        self.assertIn("Authorization: ***", payload["stderrTail"])
+        self.assertNotIn("abcdefghijklmnop", payload["stderrTail"])
+
+        text_request = self.delegate.request_from_parsed(
+            self.delegate.parse_cli(["droid", "reviewer", "call", "hello"]),
+            config,
+            io.StringIO(""),
+        )
+        stderr = io.StringIO()
+        with mock.patch.dict(os.environ, {"PATH": env_path}):
+            code, _payload = self.delegate.execute_request(
+                text_request,
+                json_mode=False,
+                config=config,
+                pass_through=False,
+                completion_report_mode="none",
+                source_workspace=self.delegate.ResolvedWorkspace("<call-temp-cwd>", "directory"),
+                stdout=io.StringIO(),
+                stderr=stderr,
+            )
+        self.assertEqual(code, 7)
+        self.assertIn("Authorization: ***", stderr.getvalue())
+        self.assertNotIn("abcdefghijklmnop", stderr.getvalue())
 
     def test_json_success_shape_with_fake_binary(self):
         repo = make_git_repo()
@@ -1038,6 +1097,48 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertEqual(payload["configKey"], "kimi.binary")
         self.assertEqual(payload["suggestedBinaryPath"], str(candidate))
         self.assertIn(str(candidate), payload["message"])
+
+    def test_call_mode_warning_merge_dedupes_preserving_order(self):
+        # F7: call-mode warning merge dedupes while preserving order. A warning
+        # present in both request.warnings and result.warnings is emitted once.
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["droid"]["models"] = {"reviewer": "model-id"}
+        parsed = self.delegate.parse_cli(["droid", "reviewer", "call", "hello"])
+        request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+        duplicate_warning = "shared warning from both channels"
+        request = dataclasses.replace(
+            request,
+            warnings=(duplicate_warning, "request-only warning"),
+            cleanup_workspace=False,
+        )
+        fake_result = self.delegate.delegate_runner.CallResult(
+            text="ok",
+            exit_code=0,
+            duration_ms=10,
+            stdout_bytes=2,
+            stderr_bytes=0,
+            text_chars=2,
+            text_truncated=False,
+            warnings=(duplicate_warning, "result-only warning"),
+        )
+        with mock.patch.object(
+            self.delegate.delegate_runner, "execute_call", return_value=fake_result
+        ):
+            code, payload = self.delegate.execute_request(
+                request,
+                json_mode=True,
+                config=config,
+                pass_through=False,
+                completion_report_mode="none",
+                source_workspace=self.delegate.ResolvedWorkspace("<call-temp-cwd>", "directory"),
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            payload["warnings"],
+            ["shared warning from both channels", "request-only warning", "result-only warning"],
+        )
 
 
 if __name__ == "__main__":

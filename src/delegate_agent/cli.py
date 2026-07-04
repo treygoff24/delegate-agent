@@ -573,11 +573,26 @@ def execute_request(
                 }
                 if request.warnings:
                     payload["warnings"] = list(request.warnings)
+                if result.warnings:
+                    # Dedupe while preserving order so a warning present in both
+                    # request.warnings and result.warnings is not emitted twice.
+                    merged: list[str] = []
+                    seen: set[str] = set()
+                    for warning in [*payload.get("warnings", []), *result.warnings]:
+                        if isinstance(warning, str) and warning not in seen:
+                            seen.add(warning)
+                            merged.append(warning)
+                    payload["warnings"] = merged
                 reasoning.add_reasoning_payload_fields(payload, request)
                 if result.exit_code != 0:
                     payload["error"] = "child_failed"
                     payload["message"] = "Child command failed."
+                    payload["stderrTail"] = result.stderr_tail
                 return result.exit_code, payload
+            for warning in result.warnings:
+                print(f"warning: {warning}", file=stderr)
+            if result.exit_code != 0 and result.stderr_tail:
+                print(result.stderr_tail, file=stderr)
             if result.text:
                 print(result.text, file=stdout)
             return result.exit_code, None

@@ -1291,6 +1291,136 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
         self.assertEqual(section["rawOutputBytes"], 100_001)
         self.assertEqual(len(section["content"]), 100_001)
 
+    def _write_safe_mode_run_with_report(
+        self,
+        *,
+        report_text: str,
+        result_quality: str | None = None,
+        warnings: list[str] | None = None,
+    ) -> tuple[str, str]:
+        run_id, alias = self.write_run(harness="codex", status="succeeded", pid=None)
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        (run_path / "completion-report.md").write_text(report_text, encoding="utf-8")
+        manifest = json.loads((run_path / "manifest.json").read_text(encoding="utf-8"))
+        manifest["mode"] = "safe"
+        self.registry.write_json_atomic(run_path / "manifest.json", manifest)
+        state = json.loads((run_path / "state.json").read_text(encoding="utf-8"))
+        state["completionReportSource"] = "child"
+        if result_quality is not None:
+            state["resultQuality"] = result_quality
+        if warnings is not None:
+            state["warnings"] = warnings
+        self.registry.write_json_atomic(run_path / "state.json", state)
+        return run_id, alias
+
+    def test_run_output_substantive_short_child_report_not_suspect_short(self):
+        # F1 (read-time): a terse but substantive "Verdict:" report must NOT be
+        # flagged suspect_short when read via run-output.
+        _, alias = self._write_safe_mode_run_with_report(report_text="Verdict: pass")
+        stdout = io.StringIO()
+        code = self.delegate.main(
+            ["--json", "--cwd", str(self.workspace), "run-output", alias, "--completion-report"],
+            stdout=stdout,
+        )
+        self.assertEqual(code, 0)
+        section = json.loads(stdout.getvalue())["sections"]["completionReport"]
+        self.assertEqual(section["resultQuality"], "ok")
+        self.assertNotIn("suspect_short", json.dumps(section))
+
+    def test_run_output_preamble_only_short_child_report_is_suspect_short(self):
+        # F1 (read-time): a preamble-only fragment that is short and NOT
+        # substantive must still flag suspect_short when read via run-output.
+        _, alias = self._write_safe_mode_run_with_report(
+            report_text="Performing an adversarial review now."
+        )
+        stdout = io.StringIO()
+        code = self.delegate.main(
+            ["--json", "--cwd", str(self.workspace), "run-output", alias, "--completion-report"],
+            stdout=stdout,
+        )
+        self.assertEqual(code, 0)
+        section = json.loads(stdout.getvalue())["sections"]["completionReport"]
+        self.assertEqual(section["resultQuality"], "suspect_short")
+
+    def test_run_output_synthesized_report_not_suspect_short(self):
+        # F2 (read-time): a delegate-synthesized report must never be suspect_short
+        # even if it is short.
+        run_id, alias = self.write_run(harness="codex", status="failed", pid=None)
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        (run_path / "completion-report.md").write_text(
+            "Synthesized by delegate.\n\nStatus: failed\nFailure reason: child_failed\n",
+            encoding="utf-8",
+        )
+        manifest = json.loads((run_path / "manifest.json").read_text(encoding="utf-8"))
+        manifest["mode"] = "safe"
+        self.registry.write_json_atomic(run_path / "manifest.json", manifest)
+        state = json.loads((run_path / "state.json").read_text(encoding="utf-8"))
+        state["completionReportSource"] = "delegate_synthesized"
+        self.registry.write_json_atomic(run_path / "state.json", state)
+        stdout = io.StringIO()
+        code = self.delegate.main(
+            ["--json", "--cwd", str(self.workspace), "run-output", alias, "--completion-report"],
+            stdout=stdout,
+        )
+        self.assertEqual(code, 0)
+        section = json.loads(stdout.getvalue())["sections"]["completionReport"]
+        self.assertNotEqual(section["resultQuality"], "suspect_short")
+
+    def test_run_output_prefers_stored_state_result_quality(self):
+        # F5 (read-time): run-output prefers the stored state.resultQuality and
+        # does not recompute from disk when state has it.
+        _, alias = self._write_safe_mode_run_with_report(
+            report_text="Verdict: pass",
+            result_quality="housekeeping_noop",
+        )
+        stdout = io.StringIO()
+        code = self.delegate.main(
+            ["--json", "--cwd", str(self.workspace), "run-output", alias, "--completion-report"],
+            stdout=stdout,
+        )
+        self.assertEqual(code, 0)
+        section = json.loads(stdout.getvalue())["sections"]["completionReport"]
+        self.assertEqual(section["resultQuality"], "housekeeping_noop")
+
+    def test_run_output_dedupes_quality_warning_against_state_warnings(self):
+        # F5 (cross-channel dedupe): when run-output re-emits a quality warning
+        # already present in state.warnings, it must not duplicate it.
+        _, alias = self._write_safe_mode_run_with_report(
+            report_text="Performing an adversarial review now.",
+            result_quality="suspect_short",
+            warnings=[
+                "resultQuality=suspect_short: safe-mode completion report is under 200 chars; inspect stdout/stderr or reroute if it lacks findings."
+            ],
+        )
+        stdout = io.StringIO()
+        code = self.delegate.main(
+            ["--json", "--cwd", str(self.workspace), "run-output", alias, "--completion-report"],
+            stdout=stdout,
+        )
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        warnings = payload.get("warnings", [])
+        suspect_count = sum(1 for w in warnings if "suspect_short" in w)
+        self.assertEqual(suspect_count, 1, f"expected one suspect_short warning, got {warnings}")
+
+    def test_runs_table_merges_state_warnings_deduped(self):
+        # F4: build_run_summary merges state-persisted warnings into the runs-table
+        # warnings array, deduped.
+        run_id, _alias = self.write_run(status="succeeded", pid=None)
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        state = json.loads((run_path / "state.json").read_text(encoding="utf-8"))
+        state["warnings"] = ["a persisted warning"]
+        self.registry.write_json_atomic(run_path / "state.json", state)
+        stdout = io.StringIO()
+        code = self.delegate.main(
+            ["--json", "--cwd", str(self.workspace), "runs", "--limit", "1"],
+            stdout=stdout,
+        )
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        warnings = payload["runs"][0].get("warnings", [])
+        self.assertIn("a persisted warning", warnings)
+
 
 if __name__ == "__main__":
     unittest.main()

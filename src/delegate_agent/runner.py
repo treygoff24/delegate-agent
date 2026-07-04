@@ -4,6 +4,7 @@ import contextlib
 import json
 import math
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -45,6 +46,25 @@ PROGRESS_INITIAL_DELAY_SEC = delegate_config.default_progress_initial_delay_sec(
 PROGRESS_HEARTBEAT_INTERVAL_SEC = delegate_config.default_progress_interval_sec()
 PROGRESS_INITIAL_DELAY_ENV = "DELEGATE_PROGRESS_INITIAL_DELAY_SEC"
 PROGRESS_INTERVAL_ENV = "DELEGATE_PROGRESS_INTERVAL_SEC"
+RESULT_QUALITY_OK = harness_events.RESULT_QUALITY_OK
+RESULT_QUALITY_HOUSEKEEPING = harness_events.RESULT_QUALITY_HOUSEKEEPING
+RESULT_QUALITY_EMPTY = harness_events.RESULT_QUALITY_EMPTY
+RESULT_QUALITY_SUSPECT_SHORT = harness_events.RESULT_QUALITY_SUSPECT_SHORT
+RESULT_QUALITY_NO_ASSISTANT_TEXT = harness_events.RESULT_QUALITY_NO_ASSISTANT_TEXT
+COMPLETION_REPORT_SOURCE_CHILD = "child"
+COMPLETION_REPORT_SOURCE_SYNTHESIZED = "delegate_synthesized"
+COMPLETION_REPORT_SOURCE_STDOUT_RECOVERY = "stdout_recovery"
+# Auth-failure detection matches against the REDACTED STDERR TAIL ONLY (not the
+# normalized-events haystack), so a child report merely DISCUSSING a 401 in its
+# events/report text cannot be misclassified as an auth failure. ``token_expired``
+# and ``refresh token was revoked`` are unambiguous auth signals on their own; a
+# bare ``401`` only counts when auth context appears nearby (unauthorized/token/
+# auth within the same line), otherwise a 401 in unrelated output is ignored.
+AUTH_FAILURE_PATTERNS = (
+    re.compile(r"401[^\n]{0,80}(?:unauthorized|token|auth)", re.IGNORECASE),
+    re.compile(r"token_expired", re.IGNORECASE),
+    re.compile(r"refresh token was revoked", re.IGNORECASE),
+)
 
 SKILL_REVIEW_PREFIX = prompt_instructions.SKILL_REVIEW_PREFIX
 COMPLETION_REPORT_SUFFIX = prompt_instructions.COMPLETION_REPORT_SUFFIX
@@ -240,6 +260,21 @@ def build_state(
         "stderrBytes": stderr_bytes,
         "lastActivityAt": now,
     }
+    state["completionReportWritten"] = bool(
+        extra.get("completionReportWritten") if extra is not None else False
+    )
+    state["completionReportSource"] = (
+        extra.get("completionReportSource") if extra is not None else None
+    )
+    # Default to "ok" only when no extra payload is supplied (e.g. an early
+    # running persist). When extra is provided, respect its resultQuality
+    # explicitly: a None value means "no result to classify" (e.g. a launch
+    # failure that never ran the child), so the key is omitted entirely rather
+    # than defaulted to "ok".
+    if extra is None:
+        state["resultQuality"] = RESULT_QUALITY_OK
+    elif "resultQuality" in extra and extra["resultQuality"] is not None:
+        state["resultQuality"] = extra["resultQuality"]
     if exit_code is not None:
         state["exitCode"] = exit_code
         state["finishedAt"] = now
@@ -251,6 +286,11 @@ def build_state(
             state["pgid"] = os.getpgid(pid)
     if extra is not None:
         state.update(extra)
+    # A None resultQuality means "no result to classify" (e.g. a launch failure
+    # that never ran the child). Omit the key entirely rather than persist null,
+    # so launch-failure state stays consistent with its snapshot.
+    if state.get("resultQuality") is None:
+        state.pop("resultQuality", None)
     return state
 
 
@@ -299,6 +339,9 @@ def build_snapshot(
         "startedAt": ctx.started_at,
         "current": accumulator.current,
         "recentEvents": recent_events,
+        "completionReportWritten": completion_report_written,
+        "completionReportSource": None,
+        "resultQuality": RESULT_QUALITY_OK,
         **assistant_meta,
         **events_meta,
     }
@@ -378,6 +421,150 @@ def write_completion_report(run_path: Path, text: str) -> bool:
     return True
 
 
+def _append_unique(values: list[str], value: str) -> None:
+    if value not in values:
+        values.append(value)
+
+
+# Delegate to the shared helper in harness_events so the runner (write-time) and
+# run-output (read-time) channels emit identical warning text.
+_quality_warning = harness_events.quality_warning
+
+
+def _classify_result_quality(
+    *,
+    ctx: RunContext,
+    exit_code: int,
+    report_text: str,
+    report_written: bool,
+    report_source: str | None,
+    accumulator: harness_events.StreamAccumulator,
+) -> str:
+    if report_text.strip():
+        quality = harness_events.assistant_recovery_quality_for_text(report_text)
+        if quality == "housekeeping_fallback" and harness_events.is_housekeeping_assistant_text(
+            report_text
+        ):
+            return RESULT_QUALITY_HOUSEKEEPING
+        # suspect_short applies ONLY to genuine child reports that are short AND
+        # not substantive: a terse but substantive "Verdict:/Status:" report must
+        # NOT be flagged, while a preamble-only fragment like "Performing an
+        # adversarial review..." must still flag. Delegate-synthesized reports
+        # are never suspect (they are structured diagnostics, not child output).
+        if (
+            ctx.mode == "safe"
+            and report_source == COMPLETION_REPORT_SOURCE_CHILD
+            and len(report_text.strip()) < 200
+            and not harness_events.is_substantive_assistant_text(report_text)
+        ):
+            return RESULT_QUALITY_SUSPECT_SHORT
+        return RESULT_QUALITY_OK
+    if (
+        exit_code == 0
+        and accumulator.structured_events_seen > 0
+        and not accumulator.assistant_text.strip()
+        and not accumulator.completion_text
+    ):
+        return RESULT_QUALITY_NO_ASSISTANT_TEXT
+    if exit_code == 0 and not report_written:
+        return RESULT_QUALITY_EMPTY
+    return RESULT_QUALITY_OK
+
+
+def _redacted_tail_from_bytes(data: bytes, *, limit: int = profiles.STDERR_TAIL_LIMIT) -> str:
+    if limit <= 0:
+        return ""
+    return redaction.redact_string(data[-limit:].decode("utf-8", errors="replace"))
+
+
+def _auth_failure_seen(stderr_tail: str, accumulator: harness_events.StreamAccumulator) -> bool:
+    # Match against the redacted stderr tail ONLY. Inspecting the normalized
+    # events haystack would misclassify a child report that merely DISCUSSES a
+    # 401 (e.g. a review mentioning "the endpoint returned 401") as an auth
+    # failure. The accumulator is accepted to keep the call site stable but is
+    # intentionally not consulted here.
+    del accumulator  # unused: auth signals come from stderr, not event text
+    return any(pattern.search(stderr_tail) for pattern in AUTH_FAILURE_PATTERNS)
+
+
+def _failure_reason(
+    *,
+    status: str,
+    stderr_tail: str,
+    accumulator: harness_events.StreamAccumulator,
+    extra: JsonObject,
+) -> str | None:
+    existing = extra.get("failureReason")
+    if isinstance(existing, str) and existing:
+        return existing
+    if status not in {run_registry.STATUS_FAILED, run_registry.STATUS_CANCELLED}:
+        return None
+    if _auth_failure_seen(stderr_tail, accumulator):
+        return "auth_failed"
+    if status == run_registry.STATUS_CANCELLED:
+        return "harness_cancelled"
+    return "child_failed"
+
+
+def _auth_remediation_actions(ctx: RunContext) -> list[str]:
+    """Harness-specific auth-remediation next-actions for an auth_failed run."""
+    if ctx.harness == "codex" or ctx.engine == "codex":
+        return ["delegate profiles", "codex login"]
+    return [f"re-authenticate the {ctx.harness} CLI"]
+
+
+def _auth_remediation_line(ctx: RunContext) -> str:
+    """Harness-specific auth-remediation prose for a synthesized report."""
+    if ctx.harness == "codex" or ctx.engine == "codex":
+        return (
+            "Remediation: inspect `delegate profiles`, then refresh Codex auth with `codex login`."
+        )
+    return f"Remediation: re-authenticate the {ctx.harness} CLI."
+
+
+def _completion_report_text_and_source(
+    ctx: RunContext,
+    accumulator: harness_events.StreamAccumulator,
+    *,
+    completion_report_mode: str,
+    status: str,
+    failure_reason: str | None,
+    stderr_tail: str,
+) -> tuple[str, str | None]:
+    child_text = _completion_report_source(
+        ctx,
+        accumulator,
+        completion_report_mode=completion_report_mode,
+    ).strip()
+    if accumulator.completion_text and child_text:
+        return child_text, COMPLETION_REPORT_SOURCE_CHILD
+    if status == run_registry.STATUS_FAILED and not accumulator.completion_text:
+        next_actions = [
+            run_registry.run_output_command(
+                ctx.alias,
+                cwd=ctx.source_cwd,
+            )
+            + " --stderr --tail 80",
+        ]
+        if failure_reason == "auth_failed":
+            next_actions = [*_auth_remediation_actions(ctx), *next_actions]
+        lines = [
+            "Synthesized by delegate.",
+            "",
+            f"Status: {status}",
+            f"Failure reason: {failure_reason or 'child_failed'}",
+        ]
+        if failure_reason == "auth_failed":
+            lines.append(_auth_remediation_line(ctx))
+        if stderr_tail.strip():
+            lines.extend(["", "Redacted stderr tail:", "```text", stderr_tail.rstrip(), "```"])
+        lines.extend(["", "Next actions:", *(f"- {action}" for action in next_actions)])
+        return "\n".join(lines), COMPLETION_REPORT_SOURCE_SYNTHESIZED
+    if child_text:
+        return child_text, COMPLETION_REPORT_SOURCE_STDOUT_RECOVERY
+    return "", None
+
+
 def emit_bounded_text_summary(
     ctx: RunContext,
     *,
@@ -409,6 +596,11 @@ def emit_bounded_text_summary(
     for warning in ctx.warnings:
         print(f"warning: {warning}", file=stdout)
     if extra is not None:
+        extra_warnings = extra.get("warnings")
+        if isinstance(extra_warnings, list):
+            for warning in extra_warnings:
+                if isinstance(warning, str) and warning not in ctx.warnings:
+                    print(f"warning: {warning}", file=stdout)
         work_summary = extra.get("workSummary")
         if isinstance(work_summary, dict):
             commits_created = work_summary.get("commitsCreatedCount", 0)
@@ -430,11 +622,21 @@ def emit_bounded_text_summary(
         if extra.get("commitPolicyUnverified") is True:
             print("commit policy: unverified (--forbid-commit)", file=stdout)
     print(f"snapshot: {run_registry.snapshot_command(ctx.alias, cwd=ctx.source_cwd)}", file=stdout)
-    print(
-        "completion report: "
-        f"{run_registry.run_output_command(ctx.alias, completion_report=True, cwd=ctx.source_cwd)}",
-        file=stdout,
-    )
+    report_written = extra.get("completionReportWritten") if isinstance(extra, dict) else False
+    report_source = extra.get("completionReportSource") if isinstance(extra, dict) else None
+    if report_written:
+        print(
+            "completion report: "
+            f"{run_registry.run_output_command(ctx.alias, completion_report=True, cwd=ctx.source_cwd)}",
+            file=stdout,
+        )
+        if isinstance(report_source, str):
+            print(f"completion report source: {report_source}", file=stdout)
+    else:
+        print(
+            f"diagnostics: {run_registry.run_output_command(ctx.alias, cwd=ctx.source_cwd)}",
+            file=stdout,
+        )
     if ctx.execution_cwd and (lifecycle == "temporary" or lifecycle == "persistent"):
         print(
             f"inspect: {shlex.join(['git', '-C', ctx.execution_cwd, 'status', '--short'])}",
@@ -489,6 +691,13 @@ def completion_json_payload(
             cwd=ctx.source_cwd,
         )
         payload["completionReportPath"] = completion_report_path(ctx.run_id)
+    payload["completionReportWritten"] = completion_report_written
+    payload["completionReportSource"] = (
+        extra.get("completionReportSource") if extra is not None else None
+    )
+    payload["resultQuality"] = (
+        extra.get("resultQuality") if extra is not None else RESULT_QUALITY_OK
+    )
     if ctx.auth_profile is not None:
         payload["authProfile"] = ctx.auth_profile
     if ctx.fallback_auth_profile is not None:
@@ -620,6 +829,8 @@ class CallResult:
     stderr_bytes: int
     text_chars: int
     text_truncated: bool
+    stderr_tail: str = ""
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -646,6 +857,13 @@ def _final_extra(ctx: RunContext, capture_exit_code: int) -> tuple[int, JsonObje
     summary = _persistent_work_summary(ctx)
     if summary is not None:
         extra["workSummary"] = summary
+        if summary.get("noChanges") is True:
+            warnings = list(extra.get("warnings") or [])
+            _append_unique(
+                warnings,
+                "Work-mode run completed with no file changes or commits detected.",
+            )
+            extra["warnings"] = warnings
     commits_created = worktree_summary.commits_created_count(summary)
     if (
         summary is not None
@@ -794,14 +1012,24 @@ def _record_tracked_launch_failure(
     ctx: RunContext,
     error: RunnerLaunchError,
 ) -> None:
-    extra: JsonObject = {"error": error.error, "message": error.message}
+    # A launch failure never ran the child, so there is no result to classify.
+    # resultQuality is set to None explicitly so build_state omits the key,
+    # keeping state consistent with the snapshot below (which also omits it).
+    extra: JsonObject = {
+        "error": error.error,
+        "message": error.message,
+        "resultQuality": None,
+    }
     write_state(files.run_path, build_state(ctx, status="failed", extra=extra))
     snapshot = build_snapshot(
         ctx, accumulator=harness_events.StreamAccumulator(harness=ctx.harness)
     )
     snapshot["ok"] = False
     snapshot["status"] = "failed"
-    snapshot.update(extra)
+    # The child never ran, so there is no result quality to report. Remove the
+    # snapshot's default "ok" verdict so launch-failure state and snapshot agree.
+    snapshot.pop("resultQuality", None)
+    snapshot.update({"error": error.error, "message": error.message})
     write_snapshot(files.run_path, snapshot)
 
 
@@ -1008,14 +1236,41 @@ def _finalize_tracked_run(
         status = capture.accumulator.terminal_status
         if exit_code == 0:
             exit_code = 1
-    report_written = write_completion_report(
-        files.run_path,
-        _completion_report_source(
-            ctx,
-            capture.accumulator,
-            completion_report_mode=completion_report_mode,
-        ),
+    stderr_tail = profiles.read_bounded_stderr_tail(files.stderr_log)
+    failure_reason = _failure_reason(
+        status=status,
+        stderr_tail=stderr_tail,
+        accumulator=capture.accumulator,
+        extra=merged_extra,
     )
+    if failure_reason is not None:
+        merged_extra["failureReason"] = failure_reason
+        if failure_reason == "auth_failed":
+            merged_extra["nextActions"] = _auth_remediation_actions(ctx)
+    report_text, report_source = _completion_report_text_and_source(
+        ctx,
+        capture.accumulator,
+        completion_report_mode=completion_report_mode,
+        status=status,
+        failure_reason=failure_reason,
+        stderr_tail=stderr_tail,
+    )
+    report_written = write_completion_report(files.run_path, report_text)
+    result_quality = _classify_result_quality(
+        ctx=ctx,
+        exit_code=exit_code,
+        report_text=report_text,
+        report_written=report_written,
+        report_source=report_source,
+        accumulator=capture.accumulator,
+    )
+    merged_extra["completionReportWritten"] = report_written
+    merged_extra["completionReportSource"] = report_source if report_written else None
+    merged_extra["resultQuality"] = result_quality
+    if result_quality != RESULT_QUALITY_OK:
+        warnings = list(merged_extra.get("warnings") or [])
+        _append_unique(warnings, _quality_warning(result_quality, harness=ctx.harness))
+        merged_extra["warnings"] = warnings
     persist_progress(
         files.run_path,
         ctx,
@@ -1275,13 +1530,22 @@ def execute_call(
     stdout_bytes = len(completed.stdout or b"")
     stderr_bytes = len(completed.stderr or b"")
     stdout_text = (completed.stdout or b"").decode("utf-8", errors="replace")
+    stderr_tail = _redacted_tail_from_bytes(completed.stderr or b"")
     accumulator = harness_events.StreamAccumulator(harness=harness)
     for line in stdout_text.splitlines():
         accumulator.ingest_line(line)
     text, meta = accumulator.bounded_assistant_text()
+    warnings: tuple[str, ...] = ()
     if text:
         text_chars = int(meta.get("assistantTextChars", len(text)))
         text_truncated = bool(meta.get("assistantTextTruncated", False))
+    elif accumulator.structured_events_seen > 0:
+        warnings = (
+            "Structured child stdout contained no assistant text; suppressed raw event output.",
+        )
+        text = ""
+        text_chars = 0
+        text_truncated = False
     else:
         # No structured assistant events parsed: fall back to raw stdout, bounded.
         raw = stdout_text.strip()
@@ -1296,6 +1560,8 @@ def execute_call(
         stderr_bytes=stderr_bytes,
         text_chars=text_chars,
         text_truncated=text_truncated,
+        stderr_tail=stderr_tail,
+        warnings=warnings,
     )
 
 

@@ -233,6 +233,7 @@ def run_output_json_payload(
     run_id: str,
     sections: JsonObject,
     resolution: JsonObject | None = None,
+    warnings: list[str] | None = None,
 ) -> JsonObject:
     payload: JsonObject = {
         "schema": run_registry.RUN_OUTPUT_SCHEMA,
@@ -244,6 +245,8 @@ def run_output_json_payload(
         payload["alias"] = alias
     if resolution:
         payload.update(resolution)
+    if warnings:
+        payload["warnings"] = warnings
     return payload
 
 
@@ -269,12 +272,18 @@ def _run_output_section_header(name: str, meta: JsonObject) -> str:
     # Text mode needs in-band cues for anything JSON mode flags in section
     # metadata: a recovered (synthetic) completion report is not a child-written
     # report, and a tailed log is not the whole log.
+    details: list[str] = []
     if meta.get("synthetic") is True:
-        return f"{name} (synthetic: recovered from stdout.log tail)"
+        details.append("synthetic: recovered from stdout.log tail")
     tail_lines = meta.get("tailLines")
     if meta.get("truncated") is True and isinstance(tail_lines, int):
-        return f"{name} (last {tail_lines} lines; full log {meta.get('bytes', '?')} bytes)"
-    return name
+        details.append(f"last {tail_lines} lines; full log {meta.get('bytes', '?')} bytes")
+    if meta.get("charTruncated") is True:
+        returned = meta.get("returnedChars", "?")
+        omitted = meta.get("omittedChars", "?")
+        details.append(f"last {returned} chars; {omitted} omitted")
+    suffix = f" ({'; '.join(details)})" if details else ""
+    return f"{name}{suffix}"
 
 
 def render_run_output_text(
@@ -283,6 +292,7 @@ def render_run_output_text(
     *,
     section_meta: JsonObject | None = None,
     resolution: JsonObject | None = None,
+    warnings: list[str] | None = None,
 ) -> None:
     if resolution:
         requested = resolution.get("requestedHandle")
@@ -290,6 +300,10 @@ def render_run_output_text(
         kind = resolution.get("resolutionKind")
         if isinstance(requested, str) and isinstance(resolved, str) and isinstance(kind, str):
             print(f"resolved handle: {requested} -> {resolved} ({kind})", file=stdout)
+    if warnings:
+        print("warnings:", file=stdout)
+        for warning in warnings:
+            print(f"  - {warning}", file=stdout)
     for name in ("completionReport", "stdout", "stderr", "diagnostics"):
         content = sections.get(name)
         if not content:

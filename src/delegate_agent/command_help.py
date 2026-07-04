@@ -555,6 +555,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "Prefer this over piping launch output through tail.",
             "Non-raw stdout/stderr are bounded by line tail and character cap; use --raw only "
             "when you intentionally need the full stream.",
+            "--tail and --max-chars require --stdout or --stderr; completion reports reject them.",
         ),
         see_also=("snapshot", "runs"),
         unsupported_global_options=("--auth-profile",),
