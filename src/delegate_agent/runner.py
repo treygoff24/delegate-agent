@@ -126,6 +126,9 @@ class RunContext:
     fallback_env_overrides: dict[str, str] = field(default_factory=dict)
     auth_profile: str | None = None
     fallback_auth_profile: str | None = None
+    include_dirty: bool = False
+    synced_files: int = 0
+    group: str | None = None
 
 
 def write_manifest(run_path: Path, manifest: JsonObject) -> None:
@@ -236,6 +239,11 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
         payload["authProfile"] = ctx.auth_profile
     if ctx.fallback_auth_profile is not None:
         payload["fallbackProfile"] = ctx.fallback_auth_profile
+    if ctx.group is not None:
+        payload["group"] = ctx.group
+    if ctx.include_dirty:
+        payload["includeDirty"] = True
+        payload["syncedFiles"] = ctx.synced_files
     return payload
 
 
@@ -286,6 +294,11 @@ def build_state(
             state["pgid"] = os.getpgid(pid)
     if extra is not None:
         state.update(extra)
+    if ctx.group is not None:
+        state["group"] = ctx.group
+    if ctx.include_dirty:
+        state["includeDirty"] = True
+        state["syncedFiles"] = ctx.synced_files
     # A None resultQuality means "no result to classify" (e.g. a launch failure
     # that never ran the child). Omit the key entirely rather than persist null,
     # so launch-failure state stays consistent with its snapshot.
@@ -359,6 +372,11 @@ def build_snapshot(
         snapshot["terminalEvent"] = accumulator.terminal_event
     if accumulator.terminal_status is not None:
         snapshot["terminalStatus"] = accumulator.terminal_status
+    if ctx.group is not None:
+        snapshot["group"] = ctx.group
+    if ctx.include_dirty:
+        snapshot["includeDirty"] = True
+        snapshot["syncedFiles"] = ctx.synced_files
     if completion_report_written:
         report_path = completion_report_path(ctx.run_id)
         snapshot["completionReport"] = {
@@ -656,6 +674,8 @@ def emit_bounded_text_summary(
         print(f"isolation: {lifecycle}", file=stdout)
     if ctx.safe_workspace_method:
         print(f"safe workspace method: {ctx.safe_workspace_method}", file=stdout)
+    if ctx.include_dirty:
+        print(f"syncedFiles: {ctx.synced_files}", file=stdout)
     for warning in ctx.warnings:
         print(f"warning: {warning}", file=stdout)
     if extra is not None:
@@ -765,6 +785,11 @@ def completion_json_payload(
         payload["authProfile"] = ctx.auth_profile
     if ctx.fallback_auth_profile is not None:
         payload["fallbackProfile"] = ctx.fallback_auth_profile
+    if ctx.group is not None:
+        payload["group"] = ctx.group
+    if ctx.include_dirty:
+        payload["includeDirty"] = True
+        payload["syncedFiles"] = ctx.synced_files
     run_metadata.add_run_metadata_payload_fields(payload, ctx)
     reasoning.add_reasoning_payload_fields(payload, ctx)
     if assistant_meta is not None:
@@ -869,6 +894,7 @@ class TrackedRunFiles:
     run_path: Path
     stdout_log: Path
     stderr_log: Path
+    scratch_dir: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -1034,13 +1060,48 @@ def _prepare_tracked_run(
 ) -> TrackedRunFiles:
     run_path = run_registry.run_directory(ctx.registry_root, ctx.run_id)
     run_registry.ensure_private_dir(run_path)
+    scratch_dir: Path | None = None
+    if ctx.mode == "safe" or ctx.effective_isolation != "none":
+        scratch_dir = run_path / "scratch"
+        run_registry.ensure_private_dir(scratch_dir)
     write_manifest(run_path, build_manifest(ctx, manifest_argv or argv))
 
     stdout_log = run_path / STDOUT_LOG
     stderr_log = run_path / STDERR_LOG
     run_registry.write_private_bytes(stdout_log, b"")
     run_registry.write_private_bytes(stderr_log, b"")
-    return TrackedRunFiles(run_path=run_path, stdout_log=stdout_log, stderr_log=stderr_log)
+    return TrackedRunFiles(
+        run_path=run_path,
+        stdout_log=stdout_log,
+        stderr_log=stderr_log,
+        scratch_dir=scratch_dir,
+    )
+
+
+def _env_overrides_with_scratch(
+    env_overrides: dict[str, str] | None,
+    scratch_dir: Path | None,
+) -> dict[str, str] | None:
+    if scratch_dir is None:
+        return env_overrides
+    return {
+        **(env_overrides or {}),
+        "TMPDIR": str(scratch_dir),
+        "TMP": str(scratch_dir),
+        "TEMP": str(scratch_dir),
+    }
+
+
+def _codex_argv_with_scratch(argv: list[str], scratch_dir: Path | None) -> list[str]:
+    if scratch_dir is None or "--sandbox" not in argv:
+        return list(argv)
+    sandbox_index = argv.index("--sandbox")
+    if sandbox_index + 1 >= len(argv) or argv[sandbox_index + 1] != "read-only":
+        return list(argv)
+    updated = list(argv)
+    insert_at = max(len(updated) - 1, 0)
+    updated[insert_at:insert_at] = ["--add-dir", str(scratch_dir)]
+    return updated
 
 
 def _launch_tracked_process(
@@ -1049,8 +1110,11 @@ def _launch_tracked_process(
     *,
     stdin_text: str | None,
     env_overrides: dict[str, str] | None = None,
+    scratch_dir: Path | None = None,
 ) -> subprocess.Popen[bytes]:
-    env = profiles.child_environment(overrides=env_overrides)
+    env = profiles.child_environment(
+        overrides=_env_overrides_with_scratch(env_overrides, scratch_dir)
+    )
     return subprocess.Popen(  # nosec B603 - Delegate intentionally launches validated harness argv with shell=False.
         argv,
         cwd=cwd,
@@ -1443,6 +1507,7 @@ def _run_single_tracked_attempt(
     started: float,
     stdin_text: str | None,
     env_overrides: dict[str, str] | None,
+    scratch_dir: Path | None,
     progress: bool,
     progress_stderr: TextIO | None,
     progress_initial_delay_sec: float,
@@ -1456,6 +1521,7 @@ def _run_single_tracked_attempt(
         cwd,
         stdin_text=stdin_text,
         env_overrides=env_overrides,
+        scratch_dir=scratch_dir,
     )
     return _capture_tracked_process(
         process,
@@ -1490,8 +1556,16 @@ def execute_tracked(
         raise ValueError("stdin_text and prompt_file_text are mutually exclusive")
     files = _prepare_tracked_run(argv, ctx, manifest_argv=manifest_argv)
     started = time.monotonic()
+    run_argv = _codex_argv_with_scratch(argv, files.scratch_dir) if ctx.engine == "codex" else argv
+    run_manifest_argv = (
+        _codex_argv_with_scratch(manifest_argv, files.scratch_dir)
+        if ctx.engine == "codex" and manifest_argv is not None
+        else manifest_argv
+    )
+    if ctx.engine == "codex" and files.scratch_dir is not None:
+        write_manifest(files.run_path, build_manifest(ctx, run_manifest_argv or run_argv))
     launch_argv, prompt_temp_dir = _materialize_prompt_file_argv(
-        argv,
+        run_argv,
         prompt_file_text=prompt_file_text,
         prompt_file_placeholder=prompt_file_placeholder,
     )
@@ -1507,6 +1581,7 @@ def execute_tracked(
                 started=started,
                 stdin_text=stdin_text,
                 env_overrides=ctx.env_overrides or None,
+                scratch_dir=files.scratch_dir,
                 progress=progress,
                 progress_stderr=stderr if progress else None,
                 progress_initial_delay_sec=progress_initial_delay_sec,
@@ -1537,6 +1612,7 @@ def execute_tracked(
                 started=started,
                 stdin_text=stdin_text,
                 env_overrides=ctx.fallback_env_overrides,
+                scratch_dir=files.scratch_dir,
                 progress=progress,
                 progress_stderr=stderr if progress else None,
                 progress_initial_delay_sec=progress_initial_delay_sec,

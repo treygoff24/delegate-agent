@@ -12,6 +12,7 @@ Use `delegate --help` for the exact command list from the installed version. Glo
 --completion-report MODE      markdown or none.
 --no-completion-report        Disable completion-report prompt injection.
 --auth-profile NAME           Override detected profiles for launches, dry-run, run --input-json, profiles, and capabilities refresh.
+--group NAME                  Tag a launch/run-input request with a lightweight group ([A-Za-z0-9._-]{1,64}).
 ```
 
 ## Commands
@@ -78,6 +79,36 @@ Delegate still reports remaining child commits in the work summary, emits a
 warning plus suggested review commands, but does not fail solely because commits
 exist. Validation rejects `--forbid-commit` outside `work` mode, and explicit
 `--isolation none --forbid-commit` remains invalid.
+
+`--include-dirty` is an opt-in launch flag for `work` mode with persistent
+worktree isolation. It copies uncommitted tracked changes and untracked
+non-ignored files from the source checkout into the new persistent worktree
+before the child starts. Gitignored files remain excluded, and external symlinks
+are blocked with the same protections used by safe-mode workspace sync. Without
+the flag, persistent worktree launches still require a clean source checkout.
+JSON and text completion output report `includeDirty: true` / `syncedFiles`.
+`run --input-json` accepts the equivalent boolean field `includeDirty`.
+
+A few boundaries are worth stating explicitly:
+
+- **Tracked-but-gitignored files sync by design.** A path that is tracked in
+  repo history but also matched by a `.gitignore` rule is part of the repository
+  and is synced like any other tracked file; `--include-dirty` excludes only
+  untracked gitignored paths, not tracked ones.
+- **`--include-dirty` skips the submodule-cleanliness portion of the clean
+  check.** Without the flag, the preflight requires a clean source checkout
+  including submodule state; with the flag, the entire clean-source check is
+  skipped, so dirty submodules do not block the launch and submodule
+  working-tree state is not mirrored.
+- **Keep secrets out of hardlinks.** A hardlink at a non-ignored path to
+  gitignored content is indistinguishable from a regular file and will sync by
+  content; `--include-dirty` trusts every non-ignored path. Path-based exclusion
+  cannot close this; keep secrets out of hardlinks.
+
+`--group NAME` tags launch and `run --input-json` registry entries. It does not
+create an orchestration manifest; it only enables selectors such as
+`delegate runs --group NAME`, `delegate wait --group NAME`, and worktree
+management filters. Group names must match `[A-Za-z0-9._-]{1,64}`.
 
 `--auth-profile NAME` selects a top-level `profiles.definitions` entry and
 injects that profile's flat env map into child processes. It overrides ambient
@@ -336,6 +367,7 @@ Supported input keys:
   "reasoningEffort": "high",
   "progress": true,
   "forbidCommit": true,
+  "includeDirty": true,
   "outputSchema": "/path/to/schema.json",
   "prompt": "Implement the scoped task and report changed files."
 }
@@ -349,6 +381,7 @@ Supported input keys:
 - `reasoningEffort`: optional non-empty effort string. It overrides provider `defaultReasoningEffort` for that JSON run.
 - `progress`: optional boolean. `true` enables parent progress heartbeats on stderr; `false` disables them even when `progress.enabled` is true in config. When omitted, config `progress.enabled` applies (default `false`). `mode: "call"` rejects progress.
 - `forbidCommit`: optional boolean. `true` requires `mode: "work"` with persistent worktree isolation and fails the run if the child creates commits. `mode: "call"` rejects commit policy.
+- `includeDirty`: optional boolean. `true` requires `mode: "work"` with persistent worktree isolation and syncs tracked edits plus untracked non-ignored files into the new worktree before launch.
 - `outputSchema`: optional path to a JSON Schema for Codex's final message. Codex-only; same semantics as `--output-schema`. Other engines fail with `unsupported_output_schema`.
 - `prompt`: required task prompt.
 
@@ -370,7 +403,7 @@ delegate --json capabilities refresh
 delegate agent-help
 ```
 
-`describe` reports version, engines, modes, supported isolation values, prompt transforms, effective policy, top-level profile config metadata, and representative argv shapes. It also includes a `commands` catalog (each entry has `command` and `summary`) so an agent can enumerate the whole command surface in one call. `models` reports configured Cursor, Droid, Codex, Claude, Grok, and Kimi model settings. Discovery output applies best-effort credential scrubbing; model IDs and paths are shown verbatim. Agents should start with `--summary` for a compact inventory, then use raw output only when needed.
+`describe` reports version, engines, modes, supported isolation values, prompt transforms, effective policy, top-level profile config metadata, and representative argv shapes. It also includes a `commands` catalog derived from the help registry; each full entry includes stable `name`/`command`, usage, arguments, options, and launchOptions fields. Full `describe` is a strict superset of `describe --summary`, so fields present in summary keep the same names in the full payload. `models` reports configured Cursor, Droid, Codex, Claude, Grok, and Kimi model settings. Discovery output applies best-effort credential scrubbing; model IDs and paths are shown verbatim. Agents should start with `--summary` for a compact inventory, then use raw output only when needed.
 
 Both `describe` and `models` include provenance fields useful for detecting installed-runtime drift:
 
@@ -427,19 +460,34 @@ A `--help` token triggers help only before any prompt free-text is consumed, so 
 
 For worktree actions, a `--help` token anywhere in the args wins and performs no action — `delegate worktree remove cursor --help` prints help and removes nothing.
 
+### Scratch directory for isolated runs
+
+Tracked safe-mode and isolated runs get a per-run scratch directory at
+`.delegate/runs/<run-id>/scratch`. Delegate exports `TMPDIR`, `TMP`, and `TEMP`
+to that path after applying profile env overrides, so the scratch directory wins
+over profile-provided temp variables. The scratch directory persists with the
+run directory for inspection and is cleaned up only when the run directory is
+cleaned up.
+
+For Codex safe/isolated runs, Delegate also passes `--add-dir <scratch>` along
+with `--sandbox read-only`. Codex may still enforce its own sandbox restrictions.
+Cursor, Droid, Kimi, Grok, and Claude receive the scratch path through the temp
+environment variables only. This does not change the isolation semantics of the
+repo copy or persistent worktree itself.
+
 ### Run registry inspection
 
 Tracked runs return bounded parent-facing output and store local metadata under `.delegate/` in the source workspace.
 
 ```bash
-delegate runs [--active|--running|--stale|--recent] [--harness HARNESS] [--limit N]
+delegate runs [--active|--running|--stale|--recent] [--harness HARNESS] [--group NAME] [--limit N]
 delegate snapshot [--latest HARNESS] [--no-redact] <handle>
 delegate run-output [--latest HARNESS] <handle> [--completion-report] [--stdout] [--stderr] [--tail N] [--max-chars N] [--raw] [--no-redact]
-delegate wait <handle>... [--latest HARNESS] [--timeout SEC] [--interval SEC] [--completion-report]
+delegate wait <handle>... [--latest HARNESS] [--group NAME] [--timeout SEC] [--interval SEC] [--completion-report]
 delegate cancel <handle>...
 ```
 
-`delegate runs` defaults to recent runs. `--active` preserves the legacy active view and includes both live `running` runs and `stale` runs. Use `--running` for only live tracked processes and `--stale` for runs recorded as running whose PID is missing or dead. `--active`, `--running`, `--stale`, and `--recent` are mutually exclusive.
+`delegate runs` defaults to recent runs. `--active` preserves the legacy active view and includes both live `running` runs and `stale` runs. Use `--running` for only live tracked processes and `--stale` for runs recorded as running whose PID is missing or dead. `--active`, `--running`, `--stale`, and `--recent` are mutually exclusive. `--group NAME` filters by launch group and the runs table shows a `group` column when any visible run has one.
 
 Run-scoped handles (`snapshot`, `run-output`, `wait`, and `cancel`)
 resolve exact run IDs and numbered aliases first. A bare harness name such as
@@ -518,7 +566,7 @@ status changes, then a final table; `--completion-report` appends each run's
 report after the table. The `--timeout` is a floor, not an exact bound: a run
 that reaches terminal state just past the deadline can be observed terminal up
 to one `--interval` later, because the polling loop checks liveness before
-testing the deadline.
+testing the deadline. `--group NAME` waits for all runs tagged with that group.
 
 `delegate cancel` resolves the same run handles, refuses already-terminal runs,
 signals the recorded process group with SIGTERM, waits a 5s grace period, then
@@ -558,15 +606,15 @@ commands before you read raw `.delegate/` files directly.
 ### Worktree management
 
 ```bash
-delegate worktree list [--harness HARNESS] [--status STATUS] [--limit N] [--no-auto-prune]
+delegate worktree list [--harness HARNESS] [--group NAME] [--status STATUS] [--limit N] [--no-auto-prune]
 delegate worktree show <handle>
 delegate worktree show --latest HARNESS
-delegate worktree remove <handle> [--discard-uncommitted] [--force-branch] [--force] [--keep-branch]
-delegate worktree prune [--merged] [--older-than DAYS] [--harness HARNESS] [--include-detached] [--dry-run] [--discard-uncommitted] [--force-branch] [--force]
+delegate worktree remove <handle|--group NAME> [--discard-uncommitted] [--force-branch] [--force] [--keep-branch]
+delegate worktree prune [--merged] [--older-than DAYS] [--harness HARNESS] [--group NAME] [--include-detached] [--dry-run] [--discard-uncommitted] [--force-branch] [--force]
 delegate worktree gc [--dry-run]
 ```
 
-`worktree show --latest HARNESS` selects the latest persistent worktree for the harness, not merely the latest run overall. `worktree list` JSON includes a `summary` with status counts, registry drift counts, warning counts, `autoPruneMode`, and whether the returned operation was read-only; `summary.totalPersistentWorktrees` is always registry-wide, while `allStatusCounts` is scoped to the `--harness` filter (pre-status-filter) and `statusCounts` to the visible entries. `worktree gc` JSON includes `mode`, `effects`, per-entry `action`, and orphan `safeAction` fields to distinguish dry-run inspection from registry reconciliation; `gc` never deletes worktree directories.
+`worktree show --latest HARNESS` selects the latest persistent worktree for the harness, not merely the latest run overall. `worktree list` JSON includes a `summary` with status counts, registry drift counts, warning counts, `autoPruneMode`, and whether the returned operation was read-only; `summary.totalPersistentWorktrees` is always registry-wide, while `allStatusCounts` is scoped to the `--harness` / `--group` filters (pre-status-filter) and `statusCounts` to the visible entries. `worktree remove --group NAME` removes all matching persistent worktrees with the same safety checks as single-handle removal. `worktree prune --group NAME` limits prune candidates to the group. `worktree gc` JSON includes `mode`, `effects`, per-entry `action`, and orphan `safeAction` fields to distinguish dry-run inspection from registry reconciliation; `gc` never deletes worktree directories.
 
 List/show entry fields include `branchMergedIntoSource` (branch graph only), `mergedIntoSource` (backward-compatible branch graph state), `fullyIntegrated` (branch merged and worktree clean), `hasUncommittedChanges`, `integrationStatus`, and `uncommittedChangesIntegrated`. `workSummary` is included on `worktree show` and run completion payloads when Delegate can inspect the worktree; `worktree list` omits the deep summary for responsiveness. Consumers that need safe retirement should require `fullyIntegrated: true` or inspect `integrationStatus`. When `integrationStatus` is `branch-merged-worktree-dirty`, merge/cherry-pick suggestions are suppressed because commit integration is already complete and only uncommitted edits remain.
 

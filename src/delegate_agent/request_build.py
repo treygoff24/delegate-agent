@@ -83,6 +83,7 @@ RUN_INPUT_KEYS = {
     "progress",
     "forbidCommit",
     "readOnly",
+    "includeDirty",
 }
 
 OUTPUT_SCHEMA_COMPLETION_REPORT_WARNING = (
@@ -476,6 +477,32 @@ def _apply_forbid_commit_isolation_implication(
     return json_isolation, None, False
 
 
+def _validate_droid_model_alias(config: JsonObject, model_alias: str | None) -> None:
+    models = config["droid"]["models"]
+    if model_alias is None or model_alias not in models:
+        raise DelegateError("invalid_alias", f"Unknown Droid model alias: {model_alias}")
+
+
+def _validate_include_dirty(
+    *,
+    include_dirty: bool,
+    mode: str,
+    isolation_context: IsolationContext | None,
+) -> None:
+    if not include_dirty:
+        return
+    if mode != MODE_WORK or isolation_context is None:
+        raise DelegateError(
+            "invalid_option_combination",
+            "--include-dirty requires work mode with --isolation worktree.",
+        )
+    if isolation_context.isolation_lifecycle != "persistent":
+        raise DelegateError(
+            "invalid_option_combination",
+            "--include-dirty requires work mode with --isolation worktree.",
+        )
+
+
 def _call_workspace(dry_run: bool) -> tuple[ResolvedWorkspace, bool]:
     if dry_run:
         return ResolvedWorkspace(CALL_TEMP_CWD_PLACEHOLDER, "directory"), False
@@ -490,6 +517,7 @@ def _validate_call_cli_options(global_options: object, launch: object) -> None:
     completion_report = getattr(global_options, "completion_report", None)
     progress_intent = getattr(launch, "progress_intent", None)
     forbid_commit = getattr(launch, "forbid_commit", False)
+    include_dirty = getattr(launch, "include_dirty", False)
     if cwd is not None:
         raise DelegateError("invalid_option_combination", "call mode does not use --cwd.")
     if isolation is not None:
@@ -513,6 +541,11 @@ def _validate_call_cli_options(global_options: object, launch: object) -> None:
             "invalid_option_combination",
             "--forbid-commit requires work mode with persistent worktree isolation.",
         )
+    if include_dirty:
+        raise DelegateError(
+            "invalid_option_combination",
+            "--include-dirty requires work mode with persistent worktree isolation.",
+        )
 
 
 def _validate_call_input_json_options(
@@ -521,6 +554,7 @@ def _validate_call_input_json_options(
     *,
     raw_progress_intent: ProgressIntent,
     raw_forbid_commit: bool,
+    raw_include_dirty: bool,
 ) -> None:
     if getattr(global_options, "cwd", None) is not None:
         raise DelegateError("invalid_option_combination", "call mode does not use --cwd.")
@@ -557,6 +591,11 @@ def _validate_call_input_json_options(
             "invalid_option_combination",
             "forbidCommit requires work mode with persistent worktree isolation.",
         )
+    if raw_include_dirty:
+        raise DelegateError(
+            "invalid_option_combination",
+            "includeDirty requires work mode with persistent worktree isolation.",
+        )
 
 
 def _safe_none_normalization_warnings(
@@ -592,6 +631,8 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
     if launch.mode == MODE_CALL:
         _validate_call_cli_options(global_options, launch)
         read_only = getattr(launch, "read_only", False)
+        if launch.engine == "droid":
+            _validate_droid_model_alias(config, launch.model_alias)
         output_schema = resolve_output_schema(launch.engine, launch.output_schema)
         prompt = _call_effective_prompt(
             resolve_prompt(launch.prompt_parts, launch.prompt_file, stdin),
@@ -617,6 +658,7 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
                 output_schema=output_schema,
                 cleanup_workspace=cleanup_workspace,
                 call_read_only=read_only,
+                group=global_options.group,
             )
         except BaseException:
             if cleanup_workspace:
@@ -677,9 +719,15 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         source_head_oid=git_head_oid,
         source_head_ref=git_head_ref,
         source_branch=git_branch,
+        include_dirty=launch.include_dirty,
     )
     _validate_forbid_commit(
         forbid_commit=launch.forbid_commit,
+        mode=launch.mode,
+        isolation_context=isolation_context,
+    )
+    _validate_include_dirty(
+        include_dirty=launch.include_dirty,
         mode=launch.mode,
         isolation_context=isolation_context,
     )
@@ -711,9 +759,11 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         progress_initial_delay_sec=progress_initial_delay_sec,
         progress_interval_sec=progress_interval_sec,
         forbid_commit=launch.forbid_commit,
+        include_dirty=launch.include_dirty,
         auth_profile_override=global_options.auth_profile,
         output_schema=output_schema,
         warnings=(*output_schema_warnings, *isolation_warnings),
+        group=global_options.group,
     )
 
 
@@ -794,6 +844,9 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
             "invalid_option_combination",
             "readOnly only applies to call mode.",
         )
+    raw_include_dirty = raw.get("includeDirty", False)
+    if not isinstance(raw_include_dirty, bool):
+        raise DelegateError("invalid_include_dirty", "includeDirty must be true or false.")
     if engine == "droid":
         if not isinstance(model_alias, str) or not model_alias:
             raise DelegateError("missing_model", "droid run input requires model alias.")
@@ -816,7 +869,10 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
             raw,
             raw_progress_intent=raw_progress_intent,
             raw_forbid_commit=raw_forbid_commit,
+            raw_include_dirty=raw_include_dirty,
         )
+        if engine == "droid":
+            _validate_droid_model_alias(config, model_alias)
         workspace, cleanup_workspace = _call_workspace(False)
         try:
             return build_request(
@@ -837,6 +893,7 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
                 output_schema=output_schema,
                 cleanup_workspace=cleanup_workspace,
                 call_read_only=raw_read_only,
+                group=global_options.group,
             )
         except BaseException:
             if cleanup_workspace:
@@ -914,12 +971,20 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         source_head_oid=git_head_oid,
         source_head_ref=git_head_ref,
         source_branch=git_branch,
+        include_dirty=raw_include_dirty,
     )
     _validate_forbid_commit(
         forbid_commit=raw_forbid_commit,
         mode=str(mode),
         isolation_context=isolation_context,
     )
+    _validate_include_dirty(
+        include_dirty=raw_include_dirty,
+        mode=str(mode),
+        isolation_context=isolation_context,
+    )
+    if engine == "droid":
+        _validate_droid_model_alias(config, model_alias)
 
     completion_report_mode = resolve_completion_report_mode(parsed, config)
     completion_report_prompt_mode, output_schema_warnings = _completion_report_prompt_mode(
@@ -948,9 +1013,11 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         progress_initial_delay_sec=progress_initial_delay_sec,
         progress_interval_sec=progress_interval_sec,
         forbid_commit=raw_forbid_commit,
+        include_dirty=raw_include_dirty,
         auth_profile_override=global_options.auth_profile,
         output_schema=output_schema,
         warnings=(*output_schema_warnings, *isolation_warnings),
+        group=global_options.group,
     )
 
 
@@ -971,11 +1038,13 @@ def build_request(
     progress_initial_delay_sec: float = delegate_runner.PROGRESS_INITIAL_DELAY_SEC,
     progress_interval_sec: float = delegate_runner.PROGRESS_HEARTBEAT_INTERVAL_SEC,
     forbid_commit: bool = False,
+    include_dirty: bool = False,
     auth_profile_override: str | None = None,
     output_schema: str | None = None,
     warnings: tuple[str, ...] = (),
     cleanup_workspace: bool = False,
     call_read_only: bool = False,
+    group: str | None = None,
 ) -> Request:
     if not isinstance(workspace, ResolvedWorkspace):
         raise TypeError(
@@ -1006,11 +1075,13 @@ def build_request(
         progress_initial_delay_sec=progress_initial_delay_sec,
         progress_interval_sec=progress_interval_sec,
         forbid_commit=forbid_commit,
+        include_dirty=include_dirty,
         auth_profile_override=auth_profile_override,
         output_schema=output_schema,
         warnings=warnings,
         cleanup_workspace=cleanup_workspace,
         call_read_only=call_read_only,
+        group=group,
     )
 
 
@@ -1046,8 +1117,7 @@ def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
 def _droid_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     droid = build.config["droid"]
     models = droid["models"]
-    if build.model_alias is None or build.model_alias not in models:
-        raise DelegateError("invalid_alias", f"Unknown Droid model alias: {build.model_alias}")
+    _validate_droid_model_alias(build.config, build.model_alias)
     model = models[build.model_alias]
     if model.startswith("replace-with-") or model in {
         "your-droid-model-id",
@@ -1346,11 +1416,13 @@ def _build_request_for_workspace(
     progress_initial_delay_sec: float,
     progress_interval_sec: float,
     forbid_commit: bool,
+    include_dirty: bool,
     auth_profile_override: str | None,
     output_schema: str | None,
     warnings: tuple[str, ...],
     cleanup_workspace: bool,
     call_read_only: bool = False,
+    group: str | None = None,
 ) -> Request:
     prompt = _append_safe_dirty_tree_note(prompt, resolved, mode, isolation_context)
     workspace_warning = wsl.drivefs_workspace_warning(resolved.path)
@@ -1398,12 +1470,14 @@ def _build_request_for_workspace(
             progress_initial_delay_sec=progress_initial_delay_sec,
             progress_interval_sec=progress_interval_sec,
             forbid_commit=forbid_commit,
+            include_dirty=include_dirty,
             warnings=(*warnings, *parts.warnings),
             stdin_text=parts.stdin_text,
             prompt_file_text=parts.prompt_file_text,
             prompt_transport=parts.prompt_transport,
             display_argv=parts.display_argv,
             cleanup_workspace=cleanup_workspace,
+            group=group,
         ),
         config,
         auth_profile_override=auth_profile_override,

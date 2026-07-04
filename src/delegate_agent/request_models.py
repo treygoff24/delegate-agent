@@ -33,6 +33,7 @@ class GlobalOptions:
     completion_report: str | None = None
     isolation: str | None = None
     auth_profile: str | None = None
+    group: str | None = None
 
 
 @dataclass
@@ -47,6 +48,7 @@ class LaunchOptions:
     progress_intent: str | None = None
     forbid_commit: bool = False
     forbid_commit_implied_isolation: bool = False
+    include_dirty: bool = False
     read_only: bool = False
     dry_run: bool = False
 
@@ -151,6 +153,8 @@ class Request:
     auth_profile: str | None = None
     fallback_auth_profile: str | None = None
     cleanup_workspace: bool = False
+    include_dirty: bool = False
+    group: str | None = None
     profile_resolution: profiles.ProfileResolution = field(
         default_factory=profiles.empty_profile_resolution
     )

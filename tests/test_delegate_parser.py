@@ -434,6 +434,7 @@ class ParserTests(unittest.TestCase):
                 ),
                 (["codex", "call", "--progress", "hello"], "--progress"),
                 (["codex", "call", "--forbid-commit", "hello"], "--forbid-commit"),
+                (["codex", "call", "--include-dirty", "hello"], "--include-dirty"),
             )
             for argv, message in cases:
                 with self.subTest(argv=argv):
@@ -484,6 +485,7 @@ class ParserTests(unittest.TestCase):
                 ({**base, "isolation": "none"}, None, "must not include isolation"),
                 ({**base, "progress": True}, None, "progress is not supported"),
                 ({**base, "forbidCommit": True}, None, "forbidCommit requires work mode"),
+                ({**base, "includeDirty": True}, None, "includeDirty requires work mode"),
             )
             for raw, global_options, message in cases:
                 with self.subTest(raw=raw, global_options=global_options):

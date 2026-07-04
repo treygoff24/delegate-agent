@@ -38,8 +38,9 @@ class InspectionCommandTests(unittest.TestCase):
         assistant_text: str = "planning the change",
         pid: int | None = os.getpid(),
         started_at: str | None = None,
+        group: str | None = None,
     ) -> tuple[str, str]:
-        return write_snapshot_run(
+        run_id, alias = write_snapshot_run(
             run_registry,
             self.registry_root,
             self.workspace,
@@ -49,6 +50,13 @@ class InspectionCommandTests(unittest.TestCase):
             pid=pid,
             started_at=started_at,
         )
+        if group is not None:
+            index = run_registry.load_index(self.registry_root)
+            entry = index["runs"][run_id]
+            if isinstance(entry, dict):
+                entry["group"] = group
+            run_registry.save_index(self.registry_root, index)
+        return run_id, alias
 
     def test_resolve_latest_harness_returns_latest_alias(self):
         self.write_run(
@@ -121,6 +129,22 @@ class InspectionCommandTests(unittest.TestCase):
         self.assertEqual(code, 0)
         output = stdout.getvalue()
         self.assertIn(f"resolved handle: codex -> {latest_alias} (latest)", output)
+
+    def test_emit_runs_group_filter(self):
+        self.write_run(harness="codex", group="wave4", assistant_text="included")
+        self.write_run(harness="codex", group="other", assistant_text="excluded")
+        stdout = io.StringIO()
+
+        code = inspection_commands.emit_runs(
+            inspection_commands.RunsCommand(group="wave4", json_mode=True),
+            workspace_path=str(self.workspace),
+            stdout=stdout,
+        )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(len(payload["runs"]), 1)
+        self.assertEqual(payload["runs"][0]["group"], "wave4")
 
     def test_emit_snapshot_literal_handle_omits_resolution_fields(self):
         run_id, alias = self.write_run(harness="cursor", assistant_text="literal run")

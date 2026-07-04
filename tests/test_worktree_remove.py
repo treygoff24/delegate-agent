@@ -105,6 +105,82 @@ class WorktreeRemoveTests(WorktreeMgmtTestBase):
             state = self.delegate.run_registry.load_run_state(self._registry_root(path), run_id)
             self.assertEqual(state["worktreeStatus"], "removed")
 
+    def test_worktree_remove_group_removes_matching_runs_only(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            first_branch = "delegate/cursor-group-a"
+            first_wt = str(Path(fake_home) / "wt" / "cursor-group-a")
+            first_run_id, _first_alias = self._seed_persistent_run(
+                path,
+                alias="cursor-group-a",
+                branch=first_branch,
+                execution_cwd=first_wt,
+            )
+            second_branch = "delegate/cursor-group-b"
+            second_wt = str(Path(fake_home) / "wt" / "cursor-group-b")
+            second_run_id, _second_alias = self._seed_persistent_run(
+                path,
+                alias="cursor-group-b",
+                branch=second_branch,
+                execution_cwd=second_wt,
+            )
+            other_branch = "delegate/cursor-other"
+            other_wt = str(Path(fake_home) / "wt" / "cursor-other")
+            other_run_id, _other_alias = self._seed_persistent_run(
+                path,
+                alias="cursor-other",
+                branch=other_branch,
+                execution_cwd=other_wt,
+            )
+            self._tag_run_group(path, first_run_id, "wave4")
+            self._tag_run_group(path, second_run_id, "wave4")
+            self._tag_run_group(path, other_run_id, "other")
+            self._create_worktree_at(path, first_branch, first_wt)
+            self._create_worktree_at(path, second_branch, second_wt)
+            self._create_worktree_at(path, other_branch, other_wt)
+
+            code, out, err = self._run_cli(
+                ["--cwd", path, "--json", "worktree", "remove", "--group", "wave4"],
+                home=fake_home,
+            )
+
+            self.assertEqual(code, 0, err)
+            payload = json.loads(out)
+            self.assertEqual(payload["group"], "wave4")
+            self.assertEqual(payload["matched"], 2)
+            self.assertEqual(len(payload["removed"]), 2)
+            self.assertFalse(Path(first_wt).exists())
+            self.assertFalse(Path(second_wt).exists())
+            self.assertTrue(Path(other_wt).exists())
+
+    def test_worktree_remove_group_zero_matches_errors(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            # Seed one run in a different group so the registry exists, then
+            # remove a group with zero matches.
+            other_branch = "delegate/cursor-other"
+            other_wt = str(Path(fake_home) / "wt" / "cursor-other")
+            other_run_id, _other_alias = self._seed_persistent_run(
+                path,
+                alias="cursor-other",
+                branch=other_branch,
+                execution_cwd=other_wt,
+            )
+            self._tag_run_group(path, other_run_id, "other")
+            self._create_worktree_at(path, other_branch, other_wt)
+            code, out, _err = self._run_cli(
+                ["--cwd", path, "--json", "worktree", "remove", "--group", "nope"],
+                home=fake_home,
+            )
+            self.assertEqual(code, self.delegate.EXIT_USAGE)
+            payload = json.loads(out)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["code"], "no_matching_worktrees")
+            self.assertEqual(payload["group"], "nope")
+            self.assertEqual(payload["matched"], 0)
+            # The unrelated run is untouched.
+            self.assertTrue(Path(other_wt).exists())
+
     def test_worktree_remove_keep_branch(self):
         _repo, path = self._make_repo()
         with tempfile.TemporaryDirectory() as fake_home:

@@ -10,7 +10,7 @@ Use persistent worktree isolation when:
 - You want to review, cherry-pick, or merge the child work later.
 - You want Delegate to keep run metadata tied to a branch and worktree path.
 
-Use the real workspace instead when the task depends on uncommitted local files that you do not want to commit or mirror into a worktree.
+Use the real workspace instead when the task depends on uncommitted local files that you do not want to commit or mirror into a worktree. If you do want a persistent worktree that starts from your current dirty checkout, use `--include-dirty`.
 
 ## Launch
 
@@ -22,6 +22,38 @@ delegate --isolation worktree grok work "Implement the scoped change and report 
 delegate --isolation worktree droid implementer work "Implement the scoped change and report changed files."
 delegate --isolation worktree kimi work "Implement the scoped change and report changed files."
 ```
+
+Add `--include-dirty` when the new persistent worktree should start with the
+source checkout's uncommitted tracked edits and untracked non-ignored files:
+
+```bash
+delegate --isolation worktree cursor work --include-dirty "Implement using my local edits."
+```
+
+Gitignored files remain excluded. External symlinks are blocked with the same
+protections used by Delegate's safe-mode workspace sync. The completion payload
+reports `includeDirty: true` and `syncedFiles`.
+
+A few boundaries are worth stating explicitly:
+
+- **Tracked-but-gitignored files sync by design.** A path that is tracked in
+  repo history but also matched by a `.gitignore` rule (for example, a file that
+  was committed before being added to `.gitignore`) is part of the repository
+  and is synced like any other tracked file. `--include-dirty` excludes only
+  untracked gitignored paths, not tracked ones.
+- **`--include-dirty` skips the submodule-cleanliness portion of the clean
+  check.** Without the flag, the preflight requires a clean source checkout
+  including submodule state (`git status --ignore-submodules=none`). With the
+  flag, the entire clean-source check is skipped, so dirty submodules do not
+  block the launch and submodule working-tree state is not mirrored into the
+  new worktree (only the source checkout's tracked diff and untracked
+  non-ignored files are).
+- **Keep secrets out of hardlinks.** A hardlink at a non-ignored path to
+  gitignored content is indistinguishable from a regular file to Delegate's
+  path-based sync: it is a non-ignored path, so `--include-dirty` syncs it by
+  content, and the linked gitignored file's contents travel into the new
+  worktree. Path-based exclusion cannot close this; do not place secrets in
+  hardlinks at non-ignored paths.
 
 Add `--forbid-commit` when the child should leave only uncommitted edits for
 the orchestrator to inspect:
@@ -53,7 +85,7 @@ Persistent worktree work-mode runs require:
 
 - A Git workspace.
 - A valid `HEAD` commit.
-- A clean source checkout: no staged, unstaged, or untracked files.
+- A clean source checkout: no staged, unstaged, or untracked files, unless the launch uses `--include-dirty`.
 - No `--pass-through`.
 
 Dry-run previews the plan without creating anything:
@@ -74,13 +106,14 @@ creation base at exit.
 
 ```bash
 delegate worktree list
+delegate worktree list --group wave4
 delegate worktree show <handle>
 delegate worktree show --latest cursor
 ```
 
 `worktree show --latest HARNESS` resolves the most recent persistent worktree for that harness. A bare harness handle such as `cursor` does the same in the worktree domain. Both forms intentionally ignore newer non-worktree runs from the same harness. Migration note: old registries that contain a literal bare harness alias remain reachable by run ID for worktree commands.
 
-`worktree show` reports status, path, branch, dirty state, branch merge vs full integration state, ahead/behind counts, work summary, and suggested review or cleanup commands. `worktree list` is read-only unless an enabled auto-prune pass runs before listing; JSON output includes `summary.autoPruneMode` (`disabled`, `attempted`, or `suppressed`) and `summary.readOnly`.
+`worktree show` reports status, path, branch, dirty state, branch merge vs full integration state, ahead/behind counts, work summary, and suggested review or cleanup commands. `worktree list` is read-only unless an enabled auto-prune pass runs before listing; JSON output includes `summary.autoPruneMode` (`disabled`, `attempted`, or `suppressed`) and `summary.readOnly`. `--group NAME` filters list output to persistent worktrees launched with that group.
 
 `workSummary` includes dirty state, changed file count, diff stat, and commits
 created by the child (`commitsCreatedCount` and `commitsCreated`). It is present
@@ -135,6 +168,7 @@ Exact branch and diff suggestions are included in `worktree show` output when av
 
 ```bash
 delegate worktree remove <handle>
+delegate worktree remove --group wave4
 ```
 
 Default removal refuses if the worktree has uncommitted changes or the branch is not merged into current source `HEAD`.
@@ -153,15 +187,19 @@ delegate worktree remove <handle> --keep-branch
 - `--force`: shorthand for both destructive overrides.
 - `--keep-branch`: remove the worktree path but keep the branch.
 
+`worktree remove --group NAME` removes all persistent worktrees tagged with the
+group, applying the same dirty/unmerged safety checks to each entry.
+
 ## Prune many worktrees
 
 ```bash
 delegate worktree prune --merged --dry-run
 delegate worktree prune --merged --older-than 7
 delegate worktree prune --merged --include-detached --dry-run
+delegate worktree prune --merged --group wave4
 ```
 
-`prune` requires at least one of `--merged` or `--older-than DAYS`. It skips dirty, unknown, detached-source, and merge-check-failed entries unless you pass explicit override flags.
+`prune` requires at least one of `--merged` or `--older-than DAYS`. It skips dirty, unknown, detached-source, and merge-check-failed entries unless you pass explicit override flags. `--group NAME` limits prune candidates to that launch group.
 
 ## Repair registry state
 

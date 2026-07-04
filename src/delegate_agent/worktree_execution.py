@@ -3,11 +3,11 @@ from __future__ import annotations
 import shlex
 import subprocess  # nosec B404 - persistent worktree cleanup intentionally runs fixed git argv with shell=False.
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol, TextIO
 
-from delegate_agent import harness_events, profiles, retention, run_registry
+from delegate_agent import harness_events, profiles, retention, run_registry, safe_workspace
 from delegate_agent import runner as delegate_runner
 from delegate_agent.argv_utils import replace_workspace_arg_in_argv
 from delegate_agent.git_utils import (
@@ -64,11 +64,13 @@ class PersistentExecutionRequest(Protocol):
     reasoning_transport: str | None
     progress: bool
     forbid_commit: bool
+    include_dirty: bool
     stdin_text: str | None
     prompt_file_text: str | None
     prompt_transport: str
     display_argv: list[str] | None
     env_overrides: dict[str, str] | None
+    group: str | None
     auth_profile: str | None
     fallback_auth_profile: str | None
     profile_resolution: profiles.ProfileResolution
@@ -107,7 +109,7 @@ class PersistentWorktreePreflight:
     registry_root: Path
 
 
-@dataclass(frozen=True)
+@dataclass
 class PersistentWorktreeRegistration:
     run_id: str
     alias: str
@@ -116,6 +118,7 @@ class PersistentWorktreeRegistration:
     worktree_path: str
     creation_context: JsonObject
     pre_ctx: delegate_runner.RunContext
+    synced_files: int = 0
 
 
 @dataclass(frozen=True)
@@ -172,10 +175,11 @@ def _validate_persistent_worktree_request(
             "--pass-through is not supported with persistent worktree runs (work mode + effective worktree isolation).",
         )
 
-    try:
-        require_clean_source(source_git_root)
-    except IsolationExecutionError as exc:
-        raise PersistentWorktreeError(exc.error, exc.message) from exc
+    if not request.include_dirty:
+        try:
+            require_clean_source(source_git_root)
+        except IsolationExecutionError as exc:
+            raise PersistentWorktreeError(exc.error, exc.message) from exc
 
     execution.binary_validator(request.argv, request.engine)
 
@@ -212,6 +216,12 @@ def _build_persistent_worktree_run_context(
 ) -> delegate_runner.RunContext:
     request = execution.request
     iso_ctx = preflight.iso_ctx
+    dirty_warnings = creation_context.get("includeDirtyWarnings")
+    merged_warnings = (
+        (*request.warnings, *[w for w in dirty_warnings if isinstance(w, str)])
+        if isinstance(dirty_warnings, list)
+        else request.warnings
+    )
     return delegate_runner.RunContext(
         registry_root=preflight.registry_root,
         run_id=run_id,
@@ -235,7 +245,7 @@ def _build_persistent_worktree_run_context(
         preserved_workspace=iso_ctx.preserved_workspace,
         branch=branch,
         worktree_status="present",
-        warnings=request.warnings,
+        warnings=merged_warnings,
         reasoning_effort=request.reasoning_effort,
         reasoning_effort_source=request.reasoning_effort_source,
         reasoning_capability_source=request.reasoning_capability_source,
@@ -250,6 +260,9 @@ def _build_persistent_worktree_run_context(
         ),
         auth_profile=request.auth_profile,
         fallback_auth_profile=request.fallback_auth_profile,
+        include_dirty=request.include_dirty,
+        synced_files=int(creation_context.get("syncedFiles") or 0),
+        group=request.group,
     )
 
 
@@ -269,6 +282,7 @@ def _register_persistent_worktree_run(
             "modelAlias": request.model_alias,
             "modelResolved": request.model,
             "cwd": execution.source_workspace.path,
+            "group": request.group,
         },
     )
 
@@ -296,6 +310,7 @@ def _register_persistent_worktree_run(
         "plannedExecutionCwd": worktree_path,
         "label": label,
         "shortRunId": short_id,
+        "includeDirty": request.include_dirty,
     }
 
     pre_ctx = _build_persistent_worktree_run_context(
@@ -334,16 +349,18 @@ def _register_persistent_worktree_run(
     )
 
 
-def _record_persistent_worktree_creation_failure(
+def _record_persistent_worktree_failure(
     registration: PersistentWorktreeRegistration,
-    exc: IsolationExecutionError,
+    *,
+    error: str,
+    message: str,
 ) -> None:
     failed_state = delegate_runner.build_state(
         registration.pre_ctx,
         status="failed",
         extra={
-            "error": exc.error,
-            "message": exc.message,
+            "error": error,
+            "message": message,
             "plannedBranch": registration.branch,
             "plannedExecutionCwd": registration.worktree_path,
         },
@@ -355,8 +372,8 @@ def _record_persistent_worktree_creation_failure(
         accumulator=harness_events.StreamAccumulator(harness=registration.pre_ctx.harness),
     )
     failed_snapshot["ok"] = False
-    failed_snapshot["error"] = exc.error
-    failed_snapshot["message"] = exc.message
+    failed_snapshot["error"] = error
+    failed_snapshot["message"] = message
     failed_snapshot["status"] = "failed"
     failed_snapshot["plannedBranch"] = registration.branch
     failed_snapshot["plannedExecutionCwd"] = registration.worktree_path
@@ -377,8 +394,37 @@ def _create_persistent_worktree_or_record_failure(
             registration.worktree_path,
             preflight.base_oid,
         )
+        if execution.request.include_dirty:
+            synced_files, warnings = safe_workspace.sync_git_dirty_snapshot(
+                preflight.source_git_root,
+                registration.worktree_path,
+            )
+            registration.creation_context["syncedFiles"] = synced_files
+            registration.creation_context["includeDirtyWarnings"] = list(warnings)
+            if warnings:
+                registration.pre_ctx = replace(
+                    registration.pre_ctx,
+                    warnings=(*registration.pre_ctx.warnings, *warnings),
+                    synced_files=synced_files,
+                )
+            else:
+                registration.pre_ctx = replace(
+                    registration.pre_ctx,
+                    synced_files=synced_files,
+                )
+            delegate_runner.write_manifest(
+                registration.run_path,
+                delegate_runner.build_manifest(
+                    registration.pre_ctx,
+                    _public_argv(execution.request),
+                ),
+            )
     except IsolationExecutionError as exc:
-        _record_persistent_worktree_creation_failure(registration, exc)
+        _record_persistent_worktree_failure(
+            registration,
+            error=exc.error,
+            message=exc.message,
+        )
         if exc.error != "branch_collision":
             _cleanup_partial_worktree(
                 preflight.source_git_root,
@@ -389,6 +435,23 @@ def _create_persistent_worktree_or_record_failure(
                 remove_branch=True,
             )
         raise PersistentWorktreeError(exc.error, exc.message) from exc
+    except Exception as exc:
+        error = getattr(exc, "error", "worktree_setup_failed")
+        message = getattr(exc, "message", str(exc))
+        _record_persistent_worktree_failure(
+            registration,
+            error=str(error),
+            message=str(message),
+        )
+        _cleanup_partial_worktree(
+            preflight.source_git_root,
+            registration.worktree_path,
+            registration.branch,
+            registration.run_path,
+            stderr=execution.stderr,
+            remove_branch=True,
+        )
+        raise PersistentWorktreeError(str(error), str(message)) from exc
 
 
 def _request_for_execution_workspace(
@@ -486,18 +549,14 @@ def _launch_child_in_persistent_worktree(
     except Exception as exc:
         error_msg = str(exc)
         error_code = getattr(exc, "error", "execution_failed")
-        delegate_runner.write_state(
-            registration.run_path,
-            delegate_runner.build_state(
-                registration.pre_ctx,
-                status="failed",
-                extra={
-                    "error": error_code,
-                    "message": error_msg,
-                    "plannedBranch": registration.branch,
-                    "plannedExecutionCwd": registration.worktree_path,
-                },
-            ),
+        # _record_persistent_worktree_failure writes both the failed state and
+        # the failed snapshot in one consolidated pass; do not write_state here
+        # first (that would be a redundant double write of the same failed
+        # status). Behavior is identical, with a single state write.
+        _record_persistent_worktree_failure(
+            registration,
+            error=str(error_code),
+            message=error_msg,
         )
         raise PersistentWorktreeError(error_code, error_msg) from exc
 

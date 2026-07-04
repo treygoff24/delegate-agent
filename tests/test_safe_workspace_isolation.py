@@ -233,6 +233,297 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
             ("tracked.txt", "notes.txt"),
         )
 
+    def test_git_safe_workspace_excludes_nested_gitignored_subdir_secret(self):
+        """A secret in a subdirectory that a nested .gitignore excludes is not
+        synced into the isolated workspace (the ignore rule is honored even when
+        it lives in a subdirectory rather than the repo root)."""
+        repo = make_git_repo(with_commit=True)
+        self.addCleanup(repo.cleanup)
+        root = Path(repo.name)
+        (root / "tracked.txt").write_text("base\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", repo.name, "add", "tracked.txt"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                repo.name,
+                "-c",
+                "user.name=Delegate Test",
+                "-c",
+                "user.email=delegate-test@example.com",
+                "commit",
+                "-m",
+                "tracked",
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        sub = root / "sub"
+        sub.mkdir()
+        (sub / ".gitignore").write_text("secret.txt\n", encoding="utf-8")
+        (sub / "secret.txt").write_text("subdir-secret\n", encoding="utf-8")
+        (sub / "kept.txt").write_text("kept\n", encoding="utf-8")
+
+        worktree_path, temp_base = self.delegate.create_git_safe_workspace(repo.name)
+        try:
+            isolated = Path(worktree_path)
+            self.assertFalse((isolated / "sub" / "secret.txt").exists())
+            self.assertEqual(
+                (isolated / "sub" / "kept.txt").read_text(encoding="utf-8"),
+                "kept\n",
+            )
+            # The nested .gitignore itself is untracked and non-ignored, so it syncs.
+            self.assertTrue((isolated / "sub" / ".gitignore").exists())
+        finally:
+            self.delegate.cleanup_safe_isolated_workspace(
+                git_root=repo.name,
+                isolated_workspace=worktree_path,
+                temp_base=temp_base,
+            )
+
+    def test_git_safe_workspace_blocks_untracked_symlink_to_gitignored_target(self):
+        """An untracked symlink whose readlink target is RELATIVE and resolves
+        inside the repo to a gitignored file is replaced with the inert
+        placeholder (the leak rule), and the blocked-symlink warning is emitted.
+        The gitignored secret stays unreadable from the isolated workspace."""
+        repo = make_git_repo(with_commit=True)
+        self.addCleanup(repo.cleanup)
+        root = Path(repo.name)
+        (root / ".gitignore").write_text("secret.txt\n", encoding="utf-8")
+        (root / "secret.txt").write_text("host secret\n", encoding="utf-8")
+        (root / "leak.link").symlink_to("secret.txt")
+
+        worktree_path, temp_base, warnings = self.delegate.create_git_safe_workspace(
+            repo.name,
+            include_warnings=True,
+        )
+        try:
+            isolated = Path(worktree_path)
+            blocked = isolated / "leak.link"
+            self.assertFalse(blocked.is_symlink())
+            self.assertEqual(
+                blocked.read_text(encoding="utf-8"),
+                self.delegate.SAFE_BLOCKED_SYMLINK_PLACEHOLDER,
+            )
+            self.assertTrue(
+                any(self.delegate.SAFE_EXTERNAL_SYMLINK_WARNING_PREFIX in item for item in warnings)
+            )
+            self.assertTrue(any("leak.link" in item for item in warnings))
+        finally:
+            self.delegate.cleanup_safe_isolated_workspace(
+                git_root=repo.name,
+                isolated_workspace=worktree_path,
+                temp_base=temp_base,
+            )
+
+    def test_git_safe_workspace_recreates_legit_relative_symlink_to_non_ignored_file(self):
+        """An untracked relative symlink whose target resolves inside the repo
+        to a non-ignored file is recreated (not placeholdered)."""
+        repo = make_git_repo(with_commit=True)
+        self.addCleanup(repo.cleanup)
+        root = Path(repo.name)
+        (root / "target.txt").write_text("inside\n", encoding="utf-8")
+        (root / "good.link").symlink_to("target.txt")
+
+        worktree_path, temp_base, warnings = self.delegate.create_git_safe_workspace(
+            repo.name,
+            include_warnings=True,
+        )
+        try:
+            isolated = Path(worktree_path)
+            copied = isolated / "good.link"
+            self.assertTrue(copied.is_symlink())
+            self.assertEqual(os.readlink(copied), "target.txt")
+            self.assertEqual(
+                copied.resolve().read_text(encoding="utf-8"),
+                "inside\n",
+            )
+            self.assertNotIn(
+                self.delegate.SAFE_EXTERNAL_SYMLINK_WARNING_PREFIX,
+                warnings,
+            )
+        finally:
+            self.delegate.cleanup_safe_isolated_workspace(
+                git_root=repo.name,
+                isolated_workspace=worktree_path,
+                temp_base=temp_base,
+            )
+
+    def test_git_safe_workspace_blocks_untracked_absolute_symlink_to_repo_file(self):
+        """An untracked symlink with an ABSOLUTE readlink target is replaced with
+        the inert placeholder even when the target resolves inside the repo, and
+        the blocked-symlink warning is emitted."""
+        repo = make_git_repo(with_commit=True)
+        self.addCleanup(repo.cleanup)
+        root = Path(repo.name)
+        (root / "target.txt").write_text("inside\n", encoding="utf-8")
+        absolute_target = (root / "target.txt").resolve()
+        (root / "abs.link").symlink_to(absolute_target)
+
+        worktree_path, temp_base, warnings = self.delegate.create_git_safe_workspace(
+            repo.name,
+            include_warnings=True,
+        )
+        try:
+            isolated = Path(worktree_path)
+            blocked = isolated / "abs.link"
+            self.assertFalse(blocked.is_symlink())
+            self.assertEqual(
+                blocked.read_text(encoding="utf-8"),
+                self.delegate.SAFE_BLOCKED_SYMLINK_PLACEHOLDER,
+            )
+            self.assertTrue(
+                any(self.delegate.SAFE_EXTERNAL_SYMLINK_WARNING_PREFIX in item for item in warnings)
+            )
+            self.assertTrue(any("abs.link" in item for item in warnings))
+        finally:
+            self.delegate.cleanup_safe_isolated_workspace(
+                git_root=repo.name,
+                isolated_workspace=worktree_path,
+                temp_base=temp_base,
+            )
+
+    def test_git_safe_workspace_blocks_symlink_to_gitignored_target_with_newline_in_path(self):
+        """A symlink whose relative target resolves inside the repo to a
+        gitignored file whose path contains a newline is placeholdered.
+
+        This exercises the NUL-separated ``git check-ignore -z --stdin`` batch:
+        the old newline-separated parser would split ``secrets/sec\\nret.txt``
+        into ``secrets/sec`` and ``ret.txt``, neither matching the queried
+        path, so the symlink would NOT be placeholdered (a false negative that
+        leaked a gitignored secret). The NUL-delimited protocol bounds each
+        path correctly and detects the ignore match.
+        """
+        repo = make_git_repo(with_commit=True)
+        self.addCleanup(repo.cleanup)
+        root = Path(repo.name)
+        (root / ".gitignore").write_text("secrets/\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", repo.name, "add", ".gitignore"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                repo.name,
+                "-c",
+                "user.name=Delegate Test",
+                "-c",
+                "user.email=delegate-test@example.com",
+                "commit",
+                "-m",
+                "gitignore",
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        secrets = root / "secrets"
+        secrets.mkdir()
+        # File name contains a literal newline.
+        newline_name = "sec\nret.txt"
+        (secrets / newline_name).write_text("host secret\n", encoding="utf-8")
+        # Relative symlink whose readlink target contains the newline path.
+        (root / "weird.link").symlink_to(f"secrets/{newline_name}")
+
+        worktree_path, temp_base, warnings = self.delegate.create_git_safe_workspace(
+            repo.name,
+            include_warnings=True,
+        )
+        try:
+            isolated = Path(worktree_path)
+            blocked = isolated / "weird.link"
+            self.assertFalse(
+                blocked.is_symlink(),
+                "newline-target symlink to gitignored file must be placeholdered",
+            )
+            self.assertEqual(
+                blocked.read_text(encoding="utf-8"),
+                self.delegate.SAFE_BLOCKED_SYMLINK_PLACEHOLDER,
+            )
+            self.assertTrue(
+                any(self.delegate.SAFE_EXTERNAL_SYMLINK_WARNING_PREFIX in item for item in warnings)
+            )
+            self.assertTrue(any("weird.link" in item for item in warnings))
+        finally:
+            self.delegate.cleanup_safe_isolated_workspace(
+                git_root=repo.name,
+                isolated_workspace=worktree_path,
+                temp_base=temp_base,
+            )
+
+    def test_git_safe_workspace_fail_closes_when_check_ignore_errors(self):
+        """An unexpected ``git check-ignore`` failure (exit 128) FAILS CLOSED:
+        every queried inside-root symlink is placeholdered and a distinct
+        warning is emitted, but the sync still completes (no exception)."""
+        repo = make_git_repo(with_commit=True)
+        self.addCleanup(repo.cleanup)
+        root = Path(repo.name)
+        # Two non-ignored inside-root relative symlinks that would normally be
+        # recreated; under fail-closed they must both be placeholdered.
+        (root / "target_a.txt").write_text("inside-a\n", encoding="utf-8")
+        (root / "target_b.txt").write_text("inside-b\n", encoding="utf-8")
+        (root / "good_a.link").symlink_to("target_a.txt")
+        (root / "good_b.link").symlink_to("target_b.txt")
+
+        original_run_git_bytes = safe_workspace._run_git_bytes
+
+        def failing_check_ignore(cwd, args, *, input_bytes=None, timeout_seconds=None):
+            if args and args[0] == "check-ignore":
+                return subprocess.CompletedProcess(
+                    ["git", *args],
+                    128,
+                    b"",
+                    b"fatal: simulated check-ignore failure",
+                )
+            return original_run_git_bytes(
+                cwd, args, input_bytes=input_bytes, timeout_seconds=timeout_seconds
+            )
+
+        with mock.patch.object(safe_workspace, "_run_git_bytes", side_effect=failing_check_ignore):
+            worktree_path, temp_base, warnings = self.delegate.create_git_safe_workspace(
+                repo.name,
+                include_warnings=True,
+            )
+        try:
+            isolated = Path(worktree_path)
+            for name in ("good_a.link", "good_b.link"):
+                blocked = isolated / name
+                self.assertFalse(
+                    blocked.is_symlink(),
+                    f"{name} must be placeholdered under check-ignore fail-closed",
+                )
+                self.assertEqual(
+                    blocked.read_text(encoding="utf-8"),
+                    self.delegate.SAFE_BLOCKED_SYMLINK_PLACEHOLDER,
+                )
+            # Fail-closed notice is emitted alongside the per-path blocked warning.
+            self.assertIn(
+                safe_workspace.SAFE_CHECK_IGNORE_FAIL_CLOSED_WARNING,
+                warnings,
+            )
+            # Sync completed (no exception); the tracked target file is still
+            # mirrored so the workspace is otherwise intact.
+            self.assertEqual(
+                (isolated / "target_a.txt").read_text(encoding="utf-8"),
+                "inside-a\n",
+            )
+        finally:
+            self.delegate.cleanup_safe_isolated_workspace(
+                git_root=repo.name,
+                isolated_workspace=worktree_path,
+                temp_base=temp_base,
+            )
+
     def test_safe_dirty_tree_note_reaches_prompt_transport(self):
         repo = self.make_dirty_repo()
         workspace = self.delegate.ResolvedWorkspace(repo.name, "git")

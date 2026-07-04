@@ -17,6 +17,7 @@ class WorktreeCommand:
     handle: str | None = None
     latest_harness: str | None = None
     harness: str | None = None
+    group: str | None = None
     status: str | None = None
     limit: int | None = None
     no_auto_prune: bool = False
@@ -39,6 +40,7 @@ def _list_payload(command: WorktreeCommand, registry_root: Path, config: JsonObj
     payload = worktree_mgmt.list_worktrees(
         registry_root,
         harness=command.harness,
+        group=command.group,
         status=command.status,
         limit=command.limit or run_registry.DEFAULT_RUNS_LIMIT,
     )
@@ -75,6 +77,51 @@ def _show_payload(command: WorktreeCommand, registry_root: Path, _config: JsonOb
 def _remove_payload(
     command: WorktreeCommand, registry_root: Path, _config: JsonObject
 ) -> JsonObject:
+    if command.group is not None:
+        removed: list[JsonObject] = []
+        errors: list[JsonObject] = []
+        matches = [
+            record
+            for record in worktree_mgmt.load_persistent_records(registry_root)
+            if record.get("group") == command.group
+        ]
+        if not matches:
+            raise worktree_mgmt.WorktreeManagementError(
+                {
+                    "ok": False,
+                    "code": "no_matching_worktrees",
+                    "message": f"No persistent worktrees found for group: {command.group}",
+                    "group": command.group,
+                    "matched": 0,
+                    "retrySafe": False,
+                }
+            )
+        for record in matches:
+            handle = str(record.get("alias") or record.get("runId"))
+            try:
+                removed.append(
+                    worktree_mgmt.remove_worktree(
+                        registry_root,
+                        handle=handle,
+                        discard_uncommitted=command.discard_uncommitted,
+                        force_branch=command.force_branch,
+                        keep_branch=command.keep_branch,
+                        force=command.force,
+                    )
+                )
+                if removed[-1].get("ok") is False:
+                    errors.append(removed[-1])
+            except worktree_mgmt.WorktreeManagementError as exc:
+                errors.append(exc.payload)
+        return {
+            "schema": worktree_mgmt.SCHEMA_REMOVE,
+            "ok": not errors,
+            "group": command.group,
+            "matched": len(matches),
+            "removed": removed,
+            "errors": errors,
+            **({"exitCode": worktree_mgmt.WORKTREE_ERROR_EXIT_CODE} if errors else {}),
+        }
     if command.handle is None:
         raise worktree_mgmt.WorktreeManagementError(
             {
@@ -102,6 +149,7 @@ def _prune_payload(
         merged=command.merged,
         older_than_days=command.older_than_days,
         harness=command.harness,
+        group=command.group,
         include_detached=command.include_detached,
         dry_run=command.dry_run,
         discard_uncommitted=command.discard_uncommitted,

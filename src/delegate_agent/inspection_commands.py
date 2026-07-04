@@ -23,6 +23,7 @@ class RunsCommand:
     running: bool = False
     stale: bool = False
     harness: str | None = None
+    group: str | None = None
     limit: int | None = None
     json_mode: bool = False
 
@@ -89,6 +90,7 @@ def emit_runs(command: RunsCommand, *, workspace_path: str, stdout: TextIO) -> i
             active=command.active,
             status_filter=status_filter,
             harness=command.harness,
+            group=command.group,
             limit=limit,
         )
     summaries = [redaction.redact_value(summary) for summary in summaries]

@@ -194,6 +194,7 @@ def build_run_summary(
         "runId": run_id,
         "alias": alias if isinstance(alias, str) else None,
         "harness": harness if isinstance(harness, str) else None,
+        "group": index_entry.get("group") if isinstance(index_entry.get("group"), str) else None,
         "stdoutBytes": stdout_bytes,
         "stderrBytes": stderr_bytes,
         "warnings": warnings,
@@ -264,6 +265,7 @@ def list_run_summaries(
     active: bool = False,
     status_filter: str | None = None,
     harness: str | None = None,
+    group: str | None = None,
     limit: int = DEFAULT_RUNS_LIMIT,
 ) -> list[JsonObject]:
     if limit < 1:
@@ -274,6 +276,9 @@ def list_run_summaries(
             continue
         entry_harness = entry.get("harness")
         if harness is not None and entry_harness != harness:
+            continue
+        entry_group = entry.get("group")
+        if group is not None and entry_group != group:
             continue
         summary = build_run_summary(registry_root, run_id, entry)
         status = summary.get("status")

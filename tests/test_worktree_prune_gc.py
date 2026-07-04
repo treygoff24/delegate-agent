@@ -38,6 +38,43 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
             self.assertEqual(len(payload["planned"]), 1)
             self.assertTrue(Path(wt_path).exists())
 
+    def test_worktree_prune_group_filters_candidates(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            matching_branch = "delegate/cursor-prune-group"
+            matching_wt = str(Path(fake_home) / "wt" / "cursor-prune-group")
+            matching_run_id, _matching_alias = self._seed_persistent_run(
+                path,
+                alias="cursor-prune-group",
+                branch=matching_branch,
+                execution_cwd=matching_wt,
+            )
+            other_branch = "delegate/cursor-prune-other"
+            other_wt = str(Path(fake_home) / "wt" / "cursor-prune-other")
+            other_run_id, _other_alias = self._seed_persistent_run(
+                path,
+                alias="cursor-prune-other",
+                branch=other_branch,
+                execution_cwd=other_wt,
+            )
+            self._tag_run_group(path, matching_run_id, "wave4")
+            self._tag_run_group(path, other_run_id, "other")
+            self._create_worktree_at(path, matching_branch, matching_wt)
+            self._create_worktree_at(path, other_branch, other_wt)
+
+            result = self.delegate.worktree_mgmt.prune_worktrees(
+                self._registry_root(path),
+                merged=True,
+                group="wave4",
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(
+                [entry["alias"] for entry in result["removed"]], ["cursor-prune-group"]
+            )
+            self.assertFalse(Path(matching_wt).exists())
+            self.assertTrue(Path(other_wt).exists())
+
     def test_worktree_prune_merged_removes_only_safe_mixed_set(self):
         _repo, path = self._make_repo()
         with tempfile.TemporaryDirectory() as fake_home:

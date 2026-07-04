@@ -30,6 +30,7 @@ CANCEL_GRACE_SECONDS = 5.0
 class WaitCommand:
     handles: tuple[str, ...]
     latest_harness: str | None = None
+    group: str | None = None
     timeout_seconds: int = WAIT_DEFAULT_TIMEOUT_SECONDS
     interval_seconds: int = WAIT_DEFAULT_INTERVAL_SECONDS
     completion_report: bool = False
@@ -51,7 +52,35 @@ def _registry_for_workspace(workspace_path: str) -> Path:
     return run_registry.registry_root_if_exists(workspace) or run_registry.registry_root(workspace)
 
 
-def _resolve_targets(registry_root: Path, handles: tuple[str, ...], latest_harness: str | None):
+def _group_targets(registry_root: Path, group: str) -> list[run_registry.RunTarget]:
+    index = run_registry.load_index(registry_root)
+    runs = index.get("runs", {})
+    targets: list[run_registry.RunTarget] = []
+    for run_id, entry in runs.items():
+        if not isinstance(run_id, str) or not isinstance(entry, dict):
+            continue
+        if entry.get("group") != group:
+            continue
+        alias = entry.get("alias")
+        targets.append(run_registry.RunTarget(run_id, alias if isinstance(alias, str) else None))
+
+    def registration_ordinal(target: run_registry.RunTarget) -> int:
+        entry = runs.get(target.run_id)
+        if not isinstance(entry, dict):
+            return 0
+        ordinal = entry.get("registrationOrdinal", 0)
+        return ordinal if isinstance(ordinal, int) and not isinstance(ordinal, bool) else 0
+
+    targets.sort(key=registration_ordinal)
+    return targets
+
+
+def _resolve_targets(
+    registry_root: Path,
+    handles: tuple[str, ...],
+    latest_harness: str | None,
+    group: str | None = None,
+):
     targets = []
     seen: set[str] = set()
     for handle in handles:
@@ -75,7 +104,14 @@ def _resolve_targets(registry_root: Path, handles: tuple[str, ...], latest_harne
             raise WaitCancelError(target.error, target.message)
         if target.run_id not in seen:
             targets.append(target)
+    if group is not None:
+        for target in _group_targets(registry_root, group):
+            if target.run_id not in seen:
+                targets.append(target)
+                seen.add(target.run_id)
     if not targets:
+        if group is not None:
+            raise WaitCancelError("no_matching_runs", f"No runs found for group: {group}")
         raise WaitCancelError("missing_handle", "wait/cancel requires at least one run handle.")
     return targets
 
@@ -159,7 +195,12 @@ def _append_reports(
 
 def emit_wait(command: WaitCommand, *, workspace_path: str, stdout: TextIO) -> int:
     registry_root = _registry_for_workspace(workspace_path)
-    targets = _resolve_targets(registry_root, command.handles, command.latest_harness)
+    targets = _resolve_targets(
+        registry_root,
+        command.handles,
+        command.latest_harness,
+        command.group,
+    )
     deadline = time.monotonic() + command.timeout_seconds
     last_statuses: dict[str, str] = {}
     timed_out = False

@@ -205,7 +205,13 @@ def runs_json_payload(
 
 def render_runs_text(summaries: list[JsonObject], stdout: TextIO, *, mode: str) -> None:
     print(f"mode: {mode}", file=stdout)
-    print("alias      status    harness  age      iso          current", file=stdout)
+    show_group = any(isinstance(summary.get("group"), str) for summary in summaries)
+    if show_group:
+        print(
+            "alias      status    harness  age      iso          group       current", file=stdout
+        )
+    else:
+        print("alias      status    harness  age      iso          current", file=stdout)
     for summary in summaries:
         alias = summary.get("alias") or summary.get("runId") or "?"
         status = summary.get("status", "unknown")
@@ -222,9 +228,17 @@ def render_runs_text(summaries: list[JsonObject], stdout: TextIO, *, mode: str) 
         current = summary.get("current", "")
         if isinstance(current, str) and len(current) > 40:
             current = current[:37] + "..."
-        print(
-            f"{alias:<10} {status:<9} {harness:<8} {age:<8} {iso_label:<11} {current}", file=stdout
-        )
+        if show_group:
+            group = summary.get("group") if isinstance(summary.get("group"), str) else ""
+            print(
+                f"{alias:<10} {status:<9} {harness:<8} {age:<8} {iso_label:<11} {group:<11} {current}",
+                file=stdout,
+            )
+        else:
+            print(
+                f"{alias:<10} {status:<9} {harness:<8} {age:<8} {iso_label:<11} {current}",
+                file=stdout,
+            )
 
 
 def run_output_json_payload(
@@ -492,6 +506,12 @@ def render_worktree_show_text(payload: JsonObject, stdout: TextIO) -> None:
 
 
 def render_worktree_remove_text(payload: JsonObject, stdout: TextIO) -> None:
+    if isinstance(payload.get("removed"), list):
+        print(
+            f"group: {payload.get('group')} matched={payload.get('matched')} removed={len(payload.get('removed') or [])} errors={len(payload.get('errors') or [])}",
+            file=stdout,
+        )
+        return
     alias = payload.get("alias") or payload.get("runId") or "?"
     print(
         f"{alias}: removed={payload.get('removed')} pathRemoved={payload.get('pathRemoved')} branchRemoved={payload.get('branchRemoved')}",

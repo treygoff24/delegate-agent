@@ -50,6 +50,7 @@ class IsolationContext:
     source_head_ref: str | None = None
     source_branch: str | None = None
     safe_workspace_method: str | None = None
+    include_dirty: bool = False
     warnings: tuple[str, ...] = ()
 
 
@@ -150,6 +151,7 @@ def build_isolation_context(
     source_branch: str | None = None,
     config: JsonObject | None = None,
     run_short_id: str | None = None,
+    include_dirty: bool = False,
 ) -> IsolationContext:
     """Resolve isolation into launch metadata and planned persistent-worktree paths."""
     # isolation_mode preserves the raw resolved value (auto/none/worktree).
@@ -193,6 +195,7 @@ def build_isolation_context(
         source_head_oid=source_head_oid,
         source_head_ref=source_head_ref,
         source_branch=source_branch,
+        include_dirty=include_dirty,
     )
 
 
@@ -240,7 +243,8 @@ def require_clean_source(source_git_root: str) -> None:
             (
                 "--isolation worktree for work mode requires a clean source workspace. "
                 "Commit/stash/delete local changes, run in-place with --isolation none, "
-                "or wait for a future --include-dirty option."
+                "or relaunch with --include-dirty to copy tracked edits and untracked "
+                "non-ignored files into the new worktree."
             ),
         )
 

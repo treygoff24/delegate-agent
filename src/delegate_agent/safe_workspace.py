@@ -78,6 +78,11 @@ SAFE_EXTERNAL_SYMLINK_WARNING_PREFIX = (
 
 SAFE_BLOCKED_SYMLINK_PLACEHOLDER = "External symlink blocked by Delegate safe isolation.\n"
 
+SAFE_CHECK_IGNORE_FAIL_CLOSED_WARNING = (
+    "Safe isolation could not verify gitignore status for one or more untracked "
+    "symlink target(s); fail-closed replaced all queried symlinks with placeholders."
+)
+
 
 def _ensure_codex_skip_git_repo_check(argv: list[str]) -> list[str]:
     if "--skip-git-repo-check" in argv:
@@ -212,6 +217,131 @@ def symlink_target_resolves_outside(path: Path, source_root: Path) -> bool:
     return not _is_relative_to(target, root_resolved)
 
 
+def _git_check_ignore(git_root: str, paths: list[str]) -> tuple[set[str], bool]:
+    """Return the subset of ``paths`` that Git reports as ignored.
+
+    Uses a single batched ``git check-ignore -z --stdin`` invocation with
+    NUL-separated input and output so a large untracked set never spawns one
+    subprocess per path and so paths containing newlines are handled correctly.
+    ``git check-ignore`` exits 0 when at least one path is ignored, 1 when none
+    are, and any other code (e.g. 128) on error.
+
+    Returns ``(ignored, fail_closed)``:
+    - exit 1 -> ``({}, False)`` (clean: nothing ignored).
+    - exit 0 -> parse NUL-separated stdout -> ``(ignored, False)``.
+    - any other exit -> ``({}, True)``: FAIL CLOSED for the batch. The caller
+      must treat every queried target as ignored (placeholder the symlinks) and
+      emit a warning, but must not raise and abort the whole sync.
+    """
+    if not paths:
+        return set(), False
+    result = _run_git_bytes(
+        git_root,
+        ["check-ignore", "-z", "--stdin"],
+        input_bytes=b"\x00".join(p.encode("utf-8") for p in paths) + b"\x00",
+        timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
+    )
+    if result.returncode == 1:
+        return set(), False
+    if result.returncode != 0:
+        return set(), True
+    ignored: set[str] = set()
+    for token in result.stdout.decode(errors="replace").split("\x00"):
+        if token:
+            ignored.add(token)
+    return ignored, False
+
+
+def _classify_untracked_symlink_leaks(
+    git_root: str,
+    untracked: list[str],
+    root: Path,
+    root_resolved: Path,
+) -> tuple[set[str], tuple[str, ...]]:
+    """Return relative paths of untracked symlinks blocked by the leak rule.
+
+    A symlink is recreated only when its readlink target is RELATIVE, resolves
+    INSIDE ``git_root``, and the resolved target is NOT gitignored. Anything
+    else is a leak risk and is blocked here. External symlinks (target resolves
+    outside ``git_root``) are deliberately excluded: they are already caught by
+    ``symlink_target_resolves_outside`` and reported via
+    ``external_symlink_warnings``, so reporting them here would duplicate the
+    existing warning channel. The remaining cases -- an absolute readlink whose
+    target resolves inside the repo, or a relative-inside symlink whose target
+    is gitignored -- are the leak cases this function returns so the caller can
+    placeholder them and emit one consolidated warning.
+
+    ``git check-ignore`` is invoked once (batched over all inside-root targets)
+    rather than per symlink. If that probe fails with an unexpected exit code,
+    the batch FAILS CLOSED: every queried inside-root symlink is placeholdered
+    and a distinct warning is emitted, but the sync is not aborted.
+
+    Returns ``(leak_blocked, warnings)`` where ``warnings`` carries any
+    fail-closed notice (the per-path blocked-symlink warning is emitted
+    separately by the caller via ``_leak_blocked_symlink_warning``).
+    """
+    leak_blocked: set[str] = set()
+    inside_targets: dict[str, str] = {}
+    warnings: tuple[str, ...] = ()
+    for relative in untracked:
+        if not relative:
+            continue
+        source = root / relative
+        if not source.is_symlink():
+            continue
+        # External symlinks are handled by the resolves-outside path; skip them
+        # so we do not double-report on the existing warning channel.
+        if symlink_target_resolves_outside(source, root):
+            continue
+        try:
+            readlink_target = os.readlink(source)
+        except OSError:
+            leak_blocked.add(relative)
+            continue
+        if os.path.isabs(readlink_target):
+            # Absolute readlink is never recreated, even when it resolves inside
+            # the repo (it encodes a host path and can point at gitignored
+            # content). External absolute symlinks were skipped above.
+            leak_blocked.add(relative)
+            continue
+        try:
+            resolved = (source.parent / readlink_target).resolve(strict=False)
+        except OSError:
+            leak_blocked.add(relative)
+            continue
+        if not _is_relative_to(resolved, root_resolved):
+            # Escaping relative link; resolves_outside handles it.
+            continue
+        try:
+            inside_targets[relative] = resolved.relative_to(root_resolved).as_posix()
+        except ValueError:
+            leak_blocked.add(relative)
+    if inside_targets:
+        ignored, fail_closed = _git_check_ignore(git_root, list(inside_targets.values()))
+        if fail_closed:
+            # FAIL CLOSED: treat every queried inside-root symlink as a leak
+            # risk and placeholder it. Do not raise; the sync still completes.
+            leak_blocked.update(inside_targets.keys())
+            warnings = (SAFE_CHECK_IGNORE_FAIL_CLOSED_WARNING,)
+        else:
+            for symlink_rel, target_rel in inside_targets.items():
+                if target_rel in ignored:
+                    leak_blocked.add(symlink_rel)
+    return leak_blocked, warnings
+
+
+def _leak_blocked_symlink_warning(leak_blocked: set[str], *, limit: int = 5) -> tuple[str, ...]:
+    """Emit the existing blocked-symlink warning for leak-rule placeholders."""
+    if not leak_blocked:
+        return ()
+    paths = sorted(leak_blocked)
+    preview = ", ".join(paths[:limit])
+    remaining = len(paths) - limit
+    if remaining > 0:
+        preview = f"{preview}, ... (+{remaining} more)"
+    return (f"{SAFE_EXTERNAL_SYMLINK_WARNING_PREFIX}: {preview}.",)
+
+
 def write_blocked_symlink_placeholder(path: Path) -> None:
     if path.exists() or path.is_symlink():
         path.unlink()
@@ -319,9 +449,17 @@ def mirror_path_preserving_symlinks(
     destination: Path,
     *,
     source_root: Path | None = None,
+    leak_blocked: set[str] | None = None,
 ) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     if source.is_symlink():
+        relative: str | None = None
+        if source_root is not None:
+            with suppress(ValueError):
+                relative = source.relative_to(source_root).as_posix()
+        if relative is not None and relative in (leak_blocked or set()):
+            write_blocked_symlink_placeholder(destination)
+            return
         if source_root is not None and symlink_target_resolves_outside(source, source_root):
             write_blocked_symlink_placeholder(destination)
         else:
@@ -418,30 +556,48 @@ def external_symlink_warnings(source_workspace: str, *, limit: int = 5) -> tuple
     return (f"{SAFE_EXTERNAL_SYMLINK_WARNING_PREFIX}: {preview}.",)
 
 
-def sync_git_workspace_snapshot(git_root: str, worktree_path: str) -> tuple[str, ...]:
+def sync_git_dirty_snapshot(git_root: str, worktree_path: str) -> tuple[int, tuple[str, ...]]:
     apply_git_tracked_diff(worktree_path, read_git_tracked_diff(git_root))
-    untracked = _run_git(
+    changed = changed_files_vs_head(git_root)
+    untracked = _git_lines(
         git_root,
         ["ls-files", "--others", "--exclude-standard"],
-        timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
+        error="Failed to list untracked files",
     )
-    if untracked.returncode != 0:
-        raise DelegateError(
-            "safe_workspace_sync_failed",
-            f"Failed to list untracked files: {untracked.stderr.strip()}",
-        )
-    for relative in untracked.stdout.splitlines():
+    root = Path(git_root)
+    try:
+        root_resolved = root.resolve(strict=True)
+    except OSError:
+        root_resolved = root
+    leak_blocked, check_ignore_warnings = _classify_untracked_symlink_leaks(
+        git_root,
+        untracked,
+        root,
+        root_resolved,
+    )
+    for relative in untracked:
         if not relative:
             continue
         mirror_path_preserving_symlinks(
             Path(git_root) / relative,
             Path(worktree_path) / relative,
             source_root=Path(git_root),
+            leak_blocked=leak_blocked,
         )
-    return merge_warnings(
-        external_symlink_warnings(git_root),
-        block_external_symlinks(worktree_path, git_root),
+    return (
+        len(changed),
+        merge_warnings(
+            external_symlink_warnings(git_root),
+            block_external_symlinks(worktree_path, git_root),
+            _leak_blocked_symlink_warning(leak_blocked),
+            check_ignore_warnings,
+        ),
     )
+
+
+def sync_git_workspace_snapshot(git_root: str, worktree_path: str) -> tuple[str, ...]:
+    _count, warnings = sync_git_dirty_snapshot(git_root, worktree_path)
+    return warnings
 
 
 def git_head_exists(git_root: str) -> bool:
@@ -645,6 +801,7 @@ def safe_isolated_request(request: Request) -> Iterator[Request]:
             progress_initial_delay_sec=request.progress_initial_delay_sec,
             progress_interval_sec=request.progress_interval_sec,
             forbid_commit=request.forbid_commit,
+            include_dirty=request.include_dirty,
             warnings=request.warnings,
             stdin_text=request.stdin_text,
             prompt_file_text=request.prompt_file_text,
@@ -653,6 +810,7 @@ def safe_isolated_request(request: Request) -> Iterator[Request]:
             env_overrides=request.env_overrides,
             auth_profile=request.auth_profile,
             fallback_auth_profile=request.fallback_auth_profile,
+            group=request.group,
             profile_resolution=request.profile_resolution,
         )
     finally:

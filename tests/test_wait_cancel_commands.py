@@ -34,11 +34,15 @@ class WaitCancelCommandTests(unittest.TestCase):
         pid: int | None = None,
         pgid: int | None = None,
         started_at: str | None = None,
+        group: str | None = None,
     ):
+        metadata = {"mode": "work", "cwd": str(self.workspace)}
+        if group is not None:
+            metadata["group"] = group
         run_id, alias = run_registry.register_run(
             self.registry_root,
             harness="codex",
-            metadata={"mode": "work", "cwd": str(self.workspace)},
+            metadata=metadata,
         )
         run_path = run_registry.run_directory(self.registry_root, run_id)
         state = {
@@ -48,6 +52,8 @@ class WaitCancelCommandTests(unittest.TestCase):
             "status": status,
             "lastActivityAt": run_registry.utc_now_iso(),
         }
+        if group is not None:
+            state["group"] = group
         if pid is not None:
             state["pid"] = pid
         if pgid is not None:
@@ -74,6 +80,7 @@ class WaitCancelCommandTests(unittest.TestCase):
                 "alias": alias,
                 "harness": "codex",
                 "status": status,
+                **({"group": group} if group is not None else {}),
             },
         )
         return run_id, alias
@@ -119,6 +126,28 @@ class WaitCancelCommandTests(unittest.TestCase):
         payload = json.loads(out)
         self.assertEqual(payload["runs"][0]["alias"], latest_alias)
         self.assertEqual(payload["runs"][0]["resolutionKind"], "latest")
+
+    def test_wait_group_selector_waits_all_matching_runs(self):
+        _first_id, first_alias = self.write_run(status="succeeded", group="wave4")
+        _other_id, _other_alias = self.write_run(status="failed", group="other")
+        _second_id, second_alias = self.write_run(status="succeeded", group="wave4")
+
+        code, out, err = self.run_cli(["--json", "wait", "--group", "wave4", "--interval", "1"])
+
+        self.assertEqual(code, 0, err)
+        payload = json.loads(out)
+        self.assertEqual([run["alias"] for run in payload["runs"]], [first_alias, second_alias])
+
+    def test_wait_group_selector_reports_no_matches(self):
+        self.write_run(status="succeeded", group="wave4")
+
+        code, out, err = self.run_cli(["--json", "wait", "--group", "missing"])
+
+        self.assertEqual(code, cli.EXIT_USAGE)
+        payload = json.loads(out)
+        self.assertEqual(payload["error"], "no_matching_runs")
+        self.assertIn("No runs found for group: missing", payload["message"])
+        self.assertEqual(err, "")
 
     def test_cancel_refuses_terminal_run(self):
         _run_id, alias = self.write_run(status="succeeded")

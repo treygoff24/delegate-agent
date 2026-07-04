@@ -379,6 +379,7 @@ def decorate_record(
         "alias": record.get("alias"),
         "runId": record.get("runId"),
         "harness": record.get("harness"),
+        "group": record.get("group"),
         "branch": record.get("branch"),
         "executionCwd": record.get("executionCwd"),
         "sourceGitRoot": record.get("sourceGitRoot"),
@@ -441,6 +442,7 @@ def list_worktrees(
     registry_root: Path,
     *,
     harness: str | None = None,
+    group: str | None = None,
     status: str | None = None,
     limit: int = run_registry.DEFAULT_RUNS_LIMIT,
     include_detached: bool = False,
@@ -451,6 +453,8 @@ def list_worktrees(
     total_persistent = len(records)
     for record in records:
         if harness is not None and record.get("harness") != harness:
+            continue
+        if group is not None and record.get("group") != group:
             continue
         unfiltered_entry = decorate_record(record, include_detached=include_detached)
         unfiltered_status = unfiltered_entry.get("worktreeStatus")

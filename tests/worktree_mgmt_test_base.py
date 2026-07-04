@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import io
+import json
 import os
 import subprocess
 import sys
@@ -106,6 +107,23 @@ class WorktreeMgmtTestBase(unittest.TestCase):
             harness=harness,
             last_activity_at=last_activity_at,
         )
+
+    def _tag_run_group(self, repo_path: str, run_id: str, group: str) -> None:
+        registry_root = self._registry_root(repo_path)
+        index = self.delegate.run_registry.load_index(registry_root)
+        entry = index["runs"][run_id]
+        if isinstance(entry, dict):
+            entry["group"] = group
+        self.delegate.run_registry.save_index(registry_root, index)
+        run_path = self.delegate.run_registry.run_directory(registry_root, run_id)
+        for filename in ("manifest.json", "state.json", "snapshot.json"):
+            path = run_path / filename
+            if not path.exists():
+                continue
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                payload["group"] = group
+                self.delegate.run_registry.write_json_atomic(path, payload)
 
     def _create_worktree_at(
         self,

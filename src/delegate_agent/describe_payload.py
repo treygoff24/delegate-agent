@@ -67,9 +67,41 @@ def _global_options() -> list[str]:
 
 def _commands_catalog() -> list[JsonObject]:
     return [
-        {"command": spec.name, "summary": spec.summary}
+        {
+            "name": spec.name,
+            "command": spec.name,
+            "summary": spec.summary,
+            "usage": list(spec.usage),
+            "arguments": [
+                {
+                    "name": arg.name,
+                    "required": arg.required,
+                    "description": arg.description,
+                }
+                for arg in spec.arguments
+            ],
+            "options": [
+                {
+                    "flag": option.flag,
+                    "arg": option.arg,
+                    "description": option.description,
+                }
+                for option in spec.options
+            ],
+            "launchOptions": [option.flag for option in spec.options],
+        }
         for spec in command_help.COMMAND_SPECS.values()
     ]
+
+
+def _launch_options() -> list[str]:
+    flags: list[str] = []
+    for command in ("cursor", "droid", "codex", "claude", "grok", "kimi"):
+        spec = command_help.COMMAND_SPECS[command]
+        for option in spec.options:
+            if option.flag not in flags:
+                flags.append(option.flag)
+    return flags
 
 
 def _profiles_config_payload(config: JsonObject) -> JsonObject:
@@ -481,12 +513,14 @@ def describe_payload(
     )
     return {
         "ok": True,
+        "summary": False,
         "version": VERSION,
         "runtime": runtime_payload(),
         "configPath": str(config_path()),
         "configSource": config_source,
         "configResolution": config_resolution_payload(config_source, workspace),
         "engines": list(KNOWN_ENGINES),
+        "isolationValues": list(delegate_config.VALID_ISOLATION_VALUES),
         "policyProfiles": list(delegate_config.POLICY_PROFILES),
         "policyFieldSupport": _policy_field_support_matrix(),
         "engineCapabilities": _engine_capabilities(),
@@ -515,6 +549,7 @@ def describe_payload(
             "grok": PROMPT_TRANSPORT_FILE,
         },
         "globalOptions": _global_options(),
+        "launchOptions": _launch_options(),
         "completionReportModes": list(delegate_config.COMPLETION_REPORT_MODES),
         "promptTransforms": [
             "Always prepends mandatory skill review instructions before the operator prompt.",
@@ -684,6 +719,11 @@ def describe_payload(
             },
         },
         "commands": _commands_catalog(),
+        "recommendedDiscovery": [
+            "delegate --json describe --summary",
+            "delegate --json models --summary",
+            "delegate --json help <command>",
+        ],
     }
 
 
@@ -703,14 +743,7 @@ def describe_summary_payload(
         "isolationValues": list(delegate_config.VALID_ISOLATION_VALUES),
         "profiles": _profiles_config_payload(config),
         "globalOptions": _global_options(),
-        "launchOptions": [
-            "--prompt-file",
-            "--reasoning-effort",
-            "--progress",
-            "--no-progress",
-            "--forbid-commit",
-            "--read-only",
-        ],
+        "launchOptions": _launch_options(),
         "commands": _commands_catalog(),
         "recommendedDiscovery": [
             "delegate --json describe --summary",

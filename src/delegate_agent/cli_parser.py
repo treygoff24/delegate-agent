@@ -10,6 +10,7 @@ builders, not here.
 from __future__ import annotations
 
 import difflib
+import re
 import shlex
 from typing import NoReturn
 
@@ -51,14 +52,28 @@ MISPLACED_GLOBAL_OPTIONS = frozenset(
         "--completion-report",
         "--no-completion-report",
         "--auth-profile",
+        "--group",
     }
 )
 
-VALUE_GLOBAL_OPTIONS = frozenset({"--cwd", "--isolation", "--completion-report", "--auth-profile"})
+VALUE_GLOBAL_OPTIONS = frozenset(
+    {"--cwd", "--isolation", "--completion-report", "--auth-profile", "--group"}
+)
 
 AUTH_PROFILE_SUBCOMMANDS = frozenset(KNOWN_ENGINES) | frozenset(
     {"dry-run", "run", "profiles", "capabilities"}
 )
+GROUP_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+GROUP_SUBCOMMANDS = frozenset(KNOWN_ENGINES) | frozenset({"dry-run", "run"})
+
+
+def validate_group(value: str, *, option: str = "--group") -> str:
+    if not GROUP_RE.fullmatch(value):
+        raise DelegateError(
+            "invalid_group",
+            f"{option} must match [A-Za-z0-9._-]{{1,64}}.",
+        )
+    return value
 
 
 def infer_global_json(argv: list[str]) -> bool:
@@ -279,6 +294,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
     completion_report: str | None = None
     isolation: str | None = None
     auth_profile: str | None = None
+    group: str | None = None
     i = 0
     while i < len(argv):
         token = argv[i]
@@ -336,6 +352,12 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
                 )
             i += 2
             continue
+        if token == "--group":
+            if i + 1 >= len(argv):
+                raise DelegateError("missing_group", "--group requires a group name.")
+            group = validate_group(argv[i + 1])
+            i += 2
+            continue
         break
 
     if json_mode and pass_through:
@@ -360,6 +382,12 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             "invalid_option_combination",
             f"--auth-profile is not supported with delegate {subcommand}; "
             "use it with launches, dry-run, run --input-json, profiles, or capabilities refresh.",
+        )
+    if group is not None and subcommand not in GROUP_SUBCOMMANDS:
+        raise DelegateError(
+            "invalid_option_combination",
+            f"--group is not supported with delegate {subcommand}; use command-specific "
+            "--group selectors where available.",
         )
 
     if subcommand == "help":
@@ -398,7 +426,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
         )
     if subcommand == "run":
         return parse_run(
-            rest, json_mode, cwd, pass_through, completion_report, isolation, auth_profile
+            rest, json_mode, cwd, pass_through, completion_report, isolation, auth_profile, group
         )
     if subcommand in MODELESS_ENGINES:
         return parse_modeless_engine(
@@ -411,6 +439,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             completion_report=completion_report,
             isolation=isolation,
             auth_profile=auth_profile,
+            group=group,
         )
     if subcommand == "droid":
         return parse_droid(
@@ -425,7 +454,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
         )
     if subcommand == "dry-run":
         return parse_dry_run(
-            rest, json_mode, cwd, pass_through, completion_report, isolation, auth_profile
+            rest, json_mode, cwd, pass_through, completion_report, isolation, auth_profile, group
         )
     if subcommand == "snapshot":
         return parse_snapshot(rest, json_mode, cwd)
@@ -567,6 +596,7 @@ def parse_run(
     completion_report: str | None,
     isolation: str | None,
     auth_profile: str | None,
+    group: str | None = None,
 ) -> ParsedCommand:
     # Help wins before required-arg validation: `run --help` needs no --input-json.
     if any(command_help.is_help_token(token) for token in rest):
@@ -584,6 +614,7 @@ def parse_run(
             completion_report=completion_report,
             isolation=isolation,
             auth_profile=auth_profile,
+            group=group,
         ),
         run_json=RunJsonOptions(rest[1]),
     )
@@ -599,6 +630,7 @@ def parse_modeless_engine(
     completion_report: str | None,
     isolation: str | None,
     auth_profile: str | None,
+    group: str | None = None,
     *,
     help_topic: str | None = None,
 ) -> ParsedCommand:
@@ -630,6 +662,7 @@ def parse_modeless_engine(
         json_mode,
         isolation,
         read_only,
+        include_dirty,
     ) = parse_prompt_tail(rest[1:], json_mode, isolation, command_prefix=[engine, mode])
     forbid_commit_implied_isolation = False
     if forbid_commit and mode == "work" and isolation is None:
@@ -650,6 +683,7 @@ def parse_modeless_engine(
             completion_report=completion_report,
             isolation=isolation,
             auth_profile=auth_profile,
+            group=group,
         ),
         launch=LaunchOptions(
             engine=engine,
@@ -661,6 +695,7 @@ def parse_modeless_engine(
             progress_intent=progress_intent,
             forbid_commit=forbid_commit,
             forbid_commit_implied_isolation=forbid_commit_implied_isolation,
+            include_dirty=include_dirty,
             read_only=read_only,
             dry_run=dry_run,
         ),
@@ -676,6 +711,7 @@ def parse_droid(
     completion_report: str | None,
     isolation: str | None,
     auth_profile: str | None,
+    group: str | None = None,
     *,
     help_topic: str | None = None,
 ) -> ParsedCommand:
@@ -712,6 +748,7 @@ def parse_droid(
         json_mode,
         isolation,
         read_only,
+        include_dirty,
     ) = parse_prompt_tail(
         rest[2:], json_mode, isolation, command_prefix=["droid", model_alias, mode]
     )
@@ -734,6 +771,7 @@ def parse_droid(
             completion_report=completion_report,
             isolation=isolation,
             auth_profile=auth_profile,
+            group=group,
         ),
         launch=LaunchOptions(
             engine="droid",
@@ -746,6 +784,7 @@ def parse_droid(
             progress_intent=progress_intent,
             forbid_commit=forbid_commit,
             forbid_commit_implied_isolation=forbid_commit_implied_isolation,
+            include_dirty=include_dirty,
             read_only=read_only,
             dry_run=dry_run,
         ),
@@ -760,6 +799,7 @@ def parse_dry_run(
     completion_report: str | None,
     isolation: str | None,
     auth_profile: str | None,
+    group: str | None = None,
 ) -> ParsedCommand:
     # Help wins before the engine is consumed: `dry-run --help`.
     if rest and command_help.is_help_token(rest[0]):
@@ -785,6 +825,7 @@ def parse_dry_run(
             completion_report=completion_report,
             isolation=isolation,
             auth_profile=auth_profile,
+            group=group,
             help_topic="dry-run",
         )
     if engine == "droid":
@@ -797,6 +838,7 @@ def parse_dry_run(
             completion_report=completion_report,
             isolation=isolation,
             auth_profile=auth_profile,
+            group=group,
             help_topic="dry-run",
         )
     raise DelegateError(
@@ -821,12 +863,14 @@ def parse_prompt_tail(
     bool,
     str | None,
     bool,
+    bool,
 ]:
     prompt_file: str | None = None
     output_schema: str | None = None
     reasoning_effort: str | None = None
     progress_intent: str | None = None
     forbid_commit = False
+    include_dirty = False
     read_only = False
     prompt_parts: list[str] = []
     i = 0
@@ -935,6 +979,15 @@ def parse_prompt_tail(
             forbid_commit = True
             i += 1
             continue
+        if token == "--include-dirty":
+            if include_dirty:
+                raise DelegateError(
+                    "invalid_option_combination",
+                    "Only one --include-dirty flag is allowed.",
+                )
+            include_dirty = True
+            i += 1
+            continue
         if token == "--read-only":
             read_only = True
             i += 1
@@ -965,6 +1018,7 @@ def parse_prompt_tail(
         json_mode,
         isolation,
         read_only,
+        include_dirty,
     )
 
 
@@ -1028,6 +1082,7 @@ def parse_runs(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedComma
     running = False
     stale = False
     harness: str | None = None
+    group: str | None = None
     limit: int | None = None
     i = 0
     while i < len(rest):
@@ -1057,6 +1112,12 @@ def parse_runs(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedComma
                     "invalid_harness",
                     f"runs --harness must be one of {', '.join(KNOWN_ENGINES)}.",
                 )
+            i += 2
+            continue
+        if token == "--group":
+            if i + 1 >= len(rest):
+                raise DelegateError("missing_group", "runs --group requires a group name.")
+            group = validate_group(rest[i + 1])
             i += 2
             continue
         if token == "--limit":
@@ -1092,6 +1153,7 @@ def parse_runs(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedComma
             running=running,
             stale=stale,
             harness=harness,
+            group=group,
             limit=limit,
             json_mode=json_mode,
         ),
@@ -1226,6 +1288,7 @@ def parse_wait(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedComma
         return help_command(json_mode, "wait")
     handles: list[str] = []
     latest_harness: str | None = None
+    group: str | None = None
     timeout = wait_cancel_commands.WAIT_DEFAULT_TIMEOUT_SECONDS
     interval = wait_cancel_commands.WAIT_DEFAULT_INTERVAL_SECONDS
     completion_report = False
@@ -1248,6 +1311,12 @@ def parse_wait(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedComma
                 missing_value_description="seconds",
             )
             continue
+        if token == "--group":
+            if i + 1 >= len(rest):
+                raise DelegateError("missing_group", "wait --group requires a group name.")
+            group = validate_group(rest[i + 1])
+            i += 2
+            continue
         if token == "--interval":
             interval, i = parse_required_positive_int_option(
                 rest,
@@ -1267,14 +1336,17 @@ def parse_wait(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedComma
             raise DelegateError("unknown_option", unknown_option_message("wait", token))
         handles.append(token)
         i += 1
-    if not handles and latest_harness is None:
-        raise DelegateError("missing_handle", "wait requires a handle or --latest <harness>.")
+    if not handles and latest_harness is None and group is None:
+        raise DelegateError(
+            "missing_handle", "wait requires a handle, --latest <harness>, or --group <name>."
+        )
     return ParsedCommand(
         "wait",
         global_options=GlobalOptions(json_mode=json_mode, cwd=cwd),
         wait_command=wait_cancel_commands.WaitCommand(
             handles=tuple(handles),
             latest_harness=latest_harness,
+            group=group,
             timeout_seconds=timeout,
             interval_seconds=interval,
             completion_report=completion_report,
@@ -1382,6 +1454,7 @@ WorktreeOptionSpec = tuple[str, str]
 WORKTREE_OPTION_SPECS: dict[str, dict[str, WorktreeOptionSpec]] = {
     "list": {
         "--harness": ("str", "harness"),
+        "--group": ("group", "group"),
         "--status": ("status", "status"),
         "--limit": ("positive_int", "limit"),
         "--no-auto-prune": ("flag", "no_auto_prune"),
@@ -1390,6 +1463,7 @@ WORKTREE_OPTION_SPECS: dict[str, dict[str, WorktreeOptionSpec]] = {
         "--latest": ("str", "latest_harness"),
     },
     "remove": {
+        "--group": ("group", "group"),
         "--discard-uncommitted": ("flag", "discard_uncommitted"),
         "--force-branch": ("flag", "force_branch"),
         "--force": ("flag", "force"),
@@ -1399,6 +1473,7 @@ WORKTREE_OPTION_SPECS: dict[str, dict[str, WorktreeOptionSpec]] = {
         "--merged": ("flag", "merged"),
         "--older-than": ("non_negative_int", "older_than_days"),
         "--harness": ("str", "harness"),
+        "--group": ("group", "group"),
         "--include-detached": ("flag", "include_detached"),
         "--dry-run": ("flag", "dry_run"),
         "--discard-uncommitted": ("flag", "discard_uncommitted"),
@@ -1423,7 +1498,9 @@ def _apply_worktree_option(
         options[attr] = True
         return index + 1
     value = _require_option_value(args, index, option)
-    if kind == "str":
+    if kind == "group":
+        options[attr] = validate_group(value, option=option)
+    elif kind == "str":
         options[attr] = value
     elif kind == "status":
         if value not in worktree_mgmt.VALID_STATUSES:
@@ -1465,12 +1542,12 @@ def parse_worktree(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedC
     action_specs = WORKTREE_OPTION_SPECS[action]
     while i < len(args):
         token = args[i]
-        if token in MISPLACED_GLOBAL_OPTIONS:
-            raise_misplaced_global_option(f"{token} must appear before the subcommand.")
         spec = action_specs.get(token)
         if spec is not None:
             i = _apply_worktree_option(options, args, i, token, spec)
             continue
+        if token in MISPLACED_GLOBAL_OPTIONS:
+            raise_misplaced_global_option(f"{token} must appear before the subcommand.")
         if token.startswith("--"):
             raise DelegateError(
                 "unknown_option", f"worktree {action} does not support option: {token}"
@@ -1494,9 +1571,16 @@ def parse_worktree(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedC
         else:
             options["handle"] = positional[0]
     if action == "remove":
-        if len(positional) != 1:
+        if options.get("group") is not None:
+            if positional:
+                raise DelegateError(
+                    "invalid_option_combination",
+                    "worktree remove accepts either --group NAME or a handle, not both.",
+                )
+        elif len(positional) != 1:
             raise DelegateError("missing_handle", "worktree remove requires an alias or run id.")
-        options["handle"] = positional[0]
+        else:
+            options["handle"] = positional[0]
     if options.get("keep_branch") and (options.get("force_branch") or options.get("force")):
         raise DelegateError(
             "invalid_option_combination",

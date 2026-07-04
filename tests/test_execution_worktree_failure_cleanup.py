@@ -397,6 +397,71 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
             self.assertIn("exitCode", state)
             self.assertIsNotNone(state["exitCode"])
 
+    def test_launch_exception_after_manifest_write_records_failed_snapshot(self):
+        """Exceptions after persistent registration/manifest write leave an inspectable failure."""
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            mock.patch.dict(os.environ, {"HOME": fake_home}),
+        ):
+            repo, _git_cd = self._make_git_repo_with_commit()
+            workspace = self.delegate.resolve_workspace(repo.name)
+            request = self._make_persistent_worktree_request(
+                "cursor",
+                "work",
+                repo.name,
+                self.delegate.DEFAULT_CONFIG,
+            )
+            fake_bin = self.make_fake_bin()
+            request = self.delegate.Request(
+                request.engine,
+                request.mode,
+                request.workspace,
+                request.prompt,
+                [str(fake_bin / "agent"), "--workspace", repo.name, "hello"],
+                request.model,
+                dry_run=False,
+                workspace_kind=request.workspace_kind,
+                isolation_context=request.isolation_context,
+            )
+
+            def fail_execute_tracked(*_args, **_kwargs):
+                raise self.delegate.delegate_runner.RunnerLaunchError(
+                    "simulated_setup_error",
+                    "simulated setup failure",
+                )
+
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {"PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", "")},
+                ),
+                mock.patch.object(
+                    self.delegate.worktree_execution.delegate_runner,
+                    "execute_tracked",
+                    side_effect=fail_execute_tracked,
+                ),
+                self.assertRaises(self.delegate.DelegateError) as ctx,
+            ):
+                self.delegate.execute_request(
+                    request,
+                    json_mode=False,
+                    config=self.delegate.DEFAULT_CONFIG,
+                    pass_through=False,
+                    completion_report_mode="none",
+                    source_workspace=workspace,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+
+            self.assertEqual(ctx.exception.error, "simulated_setup_error")
+            registry_root = Path(repo.name) / ".delegate"
+            run_dirs = list((registry_root / "runs").glob("del_*"))
+            self.assertTrue(run_dirs)
+            snapshot = self.delegate.json.loads((run_dirs[0] / "snapshot.json").read_text())
+            self.assertEqual(snapshot.get("status"), "failed")
+            self.assertEqual(snapshot.get("error"), "simulated_setup_error")
+            self.assertIn("simulated setup failure", snapshot.get("message", ""))
+
     # -- L837: Real git worktree add collision via pre-existing worktree --------
 
     def test_persistent_worktree_add_collision_fails_and_cleans_up(self):
@@ -525,6 +590,148 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
                         0,
                         "No delegate worktree directories should exist after a failed creation",
                     )
+
+    # -- Finding: sync failure mid-include-dirty tears down worktree, no child --
+
+    def test_include_dirty_sync_failure_tears_down_worktree_and_never_launches_child(self):
+        """When sync_git_dirty_snapshot fails after the persistent worktree is
+        created, the fail-clean branch records a failed snapshot, tears down the
+        partial worktree, and the child is never launched."""
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            mock.patch.dict(os.environ, {"HOME": fake_home}),
+        ):
+            repo, _git_cd = self._make_git_repo_with_commit()
+            repo_path = Path(repo.name)
+            # Make the source dirty so include-dirty has something to sync.
+            (repo_path / "tracked.txt").write_text("dirty\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "-C", repo.name, "add", "tracked.txt"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    repo.name,
+                    "-c",
+                    "user.name=Delegate Test",
+                    "-c",
+                    "user.email=delegate-test@example.com",
+                    "commit",
+                    "-m",
+                    "base",
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            (repo_path / "tracked.txt").write_text("dirty-now\n", encoding="utf-8")
+
+            agent_marker_parent = Path(tempfile.mkdtemp())
+            self.addCleanup(
+                lambda: __import__("shutil").rmtree(agent_marker_parent, ignore_errors=True)
+            )
+            agent = agent_marker_parent / "agent"
+            agent.write_text(
+                "#!/usr/bin/env bash\n"
+                f"touch {agent_marker_parent / 'child-launched.marker'}\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            agent.chmod(0o755)
+
+            workspace = self.delegate.resolve_workspace(repo.name)
+            request = self._make_persistent_worktree_request(
+                "cursor",
+                "work",
+                repo.name,
+                self.delegate.DEFAULT_CONFIG,
+            )
+            request = self.delegate.Request(
+                request.engine,
+                request.mode,
+                request.workspace,
+                request.prompt,
+                [str(agent), "--workspace", repo.name, "hello"],
+                request.model,
+                model_alias=request.model_alias,
+                dry_run=request.dry_run,
+                workspace_kind=request.workspace_kind,
+                isolation_context=request.isolation_context,
+                include_dirty=True,
+            )
+
+            executed_tracked = {"called": False}
+            original_execute_tracked = (
+                self.delegate.worktree_execution.delegate_runner.execute_tracked
+            )
+
+            def tracking_execute_tracked(*_args, **_kwargs):
+                executed_tracked["called"] = True
+                return original_execute_tracked(*_args, **_kwargs)
+
+            def failing_sync(*_args, **_kwargs):
+                raise self.delegate.DelegateError(
+                    "safe_workspace_sync_failed",
+                    "Simulated include-dirty sync failure",
+                )
+
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {"PATH": str(agent_marker_parent) + os.pathsep + os.environ.get("PATH", "")},
+                ),
+                mock.patch.object(
+                    self.delegate.worktree_execution.safe_workspace,
+                    "sync_git_dirty_snapshot",
+                    side_effect=failing_sync,
+                ),
+                mock.patch.object(
+                    self.delegate.worktree_execution.delegate_runner,
+                    "execute_tracked",
+                    side_effect=tracking_execute_tracked,
+                ),
+                self.assertRaises(self.delegate.DelegateError) as ctx,
+            ):
+                self.delegate.execute_request(
+                    request,
+                    json_mode=False,
+                    config=self.delegate.DEFAULT_CONFIG,
+                    pass_through=False,
+                    completion_report_mode="none",
+                    source_workspace=workspace,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+
+            self.assertEqual(ctx.exception.error, "safe_workspace_sync_failed")
+            # Child was never launched.
+            self.assertFalse(executed_tracked["called"])
+            self.assertFalse((agent_marker_parent / "child-launched.marker").exists())
+
+            # Failed snapshot is inspectable.
+            registry_root = Path(repo.name) / ".delegate"
+            run_dirs = list((registry_root / "runs").glob("del_*"))
+            self.assertTrue(run_dirs)
+            snapshot = json.loads((run_dirs[0] / "snapshot.json").read_text())
+            self.assertEqual(snapshot.get("status"), "failed")
+            self.assertEqual(snapshot.get("error"), "safe_workspace_sync_failed")
+            self.assertIn("Simulated include-dirty sync failure", snapshot.get("message", ""))
+            state = json.loads((run_dirs[0] / "state.json").read_text())
+            self.assertEqual(state.get("status"), "failed")
+
+            # Partial worktree was torn down: no delegate worktree dirs remain.
+            data_home = Path(fake_home) / ".delegate" / "worktrees"
+            if data_home.exists():
+                cursor_dirs = list(data_home.rglob("cursor-*"))
+                self.assertEqual(
+                    len(cursor_dirs),
+                    0,
+                    "No delegate worktree directories should remain after a sync failure",
+                )
 
 
 if __name__ == "__main__":

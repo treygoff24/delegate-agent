@@ -57,6 +57,7 @@ def prune_worktrees(
     merged: bool = False,
     older_than_days: int | None = None,
     harness: str | None = None,
+    group: str | None = None,
     include_detached: bool = False,
     dry_run: bool = False,
     discard_uncommitted: bool = False,
@@ -81,6 +82,9 @@ def prune_worktrees(
         alias = record.get("alias")
         if harness is not None and record.get("harness") != harness:
             skipped.append(_entry_ref(record, reason="harness_filter"))
+            continue
+        if group is not None and record.get("group") != group:
+            skipped.append(_entry_ref(record, reason="group_filter"))
             continue
         status, _warnings = wm.detect_worktree_status(record)
         if status in (STATUS_REMOVED, STATUS_UNKNOWN):

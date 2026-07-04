@@ -175,6 +175,12 @@ def _record_for_run(
         "alias": alias,
         "runId": run_id,
         "harness": harness,
+        "group": first_string(
+            _get_str(entry, "group"),
+            _get_str(state, "group"),
+            _get_str(manifest, "group"),
+            _get_str(snapshot, "group"),
+        ),
         "branch": _branch_from(manifest, snapshot),
         "executionCwd": _execution_cwd_from(manifest, snapshot, state),
         "sourceGitRoot": _source_git_root_from(manifest, snapshot),

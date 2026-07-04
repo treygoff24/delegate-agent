@@ -230,8 +230,28 @@ class OverviewTests(unittest.TestCase):
         self.assertEqual(registry_top_level, set(TOP_LEVEL_COMMANDS) | {"help"})
 
     def test_overview_advertises_codex_output_schema(self):
-        self.assertIn("codex {safe,work,call}", self.overview)
+        self.assertIn("codex {safe,work}", self.overview)
+        self.assertIn("codex call", self.overview)
         self.assertIn("--output-schema FILE", self.overview)
+
+    def test_overview_call_lines_omit_forbid_commit(self):
+        """The overview must not advertise --forbid-commit for call mode.
+
+        Round 2 split the per-engine overview lines into {safe,work} (which
+        carries --forbid-commit) and call (which carries --read-only only),
+        consistent with the per-command help done in round 1. Every overview
+        usage line whose mode token is literally ``call`` must omit both
+        ``--forbid-commit`` and ``--include-dirty``.
+        """
+        call_lines = [
+            line.strip()
+            for line in self.overview.splitlines()
+            if " call " in line or line.rstrip().endswith("call [...]") or " call[" in line
+        ]
+        self.assertTrue(call_lines, "overview must contain call-mode usage lines")
+        for line in call_lines:
+            self.assertNotIn("--forbid-commit", line)
+            self.assertNotIn("--include-dirty", line)
 
 
 class FocusedGlobalOptionsTests(unittest.TestCase):

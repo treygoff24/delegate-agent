@@ -279,6 +279,10 @@ def dry_run_payload(request: Request) -> JsonObject:
         payload["progressRequested"] = True
     if request.forbid_commit:
         payload["commitPolicy"] = {"forbidCommit": True}
+    if request.include_dirty:
+        payload["includeDirty"] = True
+    if request.group is not None:
+        payload["group"] = request.group
     if request.auth_profile is not None:
         payload["authProfile"] = request.auth_profile
     if request.fallback_auth_profile is not None:
@@ -528,6 +532,8 @@ def make_run_context(
         ),
         auth_profile=request.auth_profile,
         fallback_auth_profile=request.fallback_auth_profile,
+        include_dirty=request.include_dirty,
+        group=request.group,
     )
 
 
@@ -680,6 +686,7 @@ def execute_request(
                 "model": isolated_request.model,
                 "modelAlias": isolated_request.model_alias,
                 "modelResolved": isolated_request.model,
+                "group": isolated_request.group,
                 "cwd": (
                     isolated_request.isolation_context.source_workspace
                     if isolated_request.isolation_context is not None
