@@ -5,6 +5,37 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-07-04
+
+Usage-audit fix wave: 82 sessions and 1,241 delegate invocations from one week of agent usage were mined for friction and failure modes, and the whole Tier 1–3 backlog was built across four decorrelated implementation waves plus live acceptance.
+
+### Added
+
+- `delegate wait` blocks on one or more runs until they reach a terminal state, using effective status so a dead child is a terminal failure rather than a hang. Supports bare-harness and `harness:model` latest selectors, `--group`, an optional timeout, and completion-report output; exits 0 (all succeeded), 1 (any failed/cancelled), or 124 (timeout). Replaces the ~100 hand-rolled polling loops agents wrote in the audit week.
+- `delegate cancel` signals a run's recorded process group (SIGTERM → 5s grace judged by group liveness → SIGKILL) with layered safety: workspace-scoped resolution, terminal/stale refusal, `pid`/`pgid <= 1` guards, and a `ps`-lstart start-identity check that refuses to signal a pid older than the run (soft-degrades when `ps` is unavailable). A `cancelRequested` marker is stamped under the registry lock before any signal so the runner finalizer can never record a cancelled run as succeeded.
+- `cancelled` is a first-class terminal status with normalized per-harness `terminalEvent`/`terminalStatus` mapping (e.g. Grok `stopReason: Cancelled` overrides an exit-0 success). Cancelled and failed runs without a child report now get a synthesized completion report (status, failure reason, redacted stderr tail, harness-appropriate remediation) so `run-output --completion-report` never dead-ends.
+- Always-numbered aliases (`codex-1`, `cursor-2`, …). Bare harness names become latest-run selectors and `harness:modelAlias` selectors resolve the newest matching run; envelopes and text banners expose `requestedHandle`/`resolvedHandle`/`resolutionKind`, and generated follow-up commands always use the concrete numbered alias. `run-output` gains `--latest`.
+- `resultQuality` classification on tracked runs (`ok` / `housekeeping_noop` / `empty` / `suspect_short` / `no_assistant_text`), computed at finalization and preferred from stored state at read time — closing the hole where an on-disk Droid "Plan is up-to-date." report surfaced as a clean success. Envelopes always carry `completionReportWritten` and `completionReportSource` (`child` / `delegate_synthesized` / `stdout_recovery`); auth failures classify as `auth_failed` from stderr-only patterns.
+- `--include-dirty` on worktree work launches syncs uncommitted tracked changes and untracked non-ignored files through the same primitives as the safe-mode snapshot, replacing the stash-launch-pop dance; sync failures tear the worktree down before any child launches.
+- `--group NAME` tags launches and selects on `runs`, `wait`, and `worktree remove`/`prune`.
+- A per-run scratch `TMPDIR` is exported to safe and isolated runs after profile env; the codex lane is granted it via `--add-dir`.
+- `did-you-mean` suggestions on unknown handles, a `list` → `runs` alias, corrected-command text on flag-order errors, and copy-paste command forms on invalid-mode errors.
+
+### Changed
+
+- `--forbid-commit` now implies `--isolation worktree` on both the CLI and JSON paths.
+- Work-mode `noChanges` and quality warnings ride the top-level `warnings` array (including the runs table). Text `run-output` discloses char truncation like JSON, and `--tail`/`--max-chars` without a stream selection is now rejected instead of silently ignored.
+- `describe` full output is a strict superset of `--summary`, both derived from `COMMAND_SPECS`.
+
+### Fixed
+
+- Registry first-init race fixed with locked init and unique atomic temp names; `write_json_atomic` cleans up temp files on failure. Run-latest tie-breaks use an explicit `registrationOrdinal` stamped under the registry lock (in-memory insertion order degrades through `save_index` on reload).
+- Plaintext progress advances every line instead of freezing on the first; `call` mode returns a redacted `stderrTail` on failure and an empty-text warning instead of raw event noise; `droid call` prevalidates model aliases before creating the workspace and cleans up on every failure path.
+
+### Security
+
+- The native boundary read empirically reproduced a leak inherited from the safe-mode mirror: an untracked symlink with an absolute target pointing at the repo's own gitignored secret was recreated verbatim — readable and writable-through in an edit-capable worktree. The shared sync now recreates untracked symlinks only when the link is relative, resolves inside the repo, and the target is not gitignored (batched `git check-ignore -z --stdin`, failing closed to placeholders on unexpected exit codes), hardening safe mode and `--include-dirty` together. The hardlink variant cannot be closed by path-based exclusion and is documented as a caveat.
+
 ## [0.9.0] - 2026-07-01
 
 ### Added
@@ -183,6 +214,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Releases before 0.1.3 predate this changelog.
 
+[0.10.0]: https://github.com/treygoff24/delegate-agent/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/treygoff24/delegate-agent/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/treygoff24/delegate-agent/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/treygoff24/delegate-agent/compare/v0.7.0...v0.8.0
