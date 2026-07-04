@@ -1035,3 +1035,70 @@ class ValidationTests(unittest.TestCase):
                 delegate.request_from_input_json(parsed, droid_test_config(delegate))
             self.assertEqual(ctx.exception.error, "invalid_isolation")
             self.assertIn("null", ctx.exception.message.lower())
+
+    # --- Finding 4: JSON-path parity for forbid-commit -----------------------
+
+    def test_input_json_forbid_commit_implies_worktree_isolation(self):
+        """run --input-json with forbidCommit: true and no isolation gets the
+        same implied worktree isolation + note as the CLI path."""
+        delegate = load_delegate()
+        repo = make_git_repo()
+        self.addCleanup(repo.cleanup)
+        task = Path(repo.name) / "task.json"
+        task.write_text(
+            json.dumps(
+                {
+                    "engine": "droid",
+                    "mode": "work",
+                    "model": "minimax",
+                    "cwd": repo.name,
+                    "prompt": "fix it",
+                    "forbidCommit": True,
+                }
+            )
+        )
+        parsed = delegate.ParsedCommand(
+            "run",
+            global_options=delegate.GlobalOptions(json_mode=True),
+            run_json=delegate.RunJsonOptions(str(task)),
+        )
+        request = delegate.request_from_input_json(parsed, droid_test_config(delegate))
+        # Implied worktree isolation.
+        self.assertIsNotNone(request.isolation_context)
+        self.assertEqual(request.isolation_context.effective_isolation, "worktree")
+        self.assertEqual(request.isolation_context.isolation_lifecycle, "persistent")
+        self.assertTrue(request.forbid_commit)
+        # The note is present.
+        self.assertIn(
+            "note: --forbid-commit implies --isolation worktree",
+            " ".join(request.warnings),
+        )
+
+    def test_input_json_forbid_commit_with_explicit_none_errors(self):
+        """run --input-json with forbidCommit: true and isolation: 'none' errors."""
+        delegate = load_delegate()
+        repo = make_git_repo()
+        self.addCleanup(repo.cleanup)
+        task = Path(repo.name) / "task.json"
+        task.write_text(
+            json.dumps(
+                {
+                    "engine": "droid",
+                    "mode": "work",
+                    "model": "minimax",
+                    "cwd": repo.name,
+                    "prompt": "fix it",
+                    "forbidCommit": True,
+                    "isolation": "none",
+                }
+            )
+        )
+        parsed = delegate.ParsedCommand(
+            "run",
+            global_options=delegate.GlobalOptions(json_mode=True),
+            run_json=delegate.RunJsonOptions(str(task)),
+        )
+        with self.assertRaises(delegate.DelegateError) as ctx:
+            delegate.request_from_input_json(parsed, droid_test_config(delegate))
+        self.assertEqual(ctx.exception.error, "invalid_option_combination")
+        self.assertIn("none", ctx.exception.message.lower())

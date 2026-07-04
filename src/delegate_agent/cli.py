@@ -23,6 +23,7 @@ from delegate_agent import (
     redaction,
     run_output_commands,
     run_registry,
+    wait_cancel_commands,
     worktree_commands,
     worktree_execution,
     worktree_mgmt,
@@ -197,6 +198,20 @@ def emit_run_output(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout:
         workspace_path=workspace.path,
         stdout=stdout,
     )
+
+
+def emit_wait(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout: TextIO) -> int:
+    command = parsed.wait_command
+    if command is None:
+        raise DelegateError("invalid_command", "wait options are required.")
+    return wait_cancel_commands.emit_wait(command, workspace_path=workspace.path, stdout=stdout)
+
+
+def emit_cancel(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout: TextIO) -> int:
+    command = parsed.cancel_command
+    if command is None:
+        raise DelegateError("invalid_command", "cancel options are required.")
+    return wait_cancel_commands.emit_cancel(command, workspace_path=workspace.path, stdout=stdout)
 
 
 def emit_worktree(
@@ -870,7 +885,7 @@ def main(
                 stdout=stdout,
             )
 
-        if parsed.subcommand in {"snapshot", "runs", "run-output", "worktree"}:
+        if parsed.subcommand in {"snapshot", "runs", "run-output", "wait", "cancel", "worktree"}:
             existing_registry = run_registry.registry_root_if_exists(Path(workspace.path))
             if existing_registry is not None:
                 maybe_run_retention_pass(existing_registry, config)
@@ -880,6 +895,10 @@ def main(
             return emit_runs(parsed, workspace, stdout)
         if parsed.subcommand == "run-output":
             return emit_run_output(parsed, workspace, stdout)
+        if parsed.subcommand == "wait":
+            return emit_wait(parsed, workspace, stdout)
+        if parsed.subcommand == "cancel":
+            return emit_cancel(parsed, workspace, stdout)
         if parsed.subcommand == "worktree":
             return emit_worktree(parsed, workspace, config, stdout)
 

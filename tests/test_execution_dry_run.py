@@ -195,28 +195,24 @@ class ExecutionDryRunTests(ExecutionTestBase):
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            parsed = self.delegate.parse_cli(
-                [
-                    "--cwd",
-                    repo_dir,
-                    "--isolation",
-                    "none",
-                    "--json",
-                    "dry-run",
-                    "cursor",
-                    "work",
-                    "--forbid-commit",
-                    "fix",
-                ]
-            )
             with self.assertRaises(self.delegate.DelegateError) as ctx:
-                self.delegate.request_from_parsed(
-                    parsed,
-                    self.delegate.DEFAULT_CONFIG,
-                    io.StringIO(""),
+                self.delegate.parse_cli(
+                    [
+                        "--cwd",
+                        repo_dir,
+                        "--isolation",
+                        "none",
+                        "--json",
+                        "dry-run",
+                        "cursor",
+                        "work",
+                        "--forbid-commit",
+                        "fix",
+                    ]
                 )
         self.assertEqual(ctx.exception.error, "invalid_option_combination")
-        self.assertIn("add --isolation worktree, or omit --forbid-commit", ctx.exception.message)
+        self.assertIn("Corrected command:", ctx.exception.message)
+        self.assertIn("--isolation worktree", ctx.exception.message)
 
     def test_codex_reasoning_without_model_uses_harness_default(self):
         with tempfile.TemporaryDirectory() as tmp:

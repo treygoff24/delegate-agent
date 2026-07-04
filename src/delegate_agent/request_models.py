@@ -17,6 +17,7 @@ from delegate_agent import (
     profile_commands,
     profiles,
     run_output_commands,
+    wait_cancel_commands,
     worktree_commands,
 )
 from delegate_agent.isolation import IsolationContext
@@ -45,6 +46,7 @@ class LaunchOptions:
     reasoning_effort: str | None = None
     progress_intent: str | None = None
     forbid_commit: bool = False
+    forbid_commit_implied_isolation: bool = False
     read_only: bool = False
     dry_run: bool = False
 
@@ -69,6 +71,8 @@ class ParsedCommand:
     snapshot: inspection_commands.SnapshotCommand | None = None
     runs: inspection_commands.RunsCommand | None = None
     run_output: run_output_commands.RunOutputCommand | None = None
+    wait_command: wait_cancel_commands.WaitCommand | None = None
+    cancel_command: wait_cancel_commands.CancelCommand | None = None
     worktree: worktree_commands.WorktreeCommand | None = None
     config_command: config_commands.ConfigCommand | None = None
     capabilities: capability_commands.CapabilitiesCommand | None = None
@@ -86,6 +90,8 @@ class ParsedCommand:
         snapshot: inspection_commands.SnapshotCommand | None = None,
         runs: inspection_commands.RunsCommand | None = None,
         run_output: run_output_commands.RunOutputCommand | None = None,
+        wait_command: wait_cancel_commands.WaitCommand | None = None,
+        cancel_command: wait_cancel_commands.CancelCommand | None = None,
         worktree: worktree_commands.WorktreeCommand | None = None,
         config_command: config_commands.ConfigCommand | None = None,
         capabilities: capability_commands.CapabilitiesCommand | None = None,
@@ -100,6 +106,8 @@ class ParsedCommand:
         self.snapshot = snapshot
         self.runs = runs
         self.run_output = run_output
+        self.wait_command = wait_command
+        self.cancel_command = cancel_command
         self.worktree = worktree
         self.config_command = config_command
         self.capabilities = capabilities

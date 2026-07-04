@@ -42,4 +42,9 @@ MODEL_SUMMARY_ENGINES = tuple(
 
 def validate_mode(mode: str) -> None:
     if mode not in VALID_MODES:
-        raise DelegateError("invalid_mode", "Mode must be safe, work, or call.")
+        raise DelegateError(
+            "invalid_mode",
+            "Mode must be safe, work, or call. Valid forms: "
+            "delegate <harness> safe|work <prompt>; "
+            "delegate droid <model-alias> safe|work <prompt>.",
+        )

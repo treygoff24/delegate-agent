@@ -26,7 +26,8 @@ RESULT_QUALITY_NO_ASSISTANT_TEXT = harness_events.RESULT_QUALITY_NO_ASSISTANT_TE
 
 @dataclass(frozen=True)
 class RunOutputCommand:
-    handle: str
+    handle: str | None
+    latest_harness: str | None = None
     json_mode: bool = False
     completion_report: bool = False
     stdout: bool = False
@@ -558,7 +559,7 @@ def emit(command: RunOutputCommand, *, workspace_path: str, stdout: TextIO) -> i
     target = run_registry.resolve_run_target(
         registry_root,
         handle=command.handle,
-        latest_harness=None,
+        latest_harness=command.latest_harness,
     )
     if isinstance(target, run_registry.RunTargetLookupError):
         raise RunOutputError(target.error, target.message)

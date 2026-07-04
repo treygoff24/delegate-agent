@@ -513,7 +513,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         name="run-output",
         summary="Inspect a tracked run's completion report or captured stdout/stderr.",
         usage=(
-            "delegate [--json] run-output <handle> "
+            "delegate [--json] run-output [--latest HARNESS] <handle> "
             "[--completion-report] [--stdout] [--stderr] [--tail N] [--max-chars N] "
             "[--raw] [--no-redact]",
         ),
@@ -525,6 +525,11 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             ),
         ),
         options=(
+            OptionSpec(
+                "--latest",
+                "HARNESS",
+                f"Inspect the most recent run for HARNESS ({ENGINES_PROSE}); accepts harness:modelAlias.",
+            ),
             OptionSpec("--completion-report", None, "Print the run's completion report."),
             OptionSpec("--stdout", None, "Print captured stdout (defaults to --tail 80)."),
             OptionSpec("--stderr", None, "Print captured stderr (defaults to --tail 80)."),
@@ -545,6 +550,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         examples=(
             "delegate run-output cursor-1",
+            "delegate run-output --latest codex --completion-report",
             "delegate run-output cursor --completion-report",
             "delegate run-output cursor-1 --stderr --tail 100",
             "delegate run-output cursor-1 --stdout --max-chars 20000",
@@ -559,6 +565,66 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         see_also=("snapshot", "runs"),
         unsupported_global_options=("--auth-profile",),
+    ),
+    "wait": CommandSpec(
+        name="wait",
+        summary="Wait for tracked runs to finish and report terminal states.",
+        usage=(
+            "delegate [--json] wait <handle>... [--latest HARNESS] "
+            "[--timeout SEC] [--interval SEC] [--completion-report]",
+        ),
+        arguments=(
+            ArgSpec(
+                "<handle>",
+                False,
+                "Run ID, numbered alias, bare harness latest selector, or harness:modelAlias.",
+            ),
+        ),
+        options=(
+            OptionSpec(
+                "--latest",
+                "HARNESS",
+                f"Also wait for the most recent run for HARNESS ({ENGINES_PROSE}); accepts harness:modelAlias.",
+            ),
+            OptionSpec("--timeout", "SEC", "Maximum wait in seconds (default 3600)."),
+            OptionSpec("--interval", "SEC", "Polling interval in seconds (default 3; min 1)."),
+            OptionSpec("--completion-report", None, "Append each run's completion report."),
+        ),
+        examples=(
+            "delegate wait codex-1 cursor-2",
+            "delegate wait --latest droid:glm --timeout 600 --interval 1",
+            "delegate --json wait cursor --completion-report",
+        ),
+        notes=(
+            "Exit codes: 0 all succeeded; 1 any failed/cancelled; 124 timeout.",
+            "Dead recorded child pids are treated as terminal failures, not as hangs.",
+        ),
+        see_also=("runs", "snapshot", "run-output", "cancel"),
+        unsupported_global_options=("--auth-profile", "--isolation"),
+    ),
+    "cancel": CommandSpec(
+        name="cancel",
+        summary="Cancel tracked runs by signaling the recorded child process group.",
+        usage=("delegate [--json] cancel <handle>...",),
+        arguments=(
+            ArgSpec(
+                "<handle>",
+                True,
+                "Run ID, numbered alias, bare harness latest selector, or harness:modelAlias.",
+            ),
+        ),
+        examples=(
+            "delegate cancel cursor-1",
+            "delegate cancel droid:glm",
+            "delegate --json cancel codex-2",
+        ),
+        notes=(
+            "Refuses already-terminal runs.",
+            "Tracked launches record a process group; legacy runs without pgid fall back to pid with a warning.",
+            "call mode is untracked and therefore not cancellable.",
+        ),
+        see_also=("wait", "runs", "snapshot", "run-output"),
+        unsupported_global_options=("--auth-profile", "--isolation"),
     ),
     "profiles": CommandSpec(
         name="profiles",
@@ -1011,6 +1077,9 @@ def render_overview_text() -> str:
         "delegate [--cwd PATH] [--json] run-output <handle> "
         "[--completion-report] [--stdout] [--stderr] [--tail N] [--max-chars N] "
         "[--raw] [--no-redact]",
+        "delegate [--cwd PATH] [--json] wait <handle>... [--latest HARNESS] "
+        "[--timeout SEC] [--interval SEC] [--completion-report]",
+        "delegate [--cwd PATH] [--json] cancel <handle>...",
         "delegate [--cwd PATH] [--json] worktree list "
         "[--harness HARNESS] [--status STATUS] [--limit N] [--no-auto-prune]",
         "delegate [--cwd PATH] [--json] worktree show <handle>",

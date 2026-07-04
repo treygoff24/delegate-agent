@@ -41,6 +41,8 @@ TOP_LEVEL_COMMANDS = (
     "snapshot",
     "runs",
     "run-output",
+    "wait",
+    "cancel",
     "worktree",
     "models",
     "describe",
@@ -137,6 +139,8 @@ class JsonCommandHelpTests(HelpCliTestBase):
         (["--json", "snapshot", "--help"], "snapshot"),
         (["--json", "runs", "--help"], "runs"),
         (["--json", "run-output", "--help"], "run-output"),
+        (["--json", "wait", "--help"], "wait"),
+        (["--json", "cancel", "--help"], "cancel"),
         (["--json", "worktree", "--help"], "worktree"),
         (["--json", "models", "--help"], "models"),
         (["--json", "describe", "--help"], "describe"),
@@ -313,6 +317,8 @@ class RegressionGuardTests(HelpCliTestBase):
             ["snapshot", "cursor", "--json"],
             ["runs", "--stale", "--json"],
             ["run-output", "cursor", "--completion-report", "--json"],
+            ["wait", "cursor", "--json"],
+            ["cancel", "cursor", "--json"],
         )
         for argv in cases:
             with self.subTest(argv=argv):
@@ -367,12 +373,69 @@ class SparseArgsNoIndexErrorTests(HelpCliTestBase):
         ["dry-run", "droid"],
         ["worktree"],
         ["run-output"],
+        ["wait"],
+        ["cancel"],
     )
 
     def test_sparse_args_raise_delegate_error(self):
         for argv in self.CASES:
             with self.subTest(argv=argv), self.assertRaises(self.delegate.DelegateError):
                 self.delegate.parse_cli(argv)
+
+
+class ErgonomicsParserTests(HelpCliTestBase):
+    def test_list_alias_maps_to_runs(self):
+        parsed = self.delegate.parse_cli(["list", "--recent"])
+        self.assertEqual(parsed.subcommand, "runs")
+        self.assertIsNotNone(parsed.runs)
+
+    def test_unknown_subcommand_suggests_known_forms(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(["kill", "codex-1"])
+        self.assertEqual(ctx.exception.error, "unknown_subcommand")
+        self.assertIn("delegate cancel", ctx.exception.message)
+
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(["droid-glm", "safe", "review"])
+        self.assertIn("delegate droid glm", ctx.exception.message)
+
+    def test_unknown_run_output_option_suggests_raw_for_full(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(["run-output", "codex-1", "--full"])
+        self.assertEqual(ctx.exception.error, "unknown_option")
+        self.assertIn("--raw", ctx.exception.message)
+
+    def test_run_output_latest_parser_path(self):
+        parsed = self.delegate.parse_cli(["run-output", "--latest", "droid:glm"])
+        self.assertEqual(parsed.subcommand, "run-output")
+        self.assertIsNone(parsed.run_output.handle)
+        self.assertEqual(parsed.run_output.latest_harness, "droid:glm")
+
+    def test_wait_latest_parser_path(self):
+        parsed = self.delegate.parse_cli(["wait", "codex-1", "--latest", "droid:glm"])
+        self.assertEqual(parsed.wait_command.handles, ("codex-1",))
+        self.assertEqual(parsed.wait_command.latest_harness, "droid:glm")
+
+    def test_ambiguous_prompt_source_includes_corrected_command(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(["cursor", "work", "prompt text", "--prompt-file", "task.md"])
+        self.assertEqual(ctx.exception.error, "ambiguous_prompt_source")
+        self.assertIn("Corrected command:", ctx.exception.message)
+        self.assertIn("--prompt-file task.md", ctx.exception.message)
+
+    def test_forbid_commit_implies_worktree_when_isolation_omitted(self):
+        parsed = self.delegate.parse_cli(["cursor", "work", "--forbid-commit", "do it"])
+        self.assertEqual(parsed.global_options.isolation, "worktree")
+        self.assertTrue(parsed.launch.forbid_commit_implied_isolation)
+
+    def test_forbid_commit_with_explicit_none_errors_with_corrected_command(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(
+                ["--isolation", "none", "cursor", "work", "--forbid-commit", "do it"]
+            )
+        self.assertEqual(ctx.exception.error, "invalid_option_combination")
+        self.assertIn("Corrected command:", ctx.exception.message)
+        self.assertIn("--isolation worktree", ctx.exception.message)
 
 
 class KimiHelpTests(HelpCliTestBase):

@@ -70,12 +70,14 @@ resolves as env override > config > built-in default (30s initial / 60s
 interval). It is incompatible with `--pass-through`.
 
 `--forbid-commit` is an opt-in launch flag for `work` mode with persistent
-worktree isolation. It injects a no-commit prompt note and fails the run if
+worktree isolation; when isolation is omitted, it implies `--isolation worktree`
+and launch output prints `note: --forbid-commit implies --isolation worktree`.
+It injects a no-commit prompt note and fails the run if
 commits remain ahead of the creation base when the child exits. Without it,
 Delegate still reports remaining child commits in the work summary, emits a
 warning plus suggested review commands, but does not fail solely because commits
-exist. Validation rejects `--forbid-commit` outside `work` mode with
-`--isolation worktree`.
+exist. Validation rejects `--forbid-commit` outside `work` mode, and explicit
+`--isolation none --forbid-commit` remains invalid.
 
 `--auth-profile NAME` selects a top-level `profiles.definitions` entry and
 injects that profile's flat env map into child processes. It overrides ambient
@@ -432,12 +434,14 @@ Tracked runs return bounded parent-facing output and store local metadata under 
 ```bash
 delegate runs [--active|--running|--stale|--recent] [--harness HARNESS] [--limit N]
 delegate snapshot [--latest HARNESS] [--no-redact] <handle>
-delegate run-output <handle> [--completion-report] [--stdout] [--stderr] [--tail N] [--max-chars N] [--raw] [--no-redact]
+delegate run-output [--latest HARNESS] <handle> [--completion-report] [--stdout] [--stderr] [--tail N] [--max-chars N] [--raw] [--no-redact]
+delegate wait <handle>... [--latest HARNESS] [--timeout SEC] [--interval SEC] [--completion-report]
+delegate cancel <handle>...
 ```
 
 `delegate runs` defaults to recent runs. `--active` preserves the legacy active view and includes both live `running` runs and `stale` runs. Use `--running` for only live tracked processes and `--stale` for runs recorded as running whose PID is missing or dead. `--active`, `--running`, `--stale`, and `--recent` are mutually exclusive.
 
-Run-scoped handles (`snapshot`, `run-output`, and future wait/cancel commands)
+Run-scoped handles (`snapshot`, `run-output`, `wait`, and `cancel`)
 resolve exact run IDs and numbered aliases first. A bare harness name such as
 `codex` resolves to that harness's latest run, and `harness:modelAlias` (for
 example `droid:glm`) resolves to the latest run for that harness/model alias.
@@ -502,6 +506,26 @@ Tracked run envelopes include `completionReportWritten`, `completionReportSource
 exit-code-derived status.
 
 Run-output JSON uses schema `delegate.run-output.v1` and returns selected completion report, stdout, and/or stderr content. By default, secret-like strings are redacted unless `--no-redact` is supplied. Tracked runs finish in one of the terminal statuses `succeeded`, `failed`, or `cancelled`; explicit harness cancellation/error terminal events override an exit-zero child status.
+
+`delegate wait` blocks until every selected run reaches terminal state. Defaults:
+`--interval 3`, minimum interval `1`, and `--timeout 3600`. Exit codes are `0`
+when all runs succeeded, `1` when any run failed or was cancelled, and `124` on
+timeout. JSON uses schema `delegate.wait.v1` with `timedOut` and per-run merged
+snapshot/state envelopes. Effective status is used: a recorded running child
+whose pid is dead is reported as terminal failure with `staleReason: dead_pid`,
+not left to hang until timeout. Text mode prints one compact line when each run's
+status changes, then a final table; `--completion-report` appends each run's
+report after the table. The `--timeout` is a floor, not an exact bound: a run
+that reaches terminal state just past the deadline can be observed terminal up
+to one `--interval` later, because the polling loop checks liveness before
+testing the deadline.
+
+`delegate cancel` resolves the same run handles, refuses already-terminal runs,
+signals the recorded process group with SIGTERM, waits a 5s grace period, then
+uses SIGKILL if needed. It never signals pid/pgid `<= 1`. Legacy runs without a
+recorded pgid fall back to the recorded pid with a warning. Cancel marks the run
+`cancelled` with `failureReason: cancelled_by_user` and records current captured
+stdout/stderr byte counts. `call` mode is untracked and therefore not cancellable.
 
 With no selector, `run-output` prints the best available parent-facing output:
 `completion-report.md` when present, a recovered final assistant message when

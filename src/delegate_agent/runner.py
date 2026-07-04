@@ -412,6 +412,69 @@ def persist_progress(
     )
 
 
+def _persist_final_progress(
+    run_path: Path,
+    ctx: RunContext,
+    accumulator: harness_events.StreamAccumulator,
+    *,
+    status: str,
+    exit_code: int,
+    stdout_bytes: int,
+    stderr_bytes: int,
+    completion_report_written: bool,
+    extra: JsonObject,
+) -> str:
+    """Persist terminal state with cancel-precedence reconciliation.
+
+    Acquires the registry lock, re-reads the current persisted state, and if a
+    concurrent ``cancel`` already wrote ``cancelled``, preserves that status and
+    ``cancelled_by_user`` failure reason instead of downgrading to the runner's
+    exit-code-derived status. The runner's work summary/output metadata
+    (exit_code, byte counts, completion report, result quality, etc.) is still
+    recorded. Returns the status that was actually persisted.
+    """
+    persisted_status = status
+    persisted_extra = dict(extra)
+    with run_registry.registry_lock(ctx.registry_root):
+        current = run_registry.load_run_state_or_none(ctx.registry_root, ctx.run_id)
+        current_status = current.get("status") if isinstance(current, dict) else None
+        if current_status == run_registry.STATUS_CANCELLED:
+            # Cancel won the race: do not downgrade. Preserve cancelled status
+            # and the cancel failure reason, but still record the runner's
+            # work summary/output metadata.
+            persisted_status = run_registry.STATUS_CANCELLED
+            persisted_extra["failureReason"] = "cancelled_by_user"
+            if exit_code == 0:
+                # A cancelled run never reports success.
+                persisted_extra["exitCode"] = 1
+            else:
+                persisted_extra["exitCode"] = exit_code
+        write_state(
+            run_path,
+            build_state(
+                ctx,
+                status=persisted_status,
+                exit_code=exit_code,
+                stdout_bytes=stdout_bytes,
+                stderr_bytes=stderr_bytes,
+                current=accumulator.current,
+                pid=persisted_extra.get("pid"),
+                extra=persisted_extra,
+            ),
+        )
+        write_snapshot(
+            run_path,
+            build_snapshot(
+                ctx,
+                accumulator=accumulator,
+                exit_code=exit_code,
+                completion_report_written=completion_report_written,
+                extra=persisted_extra,
+            ),
+        )
+    return persisted_status
+
+
 def write_completion_report(run_path: Path, text: str) -> bool:
     cleaned = text.strip()
     if not cleaned:
@@ -1271,7 +1334,7 @@ def _finalize_tracked_run(
         warnings = list(merged_extra.get("warnings") or [])
         _append_unique(warnings, _quality_warning(result_quality, harness=ctx.harness))
         merged_extra["warnings"] = warnings
-    persist_progress(
+    persisted_status = _persist_final_progress(
         files.run_path,
         ctx,
         capture.accumulator,
@@ -1282,8 +1345,28 @@ def _finalize_tracked_run(
         completion_report_written=report_written,
         extra=merged_extra,
     )
+    # Cancel-precedence reconciliation: when the finalizer preserved a
+    # concurrent cancel (persisted_status is cancelled but the runner's own
+    # exit-code-derived status was not cancelled), the LIVE result returned to
+    # the caller must agree with the persisted state. A cancelled run never
+    # reports success, so normalize exit_code to 1, status to cancelled, and
+    # the failure reason to cancelled_by_user. This keeps the CLI envelope
+    # (ok/status/exitCode), the process exit code, and state.json in lockstep.
+    if (
+        persisted_status == run_registry.STATUS_CANCELLED
+        and status != run_registry.STATUS_CANCELLED
+    ):
+        final_extra = dict(merged_extra)
+        final_extra["failureReason"] = "cancelled_by_user"
+        final_extra["exitCode"] = 1
+        return TrackedFinalization(
+            status=run_registry.STATUS_CANCELLED,
+            exit_code=1,
+            report_written=report_written,
+            extra=final_extra,
+        )
     return TrackedFinalization(
-        status=status,
+        status=persisted_status,
         exit_code=exit_code,
         report_written=report_written,
         extra=merged_extra,

@@ -9,6 +9,8 @@ builders, not here.
 
 from __future__ import annotations
 
+import difflib
+import shlex
 from typing import NoReturn
 
 from delegate_agent import (
@@ -19,6 +21,7 @@ from delegate_agent import (
     profile_commands,
     reasoning,
     run_output_commands,
+    wait_cancel_commands,
     worktree_commands,
     worktree_mgmt,
 )
@@ -345,6 +348,8 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
         raise DelegateError("missing_subcommand", "Missing subcommand.")
 
     subcommand = argv[i]
+    if subcommand == "list":
+        subcommand = "runs"
     rest = argv[i + 1 :]
     if subcommand.startswith("-"):
         raise DelegateError(
@@ -428,6 +433,20 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
         return parse_runs(rest, json_mode, cwd)
     if subcommand == "run-output":
         return parse_run_output(rest, json_mode, cwd)
+    if subcommand == "wait":
+        if isolation is not None:
+            raise DelegateError(
+                "invalid_option_combination",
+                "--isolation is not supported with delegate wait.",
+            )
+        return parse_wait(rest, json_mode, cwd)
+    if subcommand == "cancel":
+        if isolation is not None:
+            raise DelegateError(
+                "invalid_option_combination",
+                "--isolation is not supported with delegate cancel.",
+            )
+        return parse_cancel(rest, json_mode, cwd)
     if subcommand == "worktree":
         if isolation is not None:
             raise DelegateError(
@@ -443,19 +462,74 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             )
         return parse_profiles(rest, json_mode, cwd, auth_profile)
 
-    raise DelegateError("unknown_subcommand", f"Unknown subcommand: {subcommand}")
+    raise DelegateError("unknown_subcommand", unknown_subcommand_message(subcommand))
+
+
+def unknown_subcommand_message(subcommand: str) -> str:
+    suggestion_only = {
+        "codex-auth": "use: delegate profiles",
+        "kill": "use: delegate cancel ...",
+    }
+    if subcommand.startswith("droid-"):
+        model = subcommand.removeprefix("droid-")
+        suggestion_only[subcommand] = f"use: delegate droid {model} ..."
+    candidates = sorted(set(command_help.COMMAND_SPECS) | set(KNOWN_ENGINES))
+    matches = difflib.get_close_matches(subcommand, candidates, n=3)
+    parts = [f"Unknown subcommand: {subcommand}"]
+    if subcommand in suggestion_only:
+        parts.append(suggestion_only[subcommand])
+    elif matches:
+        parts.append(f"Did you mean: {', '.join(matches)}?")
+    top_level = sorted({name.split()[0] for name in command_help.COMMAND_SPECS})
+    if len(top_level) <= 20:
+        parts.append(f"Valid subcommands: {', '.join(top_level)}.")
+    return " ".join(parts)
 
 
 def has_misplaced_global_option(tokens: list[str]) -> bool:
     return any(token in MISPLACED_GLOBAL_OPTIONS for token in tokens)
 
 
-def raise_misplaced_global_option(message: str) -> NoReturn:
+def _shell_command(argv: list[str]) -> str:
+    return shlex.join(["delegate", *argv])
+
+
+def corrected_global_command(argv: list[str]) -> str:
+    globals_out: list[str] = []
+    rest: list[str] = []
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+        if token in VALUE_GLOBAL_OPTIONS and i + 1 < len(argv):
+            globals_out.extend([token, argv[i + 1]])
+            i += 2
+            continue
+        if token in MISPLACED_GLOBAL_OPTIONS:
+            globals_out.append(token)
+            i += 1
+            continue
+        rest.append(token)
+        i += 1
+    return _shell_command([*globals_out, *rest])
+
+
+def raise_misplaced_global_option(message: str, argv: list[str] | None = None) -> NoReturn:
     guidance = (
         "Move global options before the subcommand "
         "(for example: delegate --json --cwd PATH <subcommand> ...)."
     )
-    raise DelegateError("misplaced_global_option", f"{message} {guidance}")
+    corrected = f" Corrected command: {corrected_global_command(argv)}." if argv else ""
+    raise DelegateError("misplaced_global_option", f"{message} {guidance}{corrected}")
+
+
+def unknown_option_message(command: str, option: str) -> str:
+    spec = command_help.COMMAND_SPECS.get(command)
+    candidates = [opt.flag for opt in spec.options] if spec is not None else []
+    matches = difflib.get_close_matches(option, candidates, n=3)
+    if command == "run-output" and option == "--full":
+        matches = ["--raw", *[match for match in matches if match != "--raw"]]
+    suffix = f" Did you mean: {', '.join(matches)}?" if matches else ""
+    return f"{command} does not support option: {option}.{suffix}"
 
 
 def consume_json_option(rest: list[str], json_mode: bool) -> tuple[list[str], bool]:
@@ -556,7 +630,17 @@ def parse_modeless_engine(
         json_mode,
         isolation,
         read_only,
-    ) = parse_prompt_tail(rest[1:], json_mode, isolation)
+    ) = parse_prompt_tail(rest[1:], json_mode, isolation, command_prefix=[engine, mode])
+    forbid_commit_implied_isolation = False
+    if forbid_commit and mode == "work" and isolation is None:
+        isolation = "worktree"
+        forbid_commit_implied_isolation = True
+    if forbid_commit and mode == "work" and isolation == "none":
+        raise DelegateError(
+            "invalid_option_combination",
+            "--forbid-commit cannot be combined with --isolation none. "
+            f"Corrected command: {_shell_command(['--isolation', 'worktree', engine, mode, '--forbid-commit', *(prompt_parts or [])])}.",
+        )
     return ParsedCommand(
         engine,
         global_options=GlobalOptions(
@@ -576,6 +660,7 @@ def parse_modeless_engine(
             reasoning_effort=reasoning_effort,
             progress_intent=progress_intent,
             forbid_commit=forbid_commit,
+            forbid_commit_implied_isolation=forbid_commit_implied_isolation,
             read_only=read_only,
             dry_run=dry_run,
         ),
@@ -627,7 +712,19 @@ def parse_droid(
         json_mode,
         isolation,
         read_only,
-    ) = parse_prompt_tail(rest[2:], json_mode, isolation)
+    ) = parse_prompt_tail(
+        rest[2:], json_mode, isolation, command_prefix=["droid", model_alias, mode]
+    )
+    forbid_commit_implied_isolation = False
+    if forbid_commit and mode == "work" and isolation is None:
+        isolation = "worktree"
+        forbid_commit_implied_isolation = True
+    if forbid_commit and mode == "work" and isolation == "none":
+        raise DelegateError(
+            "invalid_option_combination",
+            "--forbid-commit cannot be combined with --isolation none. "
+            f"Corrected command: {_shell_command(['--isolation', 'worktree', 'droid', model_alias, mode, '--forbid-commit', *(prompt_parts or [])])}.",
+        )
     return ParsedCommand(
         "droid",
         global_options=GlobalOptions(
@@ -648,6 +745,7 @@ def parse_droid(
             reasoning_effort=reasoning_effort,
             progress_intent=progress_intent,
             forbid_commit=forbid_commit,
+            forbid_commit_implied_isolation=forbid_commit_implied_isolation,
             read_only=read_only,
             dry_run=dry_run,
         ),
@@ -711,6 +809,8 @@ def parse_prompt_tail(
     rest: list[str],
     json_mode: bool,
     isolation: str | None,
+    *,
+    command_prefix: list[str] | None = None,
 ) -> tuple[
     str | None,
     str | None,
@@ -745,7 +845,8 @@ def parse_prompt_tail(
             if prompt_parts:
                 raise DelegateError(
                     "ambiguous_prompt_source",
-                    "--prompt-file must appear before direct prompt text.",
+                    "--prompt-file must appear before direct prompt text."
+                    + corrected_prompt_file_suffix(command_prefix, rest),
                 )
             if prompt_file is not None:
                 raise DelegateError("ambiguous_prompt_source", "Only one --prompt-file is allowed.")
@@ -793,7 +894,8 @@ def parse_prompt_tail(
             try:
                 reasoning_effort = reasoning.normalize_effort(value)
             except reasoning.ReasoningCapabilityError as exc:
-                raise DelegateError(exc.error, exc.message) from exc
+                corrected = corrected_drop_option_suffix(command_prefix, rest, i, takes_value=True)
+                raise DelegateError(exc.error, f"{exc.message}{corrected}") from exc
             i += 2
             continue
         if token == "--progress":
@@ -841,7 +943,9 @@ def parse_prompt_tail(
         break
     if "--prompt-file" in prompt_parts:
         raise DelegateError(
-            "ambiguous_prompt_source", "--prompt-file must appear before direct prompt text."
+            "ambiguous_prompt_source",
+            "--prompt-file must appear before direct prompt text."
+            + corrected_prompt_file_suffix(command_prefix, rest),
         )
     if "--output-schema" in prompt_parts:
         raise DelegateError(
@@ -886,7 +990,7 @@ def parse_snapshot(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedC
             i += 1
             continue
         if token.startswith("-"):
-            raise DelegateError("unknown_option", f"snapshot does not support option: {token}")
+            raise DelegateError("unknown_option", unknown_option_message("snapshot", token))
         if handle is not None:
             raise DelegateError(
                 "unexpected_argument", f"snapshot accepts one handle: {' '.join(rest)}"
@@ -1000,8 +1104,9 @@ def parse_run_output(rest: list[str], json_mode: bool, cwd: str | None) -> Parse
     if any(command_help.is_help_token(token) for token in rest):
         return help_command(json_mode, "run-output")
     if not rest:
-        raise DelegateError("missing_handle", "run-output requires <alias-or-runId>.")
-    handle = rest[0]
+        raise DelegateError("missing_handle", "run-output requires <alias-or-runId> or --latest.")
+    handle: str | None = None
+    latest_harness: str | None = None
     completion_report = False
     stdout_flag = False
     stderr_flag = False
@@ -1009,9 +1114,17 @@ def parse_run_output(rest: list[str], json_mode: bool, cwd: str | None) -> Parse
     max_chars: int | None = None
     raw = False
     no_redact = False
-    i = 1
+    i = 0
     while i < len(rest):
         token = rest[i]
+        if token == "--latest":
+            if i + 1 >= len(rest):
+                raise DelegateError(
+                    "missing_harness", "run-output --latest requires a harness name."
+                )
+            latest_harness = rest[i + 1]
+            i += 2
+            continue
         if token == "--completion-report":
             completion_report = True
             i += 1
@@ -1052,7 +1165,21 @@ def parse_run_output(rest: list[str], json_mode: bool, cwd: str | None) -> Parse
                 missing_value_description="a positive integer",
             )
             continue
-        raise DelegateError("unknown_option", f"run-output does not support option: {token}")
+        if token.startswith("-"):
+            raise DelegateError("unknown_option", unknown_option_message("run-output", token))
+        if handle is not None:
+            raise DelegateError(
+                "unexpected_argument", f"run-output accepts one handle: {' '.join(rest)}"
+            )
+        handle = token
+        i += 1
+    if latest_harness is None and handle is None:
+        raise DelegateError("missing_handle", "run-output requires <alias-or-runId> or --latest.")
+    if latest_harness is not None and handle is not None:
+        raise DelegateError(
+            "ambiguous_run_output_target",
+            "Use either --latest <harness> or an exact handle, not both.",
+        )
     default_output = not (completion_report or stdout_flag or stderr_flag or raw)
     if default_output:
         completion_report = True
@@ -1079,6 +1206,7 @@ def parse_run_output(rest: list[str], json_mode: bool, cwd: str | None) -> Parse
         global_options=GlobalOptions(json_mode=json_mode, cwd=cwd),
         run_output=run_output_commands.RunOutputCommand(
             handle=handle,
+            latest_harness=latest_harness,
             json_mode=json_mode,
             completion_report=completion_report,
             stdout=stdout_flag,
@@ -1090,6 +1218,114 @@ def parse_run_output(rest: list[str], json_mode: bool, cwd: str | None) -> Parse
             default=default_output,
         ),
     )
+
+
+def parse_wait(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
+    rest, json_mode = consume_json_option(rest, json_mode)
+    if any(command_help.is_help_token(token) for token in rest):
+        return help_command(json_mode, "wait")
+    handles: list[str] = []
+    latest_harness: str | None = None
+    timeout = wait_cancel_commands.WAIT_DEFAULT_TIMEOUT_SECONDS
+    interval = wait_cancel_commands.WAIT_DEFAULT_INTERVAL_SECONDS
+    completion_report = False
+    i = 0
+    while i < len(rest):
+        token = rest[i]
+        if token == "--latest":
+            if i + 1 >= len(rest):
+                raise DelegateError("missing_harness", "wait --latest requires a harness name.")
+            latest_harness = rest[i + 1]
+            i += 2
+            continue
+        if token == "--timeout":
+            timeout, i = parse_required_positive_int_option(
+                rest,
+                i,
+                option_label="wait --timeout",
+                missing_error="missing_timeout",
+                invalid_error="invalid_timeout",
+                missing_value_description="seconds",
+            )
+            continue
+        if token == "--interval":
+            interval, i = parse_required_positive_int_option(
+                rest,
+                i,
+                option_label="wait --interval",
+                missing_error="missing_interval",
+                invalid_error="invalid_interval",
+                missing_value_description="seconds",
+            )
+            interval = max(interval, wait_cancel_commands.WAIT_MIN_INTERVAL_SECONDS)
+            continue
+        if token == "--completion-report":
+            completion_report = True
+            i += 1
+            continue
+        if token.startswith("-"):
+            raise DelegateError("unknown_option", unknown_option_message("wait", token))
+        handles.append(token)
+        i += 1
+    if not handles and latest_harness is None:
+        raise DelegateError("missing_handle", "wait requires a handle or --latest <harness>.")
+    return ParsedCommand(
+        "wait",
+        global_options=GlobalOptions(json_mode=json_mode, cwd=cwd),
+        wait_command=wait_cancel_commands.WaitCommand(
+            handles=tuple(handles),
+            latest_harness=latest_harness,
+            timeout_seconds=timeout,
+            interval_seconds=interval,
+            completion_report=completion_report,
+            json_mode=json_mode,
+        ),
+    )
+
+
+def parse_cancel(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
+    rest, json_mode = consume_json_option(rest, json_mode)
+    if any(command_help.is_help_token(token) for token in rest):
+        return help_command(json_mode, "cancel")
+    handles: list[str] = []
+    for token in rest:
+        if token.startswith("-"):
+            raise DelegateError("unknown_option", unknown_option_message("cancel", token))
+        handles.append(token)
+    if not handles:
+        raise DelegateError("missing_handle", "cancel requires at least one run handle.")
+    return ParsedCommand(
+        "cancel",
+        global_options=GlobalOptions(json_mode=json_mode, cwd=cwd),
+        cancel_command=wait_cancel_commands.CancelCommand(tuple(handles), json_mode=json_mode),
+    )
+
+
+def corrected_prompt_file_suffix(command_prefix: list[str] | None, rest: list[str]) -> str:
+    if not command_prefix or "--prompt-file" not in rest:
+        return ""
+    prompt_index = rest.index("--prompt-file")
+    if prompt_index + 1 >= len(rest):
+        return ""
+    prompt_file = rest[prompt_index + 1]
+    before = [token for token in rest[:prompt_index] if token != "--json"]
+    after = rest[prompt_index + 2 :]
+    corrected = [*command_prefix, "--prompt-file", prompt_file, *before, *after]
+    return f" Corrected command: {_shell_command(corrected)}."
+
+
+def corrected_drop_option_suffix(
+    command_prefix: list[str] | None,
+    rest: list[str],
+    index: int,
+    *,
+    takes_value: bool,
+) -> str:
+    if not command_prefix:
+        return ""
+    drop = 2 if takes_value else 1
+    corrected = [*command_prefix, *rest[:index], *rest[index + drop :]]
+    return f" Corrected command: {_shell_command(corrected)}."
 
 
 def parse_non_negative_int(value: str, *, option: str) -> int:

@@ -38,6 +38,8 @@ TOP_LEVEL_COMMANDS = (
     "snapshot",
     "runs",
     "run-output",
+    "wait",
+    "cancel",
     "worktree",
     "models",
     "describe",

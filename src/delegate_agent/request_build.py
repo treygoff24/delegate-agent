@@ -436,6 +436,46 @@ def _validate_forbid_commit(
         )
 
 
+def _forbid_commit_implied_isolation_note() -> str:
+    """The single source of the --forbid-commit implies --isolation worktree note."""
+    return "note: --forbid-commit implies --isolation worktree"
+
+
+def _apply_forbid_commit_isolation_implication(
+    *,
+    forbid_commit: bool,
+    mode: str,
+    cli_isolation: str | None,
+    json_isolation: str | None,
+) -> tuple[str | None, str | None, bool]:
+    """Apply the forbid-commit isolation implication shared by CLI and input-json paths.
+
+    Returns ``(resolved_json_isolation, note, implied)``:
+    - When forbid-commit is active in work mode with no explicit isolation, the
+      implied worktree isolation is returned for the JSON path (the CLI path
+      sets this in the parser), plus the note, and ``implied=True``.
+    - When forbid-commit is active in work mode with explicit ``none``,
+      an ``invalid_option_combination`` error is raised (both paths share this).
+    - Otherwise the inputs are returned unchanged with ``implied=False``.
+
+    This is the single place that owns the implication so ``run --input-json``
+    with ``forbidCommit: true`` and no isolation gets the same implied worktree
+    isolation + note as the CLI path.
+    """
+    if not forbid_commit or mode != MODE_WORK:
+        return json_isolation, None, False
+    effective = cli_isolation if cli_isolation is not None else json_isolation
+    if effective is None:
+        return "worktree", _forbid_commit_implied_isolation_note(), True
+    if effective == "none":
+        raise DelegateError(
+            "invalid_option_combination",
+            "--forbid-commit cannot be combined with --isolation none. "
+            "Use --isolation worktree, or omit --forbid-commit.",
+        )
+    return json_isolation, None, False
+
+
 def _call_workspace(dry_run: bool) -> tuple[ResolvedWorkspace, bool]:
     if dry_run:
         return ResolvedWorkspace(CALL_TEMP_CWD_PLACEHOLDER, "directory"), False
@@ -613,12 +653,16 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         )
     except delegate_config.InvalidIsolationError as exc:
         raise DelegateError("invalid_isolation", str(exc)) from exc
-    isolation_warnings = _safe_none_normalization_warnings(
-        engine=launch.engine,
-        mode=launch.mode,
-        requested=global_options.isolation,
-        effective=effective_isolation,
+    isolation_warnings = list(
+        _safe_none_normalization_warnings(
+            engine=launch.engine,
+            mode=launch.mode,
+            requested=global_options.isolation,
+            effective=effective_isolation,
+        )
     )
+    if getattr(launch, "forbid_commit_implied_isolation", False):
+        isolation_warnings.append(_forbid_commit_implied_isolation_note())
 
     isolation_context = build_isolation_context(
         source_workspace=workspace.path,
@@ -818,6 +862,19 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
             "isolation in input JSON must be auto, none, or worktree.",
         )
 
+    # Apply the forbid-commit isolation implication shared with the CLI path so
+    # run --input-json with forbidCommit: true and no isolation gets the same
+    # implied worktree isolation + note. Explicit "none" + forbidCommit errors
+    # here (both paths share this refusal).
+    forbid_commit_note: str | None = None
+    if raw_forbid_commit:
+        json_isolation, forbid_commit_note, _ = _apply_forbid_commit_isolation_implication(
+            forbid_commit=raw_forbid_commit,
+            mode=str(mode),
+            cli_isolation=global_options.isolation,
+            json_isolation=json_isolation,
+        )
+
     workspace = resolve_workspace(global_options.cwd, json_cwd)
     git_root, git_common_dir, git_head_oid, git_head_ref, git_branch = capture_git_metadata(
         workspace.path
@@ -833,12 +890,16 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         )
     except delegate_config.InvalidIsolationError as exc:
         raise DelegateError("invalid_isolation", str(exc)) from exc
-    isolation_warnings = _safe_none_normalization_warnings(
-        engine=str(engine),
-        mode=str(mode),
-        requested=global_options.isolation or json_isolation,
-        effective=effective_isolation,
+    isolation_warnings = list(
+        _safe_none_normalization_warnings(
+            engine=str(engine),
+            mode=str(mode),
+            requested=global_options.isolation or json_isolation,
+            effective=effective_isolation,
+        )
     )
+    if forbid_commit_note is not None:
+        isolation_warnings.append(forbid_commit_note)
 
     isolation_context = build_isolation_context(
         source_workspace=workspace.path,
