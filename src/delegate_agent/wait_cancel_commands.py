@@ -410,6 +410,31 @@ def _cancel_target(registry_root: Path, target: run_registry.RunTarget) -> JsonO
     identity_pid = pid if pid is not None else signal_value
     warnings.extend(_check_pid_identity(registry_root, target, identity_pid))
 
+    # Marker protocol: stamp cancelRequested BEFORE sending any signal, under the
+    # registry lock. This lets the runner finalizer (which acquires the same
+    # lock) observe the marker even if the child exits 0 on SIGTERM and the
+    # finalizer runs before cancel's post-grace terminal write. Only stamp when
+    # the run is not already terminal: the top-of-function refusal already
+    # rejected terminal runs, but the runner may have finalized during the
+    # identity-check window, so re-check under the lock. A terminal run keeps
+    # its existing status (cancel's final locked write reconciles to cancelled).
+    cancel_requested_at = run_registry.utc_now_iso()
+    with run_registry.registry_lock(registry_root):
+        pre_signal = run_registry.load_run_state_or_none(registry_root, target.run_id)
+        pre_fields = run_registry.status_fields(pre_signal)
+        pre_effective = pre_fields.get("effectiveStatus")
+        if (
+            pre_effective not in run_registry.TERMINAL_STATUSES
+            and pre_effective != run_registry.STATUS_STALE
+        ):
+            stamped = dict(pre_signal or state or {})
+            stamped["cancelRequested"] = True
+            stamped["cancelRequestedAt"] = cancel_requested_at
+            run_registry.write_json_atomic(
+                run_registry.run_directory(registry_root, target.run_id) / run_registry.STATE_FILE,
+                stamped,
+            )
+
     _send_signal(signal_value, signal.SIGTERM, process_group=process_group)
     deadline = time.monotonic() + CANCEL_GRACE_SECONDS
     while time.monotonic() < deadline:

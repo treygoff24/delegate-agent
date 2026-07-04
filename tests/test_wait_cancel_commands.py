@@ -191,10 +191,10 @@ class WaitCancelCommandTests(unittest.TestCase):
         run_path = run_registry.run_directory(self.registry_root, run_id)
         # The initial state is 'running' so the top-of-_cancel_target check
         # passes. Simulate the runner finalizer writing 'failed' during the
-        # grace window by injecting it into the state file before the locked
-        # re-read. We patch load_run_state_or_none so the locked re-read sees
-        # 'failed' (the runner's terminal write) while the first read sees the
-        # original 'running'.
+        # grace window. The marker protocol adds a pre-signal locked re-read
+        # (call #2) that must still see 'running' so the marker is stamped; the
+        # runner's terminal write is observed by the final locked re-read
+        # (call #3), which reconciles to cancelled.
         original_load = run_registry.load_run_state_or_none
         runner_terminal_state = dict(json.loads((run_path / run_registry.STATE_FILE).read_text()))
         runner_terminal_state.update(
@@ -210,8 +210,8 @@ class WaitCancelCommandTests(unittest.TestCase):
 
         def fake_load(root, rid):
             call_count["n"] += 1
-            if call_count["n"] == 2:
-                # Locked re-read sees the runner's terminal write.
+            if call_count["n"] == 3:
+                # Final locked re-read sees the runner's terminal write.
                 return dict(runner_terminal_state)
             return original_load(root, rid)
 
@@ -225,6 +225,77 @@ class WaitCancelCommandTests(unittest.TestCase):
         self.assertEqual(state["status"], "cancelled")
         self.assertEqual(state["failureReason"], "cancelled_by_user")
         proc.kill()
+
+    # --- DEFECT 2: marker protocol -----------------------------------------
+
+    def test_cancel_stamps_cancel_requested_marker_before_signal(self):
+        """Cancel stamps cancelRequested:true + cancelRequestedAt on a live run
+        under the registry lock BEFORE sending any signal. The marker survives
+        the cancel flow and the final state is cancelled."""
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            start_new_session=True,
+        )
+        self.addCleanup(lambda: proc.kill() if proc.poll() is None else None)
+        pgid = os.getpgid(proc.pid)
+        run_id, alias = self.write_run(status="running", pid=proc.pid, pgid=pgid)
+        run_path = run_registry.run_directory(self.registry_root, run_id)
+        target = run_registry.RunTarget(run_id=run_id, alias=alias)
+        # Capture the state written by the pre-signal marker stamp by hooking
+        # write_json_atomic: record every state.json write.
+        state_writes: list[dict] = []
+        original_write = run_registry.write_json_atomic
+
+        def capturing_write(path, data):
+            if str(path).endswith(run_registry.STATE_FILE):
+                state_writes.append(dict(data) if isinstance(data, dict) else data)
+            return original_write(path, data)
+
+        with unittest_mock.patch.object(
+            run_registry, "write_json_atomic", side_effect=capturing_write
+        ):
+            payload = wait_cancel_commands._cancel_target(self.registry_root, target)
+        self.assertEqual(payload["status"], "cancelled")
+        # The first state write must be the marker stamp (cancelRequested true).
+        marker_writes = [
+            w for w in state_writes if isinstance(w, dict) and w.get("cancelRequested") is True
+        ]
+        self.assertTrue(marker_writes, "cancel must stamp cancelRequested:true before signaling")
+        first_marker = marker_writes[0]
+        self.assertIn("cancelRequestedAt", first_marker)
+        self.assertIsInstance(first_marker["cancelRequestedAt"], str)
+        self.assertTrue(first_marker["cancelRequestedAt"])
+        # The marker stamp must NOT itself be terminal: it preserves the running
+        # status so the runner can still observe the marker if it finalizes first.
+        self.assertNotEqual(first_marker.get("status"), "cancelled")
+        # Final state is cancelled.
+        final_state = json.loads((run_path / run_registry.STATE_FILE).read_text())
+        self.assertEqual(final_state["status"], "cancelled")
+        proc.wait(timeout=5)
+
+    def test_cancel_does_not_stamp_marker_on_already_terminal_run(self):
+        """DEFECT 2 scenario iv: cancelRequested is never stamped on an
+        already-terminal run. A terminal run is refused before the marker stamp."""
+        _run_id, alias = self.write_run(status="succeeded")
+        target = run_registry.RunTarget(run_id=_run_id, alias=alias)
+        original_write = run_registry.write_json_atomic
+        state_writes: list[dict] = []
+
+        def capturing_write(path, data):
+            if str(path).endswith(run_registry.STATE_FILE):
+                state_writes.append(dict(data) if isinstance(data, dict) else data)
+            return original_write(path, data)
+
+        with (
+            unittest_mock.patch.object(
+                run_registry, "write_json_atomic", side_effect=capturing_write
+            ),
+            self.assertRaises(wait_cancel_commands.WaitCancelError) as ctx,
+        ):
+            wait_cancel_commands._cancel_target(self.registry_root, target)
+        self.assertEqual(ctx.exception.error, "run_already_terminal")
+        # No state write happened at all (refusal precedes the marker stamp).
+        self.assertEqual(state_writes, [])
 
     def test_race_cancel_finalizes_first_runner_preserves_cancelled(self):
         """Cancel writes cancelled first, then the runner finalizer preserves

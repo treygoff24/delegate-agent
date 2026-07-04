@@ -470,7 +470,12 @@ run directory for inspection and is cleaned up only when the run directory is
 cleaned up.
 
 For Codex safe/isolated runs, Delegate also passes `--add-dir <scratch>` along
-with `--sandbox read-only`. Codex may still enforce its own sandbox restrictions.
+with `--sandbox read-only`. Verified live 2026-07-04: the Codex read-only sandbox
+still denies scratch writes despite `--add-dir` ("operation not permitted"), so
+Codex safe children currently cannot use the scratch TMPDIR; the flag is kept so
+scratch access starts working automatically if a future Codex honors it. Prompts
+for Codex safe runs should not depend on temp-file writes. The scratch export is
+verified working on the copy-isolated lanes (Cursor, Droid, Kimi, Grok, Claude).
 Cursor, Droid, Kimi, Grok, and Claude receive the scratch path through the temp
 environment variables only. This does not change the isolation semantics of the
 repo copy or persistent worktree itself.
@@ -574,6 +579,24 @@ uses SIGKILL if needed. It never signals pid/pgid `<= 1`. Legacy runs without a
 recorded pgid fall back to the recorded pid with a warning. Cancel marks the run
 `cancelled` with `failureReason: cancelled_by_user` and records current captured
 stdout/stderr byte counts. `call` mode is untracked and therefore not cancellable.
+
+Before sending any signal, cancel stamps a `cancelRequested: true` marker (with
+a `cancelRequestedAt` timestamp) on the run state under the registry lock, so
+that a runner finalizer observing the marker persists `cancelled` even if the
+child exits 0 on SIGTERM and finalizes before cancel's post-grace terminal
+write. This keeps the synchronous launcher envelope (`ok`/`status`/`exitCode`),
+the persisted state, and the eventual reconciled registry entry in agreement
+regardless of which side finishes first. The marker is never stamped on an
+already-terminal run.
+
+A cancelled run has no child completion report (the child was killed mid-flight),
+so Delegate synthesizes one with `completionReportSource: delegate_synthesized`.
+The synthesized cancelled report records `Status: cancelled`, the failure reason
+(`cancelled_by_user` for an operator cancel, `harness_cancelled` for a harness
+terminal cancellation event), a bounded redacted stderr tail when present, and a
+next action pointing at `run-output <alias>` for partial output. It is readable
+via `run-output <handle> --completion-report` the same way a failed run's
+synthesized report is.
 
 With no selector, `run-output` prints the best available parent-facing output:
 `completion-report.md` when present, a recovered final assistant message when

@@ -445,21 +445,32 @@ def _persist_final_progress(
     """Persist terminal state with cancel-precedence reconciliation.
 
     Acquires the registry lock, re-reads the current persisted state, and if a
-    concurrent ``cancel`` already wrote ``cancelled``, preserves that status and
-    ``cancelled_by_user`` failure reason instead of downgrading to the runner's
-    exit-code-derived status. The runner's work summary/output metadata
-    (exit_code, byte counts, completion report, result quality, etc.) is still
-    recorded. Returns the status that was actually persisted.
+    concurrent ``cancel`` already wrote ``cancelled`` (or stamped the
+    ``cancelRequested`` marker before signaling), preserves/adopts cancelled
+    status and the ``cancelled_by_user`` failure reason instead of downgrading
+    to the runner's exit-code-derived status. The runner's work summary/output
+    metadata (exit_code, byte counts, completion report, result quality, etc.)
+    is still recorded. Returns the status that was actually persisted.
+
+    The ``cancelRequested`` marker handles the finalize-first race: cancel
+    stamps the marker under the lock BEFORE sending SIGTERM, so if the child
+    exits 0 on SIGTERM and the runner finalizes before cancel's post-grace
+    terminal write, the finalizer still observes the marker and persists
+    cancelled, keeping the live envelope (ok/status/exitCode) consistent with
+    the eventual reconciled state.
     """
     persisted_status = status
     persisted_extra = dict(extra)
     with run_registry.registry_lock(ctx.registry_root):
         current = run_registry.load_run_state_or_none(ctx.registry_root, ctx.run_id)
         current_status = current.get("status") if isinstance(current, dict) else None
-        if current_status == run_registry.STATUS_CANCELLED:
-            # Cancel won the race: do not downgrade. Preserve cancelled status
-            # and the cancel failure reason, but still record the runner's
-            # work summary/output metadata.
+        cancel_requested = isinstance(current, dict) and current.get("cancelRequested") is True
+        if current_status == run_registry.STATUS_CANCELLED or cancel_requested:
+            # Cancel won the race (either it already wrote cancelled, or it
+            # stamped the cancelRequested marker before signaling and the child
+            # exited before cancel's post-grace terminal write). Do not
+            # downgrade. Persist cancelled status and the cancel failure reason,
+            # but still record the runner's work summary/output metadata.
             persisted_status = run_registry.STATUS_CANCELLED
             persisted_extra["failureReason"] = "cancelled_by_user"
             if exit_code == 0:
@@ -637,6 +648,39 @@ def _completion_report_text_and_source(
         ]
         if failure_reason == "auth_failed":
             lines.append(_auth_remediation_line(ctx))
+        if stderr_tail.strip():
+            lines.extend(["", "Redacted stderr tail:", "```text", stderr_tail.rstrip(), "```"])
+        lines.extend(["", "Next actions:", *(f"- {action}" for action in next_actions)])
+        return "\n".join(lines), COMPLETION_REPORT_SOURCE_SYNTHESIZED
+    if status == run_registry.STATUS_CANCELLED:
+        # A cancelled run was killed mid-flight: a partial child message left in
+        # stdout is NOT a valid completion report, so synthesize one regardless of
+        # any recoverable assistant text. The failure reason is the cancel reason
+        # already computed by _failure_reason (cancelled_by_user when cancel
+        # requested/won the race, harness_cancelled when a harness terminal event
+        # drove the cancellation). Same envelope fields as the failed path.
+        reason = (
+            failure_reason
+            if failure_reason
+            in {
+                "cancelled_by_user",
+                "harness_cancelled",
+            }
+            else "cancelled_by_user"
+        )
+        next_actions = [
+            run_registry.run_output_command(
+                ctx.alias,
+                cwd=ctx.source_cwd,
+            )
+            + " for partial output",
+        ]
+        lines = [
+            "Synthesized by delegate.",
+            "",
+            f"Status: {status}",
+            f"Failure reason: {reason}",
+        ]
         if stderr_tail.strip():
             lines.extend(["", "Redacted stderr tail:", "```text", stderr_tail.rstrip(), "```"])
         lines.extend(["", "Next actions:", *(f"- {action}" for action in next_actions)])
@@ -1363,6 +1407,21 @@ def _finalize_tracked_run(
         status = capture.accumulator.terminal_status
         if exit_code == 0:
             exit_code = 1
+    # Marker protocol (finalize-first race): cancel stamps cancelRequested under
+    # the registry lock BEFORE signaling. If the child exits 0 on SIGTERM and
+    # the runner finalizes before cancel's post-grace terminal write, the
+    # finalizer observes the marker here and treats the run as cancelled for
+    # both report synthesis and the persisted finalization. This is a non-lock
+    # read for the report/failure-reason decision; _persist_final_progress
+    # re-reads under the lock and makes the authoritative persisted-status
+    # decision, so a marker that disappears between reads cannot corrupt state.
+    pre_state = run_registry.load_run_state_or_none(ctx.registry_root, ctx.run_id)
+    cancel_requested = isinstance(pre_state, dict) and pre_state.get("cancelRequested") is True
+    if cancel_requested and status != run_registry.STATUS_CANCELLED:
+        status = run_registry.STATUS_CANCELLED
+        if exit_code == 0:
+            exit_code = 1
+        merged_extra["failureReason"] = "cancelled_by_user"
     stderr_tail = profiles.read_bounded_stderr_tail(files.stderr_log)
     failure_reason = _failure_reason(
         status=status,

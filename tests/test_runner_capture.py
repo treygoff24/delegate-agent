@@ -475,6 +475,152 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertEqual(state["status"], "cancelled")
             self.assertEqual(state["terminalStatus"], "cancelled")
 
+    def test_cancelled_run_synthesizes_completion_report_readable_via_run_output(self):
+        # DEFECT 1: a cancelled run (harness terminal cancellation event) must
+        # synthesize a completion report readable via run-output --completion-report,
+        # not dead-end with missing_completion_report.
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        script = Path(temp.name) / "grok"
+        script.write_text(
+            "#!/usr/bin/env bash\n"
+            'printf \'%s\\n\' \'{"type":"text","data":"partial"}\'\n'
+            'printf \'%s\\n\' \'{"type":"end","stopReason":"Cancelled"}\'\n'
+            "printf 'cancel-noise-stderr\\n' >&2\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="grok")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="grok",
+                engine="grok",
+                mode="safe",
+                model="model-id",
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-05-20T21:42:33Z",
+            )
+            code, payload = self.runner.execute_tracked(
+                [str(script)],
+                workspace,
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+            self.assertEqual(code, 1)
+            assert payload is not None
+            self.assertEqual(payload["status"], "cancelled")
+            self.assertTrue(payload["completionReportWritten"])
+            self.assertEqual(payload["completionReportSource"], "delegate_synthesized")
+            report = (root / "runs" / run_id / "completion-report.md").read_text(encoding="utf-8")
+            self.assertIn("Synthesized by delegate", report)
+            self.assertIn("Status: cancelled", report)
+            self.assertIn("Failure reason: harness_cancelled", report)
+            self.assertIn("run-output", report)
+            self.assertIn("partial output", report)
+
+            # Readable via run-output --completion-report.
+            out = io.StringIO()
+            command = self.run_output.RunOutputCommand(
+                alias,
+                json_mode=True,
+                completion_report=True,
+            )
+            self.assertEqual(
+                self.run_output.emit(command, workspace_path=workspace, stdout=out),
+                0,
+            )
+            section = json.loads(out.getvalue())["sections"]["completionReport"]
+            self.assertEqual(section["completionReportSource"], "delegate_synthesized")
+            self.assertIn("Status: cancelled", section["content"])
+
+    def test_finalize_first_marker_race_envelope_and_state_both_cancelled(self):
+        # DEFECT 2 (scenario ii): finalize-first ordering. State has
+        # cancelRequested stamped, child exits 0 -> envelope + state both
+        # cancelled/exitCode 1, with a synthesized cancelled report.
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            run_path = self.registry.run_directory(root, run_id)
+            # Stamp the cancelRequested marker (as cancel does before signaling).
+            state = {
+                "schema": self.registry.STATE_SCHEMA,
+                "runId": run_id,
+                "alias": alias,
+                "status": "running",
+                "lastActivityAt": self.registry.utc_now_iso(),
+                "pid": os.getpid(),
+                "pgid": os.getpgid(0),
+                "cancelRequested": True,
+                "cancelRequestedAt": self.registry.utc_now_iso(),
+            }
+            self.registry.write_json_atomic(run_path / self.registry.STATE_FILE, state)
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-05-20T21:42:33Z",
+            )
+            accumulator = self.runner.harness_events.StreamAccumulator(harness="codex")
+            files = self.runner.TrackedRunFiles(
+                run_path=run_path,
+                stdout_log=run_path / self.registry.STDOUT_LOG,
+                stderr_log=run_path / self.registry.STDERR_LOG,
+            )
+            # Child exited 0, but cancelRequested is stamped.
+            capture = self.runner.TrackedCaptureResult(
+                accumulator=accumulator,
+                exit_code=0,
+                duration_ms=100,
+                stdout_bytes=10,
+                stderr_bytes=5,
+                stdin_failures=(),
+                pid=os.getpid(),
+                pgid=os.getpgid(0),
+            )
+            finalization = self.runner._finalize_tracked_run(
+                files,
+                ctx,
+                capture,
+                completion_report_mode="off",
+            )
+            # The LIVE envelope must agree with the persisted state.
+            self.assertEqual(finalization.status, "cancelled")
+            self.assertEqual(finalization.exit_code, 1)
+            self.assertEqual(finalization.extra.get("failureReason"), "cancelled_by_user")
+            ok = finalization.exit_code == 0
+            self.assertFalse(ok, "finalize-first with cancelRequested and exit 0 must be ok=False")
+            # A synthesized cancelled report must have been written.
+            self.assertTrue(finalization.report_written)
+            self.assertEqual(
+                finalization.extra.get("completionReportSource"), "delegate_synthesized"
+            )
+            report = (run_path / "completion-report.md").read_text(encoding="utf-8")
+            self.assertIn("Status: cancelled", report)
+            self.assertIn("cancelled_by_user", report)
+            # Persisted state must be cancelled/exitCode 1.
+            persisted = json.loads((run_path / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(persisted["status"], "cancelled")
+            self.assertEqual(persisted["failureReason"], "cancelled_by_user")
+            self.assertEqual(persisted.get("exitCode"), 1)
+
     def test_tracked_run_gives_child_eof_stdin(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
