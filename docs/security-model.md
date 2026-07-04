@@ -115,9 +115,9 @@ Cursor safe, Droid safe, Codex safe, Claude safe, Grok safe, and Kimi safe norma
 
 Git repositories with commits use a detached temporary Git worktree. Non-Git directories use a temporary directory copy. Git repositories with no commits fall back to a temporary directory copy because Git cannot create a detached worktree from an unborn `HEAD`; Delegate reports that fallback in run metadata.
 
-Delegate preserves internal symlinks during directory-copy and safe-worktree snapshot sync. Symlinks that resolve outside the source workspace are replaced with inert placeholder files inside the isolated workspace, and Delegate reports a warning that lists the relative paths it blocked. The placeholder does not include the external target path or target contents.
+Delegate recreates an untracked symlink during snapshot sync (directory-copy, safe-worktree, and `--include-dirty`) only when all three hold: the link is relative, it resolves inside the source workspace, and its target is not gitignored. Any symlink failing those checks — an absolute target, an escape outside the tree, or a link pointing at a gitignored secret inside the repo — is replaced with an inert placeholder file, and the check fails closed to a placeholder on any ambiguity (for example an unexpected `git check-ignore` exit code). Delegate reports a warning listing the symlink paths it blocked; the placeholder contains neither the target path nor the target contents.
 
-This protects the temporary safe workspace from accidental outside-file exposure through source-tree symlinks. It is not a full host sandbox: a child runtime may still read absolute paths, use credentials, call external tools, or perform network operations according to its own permissions.
+This closes a leak where an untracked symlink whose absolute target pointed at the repo's own gitignored secret would otherwise be recreated verbatim inside an edit-capable worktree, exposing that secret read/write to the child. It does not defend against hardlinks, which are indistinguishable from ordinary files by path and are documented as an out-of-scope caveat. It is not a full host sandbox either: a child runtime may still read absolute paths, use credentials, call external tools, or perform network operations according to its own permissions.
 
 ### Persistent worktree isolation
 
