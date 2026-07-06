@@ -38,7 +38,7 @@ pip install delegate-agent-cli
 For the latest unreleased code, or to contribute:
 
 ```bash
-python3 -m pip install "delegate-agent @ git+https://github.com/treygoff24/delegate-agent.git"
+python3 -m pip install "delegate-agent-cli @ git+https://github.com/treygoff24/delegate-agent.git"
 ```
 
 For local development or a checkout-only smoke test:
