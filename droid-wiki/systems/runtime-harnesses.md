@@ -4,7 +4,7 @@ Active contributors: Trey
 
 ## Purpose
 
-Runtime harnesses turn a normalized Delegate request into a concrete child command for Cursor Agent, Factory Droid, OpenAI Codex, Claude Code, or Kimi Code.
+Runtime harnesses turn a normalized Delegate request into a concrete child command for Cursor Agent, Factory Droid, OpenAI Codex, Claude Code, xAI Grok Build, or Kimi Code.
 
 ## Directory layout
 
@@ -28,7 +28,7 @@ Runtime harnesses turn a normalized Delegate request into a concrete child comma
 
 ## How it works
 
-Cursor and Kimi use argv prompt transport with public redaction placeholders. Droid uses a private prompt file. Codex and Claude use stdin. Safe/work flags are provider-specific: Codex safe uses a read-only sandbox, Claude safe uses plan permission mode and limited tools, Droid work uses `--skip-permissions-unsafe`, and Cursor work uses edit-enabling flags.
+Cursor and Kimi use argv prompt transport with public redaction placeholders. Droid and Grok use private prompt files. Codex and Claude use stdin. Safe/work flags are provider-specific: Codex safe uses a read-only sandbox, Claude safe uses plan permission mode and limited tools, Grok safe uses read-only sandbox and permission controls, Droid work uses `--skip-permissions-unsafe`, and Cursor work uses edit-enabling flags.
 
 ## Integration points
 

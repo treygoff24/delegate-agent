@@ -15,7 +15,7 @@ graph TD
     Request --> Worktree[src/delegate_agent/worktree_execution.py]
     SafeIso --> Runner[src/delegate_agent/runner.py]
     Worktree --> Runner
-    Runner --> Child[Cursor, Droid, Codex, Claude, or Kimi]
+    Runner --> Child[Cursor, Droid, Codex, Claude, Grok, or Kimi]
     Runner --> Events[src/delegate_agent/harness_events.py]
     Runner --> Registry[src/delegate_agent/run_registry.py]
     Registry --> Inspect[runs, snapshot, run-output]

@@ -22,6 +22,7 @@ Delegate keeps runtime dependencies small and delegates provider-specific work t
 | `droid` | Factory Droid harness | Configured by `droid.binary` and `droid.models`. |
 | `codex` | OpenAI Codex harness | Configured by `codex.binary`. |
 | `claude` | Claude Code harness | Configured by `claude.binary`. |
+| `grok` | xAI Grok Build harness | Configured by `grok.binary`. |
 | `kimi` | Kimi Code harness | Configured by `kimi.binary`. |
 | `git` | Isolation and worktrees | Used by `src/delegate_agent/git_utils.py`, `src/delegate_agent/isolation.py`, and worktree modules. |
 

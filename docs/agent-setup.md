@@ -162,7 +162,7 @@ For an orchestrating agent, script, or CI job:
 
 ## CI expectations
 
-The required test suite does not need real Cursor, Droid, Codex, Claude, or Kimi binaries. Tests use dry-run paths and fake binaries where needed:
+The required test suite does not need real Cursor, Droid, Codex, Claude, Grok, or Kimi binaries. Tests use dry-run paths and fake binaries where needed:
 
 ```bash
 python3 -m compileall -q src tests bin

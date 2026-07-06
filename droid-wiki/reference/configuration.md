@@ -15,6 +15,7 @@ From lowest to highest precedence: embedded defaults, `~/.delegate/config.json`,
 | `droid` | Droid binary, local model aliases, and default effort. |
 | `codex` | Codex binary, model, profile, sandbox, and config behavior. |
 | `claude` | Claude binary, model, native effort, permission mode, and session behavior. |
+| `grok` | Grok binary, model, native effort, permission mode, sandbox, and web-search behavior. |
 | `kimi` | Kimi binary and default model. |
 | `reasoning` | Codex and Droid model capability declarations. |
 | `policy` | Mode and harness-scoped runtime policy. |

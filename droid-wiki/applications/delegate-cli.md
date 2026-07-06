@@ -4,7 +4,7 @@ Active contributors: Trey
 
 ## Purpose
 
-The Delegate CLI gives humans and parent agents one command surface for launching bounded tasks in Cursor Agent, Factory Droid, OpenAI Codex, Claude Code, and Kimi Code.
+The Delegate CLI gives humans and parent agents one command surface for launching bounded tasks in Cursor Agent, Factory Droid, OpenAI Codex, Claude Code, xAI Grok Build, and Kimi Code.
 
 ## Directory layout
 

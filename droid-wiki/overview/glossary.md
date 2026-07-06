@@ -3,7 +3,7 @@
 | Term | Meaning | Source |
 | --- | --- | --- |
 | Delegate | The wrapper CLI implemented by this repository. | `README.md`, `src/delegate_agent/cli.py` |
-| Engine | The selected child runtime family: `cursor`, `droid`, `codex`, `claude`, or `kimi`. | `src/delegate_agent/cli.py` |
+| Engine | The selected child runtime family: `cursor`, `droid`, `codex`, `claude`, `grok`, or `kimi`. | `src/delegate_agent/cli.py` |
 | Harness | Runtime adapter name used in run metadata. | `src/delegate_agent/runner.py`, `src/delegate_agent/run_registry.py` |
 | Safe mode | Review/investigation mode. It is framed as no-edit and usually uses temporary isolation. | `docs/security-model.md`, `src/delegate_agent/cli.py` |
 | Work mode | Edit-capable mode. It can run in place or in a persistent worktree. | `docs/security-model.md`, `src/delegate_agent/cli.py` |

@@ -4,7 +4,7 @@
 
 # Delegate Agent
 
-Delegate Agent is a small CLI for handing a bounded task to another coding-agent runtime. It normalizes common calls to Cursor Agent, Factory Droid, OpenAI Codex, Claude Code, and Kimi Code so humans or other agents can launch review, investigation, and implementation jobs without remembering each tool's flags.
+Delegate Agent is a small CLI for handing a bounded task to another coding-agent runtime. It normalizes common calls to Cursor Agent, Factory Droid, OpenAI Codex, Claude Code, xAI Grok Build, and Kimi Code so humans or other agents can launch review, investigation, and implementation jobs without remembering each tool's flags.
 
 Use it when you want a predictable wrapper around prompts like:
 
@@ -16,8 +16,7 @@ Delegate does **not** commit, push, merge, deploy, publish, or run a background 
 
 Prompt handling is provider-specific: Codex and Claude prompts are delivered to the child
 runtime over stdin; Droid prompts are delivered through a private temporary
-prompt file using Droid's `--file` option; Cursor Agent and Kimi Code currently
-require prompt argv. Delegate redacts Cursor and Kimi prompt argv in dry-run
+prompt file using Droid's `--file` option, and Grok prompts use Grok's `--prompt-file`; Cursor Agent and Kimi Code currently require prompt argv. Delegate redacts Cursor and Kimi prompt argv in dry-run
 output and run manifests, but true process-argv hiding for those harnesses
 depends on the child CLIs exposing stdin or prompt-file transport.
 

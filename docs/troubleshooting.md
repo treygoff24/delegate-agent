@@ -306,7 +306,7 @@ reviewing the worktree.
 
 ## CI does not have child runtimes
 
-That is expected. Required tests do not need real Cursor, Droid, Codex, Claude, or Kimi binaries:
+That is expected. Required tests do not need real Cursor, Droid, Codex, Claude, Grok, or Kimi binaries:
 
 ```bash
 python3 -m compileall -q src tests bin
