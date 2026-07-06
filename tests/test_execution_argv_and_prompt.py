@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from unittest import mock
 
@@ -20,6 +21,30 @@ from tests.execution_test_base import (
 
 
 class ExecutionArgvAndPromptTests(ExecutionTestBase):
+    def assert_tracked_child_exited_and_safe_temp_dirs_cleaned(
+        self,
+        payload: dict,
+        temp_dirs_before: set[Path],
+    ) -> None:
+        pid = payload.get("pid")
+        self.assertIsInstance(pid, int)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.02)
+        else:
+            self.fail(f"tracked child process {pid} is still running")
+
+        while time.monotonic() < deadline:
+            remaining = safe_temp_dirs() - temp_dirs_before
+            if not remaining:
+                return
+            time.sleep(0.02)
+        self.assertEqual(safe_temp_dirs() - temp_dirs_before, set())
+
     def test_call_json_returns_text_without_registry(self):
         fake_bin = self.make_fake_bin()
         env_path = str(fake_bin) + os.pathsep + os.environ.get("PATH", "")
@@ -462,7 +487,10 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertIn("executionCwd", payload)
         self.assertNotEqual(payload["executionCwd"], payload["cwd"])
         self.assertTrue(payload.get("isolatedWorkspace"))
-        self.assertEqual(safe_temp_dirs() - temp_dirs_before, set())
+        self.assert_tracked_child_exited_and_safe_temp_dirs_cleaned(
+            payload,
+            temp_dirs_before,
+        )
 
     def test_cursor_safe_git_execution_does_not_mutate_original_workspace(self):
         repo = make_git_repo()
@@ -849,7 +877,10 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertEqual(Path(payload["cwd"]).resolve(), Path(repo.name).resolve())
         self.assertIn("executionCwd", payload)
         self.assertNotEqual(payload["executionCwd"], payload["cwd"])
-        self.assertEqual(safe_temp_dirs() - temp_dirs_before, set())
+        self.assert_tracked_child_exited_and_safe_temp_dirs_cleaned(
+            payload,
+            temp_dirs_before,
+        )
 
     def make_kimi_safe_fake(self):
         temp = tempfile.TemporaryDirectory()

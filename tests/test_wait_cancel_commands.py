@@ -91,6 +91,19 @@ class WaitCancelCommandTests(unittest.TestCase):
         code = cli.main(["--cwd", str(self.workspace), *argv], stdout=stdout, stderr=stderr)
         return code, stdout.getvalue(), stderr.getvalue()
 
+    def add_process_cleanup(self, proc: subprocess.Popen) -> None:
+        self.addCleanup(self.cleanup_process, proc)
+
+    @staticmethod
+    def cleanup_process(proc: subprocess.Popen) -> None:
+        if proc.poll() is None:
+            proc.kill()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+
     def test_wait_succeeded_returns_zero_json(self):
         _run_id, alias = self.write_run(status="succeeded")
         code, out, err = self.run_cli(["--json", "wait", alias, "--interval", "1"])
@@ -160,7 +173,7 @@ class WaitCancelCommandTests(unittest.TestCase):
             [sys.executable, "-c", "import time; time.sleep(30)"],
             start_new_session=True,
         )
-        self.addCleanup(lambda: proc.kill() if proc.poll() is None else None)
+        self.add_process_cleanup(proc)
         pgid = os.getpgid(proc.pid)
         run_id, alias = self.write_run(status="running", pid=proc.pid, pgid=pgid)
         code, out, err = self.run_cli(["--json", "cancel", alias])
@@ -185,7 +198,7 @@ class WaitCancelCommandTests(unittest.TestCase):
             [sys.executable, "-c", "import time; time.sleep(30)"],
             start_new_session=True,
         )
-        self.addCleanup(lambda: proc.kill() if proc.poll() is None else None)
+        self.add_process_cleanup(proc)
         pgid = os.getpgid(proc.pid)
         run_id, alias = self.write_run(status="running", pid=proc.pid, pgid=pgid)
         run_path = run_registry.run_directory(self.registry_root, run_id)
@@ -236,7 +249,7 @@ class WaitCancelCommandTests(unittest.TestCase):
             [sys.executable, "-c", "import time; time.sleep(30)"],
             start_new_session=True,
         )
-        self.addCleanup(lambda: proc.kill() if proc.poll() is None else None)
+        self.add_process_cleanup(proc)
         pgid = os.getpgid(proc.pid)
         run_id, alias = self.write_run(status="running", pid=proc.pid, pgid=pgid)
         run_path = run_registry.run_directory(self.registry_root, run_id)
@@ -449,7 +462,7 @@ class WaitCancelCommandTests(unittest.TestCase):
             [sys.executable, "-c", "import time; time.sleep(30)"],
             start_new_session=True,
         )
-        self.addCleanup(lambda: proc.kill() if proc.poll() is None else None)
+        self.add_process_cleanup(proc)
         pgid = os.getpgid(proc.pid)
         run_id, alias = self.write_run(
             status="running", pid=proc.pid, pgid=pgid, started_at=started_at
@@ -479,7 +492,7 @@ class WaitCancelCommandTests(unittest.TestCase):
             [sys.executable, "-c", "import time; time.sleep(30)"],
             start_new_session=True,
         )
-        self.addCleanup(lambda: proc.kill() if proc.poll() is None else None)
+        self.add_process_cleanup(proc)
         pgid = os.getpgid(proc.pid)
         run_id, alias = self.write_run(
             status="running", pid=proc.pid, pgid=pgid, started_at=started_at
@@ -515,7 +528,7 @@ class WaitCancelCommandTests(unittest.TestCase):
             [sys.executable, "-c", "import time; time.sleep(30)"],
             start_new_session=True,
         )
-        self.addCleanup(lambda: proc.kill() if proc.poll() is None else None)
+        self.add_process_cleanup(proc)
         pgid = os.getpgid(proc.pid)
         run_id, alias = self.write_run(status="running", pid=proc.pid, pgid=pgid)
         target = run_registry.RunTarget(run_id=run_id, alias=alias)
@@ -546,7 +559,7 @@ class WaitCancelCommandTests(unittest.TestCase):
             [sys.executable, "-c", parent_script],
             start_new_session=True,
         )
-        self.addCleanup(lambda: proc.kill() if proc.poll() is None else None)
+        self.add_process_cleanup(proc)
         pgid = os.getpgid(proc.pid)
         run_id, alias = self.write_run(status="running", pid=proc.pid, pgid=pgid)
         target = run_registry.RunTarget(run_id=run_id, alias=alias)
@@ -605,7 +618,7 @@ class WaitCancelCommandTests(unittest.TestCase):
             [sys.executable, "-c", "import time; time.sleep(30)"],
             start_new_session=True,
         )
-        self.addCleanup(lambda: proc.kill() if proc.poll() is None else None)
+        self.add_process_cleanup(proc)
         _run_id, alias = self.write_run(status="running", pid=proc.pid)
         code, out, err = self.run_cli(["--json", "cancel", alias])
         self.assertEqual(code, 0, err)
