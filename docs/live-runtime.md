@@ -24,6 +24,23 @@ delegate --json describe
 
 The installed command may use user config from `~/.delegate/config.json` unless `DELEGATE_CONFIG` points elsewhere. `describe` reports the active `configSource`.
 
+When `AI_PROFILE=work|personal` is set and the matching
+`~/.delegate/config.<profile>.json` overlay is missing, Delegate blocks launch
+and mutation commands but allows read-only diagnostics (`profiles`, `runs`,
+`run-output`, `snapshot`, cached `capabilities`, `worktree show`,
+`worktree list`, `describe`, `models`) with a warning. This check runs inside
+`delegate_agent.cli:main` (`src/delegate_agent/profile_guard.py`), so it applies
+regardless of entrypoint: the installed pip console script, `python -m
+delegate_agent.cli`, or `bin/delegate.py`. Some local installs additionally put
+a profile-aware shell shim in front of the Python entrypoint -- the tracked
+source for that shim is `bin/delegate-profile-shim` -- which applies the same
+check even earlier, before Python starts. `AI_PROFILE` values other than
+`work`/`personal` are not recognized profiles; Delegate warns and runs on the
+base account rather than failing closed, since there is no config filename
+convention to check against. Fix a half-configured install with
+`env -u AI_PROFILE delegate config sync-profiles`, or bypass once with
+`env -u AI_PROFILE delegate ...` or an explicit `DELEGATE_CONFIG=...`.
+
 ## Do not promote implicitly
 
 Repository development should not overwrite an installed runtime, user config, or local worktree store as a side effect. Promote a checkout to an installed command only through an explicit install/update step after review and tests.

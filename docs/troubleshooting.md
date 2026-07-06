@@ -109,6 +109,34 @@ ls -la ~/.delegate/config.json .delegate/config.json 2>/dev/null || true
 
 When `DELEGATE_CONFIG` is set, the file must exist.
 
+## `AI_PROFILE=...` but `config.<profile>.json` is missing
+
+Delegate uses `~/.delegate/config.work.json` or `~/.delegate/config.personal.json`
+when `AI_PROFILE=work|personal` is present. If that overlay is missing, launch
+and mutation commands fail closed so they do not silently use the wrong
+account. Read-only diagnostics (`profiles`, `runs`, `run-output`, `snapshot`,
+cached `capabilities`, `worktree show`, `worktree list`, `describe`, `models`)
+should still run with a warning. This check runs in the Python CLI itself, so
+it applies whether or not a profile-aware launcher shim
+(`bin/delegate-profile-shim`) is in front of `delegate`.
+
+A miscased or unrecognized `AI_PROFILE` value (anything other than exactly
+`work` or `personal`) is not treated as a profile crossover risk at all --
+Delegate warns that it is running on the base account and proceeds normally.
+
+Fix the install:
+
+```bash
+env -u AI_PROFILE delegate config sync-profiles
+```
+
+Temporary bypasses:
+
+```bash
+env -u AI_PROFILE delegate profiles
+DELEGATE_CONFIG=/path/to/config.json delegate profiles
+```
+
 ## WSL path or Git warnings
 
 Inside WSL, use Linux paths and Linux-installed tools:

@@ -692,13 +692,14 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         name="config",
         summary="Manage the user Delegate config file.",
         usage=("delegate [--json] config <action>",),
-        arguments=(ArgSpec("action", True, "Currently: init."),),
+        arguments=(ArgSpec("action", True, "Currently: init, sync-profiles."),),
         notes=(
             "config init writes an editable starter config to ~/.delegate/config.json, "
             "or to DELEGATE_CONFIG when that environment variable is set.",
-            "Run delegate config init --force to overwrite an existing config.",
+            "config sync-profiles writes missing config.work.json/config.personal.json overlays.",
+            "Run delegate config init --force to overwrite an existing base config.",
         ),
-        see_also=("config init", "profiles", "models", "describe"),
+        see_also=("config init", "config sync-profiles", "profiles", "models", "describe"),
         unsupported_global_options=(
             "--cwd",
             "--isolation",
@@ -719,9 +720,33 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         notes=(
             "The starter config includes placeholder Droid aliases and placeholder CODEX_HOME profile pointers.",
+            "It also writes missing config.work.json/config.personal.json profile overlays next to the base config.",
             "Use POSIX paths inside WSL; convert Windows paths with wslpath before putting them in config.",
         ),
-        see_also=("config", "profiles", "models"),
+        see_also=("config", "config sync-profiles", "profiles", "models"),
+        unsupported_global_options=(
+            "--cwd",
+            "--isolation",
+            "--auth-profile",
+            "--pass-through",
+            "--completion-report",
+            "--no-completion-report",
+        ),
+    ),
+    "config sync-profiles": CommandSpec(
+        name="config sync-profiles",
+        summary="Write missing profile overlay config files.",
+        usage=("delegate [--json] config sync-profiles",),
+        examples=(
+            "delegate config sync-profiles",
+            "env -u AI_PROFILE delegate --json config sync-profiles",
+        ),
+        notes=(
+            "Creates missing config.work.json and config.personal.json next to the base config.",
+            "Existing profile overlay files are left untouched.",
+            "Each overlay pins profiles.default and carries that profile's CODEX_HOME pointer; secrets stay out of repo/config examples.",
+        ),
+        see_also=("config", "config init", "profiles"),
         unsupported_global_options=(
             "--cwd",
             "--isolation",

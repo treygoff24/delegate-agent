@@ -341,11 +341,21 @@ config validation.
 ```bash
 delegate config init
 delegate --json config init --force
+delegate config sync-profiles
 ```
 
 `delegate config init` writes an editable starter config to
 `~/.delegate/config.json`, or to `DELEGATE_CONFIG` when set. It refuses to
-overwrite an existing file unless `--force` is passed.
+overwrite an existing file unless `--force` is passed. It also writes missing
+`config.work.json` and `config.personal.json` profile overlays next to the base
+config.
+
+`delegate config sync-profiles` reads the base config and creates any missing
+profile overlays without overwriting existing ones. `config` is itself a
+mutation command, so if `AI_PROFILE=work|personal` is set and the matching
+overlay is missing, the profile guard (enforced in the CLI itself, and again
+by `bin/delegate-profile-shim` if that's in front of it) blocks it too -- run
+it as `env -u AI_PROFILE delegate config sync-profiles`.
 
 ### JSON input
 

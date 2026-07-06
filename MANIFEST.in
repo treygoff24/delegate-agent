@@ -4,6 +4,8 @@ include CHANGELOG.md
 include CONTRIBUTING.md
 include SECURITY.md
 include config.example.json
+include bin/delegate.py
+include bin/delegate-profile-shim
 include docs/agent-setup.md
 include docs/cli-reference.md
 include docs/configuration.md

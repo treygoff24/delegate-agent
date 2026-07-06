@@ -21,6 +21,11 @@ delegate config init
 $EDITOR ~/.delegate/config.json
 ```
 
+`config init` also writes missing `config.work.json` and
+`config.personal.json` profile overlays next to the base config. Existing
+installs can run `env -u AI_PROFILE delegate config sync-profiles` to create
+missing overlays without overwriting ones already present.
+
 Config objects are deep-merged. That means an explicit config can override a
 specific key, but nested maps such as `droid.models` are merged with lower layers
 rather than cleared. For a deterministic automation run with no user-level
@@ -239,6 +244,10 @@ Controls local run recording.
   the live secret into the value, and an opaque secret would print verbatim in
   `delegate profiles` and dry-run output. Keep secrets in shell env or
   harness-native key files.
+- `delegate config sync-profiles` creates missing `config.<profile>.json`
+  overlays for the built-in `work` and `personal` profile names. Each overlay
+  pins `profiles.default` and carries that profile's `CODEX_HOME` pointer; it
+  does not contain secrets.
 - `--auth-profile NAME` overrides ambient detection for launches, `dry-run`,
   `run --input-json`, `delegate profiles`, and `capabilities refresh`. Unknown
   names fail closed with `unknown_profile`.

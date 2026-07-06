@@ -138,6 +138,45 @@ Persistent worktree isolation is not a security sandbox. It does not prevent:
 - Run secret and path scans before publishing.
 - Profiles never store secrets. `profiles.definitions.*.env` is for non-secret routing pointers only (for example `CODEX_HOME`); secret-shaped keys are rejected at config load with `secret_in_profile_env`. Enforcement is by key name, so do not embed a credential in an innocuously named value or interpolate one via `$VAR` — keep real credentials in shell env or harness-native key stores. Resolved profile env is injected into child processes; only profile *names* are persisted in run state, and `delegate profiles` / dry-run echo env values through the same best-effort credential scrubbing as other surfaces.
 
+### AI_PROFILE account-crossover guard
+
+Some installs run every harness launch inside a shell that sets
+`AI_PROFILE=work` or `AI_PROFILE=personal` to route which `~/.delegate/config.<profile>.json`
+overlay (and which credential-bearing `keys.zsh`) applies. The failure mode
+this guards against: a shell in `AI_PROFILE=work` with no `config.work.json`
+yet must never silently fall back to launching on the base/ambient account —
+that is a billing and credential crossover, not a cosmetic bug.
+
+The guarantee is enforced in **two places**, both fail-closed by default:
+
+1. **`delegate_agent.cli:main`** (`src/delegate_agent/profile_guard.py`). This
+   runs inside the Python CLI itself, immediately after argv parsing and before
+   any config load, workspace resolution, or child launch. It applies no
+   matter how `delegate` is invoked: the installed pip console script,
+   `python -m delegate_agent.cli`, or `bin/delegate.py`.
+2. **`bin/delegate-profile-shim`**, a shell shim template some installs put in
+   front of the Python entrypoint. It applies the same check even earlier,
+   before Python starts, as defense in depth.
+
+Both layers agree on the same rule: when `DELEGATE_CONFIG` is unset and
+`AI_PROFILE` is exactly `work` or `personal`, and the matching overlay config
+is missing or unreadable, launch and mutation commands (any engine, `run`,
+`dry-run`, `wait`, `cancel`, `config`, `worktree remove`/`prune`/`gc`,
+`capabilities refresh`) are refused. Read-only diagnostics (`profiles`,
+`runs`, `run-output`, `snapshot`, cached `capabilities`, `describe`, `models`,
+`worktree show`/`list`) still run, with a stderr warning that the check would
+otherwise fail closed. Once `DELEGATE_CONFIG` is set — by the shim, after it
+validates the overlay, or directly by a caller — the Python-layer guard does
+not re-check `AI_PROFILE`; it treats an explicit `DELEGATE_CONFIG` as already
+having answered the question.
+
+An `AI_PROFILE` value that is set, non-empty, and not exactly `work` or
+`personal` (a typo or an unrelated convention) is not a recognized profile, so
+none of the above applies: both layers print a warning that Delegate is
+running on the base account and proceed normally rather than failing closed —
+there is no `config.<profile>.json` naming convention to check an unknown
+name against.
+
 ## Output and redaction
 
 Newly-created `.delegate/` registry directories and files are made owner-only on POSIX systems.
