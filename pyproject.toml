@@ -3,7 +3,7 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "delegate-agent"
+name = "delegate-agent-cli"
 version = "0.11.0"
 description = "A tiny CLI for delegating bounded agent tasks to Cursor, Droid, OpenAI Codex, Claude Code, Grok Build, or Kimi Code runtimes."
 readme = "README.md"
