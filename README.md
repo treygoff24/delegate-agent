@@ -21,9 +21,21 @@ require prompt argv. Delegate redacts Cursor and Kimi prompt argv in dry-run
 output and run manifests, but true process-argv hiding for those harnesses
 depends on the child CLIs exposing stdin or prompt-file transport.
 
-## Install from source
+## Install
 
-Delegate requires Python 3.11 or newer. It is currently documented as a GitHub-source install, not a PyPI package.
+Delegate requires Python 3.11 or newer. The PyPI package is named `delegate-agent-cli` (PyPI's name-similarity rule blocked the shorter `delegate-agent`), but it installs the same `delegate` command either way.
+
+```bash
+uv tool install delegate-agent-cli
+# or
+pipx install delegate-agent-cli
+# or
+pip install delegate-agent-cli
+```
+
+### Install from source
+
+For the latest unreleased code, or to contribute:
 
 ```bash
 python3 -m pip install "delegate-agent @ git+https://github.com/treygoff24/delegate-agent.git"

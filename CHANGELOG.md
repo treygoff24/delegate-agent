@@ -21,6 +21,11 @@ Profile-guard calibration fix for issue #9: a shell carrying `AI_PROFILE=work|pe
 
 - The fail-closed profile-crossover guarantee is now enforced inside the Python CLI (`delegate_agent.cli:main` via the new `delegate_agent.profile_guard`), classifying from the real parsed command rather than positional argv guessing. This closes a gap where the guarantee lived only in the optional shell shim: the pip console script, `python -m delegate_agent.cli`, and `bin/delegate.py` all reach `main` with no shim in front, and previously fell through to the base account on a missing overlay. The guard no-ops when `DELEGATE_CONFIG` is already exported (shim precedence) so the two layers compose without a double check. The tracked `bin/delegate-profile-shim` template applies the same check before Python starts, as an additional early gate; it scans all args for `capabilities refresh` so a mutation is never misclassified as a read-only probe.
 
+### Packaging
+
+- Published to PyPI as `delegate-agent-cli`: PyPI's separator-stripped name-similarity rule blocked the shorter `delegate-agent` (an existing `DelegateAgent` project collides). The installed console script is still `delegate`; only the `pip install` name changed.
+- Hardened two tests (`test_execution_argv_and_prompt.py`, `test_wait_cancel_commands.py`) that raced child-process teardown against the isolation and cleanup assertions they were checking, which showed up as intermittent failures on the publish gate.
+
 ## [0.10.0] - 2026-07-04
 
 Usage-audit fix wave: 82 sessions and 1,241 delegate invocations from one week of agent usage were mined for friction and failure modes, and the whole Tier 1–3 backlog was built across four decorrelated implementation waves plus live acceptance.

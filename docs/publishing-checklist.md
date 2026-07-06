@@ -1,6 +1,8 @@
 # Publishing checklist
 
-Use this before making a public source release, GitHub release, or package artifact. The project is currently documented as GitHub-source install; do not advertise PyPI until the packaging flow is complete.
+Use this before making a public source release, GitHub release, or package artifact.
+
+PyPI packaging is validated and live: `delegate-agent-cli` published 2026-07-06 (PyPI's name-similarity rule blocked the shorter `delegate-agent`; the installed console script is still `delegate`). Re-run the full checklist below for every subsequent release — publishing once does not exempt future versions from these checks.
 
 ## Required checks
 
@@ -64,5 +66,5 @@ Use this before making a public source release, GitHub release, or package artif
 ## Release decision
 
 - [ ] Decide whether this release is source-only, GitHub release, PyPI, or another distribution path.
-- [ ] If PyPI is chosen, add and test the release workflow before advertising PyPI installation.
+- [ ] If PyPI is chosen, confirm the release workflow still passes before publishing (PyPI itself is already validated as a distribution path as of the 2026-07-06 `delegate-agent-cli` publish).
 - [ ] Tag only after docs, package metadata, and artifact checks agree.
