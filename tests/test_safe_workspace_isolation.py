@@ -2,6 +2,7 @@ import io
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,9 +10,15 @@ from unittest import mock
 
 from tests.delegate_commands_test_base import CommandTestBase, make_git_repo
 
+ROOT = Path(__file__).resolve().parents[1]
+SRC = str(ROOT / "src")
+
+if SRC not in sys.path:
+    sys.path.insert(0, SRC)
+
 # Imported after the base (which bootstraps sys.path); the two timeout tests
 # monkeypatch safe_workspace._run_git / _run_git_bytes directly on this module.
-from delegate_agent import safe_workspace
+from delegate_agent import safe_workspace  # noqa: E402
 
 
 class SafeWorkspaceIsolationTests(CommandTestBase):

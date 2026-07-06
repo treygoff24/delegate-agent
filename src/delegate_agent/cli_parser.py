@@ -261,9 +261,22 @@ def parse_config_subcommand(
             "--auth-profile is not supported with delegate config.",
         )
     action = rest[0]
-    if action != "init":
+    if action not in {"init", "sync-profiles"}:
         raise DelegateError("unknown_config_action", f"Unknown config action: {action}")
     force = False
+    if action == "sync-profiles":
+        for token in rest[1:]:
+            if command_help.is_help_token(token):
+                return help_command(json_mode, "config sync-profiles")
+            require_no_extra([token], "config sync-profiles")
+        return ParsedCommand(
+            "config",
+            global_options=GlobalOptions(json_mode=json_mode),
+            config_command=config_commands.ConfigCommand(
+                action="sync-profiles",
+                json_mode=json_mode,
+            ),
+        )
     for token in rest[1:]:
         if command_help.is_help_token(token):
             return help_command(json_mode, "config init")

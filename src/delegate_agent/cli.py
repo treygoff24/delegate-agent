@@ -18,6 +18,7 @@ from delegate_agent import (
     config_commands,
     inspection_commands,
     profile_commands,
+    profile_guard,
     profiles,
     reasoning,
     redaction,
@@ -817,6 +818,7 @@ def main(
         parsed = parse_cli(argv)
         global_options = parsed.global_options
         json_mode = global_options.json_mode
+        profile_guard.enforce_profile_guard(parsed, stderr=stderr)
         if parsed.subcommand == "help":
             return emit_command_help(parsed.help_topic, global_options.json_mode, stdout)
         if parsed.subcommand == "version":

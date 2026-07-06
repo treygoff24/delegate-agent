@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# Profile-aware delegate launcher template.
+#
+# Installers may copy this to a user-local `delegate` shim. It routes recognized
+# AI_PROFILE shells to matching ~/.delegate/config.<profile>.json files, while
+# letting known read-only diagnostics run when the profile config is missing.
+
+_delegate_profile_config="${HOME}/.delegate/config.${AI_PROFILE:-}.json"
+
+_delegate_subcommand() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --json|--pass-through|--no-completion-report)
+        shift
+        ;;
+      --cwd|--isolation|--completion-report|--auth-profile|--group)
+        [ "$#" -ge 2 ] || return 0
+        shift 2
+        ;;
+      --help|-h|--version)
+        printf '%s\n' "$1"
+        return 0
+        ;;
+      --)
+        shift
+        break
+        ;;
+      *)
+        printf '%s\n' "$1"
+        return 0
+        ;;
+    esac
+  done
+}
+
+_delegate_is_readonly_request() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --json|--pass-through|--no-completion-report)
+        shift
+        ;;
+      --cwd|--isolation|--completion-report|--auth-profile|--group)
+        [ "$#" -ge 2 ] || return 1
+        shift 2
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+  _cmd="${1:-}"
+  [ "$#" -gt 0 ] && shift
+  case "$_cmd" in
+    profiles|runs|run-output|describe|models|snapshot|agent-help|help|--help|-h|--version)
+      return 0
+      ;;
+    capabilities)
+      # Scan every remaining arg for a `refresh` positional (not just $1) so
+      # `capabilities --verbose refresh` is still classified as a mutation.
+      for _delegate_cap_arg in "$@"; do
+        if [ "$_delegate_cap_arg" = "refresh" ]; then
+          return 1
+        fi
+      done
+      return 0
+      ;;
+    worktree)
+      case "${1:-}" in
+        show|list)
+          return 0
+          ;;
+        *)
+          return 1
+          ;;
+      esac
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+_delegate_profile_fix_message() {
+  cat >&2 <<EOF
+delegate: AI_PROFILE=${AI_PROFILE} but ${_delegate_profile_config} is missing/unreadable; refusing to run a launch or mutation command on the wrong account.
+Fix: create the profile config from config.example.json, or run 'env -u AI_PROFILE delegate config sync-profiles' to materialize missing profile overlays.
+Temporary bypasses: 'env -u AI_PROFILE delegate ...' uses the base config (work Claude, ambient Codex), or set 'DELEGATE_CONFIG=/path/to/config.json delegate ...'.
+EOF
+}
+
+if [ -z "${DELEGATE_CONFIG:-}" ] && [ -n "${AI_PROFILE:-}" ]; then
+  case "${AI_PROFILE}" in
+    personal|work)
+      if [ ! -r "$_delegate_profile_config" ]; then
+        _delegate_cmd="$(_delegate_subcommand "$@")"
+        if _delegate_is_readonly_request "$@"; then
+          echo "delegate: warning: AI_PROFILE=${AI_PROFILE} but ${_delegate_profile_config} is missing/unreadable; continuing because '${_delegate_cmd}' is read-only. Launch and mutation commands remain blocked until the profile config exists." >&2
+        else
+          _delegate_profile_fix_message
+          exit 1
+        fi
+      else
+        export DELEGATE_CONFIG="$_delegate_profile_config"
+        _delegate_keys="${HOME}/.ai-profiles/${AI_PROFILE}/keys.zsh"
+        # ponytail: current keys.zsh files are plain exports; switch to parsing if
+        # they ever need zsh-only syntax.
+        [ -f "$_delegate_keys" ] && . "$_delegate_keys"
+      fi
+      ;;
+    *)
+      echo "delegate: AI_PROFILE='${AI_PROFILE}' is not a recognized profile (work|personal); running on the base account" >&2
+      ;;
+  esac
+fi
+
+if [ -n "${DELEGATE_SHIM_PY:-}" ]; then
+  exec python3 "$DELEGATE_SHIM_PY" "$@"
+fi
+exec python3 -m delegate_agent.cli "$@"

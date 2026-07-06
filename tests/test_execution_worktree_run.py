@@ -1,13 +1,20 @@
 import io
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from unittest import mock
 
 from tests.execution_test_base import ExecutionTestBase, safe_temp_dirs
 
-from delegate_agent import worktree_summary
+ROOT = Path(__file__).resolve().parents[1]
+SRC = str(ROOT / "src")
+
+if SRC not in sys.path:
+    sys.path.insert(0, SRC)
+
+from delegate_agent import worktree_summary  # noqa: E402
 
 
 class ExecutionWorktreeRunTests(ExecutionTestBase):

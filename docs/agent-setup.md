@@ -51,6 +51,10 @@ This guide covers both human setup and non-interactive setup for agents or CI jo
    ```
 
    Replace placeholder Droid model IDs. Use local aliases such as `reviewer` and `implementer`; the alias names are yours and do not need to reveal the provider.
+   `config init` also writes missing `config.work.json` and
+   `config.personal.json` profile overlays next to the base config. For an
+   existing install, run `env -u AI_PROFILE delegate config sync-profiles` to
+   create missing overlays without overwriting existing ones.
 
    In a development checkout, `cp config.example.json ~/.delegate/config.json`
    is still fine. Installed users should prefer `delegate config init`.

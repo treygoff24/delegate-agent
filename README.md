@@ -64,6 +64,11 @@ delegate config init
 $EDITOR ~/.delegate/config.json
 ```
 
+`config init` also writes missing `~/.delegate/config.work.json` and
+`~/.delegate/config.personal.json` profile overlays. For an existing install,
+run `env -u AI_PROFILE delegate config sync-profiles` to materialize any missing
+overlays without overwriting ones you already edited.
+
 Inspect what Delegate sees:
 
 ```bash
@@ -255,6 +260,18 @@ delegate --auth-profile work codex safe "Review this diff."
 ```
 
 Delegate resolves the profile once per request and injects its env into every spawned child across tracked, pass-through, safe-isolation, and persistent-worktree paths. Profile `env` holds **non-secret routing pointers only** (for example `CODEX_HOME`); secret-shaped keys are rejected at config load, so real credentials stay in your shell or a harness-native key store. See [Configuration](docs/configuration.md#profiles) for the full schema.
+
+If `AI_PROFILE=work|personal` points at a missing profile overlay, Delegate
+blocks launch and mutation commands, but lets read-only diagnostics
+(`profiles`, `runs`, `run-output`, `snapshot`, cached `capabilities`,
+`worktree show`, `worktree list`, `describe`, `models`) continue with a
+warning. This guarantee is enforced in the Python CLI itself (`delegate_agent.cli:main`), so it holds no matter how you invoke Delegate: the
+pip console script, `python -m delegate_agent.cli`, `bin/delegate.py`, or a
+shell shim in front of any of those. The tracked launcher shim template,
+`bin/delegate-profile-shim`, applies the same check earlier, before Python
+even starts, as an additional early gate. Temporary bypasses: `env -u
+AI_PROFILE delegate ...` uses the base config, or set
+`DELEGATE_CONFIG=/path/to/config.json`.
 
 ## Useful docs
 

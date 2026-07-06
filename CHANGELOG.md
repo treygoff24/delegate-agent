@@ -5,6 +5,22 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-07-05
+
+Profile-guard calibration fix for issue #9: a shell carrying `AI_PROFILE=work|personal` with no matching `~/.delegate/config.<profile>.json` no longer presents a half-configured install as a total CLI outage.
+
+### Added
+
+- `delegate config sync-profiles` materializes missing `~/.delegate/config.<profile>.json` overlays (`work`, `personal`) from the validated base config. It never clobbers an overlay you already edited, validates the merged effective config before any write, and writes each overlay with private-file permissions. `delegate config init` now writes the same overlays alongside the base config. Both share one path convention (`config.profile_config_path`, `config.PROFILE_CONFIG_NAMES`) so the writer and the guard cannot disagree on overlay naming.
+
+### Fixed
+
+- `AI_PROFILE=work|personal` with a missing or unreadable profile overlay no longer hard-blocks every command, including the read-only diagnostics you would reach for to debug it. Recognized-but-configless profiles now block only launch and mutation commands — with remediation text that points at `delegate config sync-profiles` and the `env -u AI_PROFILE` / `DELEGATE_CONFIG=` bypasses — while read-only diagnostics (`profiles`, `runs`, `run-output`, `snapshot`, cached `capabilities`, `worktree show`/`list`, `describe`, `models`, `help`, `version`) pass with a stderr warning. An unrecognized non-empty `AI_PROFILE` now warns and continues on the base account instead of silently falling through.
+
+### Security
+
+- The fail-closed profile-crossover guarantee is now enforced inside the Python CLI (`delegate_agent.cli:main` via the new `delegate_agent.profile_guard`), classifying from the real parsed command rather than positional argv guessing. This closes a gap where the guarantee lived only in the optional shell shim: the pip console script, `python -m delegate_agent.cli`, and `bin/delegate.py` all reach `main` with no shim in front, and previously fell through to the base account on a missing overlay. The guard no-ops when `DELEGATE_CONFIG` is already exported (shim precedence) so the two layers compose without a double check. The tracked `bin/delegate-profile-shim` template applies the same check before Python starts, as an additional early gate; it scans all args for `capabilities refresh` so a mutation is never misclassified as a read-only probe.
+
 ## [0.10.0] - 2026-07-04
 
 Usage-audit fix wave: 82 sessions and 1,241 delegate invocations from one week of agent usage were mined for friction and failure modes, and the whole Tier 1–3 backlog was built across four decorrelated implementation waves plus live acceptance.
@@ -214,6 +230,7 @@ Usage-audit fix wave: 82 sessions and 1,241 delegate invocations from one week o
 
 - Releases before 0.1.3 predate this changelog.
 
+[0.11.0]: https://github.com/treygoff24/delegate-agent/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/treygoff24/delegate-agent/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/treygoff24/delegate-agent/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/treygoff24/delegate-agent/compare/v0.8.0...v0.8.1

@@ -926,6 +926,19 @@ def config_path() -> Path:
     return Path(raw).expanduser()
 
 
+PROFILE_CONFIG_NAMES = ("work", "personal")
+
+
+def profile_config_path(base_path: Path, profile: str) -> Path:
+    """Path to the AI_PROFILE overlay config for ``profile`` next to ``base_path``.
+
+    Shared by ``config_commands`` (which writes these overlays) and
+    ``profile_guard`` (which checks for them), so both agree on
+    ``~/.delegate/config.<profile>.json`` naming without duplicating the rule.
+    """
+    return base_path.with_name(f"{base_path.stem}.{profile}{base_path.suffix}")
+
+
 def workspace_config_path(workspace: Path) -> Path:
     return workspace / WORKSPACE_CONFIG_RELATIVE
 
