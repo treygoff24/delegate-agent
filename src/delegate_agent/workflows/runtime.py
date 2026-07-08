@@ -135,7 +135,7 @@ class WorkflowState:
                 self.claimed_keys.add(key)
             elif event.get("type") == "agent_started":
                 self.started_without_result.add(key)
-            elif event.get("type") in {"agent_finished", "agent_result"}:
+            elif event.get("type") == "agent_finished":
                 self.replay_keys.add(key)
                 self.replay[key] = event.get("result")
                 self.started_without_result.discard(key)
