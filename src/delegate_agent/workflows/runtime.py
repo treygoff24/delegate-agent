@@ -73,6 +73,11 @@ class Budget:
             self._spent += 1
             return self._spent
 
+    def reconcile_spent(self, minimum: int) -> None:
+        with self._lock:
+            if minimum > self._spent:
+                self._spent = minimum
+
 
 @dataclass
 class WorkflowState:
@@ -134,6 +139,11 @@ class WorkflowState:
                 self.replay_keys.add(key)
                 self.replay[key] = event.get("result")
                 self.started_without_result.discard(key)
+        # Budget events are fsynced but status.json is not, so after a hard
+        # crash the seeded spent can lag the durable claim set. One claim per
+        # key, so spent is at least len(claimed_keys); status can only lag
+        # the journal, never lead it.
+        self.budget.reconcile_spent(len(self.claimed_keys))
 
     def append_event(self, event_type: str, **payload: Any) -> dict[str, Any]:
         with self.journal_lock:
@@ -758,8 +768,10 @@ class WorkflowDsl:
             return _MISSING
         if not _workflow_run_terminal(self.state.workspace, run_id):
             waited = _wait_for_workflow_agent_run(self.state.workspace, run_id, timeout)
-            if not waited:
+            if not waited and not _workflow_run_terminal(self.state.workspace, run_id):
                 # Match live-path timeout: cancel the child; timeout is definitive.
+                # The terminal re-check closes the race where the child finished
+                # between the wait deadline and the cancel — adopt that instead.
                 cancel_workflow_agent_child(self.state.workspace, self.state.wf_id, key)
                 self.state.append_event("agent_timeout", key=key, scope=scope, runId=run_id)
                 return None

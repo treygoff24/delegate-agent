@@ -37,7 +37,6 @@ DURABLE_EVENT_TYPES = {
     "gate",
     "workflow_finished",
 }
-RESULT_EVENT_TYPES = DURABLE_EVENT_TYPES - {"agent_started", "budget"}
 
 
 def workflow_root(workspace: Path) -> Path:

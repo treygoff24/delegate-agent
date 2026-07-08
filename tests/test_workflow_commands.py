@@ -1194,6 +1194,116 @@ class WorkflowCommandTests(unittest.TestCase):
             ["fake completion", "fake completion", "fake completion"],
         )
 
+    def test_resume_reseeds_spent_budget_from_durable_journal(self) -> None:
+        # Round-4: budget events are fsynced but status.json is not, so after a
+        # hard crash status can lag the journal; resume must trust the journal.
+        script = self.write_workflow(
+            """
+            meta = {"name": "budget-reseed", "defaults": {"engine": "codex", "mode": "safe"}}
+            return parallel([
+                lambda: agent("very slow a"),
+                lambda: agent("very slow b"),
+                lambda: agent("very slow c"),
+            ])
+            """
+        )
+        launch = self.run_delegate(
+            ["--json", "workflow", "run", str(script), "--budget", "3"],
+            env_extra={"FAKE_CODEX_SLEEP_SECONDS": "30"},
+        )
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        self.wait_for_group_runs(wf_id, count=3)
+        killed = self.run_delegate(["--json", "workflow", "kill", wf_id])
+        self.assertEqual(killed.returncode, 0, killed.stderr)
+        root = self.workspace / ".delegate" / "workflows" / wf_id
+        journal = root / "journal.jsonl"
+        events = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+        kept = [
+            event
+            for event in events
+            if event["type"]
+            not in {"agent_finished", "workflow_finished", "workflow_killed", "workflow_failed"}
+        ]
+        journal.write_text(
+            "".join(json.dumps(event, sort_keys=True) + "\n" for event in kept),
+            encoding="utf-8",
+        )
+        # Simulate the non-durable status write being lost in the crash while
+        # the fsynced journal (three budget claims) survived.
+        status_path = root / workflow_registry.STATUS_FILE
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+        status["budget"] = {"total": 3, "spent": 0}
+        status_path.write_text(json.dumps(status, sort_keys=True), encoding="utf-8")
+        if (root / "result.json").exists():
+            (root / "result.json").unlink()
+        resumed = self.run_delegate(["--json", "workflow", "run", "--resume", wf_id])
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "15"])
+        self.assertEqual(waited.returncode, 0, waited.stderr)
+        status_after = json.loads(self.run_delegate(["--json", "workflow", "status", wf_id]).stdout)
+        self.assertEqual(status_after["status"], "succeeded")
+        self.assertEqual(status_after["budget"]["spent"], 3)
+
+    def test_adoption_timeout_recheck_adopts_child_completed_during_wait(self) -> None:
+        # Round-4: a child that finishes between the adoption-wait deadline and
+        # the cancel must be adopted, not discarded as a timeout None.
+        script = self.write_workflow(
+            """
+            meta = {"name": "adopt-race", "defaults": {"engine": "codex", "mode": "safe"}}
+            return agent("one", label="race-me")
+            """
+        )
+        launch = self.run_delegate(["--json", "workflow", "run", str(script)])
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        self.assertEqual(
+            self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"]).returncode,
+            0,
+        )
+        root = self.workspace / ".delegate" / "workflows" / wf_id
+        from unittest import mock
+
+        from delegate_agent.workflows import runtime as workflow_runtime
+
+        state = workflow_runtime.WorkflowState(
+            wf_id=wf_id,
+            workspace=self.workspace,
+            root=root,
+            script_path=root / workflow_registry.SCRIPT_FILE,
+            config=json.loads(self.config_path.read_text(encoding="utf-8")),
+            cli_argv=[sys.executable, str(CLI)],
+            args=None,
+            budget=workflow_runtime.Budget(None),
+        )
+        dsl = workflow_runtime.WorkflowDsl(state, {"defaults": {}})
+        key = next(iter(state.replay_keys))
+        # Simulate: run looked non-terminal at entry, the wait timed out, and
+        # the run turned terminal in the race window before the cancel.
+        with (
+            mock.patch.object(
+                workflow_runtime, "_workflow_run_terminal", side_effect=[False, True]
+            ),
+            mock.patch.object(workflow_runtime, "_wait_for_workflow_agent_run", return_value=False),
+            mock.patch.object(workflow_runtime, "cancel_workflow_agent_child") as cancel_mock,
+        ):
+            adopted = dsl._adopt_existing_agent_run(
+                key,
+                scope="root/seq#0",
+                label="race-me",
+                phase=None,
+                schema=None,
+                prefer_assistant=False,
+                timeout=1,
+            )
+        self.assertEqual(adopted, "fake completion")
+        cancel_mock.assert_not_called()
+        events = [
+            json.loads(line)
+            for line in (root / "journal.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertNotIn("agent_timeout", {event["type"] for event in events})
+
     def test_adoption_wait_timeout_cancels_child_without_duplicate(self) -> None:
         # F2: adoption wait timeout cancels the adopted run and returns None.
         script = self.write_workflow(
