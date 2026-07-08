@@ -160,6 +160,7 @@ class Request:
     cleanup_workspace: bool = False
     include_dirty: bool = False
     group: str | None = None
+    workflow_agent_key: str | None = None
     prompt_instruction_mode: str = PROMPT_INSTRUCTION_MODE_WRAPPED
     profile_resolution: profiles.ProfileResolution = field(
         default_factory=profiles.empty_profile_resolution

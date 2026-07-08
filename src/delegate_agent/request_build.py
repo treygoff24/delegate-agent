@@ -88,6 +88,7 @@ RUN_INPUT_KEYS = {
     "readOnly",
     "includeDirty",
     "promptInstructionMode",
+    "workflowAgentKey",
 }
 
 OUTPUT_SCHEMA_COMPLETION_REPORT_WARNING = (
@@ -941,6 +942,9 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         )
     output_schema = resolve_output_schema(str(engine), raw.get("outputSchema"))
     raw_instruction_mode = raw.get("promptInstructionMode")
+    raw_workflow_agent_key = raw.get("workflowAgentKey")
+    if raw_workflow_agent_key is not None and not isinstance(raw_workflow_agent_key, str):
+        raise DelegateError("invalid_workflow_agent_key", "workflowAgentKey must be a string.")
 
     if mode == MODE_CALL:
         _validate_call_input_json_options(
@@ -980,6 +984,7 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
                 cleanup_workspace=cleanup_workspace,
                 call_read_only=raw_read_only,
                 group=global_options.group,
+                workflow_agent_key=raw_workflow_agent_key,
                 prompt_instruction_mode=resolve_input_json_prompt_instruction_mode(
                     raw_instruction_mode,
                     call_prompt,
@@ -1119,6 +1124,7 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         output_schema=output_schema,
         warnings=(*output_schema_warnings, *isolation_warnings),
         group=global_options.group,
+        workflow_agent_key=raw_workflow_agent_key,
         prompt_instruction_mode=instruction_mode,
     )
 
@@ -1147,6 +1153,7 @@ def build_request(
     cleanup_workspace: bool = False,
     call_read_only: bool = False,
     group: str | None = None,
+    workflow_agent_key: str | None = None,
     prompt_instruction_mode: str = PROMPT_INSTRUCTION_MODE_WRAPPED,
 ) -> Request:
     if not isinstance(workspace, ResolvedWorkspace):
@@ -1185,6 +1192,7 @@ def build_request(
         cleanup_workspace=cleanup_workspace,
         call_read_only=call_read_only,
         group=group,
+        workflow_agent_key=workflow_agent_key,
         prompt_instruction_mode=prompt_instruction_mode,
     )
 
@@ -1527,6 +1535,7 @@ def _build_request_for_workspace(
     cleanup_workspace: bool,
     call_read_only: bool = False,
     group: str | None = None,
+    workflow_agent_key: str | None = None,
     prompt_instruction_mode: str = PROMPT_INSTRUCTION_MODE_WRAPPED,
 ) -> Request:
     if prompt_instruction_mode != PROMPT_INSTRUCTION_MODE_SLASH:
@@ -1584,6 +1593,7 @@ def _build_request_for_workspace(
             display_argv=parts.display_argv,
             cleanup_workspace=cleanup_workspace,
             group=group,
+            workflow_agent_key=workflow_agent_key,
             prompt_instruction_mode=prompt_instruction_mode,
         ),
         config,

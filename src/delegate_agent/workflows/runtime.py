@@ -577,6 +577,7 @@ class WorkflowDsl:
                     result = self._run_agent_attempts(
                         candidate,
                         prompt,
+                        key=key,
                         mode=resolved_mode,
                         model=resolved_model,
                         effort=resolved_effort,
@@ -618,6 +619,7 @@ class WorkflowDsl:
         engine: str,
         prompt: str,
         *,
+        key: str,
         mode: str,
         model: str | None,
         effort: str | None,
@@ -653,6 +655,7 @@ class WorkflowDsl:
                     passthrough=passthrough,
                     timeout=timeout,
                     retries=retries,
+                    key=key,
                 )
             with engine_sem:
                 return self._run_structured_or_text(
@@ -666,6 +669,7 @@ class WorkflowDsl:
                     passthrough=passthrough,
                     timeout=timeout,
                     retries=retries,
+                    key=key,
                 )
 
     def _run_structured_or_text(
@@ -681,6 +685,7 @@ class WorkflowDsl:
         passthrough: bool,
         timeout: int | float | None,
         retries: int | None,
+        key: str,
     ) -> Any:
         if schema is None:
             return self._run_delegate(
@@ -694,6 +699,7 @@ class WorkflowDsl:
                 timeout=timeout,
                 output_schema=None,
                 prefer_assistant=False,
+                workflow_agent_key=key,
             )
         workflow_schema.validate_schema_subset(schema)
         attempts = retries if retries is not None else _structured_retries(self.state.config)
@@ -719,6 +725,7 @@ class WorkflowDsl:
                         timeout=timeout,
                         output_schema=schema_path,
                         prefer_assistant=True,
+                        workflow_agent_key=key,
                     )
                 finally:
                     Path(schema_path).unlink(missing_ok=True)
@@ -735,6 +742,7 @@ class WorkflowDsl:
                     timeout=timeout,
                     output_schema=None,
                     prefer_assistant=True,
+                    workflow_agent_key=key,
                 )
             try:
                 value = workflow_schema.parse_json_tolerant(text or "")
@@ -764,6 +772,7 @@ class WorkflowDsl:
         timeout: int | float | None,
         output_schema: str | None,
         prefer_assistant: bool,
+        workflow_agent_key: str,
     ) -> str | None:
         payload: JsonObject = {
             "engine": engine,
@@ -779,6 +788,7 @@ class WorkflowDsl:
             payload["isolation"] = isolation
         if output_schema is not None:
             payload["outputSchema"] = output_schema
+        payload["workflowAgentKey"] = workflow_agent_key
         payload["promptInstructionMode"] = (
             PROMPT_INSTRUCTION_MODE_SLASH if passthrough else PROMPT_INSTRUCTION_MODE_WRAPPED
         )
@@ -799,6 +809,7 @@ class WorkflowDsl:
             ]
             completed = _run_child_command(argv, cwd=str(self.state.workspace), timeout=timeout)
         except subprocess.TimeoutExpired:
+            cancel_workflow_agent_child(self.state.workspace, self.state.wf_id, workflow_agent_key)
             self.state.append_event("agent_timeout", engine=engine, timeout=timeout)
             return None
         finally:
@@ -956,6 +967,18 @@ def load_args(root: Path) -> Any:
 
 
 def cancel_workflow_children(workspace: Path, wf_id: str) -> list[JsonObject]:
+    return _cancel_workflow_runs(workspace, wf_id, workflow_agent_key=None)
+
+
+def cancel_workflow_agent_child(
+    workspace: Path, wf_id: str, workflow_agent_key: str
+) -> list[JsonObject]:
+    return _cancel_workflow_runs(workspace, wf_id, workflow_agent_key=workflow_agent_key)
+
+
+def _cancel_workflow_runs(
+    workspace: Path, wf_id: str, *, workflow_agent_key: str | None
+) -> list[JsonObject]:
     root = run_registry.registry_root_if_exists(workspace) or run_registry.registry_root(workspace)
     if not root.exists():
         return []
@@ -965,6 +988,8 @@ def cancel_workflow_children(workspace: Path, wf_id: str) -> list[JsonObject]:
         if not isinstance(run_id, str) or not isinstance(entry, dict):
             continue
         if entry.get("group") != wf_id:
+            continue
+        if workflow_agent_key is not None and entry.get("workflowAgentKey") != workflow_agent_key:
             continue
         state = run_registry.load_run_state_or_none(root, run_id)
         if (
@@ -1067,6 +1092,7 @@ __all__ = [
     "Budget",
     "BudgetExceeded",
     "WorkflowState",
+    "cancel_workflow_agent_child",
     "cancel_workflow_children",
     "detach_supervisor",
     "execute_workflow",

@@ -716,6 +716,7 @@ def execute_request(
                 "modelAlias": isolated_request.model_alias,
                 "modelResolved": isolated_request.model,
                 "group": isolated_request.group,
+                "workflowAgentKey": isolated_request.workflow_agent_key,
                 "cwd": (
                     isolated_request.isolation_context.source_workspace
                     if isolated_request.isolation_context is not None
