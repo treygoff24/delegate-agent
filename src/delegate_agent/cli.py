@@ -637,6 +637,8 @@ def execute_request(
                         stdin_text=request.stdin_text,
                         prompt_file_text=request.prompt_file_text,
                         prompt_file_placeholder=PROMPT_FILE_ARG_PLACEHOLDER,
+                        agent_config_text=request.agent_config_text,
+                        agent_config_placeholder=DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
                         manifest_argv=public_argv(request),
                         progress=False,
                     )

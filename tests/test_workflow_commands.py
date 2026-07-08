@@ -43,11 +43,29 @@ class WorkflowCommandTests(unittest.TestCase):
                         "binary": str(self.bin_dir / "droid"),
                         "models": {"gemini": "fake-gemini"},
                     },
+                    "devin": {"binary": str(self.bin_dir / "devin")},
                     "workflows": {"itemThreads": 4, "structuredOutputRetries": 1},
                 }
             ),
             encoding="utf-8",
         )
+        devin = self.bin_dir / "devin"
+        devin.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, sys\n"
+            "# Read-only lanes must materialize a real agent-config file.\n"
+            "if '--agent-config' in sys.argv:\n"
+            "    cfg = sys.argv[sys.argv.index('--agent-config') + 1]\n"
+            "    if not os.path.isfile(cfg):\n"
+            "        sys.stderr.write(f'missing agent config: {cfg}\\n')\n"
+            "        sys.exit(1)\n"
+            "prompt = ''\n"
+            "if '--prompt-file' in sys.argv:\n"
+            "    prompt = open(sys.argv[sys.argv.index('--prompt-file') + 1], encoding='utf-8').read()\n"
+            "print('fake devin completion')\n",
+            encoding="utf-8",
+        )
+        devin.chmod(0o755)
         for name in ("agent", "droid"):
             path = self.bin_dir / name
             path.write_text(
@@ -921,6 +939,28 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertIn("delegate-call-", snapshot["executionCwd"])
         result = self.run_delegate(["--json", "workflow", "result", wf_id])
         self.assertIn("fake completion", json.loads(result.stdout)["result"])
+
+    def test_grouped_call_child_materializes_devin_agent_config(self) -> None:
+        # Merge-interaction regression: the grouped-call execute_tracked branch
+        # must pass agent_config_text through, or devin read-only children get
+        # a literal placeholder path and die at launch.
+        script = self.write_workflow(
+            """
+            meta = {"name": "devin-call", "defaults": {"engine": "devin"}}
+            return agent("one-hop", mode="call")
+            """
+        )
+        launch = self.run_delegate(["--json", "workflow", "run", str(script)])
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        self.assertEqual(
+            self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"]).returncode,
+            0,
+        )
+        result = self.run_delegate(["--json", "workflow", "result", wf_id])
+        self.assertIn("fake devin completion", json.loads(result.stdout)["result"])
+        runs = json.loads(self.run_delegate(["--json", "runs", "--group", wf_id]).stdout)["runs"]
+        self.assertEqual(runs[0]["status"], "succeeded")
 
     def test_workflow_kill_cancels_in_flight_call_child(self) -> None:
         # R2: workflow kill fans out to in-flight call-mode children.
