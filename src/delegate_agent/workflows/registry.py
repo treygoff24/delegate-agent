@@ -23,7 +23,16 @@ APPROVAL_FILE = "approval.json"
 LOCK_FILE = "workflow.lock"
 WORKFLOW_ID_HEX = 12
 WORKFLOW_ID_RE = __import__("re").compile(r"^wf_[0-9a-f]{12}$")
-RESULT_EVENT_TYPES = {"agent_finished", "agent_result", "gate", "workflow_finished"}
+# Durable events are fsynced: result events plus agent_started (the resume
+# adoption anchor). Phase/log/budget ticks stay unfsynced.
+DURABLE_EVENT_TYPES = {
+    "agent_started",
+    "agent_finished",
+    "agent_result",
+    "gate",
+    "workflow_finished",
+}
+RESULT_EVENT_TYPES = DURABLE_EVENT_TYPES - {"agent_started"}
 
 
 def workflow_root(workspace: Path) -> Path:
@@ -93,7 +102,7 @@ def append_jsonl(path: Path, event: dict[str, Any]) -> None:
     fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, run_registry.PRIVATE_FILE_MODE)
     with os.fdopen(fd, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(event, sort_keys=True) + "\n")
-        if event.get("type") in RESULT_EVENT_TYPES:
+        if event.get("type") in DURABLE_EVENT_TYPES:
             handle.flush()
             os.fsync(handle.fileno())
 
