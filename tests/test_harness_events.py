@@ -300,6 +300,23 @@ class HarnessEventsTests(unittest.TestCase):
         self.assertEqual(acc.events[0].kind, "text")
         self.assertIn("not json", acc.events[0].message or "")
 
+    def test_devin_json_shaped_line_is_preserved_as_plain_text(self):
+        acc = self.events.StreamAccumulator(harness="devin")
+        acc.ingest_line("Retrying the request with backoff config:")
+        acc.ingest_line('{"retries": 3}')
+        acc.ingest_line("Retry succeeded.")
+        self.assertEqual(acc.structured_events_seen, 0)
+        self.assertIn('{"retries": 3}', acc.assistant_text)
+        self.assertIn("Retrying the request with backoff config:", acc.assistant_text)
+        self.assertIn("Retry succeeded.", acc.assistant_text)
+
+    def test_devin_multiline_output_preserves_single_newlines(self):
+        acc = self.events.StreamAccumulator(harness="devin")
+        acc.ingest_line("line one")
+        acc.ingest_line("line two")
+        acc.ingest_line("line three")
+        self.assertEqual(acc.assistant_text, "line one\nline two\nline three")
+
     def test_claude_assistant_tool_use_blocks_emit_tool_started(self):
         acc = self.events.StreamAccumulator()
         acc.ingest_line(
