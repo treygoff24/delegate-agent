@@ -923,7 +923,7 @@ def describe_payload(
                 "work": devin_work_argv,
                 "workNotes": [
                     "Work mode uses --permission-mode dangerous because non-interactive Devin rejects unapproved edit/exec tools.",
-                    "Model selection uses devin.defaultModel in config or optional JSON input model; Delegate does not validate model names.",
+                    "Model selection uses --model (alias from devin.models or a raw model ID), optional JSON input model, or devin.defaultModel; Delegate does not validate model names.",
                     "Reasoning effort is unsupported for Devin in v1.",
                     "Prompt uses --prompt-file plus -p; tracked and call runs parse plain stdout.",
                 ],
@@ -1206,7 +1206,7 @@ Devin:
   - {SAFE_WORKSPACE_SYNC_NOTE}
   - Safe and call --read-only pass a Delegate-generated --agent-config deny-list for edit/write/exec and mcp__* plus --permission-mode auto.
   - Work and default call mode use --permission-mode dangerous because Devin print mode rejects unapproved edit/exec tools.
-  - Model selection uses devin.defaultModel in config or optional JSON input model; Delegate lets Devin validate unknown model names.
+  - Model selection uses --model (alias from devin.models or a raw model ID), optional JSON input model, or devin.defaultModel; Delegate lets Devin validate unknown model names.
   - Reasoning effort is unsupported for Devin in v1.
 
 Droid modes:

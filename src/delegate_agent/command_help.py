@@ -409,7 +409,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             CALL_MODE_NOTE,
             "Safe and call --read-only pass a Delegate-generated --agent-config deny-list for edit/write/exec and mcp__* plus --permission-mode auto.",
             "Work and default call mode use --permission-mode dangerous because Devin print mode rejects unapproved edit/exec tools.",
-            "Model selection uses devin.defaultModel in config or the run-input JSON model; unknown models are left to Devin CLI validation.",
+            "Model selection uses --model (alias from devin.models or a raw model ID), the run-input JSON model, or devin.defaultModel in config; unknown models are left to Devin CLI validation.",
             "Reasoning effort is unsupported for Devin in v1.",
         ),
         see_also=("cursor", "codex", "droid", "grok", "models", "agent-help"),
@@ -1157,7 +1157,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "delegate --json models cursor --live",
         ),
         notes=(
-            "Discovery output applies best-effort credential scrubbing; model IDs and paths are shown verbatim.",
+            "Discovery output applies best-effort credential scrubbing; secret-shaped model IDs or paths are redacted, so copy exact values from config.",
             "Agent discovery should prefer --summary, then use raw output only when needed.",
             "Bundled tables are advisory; the harness is the source of truth (use --live where supported).",
             "Per-engine catalogs merge config aliases/defaultModel over live results over bundled IDs.",

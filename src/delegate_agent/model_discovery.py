@@ -6,6 +6,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import TextIO
 
@@ -291,14 +292,19 @@ def parse_droid_custom_models(custom_models: list[object]) -> list[JsonObject]:
 
 def _probe_devin_models(config: JsonObject) -> list[JsonObject]:
     binary = delegate_config.harness_binary(config, "devin")
-    completed = subprocess.run(
-        [binary, "--model", DEVIN_LIVE_SENTINEL, "-p", "--", "probe"],
-        capture_output=True,
-        text=True,
-        timeout=LIVE_PROBE_TIMEOUT_SEC,
-        check=False,
-        stdin=subprocess.DEVNULL,
-    )
+    # The invalid sentinel makes devin fail fast pre-session; running from a
+    # throwaway cwd additionally guarantees the probe can never touch the
+    # caller's workspace even if that behavior changes.
+    with tempfile.TemporaryDirectory(prefix="delegate-model-probe-") as probe_cwd:
+        completed = subprocess.run(
+            [binary, "--model", DEVIN_LIVE_SENTINEL, "-p", "--", "probe"],
+            capture_output=True,
+            text=True,
+            timeout=LIVE_PROBE_TIMEOUT_SEC,
+            check=False,
+            stdin=subprocess.DEVNULL,
+            cwd=probe_cwd,
+        )
     combined = f"{completed.stderr or ''}\n{completed.stdout or ''}"
     return parse_devin_available_models(combined)
 

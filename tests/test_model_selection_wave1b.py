@@ -290,6 +290,84 @@ class DroidModelSelectionTests(CommandTestBase):
         )
         request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
         self.assertEqual(request.model, "glm-5.1")
+        # A map-key hit via --model keeps alias metadata, matching the
+        # positional and input-JSON alias paths.
+        self.assertEqual(request.model_alias, "fast")
+
+    def test_droid_model_flag_raw_id_has_no_alias_metadata(self):
+        repo = make_git_repo(with_commit=True)
+        self.addCleanup(repo.cleanup)
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["droid"]["models"] = {"reviewer": "gpt-5.5"}
+        parsed = self.delegate.parse_cli(
+            ["--cwd", repo.name, "dry-run", "droid", "safe", "--model", "custom:raw", "review"]
+        )
+        request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+        self.assertEqual(request.model, "custom:raw")
+        self.assertIsNone(request.model_alias)
+
+    def test_droid_input_json_omitted_model_uses_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "task.json"
+            task.write_text(
+                json.dumps({"engine": "droid", "mode": "safe", "cwd": tmp, "prompt": "review"}),
+                encoding="utf-8",
+            )
+            parsed = self.delegate.ParsedCommand(
+                "run",
+                global_options=self.delegate.GlobalOptions(json_mode=True),
+                run_json=self.delegate.RunJsonOptions(str(task)),
+            )
+            config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+            config["droid"]["defaultModel"] = "factory/json-default"
+            request = self.delegate.request_from_input_json(parsed, config)
+            self.assertEqual(request.model, "factory/json-default")
+
+    def test_devin_effort_error_names_overridden_model(self):
+        repo = make_git_repo(with_commit=True)
+        self.addCleanup(repo.cleanup)
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        parsed = self.delegate.parse_cli(
+            [
+                "--cwd",
+                repo.name,
+                "dry-run",
+                "devin",
+                "safe",
+                "--model",
+                "swe-1.7-lightning",
+                "--reasoning-effort",
+                "high",
+                "review",
+            ]
+        )
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+        self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
+        self.assertIn("swe-1.7-lightning", ctx.exception.message)
+
+    def test_kimi_effort_error_names_overridden_model(self):
+        repo = make_git_repo(with_commit=True)
+        self.addCleanup(repo.cleanup)
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        parsed = self.delegate.parse_cli(
+            [
+                "--cwd",
+                repo.name,
+                "dry-run",
+                "kimi",
+                "safe",
+                "--model",
+                "my-kimi-model",
+                "--reasoning-effort",
+                "high",
+                "review",
+            ]
+        )
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+        self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
+        self.assertIn("my-kimi-model", ctx.exception.message)
 
 
 class CursorModelOverrideTests(CommandTestBase):

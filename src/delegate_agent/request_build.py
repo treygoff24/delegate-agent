@@ -998,15 +998,21 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
     json_model_alias: str | None = model_alias if isinstance(model_alias, str) else None
     json_model_override: str | None = None
     if engine == "droid":
-        if not isinstance(model_alias, str) or not model_alias:
-            raise DelegateError("missing_model", "droid run input requires model alias.")
-        # Alias-or-id, matching --model: a droid.models key keeps alias semantics
-        # (modelAlias metadata, placeholder guard); anything else passes through
-        # verbatim and the harness validates it.
-        droid_models = config.get("droid", {}).get("models")
-        if not (isinstance(droid_models, dict) and model_alias in droid_models):
-            json_model_alias = None
-            json_model_override = model_alias
+        if model_alias is None and _resolve_default_model(config.get("droid", {})) is not None:
+            pass  # droid.defaultModel covers the omitted key.
+        elif not isinstance(model_alias, str) or not model_alias:
+            raise DelegateError(
+                "missing_model",
+                "droid run input requires a model alias or id (or set droid.defaultModel).",
+            )
+        else:
+            # Alias-or-id, matching --model: a droid.models key keeps alias
+            # semantics (modelAlias metadata, placeholder guard); anything else
+            # passes through verbatim and the harness validates it.
+            droid_models = config.get("droid", {}).get("models")
+            if not (isinstance(droid_models, dict) and model_alias in droid_models):
+                json_model_alias = None
+                json_model_override = model_alias
     elif engine in MODELESS_ENGINES:
         if model_alias is not None and not isinstance(model_alias, str):
             raise DelegateError("invalid_model", f"model must be a string or null for {engine}.")
@@ -1323,8 +1329,15 @@ def _droid_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     _reject_droid_model_conflict(build.model_alias, build.model_override)
 
     if build.model_override is not None:
-        model = resolve_model_selection(droid, build.model_override)
-        alias_for_errors = None
+        # A droid.models key keeps full alias semantics (modelAlias metadata,
+        # placeholder guard context) — parity with the positional and
+        # input-JSON alias paths.
+        if isinstance(models, dict) and build.model_override in models:
+            model = models[build.model_override]
+            alias_for_errors = build.model_override
+        else:
+            model = build.model_override
+            alias_for_errors = None
     elif build.model_alias is not None:
         _validate_droid_model_alias(build.config, build.model_alias)
         model = models[build.model_alias]
@@ -1372,7 +1385,7 @@ def _droid_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     return EngineRequestParts(
         model=model,
         argv=argv,
-        model_alias=build.model_alias,
+        model_alias=alias_for_errors if alias_for_errors is not None else build.model_alias,
         prompt_transport=PROMPT_TRANSPORT_FILE,
         prompt_file_text=prompt,
         display_argv=display_argv,
@@ -1537,10 +1550,9 @@ def _grok_request_parts(build: EngineBuildInput) -> EngineRequestParts:
 
 def _devin_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     _ = build.effort_source, build.cache
+    devin = build.config["devin"]
+    model = _resolve_engine_model(devin, build)
     if build.requested_effort is not None:
-        devin = build.config.get("devin")
-        default_model = devin.get("defaultModel") if isinstance(devin, dict) else None
-        model = default_model if isinstance(default_model, str) and default_model else None
         raise DelegateError(
             "unsupported_reasoning_effort",
             reasoning.format_explicit_reasoning_effort_error(
@@ -1551,8 +1563,6 @@ def _devin_request_parts(build: EngineBuildInput) -> EngineRequestParts:
                 detail="reasoning effort is not supported",
             ),
         )
-    devin = build.config["devin"]
-    model = _resolve_engine_model(devin, build)
     argv = build_devin_argv(
         devin,
         build.mode,
@@ -1581,10 +1591,9 @@ def _devin_request_parts(build: EngineBuildInput) -> EngineRequestParts:
 
 def _kimi_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     _ = build.effort_source, build.cache
+    kimi = build.config["kimi"]
+    model = _resolve_engine_model(kimi, build)
     if build.requested_effort is not None:
-        kimi = build.config.get("kimi")
-        default_model = kimi.get("defaultModel") if isinstance(kimi, dict) else None
-        model = default_model if isinstance(default_model, str) and default_model else None
         raise DelegateError(
             "unsupported_reasoning_effort",
             reasoning.format_explicit_reasoning_effort_error(
@@ -1595,8 +1604,6 @@ def _kimi_request_parts(build: EngineBuildInput) -> EngineRequestParts:
                 detail="reasoning effort is not supported",
             ),
         )
-    kimi = build.config["kimi"]
-    model = _resolve_engine_model(kimi, build)
     argv = build_kimi_argv(
         kimi,
         build.mode,
