@@ -241,10 +241,33 @@ delegate [--json] workflow save <script.py> --name NAME
   without launching child agents or consuming real budget.
 - `--resume` replays the journal, adopts matching child runs by workflow agent
   key, and continues from missing work.
-- `approve` releases a paused gate. `kill` validates the supervisor process
-  group before signaling and always attempts child fan-out cancellation.
+- `approve` releases a paused gate (and resumes). Do not also run
+  `run --resume` for the same gate — approve already is that resume. `kill`
+  validates the supervisor process group before signaling and always attempts
+  child fan-out cancellation.
 - JSON-capable workflow commands return the normal `{ok: ...}` envelope. Invalid
   scripts fail with `invalid_workflow_script`.
+
+#### Workflow error codes
+
+Codes raised as `DelegateError` from workflow commands (`workflows/commands.py`):
+
+| Code | Meaning |
+| --- | --- |
+| `invalid_workflow_args` | `--args` is not valid JSON. |
+| `invalid_workflow_id` | `wfId` is not `wf_` + 12 hex digits. |
+| `invalid_workflow_name` | Saved-workflow `--name` is not a simple file stem. |
+| `invalid_workflow_script` | Script failed `check` / load validation. |
+| `missing_workflow` | A verb that needs `<wfId>` was invoked without one. |
+| `missing_workflow_save_args` | `save` needs both `<script.py>` and `--name`. |
+| `missing_workflow_script` | `run`/`check` need `<script.py>` or `--name`. |
+| `unknown_workflow_action` | Unrecognized `workflow` subcommand. |
+| `workflow_execution_failed` | Dry-run (or in-process) execution raised before detach. |
+| `workflow_locked` | Another supervisor already holds the workflow flock. |
+| `workflow_not_found` | No workflow directory / status for that `wfId`. |
+| `workflow_not_gated` | `approve` on a workflow that is not paused on a gate. |
+| `workflow_result_missing` | `result` before `result.json` exists. |
+| `workflow_script_not_found` | Resolved script path is missing or not a file. |
 
 See [Delegate Workflows](delegate-workflows.md) for the DSL, caps, config, and
 gate semantics.

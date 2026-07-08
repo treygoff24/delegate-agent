@@ -53,12 +53,19 @@ A workflow gate checkpoints the whole workflow tree, not just the nested child
 that reached the gate. When a gate closes, the runtime stops admitting new
 `agent()` calls tree-wide, drains already in-flight agents to the journal, emits
 the gate event, writes `status: "paused"`, and exits the supervisor without
-writing `result.json`. Resume or approval releases the gate:
+writing `result.json`. Release the gate with **one** of these — not both:
 
 ```bash
+# Normal continuation after a human checkpoint:
 python3 bin/delegate.py workflow approve wf_0123abcdef45
+
+# Equivalent lower-level form (approve delegates to the same resume path):
 python3 bin/delegate.py workflow run --resume wf_0123abcdef45
 ```
+
+`workflow approve` already resumes the supervisor (`emit_approve` →
+`emit_run(resume=...)`). Running approve and then `run --resume` races a second
+resume against the first and fails with `workflow_locked`. Pick one.
 
 This preserves in-flight sibling results for replay while preventing unrelated
 siblings from starting after a human checkpoint has requested control.
