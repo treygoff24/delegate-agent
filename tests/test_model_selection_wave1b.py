@@ -306,6 +306,20 @@ class DroidModelSelectionTests(CommandTestBase):
         self.assertEqual(request.model, "custom:raw")
         self.assertIsNone(request.model_alias)
 
+    def test_droid_null_models_map_degrades_cleanly(self):
+        # `"droid": {"models": null}` passes shared config validation (null is
+        # treated as absent); the runtime must error cleanly, not TypeError.
+        repo = make_git_repo(with_commit=True)
+        self.addCleanup(repo.cleanup)
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["droid"]["models"] = None
+        parsed = self.delegate.parse_cli(
+            ["--cwd", repo.name, "dry-run", "droid", "reviewer", "safe", "review"]
+        )
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+        self.assertEqual(ctx.exception.error, "invalid_alias")
+
     def test_droid_input_json_omitted_model_uses_default(self):
         with tempfile.TemporaryDirectory() as tmp:
             task = Path(tmp) / "task.json"
@@ -409,6 +423,23 @@ class CursorModelOverrideTests(CommandTestBase):
         self.assertTrue(
             any("effort" in w.lower() and "model" in w.lower() for w in request.warnings)
         )
+
+    def test_config_sourced_effort_bypass_also_warns(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["cursor"]["defaultReasoningEffort"] = "high"
+        config["cursor"]["reasoningEffortModels"] = {"high": "sonnet-4-thinking"}
+        request = self.build_git_request(
+            "cursor",
+            "safe",
+            None,
+            "/repo",
+            "hello",
+            config,
+            True,
+            model_override="pinned-cursor-model",
+        )
+        self.assertEqual(request.model, "pinned-cursor-model")
+        self.assertTrue(any("bypass" in w.lower() for w in request.warnings))
 
     def test_input_json_model_override_honored(self):
         with tempfile.TemporaryDirectory() as tmp:

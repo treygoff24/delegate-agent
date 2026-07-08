@@ -554,9 +554,15 @@ def _apply_forbid_commit_isolation_implication(
     return json_isolation, None, False
 
 
+def _droid_models_map(config: JsonObject) -> dict:
+    # config validation treats a null/absent models map as empty for every
+    # engine; mirror that here so droid never crashes on `"models": null`.
+    models = config["droid"].get("models")
+    return models if isinstance(models, dict) else {}
+
+
 def _validate_droid_model_alias(config: JsonObject, model_alias: str | None) -> None:
-    models = config["droid"]["models"]
-    if model_alias is None or model_alias not in models:
+    if model_alias is None or model_alias not in _droid_models_map(config):
         raise DelegateError("invalid_alias", f"Unknown Droid model alias: {model_alias}")
 
 
@@ -1289,7 +1295,10 @@ def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     if pinned is not None:
         model = pinned
         capability = None
-        if build.requested_effort is not None and build.effort_source != "config":
+        # Warn regardless of where the effort came from (flag, input-json, or
+        # cursor.defaultReasoningEffort): if routing would have applied, the
+        # pinned model materially bypassed it.
+        if build.requested_effort is not None:
             warnings.append(
                 "cursor reasoning-effort routing was bypassed by the pinned model; "
                 "proceeding with the explicit model selection."
@@ -1325,7 +1334,7 @@ def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
 
 def _droid_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     droid = build.config["droid"]
-    models = droid["models"]
+    models = _droid_models_map(build.config)
     _reject_droid_model_conflict(build.model_alias, build.model_override)
 
     if build.model_override is not None:

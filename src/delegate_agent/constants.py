@@ -26,10 +26,6 @@ ENGINES_PROSE = f"{', '.join(KNOWN_ENGINES[:-1])}, or {KNOWN_ENGINES[-1]}"
 MODELESS_ENGINES = tuple(engine for engine in KNOWN_ENGINES if engine != "droid")
 # Engines whose binary is a simple <engine>.binary config key.
 BINARY_CONFIG_ENGINES = tuple(engine for engine in KNOWN_ENGINES if engine != "cursor")
-# Modeless engines accepted by input JSON's optional model field.
-MODELESS_NONCURSOR_ENGINES = tuple(
-    engine for engine in KNOWN_ENGINES if engine not in {"cursor", "droid"}
-)
 # Engines whose safe-review prompt prefix is injected by request_build.effective_prompt.
 SAFE_REVIEW_PREFIX_INJECTED_HERE_ENGINES = tuple(
     engine for engine in KNOWN_ENGINES if engine in {"codex", "droid", "claude", "grok", "devin"}

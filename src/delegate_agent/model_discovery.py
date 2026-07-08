@@ -200,14 +200,18 @@ def _probe_cursor_models(config: JsonObject) -> list[JsonObject]:
     if not isinstance(prefix, list) or not prefix or not all(isinstance(p, str) for p in prefix):
         raise RuntimeError("cursor.argvPrefix must be a non-empty string array")
     argv = [*prefix, "models"]
-    completed = subprocess.run(
-        argv,
-        capture_output=True,
-        text=True,
-        timeout=LIVE_PROBE_TIMEOUT_SEC,
-        check=False,
-        stdin=subprocess.DEVNULL,
-    )
+    # Throwaway cwd: a wrapper or the harness itself may write relative files
+    # (caches, logs) during a listing; never let that land in the caller's tree.
+    with tempfile.TemporaryDirectory(prefix="delegate-model-probe-") as probe_cwd:
+        completed = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=LIVE_PROBE_TIMEOUT_SEC,
+            check=False,
+            stdin=subprocess.DEVNULL,
+            cwd=probe_cwd,
+        )
     if completed.returncode != 0:
         raise RuntimeError(
             f"cursor models exited {completed.returncode}: "

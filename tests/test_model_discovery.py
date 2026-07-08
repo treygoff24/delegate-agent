@@ -214,6 +214,33 @@ class LiveProbeIntegrationTests(unittest.TestCase):
             self.assertEqual(by_id["live-cursor-model"]["note"], "Live Cursor")
             self.assertIn("composer-2.5", by_id)
 
+    def test_live_probes_run_in_throwaway_cwd(self):
+        # A harness that writes relative files during a listing must not
+        # touch the caller's working directory.
+        import os
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = _write_executable(
+                Path(tmp) / "fake-cursor",
+                "#!/usr/bin/env bash\n"
+                "echo side-effect > probe-side-effect.txt\n"
+                'pwd > "$SIDE_EFFECT_LOG"\n'
+                "echo 'Available models'\n"
+                "printf 'live-cursor-model - Live Cursor\\n'\n"
+                "exit 0\n",
+            )
+            log = Path(tmp) / "cwd.log"
+            config = self.embedded_default_config()
+            config["cursor"]["argvPrefix"] = [str(fake)]
+            os.environ["SIDE_EFFECT_LOG"] = str(log)
+            try:
+                self.engine_models_payload(config, "cursor", live=True)
+            finally:
+                os.environ.pop("SIDE_EFFECT_LOG", None)
+            probe_cwd = log.read_text(encoding="utf-8").strip()
+            self.assertNotEqual(probe_cwd, os.getcwd())
+            self.assertFalse((Path(os.getcwd()) / "probe-side-effect.txt").exists())
+
     def test_droid_live_merge_from_settings(self):
         with tempfile.TemporaryDirectory() as tmp:
             settings = Path(tmp) / "settings.json"
