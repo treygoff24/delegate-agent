@@ -324,6 +324,73 @@ class LiveProbeIntegrationTests(unittest.TestCase):
                 self.assertNotIn("live", sources)
 
 
+class NonDroidModelsSummaryExtensionTests(unittest.TestCase):
+    """Wave 3 §1.3: non-droid <engine>.models appear in full + summary payloads."""
+
+    def test_full_payload_includes_nonempty_non_droid_models_maps(self):
+        from delegate_agent.config import embedded_default_config
+        from delegate_agent.describe_payload import models_payload
+
+        config = embedded_default_config()
+        config["droid"]["models"] = {"glm": "glm-5.1"}
+        config["codex"]["models"] = {"fast": "gpt-5.5"}
+        config["claude"]["models"] = {}
+        with tempfile.TemporaryDirectory() as workspace:
+            payload = models_payload(config, "fixture-config", Path(workspace))
+            self.assertEqual(payload["codex"]["models"], {"fast": "gpt-5.5"})
+            self.assertNotIn("models", payload["claude"])
+            self.assertEqual(payload["droid"]["models"]["glm"], "glm-5.1")
+            self.assertEqual(payload["cursor"]["defaultModel"], config["cursor"]["defaultModel"])
+
+    def test_summary_includes_non_droid_alias_entries(self):
+        from delegate_agent.config import embedded_default_config
+        from delegate_agent.describe_payload import models_summary_payload
+
+        config = embedded_default_config()
+        config["droid"]["models"] = {"glm": "glm-5.1"}
+        config["codex"]["models"] = {"fast": "gpt-5.5"}
+        with tempfile.TemporaryDirectory() as workspace:
+            summary = models_summary_payload(config, "fixture-config", Path(workspace))
+            by_provider_alias = {
+                (item["provider"], item["alias"]): item for item in summary["aliases"]
+            }
+            codex_fast = by_provider_alias[("codex", "fast")]
+            self.assertEqual(codex_fast["model"], "gpt-5.5")
+            self.assertEqual(codex_fast["provider"], "codex")
+            self.assertEqual(
+                codex_fast["command"],
+                "delegate codex {safe,work,call} --model fast",
+            )
+            self.assertTrue(codex_fast["available"])
+            self.assertTrue(codex_fast["safeSupported"])
+            self.assertTrue(codex_fast["workSupported"])
+            droid_glm = by_provider_alias[("droid", "glm")]
+            self.assertEqual(droid_glm["model"], "glm-5.1")
+            self.assertEqual(
+                droid_glm["command"],
+                "delegate droid glm {safe,work,call}",
+            )
+            self.assertEqual(
+                by_provider_alias[("codex", "codex")]["command"],
+                "delegate codex {safe,work,call}",
+            )
+
+    def test_empty_non_droid_models_do_not_add_summary_entries(self):
+        from delegate_agent.config import embedded_default_config
+        from delegate_agent.describe_payload import models_summary_payload
+
+        config = embedded_default_config()
+        config["codex"]["models"] = {}
+        with tempfile.TemporaryDirectory() as workspace:
+            summary = models_summary_payload(config, "fixture-config", Path(workspace))
+            non_droid_alias_entries = [
+                item
+                for item in summary["aliases"]
+                if item["provider"] != "droid" and item["alias"] != item["provider"]
+            ]
+            self.assertEqual(non_droid_alias_entries, [])
+
+
 class PlainModelsUnchangedTests(unittest.TestCase):
     MODELS_KEYS: ClassVar[dict[str, set[str]]] = _MODELS_KEYS
     MODELS_SUMMARY_KEYS: ClassVar[dict[str, set[str]]] = _MODELS_SUMMARY_KEYS

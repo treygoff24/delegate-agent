@@ -155,6 +155,26 @@ class EngineModelsConfigTests(unittest.TestCase):
             "droid.models alias 'safe' collides with a launch mode name; rename the alias.",
         )
 
+    def test_models_alias_must_not_equal_own_engine_name(self):
+        config = copy.deepcopy(self.config_mod.DEFAULT_CONFIG)
+        config["codex"]["models"] = {"codex": "private-codex"}
+        with self.assertRaises(self.config_mod.ConfigError) as ctx:
+            self.config_mod.validate_config(config)
+        self.assertEqual(ctx.exception.error, "invalid_codex_config")
+        self.assertEqual(
+            ctx.exception.message,
+            "codex.models alias 'codex' collides with its own engine name "
+            "(shadowing the engine's summary entry); rename the alias.",
+        )
+
+    def test_models_alias_may_name_another_engine(self):
+        # droid.models.grok pointing droid at a Grok model is a real-world
+        # BYOK pattern and must stay valid; only alias == its OWN engine is
+        # rejected.
+        config = copy.deepcopy(self.config_mod.DEFAULT_CONFIG)
+        config["droid"]["models"] = {"grok": "custom:grok-4.5"}
+        self.config_mod.validate_config(config)
+
     def test_models_alias_must_not_start_with_dash(self):
         config = copy.deepcopy(self.config_mod.DEFAULT_CONFIG)
         config["cursor"]["models"] = {"-fast": "composer-2.5"}

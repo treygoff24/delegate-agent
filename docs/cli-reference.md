@@ -20,29 +20,29 @@ Use `delegate --help` for the exact command list from the installed version. Glo
 ### Direct runtime commands
 
 ```bash
-delegate cursor safe [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate cursor work [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate cursor call [--read-only] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+delegate cursor safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate cursor work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate cursor call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 
-delegate droid MODEL_ALIAS safe [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate droid MODEL_ALIAS work [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate droid MODEL_ALIAS call [--read-only] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+delegate droid [MODEL_ALIAS] safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate droid [MODEL_ALIAS] work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate droid [MODEL_ALIAS] call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 
-delegate codex safe [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [--output-schema FILE] [prompt...]
-delegate codex work [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [--output-schema FILE] [prompt...]
-delegate codex call [--read-only] [--reasoning-effort LEVEL] [--prompt-file PATH] [--output-schema FILE] [prompt...]
+delegate codex safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [--output-schema FILE] [prompt...]
+delegate codex work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [--output-schema FILE] [prompt...]
+delegate codex call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [--output-schema FILE] [prompt...]
 
-delegate claude safe [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate claude work [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate claude call [--read-only] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+delegate claude safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate claude work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate claude call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 
-delegate grok safe [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate grok work [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate grok call [--read-only] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+delegate grok safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate grok work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate grok call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 
-delegate kimi safe [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate kimi work [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate kimi call [--read-only] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+delegate kimi safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate kimi work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate kimi call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 ```
 
 Prompt sources are direct arguments, `--prompt-file`, or Delegate stdin. Raw C0 control characters other than newline, carriage return, and tab are stripped before launch; a prompt that becomes empty fails fast. After
@@ -61,7 +61,17 @@ begins, a later `--json` or `--isolation` still fails with
 `misplaced_global_option`; use `--prompt-file` or stdin for literal flag-like
 prompt text.
 
-`--reasoning-effort LEVEL` is optional and parsed only before prompt text begins. Unsupported model/effort pairs fail closed before launch with `unsupported_reasoning_effort`. It affects only model reasoning depth, cost, or latency; it does not change `safe`/`work`/`call` permissions, sandboxing, approvals, network policy, or edit capability. Cursor effort is model-selection based and requires `cursor.reasoningEffortModels`; Droid emits `--reasoning-effort LEVEL`; Codex emits a `model_reasoning_effort` config override for the resolved model, or for the Codex harness default model when no `codex.defaultModel` is configured and the request was explicit; Claude emits Claude Code `--effort LEVEL`; Grok emits Grok `--effort LEVEL` (`low`, `medium`, `high`, `xhigh`, `max`). Kimi does not support reasoning effort in v1.
+`--model <alias-or-model>` is optional on every engine and is parsed only before
+prompt text begins. The value is resolved against `<engine>.models` when it
+matches an alias key; otherwise it is passed through verbatim as a raw model ID
+(the harness validates unknown IDs). Droid also accepts an optional positional
+`MODEL_ALIAS` (alias-only/strict); give either the positional or `--model`, not
+both. With neither, Droid uses `droid.defaultModel` when set. Discover aliases
+and advisory catalogs with `delegate models`, `delegate models <engine>`, and
+`delegate models <engine> --live` (live probes for cursor/droid/devin; other
+engines report live unsupported).
+
+`--reasoning-effort LEVEL` is optional and parsed only before prompt text begins. Unsupported model/effort pairs fail closed before launch with `unsupported_reasoning_effort`. It affects only model reasoning depth, cost, or latency; it does not change `safe`/`work`/`call` permissions, sandboxing, approvals, network policy, or edit capability. Cursor effort is model-selection based and requires `cursor.reasoningEffortModels`; an explicit `--model` wins over effort→model routing. Droid emits `--reasoning-effort LEVEL`; Codex emits a `model_reasoning_effort` config override for the resolved model, or for the Codex harness default model when no `codex.defaultModel` is configured and the request was explicit; Claude emits Claude Code `--effort LEVEL`; Grok emits Grok `--effort LEVEL` (`low`, `medium`, `high`, `xhigh`, `max`). Kimi does not support reasoning effort in v1.
 
 `--progress` enables parent progress heartbeats on stderr for tracked foreground
 runs. `--no-progress` disables them even when `progress.enabled` is true in
@@ -123,11 +133,12 @@ auth/env selection happens.
 Usage:
 
 ```bash
-delegate [--json] [--isolation auto|none|worktree] codex {safe,work,call} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [--output-schema FILE] [prompt...]
+delegate [--json] [--isolation auto|none|worktree] codex {safe,work,call} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [--output-schema FILE] [prompt...]
 ```
 
 - Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff. Codex safe always uses `--sandbox read-only`. Under `--isolation auto`, Codex safe is the only safe harness that may opt out with `--isolation none`, because Codex still keeps its read-only sandbox active.
 - Prompt text is delivered on stdin to `codex exec`; dry-run argv and tracked run manifests do not contain the prompt.
+- Model selection uses `--model` (alias from `codex.models` or a raw model ID), the run-input JSON `model`, or `codex.defaultModel`.
 - `--reasoning-effort` maps to a Codex `model_reasoning_effort` config override after the model is resolved.
 - `--output-schema FILE` is **codex-only**. Cursor, Droid, Kimi, and Claude reject it. `FILE` is a path to a JSON Schema that OpenAI enforces on Codex's final message, for machine-parseable output in fan-outs and JSON run input. Relative paths resolve against the process launch cwd, the same rule as `--prompt-file`. When set, Delegate suppresses the completion-report prompt injection for that run so the schema owns the whole final message. Missing or unreadable files fail fast before launch.
 
@@ -135,6 +146,7 @@ Examples:
 
 ```bash
 delegate codex safe "Review this repo for regressions; report file/line/severity."
+delegate codex safe --model gpt-5.5 "Review this repo for regressions; report file/line/severity."
 delegate codex work "Implement the scoped task; report changed files and tests."
 delegate codex call "Summarize this context in three bullets."
 delegate --json codex safe --output-schema findings.schema.json "Return one record per finding."
@@ -146,7 +158,7 @@ delegate --isolation worktree codex work "Implement the feature in a persistent 
 Usage:
 
 ```bash
-delegate [--json] [--isolation auto|none|worktree] claude {safe,work,call} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate [--json] [--isolation auto|none|worktree] claude {safe,work,call} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 ```
 
 - Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff. Under `--isolation auto`, Claude safe uses `--permission-mode plan`, `--strict-mcp-config`, Read/Grep/Glob, and selected read-only Bash tools such as `git diff`/`git status`.
@@ -154,13 +166,14 @@ delegate [--json] [--isolation auto|none|worktree] claude {safe,work,call} [--re
 - Prompt text is delivered on stdin to `claude -p`; dry-run argv and tracked run manifests do not contain the prompt.
 - JSON-streaming runs use `--output-format stream-json --input-format text`; pass-through runs use `--output-format text`.
 - Work mode uses `claude.workPermissionMode` from config, unless Delegate policy explicitly enables `policy.harness.claude.work.bypassApprovalsAndSandbox`, which maps to Claude `--permission-mode bypassPermissions`.
+- Model selection uses `--model` (alias from `claude.models` or a raw model ID), the run-input JSON `model`, or `claude.defaultModel`.
 - `--reasoning-effort` maps to Claude Code `--effort` and accepts `low`, `medium`, `high`, `xhigh`, or `max`.
 
 Examples:
 
 ```bash
 delegate claude safe "Review this repo for regressions; report file/line/severity."
-delegate claude work "Implement the scoped task; report changed files and tests."
+delegate claude work --model claude-opus-4-6 "Implement the scoped task; report changed files and tests."
 delegate claude call "Summarize this context in three bullets."
 delegate --isolation worktree claude work "Implement the feature in a persistent worktree."
 ```
@@ -170,12 +183,13 @@ delegate --isolation worktree claude work "Implement the feature in a persistent
 Usage:
 
 ```bash
-delegate [--json] [--isolation auto|none|worktree] grok {safe,work,call} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate [--json] [--isolation auto|none|worktree] grok {safe,work,call} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 ```
 
 - Safe mode reviews your **current working tree** in an isolated throwaway copy plus Grok read-only controls (`--sandbox read-only`, `--permission-mode dontAsk` by default). Delegate does not use Grok `plan` mode for safe review.
 - Prompt text is delivered via Grok `--prompt-file` from a Delegate temp file; dry-run argv and tracked run manifests do not contain the prompt.
 - Work mode uses `grok.workPermissionMode` and `grok.workSandbox` from config, unless Delegate policy explicitly enables `policy.harness.grok.work.bypassApprovalsAndSandbox`, which maps to Grok `--permission-mode bypassPermissions`.
+- Model selection uses `--model` (alias from `grok.models` or a raw model ID), the run-input JSON `model`, or `grok.defaultModel`.
 - `--reasoning-effort` maps to Grok `--effort` and accepts `low`, `medium`, `high`, `xhigh`, or `max`.
 - `--output-schema` is unsupported for Grok in v1 because Grok `--json-schema` forces final JSON output and weakens live snapshot parity.
 
@@ -193,12 +207,12 @@ delegate --isolation worktree grok work "Implement the feature in a persistent w
 Usage:
 
 ```bash
-delegate [--json] [--isolation auto|none|worktree] kimi {safe,work,call} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate [--json] [--isolation auto|none|worktree] kimi {safe,work,call} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 ```
 
 - Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff. Under `--isolation auto`, Kimi safe uses a read-only safety prompt. Delegate intentionally avoids Kimi `--plan` in safe mode. Kimi prompt mode auto-approves tool actions, so the isolation is the effective write boundary; the safety prompt is advisory.
 - Work mode uses Kimi prompt mode and runs in the real workspace unless you opt into worktree isolation. Delegate does not emit `--yolo` because Kimi rejects combining `--yolo` with `--prompt`.
-- Model selection comes from `kimi.defaultModel` config or the `model` key in JSON run input; there is no CLI model alias.
+- Model selection uses `--model` (alias from `kimi.models` or a raw model ID), the run-input JSON `model`, or `kimi.defaultModel`.
 - `--reasoning-effort` is unsupported for Kimi in v1.
 - Kimi prompt text is passed via argv.
 
@@ -446,7 +460,7 @@ Supported input keys:
 
 - `engine`: `cursor`, `droid`, `codex`, `claude`, `grok`, `devin`, or `kimi`.
 - `mode`: `safe`, `work`, or `call`.
-- `model`: Droid requires a configured local alias; Codex, Claude, and Kimi treat a non-empty string as a model override; Cursor does not accept per-run model aliases in v1.
+- `model`: optional alias-or-id for every engine. Resolved against `<engine>.models` when it matches an alias; otherwise passed through as a raw model ID. For Droid, a positional alias remains alias-only/strict; JSON/`--model` is alias-or-id. Cursor honors an explicit model even when it differs from `cursor.defaultModel`.
 - `cwd`: optional workspace path. Git directories resolve to the repo root. Omit it for `mode: "call"`, which always uses an empty temporary cwd.
 - `isolation`: optional `auto`, `none`, or `worktree`. `null` is invalid. `mode: "call"` rejects isolation. For Cursor, Claude, Grok, Droid, and Kimi safe mode, `none` is normalized to `auto` with a warning.
 - `reasoningEffort`: optional non-empty effort string. It overrides provider `defaultReasoningEffort` for that JSON run.
@@ -469,12 +483,14 @@ delegate --json describe --summary
 delegate --json models --summary
 delegate --json describe
 delegate --json models
+delegate --json models <engine>
+delegate --json models <engine> --live
 delegate --json capabilities
 delegate --json capabilities refresh
 delegate agent-help
 ```
 
-`describe` reports version, engines, modes, supported isolation values, prompt transforms, effective policy, top-level profile config metadata, and representative argv shapes. It also includes a `commands` catalog derived from the help registry; each full entry includes stable `name`/`command`, usage, arguments, options, and launchOptions fields. Full `describe` is a strict superset of `describe --summary`, so fields present in summary keep the same names in the full payload. `models` reports configured Cursor, Droid, Codex, Claude, Grok, and Kimi model settings. Discovery output applies best-effort credential scrubbing; model IDs and paths are shown verbatim. Agents should start with `--summary` for a compact inventory, then use raw output only when needed.
+`describe` reports version, engines, modes, supported isolation values, prompt transforms, effective policy, top-level profile config metadata, and representative argv shapes. It also includes a `commands` catalog derived from the help registry; each full entry includes stable `name`/`command`, usage, arguments, options, and launchOptions fields. Full `describe` is a strict superset of `describe --summary`, so fields present in summary keep the same names in the full payload. `models` reports configured Cursor, Droid, Codex, Claude, Grok, Devin, and Kimi model settings, including non-empty `<engine>.models` alias maps. `models <engine>` returns an advisory per-engine catalog (bundled + config); `--live` merges a harness probe for cursor, droid, and devin when available. Discovery output applies best-effort credential scrubbing, so secret-shaped values (including model IDs or paths that resemble credentials) are redacted — copy exact values from your config file rather than from scrubbed output. Agents should start with `--summary` for a compact inventory, then use raw output only when needed.
 
 Both `describe` and `models` include provenance fields useful for detecting installed-runtime drift:
 

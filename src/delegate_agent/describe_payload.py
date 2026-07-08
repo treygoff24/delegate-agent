@@ -187,63 +187,87 @@ def config_resolution_payload(config_source: str, workspace: Path | None = None)
     }
 
 
+def _nonempty_engine_models(section: JsonObject) -> JsonObject | None:
+    models = section.get("models")
+    if isinstance(models, dict) and models:
+        return models
+    return None
+
+
 def models_payload(
     config: JsonObject,
     config_source: str,
     workspace: Path | None = None,
 ) -> JsonObject:
     cache = reasoning.load_reasoning_capability_cache(workspace) if workspace is not None else None
+    cursor: JsonObject = {
+        "defaultModel": config["cursor"]["defaultModel"],
+        "argvPrefix": config["cursor"]["argvPrefix"],
+        "defaultReasoningEffort": config["cursor"].get("defaultReasoningEffort"),
+        "reasoningEffortModels": config["cursor"].get("reasoningEffortModels", {}),
+    }
+    codex: JsonObject = {
+        "binary": config["codex"]["binary"],
+        "defaultModel": config["codex"]["defaultModel"],
+        "defaultReasoningEffort": config["codex"].get("defaultReasoningEffort"),
+        "profile": config["codex"]["profile"],
+    }
+    claude: JsonObject = {
+        "binary": config["claude"]["binary"],
+        "defaultModel": config["claude"]["defaultModel"],
+        "defaultReasoningEffort": config["claude"].get("defaultReasoningEffort"),
+        "workPermissionMode": config["claude"]["workPermissionMode"],
+        "noSessionPersistence": config["claude"]["noSessionPersistence"],
+        "bare": config["claude"]["bare"],
+    }
+    kimi: JsonObject = {
+        "binary": config["kimi"]["binary"],
+        "defaultModel": config["kimi"]["defaultModel"],
+        "defaultReasoningEffort": config["kimi"].get("defaultReasoningEffort"),
+    }
+    grok: JsonObject = {
+        "binary": config["grok"]["binary"],
+        "defaultModel": config["grok"]["defaultModel"],
+        "defaultReasoningEffort": config["grok"].get("defaultReasoningEffort"),
+        "workPermissionMode": config["grok"]["workPermissionMode"],
+        "safePermissionMode": config["grok"]["safePermissionMode"],
+        "safeSandbox": config["grok"]["safeSandbox"],
+        "workSandbox": config["grok"]["workSandbox"],
+        "disableWebSearch": config["grok"]["disableWebSearch"],
+        "noSubagents": config["grok"]["noSubagents"],
+    }
+    devin: JsonObject = {
+        "binary": config["devin"]["binary"],
+        "defaultModel": config["devin"]["defaultModel"],
+        "defaultReasoningEffort": config["devin"].get("defaultReasoningEffort"),
+    }
+    for engine, section in (
+        ("cursor", cursor),
+        ("codex", codex),
+        ("claude", claude),
+        ("kimi", kimi),
+        ("grok", grok),
+        ("devin", devin),
+    ):
+        models = _nonempty_engine_models(config[engine])
+        if models is not None:
+            section["models"] = models
     return {
         "ok": True,
         "configSource": config_source,
         "configResolution": config_resolution_payload(config_source, workspace),
         "runtime": runtime_payload(),
         "reasoningAliases": reasoning.build_alias_reasoning_summaries(config, cache),
-        "cursor": {
-            "defaultModel": config["cursor"]["defaultModel"],
-            "argvPrefix": config["cursor"]["argvPrefix"],
-            "defaultReasoningEffort": config["cursor"].get("defaultReasoningEffort"),
-            "reasoningEffortModels": config["cursor"].get("reasoningEffortModels", {}),
-        },
+        "cursor": cursor,
         "droid": {
             "models": config["droid"]["models"],
             "defaultReasoningEffort": config["droid"].get("defaultReasoningEffort"),
         },
-        "codex": {
-            "binary": config["codex"]["binary"],
-            "defaultModel": config["codex"]["defaultModel"],
-            "defaultReasoningEffort": config["codex"].get("defaultReasoningEffort"),
-            "profile": config["codex"]["profile"],
-        },
-        "claude": {
-            "binary": config["claude"]["binary"],
-            "defaultModel": config["claude"]["defaultModel"],
-            "defaultReasoningEffort": config["claude"].get("defaultReasoningEffort"),
-            "workPermissionMode": config["claude"]["workPermissionMode"],
-            "noSessionPersistence": config["claude"]["noSessionPersistence"],
-            "bare": config["claude"]["bare"],
-        },
-        "kimi": {
-            "binary": config["kimi"]["binary"],
-            "defaultModel": config["kimi"]["defaultModel"],
-            "defaultReasoningEffort": config["kimi"].get("defaultReasoningEffort"),
-        },
-        "grok": {
-            "binary": config["grok"]["binary"],
-            "defaultModel": config["grok"]["defaultModel"],
-            "defaultReasoningEffort": config["grok"].get("defaultReasoningEffort"),
-            "workPermissionMode": config["grok"]["workPermissionMode"],
-            "safePermissionMode": config["grok"]["safePermissionMode"],
-            "safeSandbox": config["grok"]["safeSandbox"],
-            "workSandbox": config["grok"]["workSandbox"],
-            "disableWebSearch": config["grok"]["disableWebSearch"],
-            "noSubagents": config["grok"]["noSubagents"],
-        },
-        "devin": {
-            "binary": config["devin"]["binary"],
-            "defaultModel": config["devin"]["defaultModel"],
-            "defaultReasoningEffort": config["devin"].get("defaultReasoningEffort"),
-        },
+        "codex": codex,
+        "claude": claude,
+        "kimi": kimi,
+        "grok": grok,
+        "devin": devin,
     }
 
 
@@ -386,6 +410,32 @@ def models_summary_payload(
                     )
                 )
                 aliases.append(entry)
+
+    for engine in MODEL_SUMMARY_ENGINES:
+        section = config.get(engine)
+        if not isinstance(section, dict):
+            continue
+        models = section.get("models")
+        if not isinstance(models, dict) or not models:
+            continue
+        for alias, model_id in sorted(models.items()):
+            if not isinstance(alias, str) or not alias:
+                continue
+            entry = {
+                "alias": alias,
+                "provider": engine,
+                "command": f"delegate {engine} {{safe,work,call}} --model {alias}",
+                "available": isinstance(model_id, str) and bool(model_id),
+                "safeSupported": True,
+                "workSupported": True,
+                "model": model_id if isinstance(model_id, str) else None,
+            }
+            entry.update(
+                _summary_reasoning_fields(
+                    _reasoning_for_alias(reasoning_aliases, engine, alias),
+                )
+            )
+            aliases.append(entry)
 
     return {
         "ok": True,

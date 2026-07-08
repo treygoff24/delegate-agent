@@ -153,6 +153,9 @@ Controls local run recording.
     "argvPrefix": ["agent"],
     "defaultModel": "composer-2.5",
     "defaultReasoningEffort": null,
+    "models": {
+      "fast": "replace-with-cursor-model-id"
+    },
     "reasoningEffortModels": {
       "high": "replace-with-thinking-cursor-model"
     }
@@ -162,8 +165,9 @@ Controls local run recording.
 
 - `argvPrefix`: command prefix for Cursor Agent. Use an array so wrappers are possible.
 - `defaultModel`: non-empty model name passed to Cursor.
+- `models`: optional map of local aliases to Cursor model IDs. Used by `--model` and JSON `model`. Alias keys must not collide with mode names (`safe`/`work`/`call`) or start with `-`.
 - `defaultReasoningEffort`: optional non-empty effort string. If set, it requires a matching `reasoningEffortModels` entry. When no mapping exists, the run proceeds without reasoning effort and records a warning (an explicit `--reasoning-effort` flag still fails closed).
-- `reasoningEffortModels`: map from effort strings to Cursor model names. Cursor currently has no standalone reasoning-effort flag, so Delegate implements Cursor effort by selecting the configured model for that effort.
+- `reasoningEffortModels`: map from effort strings to Cursor model names. Cursor currently has no standalone reasoning-effort flag, so Delegate implements Cursor effort by selecting the configured model for that effort. An explicit `--model` wins over effort→model routing.
 - `cursor.binary` is not supported; use `argvPrefix`.
 
 ### `droid`
@@ -172,6 +176,7 @@ Controls local run recording.
 {
   "droid": {
     "binary": "droid",
+    "defaultModel": null,
     "defaultReasoningEffort": null,
     "models": {
       "reviewer": "replace-with-read-only-model-id",
@@ -182,7 +187,8 @@ Controls local run recording.
 ```
 
 - `binary`: child executable for Droid.
-- `models`: map of local aliases to real Droid model IDs. May be empty if you do not use Droid; running a Droid alias that is not present fails with `invalid_alias`.
+- `defaultModel`: optional default model ID used when neither a positional alias nor `--model` is given.
+- `models`: map of local aliases to real Droid model IDs. May be empty if you do not use Droid; running a Droid positional alias that is not present fails with `invalid_alias`. Alias keys must not collide with mode names (`safe`/`work`/`call`) or start with `-`.
 - `defaultReasoningEffort`: optional non-empty effort string validated against the resolved Droid model before launch. When the model has no matching capability declaration, the run proceeds without reasoning effort and records a warning (an explicit `--reasoning-effort` flag still fails closed).
 - Placeholder IDs that start with `replace-with-` are rejected for real runs.
 
@@ -194,6 +200,9 @@ Controls local run recording.
     "binary": "codex",
     "defaultModel": null,
     "defaultReasoningEffort": null,
+    "models": {
+      "fast": "replace-with-codex-model-id"
+    },
     "profile": null,
     "fallbackProfile": null,
     "workSandbox": "workspace-write",
@@ -204,6 +213,7 @@ Controls local run recording.
 ```
 
 - `defaultModel`: optional model string. `null` lets Codex choose its own default.
+- `models`: optional map of local aliases to Codex model IDs for `--model` / JSON `model`. Alias keys must not collide with mode names or start with `-`.
 - `defaultReasoningEffort`: optional non-empty effort string. When a Codex model resolves (run input or `codex.defaultModel`) and supports the level, Delegate emits a Codex config override; otherwise the run proceeds without reasoning effort and records a warning. An explicit `--reasoning-effort` flag fails closed for unsupported levels, but can target the Codex harness default model when no model is configured.
 - `profile`: optional Codex CLI config overlay name. It is config-only; JSON run input cannot set it.
 - `fallbackProfile`: optional top-level `profiles.definitions` name for one quota-limit retry on tracked Codex runs. The fallback profile must define `env.CODEX_HOME`.
@@ -270,6 +280,7 @@ Controls local run recording.
     "binary": "claude",
     "defaultModel": null,
     "defaultReasoningEffort": null,
+    "models": {},
     "workPermissionMode": "auto",
     "noSessionPersistence": true,
     "bare": false
@@ -279,6 +290,7 @@ Controls local run recording.
 
 - `binary`: child executable for Claude Code.
 - `defaultModel`: optional Claude model string. `null` lets Claude Code choose its own default.
+- `models`: optional map of local aliases to Claude model IDs for `--model` / JSON `model`. Alias keys must not collide with mode names or start with `-`.
 - `defaultReasoningEffort`: optional Claude Code effort string: `low`, `medium`, `high`, `xhigh`, or `max`. Delegate emits it as `--effort`.
 - `workPermissionMode`: Claude Code permission mode for work runs. Allowed values are `acceptEdits`, `auto`, `default`, `dontAsk`, and `plan`.
 - `workPermissionMode` cannot be `bypassPermissions`; use `policy.harness.claude.work.bypassApprovalsAndSandbox` when you explicitly want Delegate to emit Claude `--permission-mode bypassPermissions`.
@@ -294,6 +306,7 @@ Controls local run recording.
     "binary": "grok",
     "defaultModel": null,
     "defaultReasoningEffort": null,
+    "models": {},
     "workPermissionMode": "auto",
     "safePermissionMode": "dontAsk",
     "safeSandbox": "read-only",
@@ -306,6 +319,7 @@ Controls local run recording.
 
 - `binary`: path to the Grok Build CLI executable. Delegate also searches `~/.grok/bin`.
 - `defaultModel`: optional Grok model string. `null` lets Grok choose its own default.
+- `models`: optional map of local aliases to Grok model IDs for `--model` / JSON `model`. Alias keys must not collide with mode names or start with `-`.
 - `defaultReasoningEffort`: optional Grok effort string: `low`, `medium`, `high`, `xhigh`, or `max`. Delegate emits it as `--effort`.
 - `workPermissionMode`: Grok permission mode for work runs. Allowed values include `acceptEdits`, `auto`, `default`, and `dontAsk`.
 - `workPermissionMode` cannot be `bypassPermissions`; use `policy.harness.grok.work.bypassApprovalsAndSandbox` when you explicitly want Delegate to emit Grok `--permission-mode bypassPermissions`.
@@ -323,17 +337,38 @@ Controls local run recording.
   "kimi": {
     "binary": "kimi",
     "defaultModel": "kimi-code/kimi-for-coding",
-    "defaultReasoningEffort": null
+    "defaultReasoningEffort": null,
+    "models": {}
   }
 }
 ```
 
 - `binary`: path to the `kimi` executable.
 - `defaultModel`: default Kimi model alias (e.g. `kimi-code/kimi-for-coding`). Set to `null` to let Kimi use its own configured default.
+- `models`: optional map of local aliases to Kimi model IDs for `--model` / JSON `model`. Alias keys must not collide with mode names or start with `-`.
 - `defaultReasoningEffort`: not supported in v1; must be `null`.
 - Kimi's thinking/effort level is configured in `~/.kimi-code/config.toml`, not through Delegate.
 - Kimi safe mode uses Delegate's read-only safety prompt and isolated workspace. Kimi prompt mode auto-approves tool actions, so the isolated workspace is the effective write boundary.
 - Kimi work mode uses prompt mode. Delegate does not emit `--yolo` because Kimi rejects combining `--yolo` with `--prompt`.
+
+### `devin`
+
+```json
+{
+  "devin": {
+    "binary": "devin",
+    "defaultModel": "swe-1.7",
+    "defaultReasoningEffort": null,
+    "models": {}
+  }
+}
+```
+
+- `binary`: path to the Devin CLI executable.
+- `defaultModel`: default Devin model ID (embedded default `swe-1.7`).
+- `models`: optional map of local aliases to Devin model IDs for `--model` / JSON `model`. Alias keys must not collide with mode names or start with `-`.
+- `defaultReasoningEffort`: not supported in v1; must be `null`.
+- Discover live Devin model IDs with `delegate models devin --live`.
 
 ### `reasoning`
 

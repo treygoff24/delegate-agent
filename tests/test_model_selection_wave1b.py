@@ -435,7 +435,9 @@ class InputJsonModelResolutionTests(CommandTestBase):
             self.assertEqual(request.model_alias, "minimax")
             self.assertEqual(request.model, "custom:minimax-e2e")
 
-    def test_droid_input_json_unknown_alias_still_rejected(self):
+    def test_droid_input_json_raw_id_passes_through(self):
+        # Alias-or-id parity with --model: a non-alias value is passed through
+        # verbatim (harness validates) with no modelAlias metadata.
         with tempfile.TemporaryDirectory() as tmp:
             task = Path(tmp) / "task.json"
             task.write_text(
@@ -443,7 +445,7 @@ class InputJsonModelResolutionTests(CommandTestBase):
                     {
                         "engine": "droid",
                         "mode": "safe",
-                        "model": "raw-model-id",
+                        "model": "custom:raw-model-id",
                         "cwd": tmp,
                         "prompt": "review",
                     }
@@ -457,9 +459,10 @@ class InputJsonModelResolutionTests(CommandTestBase):
             )
             config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
             config["droid"]["models"] = {"minimax": "custom:minimax-e2e"}
-            with self.assertRaises(self.delegate.DelegateError) as ctx:
-                self.delegate.request_from_input_json(parsed, config)
-            self.assertEqual(ctx.exception.error, "invalid_alias")
+            request = self.delegate.request_from_input_json(parsed, config)
+            self.assertIsNone(request.model_alias)
+            self.assertEqual(request.model, "custom:raw-model-id")
+            _assert_argv_has_model(self, request.argv, "custom:raw-model-id")
 
     def test_droid_input_json_still_requires_model_string(self):
         with tempfile.TemporaryDirectory() as tmp:

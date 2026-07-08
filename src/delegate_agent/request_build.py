@@ -995,9 +995,18 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
     raw_include_dirty = raw.get("includeDirty", False)
     if not isinstance(raw_include_dirty, bool):
         raise DelegateError("invalid_include_dirty", "includeDirty must be true or false.")
+    json_model_alias: str | None = model_alias if isinstance(model_alias, str) else None
+    json_model_override: str | None = None
     if engine == "droid":
         if not isinstance(model_alias, str) or not model_alias:
             raise DelegateError("missing_model", "droid run input requires model alias.")
+        # Alias-or-id, matching --model: a droid.models key keeps alias semantics
+        # (modelAlias metadata, placeholder guard); anything else passes through
+        # verbatim and the harness validates it.
+        droid_models = config.get("droid", {}).get("models")
+        if not (isinstance(droid_models, dict) and model_alias in droid_models):
+            json_model_alias = None
+            json_model_override = model_alias
     elif engine in MODELESS_ENGINES:
         if model_alias is not None and not isinstance(model_alias, str):
             raise DelegateError("invalid_model", f"model must be a string or null for {engine}.")
@@ -1031,7 +1040,7 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
             return build_request(
                 str(engine),
                 str(mode),
-                model_alias if isinstance(model_alias, str) else None,
+                json_model_alias,
                 workspace,
                 _call_effective_prompt(call_prompt, read_only=raw_read_only),
                 config,
@@ -1054,6 +1063,7 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
                     engine=str(engine),
                     mode=str(mode),
                 ),
+                model_override=json_model_override,
             )
         except BaseException:
             if cleanup_workspace:
@@ -1166,7 +1176,7 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
     return build_request(
         str(engine),
         str(mode),
-        model_alias if isinstance(model_alias, str) else None,
+        json_model_alias,
         workspace,
         prompt,
         config,
@@ -1186,6 +1196,7 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         group=global_options.group,
         workflow_agent_key=raw_workflow_agent_key,
         prompt_instruction_mode=instruction_mode,
+        model_override=json_model_override,
     )
 
 

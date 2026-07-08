@@ -762,6 +762,12 @@ def _validate_engine_models(models: JsonValue, *, engine: str, error: str) -> No
                 error,
                 f"{path} alias {alias!r} collides with a launch mode name; rename the alias.",
             )
+        if alias == engine:
+            raise ConfigError(
+                error,
+                f"{path} alias {alias!r} collides with its own engine name "
+                "(shadowing the engine's summary entry); rename the alias.",
+            )
         if alias.startswith("-"):
             raise ConfigError(
                 error,

@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Per-run model selection: every engine accepts `--model <alias-or-id>` (alias
+  from `<engine>.models`, or a raw model ID passed through verbatim). Alias maps
+  are generalized beyond Droid to all engines; Droid keeps its optional
+  positional alias and gains optional `droid.defaultModel`. `delegate models
+  <engine>` merges bundled + config catalogs; `--live` probes cursor/droid/devin
+  when available. Non-droid aliases also appear in `models` / `models --summary`.
 - Delegate Workflows: a Python DSL supervisor for multi-agent fan-out, durable
   journaling, nested workflow calls, schema-validated `agent()` results,
   approval gates, resume, kill, saved workflows, and workflow discovery in
@@ -24,6 +30,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read-only safe/call enforcement through a Delegate-generated
   `--agent-config`, and `--permission-mode dangerous` for work/default-call
   print-mode runs.
+
+### Changed
+
+- Config migration: a `<engine>.models` alias key named after a mode (`safe`,
+  `work`, or `call`) or after its own engine is now a config validation error —
+  rename the alias (aliases naming a *different* engine, like a `droid.models`
+  alias called `grok`, remain valid). Cursor input-JSON `"model"` values that differ from
+  `cursor.defaultModel` are now honored instead of rejected. Droid run-input
+  JSON `"model"` is now alias-or-id like `--model`: a `droid.models` key keeps
+  alias semantics, anything else passes through verbatim to the harness
+  (previously a hard `invalid_alias` error).
+
 ## [0.11.0] - 2026-07-05
 
 Profile-guard calibration fix for issue #9: a shell carrying `AI_PROFILE=work|personal` with no matching `~/.delegate/config.<profile>.json` no longer presents a half-configured install as a total CLI outage.

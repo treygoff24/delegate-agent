@@ -90,6 +90,8 @@ delegate --json describe --summary
 delegate --json models --summary
 delegate --json describe
 delegate --json models
+delegate --json models codex          # per-engine advisory catalog
+delegate --json models cursor --live  # merge live harness probe when supported
 delegate --json capabilities
 ```
 
@@ -140,6 +142,16 @@ delegate cursor work "Fix the parser bug. Run python3 -m unittest tests.test_del
 delegate claude work "Implement the scoped change and run the named check. Report changed files."
 delegate devin work "Implement the scoped change and run the named check. Report changed files."
 delegate kimi work "Implement the scoped change and run the named check. Report changed files."
+```
+
+Pin a model per run with `--model` (config alias from `<engine>.models`, or a
+raw model ID passed through verbatim). Droid still accepts a positional alias;
+`--model` works on every engine, including Droid:
+
+```bash
+delegate devin safe --model claude-fable-5 "Review this repository. Do not edit files."
+delegate droid work --model custom:my-model "Implement the scoped change."
+delegate --json dry-run codex safe --model fast "Review this repository. Do not edit files."
 ```
 
 For long foreground runs, add `--progress` to emit bounded parent heartbeats to

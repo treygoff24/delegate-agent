@@ -142,6 +142,7 @@ intentionally deferred.
 - Use `safe` or `work` lanes for agents that inspect or modify the tree.
 - Use `call --read-only` lanes for judge/verify steps that should not touch files.
 - `call` is the default mode for `judges()`, and workflow call-mode children are read-only by default.
+- `agent(model=...)` selects the child model per-run; every engine now supports it via `--model`.
 - `passthrough=True` is incompatible with `schema=` and with `mode="call"`; slash pass-through needs a work lane or an argv-enforced-safe lane.
 - Prefer `agent(phase="...")` under concurrency; global `phase()` is intentionally racy like Claude's workflow primitive.
 - Use `--budget N` for run-count control. `budget.spent()` and `budget.remaining()` are available inside scripts. Dry-runs simulate budget ticks but do not consume real budget.
