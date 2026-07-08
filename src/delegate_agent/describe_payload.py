@@ -1000,7 +1000,20 @@ def emit_models(
     *,
     workspace: Path | None = None,
     summary: bool = False,
+    engine: str | None = None,
+    live: bool = False,
 ) -> int:
+    if engine is not None:
+        from delegate_agent import model_discovery
+
+        payload = _scrub_discovery_payload(
+            model_discovery.engine_models_payload(config, engine, live=live)
+        )
+        if json_mode:
+            delegate_rendering.print_json(payload, stdout)
+        else:
+            model_discovery.emit_engine_models_text(payload, stdout)
+        return EXIT_OK
     if summary:
         payload = _scrub_discovery_payload(models_summary_payload(config, config_source, workspace))
         if json_mode:

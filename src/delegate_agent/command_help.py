@@ -1129,17 +1129,38 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
     ),
     "models": CommandSpec(
         name="models",
-        summary="List configured engines and model settings.",
-        usage=("delegate [--json] models [--summary]",),
-        options=(OptionSpec("--summary", None, "Emit a compact alias-centered inventory."),),
+        summary="List configured engines and model settings, or an advisory catalog for one engine.",
+        usage=(
+            "delegate [--json] models [--summary]",
+            "delegate [--json] models <engine> [--live]",
+        ),
+        arguments=(
+            ArgSpec(
+                "engine",
+                False,
+                "Optional engine name for a per-engine advisory model catalog.",
+            ),
+        ),
+        options=(
+            OptionSpec("--summary", None, "Emit a compact alias-centered inventory."),
+            OptionSpec(
+                "--live",
+                None,
+                "Merge a live harness probe (requires <engine>; degrades on failure).",
+            ),
+        ),
         examples=(
             "delegate models",
             "delegate --json models",
             "delegate --json models --summary",
+            "delegate --json models cursor",
+            "delegate --json models cursor --live",
         ),
         notes=(
             "Discovery output applies best-effort credential scrubbing; model IDs and paths are shown verbatim.",
             "Agent discovery should prefer --summary, then use raw output only when needed.",
+            "Bundled tables are advisory; the harness is the source of truth (use --live where supported).",
+            "Per-engine catalogs merge config aliases/defaultModel over live results over bundled IDs.",
         ),
         see_also=("describe", "cursor", "codex", "droid", "kimi", "claude"),
         unsupported_global_options=("--auth-profile",),
@@ -1359,6 +1380,7 @@ def render_overview_text() -> str:
         "delegate [--cwd PATH] [--json] workflow list",
         "delegate [--cwd PATH] [--json] [--auth-profile NAME] profiles",
         "delegate [--json] models [--summary]",
+        "delegate [--json] models <engine> [--live]",
         "delegate [--json] capabilities [refresh]",
         "delegate [--json] describe [--summary]",
         "delegate agent-help",

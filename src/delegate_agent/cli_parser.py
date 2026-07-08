@@ -176,12 +176,37 @@ def parse_simple_inspection_subcommand(
     if any(command_help.is_help_token(token) for token in rest):
         return help_command(json_mode, name)
     summary = False
+    engine: str | None = None
+    live = False
     if name in INSPECTION_OPTION_SUBCOMMANDS:
         for token in rest:
             if token == "--summary":
                 summary = True
                 continue
+            if name == "models" and token == "--live":
+                live = True
+                continue
+            if name == "models" and not token.startswith("-"):
+                if engine is not None:
+                    require_no_extra([token], name)
+                engine = token
+                continue
             require_no_extra([token], name)
+        if live and engine is None:
+            raise DelegateError(
+                "invalid_option_combination",
+                "--live requires an engine argument (delegate models <engine> --live).",
+            )
+        if summary and engine is not None:
+            raise DelegateError(
+                "invalid_option_combination",
+                "--summary is not supported with models <engine>.",
+            )
+        if engine is not None and engine not in KNOWN_ENGINES:
+            raise DelegateError(
+                "invalid_engine",
+                f"engine must be {ENGINES_PROSE}.",
+            )
     else:
         require_no_extra(rest, name)
     return ParsedCommand(
@@ -194,7 +219,7 @@ def parse_simple_inspection_subcommand(
             isolation=isolation,
             auth_profile=auth_profile,
         ),
-        inspection=InspectionOptions(summary=summary),
+        inspection=InspectionOptions(summary=summary, engine=engine, live=live),
     )
 
 

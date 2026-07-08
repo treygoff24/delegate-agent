@@ -963,6 +963,8 @@ def main(
                 stdout,
                 workspace=config_workspace,
                 summary=inspection.summary,
+                engine=inspection.engine,
+                live=inspection.live,
             )
         if parsed.subcommand == "describe":
             inspection = parsed.inspection or InspectionOptions()
