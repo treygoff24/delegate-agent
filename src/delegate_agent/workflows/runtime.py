@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import hashlib
+import io
 import json
 import os
 import signal
@@ -34,6 +36,8 @@ DEFAULT_MODE = "safe"
 DEFAULT_STRUCTURED_RETRIES = 2
 DEFAULT_ITEM_THREADS = 64
 ENGINE_ARGV_TRANSPORT = {"cursor", "kimi"}
+WORKFLOW_LOCK_FD_ENV = "DELEGATE_WORKFLOW_LOCK_FD"
+_MISSING = object()
 
 
 class BudgetExceeded(RuntimeError):
@@ -97,6 +101,8 @@ class WorkflowState:
         default_factory=lambda: threading.Condition(threading.Lock())
     )
     dry_runs: list[dict[str, Any]] = field(default_factory=list)
+    dry_run_budget_spent: int = 0
+    supervisor_token: str = field(default_factory=lambda: os.urandom(8).hex())
 
     def __post_init__(self) -> None:
         self.journal_path = self.root / registry.JOURNAL_FILE
@@ -162,6 +168,8 @@ class WorkflowState:
                 "remaining": _budget_remaining_json(self.budget),
             },
             "supervisorPid": os.getpid(),
+            "supervisorPgid": os.getpgrp(),
+            "supervisorToken": self.supervisor_token,
             "updatedAt": run_registry.utc_now_iso(),
         }
         if last_event is not None:
@@ -243,8 +251,8 @@ class WorkflowState:
         return bool(getattr(self.thread_local, "item_depth", 0))
 
     @contextlib.contextmanager
-    def item_slot(self, *, bypass: bool = False):
-        manager = contextlib.nullcontext() if bypass else self.item_semaphore
+    def item_slot(self, *, bypass: bool = False, pre_acquired: bool = False):
+        manager = contextlib.nullcontext() if bypass or pre_acquired else self.item_semaphore
         with manager:
             previous = getattr(self.thread_local, "item_depth", 0)
             self.thread_local.item_depth = previous + 1
@@ -252,6 +260,13 @@ class WorkflowState:
                 yield
             finally:
                 self.thread_local.item_depth = previous
+                if pre_acquired:
+                    self.item_semaphore.release()
+
+    def dry_run_budget_tick(self) -> int:
+        with self.lifetime_lock:
+            self.dry_run_budget_spent += 1
+            return self.dry_run_budget_spent
 
 
 def _global_agent_cap() -> int:
@@ -342,18 +357,23 @@ class WorkflowDsl:
         results: list[Any] = [None] * len(items)
         threads: list[threading.Thread] = []
         bypass_item_cap = self.state.inside_item_thread()
+        gate_errors: list[GateExit] = []
 
-        def run_item(index: int, item: Any) -> None:
+        def run_item(index: int, item: Any, pre_acquired: bool) -> None:
             # Nested primitives bypass the item-thread cap so an outer callback
             # cannot hold every slot while waiting for its child item threads.
-            with self.state.item_slot(bypass=bypass_item_cap):
+            with self.state.item_slot(bypass=bypass_item_cap, pre_acquired=pre_acquired):
                 previous = item
                 with self.state.scope(f"{base_scope}/item#{index}"):
                     for stage_index, stage in enumerate(stages):
                         with self.state.scope(f"{base_scope}/item#{index}/stage#{stage_index}"):
                             try:
                                 previous = stage(previous, item, index)
-                            except (BudgetExceeded, GateExit):
+                            except BudgetExceeded:
+                                previous = None
+                                break
+                            except GateExit as exc:
+                                gate_errors.append(exc)
                                 previous = None
                                 break
                             except Exception as exc:
@@ -369,11 +389,24 @@ class WorkflowDsl:
                 results[index] = previous
 
         for index, item in enumerate(items):
-            thread = threading.Thread(target=run_item, args=(index, item), daemon=False)
-            thread.start()
+            pre_acquired = False
+            if not bypass_item_cap:
+                self.state.item_semaphore.acquire()
+                pre_acquired = True
+            thread = threading.Thread(
+                target=run_item, args=(index, item, pre_acquired), daemon=False
+            )
+            try:
+                thread.start()
+            except BaseException:
+                if pre_acquired:
+                    self.state.item_semaphore.release()
+                raise
             threads.append(thread)
         for thread in threads:
             thread.join()
+        if gate_errors:
+            raise gate_errors[0]
         return results
 
     def parallel(self, thunks: list[Callable[[], Any]]) -> list[Any]:
@@ -387,15 +420,19 @@ class WorkflowDsl:
         results: list[Any] = [None] * len(thunks)
         threads: list[threading.Thread] = []
         bypass_item_cap = self.state.inside_item_thread()
+        gate_errors: list[GateExit] = []
 
-        def run_thunk(index: int, thunk: Callable[[], Any]) -> None:
+        def run_thunk(index: int, thunk: Callable[[], Any], pre_acquired: bool) -> None:
             with (
-                self.state.item_slot(bypass=bypass_item_cap),
+                self.state.item_slot(bypass=bypass_item_cap, pre_acquired=pre_acquired),
                 self.state.scope(f"{base_scope}/thunk#{index}"),
             ):
                 try:
                     results[index] = thunk()
-                except (BudgetExceeded, GateExit):
+                except BudgetExceeded:
+                    results[index] = None
+                except GateExit as exc:
+                    gate_errors.append(exc)
                     results[index] = None
                 except Exception as exc:
                     self.state.append_event(
@@ -406,11 +443,24 @@ class WorkflowDsl:
                     results[index] = None
 
         for index, thunk in enumerate(thunks):
-            thread = threading.Thread(target=run_thunk, args=(index, thunk), daemon=False)
-            thread.start()
+            pre_acquired = False
+            if not bypass_item_cap:
+                self.state.item_semaphore.acquire()
+                pre_acquired = True
+            thread = threading.Thread(
+                target=run_thunk, args=(index, thunk, pre_acquired), daemon=False
+            )
+            try:
+                thread.start()
+            except BaseException:
+                if pre_acquired:
+                    self.state.item_semaphore.release()
+                raise
             threads.append(thread)
         for thread in threads:
             thread.join()
+        if gate_errors:
+            raise gate_errors[0]
         return results
 
     def judges(
@@ -438,7 +488,7 @@ class WorkflowDsl:
     def workflow(self, name_or_path: str, args: Any = None, gate: bool | str = False) -> Any:
         if self.state.depth >= 3:
             raise RuntimeError("workflow nesting depth exceeded 3")
-        child_path = resolve_workflow_reference(name_or_path)
+        child_path = resolve_workflow_reference(name_or_path, self.state.script_path.parent)
         child_source = workflow_script.read_script(child_path)
         workflow_script.check_source(child_source, filename=str(child_path))
         name = Path(name_or_path).stem
@@ -508,12 +558,17 @@ class WorkflowDsl:
         timeout: int | float | None = None,
         retries: int | None = None,
     ) -> Any:
-        if passthrough and schema is not None:
-            raise ValueError("passthrough=True is mutually exclusive with schema=")
         if not isinstance(prompt, str):
             prompt = str(prompt)
         engines = _engine_chain(engine or self.defaults.get("engine") or DEFAULT_ENGINE)
         resolved_mode = mode or self.defaults.get("mode") or DEFAULT_MODE
+        if passthrough and resolved_mode == MODE_CALL:
+            raise ValueError(
+                "passthrough=True with mode='call' is invalid; slash pass-through "
+                "needs a work or argv-enforced-safe lane"
+            )
+        if passthrough and schema is not None:
+            raise ValueError("passthrough=True is mutually exclusive with schema=")
         resolved_model = model or self.defaults.get("model")
         resolved_effort = effort or self.defaults.get("effort")
         resolved_isolation = isolation or self.defaults.get("isolation")
@@ -539,15 +594,39 @@ class WorkflowDsl:
                 result=result,
             )
             return result
+        if key in self.state.started_without_result:
+            adopted = self._adopt_existing_agent_run(
+                key,
+                scope=path,
+                label=label,
+                phase=resolved_phase,
+                prefer_assistant=schema is not None,
+                timeout=timeout,
+            )
+            if adopted is not _MISSING:
+                self.state.replay_keys.add(key)
+                self.state.replay[key] = adopted
+                self.state.append_event(
+                    "agent_finished",
+                    key=key,
+                    scope=path,
+                    result=adopted,
+                    adopted=True,
+                )
+                return adopted
         self.state.claim_agent_lifetime()
-        spent = self.state.budget.claim()
-        self.state.append_event(
-            "budget",
-            spent=spent,
-            total=self.state.budget.total,
-            remaining=_budget_remaining_json(self.state.budget),
-        )
         if self.state.dry_run:
+            spent = self.state.dry_run_budget_tick()
+            remaining = (
+                None if self.state.budget.total is None else max(self.state.budget.total - spent, 0)
+            )
+            self.state.append_event(
+                "budget",
+                spent=spent,
+                total=self.state.budget.total,
+                remaining=remaining,
+                simulated=True,
+            )
             placeholder = workflow_schema.placeholder(schema) if schema else ""
             self.state.dry_runs.append(
                 {
@@ -562,10 +641,18 @@ class WorkflowDsl:
             self.state.append_event("agent_started", key=key, scope=path, dryRun=True)
             self.state.append_event("agent_finished", key=key, scope=path, result=placeholder)
             return placeholder
+        spent = self.state.budget.claim()
+        self.state.append_event(
+            "budget",
+            spent=spent,
+            total=self.state.budget.total,
+            remaining=_budget_remaining_json(self.state.budget),
+        )
         with self.state.active_agent():
             self.state.append_event(
                 "agent_started",
                 key=key,
+                workflowAgentKey=key,
                 scope=path,
                 label=label,
                 phase=resolved_phase,
@@ -613,6 +700,41 @@ class WorkflowDsl:
                 "agent_finished", key=key, scope=path, result=None, exhausted=True
             )
             return None
+
+    def _adopt_existing_agent_run(
+        self,
+        key: str,
+        *,
+        scope: str,
+        label: str | None,
+        phase: str | None,
+        prefer_assistant: bool,
+        timeout: int | float | None,
+    ) -> Any:
+        run_id = _find_workflow_agent_run(self.state.workspace, self.state.wf_id, key)
+        if run_id is None:
+            return _MISSING
+        if not _workflow_run_terminal(self.state.workspace, run_id):
+            waited = _wait_for_workflow_agent_run(self.state.workspace, run_id, timeout)
+            if not waited:
+                self.state.append_event("agent_timeout", key=key, scope=scope, runId=run_id)
+                return None
+        result = _workflow_agent_run_result(
+            self.state.workspace,
+            run_id,
+            prefer_assistant=prefer_assistant,
+        )
+        self.state.append_event(
+            "agent_adopted",
+            key=key,
+            workflowAgentKey=key,
+            scope=scope,
+            label=label,
+            phase=phase,
+            runId=run_id,
+            result=result,
+        )
+        return result
 
     def _run_agent_attempts(
         self,
@@ -706,7 +828,7 @@ class WorkflowDsl:
         prior_output = ""
         prior_error = ""
         for attempt in range(attempts + 1):
-            attempt_prompt = prompt
+            attempt_prompt = _correction_prompt(prompt, prior_output, prior_error)
             if engine == "codex":
                 with tempfile.NamedTemporaryFile(
                     "w", encoding="utf-8", delete=False
@@ -777,9 +899,10 @@ class WorkflowDsl:
         payload: JsonObject = {
             "engine": engine,
             "mode": mode,
-            "cwd": str(self.state.workspace),
             "prompt": prompt,
         }
+        if mode != MODE_CALL:
+            payload["cwd"] = str(self.state.workspace)
         if model is not None:
             payload["model"] = model
         if effort is not None:
@@ -907,6 +1030,22 @@ def _structured_prompt(
     return "\n".join(parts)
 
 
+def _correction_prompt(prompt: str, prior_output: str, prior_error: str) -> str:
+    if not prior_output and not prior_error:
+        return prompt
+    return "\n".join(
+        [
+            prompt,
+            "",
+            "Your prior output was invalid. Correct it now.",
+            "Prior output:",
+            prior_output,
+            "Validation error:",
+            prior_error,
+        ]
+    )
+
+
 def _parse_engine_spec(value: Any) -> tuple[str, str | None]:
     if isinstance(value, dict):
         return str(value.get("engine", DEFAULT_ENGINE)), value.get("model")
@@ -952,11 +1091,40 @@ def _approval_allows(root: Path, key: str) -> bool:
     )
 
 
-def resolve_workflow_reference(name_or_path: str) -> Path:
-    candidate = Path(str(name_or_path)).expanduser()
-    if candidate.exists():
-        return candidate.resolve()
-    return registry.saved_workflow_path(str(name_or_path)).resolve()
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def resolve_workflow_reference(name_or_path: str, parent_script_dir: Path) -> Path:
+    raw = str(name_or_path)
+    try:
+        saved = registry.saved_workflow_path(raw).resolve()
+    except ValueError:
+        saved = None
+    if saved is not None and saved.exists():
+        return saved
+    candidate = Path(raw).expanduser()
+    user_root = registry.user_workflow_root().resolve()
+    if candidate.is_absolute():
+        resolved = candidate.resolve()
+        if resolved.exists() and _is_relative_to(resolved, user_root):
+            return resolved
+        raise RuntimeError(
+            "nested workflow paths must be saved workflow names, absolute paths inside "
+            "~/.delegate/workflows, or paths inside the parent workflow directory"
+        )
+    parent_root = parent_script_dir.resolve()
+    resolved = (parent_root / candidate).resolve()
+    if resolved.exists() and _is_relative_to(resolved, parent_root):
+        return resolved
+    raise RuntimeError(
+        "nested workflow paths must be saved workflow names, absolute paths inside "
+        "~/.delegate/workflows, or paths inside the parent workflow directory"
+    )
 
 
 def load_args(root: Path) -> Any:
@@ -1000,16 +1168,107 @@ def _cancel_workflow_runs(
     if not handles:
         return []
     command = wait_cancel_commands.CancelCommand(tuple(handles), json_mode=True)
-    import io
-
     out = io.StringIO()
     wait_cancel_commands.emit_cancel(command, workspace_path=str(workspace), stdout=out)
     try:
         payload = json.loads(out.getvalue())
     except json.JSONDecodeError:
         return []
-    cancelled = payload.get("cancelled") if isinstance(payload, dict) else None
+    cancelled = payload.get("runs") if isinstance(payload, dict) else None
     return cancelled if isinstance(cancelled, list) else []
+
+
+def _run_registry_root(workspace: Path) -> Path:
+    return run_registry.registry_root_if_exists(workspace) or run_registry.registry_root(workspace)
+
+
+def _find_workflow_agent_run(workspace: Path, wf_id: str, workflow_agent_key: str) -> str | None:
+    root = _run_registry_root(workspace)
+    if not root.exists():
+        return None
+    index = run_registry.load_index(root)
+    matches: list[tuple[int, str]] = []
+    for run_id, entry in index.get("runs", {}).items():
+        if not isinstance(run_id, str) or not isinstance(entry, dict):
+            continue
+        if entry.get("group") != wf_id or entry.get("workflowAgentKey") != workflow_agent_key:
+            continue
+        ordinal = entry.get("registrationOrdinal", 0)
+        matches.append((ordinal if isinstance(ordinal, int) else 0, run_id))
+    if not matches:
+        return None
+    matches.sort()
+    return matches[-1][1]
+
+
+def _workflow_run_terminal(workspace: Path, run_id: str) -> bool:
+    root = _run_registry_root(workspace)
+    state = run_registry.load_run_state_or_none(root, run_id)
+    return (
+        run_registry.status_fields(state).get("effectiveStatus") in run_registry.TERMINAL_STATUSES
+    )
+
+
+def _wait_for_workflow_agent_run(workspace: Path, run_id: str, timeout: int | float | None) -> bool:
+    command = wait_cancel_commands.WaitCommand(
+        (run_id,),
+        timeout_seconds=int(timeout or wait_cancel_commands.WAIT_DEFAULT_TIMEOUT_SECONDS),
+        interval_seconds=1,
+        json_mode=True,
+    )
+    out = io.StringIO()
+    exit_code = wait_cancel_commands.emit_wait(command, workspace_path=str(workspace), stdout=out)
+    return exit_code != 124
+
+
+def _workflow_agent_run_result(
+    workspace: Path,
+    run_id: str,
+    *,
+    prefer_assistant: bool,
+) -> str | None:
+    root = _run_registry_root(workspace)
+    state = run_registry.load_run_state_or_none(root, run_id)
+    if run_registry.status_fields(state).get("effectiveStatus") != run_registry.STATUS_SUCCEEDED:
+        return None
+    snapshot = run_registry.load_run_snapshot_or_none(root, run_id)
+    assistant = snapshot.get("assistantText") if isinstance(snapshot, dict) else None
+    if prefer_assistant and isinstance(assistant, str) and assistant.strip():
+        return assistant
+    completion = snapshot.get("completionReport") if isinstance(snapshot, dict) else None
+    report_path = completion.get("path") if isinstance(completion, dict) else None
+    if isinstance(report_path, str):
+        path = Path(report_path)
+        if not path.is_absolute():
+            path = workspace / path
+        if path.exists():
+            return path.read_text(encoding="utf-8", errors="replace").strip()
+    if isinstance(assistant, str):
+        return assistant
+    return ""
+
+
+@contextlib.contextmanager
+def _held_workflow_lock(root: Path):
+    raw_fd = os.environ.get(WORKFLOW_LOCK_FD_ENV)
+    if raw_fd is not None:
+        try:
+            fd = int(raw_fd)
+        except ValueError:
+            fd = registry.acquire_workflow_lock(root)
+            close_fd = True
+        else:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            close_fd = True
+    else:
+        fd = registry.acquire_workflow_lock(root)
+        close_fd = True
+    try:
+        yield
+    finally:
+        if close_fd:
+            with contextlib.suppress(OSError):
+                os.close(fd)
 
 
 def run_supervisor(
@@ -1020,43 +1279,59 @@ def run_supervisor(
     config: JsonObject,
 ) -> int:
     root = registry.workflow_dir(workspace, wf_id)
-    status = registry.read_json(root / registry.STATUS_FILE) or {}
-    script_path = root / registry.SCRIPT_FILE
-    args = load_args(root)
-    budget_payload = status.get("budget") if isinstance(status, dict) else None
-    total = budget_payload.get("total") if isinstance(budget_payload, dict) else None
-    spent = budget_payload.get("spent") if isinstance(budget_payload, dict) else None
-    total_budget = total if isinstance(total, int) else None
-    spent_budget = spent if isinstance(spent, int) and spent >= 0 else 0
-    state = WorkflowState(
-        wf_id=wf_id,
-        workspace=workspace,
-        root=root,
-        script_path=script_path,
-        config=config,
-        cli_argv=cli_argv,
-        args=args,
-        budget=Budget(total_budget, spent_budget),
-    )
-    state.write_status("running")
-    try:
-        result = execute_workflow(state)
-    except GateExit:
+    with _held_workflow_lock(root):
+        status = registry.read_json(root / registry.STATUS_FILE) or {}
+        script_path = root / registry.SCRIPT_FILE
+        args = load_args(root)
+        budget_payload = status.get("budget") if isinstance(status, dict) else None
+        total = budget_payload.get("total") if isinstance(budget_payload, dict) else None
+        spent = budget_payload.get("spent") if isinstance(budget_payload, dict) else None
+        total_budget = total if isinstance(total, int) else None
+        spent_budget = spent if isinstance(spent, int) and spent >= 0 else 0
+        state = WorkflowState(
+            wf_id=wf_id,
+            workspace=workspace,
+            root=root,
+            script_path=script_path,
+            config=config,
+            cli_argv=cli_argv,
+            args=args,
+            budget=Budget(total_budget, spent_budget),
+        )
+        state.write_status("running")
+        try:
+            result = execute_workflow(state)
+        except GateExit:
+            return 0
+        except BaseException as exc:
+            state.append_event("workflow_failed", error=str(exc))
+            registry.write_result(root, {"ok": False, "wfId": wf_id, "error": str(exc)})
+            state.write_status("failed", error=str(exc))
+            return 1
+        registry.write_result(root, {"ok": True, "wfId": wf_id, "result": result})
+        state.append_event("workflow_finished", result=result)
+        state.write_status("succeeded")
         return 0
-    except BaseException as exc:
-        state.append_event("workflow_failed", error=str(exc))
-        registry.write_result(root, {"ok": False, "wfId": wf_id, "error": str(exc)})
-        state.write_status("failed", error=str(exc))
-        return 1
-    registry.write_result(root, {"ok": True, "wfId": wf_id, "result": result})
-    state.append_event("workflow_finished", result=result)
-    state.write_status("succeeded")
-    return 0
 
 
-def detach_supervisor(argv: list[str], *, cwd: Path) -> None:
+def detach_supervisor(argv: list[str], *, cwd: Path, lock_fd: int | None = None) -> None:
+    env = os.environ.copy()
+    pass_fds: tuple[int, ...] = ()
+    if lock_fd is not None:
+        os.set_inheritable(lock_fd, True)
+        env[WORKFLOW_LOCK_FD_ENV] = str(lock_fd)
+        pass_fds = (lock_fd,)
     if os.environ.get("DELEGATE_WORKFLOW_NO_DAEMON") == "1":
-        subprocess.Popen(argv, cwd=str(cwd), stdin=subprocess.DEVNULL)
+        subprocess.Popen(
+            argv,
+            cwd=str(cwd),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            env=env,
+            pass_fds=pass_fds,
+        )
         return
     first = os.fork()
     if first > 0:
@@ -1069,23 +1344,36 @@ def detach_supervisor(argv: list[str], *, cwd: Path) -> None:
     devnull = os.open(os.devnull, os.O_RDWR)
     for fd in (0, 1, 2):
         os.dup2(devnull, fd)
-    os.execvpe(argv[0], argv, os.environ.copy())
+    os.execvpe(argv[0], argv, env)
 
 
-def kill_supervisor(pid: int) -> None:
-    if pid <= 1:
-        return
+def kill_supervisor(pid: int, pgid: int | None) -> bool:
+    if pid <= 1 or pgid is None or pgid <= 1:
+        return False
+    try:
+        live_pgid = os.getpgid(pid)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return False
+    if live_pgid != pgid:
+        return False
     with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.kill(pid, signal.SIGTERM)
+        os.killpg(pgid, signal.SIGTERM)
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(pid, 0)
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return True
+        else:
             time.sleep(0.05)
             continue
-        return
     with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.kill(pid, signal.SIGKILL)
+        os.killpg(pgid, signal.SIGKILL)
+    return True
 
 
 __all__ = [

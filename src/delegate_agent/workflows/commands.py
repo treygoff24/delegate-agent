@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import shutil
 import sys
 import time
@@ -55,12 +57,18 @@ def emit(
     if action == "_supervise":
         if command.wf_id is None:
             raise DelegateError("missing_workflow", "workflow _supervise requires <wfId>.")
-        return runtime.run_supervisor(
-            workspace=workspace,
-            wf_id=command.wf_id,
-            cli_argv=_delegate_cli_argv(),
-            config=config,
-        )
+        try:
+            return runtime.run_supervisor(
+                workspace=workspace,
+                wf_id=command.wf_id,
+                cli_argv=_delegate_cli_argv(),
+                config=config,
+            )
+        except BlockingIOError as exc:
+            raise DelegateError(
+                "workflow_locked",
+                f"Workflow is already running: {command.wf_id}",
+            ) from exc
     if action == "status":
         return emit_status(command, workspace=workspace, stdout=stdout)
     if action == "events":
@@ -109,6 +117,7 @@ def emit_run(
     stdout: TextIO,
     stderr: TextIO,
 ) -> int:
+    warnings: list[str] = []
     if command.resume:
         wf_id = _validate_wf_id(command.resume)
         root = registry.workflow_dir(workspace, wf_id)
@@ -139,7 +148,8 @@ def emit_run(
             registry.write_status(root, status)
     else:
         source = _script_path_for_command(command)
-        check_script(source)
+        check_result = check_script(source)
+        warnings = list(check_result.warnings)
         wf_id = registry.generate_workflow_id()
         root = registry.ensure_workflow_dir(workspace, wf_id)
         data = source.read_bytes()
@@ -173,8 +183,10 @@ def emit_run(
             args_value=args_value,
             budget_total=budget_total,
             json_mode=command.json_mode,
+            warnings=warnings,
             stdout=stdout,
         )
+    lock_fd = _acquire_workflow_lock(root, wf_id)
     supervisor_argv = [
         *_delegate_cli_argv(),
         "--cwd",
@@ -183,7 +195,11 @@ def emit_run(
         "_supervise",
         wf_id,
     ]
-    runtime.detach_supervisor(supervisor_argv, cwd=workspace)
+    try:
+        runtime.detach_supervisor(supervisor_argv, cwd=workspace, lock_fd=lock_fd)
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(lock_fd)
     payload: JsonObject = {
         "ok": True,
         "schema": WORKFLOW_COMMAND_SCHEMA,
@@ -191,13 +207,16 @@ def emit_run(
         "journalPath": str(root / registry.JOURNAL_FILE),
         "scriptPath": str(script_path),
     }
+    if warnings:
+        payload["warnings"] = warnings
     if command.json_mode:
         rendering.print_json(payload, stdout)
     else:
+        for warning in warnings:
+            print(f"warning: {warning}", file=stderr)
         print(f"wfId: {wf_id}", file=stdout)
         print(f"journalPath: {payload['journalPath']}", file=stdout)
         print(f"scriptPath: {payload['scriptPath']}", file=stdout)
-    _ = stderr
     return EXIT_OK
 
 
@@ -211,6 +230,7 @@ def emit_dry_run(
     args_value: Any,
     budget_total: int | None,
     json_mode: bool,
+    warnings: list[str],
     stdout: TextIO,
 ) -> int:
     state = runtime.WorkflowState(
@@ -224,7 +244,10 @@ def emit_dry_run(
         budget=runtime.Budget(budget_total),
         dry_run=True,
     )
-    result = runtime.execute_workflow(state)
+    try:
+        result = runtime.execute_workflow(state)
+    except Exception as exc:
+        raise DelegateError("workflow_execution_failed", str(exc)) from exc
     tree = _run_tree(state.dry_runs)
     payload: JsonObject = {
         "ok": True,
@@ -234,6 +257,8 @@ def emit_dry_run(
         "runTree": tree,
         "result": result,
     }
+    if warnings:
+        payload["warnings"] = warnings
     if json_mode:
         rendering.print_json(payload, stdout)
     else:
@@ -362,6 +387,7 @@ def emit_approve(
         raise DelegateError(
             "workflow_not_gated", f"Workflow is not waiting on a gate: {command.wf_id}"
         )
+    _assert_workflow_unlocked(root, command.wf_id or "")
     registry.write_json(root / registry.APPROVAL_FILE, {"approved": True, "gateKey": gate_key})
     resumed = WorkflowCommand("run", resume=command.wf_id, json_mode=command.json_mode)
     return emit_run(resumed, workspace=workspace, config=config, stdout=stdout, stderr=stdout)
@@ -371,13 +397,24 @@ def emit_kill(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) -> i
     root = _workflow_dir_for_command(command, workspace)
     status = registry.read_json(root / registry.STATUS_FILE) or {}
     pid = status.get("supervisorPid")
+    pgid = status.get("supervisorPgid")
+    supervisor_signalled = False
     if isinstance(pid, int):
-        runtime.kill_supervisor(pid)
+        supervisor_signalled = runtime.kill_supervisor(pid, pgid if isinstance(pgid, int) else None)
     cancelled = runtime.cancel_workflow_children(workspace, command.wf_id or "")
     _append_command_event(root, "workflow_killed", cancelled=cancelled)
-    registry.write_status(
-        root, {"ok": False, "wfId": command.wf_id, "status": "killed", "cancelled": cancelled}
+    merged = dict(status) if isinstance(status, dict) else {}
+    merged.update(
+        {
+            "ok": False,
+            "wfId": command.wf_id,
+            "status": "killed",
+            "killedAt": run_registry.utc_now_iso(),
+            "cancelled": cancelled,
+            "supervisorSignalled": supervisor_signalled,
+        }
     )
+    registry.write_status(root, merged)
     payload: JsonObject = {
         "ok": True,
         "schema": WORKFLOW_COMMAND_SCHEMA,
@@ -444,8 +481,11 @@ def emit_save(command: WorkflowCommand, *, stdout: TextIO) -> int:
 
 
 def check_script(path: Path) -> workflow_script.CheckResult:
-    source = workflow_script.read_script(path)
-    return workflow_script.check_source(source, filename=str(path))
+    try:
+        source = workflow_script.read_script(path)
+        return workflow_script.check_source(source, filename=str(path))
+    except workflow_script.WorkflowScriptError as exc:
+        raise DelegateError("invalid_workflow_script", str(exc)) from exc
 
 
 def _script_path_for_command(command: WorkflowCommand) -> Path:
@@ -491,6 +531,19 @@ def _append_command_event(root: Path, event_type: str, **payload: Any) -> None:
         root / registry.JOURNAL_FILE,
         {"seq": sequence + 1, "type": event_type, "at": run_registry.utc_now_iso(), **payload},
     )
+
+
+def _acquire_workflow_lock(root: Path, wf_id: str) -> int:
+    try:
+        return registry.acquire_workflow_lock(root)
+    except BlockingIOError as exc:
+        raise DelegateError("workflow_locked", f"Workflow is already running: {wf_id}") from exc
+
+
+def _assert_workflow_unlocked(root: Path, wf_id: str) -> None:
+    fd = _acquire_workflow_lock(root, wf_id)
+    with contextlib.suppress(OSError):
+        os.close(fd)
 
 
 def _validate_wf_id(wf_id: str) -> str:

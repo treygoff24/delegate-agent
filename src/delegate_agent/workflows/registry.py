@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
 import secrets
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -18,8 +20,10 @@ STATUS_FILE = "status.json"
 RESULT_FILE = "result.json"
 ARGS_FILE = "args.json"
 APPROVAL_FILE = "approval.json"
+LOCK_FILE = "workflow.lock"
 WORKFLOW_ID_HEX = 12
 WORKFLOW_ID_RE = __import__("re").compile(r"^wf_[0-9a-f]{12}$")
+RESULT_EVENT_TYPES = {"agent_finished", "agent_result", "gate", "workflow_finished"}
 
 
 def workflow_root(workspace: Path) -> Path:
@@ -72,23 +76,49 @@ def write_result(root: Path, payload: JsonObject) -> None:
     write_json(root / RESULT_FILE, merged)
 
 
+def acquire_workflow_lock(root: Path) -> int:
+    run_registry.ensure_private_dir(root)
+    path = root / LOCK_FILE
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, run_registry.PRIVATE_FILE_MODE)
+    run_registry.ensure_private_file(path)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        raise
+    return fd
+
+
 def append_jsonl(path: Path, event: dict[str, Any]) -> None:
     fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, run_registry.PRIVATE_FILE_MODE)
-    try:
-        with os.fdopen(fd, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(event, sort_keys=True) + "\n")
-    finally:
-        pass
+    with os.fdopen(fd, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event, sort_keys=True) + "\n")
+        if event.get("type") in RESULT_EVENT_TYPES:
+            handle.flush()
+            os.fsync(handle.fileno())
 
 
 def iter_journal(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     events: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    text = path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    final_line_complete = text.endswith("\n")
+    for index, line in enumerate(lines):
         if not line.strip():
             continue
-        value = json.loads(line)
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            if index == len(lines) - 1 and not final_line_complete:
+                warnings.warn(
+                    f"Ignoring truncated final workflow journal line in {path}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                break
+            raise
         if isinstance(value, dict):
             events.append(value)
     return events

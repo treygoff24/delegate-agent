@@ -790,6 +790,7 @@ def safe_isolated_request(request: Request) -> Iterator[Request]:
             argv=isolated_argv,
             model=request.model,
             model_alias=request.model_alias,
+            output_schema=request.output_schema,
             dry_run=request.dry_run,
             workspace_kind=workspace_kind,
             isolation_context=isolation,
@@ -810,7 +811,10 @@ def safe_isolated_request(request: Request) -> Iterator[Request]:
             env_overrides=request.env_overrides,
             auth_profile=request.auth_profile,
             fallback_auth_profile=request.fallback_auth_profile,
+            cleanup_workspace=request.cleanup_workspace,
             group=request.group,
+            workflow_agent_key=request.workflow_agent_key,
+            prompt_instruction_mode=request.prompt_instruction_mode,
             profile_resolution=request.profile_resolution,
         )
     finally:

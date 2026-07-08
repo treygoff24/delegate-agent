@@ -8,6 +8,7 @@ from typing import Any
 
 from delegate_agent.constants import (
     KNOWN_ENGINES,
+    MODE_CALL,
     MODE_SAFE,
     PROMPT_ENFORCED_SAFE_ENGINES,
     VALID_MODES,
@@ -143,6 +144,10 @@ def _literal_keyword(call: ast.Call, name: str) -> Any:
     return None
 
 
+def _has_keyword(call: ast.Call, name: str) -> bool:
+    return any(keyword.arg == name for keyword in call.keywords)
+
+
 def _validate_literal_schemas(tree: ast.AST) -> None:
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -180,6 +185,13 @@ def _validate_literal_agent_modes(tree: ast.AST, meta: dict[str, Any]) -> None:
         passthrough = _literal_keyword(node, "passthrough") is True
         if not passthrough:
             continue
+        if mode == MODE_CALL:
+            raise WorkflowScriptError(
+                "passthrough=True with mode='call' is invalid; slash pass-through needs "
+                "a work or argv-enforced-safe lane"
+            )
+        if _has_keyword(node, "schema") and _literal_keyword(node, "schema") is not None:
+            raise WorkflowScriptError("passthrough=True is mutually exclusive with schema=")
         if mode == MODE_SAFE and any(item in PROMPT_ENFORCED_SAFE_ENGINES for item in engines):
             raise WorkflowScriptError(
                 "passthrough=True is not supported for prompt-enforced safe engines"
