@@ -593,6 +593,52 @@ def execute_request(
                 config_source=config_source,
                 env_overrides=request.env_overrides,
             )
+            # Group-tagged call runs register in the invocation workspace so
+            # workflow kill/adopt/group scans can see them; execution stays in
+            # the throwaway call cwd. Plain (ungrouped) call stays untracked.
+            if request.group is not None:
+                registry_root = run_registry.ensure_registry(
+                    Path(source_workspace.path),
+                    workspace_kind=source_workspace.kind,
+                )
+                maybe_run_retention_pass(registry_root, config)
+                run_id, alias = run_registry.register_run(
+                    registry_root,
+                    harness=request.engine,
+                    metadata={
+                        "mode": request.mode,
+                        "model": request.model,
+                        "modelAlias": request.model_alias,
+                        "modelResolved": request.model,
+                        "group": request.group,
+                        "workflowAgentKey": request.workflow_agent_key,
+                        "cwd": source_workspace.path,
+                    },
+                )
+                ctx_runner = make_run_context(
+                    registry_root,
+                    request,
+                    run_id=run_id,
+                    alias=alias,
+                    source_workspace=source_workspace,
+                )
+                try:
+                    return delegate_runner.execute_tracked(
+                        request.argv,
+                        request.workspace,
+                        ctx_runner,
+                        json_mode=json_mode,
+                        stdout=stdout,
+                        stderr=stderr,
+                        completion_report_mode=completion_report_mode,
+                        stdin_text=request.stdin_text,
+                        prompt_file_text=request.prompt_file_text,
+                        prompt_file_placeholder=PROMPT_FILE_ARG_PLACEHOLDER,
+                        manifest_argv=public_argv(request),
+                        progress=False,
+                    )
+                except delegate_runner.RunnerLaunchError as exc:
+                    raise DelegateError(exc.error, exc.message) from exc
             try:
                 result = delegate_runner.execute_call(
                     request.argv,
@@ -760,6 +806,8 @@ def pre_read_run_json_for_config(
     input_json_path: str,
     cli_cwd: str | None,
     cli_isolation: str | None = None,
+    *,
+    group: str | None = None,
 ) -> tuple[ResolvedWorkspace, JsonObject, str]:
     """Pre-read run input JSON for config discovery: extract cwd/isolation, resolve workspace,
     load config from that workspace, validate config. Returns (workspace, config, source)."""
@@ -770,8 +818,6 @@ def pre_read_run_json_for_config(
     path = Path(input_json_path).expanduser()
     raw = _load_input_json_object(path)
     if raw.get("mode") == MODE_CALL:
-        if cli_cwd is not None:
-            raise DelegateError("invalid_option_combination", "call mode does not use --cwd.")
         if cli_isolation is not None:
             raise DelegateError(
                 "invalid_option_combination",
@@ -786,6 +832,18 @@ def pre_read_run_json_for_config(
                 "invalid_option_combination",
                 "call mode input JSON must not include isolation.",
             )
+        # Grouped call runs register in the invocation workspace registry while
+        # still executing in a throwaway call cwd. Ungrouped call stays untracked.
+        if group is not None:
+            if cli_cwd is not None:
+                workspace = resolve_workspace(cli_cwd)
+            else:
+                workspace = resolve_workspace(None)
+            config, source = load_config(workspace=Path(workspace.path))
+            validate_config(config)
+            return workspace, config, source
+        if cli_cwd is not None:
+            raise DelegateError("invalid_option_combination", "call mode does not use --cwd.")
         config, source = load_config(workspace=None)
         validate_config(config)
         return ResolvedWorkspace(CALL_TEMP_CWD_PLACEHOLDER, "directory"), config, source
@@ -866,16 +924,20 @@ def main(
                 run_json.input_json,
                 global_options.cwd,
                 global_options.isolation,
+                group=global_options.group,
             )
             config_workspace = Path(workspace.path)
         else:
             if parsed.launch is not None and parsed.launch.mode == MODE_CALL:
-                if global_options.cwd is not None:
+                if global_options.cwd is not None and global_options.group is None:
                     raise DelegateError(
                         "invalid_option_combination",
                         "call mode does not use --cwd.",
                     )
-                config_workspace = None
+                if global_options.group is not None:
+                    config_workspace = workspace_path_for_config(global_options.cwd)
+                else:
+                    config_workspace = None
             else:
                 config_workspace = workspace_path_for_config(global_options.cwd)
             config, source = load_config(workspace=config_workspace)
@@ -906,7 +968,10 @@ def main(
 
         if parsed.subcommand != "run":
             if parsed.launch is not None and parsed.launch.mode == MODE_CALL:
-                workspace = ResolvedWorkspace(CALL_TEMP_CWD_PLACEHOLDER, "directory")
+                if global_options.group is not None:
+                    workspace = resolve_workspace(global_options.cwd)
+                else:
+                    workspace = ResolvedWorkspace(CALL_TEMP_CWD_PLACEHOLDER, "directory")
             else:
                 workspace = resolve_workspace(global_options.cwd)
 

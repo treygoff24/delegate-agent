@@ -585,7 +585,10 @@ def _validate_call_cli_options(global_options: object, launch: object) -> None:
     progress_intent = getattr(launch, "progress_intent", None)
     forbid_commit = getattr(launch, "forbid_commit", False)
     include_dirty = getattr(launch, "include_dirty", False)
-    if cwd is not None:
+    group = getattr(global_options, "group", None)
+    # Grouped call runs may take --cwd so the run registers in the invocation
+    # workspace registry; ungrouped call still rejects --cwd.
+    if cwd is not None and group is None:
         raise DelegateError("invalid_option_combination", "call mode does not use --cwd.")
     if isolation is not None:
         raise DelegateError("invalid_option_combination", "call mode does not use --isolation.")
@@ -623,7 +626,8 @@ def _validate_call_input_json_options(
     raw_forbid_commit: bool,
     raw_include_dirty: bool,
 ) -> None:
-    if getattr(global_options, "cwd", None) is not None:
+    group = getattr(global_options, "group", None)
+    if getattr(global_options, "cwd", None) is not None and group is None:
         raise DelegateError("invalid_option_combination", "call mode does not use --cwd.")
     if getattr(global_options, "isolation", None) is not None:
         raise DelegateError("invalid_option_combination", "call mode does not use --isolation.")
