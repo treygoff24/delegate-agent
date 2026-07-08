@@ -1,5 +1,16 @@
 from __future__ import annotations
 
+import re
+
+# Leading harness slash command: `/goal fix tests` matches; `/tmp/foo.py is
+# broken` does not (a second slash in the first token means path, not command).
+SLASH_COMMAND_RE = re.compile(r"^/[A-Za-z][A-Za-z0-9_-]*(\s|$)")
+
+
+def detect_slash_command(prompt: str) -> bool:
+    return SLASH_COMMAND_RE.match(prompt) is not None
+
+
 SKILL_REVIEW_PREFIX = """## Delegate sub-agent skill review requirement
 
 Before doing the task, review the full list of skills available in your current agent environment. Load/read and apply any skill instructions that are relevant to the task, workspace, tools, code quality, verification, or final deliverable. If no skill is relevant, proceed normally after explicitly deciding that. This requirement is mandatory for every Delegate Agent run; do not skip it just because the parent prompt did not mention skills.

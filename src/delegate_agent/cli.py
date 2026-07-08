@@ -55,7 +55,13 @@ from delegate_agent.cli_parser import (  # noqa: F401  # re-exported for tests /
     parse_cli,
     parse_required_positive_int_option,
 )
-from delegate_agent.constants import BINARY_CONFIG_ENGINES, KNOWN_ENGINES, MODE_CALL, MODE_SAFE
+from delegate_agent.constants import (
+    BINARY_CONFIG_ENGINES,
+    KNOWN_ENGINES,
+    MODE_CALL,
+    MODE_SAFE,
+    PROMPT_INSTRUCTION_MODE_SLASH,
+)
 from delegate_agent.describe_payload import (  # noqa: F401  # re-exported for tests / back-compat
     _claude_runtime_policy,
     describe_payload,
@@ -272,6 +278,7 @@ def dry_run_payload(request: Request) -> JsonObject:
         "model": request.model,
         "argv": public_argv(request),
         "promptTransport": request.prompt_transport,
+        "promptInstructionMode": request.prompt_instruction_mode,
     }
     reasoning.add_reasoning_payload_fields(payload, request)
     if request.warnings:
@@ -535,6 +542,7 @@ def make_run_context(
         fallback_auth_profile=request.fallback_auth_profile,
         include_dirty=request.include_dirty,
         group=request.group,
+        prompt_instruction_mode=request.prompt_instruction_mode,
     )
 
 
@@ -939,6 +947,16 @@ def main(
             return EXIT_OK
 
         completion_report_mode = resolve_completion_report_mode(parsed, config)
+        if request.prompt_instruction_mode == PROMPT_INSTRUCTION_MODE_SLASH:
+            # Verbatim prompt carries no completion-report instruction; don't
+            # expect (or synthesize around) a report the child was never asked for.
+            completion_report_mode = delegate_config.COMPLETION_REPORT_MODE_NONE
+            if not global_options.pass_through and not global_options.json_mode:
+                print(
+                    "notice: leading slash command detected; sending prompt verbatim "
+                    "(delegate instruction wrapping suppressed).",
+                    file=stderr,
+                )
         exit_code, payload = execute_request(
             request,
             global_options.json_mode,

@@ -20,6 +20,7 @@ from delegate_agent import (
     wait_cancel_commands,
     worktree_commands,
 )
+from delegate_agent.constants import PROMPT_INSTRUCTION_MODE_WRAPPED
 from delegate_agent.isolation import IsolationContext
 from delegate_agent.json_types import JsonObject
 from delegate_agent.prompt_transport import PROMPT_TRANSPORT_ARGV
@@ -155,6 +156,7 @@ class Request:
     cleanup_workspace: bool = False
     include_dirty: bool = False
     group: str | None = None
+    prompt_instruction_mode: str = PROMPT_INSTRUCTION_MODE_WRAPPED
     profile_resolution: profiles.ProfileResolution = field(
         default_factory=profiles.empty_profile_resolution
     )

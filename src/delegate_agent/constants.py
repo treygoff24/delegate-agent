@@ -39,6 +39,21 @@ MODEL_SUMMARY_ENGINES = tuple(
     engine for engine in ("cursor", "codex", "claude", "grok", "kimi") if engine in MODELESS_ENGINES
 )
 
+# Prompt instruction wrapping: "wrapped" gets the skill-review preamble,
+# safe-review prefix, and completion-report suffix; "slash-passthrough" sends
+# the prompt verbatim so harness slash commands (e.g. Codex `/goal`) keep
+# their required position-zero characters.
+PROMPT_INSTRUCTION_MODE_WRAPPED = "wrapped"
+PROMPT_INSTRUCTION_MODE_SLASH = "slash-passthrough"
+# Engines whose safe mode is substantially prompt-enforced: workspace isolation
+# protects the source tree, but the advisory safe-review prefix is what keeps
+# the run review-shaped. A verbatim prompt would strip that contract, so slash
+# pass-through is rejected in safe mode for these engines. codex/claude/grok
+# safe is argv/sandbox-enforced and stays allowed.
+PROMPT_ENFORCED_SAFE_ENGINES = tuple(
+    engine for engine in KNOWN_ENGINES if engine in {"cursor", "droid", "kimi"}
+)
+
 
 def validate_mode(mode: str) -> None:
     if mode not in VALID_MODES:

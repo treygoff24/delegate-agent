@@ -263,6 +263,7 @@ def _build_persistent_worktree_run_context(
         include_dirty=request.include_dirty,
         synced_files=int(creation_context.get("syncedFiles") or 0),
         group=request.group,
+        prompt_instruction_mode=request.prompt_instruction_mode,
     )
 
 

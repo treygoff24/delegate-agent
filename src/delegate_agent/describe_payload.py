@@ -30,6 +30,9 @@ from delegate_agent.constants import (
     MODE_SAFE,
     MODE_WORK,
     MODEL_SUMMARY_ENGINES,
+    PROMPT_ENFORCED_SAFE_ENGINES,
+    PROMPT_INSTRUCTION_MODE_SLASH,
+    PROMPT_INSTRUCTION_MODE_WRAPPED,
 )
 from delegate_agent.errors import EXIT_OK, DelegateError
 from delegate_agent.json_types import JsonObject
@@ -552,9 +555,25 @@ def describe_payload(
         "launchOptions": _launch_options(),
         "completionReportModes": list(delegate_config.COMPLETION_REPORT_MODES),
         "promptTransforms": [
-            "Always prepends mandatory skill review instructions before the operator prompt.",
+            "Prepends mandatory skill review instructions before the operator prompt "
+            "(suppressed under slash-passthrough).",
             "Optionally appends completion-report instructions unless disabled.",
         ],
+        "promptInstructionModes": {
+            "modes": [PROMPT_INSTRUCTION_MODE_WRAPPED, PROMPT_INSTRUCTION_MODE_SLASH],
+            "detection": (
+                "A top-level launch prompt starting with a harness slash command "
+                "(regex ^/[A-Za-z][A-Za-z0-9_-]*(\\s|$), e.g. Codex /goal) is sent "
+                "verbatim: skill preamble, safe-review prefix, and completion-report "
+                "suffix are all suppressed. --pass-through suppresses the skill "
+                "preamble and completion report but keeps the safe-review prefix. "
+                "Reported as promptInstructionMode in run metadata."
+            ),
+            "safeModeAllowed": {
+                engine: engine not in PROMPT_ENFORCED_SAFE_ENGINES for engine in KNOWN_ENGINES
+            },
+            "callReadOnlyAllowed": False,
+        },
         "profiles": _profiles_config_payload(config),
         "passThrough": "Opt-in raw child stdout/stderr streaming; incompatible with --json.",
         "cwdResolution": "Git directories resolve to the repository root; non-Git directories are used directly.",

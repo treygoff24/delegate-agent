@@ -45,6 +45,9 @@ from delegate_agent.constants import (
     MODE_SAFE,
     MODE_WORK,
     MODELESS_NONCURSOR_ENGINES,
+    PROMPT_ENFORCED_SAFE_ENGINES,
+    PROMPT_INSTRUCTION_MODE_SLASH,
+    PROMPT_INSTRUCTION_MODE_WRAPPED,
     SAFE_REVIEW_PREFIX_INJECTED_HERE_ENGINES,
     validate_mode,
 )
@@ -329,6 +332,29 @@ def _completion_report_prompt_mode(
     return completion_report_mode, ()
 
 
+def resolve_prompt_instruction_mode(
+    prompt: str,
+    *,
+    engine: str,
+    mode: str,
+) -> str:
+    """Resolve wrapped vs slash-passthrough for a top-level launch prompt.
+
+    Auto-detection applies only here, where position zero is invoker-controlled;
+    interpolated content (e.g. workflow stage output) must never be sniffed.
+    """
+    if not delegate_runner.detect_slash_command(prompt):
+        return PROMPT_INSTRUCTION_MODE_WRAPPED
+    if mode == MODE_SAFE and engine in PROMPT_ENFORCED_SAFE_ENGINES:
+        raise DelegateError(
+            "slash_passthrough_unsupported",
+            f"{engine} safe mode is prompt-enforced; a verbatim prompt would strip "
+            "the read-only review contract. Use codex/claude/grok safe, or "
+            f"{engine} work mode.",
+        )
+    return PROMPT_INSTRUCTION_MODE_SLASH
+
+
 def resolve_completion_report_mode(parsed: ParsedCommand, config: JsonObject) -> str:
     global_options = parsed.global_options
     if global_options.pass_through:
@@ -344,20 +370,33 @@ def effective_prompt(
     engine: str = "",
     mode: str = "",
     completion_report_mode: str,
+    instruction_mode: str = PROMPT_INSTRUCTION_MODE_WRAPPED,
+    skip_skill_preamble: bool = False,
 ) -> str:
+    if instruction_mode == PROMPT_INSTRUCTION_MODE_SLASH:
+        # Verbatim means verbatim: no skill preamble, no safe prefix, no
+        # completion-report suffix. Harness slash commands need position zero.
+        return prompt
     if mode == MODE_CALL:
         return prompt
-    prompt = delegate_runner.prepend_skill_review_instructions(prompt)
+    if not skip_skill_preamble:
+        # --pass-through suppresses delegate's instruction wrapping but keeps the
+        # safe-review prefix: that prefix is the write boundary for prompt-enforced
+        # safe engines, not report plumbing.
+        prompt = delegate_runner.prepend_skill_review_instructions(prompt)
     safe_prefix = (
         SAFE_REVIEW_PREFIX_BY_ENGINE.get(engine)
         if engine in SAFE_REVIEW_PREFIX_INJECTED_HERE_ENGINES
         else None
     )
     if mode == MODE_SAFE and safe_prefix is not None and safe_prefix not in prompt:
-        # prepend_skill_review_instructions guarantees SKILL_REVIEW_PREFIX at index 0,
-        # so provider-specific safe prefixes slot in cleanly between skill-review
-        # and the user prompt.
-        insert_at = len(delegate_runner.SKILL_REVIEW_PREFIX)
+        # When the skill preamble is present it is guaranteed at index 0, so the
+        # provider-specific safe prefix slots in between it and the user prompt.
+        insert_at = (
+            len(delegate_runner.SKILL_REVIEW_PREFIX)
+            if prompt.startswith(delegate_runner.SKILL_REVIEW_PREFIX)
+            else 0
+        )
         prompt = prompt[:insert_at] + safe_prefix + prompt[insert_at:]
     if completion_report_mode == delegate_config.COMPLETION_REPORT_MODE_MARKDOWN:
         return delegate_runner.append_completion_report_instructions(prompt)
@@ -634,10 +673,14 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         if launch.engine == "droid":
             _validate_droid_model_alias(config, launch.model_alias)
         output_schema = resolve_output_schema(launch.engine, launch.output_schema)
-        prompt = _call_effective_prompt(
-            resolve_prompt(launch.prompt_parts, launch.prompt_file, stdin),
-            read_only=read_only,
-        )
+        raw_prompt = resolve_prompt(launch.prompt_parts, launch.prompt_file, stdin)
+        if read_only and delegate_runner.detect_slash_command(raw_prompt):
+            raise DelegateError(
+                "slash_passthrough_unsupported",
+                "call --read-only wraps the prompt in the read-only contract; "
+                "slash-command prompts cannot run verbatim there. Use plain call mode.",
+            )
+        prompt = _call_effective_prompt(raw_prompt, read_only=read_only)
         workspace, cleanup_workspace = _call_workspace(launch.dry_run)
         try:
             return build_request(
@@ -737,11 +780,18 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         completion_report_mode,
         output_schema,
     )
+    instruction_mode = resolve_prompt_instruction_mode(
+        prompt,
+        engine=launch.engine,
+        mode=launch.mode,
+    )
     prompt = effective_prompt(
         prompt,
         engine=launch.engine,
         mode=launch.mode,
         completion_report_mode=completion_report_prompt_mode,
+        instruction_mode=instruction_mode,
+        skip_skill_preamble=global_options.pass_through,
     )
     return build_request(
         launch.engine,
@@ -764,6 +814,7 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         output_schema=output_schema,
         warnings=(*output_schema_warnings, *isolation_warnings),
         group=global_options.group,
+        prompt_instruction_mode=instruction_mode,
     )
 
 
@@ -991,11 +1042,19 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         completion_report_mode,
         output_schema,
     )
+    prompt = validate_prompt(prompt)
+    instruction_mode = resolve_prompt_instruction_mode(
+        prompt,
+        engine=str(engine),
+        mode=str(mode),
+    )
     prompt = effective_prompt(
-        validate_prompt(prompt),
+        prompt,
         engine=str(engine),
         mode=str(mode),
         completion_report_mode=completion_report_prompt_mode,
+        instruction_mode=instruction_mode,
+        skip_skill_preamble=global_options.pass_through,
     )
     return build_request(
         str(engine),
@@ -1018,6 +1077,7 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         output_schema=output_schema,
         warnings=(*output_schema_warnings, *isolation_warnings),
         group=global_options.group,
+        prompt_instruction_mode=instruction_mode,
     )
 
 
@@ -1045,6 +1105,7 @@ def build_request(
     cleanup_workspace: bool = False,
     call_read_only: bool = False,
     group: str | None = None,
+    prompt_instruction_mode: str = PROMPT_INSTRUCTION_MODE_WRAPPED,
 ) -> Request:
     if not isinstance(workspace, ResolvedWorkspace):
         raise TypeError(
@@ -1082,6 +1143,7 @@ def build_request(
         cleanup_workspace=cleanup_workspace,
         call_read_only=call_read_only,
         group=group,
+        prompt_instruction_mode=prompt_instruction_mode,
     )
 
 
@@ -1423,8 +1485,10 @@ def _build_request_for_workspace(
     cleanup_workspace: bool,
     call_read_only: bool = False,
     group: str | None = None,
+    prompt_instruction_mode: str = PROMPT_INSTRUCTION_MODE_WRAPPED,
 ) -> Request:
-    prompt = _append_safe_dirty_tree_note(prompt, resolved, mode, isolation_context)
+    if prompt_instruction_mode != PROMPT_INSTRUCTION_MODE_SLASH:
+        prompt = _append_safe_dirty_tree_note(prompt, resolved, mode, isolation_context)
     workspace_warning = wsl.drivefs_workspace_warning(resolved.path)
     if workspace_warning is not None:
         warnings = (*warnings, workspace_warning)
@@ -1478,6 +1542,7 @@ def _build_request_for_workspace(
             display_argv=parts.display_argv,
             cleanup_workspace=cleanup_workspace,
             group=group,
+            prompt_instruction_mode=prompt_instruction_mode,
         ),
         config,
         auth_profile_override=auth_profile_override,

@@ -28,6 +28,7 @@ from delegate_agent import (
     run_registry,
     worktree_summary,
 )
+from delegate_agent.constants import PROMPT_INSTRUCTION_MODE_WRAPPED
 from delegate_agent.json_types import JsonObject
 
 STDOUT_LOG = run_registry.STDOUT_LOG
@@ -70,6 +71,7 @@ SKILL_REVIEW_PREFIX = prompt_instructions.SKILL_REVIEW_PREFIX
 COMPLETION_REPORT_SUFFIX = prompt_instructions.COMPLETION_REPORT_SUFFIX
 prepend_skill_review_instructions = prompt_instructions.prepend_skill_review_instructions
 append_completion_report_instructions = prompt_instructions.append_completion_report_instructions
+detect_slash_command = prompt_instructions.detect_slash_command
 
 
 def _bounded_call_fallback_text(text: str) -> str:
@@ -129,6 +131,7 @@ class RunContext:
     include_dirty: bool = False
     synced_files: int = 0
     group: str | None = None
+    prompt_instruction_mode: str = PROMPT_INSTRUCTION_MODE_WRAPPED
 
 
 def write_manifest(run_path: Path, manifest: JsonObject) -> None:
@@ -230,6 +233,7 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
         "startedAt": ctx.started_at,
         "argv": argv,
         "promptTransport": ctx.prompt_transport,
+        "promptInstructionMode": ctx.prompt_instruction_mode,
     }
     run_metadata.add_run_metadata_payload_fields(payload, ctx)
     reasoning.add_reasoning_payload_fields(payload, ctx)
@@ -834,6 +838,7 @@ def completion_json_payload(
     if ctx.include_dirty:
         payload["includeDirty"] = True
         payload["syncedFiles"] = ctx.synced_files
+    payload["promptInstructionMode"] = ctx.prompt_instruction_mode
     run_metadata.add_run_metadata_payload_fields(payload, ctx)
     reasoning.add_reasoning_payload_fields(payload, ctx)
     if assistant_meta is not None:
