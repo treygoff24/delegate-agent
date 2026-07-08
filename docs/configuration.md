@@ -113,6 +113,11 @@ layers. This is read-only observability; inspecting it does not modify
     "binary": "kimi",
     "defaultModel": "kimi-code/kimi-for-coding",
     "defaultReasoningEffort": null
+  },
+  "workflows": {
+    "engineCaps": {},
+    "itemThreads": 64,
+    "structuredOutputRetries": 2
   }
 }
 ```
@@ -446,3 +451,31 @@ Controls parent progress heartbeats for tracked foreground runs. Heartbeats are 
 - `intervalSec`: spacing between subsequent heartbeats. Must be a positive, finite number. Default `60`.
 
 Timing resolves as environment override, then config, then embedded default. Non-positive, non-finite, or non-numeric `initialDelaySec`/`intervalSec`, and a non-boolean `enabled`, are rejected at config load. See [CLI reference](cli-reference.md) for the `--progress` / `--no-progress` launch flags.
+
+### `workflows`
+
+```json
+{
+  "workflows": {
+    "engineCaps": {"codex": 4, "claude": 2},
+    "itemThreads": 64,
+    "structuredOutputRetries": 2
+  }
+}
+```
+
+Controls the local workflow supervisor. See
+[Delegate Workflows](delegate-workflows.md) for DSL details and limits.
+
+- `engineCaps`: optional per-engine concurrent child-run caps. Keys are
+  Delegate engine names; values must be positive integers. Engines without an
+  entry are not capped by this setting.
+- `itemThreads`: maximum concurrent item worker threads for `pipeline()` and
+  `parallel()`. Positive integers override the embedded default of `64`; `0`
+  or a missing key falls back to the default.
+- `structuredOutputRetries`: non-negative retry count for `agent(schema=...)`
+  validation failures. The embedded default is `2`.
+
+Workflow hard caps are not configurable in v1: scripts are limited to 512 KiB,
+nested `workflow()` calls to depth 3, lifetime `agent()` calls to 1000, and
+`pipeline()`/`parallel()` inputs to 4096 items.

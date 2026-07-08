@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Delegate Workflows: a Python DSL supervisor for multi-agent fan-out, durable
+  journaling, nested workflow calls, schema-validated `agent()` results,
+  approval gates, resume, kill, saved workflows, and workflow discovery in
+  `describe`/help/docs.
+- Slash pass-through: launch prompts that intentionally start with a harness
+  slash command can be sent verbatim when the target mode's safety boundary does
+  not depend on Delegate's prompt preamble. `--pass-through` also suppresses the
+  skill preamble and completion-report suffix while preserving safe-mode
+  boundaries.
+
 ## [0.11.0] - 2026-07-05
 
 Profile-guard calibration fix for issue #9: a shell carrying `AI_PROFILE=work|personal` with no matching `~/.delegate/config.<profile>.json` no longer presents a half-configured install as a total CLI outage.

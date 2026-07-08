@@ -596,7 +596,15 @@ def describe_payload(
         "workflows": {
             "registry": ".delegate/workflows/<wfId>/",
             "idFormat": "wf_<12 hex>",
-            "files": ["script.py", "journal.jsonl", "status.json", "result.json"],
+            "files": [
+                "script.py",
+                "args.json",
+                "journal.jsonl",
+                "status.json",
+                "result.json",
+                "approval.json",
+                "workflow.lock",
+            ],
             "config": config.get("workflows", {}),
             "dsl": {
                 "globals": [
@@ -619,12 +627,14 @@ def describe_payload(
                     "returns": "parent-facing output string, schema object, or None",
                     "notes": [
                         "engine may be a fallback list; child runs are tagged --group <wfId>.",
-                        "passthrough=True is explicit and mutually exclusive with schema=.",
+                        "passthrough=True is explicit and mutually exclusive with schema= and mode='call'.",
                         "cursor/kimi argv transport rejects prompts around 100KB; route large stages to codex/claude/droid.",
                     ],
                 },
+                "phase": "phase(title) emits a phase event for human-readable progress.",
+                "log": "log(message) emits a log event with JSON-safe message text.",
                 "pipeline": "pipeline(items, stage1, ...) chains per item with no inter-stage barrier; stage(prev, item, index).",
-                "parallel": "parallel([lambda: ...]) is a barrier, preserves order, maps failures to None.",
+                "parallel": "parallel([lambda: ...]) is a barrier and preserves order.",
                 "workflow": "workflow(name_or_path, args=None, gate=False) nests to depth 3; gate=True pauses through resume/approve.",
                 "judges": "judges(prompt, schema, engines=[...]) runs call --read-only judge lanes and returns votes.",
                 "budget": "run-count budget: total, spent(), remaining().",

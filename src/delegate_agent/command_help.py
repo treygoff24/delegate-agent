@@ -742,7 +742,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
     "workflow watch": CommandSpec(
         name="workflow watch",
         summary="Print workflow journal events incrementally.",
-        usage=("delegate workflow watch <wfId> [--since SEQ]",),
+        usage=("delegate [--json] workflow watch <wfId> [--since SEQ]",),
         options=(OptionSpec("--since", "SEQ", "Start after sequence number."),),
         see_also=("workflow events",),
     ),

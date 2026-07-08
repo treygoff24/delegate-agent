@@ -166,6 +166,19 @@ run, use stateless `call` mode:
 delegate --json codex call "Summarize this context in three bullets."
 ```
 
+For multi-step fan-out or gated review flows, use Delegate Workflows. A workflow
+is a Python script that launches normal Delegate child runs, journals progress,
+can pause on approval gates, and can resume from cached child results:
+
+```bash
+python3 bin/delegate.py workflow check review.py
+python3 bin/delegate.py --json workflow run review.py --args '{"files":["src/cli.py"]}' --budget 10
+python3 bin/delegate.py workflow approve wf_0123abcdef45
+```
+
+See [Delegate Workflows](docs/delegate-workflows.md) for the DSL, safety
+limits, config, and gate semantics.
+
 Reasoning effort is provider-aware. Unsupported combinations fail before launch. It changes only the requested model thinking depth/cost/latency; it does not change safe/work/call mode, sandboxing, approvals, or edit capability. Codex/Droid validate effort against model capability metadata, Cursor maps effort to configured model selection, Claude maps to Claude Code `--effort`, and Grok maps to Grok `--effort` (`low`, `medium`, `high`, `xhigh`, `max`). Explicit Codex effort can target the harness default model even when `codex.defaultModel` is unset:
 
 ```bash
@@ -290,6 +303,7 @@ AI_PROFILE delegate ...` uses the base config, or set
 - [Agent setup](docs/agent-setup.md): human and non-interactive setup flows.
 - [CLI reference](docs/cli-reference.md): commands, exit codes, and JSON contracts.
 - [Configuration](docs/configuration.md): config precedence, sections, and provider-neutral aliases.
+- [Delegate Workflows](docs/delegate-workflows.md): workflow DSL, caps, config, and gate semantics.
 - [Security model](docs/security-model.md): boundaries, limitations, and safe usage.
 - [Worktrees](docs/worktrees.md): persistent-worktree lifecycle and cleanup.
 - [Troubleshooting](docs/troubleshooting.md): common failures and checks.

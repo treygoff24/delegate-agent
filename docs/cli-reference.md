@@ -211,6 +211,44 @@ delegate kimi call "Summarize this context in three bullets."
 delegate --isolation worktree kimi work "Implement the feature in a persistent worktree."
 ```
 
+### `delegate workflow`
+
+Workflows run a Python DSL supervisor that can fan out normal Delegate child
+runs, journal progress, pause on approval gates, and resume from cached child
+results. Workflow state lives under `.delegate/workflows/<wfId>/`; child runs
+are tagged with `--group <wfId>`.
+
+Usage:
+
+```bash
+delegate [--json] workflow check <script.py>
+delegate [--json] workflow run <script.py> [--args JSON] [--budget N] [--dry-run]
+delegate [--json] workflow run --resume <wfId> [--budget N]
+delegate [--json] workflow status <wfId>
+delegate [--json] workflow events <wfId> [--since SEQ]
+delegate [--json] workflow watch <wfId> [--since SEQ]
+delegate [--json] workflow wait <wfId> [--timeout SEC]
+delegate [--json] workflow result <wfId>
+delegate [--json] workflow approve <wfId>
+delegate [--json] workflow kill <wfId>
+delegate [--json] workflow list
+delegate [--json] workflow save <script.py> --name NAME
+```
+
+- `check` validates the workflow script, including literal preflight checks for
+  unsupported `agent()` combinations.
+- `run` launches a detached supervisor; `--dry-run` renders planned stubs
+  without launching child agents or consuming real budget.
+- `--resume` replays the journal, adopts matching child runs by workflow agent
+  key, and continues from missing work.
+- `approve` releases a paused gate. `kill` validates the supervisor process
+  group before signaling and always attempts child fan-out cancellation.
+- JSON-capable workflow commands return the normal `{ok: ...}` envelope. Invalid
+  scripts fail with `invalid_workflow_script`.
+
+See [Delegate Workflows](delegate-workflows.md) for the DSL, caps, config, and
+gate semantics.
+
 ### Stateless `call` mode
 
 `call` is the one-hop model-call form of Delegate: "work mode minus a repo." It
