@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import subprocess
@@ -994,8 +995,11 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertGreater(len(runs_after), len(runs_before))
 
     def test_agent_started_events_are_fsynced(self) -> None:
-        # R4: agent_started is a durable adoption anchor.
+        # R4 / F5: durable adoption, audit, and budget-claim events are fsynced.
         self.assertIn("agent_started", workflow_registry.DURABLE_EVENT_TYPES)
+        self.assertIn("agent_adopt_rejected", workflow_registry.DURABLE_EVENT_TYPES)
+        self.assertIn("agent_timeout", workflow_registry.DURABLE_EVENT_TYPES)
+        self.assertIn("budget", workflow_registry.DURABLE_EVENT_TYPES)
         journal = self.workspace / "fsync-journal.jsonl"
         fsynced: list[int] = []
         original_fsync = os.fsync
@@ -1012,9 +1016,16 @@ class WorkflowCommandTests(unittest.TestCase):
             workflow_registry.append_jsonl(
                 journal, {"seq": 3, "type": "agent_finished", "key": "k", "result": "ok"}
             )
+            workflow_registry.append_jsonl(
+                journal, {"seq": 4, "type": "agent_adopt_rejected", "key": "k"}
+            )
+            workflow_registry.append_jsonl(journal, {"seq": 5, "type": "agent_timeout", "key": "k"})
+            workflow_registry.append_jsonl(
+                journal, {"seq": 6, "type": "budget", "key": "k", "spent": 1}
+            )
         finally:
             os.fsync = original  # type: ignore[assignment]
-        self.assertEqual(len(fsynced), 2)
+        self.assertEqual(len(fsynced), 5)
 
     def test_resume_budget_override_does_not_mutate_while_locked(self) -> None:
         # R5: lock before budget mutation on resume.
@@ -1039,8 +1050,9 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertEqual(after["budget"]["total"], 3)
         self.run_delegate(["--json", "workflow", "kill", wf_id])
 
-    def test_workflow_kill_status_survives_supervisor_shutdown(self) -> None:
-        # R6: kill waits for supervisor death before merging status=killed.
+    def test_workflow_kill_waits_for_held_lock_before_merging_status(self) -> None:
+        # R6 / F3: kill must wait on the workflow flock (or escalate) before
+        # merging status=killed; supervisorExited must be explicit, not defaulted.
         script = self.write_workflow(
             """
             meta = {"name": "kill-status", "defaults": {"engine": "codex", "mode": "safe"}}
@@ -1049,22 +1061,48 @@ class WorkflowCommandTests(unittest.TestCase):
         )
         launch = self.run_delegate(
             ["--json", "workflow", "run", str(script)],
-            env_extra={"FAKE_CODEX_SLEEP_SECONDS": "10"},
+            env_extra={"FAKE_CODEX_SLEEP_SECONDS": "30"},
         )
         self.assertEqual(launch.returncode, 0, launch.stderr)
         wf_id = json.loads(launch.stdout)["wfId"]
         self.wait_for_group_runs(wf_id)
+        status = json.loads(self.run_delegate(["--json", "workflow", "status", wf_id]).stdout)
+        # Kill the live supervisor so its flock drops, then re-hold the lock
+        # from the test to simulate a slow-dying supervisor during kill.
+        os.kill(int(status["supervisorPid"]), 9)
+        root = self.workspace / ".delegate" / "workflows" / wf_id
+        deadline = time.monotonic() + 5
+        lock_fd = -1
+        while time.monotonic() < deadline:
+            try:
+                lock_fd = os.open(root / "workflow.lock", os.O_CREAT | os.O_RDWR)
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if lock_fd >= 0:
+                    os.close(lock_fd)
+                    lock_fd = -1
+                time.sleep(0.05)
+        else:
+            self.fail("could not acquire workflow lock after supervisor death")
+        self.addCleanup(lambda: os.close(lock_fd) if lock_fd >= 0 else None)
+        started = time.monotonic()
         killed = self.run_delegate(["--json", "workflow", "kill", wf_id])
+        elapsed = time.monotonic() - started
         self.assertEqual(killed.returncode, 0, killed.stderr)
+        # Bounded wait (5s) + force wait (2s) before merge while lock is held.
+        self.assertGreaterEqual(elapsed, 5.0)
         status = json.loads(self.run_delegate(["--json", "workflow", "status", wf_id]).stdout)
         self.assertEqual(status["status"], "killed")
-        self.assertTrue(status.get("supervisorExited", True))
+        self.assertIn("supervisorExited", status)
+        self.assertIs(status["supervisorExited"], False)
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
         time.sleep(0.3)
         status_later = json.loads(self.run_delegate(["--json", "workflow", "status", wf_id]).stdout)
         self.assertEqual(status_later["status"], "killed")
 
     def test_gate_pause_does_not_spawn_pipeline_tail(self) -> None:
-        # R7: after GateExit, unspawned pipeline items are short-circuited.
+        # R7 / F4: after GateExit, unspawned pipeline items must not claim budget.
         config = json.loads(self.config_path.read_text(encoding="utf-8"))
         config["workflows"]["itemThreads"] = 1
         self.config_path.write_text(json.dumps(config), encoding="utf-8")
@@ -1097,8 +1135,125 @@ class WorkflowCommandTests(unittest.TestCase):
         )["events"]
         started = [event for event in events if event["type"] == "agent_started"]
         self.assertEqual(len(started), 0)
+        budget_events = [event for event in events if event["type"] == "budget"]
+        self.assertEqual(len(budget_events), 0)
         runs = json.loads(self.run_delegate(["--json", "runs", "--group", wf_id]).stdout)["runs"]
         self.assertEqual(len(runs), 0)
+
+    def test_resume_does_not_double_claim_budget_for_respawned_keys(self) -> None:
+        # F1: journaled budget claims are idempotent per structural key on resume.
+        script = self.write_workflow(
+            """
+            meta = {"name": "budget-idempotent", "defaults": {"engine": "codex", "mode": "safe"}}
+            return parallel([
+                lambda: agent("very slow a"),
+                lambda: agent("very slow b"),
+                lambda: agent("very slow c"),
+            ])
+            """
+        )
+        launch = self.run_delegate(
+            ["--json", "workflow", "run", str(script), "--budget", "3"],
+            env_extra={"FAKE_CODEX_SLEEP_SECONDS": "30"},
+        )
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        self.wait_for_group_runs(wf_id, count=3)
+        status_mid = json.loads(self.run_delegate(["--json", "workflow", "status", wf_id]).stdout)
+        self.assertEqual(status_mid["budget"]["spent"], 3)
+        killed = self.run_delegate(["--json", "workflow", "kill", wf_id])
+        self.assertEqual(killed.returncode, 0, killed.stderr)
+        root = self.workspace / ".delegate" / "workflows" / wf_id
+        journal = root / "journal.jsonl"
+        events = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+        kept = [
+            event
+            for event in events
+            if event["type"]
+            not in {"agent_finished", "workflow_finished", "workflow_killed", "workflow_failed"}
+        ]
+        journal.write_text(
+            "".join(json.dumps(event, sort_keys=True) + "\n" for event in kept),
+            encoding="utf-8",
+        )
+        if (root / "result.json").exists():
+            (root / "result.json").unlink()
+        # Budget covers each key once; a double-claim on resume would exceed it.
+        resumed = self.run_delegate(
+            ["--json", "workflow", "run", "--resume", wf_id, "--budget", "3"]
+        )
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "15"])
+        self.assertEqual(waited.returncode, 0, waited.stderr)
+        status = json.loads(self.run_delegate(["--json", "workflow", "status", wf_id]).stdout)
+        self.assertEqual(status["status"], "succeeded")
+        self.assertEqual(status["budget"]["spent"], 3)
+        result = self.run_delegate(["--json", "workflow", "result", wf_id])
+        self.assertEqual(
+            json.loads(result.stdout)["result"],
+            ["fake completion", "fake completion", "fake completion"],
+        )
+
+    def test_adoption_wait_timeout_cancels_child_without_duplicate(self) -> None:
+        # F2: adoption wait timeout cancels the adopted run and returns None.
+        script = self.write_workflow(
+            """
+            meta = {"name": "adopt-timeout", "defaults": {"engine": "codex", "mode": "safe"}}
+            return agent("very slow", label="hold")
+            """
+        )
+        launch = self.run_delegate(
+            ["--json", "workflow", "run", str(script)],
+            env_extra={"FAKE_CODEX_SLEEP_SECONDS": "30"},
+        )
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        runs = self.wait_for_group_runs(wf_id)
+        self.assertEqual(len(runs), 1)
+        status = json.loads(self.run_delegate(["--json", "workflow", "status", wf_id]).stdout)
+        supervisor_pid = status["supervisorPid"]
+        os.kill(int(supervisor_pid), 9)
+        root = self.workspace / ".delegate" / "workflows" / wf_id
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                fd = workflow_registry.acquire_workflow_lock(root)
+            except BlockingIOError:
+                time.sleep(0.05)
+                continue
+            os.close(fd)
+            break
+        else:
+            self.fail("supervisor did not release workflow lock")
+        # timeout is not part of the structural key; shorten adoption wait only.
+        Path(status["scriptPath"]).write_text(
+            textwrap.dedent(
+                """
+                meta = {"name": "adopt-timeout", "defaults": {"engine": "codex", "mode": "safe"}}
+                return agent("very slow", label="hold", timeout=1)
+                """
+            ).strip()
+            + "\n",
+            encoding="utf-8",
+        )
+        if (root / "result.json").exists():
+            (root / "result.json").unlink()
+        resumed = self.run_delegate(["--json", "workflow", "run", "--resume", wf_id])
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "15"])
+        self.assertEqual(waited.returncode, 0, waited.stderr)
+        result = self.run_delegate(["--json", "workflow", "result", wf_id])
+        self.assertIsNone(json.loads(result.stdout)["result"])
+        events = json.loads(
+            self.run_delegate(["--json", "workflow", "events", wf_id, "--since", "0"]).stdout
+        )["events"]
+        self.assertIn("agent_timeout", {event["type"] for event in events})
+        runs_after = json.loads(self.run_delegate(["--json", "runs", "--group", wf_id]).stdout)[
+            "runs"
+        ]
+        self.assertEqual(len(runs_after), 1)
+        snap = json.loads(self.run_delegate(["--json", "snapshot", runs_after[0]["alias"]]).stdout)
+        self.assertIn(snap.get("effectiveStatus") or snap.get("status"), {"cancelled", "failed"})
 
 
 if __name__ == "__main__":
