@@ -118,6 +118,11 @@ _REASONING_EFFORT_OPTION = OptionSpec(
     "LEVEL",
     "Request model-specific reasoning depth; unsupported model/level pairs fail closed.",
 )
+_MODEL_OPTION = OptionSpec(
+    "--model",
+    "<alias-or-model>",
+    "Select a config alias from <engine>.models or a raw model ID (unknown values pass through verbatim).",
+)
 _OUTPUT_SCHEMA_OPTION = OptionSpec(
     "--output-schema",
     "FILE",
@@ -172,13 +177,14 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         summary="Run Cursor Composer in safe, work, or stateless call mode.",
         usage=(
             "delegate [--json] [--isolation auto|none|worktree] "
-            "cursor {safe,work} [--reasoning-effort LEVEL] [--progress] "
+            "cursor {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] "
             "[--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
-            "delegate [--json] cursor call [--read-only] [--reasoning-effort LEVEL] "
+            "delegate [--json] cursor call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] "
             "[--prompt-file PATH] [prompt...]",
         ),
         arguments=(_MODE_ARG, _PROMPT_ARG),
         options=(
+            _MODEL_OPTION,
             _REASONING_EFFORT_OPTION,
             _PROGRESS_OPTION,
             _NO_PROGRESS_OPTION,
@@ -206,13 +212,14 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         summary="Run Kimi Code CLI in safe, work, or stateless call mode.",
         usage=(
             "delegate [--json] [--isolation auto|none|worktree] "
-            "kimi {safe,work} [--reasoning-effort LEVEL] [--progress] "
+            "kimi {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] "
             "[--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
-            "delegate [--json] kimi call [--read-only] [--reasoning-effort LEVEL] "
+            "delegate [--json] kimi call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] "
             "[--prompt-file PATH] [prompt...]",
         ),
         arguments=(_MODE_ARG, _PROMPT_ARG),
         options=(
+            _MODEL_OPTION,
             _REASONING_EFFORT_OPTION,
             _PROGRESS_OPTION,
             _NO_PROGRESS_OPTION,
@@ -232,8 +239,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "Kimi safe mode also uses a read-only safety prompt.",
             "work mode uses Kimi prompt mode; Delegate does not emit --yolo because "
             "Kimi rejects combining --yolo with --prompt.",
-            "Model selection uses kimi.defaultModel in config or the run-input JSON model; "
-            "there is no CLI model alias.",
+            "Model selection uses --model (alias from kimi.models or a raw model ID), "
+            "the run-input JSON model, or kimi.defaultModel in config.",
             "Reasoning effort is unsupported for Kimi in v1.",
             "Trailing prompt text begins after the mode; a later --help is prompt text, "
             "not a help request.",
@@ -245,13 +252,14 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         summary="Run OpenAI Codex CLI in safe, work, or stateless call mode.",
         usage=(
             "delegate [--json] [--isolation auto|none|worktree] "
-            "codex {safe,work} [--reasoning-effort LEVEL] [--progress] "
+            "codex {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] "
             "[--output-schema FILE] [--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
-            "delegate [--json] codex call [--read-only] [--reasoning-effort LEVEL] "
+            "delegate [--json] codex call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] "
             "[--output-schema FILE] [--prompt-file PATH] [prompt...]",
         ),
         arguments=(_MODE_ARG, _PROMPT_ARG),
         options=(
+            _MODEL_OPTION,
             _REASONING_EFFORT_OPTION,
             _OUTPUT_SCHEMA_OPTION,
             _PROGRESS_OPTION,
@@ -269,8 +277,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         notes=(
             SAFE_WORKSPACE_SYNC_NOTE,
             CALL_MODE_NOTE,
-            "Model selection uses codex.defaultModel in config or the run-input JSON model; "
-            "there is no CLI model alias.",
+            "Model selection uses --model (alias from codex.models or a raw model ID), "
+            "the run-input JSON model, or codex.defaultModel in config.",
             "Reasoning effort is validated against the resolved model and emitted as a Codex "
             "config override; with no codex.defaultModel, explicit --reasoning-effort applies "
             "to the Codex harness default model.",
@@ -286,13 +294,14 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         summary="Run Claude Code headless in safe, work, or stateless call mode.",
         usage=(
             "delegate [--json] [--isolation auto|none|worktree] "
-            "claude {safe,work} [--reasoning-effort LEVEL] [--progress] "
+            "claude {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] "
             "[--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
-            "delegate [--json] claude call [--read-only] [--reasoning-effort LEVEL] "
+            "delegate [--json] claude call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] "
             "[--prompt-file PATH] [prompt...]",
         ),
         arguments=(_MODE_ARG, _PROMPT_ARG),
         options=(
+            _MODEL_OPTION,
             _REASONING_EFFORT_OPTION,
             _PROGRESS_OPTION,
             _NO_PROGRESS_OPTION,
@@ -326,13 +335,14 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         summary="Run xAI Grok Build CLI in safe, work, or stateless call mode.",
         usage=(
             "delegate [--json] [--isolation auto|none|worktree] "
-            "grok {safe,work} [--reasoning-effort LEVEL] [--progress] "
+            "grok {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] "
             "[--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
-            "delegate [--json] grok call [--read-only] [--reasoning-effort LEVEL] "
+            "delegate [--json] grok call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] "
             "[--prompt-file PATH] [prompt...]",
         ),
         arguments=(_MODE_ARG, _PROMPT_ARG),
         options=(
+            _MODEL_OPTION,
             _REASONING_EFFORT_OPTION,
             _PROGRESS_OPTION,
             _NO_PROGRESS_OPTION,
@@ -372,13 +382,14 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         summary="Run Cognition Devin CLI in safe, work, or stateless call mode.",
         usage=(
             "delegate [--json] [--isolation auto|none|worktree] "
-            "devin {safe,work} [--reasoning-effort LEVEL] [--progress] "
+            "devin {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] "
             "[--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
-            "delegate [--json] devin call [--read-only] [--reasoning-effort LEVEL] "
+            "delegate [--json] devin call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] "
             "[--prompt-file PATH] [prompt...]",
         ),
         arguments=(_MODE_ARG, _PROMPT_ARG),
         options=(
+            _MODEL_OPTION,
             _REASONING_EFFORT_OPTION,
             _PROGRESS_OPTION,
             _NO_PROGRESS_OPTION,
@@ -408,21 +419,23 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         summary="Run a Factory Droid BYOK model alias in safe, work, or stateless call mode.",
         usage=(
             "delegate [--json] [--isolation auto|none|worktree] "
-            "droid MODEL_ALIAS {safe,work} [--reasoning-effort LEVEL] [--progress] "
+            "droid [MODEL_ALIAS] {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] "
             "[--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
-            "delegate [--json] droid MODEL_ALIAS call [--read-only] [--reasoning-effort LEVEL] "
+            "delegate [--json] droid [MODEL_ALIAS] call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] "
             "[--prompt-file PATH] [prompt...]",
         ),
         arguments=(
             ArgSpec(
                 "MODEL_ALIAS",
-                True,
-                "A droid model alias from config (see delegate models).",
+                False,
+                "Optional droid model alias from config (see delegate models). "
+                "Omit when using --model or droid.defaultModel. Do not combine with --model.",
             ),
             _MODE_ARG,
             _PROMPT_ARG,
         ),
         options=(
+            _MODEL_OPTION,
             _REASONING_EFFORT_OPTION,
             _PROGRESS_OPTION,
             _NO_PROGRESS_OPTION,
@@ -433,6 +446,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         examples=(
             'delegate droid reviewer safe "Investigate this issue; do not edit."',
+            'delegate droid safe --model glm-5.1 "Investigate this issue; do not edit."',
             'delegate droid reviewer work --reasoning-effort xhigh "Implement and verify."',
             'delegate droid reviewer work "Implement this bounded change; run the named check."',
         ),
@@ -442,7 +456,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "Droid safe mode stays read-only; work mode uses --skip-permissions-unsafe "
             "and is intentionally no-prompt -- use only in workspaces you trust.",
             "Reasoning effort is model-specific and never changes safe/work/call permissions.",
-            "--reasoning-effort requires a resolved Droid model alias from droid.models.",
+            "Positional MODEL_ALIAS is alias-only (strict); --model is alias-or-id pass-through. "
+            "Give one or the other, not both. With neither, droid.defaultModel is used.",
             "Run delegate models to list available aliases.",
         ),
         see_also=("models", "cursor", "codex", "agent-help"),
@@ -452,22 +467,22 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         summary="Resolve a cursor/codex/droid/kimi/claude/grok/devin invocation and print the planned argv without running it.",
         usage=(
             "delegate [--json] [--isolation auto|none|worktree] "
-            "dry-run {cursor,kimi,claude,grok,devin} {safe,work} [--reasoning-effort LEVEL] "
+            "dry-run {cursor,kimi,claude,grok,devin} {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] "
             "[--progress] [--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
             "delegate [--json] [--isolation auto|none|worktree] "
-            "dry-run {cursor,kimi,claude,grok,devin} call [--read-only] [--reasoning-effort LEVEL] "
+            "dry-run {cursor,kimi,claude,grok,devin} call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] "
             "[--prompt-file PATH] [prompt...]",
             "delegate [--json] [--isolation auto|none|worktree] "
-            "dry-run codex {safe,work} [--reasoning-effort LEVEL] [--output-schema FILE] "
+            "dry-run codex {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--output-schema FILE] "
             "[--progress] [--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
             "delegate [--json] [--isolation auto|none|worktree] "
-            "dry-run codex call [--read-only] [--reasoning-effort LEVEL] [--output-schema FILE] "
+            "dry-run codex call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--output-schema FILE] "
             "[--prompt-file PATH] [prompt...]",
             "delegate [--json] [--isolation auto|none|worktree] "
-            "dry-run droid MODEL_ALIAS {safe,work} [--reasoning-effort LEVEL] "
+            "dry-run droid [MODEL_ALIAS] {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] "
             "[--progress] [--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
             "delegate [--json] [--isolation auto|none|worktree] "
-            "dry-run droid MODEL_ALIAS call [--read-only] [--reasoning-effort LEVEL] "
+            "dry-run droid [MODEL_ALIAS] call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] "
             "[--prompt-file PATH] [prompt...]",
         ),
         arguments=(
@@ -479,6 +494,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             _PROMPT_ARG,
         ),
         options=(
+            _MODEL_OPTION,
             _REASONING_EFFORT_OPTION,
             _OUTPUT_SCHEMA_OPTION,
             _PROGRESS_OPTION,
@@ -1288,34 +1304,34 @@ def render_overview_text() -> str:
     lines: list[str] = [f"delegate {VERSION}", "", "Usage:"]
 
     usage_lines = [
-        f"delegate [--cwd PATH] [--json] {iso} cursor {{safe,work}} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} cursor call [--read-only] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} droid MODEL_ALIAS {{safe,work}} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} droid MODEL_ALIAS call [--read-only] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} codex {{safe,work}} [--reasoning-effort LEVEL] [--output-schema FILE] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} codex call [--read-only] [--reasoning-effort LEVEL] [--output-schema FILE] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} claude {{safe,work}} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} claude call [--read-only] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} grok {{safe,work}} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} grok call [--read-only] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} devin {{safe,work}} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} devin call [--read-only] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} kimi {{safe,work}} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} kimi call [--read-only] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} dry-run cursor {{safe,work}} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} dry-run cursor call [--read-only] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} dry-run droid MODEL_ALIAS {{safe,work}} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} dry-run droid MODEL_ALIAS call [--read-only] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} dry-run codex {{safe,work}} [--reasoning-effort LEVEL] [--output-schema FILE] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} dry-run codex call [--read-only] [--reasoning-effort LEVEL] [--output-schema FILE] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} dry-run claude {{safe,work}} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} dry-run claude call [--read-only] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} dry-run grok {{safe,work}} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} dry-run grok call [--read-only] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} dry-run devin {{safe,work}} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} dry-run devin call [--read-only] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} dry-run kimi {{safe,work}} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} dry-run kimi call [--read-only] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} cursor {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} cursor call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} droid [MODEL_ALIAS] {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} droid [MODEL_ALIAS] call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} codex {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--output-schema FILE] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} codex call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--output-schema FILE] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} claude {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} claude call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} grok {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} grok call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} devin {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} devin call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} kimi {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} kimi call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} dry-run cursor {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} dry-run cursor call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} dry-run droid [MODEL_ALIAS] {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} dry-run droid [MODEL_ALIAS] call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} dry-run codex {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--output-schema FILE] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} dry-run codex call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--output-schema FILE] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} dry-run claude {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} dry-run claude call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} dry-run grok {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} dry-run grok call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} dry-run devin {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} dry-run devin call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} dry-run kimi {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} dry-run kimi call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} run --input-json FILE",
         "delegate [--cwd PATH] [--json] snapshot [--latest HARNESS] [--no-redact] <handle>",
         "delegate [--cwd PATH] [--json] runs "

@@ -45,7 +45,7 @@ from delegate_agent.constants import (
     MODE_CALL,
     MODE_SAFE,
     MODE_WORK,
-    MODELESS_NONCURSOR_ENGINES,
+    MODELESS_ENGINES,
     PROMPT_ENFORCED_SAFE_ENGINES,
     PROMPT_INSTRUCTION_MODE_SLASH,
     PROMPT_INSTRUCTION_MODE_WRAPPED,
@@ -560,6 +560,53 @@ def _validate_droid_model_alias(config: JsonObject, model_alias: str | None) -> 
         raise DelegateError("invalid_alias", f"Unknown Droid model alias: {model_alias}")
 
 
+def resolve_model_selection(engine_section: JsonObject, value: str) -> str:
+    """Resolve ``value`` against ``<engine>.models`` aliases, else pass through."""
+    models = engine_section.get("models")
+    if isinstance(models, dict) and value in models:
+        mapped = models[value]
+        if isinstance(mapped, str):
+            return mapped
+    return value
+
+
+def _resolve_engine_model(section: JsonObject, build: EngineBuildInput) -> str | None:
+    """Per-run model: ``model_override`` > ``model_alias`` > ``defaultModel``.
+
+    Both override and alias values go through ``resolve_model_selection``
+    (alias-or-id). Computed before reasoning-capability resolution so effort
+    validation follows the selected model.
+    """
+    if build.model_override is not None:
+        return resolve_model_selection(section, build.model_override)
+    if isinstance(build.model_alias, str) and build.model_alias:
+        return resolve_model_selection(section, build.model_alias)
+    return _resolve_default_model(section)
+
+
+def _reject_droid_model_conflict(model_alias: str | None, model_override: str | None) -> None:
+    if model_alias is not None and model_override is not None:
+        raise DelegateError(
+            "model_conflict",
+            "Give either the positional droid model alias or --model, not both.",
+        )
+
+
+def _guard_droid_placeholder_model(model: str, *, alias: str | None) -> None:
+    if model.startswith("replace-with-") or model in {
+        "your-droid-model-id",
+        "real-droid-model-id",
+    }:
+        label = f"'{alias}'" if alias else "selection"
+        raise DelegateError(
+            "unconfigured_model",
+            (
+                f"Droid model {label} is still a placeholder. "
+                "Copy config.example.json to ~/.delegate/config.json and set a real Droid model ID."
+            ),
+        )
+
+
 def _validate_include_dirty(
     *,
     include_dirty: bool,
@@ -713,7 +760,9 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         _validate_call_cli_options(global_options, launch)
         read_only = getattr(launch, "read_only", False)
         if launch.engine == "droid":
-            _validate_droid_model_alias(config, launch.model_alias)
+            _reject_droid_model_conflict(launch.model_alias, launch.model)
+            if launch.model_alias is not None:
+                _validate_droid_model_alias(config, launch.model_alias)
         output_schema = resolve_output_schema(launch.engine, launch.output_schema)
         raw_prompt = resolve_prompt(launch.prompt_parts, launch.prompt_file, stdin)
         if read_only and delegate_runner.detect_slash_command(raw_prompt):
@@ -744,6 +793,7 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
                 cleanup_workspace=cleanup_workspace,
                 call_read_only=read_only,
                 group=global_options.group,
+                model_override=launch.model,
             )
         except BaseException:
             if cleanup_workspace:
@@ -816,6 +866,10 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         mode=launch.mode,
         isolation_context=isolation_context,
     )
+    if launch.engine == "droid":
+        _reject_droid_model_conflict(launch.model_alias, launch.model)
+        if launch.model_alias is not None:
+            _validate_droid_model_alias(config, launch.model_alias)
 
     completion_report_mode = resolve_completion_report_mode(parsed, config)
     completion_report_prompt_mode, output_schema_warnings = _completion_report_prompt_mode(
@@ -857,6 +911,7 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         warnings=(*output_schema_warnings, *isolation_warnings),
         group=global_options.group,
         prompt_instruction_mode=instruction_mode,
+        model_override=launch.model,
     )
 
 
@@ -943,17 +998,13 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
     if engine == "droid":
         if not isinstance(model_alias, str) or not model_alias:
             raise DelegateError("missing_model", "droid run input requires model alias.")
-    elif engine in MODELESS_NONCURSOR_ENGINES:
+    elif engine in MODELESS_ENGINES:
         if model_alias is not None and not isinstance(model_alias, str):
             raise DelegateError("invalid_model", f"model must be a string or null for {engine}.")
         if model_alias == "":
             raise DelegateError(
                 "invalid_model", f"model must be a non-empty string or omitted for {engine}."
             )
-    elif model_alias is not None and model_alias != config["cursor"]["defaultModel"]:
-        raise DelegateError(
-            "invalid_model", "cursor model override must match configured Composer model."
-        )
     output_schema = resolve_output_schema(str(engine), raw.get("outputSchema"))
     raw_instruction_mode = raw.get("promptInstructionMode")
     raw_workflow_agent_key = raw.get("workflowAgentKey")
@@ -968,8 +1019,6 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
             raw_forbid_commit=raw_forbid_commit,
             raw_include_dirty=raw_include_dirty,
         )
-        if engine == "droid":
-            _validate_droid_model_alias(config, model_alias)
         workspace, cleanup_workspace = _call_workspace(False)
         call_prompt = validate_prompt(prompt)
         if raw_instruction_mode == PROMPT_INSTRUCTION_MODE_SLASH and raw_read_only:
@@ -982,7 +1031,7 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
             return build_request(
                 str(engine),
                 str(mode),
-                model_alias,
+                model_alias if isinstance(model_alias, str) else None,
                 workspace,
                 _call_effective_prompt(call_prompt, read_only=raw_read_only),
                 config,
@@ -1094,9 +1143,6 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         mode=str(mode),
         isolation_context=isolation_context,
     )
-    if engine == "droid":
-        _validate_droid_model_alias(config, model_alias)
-
     completion_report_mode = resolve_completion_report_mode(parsed, config)
     completion_report_prompt_mode, output_schema_warnings = _completion_report_prompt_mode(
         completion_report_mode,
@@ -1120,7 +1166,7 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
     return build_request(
         str(engine),
         str(mode),
-        model_alias,
+        model_alias if isinstance(model_alias, str) else None,
         workspace,
         prompt,
         config,
@@ -1169,6 +1215,7 @@ def build_request(
     group: str | None = None,
     workflow_agent_key: str | None = None,
     prompt_instruction_mode: str = PROMPT_INSTRUCTION_MODE_WRAPPED,
+    model_override: str | None = None,
 ) -> Request:
     if not isinstance(workspace, ResolvedWorkspace):
         raise TypeError(
@@ -1208,18 +1255,37 @@ def build_request(
         group=group,
         workflow_agent_key=workflow_agent_key,
         prompt_instruction_mode=prompt_instruction_mode,
+        model_override=model_override,
     )
 
 
 def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
-    _ = build.model_alias, build.cache
+    _ = build.cache
     cursor = build.config["cursor"]
-    capability, reasoning_warnings = _capability_with_config_fallback(
-        lambda: resolve_cursor_reasoning_capability(cursor, build.requested_effort),
-        engine="cursor",
-        effort_source=build.effort_source,
-    )
-    model = capability.model if capability is not None else cursor["defaultModel"]
+    pinned = None
+    if build.model_override is not None:
+        pinned = resolve_model_selection(cursor, build.model_override)
+    elif isinstance(build.model_alias, str) and build.model_alias:
+        pinned = resolve_model_selection(cursor, build.model_alias)
+
+    warnings: list[str] = []
+    if pinned is not None:
+        model = pinned
+        capability = None
+        if build.requested_effort is not None and build.effort_source != "config":
+            warnings.append(
+                "cursor reasoning-effort routing was bypassed by the pinned model; "
+                "proceeding with the explicit model selection."
+            )
+    else:
+        capability, reasoning_warnings = _capability_with_config_fallback(
+            lambda: resolve_cursor_reasoning_capability(cursor, build.requested_effort),
+            engine="cursor",
+            effort_source=build.effort_source,
+        )
+        warnings.extend(reasoning_warnings)
+        model = capability.model if capability is not None else cursor["defaultModel"]
+
     argv = build_cursor_argv(
         cursor["argvPrefix"],
         build.mode,
@@ -1235,7 +1301,7 @@ def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         model_alias=None,
         prompt_transport=PROMPT_TRANSPORT_ARGV,
         display_argv=redacted_prompt_argv(argv),
-        warnings=reasoning_warnings,
+        warnings=tuple(warnings),
         **reasoning_request_kwargs(capability, build.effort_source),
     )
 
@@ -1243,19 +1309,25 @@ def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
 def _droid_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     droid = build.config["droid"]
     models = droid["models"]
-    _validate_droid_model_alias(build.config, build.model_alias)
-    model = models[build.model_alias]
-    if model.startswith("replace-with-") or model in {
-        "your-droid-model-id",
-        "real-droid-model-id",
-    }:
-        raise DelegateError(
-            "unconfigured_model",
-            (
-                f"Droid model alias '{build.model_alias}' is still a placeholder. "
-                "Copy config.example.json to ~/.delegate/config.json and set a real Droid model ID."
-            ),
-        )
+    _reject_droid_model_conflict(build.model_alias, build.model_override)
+
+    if build.model_override is not None:
+        model = resolve_model_selection(droid, build.model_override)
+        alias_for_errors = None
+    elif build.model_alias is not None:
+        _validate_droid_model_alias(build.config, build.model_alias)
+        model = models[build.model_alias]
+        alias_for_errors = build.model_alias
+    else:
+        model = _resolve_default_model(droid)
+        alias_for_errors = None
+        if model is None:
+            raise DelegateError(
+                "missing_model",
+                "droid requires a positional model alias, --model, or droid.defaultModel.",
+            )
+
+    _guard_droid_placeholder_model(model, alias=alias_for_errors)
     capability, reasoning_warnings = _capability_with_config_fallback(
         lambda: reasoning.resolve_reasoning_capability(
             harness="droid",
@@ -1263,7 +1335,7 @@ def _droid_request_parts(build: EngineBuildInput) -> EngineRequestParts:
             requested_effort=build.requested_effort,
             config=build.config,
             cache=build.cache,
-            alias=build.model_alias,
+            alias=alias_for_errors,
         ),
         engine="droid",
         effort_source=build.effort_source,
@@ -1300,10 +1372,7 @@ def _droid_request_parts(build: EngineBuildInput) -> EngineRequestParts:
 
 def _codex_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     codex = build.config["codex"]
-    if isinstance(build.model_alias, str) and build.model_alias:
-        model = build.model_alias
-    else:
-        model = _resolve_default_model(codex)
+    model = _resolve_engine_model(codex, build)
     policy = delegate_config.effective_policy(
         build.config, engine="codex", mode=_policy_mode(build)
     )
@@ -1373,10 +1442,7 @@ def _codex_request_parts(build: EngineBuildInput) -> EngineRequestParts:
 
 def _claude_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     claude = build.config["claude"]
-    if isinstance(build.model_alias, str) and build.model_alias:
-        model = build.model_alias
-    else:
-        model = _resolve_default_model(claude)
+    model = _resolve_engine_model(claude, build)
     policy = delegate_config.effective_policy(
         build.config, engine="claude", mode=_policy_mode(build)
     )
@@ -1417,10 +1483,7 @@ def _claude_request_parts(build: EngineBuildInput) -> EngineRequestParts:
 
 def _grok_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     grok = build.config["grok"]
-    if isinstance(build.model_alias, str) and build.model_alias:
-        model = build.model_alias
-    else:
-        model = _resolve_default_model(grok)
+    model = _resolve_engine_model(grok, build)
     policy = delegate_config.effective_policy(build.config, engine="grok", mode=_policy_mode(build))
     effort: str | None = None
     warnings: tuple[str, ...] = ()
@@ -1478,10 +1541,7 @@ def _devin_request_parts(build: EngineBuildInput) -> EngineRequestParts:
             ),
         )
     devin = build.config["devin"]
-    if isinstance(build.model_alias, str) and build.model_alias:
-        model = build.model_alias
-    else:
-        model = _resolve_default_model(devin)
+    model = _resolve_engine_model(devin, build)
     argv = build_devin_argv(
         devin,
         build.mode,
@@ -1525,10 +1585,7 @@ def _kimi_request_parts(build: EngineBuildInput) -> EngineRequestParts:
             ),
         )
     kimi = build.config["kimi"]
-    if isinstance(build.model_alias, str) and build.model_alias:
-        model = build.model_alias
-    else:
-        model = _resolve_default_model(kimi)
+    model = _resolve_engine_model(kimi, build)
     argv = build_kimi_argv(
         kimi,
         build.mode,
@@ -1599,6 +1656,7 @@ def _build_request_for_workspace(
     group: str | None = None,
     workflow_agent_key: str | None = None,
     prompt_instruction_mode: str = PROMPT_INSTRUCTION_MODE_WRAPPED,
+    model_override: str | None = None,
 ) -> Request:
     if prompt_instruction_mode != PROMPT_INSTRUCTION_MODE_SLASH:
         prompt = _append_safe_dirty_tree_note(prompt, resolved, mode, isolation_context)
@@ -1624,6 +1682,7 @@ def _build_request_for_workspace(
             cache=cache,
             output_schema=output_schema,
             call_read_only=call_read_only,
+            model_override=model_override,
         ),
     )
     return _apply_profile_resolution(

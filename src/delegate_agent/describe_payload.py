@@ -1108,13 +1108,13 @@ Good defaults:
 
 Kimi:
   - {SAFE_WORKSPACE_SYNC_NOTE}
-  - Model selection uses kimi.defaultModel in config or optional JSON input model; no CLI model alias in v1.
+  - Model selection uses --model (alias from kimi.models or a raw model ID), optional JSON input model, or kimi.defaultModel in config.
   - Reasoning effort is unsupported for Kimi in v1.
   - No CLI workspace flag; Delegate sets subprocess cwd.
 
 Codex:
   - {SAFE_WORKSPACE_SYNC_NOTE}
-  - Model selection uses codex.defaultModel in config or optional JSON input model; no CLI model alias in v1.
+  - Model selection uses --model (alias from codex.models or a raw model ID), optional JSON input model, or codex.defaultModel in config.
   - Codex profile (codex.profile) is config-only; run input JSON must not include profile.
 
 Claude:
@@ -1151,7 +1151,7 @@ Droid modes:
   - Droid safe mode remains read-only: no --auto, --use-spec, or unsafe skip.
   - Uses Factory Droid --skip-permissions-unsafe, not --auto high.
   - Work mode is intentionally no-prompt; use only for bounded tasks in workspaces you trust.
-  - --reasoning-effort requires a resolved Droid model alias from droid.models.
+  - Positional MODEL_ALIAS is alias-only (strict); --model is alias-or-id pass-through. Give one or the other, not both. With neither, droid.defaultModel is used.
 
 Cursor safe mode:
   - {SAFE_WORKSPACE_SYNC_NOTE}

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Final
 
 from delegate_agent import reasoning, redaction, wsl
+from delegate_agent.constants import VALID_MODES
 from delegate_agent.json_types import JsonObject, JsonValue, is_non_negative_int
 
 DEFAULT_CONFIG_PATH: Path | None = None
@@ -68,6 +69,7 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
         "defaultModel": "composer-2.5",
         "defaultReasoningEffort": None,
         "reasoningEffortModels": {},
+        "models": {},
     },
     "droid": {
         "binary": "droid",
@@ -81,6 +83,7 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
         "binary": "kimi",
         "defaultModel": "kimi-code/kimi-for-coding",
         "defaultReasoningEffort": None,
+        "models": {},
     },
     "claude": {
         "binary": "claude",
@@ -89,6 +92,7 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
         "workPermissionMode": "auto",
         "noSessionPersistence": True,
         "bare": False,
+        "models": {},
     },
     "grok": {
         "binary": "grok",
@@ -100,11 +104,13 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
         "workSandbox": None,
         "disableWebSearch": True,
         "noSubagents": False,
+        "models": {},
     },
     "devin": {
         "binary": "devin",
         "defaultModel": "swe-1.7",
         "defaultReasoningEffort": None,
+        "models": {},
     },
     "policy": {
         "profile": "safe",
@@ -121,6 +127,7 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
         "workSandbox": "workspace-write",
         "ephemeral": True,
         "ignoreUserConfig": False,
+        "models": {},
     },
     "profiles": {
         "detectFrom": ["DELEGATE_PROFILE", "AI_PROFILE"],
@@ -561,6 +568,7 @@ def _validate_codex_section(codex: JsonValue) -> None:
         path="codex.ignoreUserConfig",
         error="invalid_codex_config",
     )
+    _validate_engine_models(codex.get("models"), engine="codex", error="invalid_codex_config")
 
 
 def _validate_codex_profile_references(config: JsonObject) -> None:
@@ -602,6 +610,7 @@ def _validate_kimi_section(kimi: JsonValue) -> None:
             "invalid_kimi_config",
             "kimi.defaultReasoningEffort is not supported; set it to null.",
         )
+    _validate_engine_models(kimi.get("models"), engine="kimi", error="invalid_kimi_config")
 
 
 def _validate_claude_section(claude: JsonValue) -> None:
@@ -644,6 +653,7 @@ def _validate_claude_section(claude: JsonValue) -> None:
         error="invalid_claude_config",
     )
     require_bool(claude.get("bare", False), path="claude.bare", error="invalid_claude_config")
+    _validate_engine_models(claude.get("models"), engine="claude", error="invalid_claude_config")
 
 
 def _validate_grok_section(grok: JsonValue) -> None:
@@ -710,6 +720,7 @@ def _validate_grok_section(grok: JsonValue) -> None:
     require_bool(
         grok.get("noSubagents", False), path="grok.noSubagents", error="invalid_grok_config"
     )
+    _validate_engine_models(grok.get("models"), engine="grok", error="invalid_grok_config")
 
 
 def _validate_devin_section(devin: JsonValue) -> None:
@@ -722,6 +733,7 @@ def _validate_devin_section(devin: JsonValue) -> None:
             "invalid_devin_config",
             "devin.defaultReasoningEffort is not supported; set it to null.",
         )
+    _validate_engine_models(devin.get("models"), engine="devin", error="invalid_devin_config")
 
 
 def _validate_provider_default_reasoning_effort(
@@ -734,6 +746,27 @@ def _validate_provider_default_reasoning_effort(
         return
     if not reasoning.is_valid_effort_string(value):
         raise ConfigError(error, f"{path} must be a non-empty string without whitespace or null.")
+
+
+def _validate_engine_models(models: JsonValue, *, engine: str, error: str) -> None:
+    path = f"{engine}.models"
+    if models is None:
+        return
+    if not isinstance(models, dict):
+        raise ConfigError(error, f"{path} must be an object.")
+    for alias, model_id in models.items():
+        if not isinstance(alias, str) or not isinstance(model_id, str) or not alias or not model_id:
+            raise ConfigError(error, f"{engine} model aliases and ids must be non-empty strings.")
+        if alias in VALID_MODES:
+            raise ConfigError(
+                error,
+                f"{path} alias {alias!r} collides with a launch mode name; rename the alias.",
+            )
+        if alias.startswith("-"):
+            raise ConfigError(
+                error,
+                f"{path} alias {alias!r} must not start with '-'.",
+            )
 
 
 def _validate_reasoning_effort_value(value: JsonValue, *, path: str) -> str:
@@ -1083,22 +1116,17 @@ def validate_config(config: JsonObject) -> None:
         error="invalid_cursor_config",
     )
     _validate_cursor_reasoning_models(cursor.get("reasoningEffortModels"))
+    _validate_engine_models(cursor.get("models"), engine="cursor", error="invalid_cursor_config")
     if not isinstance(droid, dict):
         raise ConfigError("invalid_droid_config", "droid config must be an object.")
     require_non_empty_str(droid.get("binary"), path="droid.binary", error="invalid_droid_config")
+    optional_str(droid.get("defaultModel"), path="droid.defaultModel", error="invalid_droid_config")
     _validate_provider_default_reasoning_effort(
         droid.get("defaultReasoningEffort"),
         path="droid.defaultReasoningEffort",
         error="invalid_droid_config",
     )
-    models = droid.get("models")
-    if not isinstance(models, dict):
-        raise ConfigError("invalid_droid_config", "droid.models must be an object.")
-    for alias, model_id in models.items():
-        if not isinstance(alias, str) or not isinstance(model_id, str) or not alias or not model_id:
-            raise ConfigError(
-                "invalid_droid_config", "droid model aliases and ids must be non-empty strings."
-            )
+    _validate_engine_models(droid.get("models"), engine="droid", error="invalid_droid_config")
     tracking = config.get("tracking")
     if tracking is not None:
         if not isinstance(tracking, dict):

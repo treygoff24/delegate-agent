@@ -53,6 +53,7 @@ class LaunchOptions:
     include_dirty: bool = False
     read_only: bool = False
     dry_run: bool = False
+    model: str | None = None
 
 
 @dataclass
@@ -198,3 +199,4 @@ class EngineBuildInput:
     cache: JsonObject | None
     output_schema: str | None = None
     call_read_only: bool = False
+    model_override: str | None = None

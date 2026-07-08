@@ -31,6 +31,7 @@ from delegate_agent.constants import (
     ENGINES_PROSE,
     KNOWN_ENGINES,
     MODELESS_ENGINES,
+    VALID_MODES,
     validate_mode,
 )
 from delegate_agent.errors import DelegateError
@@ -684,6 +685,7 @@ def parse_modeless_engine(
         isolation,
         read_only,
         include_dirty,
+        model,
     ) = parse_prompt_tail(rest[1:], json_mode, isolation, command_prefix=[engine, mode])
     forbid_commit_implied_isolation = False
     if forbid_commit and mode == "work" and isolation is None:
@@ -719,6 +721,7 @@ def parse_modeless_engine(
             include_dirty=include_dirty,
             read_only=read_only,
             dry_run=dry_run,
+            model=model,
         ),
     )
 
@@ -740,24 +743,42 @@ def parse_droid(
     # Help wins before the alias is consumed: `droid --help` needs no alias.
     if rest and command_help.is_help_token(rest[0]):
         return help_command(json_mode, topic)
-    if len(rest) < 2:
-        raise DelegateError("missing_droid_args", "droid requires MODEL_ALIAS and mode.")
-    model_alias = rest[0]
-    if model_alias.startswith("-"):
+    if not rest:
+        raise DelegateError(
+            "missing_droid_args",
+            "droid requires mode (and optionally a MODEL_ALIAS before the mode).",
+        )
+    if rest[0].startswith("-"):
         raise DelegateError(
             "misplaced_global_option", "Global options must appear before the subcommand."
         )
-    # Help wins after the alias, before the mode: `droid x --help`.
-    if command_help.is_help_token(rest[1]):
-        return help_command(json_mode, topic)
-    mode = rest[1]
-    if mode.startswith("-"):
-        raise DelegateError(
-            "misplaced_global_option", "Global options must appear before the subcommand."
-        )
-    validate_mode(mode)
-    # Help wins after the mode, before prompt capture: `droid x safe --help`.
-    if len(rest) >= 3 and command_help.is_help_token(rest[2]):
+    # First token is the mode when it is a known mode name; otherwise it is the
+    # positional alias and the mode follows.
+    if rest[0] in VALID_MODES:
+        model_alias = None
+        mode = rest[0]
+        tail = rest[1:]
+        command_prefix = ["droid", mode]
+    else:
+        if len(rest) < 2:
+            raise DelegateError(
+                "missing_droid_args",
+                "droid requires MODEL_ALIAS and mode.",
+            )
+        model_alias = rest[0]
+        # Help wins after the alias, before the mode: `droid x --help`.
+        if command_help.is_help_token(rest[1]):
+            return help_command(json_mode, topic)
+        mode = rest[1]
+        if mode.startswith("-"):
+            raise DelegateError(
+                "misplaced_global_option", "Global options must appear before the subcommand."
+            )
+        validate_mode(mode)
+        tail = rest[2:]
+        command_prefix = ["droid", model_alias, mode]
+    # Help wins after the mode, before prompt capture: `droid [alias] safe --help`.
+    if tail and command_help.is_help_token(tail[0]):
         return help_command(json_mode, topic)
     (
         prompt_file,
@@ -770,18 +791,18 @@ def parse_droid(
         isolation,
         read_only,
         include_dirty,
-    ) = parse_prompt_tail(
-        rest[2:], json_mode, isolation, command_prefix=["droid", model_alias, mode]
-    )
+        model,
+    ) = parse_prompt_tail(tail, json_mode, isolation, command_prefix=command_prefix)
     forbid_commit_implied_isolation = False
     if forbid_commit and mode == "work" and isolation is None:
         isolation = "worktree"
         forbid_commit_implied_isolation = True
     if forbid_commit and mode == "work" and isolation == "none":
+        droid_tokens = ["droid", *([model_alias] if model_alias else []), mode]
         raise DelegateError(
             "invalid_option_combination",
             "--forbid-commit cannot be combined with --isolation none. "
-            f"Corrected command: {_shell_command(['--isolation', 'worktree', 'droid', model_alias, mode, '--forbid-commit', *(prompt_parts or [])])}.",
+            f"Corrected command: {_shell_command(['--isolation', 'worktree', *droid_tokens, '--forbid-commit', *(prompt_parts or [])])}.",
         )
     return ParsedCommand(
         "droid",
@@ -808,6 +829,7 @@ def parse_droid(
             include_dirty=include_dirty,
             read_only=read_only,
             dry_run=dry_run,
+            model=model,
         ),
     )
 
@@ -885,6 +907,7 @@ def parse_prompt_tail(
     str | None,
     bool,
     bool,
+    str | None,
 ]:
     prompt_file: str | None = None
     output_schema: str | None = None
@@ -893,6 +916,7 @@ def parse_prompt_tail(
     forbid_commit = False
     include_dirty = False
     read_only = False
+    model: str | None = None
     prompt_parts: list[str] = []
     i = 0
     while i < len(rest):
@@ -961,6 +985,26 @@ def parse_prompt_tail(
             except reasoning.ReasoningCapabilityError as exc:
                 corrected = corrected_drop_option_suffix(command_prefix, rest, i, takes_value=True)
                 raise DelegateError(exc.error, f"{exc.message}{corrected}") from exc
+            i += 2
+            continue
+        if token == "--model":
+            if model is not None:
+                raise DelegateError(
+                    "invalid_model",
+                    "Only one --model is allowed.",
+                )
+            if i + 1 >= len(rest):
+                raise DelegateError(
+                    "missing_model",
+                    "--model requires a value.",
+                )
+            value = rest[i + 1]
+            if value.startswith("-") or command_help.is_help_token(value):
+                raise DelegateError(
+                    "missing_model",
+                    "--model requires a value.",
+                )
+            model = value
             i += 2
             continue
         if token == "--progress":
@@ -1040,6 +1084,7 @@ def parse_prompt_tail(
         isolation,
         read_only,
         include_dirty,
+        model,
     )
 
 

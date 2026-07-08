@@ -483,7 +483,10 @@ class KimiHelpTests(HelpCliTestBase):
                 self.assertEqual(code, self.delegate.EXIT_OK)
                 self.assertIn(note, out)
                 if command == "droid":
-                    self.assertIn("--reasoning-effort requires a resolved Droid model alias", out)
+                    self.assertIn(
+                        "Positional MODEL_ALIAS is alias-only (strict); --model is alias-or-id",
+                        out,
+                    )
 
         code, out, _err = self.run_main(["--json", "describe"])
         self.assertEqual(code, self.delegate.EXIT_OK)
@@ -495,7 +498,10 @@ class KimiHelpTests(HelpCliTestBase):
         code, out, _err = self.run_main(["agent-help"])
         self.assertEqual(code, self.delegate.EXIT_OK)
         self.assertIn(note, out)
-        self.assertIn("--reasoning-effort requires a resolved Droid model alias", out)
+        self.assertIn(
+            "Positional MODEL_ALIAS is alias-only (strict); --model is alias-or-id",
+            out,
+        )
 
 
 if __name__ == "__main__":
