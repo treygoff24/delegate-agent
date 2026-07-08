@@ -77,8 +77,8 @@ class SlashPassthroughRequestTests(ExecutionTestBase):
         request = self.build(["codex", "safe", prompt])
         self.assert_verbatim(request, prompt)
 
-    def test_claude_and_grok_safe_slash_allowed(self):
-        for engine in ("claude", "grok"):
+    def test_claude_grok_and_devin_safe_slash_allowed(self):
+        for engine in ("claude", "grok", "devin"):
             prompt = "/goal audit"
             request = self.build([engine, "safe", prompt])
             self.assert_verbatim(request, prompt)
@@ -205,6 +205,7 @@ class SlashPassthroughDescribeTests(ExecutionTestBase):
                 "kimi": False,
                 "claude": True,
                 "grok": True,
+                "devin": True,
             },
         )
         self.assertFalse(modes["callReadOnlyAllowed"])

@@ -41,6 +41,7 @@ from delegate_agent.argv_builders import (  # noqa: F401  # re-exported for test
     build_claude_argv,
     build_codex_argv,
     build_cursor_argv,
+    build_devin_argv,
     build_droid_argv,
     build_grok_argv,
     build_kimi_argv,
@@ -85,6 +86,8 @@ from delegate_agent.isolation import (  # noqa: F401  # re-exported for tests
 from delegate_agent.json_types import JsonObject
 from delegate_agent.prompt_transport import (  # noqa: F401  # CURSOR_PROMPT_REDACTION re-exported for tests
     CURSOR_PROMPT_REDACTION,
+    DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
+    DEVIN_AGENT_CONFIG_DISPLAY,
     DROID_PROMPT_FILE_ARG_PLACEHOLDER,
     DROID_PROMPT_FILE_DISPLAY,
     KIMI_PROMPT_REDACTION,
@@ -581,6 +584,8 @@ def execute_request(
                     stdin_text=request.stdin_text,
                     prompt_file_text=request.prompt_file_text,
                     prompt_file_placeholder=PROMPT_FILE_ARG_PLACEHOLDER,
+                    agent_config_text=request.agent_config_text,
+                    agent_config_placeholder=DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
                     env_overrides=request.env_overrides,
                 )
             except delegate_runner.RunnerLaunchError as exc:
@@ -677,6 +682,8 @@ def execute_request(
                     stdin_text=isolated_request.stdin_text,
                     prompt_file_text=isolated_request.prompt_file_text,
                     prompt_file_placeholder=PROMPT_FILE_ARG_PLACEHOLDER,
+                    agent_config_text=isolated_request.agent_config_text,
+                    agent_config_placeholder=DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
                     env_overrides=isolated_request.env_overrides,
                 )
             except delegate_runner.RunnerLaunchError as exc:
@@ -722,6 +729,8 @@ def execute_request(
                 stdin_text=isolated_request.stdin_text,
                 prompt_file_text=isolated_request.prompt_file_text,
                 prompt_file_placeholder=PROMPT_FILE_ARG_PLACEHOLDER,
+                agent_config_text=isolated_request.agent_config_text,
+                agent_config_placeholder=DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
                 manifest_argv=public_argv(isolated_request),
                 progress=isolated_request.progress,
                 progress_initial_delay_sec=isolated_request.progress_initial_delay_sec,

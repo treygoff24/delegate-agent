@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -1023,7 +1024,9 @@ class EngineArgvTests(CommandTestBase):
         payload = self.delegate.describe_payload(self.delegate.DEFAULT_CONFIG, "embedded-default")
         self.assertIn("promptTransforms", payload)
         self.assertTrue(payload["engineCapabilities"]["codex"]["outputSchema"])
-        for engine in ("cursor", "droid", "kimi", "claude", "grok"):
+        self.assertEqual(payload["engineDefaults"]["devin"]["binary"], "devin")
+        self.assertEqual(payload["engineDefaults"]["devin"]["defaultModel"], "swe-1.7")
+        for engine in ("cursor", "droid", "kimi", "claude", "grok", "devin"):
             with self.subTest(engine=engine):
                 self.assertFalse(payload["engineCapabilities"][engine]["outputSchema"])
         self.assertIn("skill review", payload["promptTransforms"][0])
@@ -1060,6 +1063,17 @@ class EngineArgvTests(CommandTestBase):
         self.assertNotIn("--yolo", kimi_work)
         self.assertIn("--prompt", kimi_work)
         self.assertNotIn("--auto", kimi_work)
+        devin_safe = payload["modeMapping"]["devin"]["safe"]
+        devin_work = payload["modeMapping"]["devin"]["work"]
+        self.assertEqual(payload["promptTransports"]["devin"], "file")
+        self.assertIn("--agent-config", devin_safe)
+        self.assertIn(self.delegate.DEVIN_AGENT_CONFIG_DISPLAY, devin_safe)
+        self.assertIn("--permission-mode auto", " ".join(devin_safe))
+        self.assertIn("--prompt-file", devin_safe)
+        self.assertIn(self.delegate.PROMPT_FILE_DISPLAY, devin_safe)
+        self.assertFalse(payload["isolation"]["safeNoneAllowed"]["devin"])
+        self.assertIn("--permission-mode dangerous", " ".join(devin_work))
+        self.assertNotIn("--agent-config", devin_work)
 
     def test_grok_safe_argv_uses_prompt_file_and_read_only_controls(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
@@ -1162,6 +1176,93 @@ class EngineArgvTests(CommandTestBase):
                 )
         self.assertEqual(ctx.exception.error, "unsupported_output_schema")
         self.assertIn("grok", ctx.exception.message.lower())
+
+    def test_devin_safe_argv_uses_prompt_file_and_agent_config(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        request = self.build_git_request(
+            "devin",
+            "safe",
+            None,
+            "/repo",
+            "review task",
+            config,
+            dry_run=True,
+        )
+        self.assertEqual(request.model, "swe-1.7")
+        self.assertEqual(request.prompt_transport, "file")
+        self.assertEqual(request.prompt_file_text, "review task")
+        self.assertEqual(
+            json.loads(request.agent_config_text or "{}"),
+            {
+                "permissions": {
+                    "allow": ["read", "grep", "glob", "Read(/**)"],
+                    "deny": ["edit", "write", "exec", "Write(/**)", "mcp__*"],
+                }
+            },
+        )
+        self.assertIn("--agent-config", request.argv)
+        self.assertIn(self.delegate.DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER, request.argv)
+        self.assertIn("--permission-mode", request.argv)
+        self.assertIn("auto", request.argv)
+        self.assertIn("--prompt-file", request.argv)
+        self.assertIn(self.delegate.PROMPT_FILE_ARG_PLACEHOLDER, request.argv)
+        self.assertEqual(request.argv[-1], "-p")
+        self.assertIn(self.delegate.DEVIN_AGENT_CONFIG_DISPLAY, request.display_argv or [])
+        self.assertIn(self.delegate.PROMPT_FILE_DISPLAY, request.display_argv or [])
+
+    def test_devin_work_uses_dangerous_permission_without_agent_config(self):
+        request = self.build_git_request(
+            "devin",
+            "work",
+            "gpt-5.4",
+            "/repo",
+            "implement",
+            self.delegate.DEFAULT_CONFIG,
+            dry_run=True,
+        )
+        self.assertEqual(request.model, "gpt-5.4")
+        self.assertIn("--model", request.argv)
+        self.assertIn("gpt-5.4", request.argv)
+        self.assertIn("--permission-mode", request.argv)
+        self.assertIn("dangerous", request.argv)
+        self.assertNotIn("--agent-config", request.argv)
+        self.assertIsNone(request.agent_config_text)
+
+    def test_devin_call_default_vs_read_only_permissions(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        default_req = self.delegate.request_from_parsed(
+            self.delegate.parse_cli(["devin", "call", "answer"]),
+            config,
+            io.StringIO(""),
+        )
+        self.addCleanup(shutil.rmtree, default_req.workspace, ignore_errors=True)
+        self.assertIn("dangerous", default_req.argv)
+        self.assertIsNone(default_req.agent_config_text)
+
+        ro_req = self.delegate.request_from_parsed(
+            self.delegate.parse_cli(["devin", "call", "--read-only", "score"]),
+            config,
+            io.StringIO(""),
+        )
+        self.addCleanup(shutil.rmtree, ro_req.workspace, ignore_errors=True)
+        self.assertIn("auto", ro_req.argv)
+        self.assertIn("--agent-config", ro_req.argv)
+        self.assertIsNotNone(ro_req.agent_config_text)
+        self.assertTrue(ro_req.prompt_file_text.startswith("You are being called"))
+
+    def test_devin_reasoning_effort_is_rejected(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.build_git_request(
+                "devin",
+                "safe",
+                None,
+                "/repo",
+                "review",
+                self.delegate.DEFAULT_CONFIG,
+                dry_run=True,
+                reasoning_effort="high",
+            )
+        self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
 
     def test_describe_and_models_include_runtime_and_config_provenance(self):
         workspace = Path("/tmp/delegate-provenance-test")

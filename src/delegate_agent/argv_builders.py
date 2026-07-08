@@ -18,6 +18,7 @@ from delegate_agent.json_types import JsonObject
 from delegate_agent.prompt_instructions import SKILL_REVIEW_PREFIX
 from delegate_agent.prompt_transport import (
     CURSOR_PROMPT_REDACTION,
+    DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
     DROID_PROMPT_FILE_ARG_PLACEHOLDER,
     PROMPT_FILE_ARG_PLACEHOLDER,
     PROMPT_TRANSPORT_ARGV,
@@ -40,6 +41,7 @@ _SAFE_REVIEW_LABEL_BY_ENGINE = {
     "codex": "Delegate Codex safe mode",
     "claude": "Delegate Claude safe mode",
     "grok": "Delegate Grok safe mode",
+    "devin": "Delegate Devin safe mode",
     "droid": "Delegate Droid safe mode",
     "kimi": "Delegate Kimi safe mode",
 }
@@ -345,6 +347,40 @@ def build_grok_argv(
             f"Unsupported Grok prompt transport: {prompt_transport}",
         )
     argv.extend(["--prompt-file", PROMPT_FILE_ARG_PLACEHOLDER])
+    return argv
+
+
+def build_devin_argv(
+    devin: JsonObject,
+    mode: str,
+    model: str | None,
+    *,
+    prompt_transport: str = PROMPT_TRANSPORT_FILE,
+    call_read_only: bool = False,
+) -> list[str]:
+    argv = [str(devin["binary"])]
+    if model:
+        argv.extend(["--model", model])
+    read_only = mode == MODE_SAFE or (mode == MODE_CALL and call_read_only)
+    if read_only:
+        argv.extend(
+            [
+                "--agent-config",
+                DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
+                "--permission-mode",
+                "auto",
+            ]
+        )
+    elif mode in (MODE_WORK, MODE_CALL):
+        argv.extend(["--permission-mode", "dangerous"])
+    else:
+        validate_mode(mode)
+    if prompt_transport != PROMPT_TRANSPORT_FILE:
+        raise DelegateError(
+            "invalid_prompt_transport",
+            f"Unsupported Devin prompt transport: {prompt_transport}",
+        )
+    argv.extend(["--prompt-file", PROMPT_FILE_ARG_PLACEHOLDER, "-p"])
     return argv
 
 

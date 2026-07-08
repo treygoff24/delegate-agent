@@ -29,6 +29,7 @@ TOP_LEVEL_COMMANDS = (
     "cursor",
     "claude",
     "grok",
+    "devin",
     "codex",
     "droid",
     "kimi",

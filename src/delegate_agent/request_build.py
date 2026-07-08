@@ -32,6 +32,7 @@ from delegate_agent.argv_builders import (
     build_claude_argv,
     build_codex_argv,
     build_cursor_argv,
+    build_devin_argv,
     build_droid_argv,
     build_grok_argv,
     build_kimi_argv,
@@ -57,6 +58,8 @@ from delegate_agent.git_utils import run_git as _run_git
 from delegate_agent.isolation import IsolationContext, build_isolation_context
 from delegate_agent.json_types import JsonObject, JsonValue
 from delegate_agent.prompt_transport import (
+    DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
+    DEVIN_AGENT_CONFIG_DISPLAY,
     DROID_PROMPT_FILE_ARG_PLACEHOLDER,
     DROID_PROMPT_FILE_DISPLAY,
     KIMI_PROMPT_REDACTION,
@@ -95,6 +98,13 @@ OUTPUT_SCHEMA_COMPLETION_REPORT_WARNING = (
 )
 CALL_TEMP_CWD_PLACEHOLDER = "<delegate-call-temp-cwd>"
 CODEX_HARNESS_DEFAULT_REASONING_EFFORTS = ("low", "medium", "high", "xhigh")
+DEVIN_READ_ONLY_AGENT_CONFIG = {
+    "permissions": {
+        "allow": ["read", "grep", "glob", "Read(/**)"],
+        "deny": ["edit", "write", "exec", "Write(/**)", "mcp__*"],
+    }
+}
+DEVIN_READ_ONLY_AGENT_CONFIG_TEXT = json.dumps(DEVIN_READ_ONLY_AGENT_CONFIG, separators=(",", ":"))
 
 # Read-only call is the stateless "judge/completion" contract: text in, text out,
 # no tree. These harnesses default to a coding-agent framing ("inspect the
@@ -1397,6 +1407,53 @@ def _grok_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     )
 
 
+def _devin_request_parts(build: EngineBuildInput) -> EngineRequestParts:
+    _ = build.effort_source, build.cache
+    if build.requested_effort is not None:
+        devin = build.config.get("devin")
+        default_model = devin.get("defaultModel") if isinstance(devin, dict) else None
+        model = default_model if isinstance(default_model, str) and default_model else None
+        raise DelegateError(
+            "unsupported_reasoning_effort",
+            reasoning.format_explicit_reasoning_effort_error(
+                harness="devin",
+                alias=build.model_alias,
+                model=model,
+                effort=build.requested_effort,
+                detail="reasoning effort is not supported",
+            ),
+        )
+    devin = build.config["devin"]
+    if isinstance(build.model_alias, str) and build.model_alias:
+        model = build.model_alias
+    else:
+        model = _resolve_default_model(devin)
+    argv = build_devin_argv(
+        devin,
+        build.mode,
+        model,
+        call_read_only=build.call_read_only,
+    )
+    display_argv = [
+        DEVIN_AGENT_CONFIG_DISPLAY
+        if item == DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER
+        else PROMPT_FILE_DISPLAY
+        if item == PROMPT_FILE_ARG_PLACEHOLDER
+        else item
+        for item in argv
+    ]
+    read_only = build.mode == MODE_SAFE or (build.mode == MODE_CALL and build.call_read_only)
+    return EngineRequestParts(
+        model=model,
+        argv=argv,
+        model_alias=build.model_alias,
+        prompt_transport=PROMPT_TRANSPORT_FILE,
+        prompt_file_text=build.prompt,
+        agent_config_text=DEVIN_READ_ONLY_AGENT_CONFIG_TEXT if read_only else None,
+        display_argv=display_argv,
+    )
+
+
 def _kimi_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     _ = build.effort_source, build.cache
     if build.requested_effort is not None:
@@ -1443,6 +1500,7 @@ ENGINE_REQUEST_PARTS_BUILDERS: dict[str, EngineRequestPartsBuilder] = {
     "codex": _codex_request_parts,
     "claude": _claude_request_parts,
     "grok": _grok_request_parts,
+    "devin": _devin_request_parts,
     "kimi": _kimi_request_parts,
 }
 
@@ -1538,6 +1596,7 @@ def _build_request_for_workspace(
             warnings=(*warnings, *parts.warnings),
             stdin_text=parts.stdin_text,
             prompt_file_text=parts.prompt_file_text,
+            agent_config_text=parts.agent_config_text,
             prompt_transport=parts.prompt_transport,
             display_argv=parts.display_argv,
             cleanup_workspace=cleanup_workspace,

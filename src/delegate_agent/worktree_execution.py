@@ -32,6 +32,7 @@ from delegate_agent.isolation import (
 )
 from delegate_agent.json_types import JsonObject
 from delegate_agent.prompt_transport import (
+    DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
     PROMPT_FILE_ARG_PLACEHOLDER,
     PROMPT_TRANSPORT_FILE,
     PROMPT_TRANSPORT_STDIN,
@@ -67,6 +68,7 @@ class PersistentExecutionRequest(Protocol):
     include_dirty: bool
     stdin_text: str | None
     prompt_file_text: str | None
+    agent_config_text: str | None
     prompt_transport: str
     display_argv: list[str] | None
     env_overrides: dict[str, str] | None
@@ -127,6 +129,7 @@ class ExecutionWorkspaceRequest:
     display_argv: list[str]
     stdin_text: str | None
     prompt_file_text: str | None
+    agent_config_text: str | None
 
 
 def execute_persistent_worktree(
@@ -489,6 +492,7 @@ def _request_for_execution_workspace(
         display_argv=execution_display_argv,
         stdin_text=execution_stdin_text,
         prompt_file_text=execution_prompt_file_text,
+        agent_config_text=request.agent_config_text,
     )
 
 
@@ -542,6 +546,8 @@ def _launch_child_in_persistent_worktree(
             stdin_text=execution_request.stdin_text,
             prompt_file_text=execution_request.prompt_file_text,
             prompt_file_placeholder=PROMPT_FILE_ARG_PLACEHOLDER,
+            agent_config_text=execution_request.agent_config_text,
+            agent_config_placeholder=DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
             manifest_argv=execution_request.display_argv,
             progress=request.progress,
             progress_initial_delay_sec=request.progress_initial_delay_sec,

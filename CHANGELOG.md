@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Added `devin` as a first-class engine for Cognition's Devin CLI across `safe`, `work`, and `call` modes. Devin uses prompt-file transport, config-driven model selection (`devin.defaultModel`, default `swe-1.7`), read-only safe/call enforcement through a Delegate-generated `--agent-config`, and `--permission-mode dangerous` for work/default-call print-mode runs.
+
 ## [0.11.0] - 2026-07-05
 
 Profile-guard calibration fix for issue #9: a shell carrying `AI_PROFILE=work|personal` with no matching `~/.delegate/config.<profile>.json` no longer presents a half-configured install as a total CLI outage.

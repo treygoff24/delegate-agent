@@ -760,6 +760,94 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertEqual(manifest["promptTransport"], "file")
             self.assertNotIn(secret_prompt, json.dumps(manifest["argv"]))
 
+    def test_tracked_devin_materializes_agent_config_without_manifest_leak(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        script = Path(temp.name) / "devin_reader.py"
+        script.write_text(
+            "import sys\n"
+            "from pathlib import Path\n"
+            "prompt_path = Path(sys.argv[sys.argv.index('--prompt-file') + 1])\n"
+            "agent_config_path = Path(sys.argv[sys.argv.index('--agent-config') + 1])\n"
+            "print('PROMPT_FILE:' + str(prompt_path))\n"
+            "print('AGENT_CONFIG_FILE:' + str(agent_config_path))\n"
+            "print('PROMPT:' + prompt_path.read_text(encoding='utf-8'))\n"
+            "print('AGENT_CONFIG:' + agent_config_path.read_text(encoding='utf-8'))\n",
+            encoding="utf-8",
+        )
+        secret_prompt = "TOP-SECRET-DEVIN-PROMPT"
+        agent_config_text = '{"permissions":{"allow":["read"],"deny":["edit"]}}'
+        prompt_placeholder = "<delegate-prompt-file>"
+        agent_config_placeholder = "<delegate-devin-agent-config>"
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="devin")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="devin",
+                engine="devin",
+                mode="safe",
+                model="swe-1.7",
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-05-20T21:42:33Z",
+                prompt_transport="file",
+            )
+            code, _payload = self.runner.execute_tracked(
+                [
+                    sys.executable,
+                    str(script),
+                    "--agent-config",
+                    agent_config_placeholder,
+                    "--prompt-file",
+                    prompt_placeholder,
+                    "-p",
+                ],
+                workspace,
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+                prompt_file_text=secret_prompt,
+                prompt_file_placeholder=prompt_placeholder,
+                agent_config_text=agent_config_text,
+                agent_config_placeholder=agent_config_placeholder,
+                manifest_argv=[
+                    sys.executable,
+                    str(script),
+                    "--agent-config",
+                    "<devin agent config>",
+                    "--prompt-file",
+                    "<prompt file>",
+                    "-p",
+                ],
+            )
+            self.assertEqual(code, 0)
+            run_path = self.registry.run_directory(root, run_id)
+            stdout_text = (run_path / "stdout.log").read_text(encoding="utf-8")
+            self.assertIn(secret_prompt, stdout_text)
+            self.assertIn(agent_config_text, stdout_text)
+            prompt_file_line = next(
+                line.removeprefix("PROMPT_FILE:")
+                for line in stdout_text.splitlines()
+                if line.startswith("PROMPT_FILE:")
+            )
+            agent_config_file_line = next(
+                line.removeprefix("AGENT_CONFIG_FILE:")
+                for line in stdout_text.splitlines()
+                if line.startswith("AGENT_CONFIG_FILE:")
+            )
+            self.assertFalse(Path(prompt_file_line).exists())
+            self.assertFalse(Path(agent_config_file_line).exists())
+            manifest = json.loads((run_path / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["promptTransport"], "file")
+            self.assertNotIn(secret_prompt, json.dumps(manifest["argv"]))
+            self.assertNotIn(agent_config_text, json.dumps(manifest["argv"]))
+
     def test_tracked_codex_item_completed_writes_completion_report(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)

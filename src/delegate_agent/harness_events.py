@@ -155,7 +155,7 @@ EVENT_TAIL = 400
 # completion event. Codex is excluded on purpose: its agent_message events can
 # be preamble ("I'll start by..."), and only a message sealed by turn.completed
 # is the real answer.
-ASSISTANT_RECOVERY_HARNESSES = frozenset({"cursor", "droid", "kimi", "claude", "grok"})
+ASSISTANT_RECOVERY_HARNESSES = frozenset({"cursor", "droid", "kimi", "claude", "grok", "devin"})
 
 
 @dataclass
@@ -253,6 +253,8 @@ class StreamAccumulator:
         bounded = text if len(text) <= 500 else text[:500] + "…"
         self.events.append(NormalizedEvent(kind="text", message=bounded))
         self.current = _bounded_current_line(bounded)
+        if self.harness == "devin":
+            self._record_recoverable_assistant_text(text)
 
     def _ingest_object(self, payload: JsonObject) -> None:
         event_type = payload.get("type")
