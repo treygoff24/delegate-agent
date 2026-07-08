@@ -118,11 +118,15 @@ def emit_run(
     stderr: TextIO,
 ) -> int:
     warnings: list[str] = []
+    lock_fd: int | None = None
     if command.resume:
         wf_id = _validate_wf_id(command.resume)
         root = registry.workflow_dir(workspace, wf_id)
         if not root.exists():
             raise DelegateError("workflow_not_found", f"Workflow not found: {wf_id}")
+        # Acquire the lock before any approval/budget mutation so a failed
+        # resume cannot clobber a live supervisor's status.json.
+        lock_fd = _acquire_workflow_lock(root, wf_id)
         status = registry.read_json(root / registry.STATUS_FILE) or {}
         gate_key = status.get("gateKey") if isinstance(status, dict) else None
         if status.get("status") == "paused" and isinstance(gate_key, str):
@@ -174,6 +178,9 @@ def emit_run(
             },
         )
     if command.dry_run:
+        if lock_fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(lock_fd)
         return emit_dry_run(
             wf_id=wf_id,
             root=root,
@@ -186,7 +193,8 @@ def emit_run(
             warnings=warnings,
             stdout=stdout,
         )
-    lock_fd = _acquire_workflow_lock(root, wf_id)
+    if lock_fd is None:
+        lock_fd = _acquire_workflow_lock(root, wf_id)
     supervisor_argv = [
         *_delegate_cli_argv(),
         "--cwd",
@@ -387,8 +395,7 @@ def emit_approve(
         raise DelegateError(
             "workflow_not_gated", f"Workflow is not waiting on a gate: {command.wf_id}"
         )
-    _assert_workflow_unlocked(root, command.wf_id or "")
-    registry.write_json(root / registry.APPROVAL_FILE, {"approved": True, "gateKey": gate_key})
+    # Resume acquires the lock before mutating approval/budget state.
     resumed = WorkflowCommand("run", resume=command.wf_id, json_mode=command.json_mode)
     return emit_run(resumed, workspace=workspace, config=config, stdout=stdout, stderr=stdout)
 
@@ -402,7 +409,19 @@ def emit_kill(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) -> i
     if isinstance(pid, int):
         supervisor_signalled = runtime.kill_supervisor(pid, pgid if isinstance(pgid, int) else None)
     cancelled = runtime.cancel_workflow_children(workspace, command.wf_id or "")
+    # Wait for the supervisor to release the workflow lock before merging
+    # status=killed, so the dying supervisor cannot overwrite the kill status.
+    supervisor_exited = runtime.wait_for_workflow_lock(
+        root, timeout_seconds=runtime.KILL_SUPERVISOR_WAIT_SECONDS
+    )
+    if not supervisor_exited and isinstance(pid, int) and isinstance(pgid, int):
+        runtime.kill_supervisor(pid, pgid, force=True)
+        supervisor_exited = runtime.wait_for_workflow_lock(
+            root, timeout_seconds=runtime.KILL_SUPERVISOR_FORCE_WAIT_SECONDS
+        )
     _append_command_event(root, "workflow_killed", cancelled=cancelled)
+    # Re-read after supervisor exit so we merge against the final snapshot.
+    status = registry.read_json(root / registry.STATUS_FILE) or status
     merged = dict(status) if isinstance(status, dict) else {}
     merged.update(
         {
@@ -412,6 +431,7 @@ def emit_kill(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) -> i
             "killedAt": run_registry.utc_now_iso(),
             "cancelled": cancelled,
             "supervisorSignalled": supervisor_signalled,
+            "supervisorExited": supervisor_exited,
         }
     )
     registry.write_status(root, merged)
@@ -538,12 +558,6 @@ def _acquire_workflow_lock(root: Path, wf_id: str) -> int:
         return registry.acquire_workflow_lock(root)
     except BlockingIOError as exc:
         raise DelegateError("workflow_locked", f"Workflow is already running: {wf_id}") from exc
-
-
-def _assert_workflow_unlocked(root: Path, wf_id: str) -> None:
-    fd = _acquire_workflow_lock(root, wf_id)
-    with contextlib.suppress(OSError):
-        os.close(fd)
 
 
 def _validate_wf_id(wf_id: str) -> str:

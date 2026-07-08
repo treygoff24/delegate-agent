@@ -37,6 +37,8 @@ DEFAULT_STRUCTURED_RETRIES = 2
 DEFAULT_ITEM_THREADS = 64
 ENGINE_ARGV_TRANSPORT = {"cursor", "kimi"}
 WORKFLOW_LOCK_FD_ENV = "DELEGATE_WORKFLOW_LOCK_FD"
+KILL_SUPERVISOR_WAIT_SECONDS = 5.0
+KILL_SUPERVISOR_FORCE_WAIT_SECONDS = 2.0
 _MISSING = object()
 
 
@@ -389,10 +391,19 @@ class WorkflowDsl:
                 results[index] = previous
 
         for index, item in enumerate(items):
+            if self.state.gate_state["stop_admitting"] or gate_errors:
+                # Gate already closed: short-circuit remaining items without
+                # spawning threads that would only block then die on admission.
+                break
             pre_acquired = False
             if not bypass_item_cap:
                 self.state.item_semaphore.acquire()
                 pre_acquired = True
+                # Re-check after acquire: with a tight item-thread cap the gate
+                # may have closed while we were blocked on the semaphore.
+                if self.state.gate_state["stop_admitting"] or gate_errors:
+                    self.state.item_semaphore.release()
+                    break
             thread = threading.Thread(
                 target=run_item, args=(index, item, pre_acquired), daemon=False
             )
@@ -407,6 +418,8 @@ class WorkflowDsl:
             thread.join()
         if gate_errors:
             raise gate_errors[0]
+        if self.state.gate_state["stop_admitting"]:
+            raise GateExit("workflow gate is closed to new agent calls")
         return results
 
     def parallel(self, thunks: list[Callable[[], Any]]) -> list[Any]:
@@ -443,10 +456,15 @@ class WorkflowDsl:
                     results[index] = None
 
         for index, thunk in enumerate(thunks):
+            if self.state.gate_state["stop_admitting"] or gate_errors:
+                break
             pre_acquired = False
             if not bypass_item_cap:
                 self.state.item_semaphore.acquire()
                 pre_acquired = True
+                if self.state.gate_state["stop_admitting"] or gate_errors:
+                    self.state.item_semaphore.release()
+                    break
             thread = threading.Thread(
                 target=run_thunk, args=(index, thunk, pre_acquired), daemon=False
             )
@@ -461,6 +479,8 @@ class WorkflowDsl:
             thread.join()
         if gate_errors:
             raise gate_errors[0]
+        if self.state.gate_state["stop_admitting"]:
+            raise GateExit("workflow gate is closed to new agent calls")
         return results
 
     def judges(
@@ -600,12 +620,14 @@ class WorkflowDsl:
                 scope=path,
                 label=label,
                 phase=resolved_phase,
+                schema=schema,
                 prefer_assistant=schema is not None,
                 timeout=timeout,
             )
             if adopted is not _MISSING:
                 self.state.replay_keys.add(key)
                 self.state.replay[key] = adopted
+                self.state.started_without_result.discard(key)
                 self.state.append_event(
                     "agent_finished",
                     key=key,
@@ -614,6 +636,8 @@ class WorkflowDsl:
                     adopted=True,
                 )
                 return adopted
+            # Failed/cancelled/unparseable/schema-invalid: keep the key in
+            # started_without_result and fall through to a live respawn.
         self.state.claim_agent_lifetime()
         if self.state.dry_run:
             spent = self.state.dry_run_budget_tick()
@@ -708,6 +732,7 @@ class WorkflowDsl:
         scope: str,
         label: str | None,
         phase: str | None,
+        schema: dict[str, Any] | None,
         prefer_assistant: bool,
         timeout: int | float | None,
     ) -> Any:
@@ -718,12 +743,31 @@ class WorkflowDsl:
             waited = _wait_for_workflow_agent_run(self.state.workspace, run_id, timeout)
             if not waited:
                 self.state.append_event("agent_timeout", key=key, scope=scope, runId=run_id)
-                return None
-        result = _workflow_agent_run_result(
+                return _MISSING
+        text = _workflow_agent_run_result(
             self.state.workspace,
             run_id,
             prefer_assistant=prefer_assistant,
         )
+        if text is None:
+            # Failed/cancelled/unparseable children are not definitive — respawn.
+            return _MISSING
+        if schema is None:
+            result: Any = text
+        else:
+            try:
+                value = workflow_schema.parse_json_tolerant(text)
+                workflow_schema.validate_value(value, schema)
+                result = value
+            except Exception as exc:
+                self.state.append_event(
+                    "agent_adopt_rejected",
+                    key=key,
+                    scope=scope,
+                    runId=run_id,
+                    error=str(exc),
+                )
+                return _MISSING
         self.state.append_event(
             "agent_adopted",
             key=key,
@@ -1347,7 +1391,7 @@ def detach_supervisor(argv: list[str], *, cwd: Path, lock_fd: int | None = None)
     os.execvpe(argv[0], argv, env)
 
 
-def kill_supervisor(pid: int, pgid: int | None) -> bool:
+def kill_supervisor(pid: int, pgid: int | None, *, force: bool = False) -> bool:
     if pid <= 1 or pgid is None or pgid <= 1:
         return False
     try:
@@ -1358,9 +1402,12 @@ def kill_supervisor(pid: int, pgid: int | None) -> bool:
         return False
     if live_pgid != pgid:
         return False
+    sig = signal.SIGKILL if force else signal.SIGTERM
     with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.killpg(pgid, signal.SIGTERM)
-    deadline = time.monotonic() + 5
+        os.killpg(pgid, sig)
+    if force:
+        return True
+    deadline = time.monotonic() + KILL_SUPERVISOR_WAIT_SECONDS
     while time.monotonic() < deadline:
         try:
             os.killpg(pgid, 0)
@@ -1376,7 +1423,25 @@ def kill_supervisor(pid: int, pgid: int | None) -> bool:
     return True
 
 
+def wait_for_workflow_lock(root: Path, *, timeout_seconds: float) -> bool:
+    """Block until the workflow lock can be acquired (supervisor has exited)."""
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        try:
+            fd = registry.acquire_workflow_lock(root)
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.05)
+            continue
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        return True
+
+
 __all__ = [
+    "KILL_SUPERVISOR_FORCE_WAIT_SECONDS",
+    "KILL_SUPERVISOR_WAIT_SECONDS",
     "Budget",
     "BudgetExceeded",
     "WorkflowState",
@@ -1386,4 +1451,5 @@ __all__ = [
     "execute_workflow",
     "kill_supervisor",
     "run_supervisor",
+    "wait_for_workflow_lock",
 ]
