@@ -843,6 +843,263 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertEqual(help_result.returncode, 0, help_result.stderr)
         self.assertEqual(json.loads(help_result.stdout)["command"], "workflow")
 
+    def test_resume_rejects_schema_invalid_adopted_result_and_respawns(self) -> None:
+        # R1: adopted raw text that fails schema must not be cached; respawn.
+        script = self.write_workflow(
+            """
+            meta = {"name": "adopt-schema", "defaults": {"engine": "codex", "mode": "safe"}}
+            SCHEMA = {"type": "object", "required": ["ok", "value"], "properties": {"ok": {"type": "boolean"}, "value": {"type": "string"}}, "additionalProperties": False}
+            return agent("structured", schema=SCHEMA, label="schema-adopt")
+            """
+        )
+        launch = self.run_delegate(["--json", "workflow", "run", str(script)])
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        self.assertEqual(
+            self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"]).returncode,
+            0,
+        )
+        root = self.workspace / ".delegate" / "workflows" / wf_id
+        journal = root / "journal.jsonl"
+        events = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+        kept = [
+            event
+            for event in events
+            if event["type"] not in {"agent_finished", "workflow_finished"}
+        ]
+        journal.write_text(
+            "".join(json.dumps(event, sort_keys=True) + "\n" for event in kept),
+            encoding="utf-8",
+        )
+        (root / "result.json").unlink()
+        runs = json.loads(self.run_delegate(["--json", "runs", "--group", wf_id]).stdout)["runs"]
+        self.assertEqual(len(runs), 1)
+        run_id = runs[0]["runId"]
+        snapshot_path = self.workspace / ".delegate" / "runs" / run_id / "snapshot.json"
+        snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        snapshot["assistantText"] = '{"ok": "wrong"}'
+        snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+
+        resumed = self.run_delegate(["--json", "workflow", "run", "--resume", wf_id])
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        self.assertEqual(
+            self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"]).returncode,
+            0,
+        )
+        result = self.run_delegate(["--json", "workflow", "result", wf_id])
+        self.assertEqual(json.loads(result.stdout)["result"], {"ok": True, "value": "structured"})
+        runs_after = json.loads(self.run_delegate(["--json", "runs", "--group", wf_id]).stdout)[
+            "runs"
+        ]
+        self.assertGreaterEqual(len(runs_after), 2)
+        events_after = json.loads(
+            self.run_delegate(["--json", "workflow", "events", wf_id, "--since", "0"]).stdout
+        )["events"]
+        self.assertIn("agent_adopt_rejected", {event["type"] for event in events_after})
+
+    def test_call_mode_workflow_child_registers_in_workspace_group(self) -> None:
+        # R2: grouped call-mode children appear in the workspace registry.
+        script = self.write_workflow(
+            """
+            meta = {"name": "call-group", "defaults": {"engine": "codex"}}
+            return agent("one-hop", mode="call")
+            """
+        )
+        launch = self.run_delegate(["--json", "workflow", "run", str(script)])
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        self.assertEqual(
+            self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"]).returncode,
+            0,
+        )
+        runs = json.loads(self.run_delegate(["--json", "runs", "--group", wf_id]).stdout)["runs"]
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0]["group"], wf_id)
+        snapshot = json.loads(self.run_delegate(["--json", "snapshot", runs[0]["alias"]]).stdout)
+        self.assertEqual(snapshot["mode"], "call")
+        self.assertIn("delegate-call-", snapshot["executionCwd"])
+        result = self.run_delegate(["--json", "workflow", "result", wf_id])
+        self.assertIn("fake completion", json.loads(result.stdout)["result"])
+
+    def test_workflow_kill_cancels_in_flight_call_child(self) -> None:
+        # R2: workflow kill fans out to in-flight call-mode children.
+        script = self.write_workflow(
+            """
+            meta = {"name": "call-kill", "defaults": {"engine": "codex"}}
+            return agent("very slow", mode="call")
+            """
+        )
+        launch = self.run_delegate(
+            ["--json", "workflow", "run", str(script)],
+            env_extra={"FAKE_CODEX_SLEEP_SECONDS": "10"},
+        )
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        self.wait_for_group_runs(wf_id)
+        killed = self.run_delegate(["--json", "workflow", "kill", wf_id])
+        self.assertEqual(killed.returncode, 0, killed.stderr)
+        self.assertTrue(json.loads(killed.stdout)["cancelled"])
+        status = json.loads(self.run_delegate(["--json", "workflow", "status", wf_id]).stdout)
+        self.assertEqual(status["status"], "killed")
+
+    def test_resume_after_kill_respawns_failed_child(self) -> None:
+        # R3: failed/cancelled children are not definitive — resume respawns.
+        script = self.write_workflow(
+            """
+            meta = {"name": "kill-resume", "defaults": {"engine": "codex", "mode": "safe"}}
+            return agent("hold for cancel", label="respawn-me")
+            """
+        )
+        launch = self.run_delegate(
+            ["--json", "workflow", "run", str(script)],
+            env_extra={"FAKE_CODEX_SLEEP_SECONDS": "10"},
+        )
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        self.wait_for_group_runs(wf_id)
+        killed = self.run_delegate(["--json", "workflow", "kill", wf_id])
+        self.assertEqual(killed.returncode, 0, killed.stderr)
+        root = self.workspace / ".delegate" / "workflows" / wf_id
+        journal = root / "journal.jsonl"
+        events = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+        # Keep agent_started so resume treats the key as started-without-result.
+        kept = [
+            event
+            for event in events
+            if event["type"]
+            not in {"agent_finished", "workflow_finished", "workflow_killed", "workflow_failed"}
+        ]
+        journal.write_text(
+            "".join(json.dumps(event, sort_keys=True) + "\n" for event in kept),
+            encoding="utf-8",
+        )
+        if (root / "result.json").exists():
+            (root / "result.json").unlink()
+        runs_before = json.loads(self.run_delegate(["--json", "runs", "--group", wf_id]).stdout)[
+            "runs"
+        ]
+        self.assertGreaterEqual(len(runs_before), 1)
+
+        resumed = self.run_delegate(["--json", "workflow", "run", "--resume", wf_id])
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        self.assertEqual(
+            self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "15"]).returncode,
+            0,
+        )
+        result = self.run_delegate(["--json", "workflow", "result", wf_id])
+        self.assertEqual(json.loads(result.stdout)["result"], "fake completion")
+        runs_after = json.loads(self.run_delegate(["--json", "runs", "--group", wf_id]).stdout)[
+            "runs"
+        ]
+        self.assertGreater(len(runs_after), len(runs_before))
+
+    def test_agent_started_events_are_fsynced(self) -> None:
+        # R4: agent_started is a durable adoption anchor.
+        self.assertIn("agent_started", workflow_registry.DURABLE_EVENT_TYPES)
+        journal = self.workspace / "fsync-journal.jsonl"
+        fsynced: list[int] = []
+        original_fsync = os.fsync
+
+        def tracking_fsync(fd: int) -> None:
+            fsynced.append(fd)
+            original_fsync(fd)
+
+        original = os.fsync
+        os.fsync = tracking_fsync  # type: ignore[assignment]
+        try:
+            workflow_registry.append_jsonl(journal, {"seq": 1, "type": "agent_started", "key": "k"})
+            workflow_registry.append_jsonl(journal, {"seq": 2, "type": "log", "message": "x"})
+            workflow_registry.append_jsonl(
+                journal, {"seq": 3, "type": "agent_finished", "key": "k", "result": "ok"}
+            )
+        finally:
+            os.fsync = original  # type: ignore[assignment]
+        self.assertEqual(len(fsynced), 2)
+
+    def test_resume_budget_override_does_not_mutate_while_locked(self) -> None:
+        # R5: lock before budget mutation on resume.
+        script = self.write_workflow(
+            """
+            meta = {"name": "lock-budget", "defaults": {"engine": "codex", "mode": "safe"}}
+            return agent("very slow")
+            """
+        )
+        launch = self.run_delegate(["--json", "workflow", "run", str(script), "--budget", "3"])
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        self.wait_for_group_runs(wf_id)
+        before = json.loads(self.run_delegate(["--json", "workflow", "status", wf_id]).stdout)
+        resumed = self.run_delegate(
+            ["--json", "workflow", "run", "--resume", wf_id, "--budget", "99"]
+        )
+        self.assertNotEqual(resumed.returncode, 0)
+        self.assertEqual(json.loads(resumed.stdout)["error"], "workflow_locked")
+        after = json.loads(self.run_delegate(["--json", "workflow", "status", wf_id]).stdout)
+        self.assertEqual(after["budget"]["total"], before["budget"]["total"])
+        self.assertEqual(after["budget"]["total"], 3)
+        self.run_delegate(["--json", "workflow", "kill", wf_id])
+
+    def test_workflow_kill_status_survives_supervisor_shutdown(self) -> None:
+        # R6: kill waits for supervisor death before merging status=killed.
+        script = self.write_workflow(
+            """
+            meta = {"name": "kill-status", "defaults": {"engine": "codex", "mode": "safe"}}
+            return agent("very slow")
+            """
+        )
+        launch = self.run_delegate(
+            ["--json", "workflow", "run", str(script)],
+            env_extra={"FAKE_CODEX_SLEEP_SECONDS": "10"},
+        )
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        self.wait_for_group_runs(wf_id)
+        killed = self.run_delegate(["--json", "workflow", "kill", wf_id])
+        self.assertEqual(killed.returncode, 0, killed.stderr)
+        status = json.loads(self.run_delegate(["--json", "workflow", "status", wf_id]).stdout)
+        self.assertEqual(status["status"], "killed")
+        self.assertTrue(status.get("supervisorExited", True))
+        time.sleep(0.3)
+        status_later = json.loads(self.run_delegate(["--json", "workflow", "status", wf_id]).stdout)
+        self.assertEqual(status_later["status"], "killed")
+
+    def test_gate_pause_does_not_spawn_pipeline_tail(self) -> None:
+        # R7: after GateExit, unspawned pipeline items are short-circuited.
+        config = json.loads(self.config_path.read_text(encoding="utf-8"))
+        config["workflows"]["itemThreads"] = 1
+        self.config_path.write_text(json.dumps(config), encoding="utf-8")
+        child = self.write_saved_workflow(
+            "gate-early-child",
+            """
+            meta = {"name": "gate-early-child"}
+            return None
+            """,
+        )
+        script = self.write_workflow(
+            f"""
+            meta = {{"name": "gate-early", "defaults": {{"engine": "codex", "mode": "safe"}}}}
+            def stage(value, item, i):
+                if i == 0:
+                    return workflow({child!r}, gate=True)
+                return agent(f"tail-{{i}}")
+            return pipeline(list(range(12)), stage)
+            """
+        )
+        launch = self.run_delegate(["--json", "workflow", "run", str(script)])
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
+        self.assertEqual(waited.returncode, 0, waited.stderr)
+        status = json.loads(self.run_delegate(["--json", "workflow", "status", wf_id]).stdout)
+        self.assertEqual(status["status"], "paused")
+        events = json.loads(
+            self.run_delegate(["--json", "workflow", "events", wf_id, "--since", "0"]).stdout
+        )["events"]
+        started = [event for event in events if event["type"] == "agent_started"]
+        self.assertEqual(len(started), 0)
+        runs = json.loads(self.run_delegate(["--json", "runs", "--group", wf_id]).stdout)["runs"]
+        self.assertEqual(len(runs), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
