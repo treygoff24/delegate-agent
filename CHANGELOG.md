@@ -18,7 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not depend on Delegate's prompt preamble. `--pass-through` also suppresses the
   skill preamble and completion-report suffix while preserving safe-mode
   boundaries.
-
+- Added `devin` as a first-class engine for Cognition's Devin CLI across
+  `safe`, `work`, and `call` modes. Devin uses prompt-file transport,
+  config-driven model selection (`devin.defaultModel`, default `swe-1.7`),
+  read-only safe/call enforcement through a Delegate-generated
+  `--agent-config`, and `--permission-mode dangerous` for work/default-call
+  print-mode runs.
 ## [0.11.0] - 2026-07-05
 
 Profile-guard calibration fix for issue #9: a shell carrying `AI_PROFILE=work|personal` with no matching `~/.delegate/config.<profile>.json` no longer presents a half-configured install as a total CLI outage.

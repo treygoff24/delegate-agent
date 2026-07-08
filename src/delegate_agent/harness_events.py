@@ -155,7 +155,7 @@ EVENT_TAIL = 400
 # completion event. Codex is excluded on purpose: its agent_message events can
 # be preamble ("I'll start by..."), and only a message sealed by turn.completed
 # is the real answer.
-ASSISTANT_RECOVERY_HARNESSES = frozenset({"cursor", "droid", "kimi", "claude", "grok"})
+ASSISTANT_RECOVERY_HARNESSES = frozenset({"cursor", "droid", "kimi", "claude", "grok", "devin"})
 
 
 @dataclass
@@ -238,6 +238,14 @@ class StreamAccumulator:
         stripped = line.strip()
         if not stripped:
             return
+        # Devin's stdout is plain text, not the structured stream-json envelope
+        # the other harnesses emit. A Devin line that happens to look like a
+        # standalone JSON object (e.g. `{"retries": 3}` inside a code snippet)
+        # must never be parsed and routed through the structured-event path,
+        # or it silently drops out of the recovered assistant text.
+        if self.harness == "devin":
+            self._ingest_text_fallback(stripped)
+            return
         try:
             payload: JsonValue = json.loads(stripped)
         except json.JSONDecodeError:
@@ -253,6 +261,8 @@ class StreamAccumulator:
         bounded = text if len(text) <= 500 else text[:500] + "…"
         self.events.append(NormalizedEvent(kind="text", message=bounded))
         self.current = _bounded_current_line(bounded)
+        if self.harness == "devin":
+            self._record_devin_assistant_text(text)
 
     def _ingest_object(self, payload: JsonObject) -> None:
         event_type = payload.get("type")
@@ -400,6 +410,27 @@ class StreamAccumulator:
             self._last_recoverable_assistant_text = stripped
             if is_substantive_assistant_text(stripped):
                 self._last_substantive_assistant_text = stripped
+
+    def _record_devin_assistant_text(self, text: str) -> None:
+        # Devin's stdout is delivered one line at a time with no explicit
+        # message boundaries, so every line ingested while harness == "devin"
+        # belongs to the same running block of output. Merge into the last
+        # chunk (joined by "\n") instead of appending a new chunk each line,
+        # which would otherwise get "\n\n"-joined into blank-line-separated
+        # paragraphs in assistant_text.
+        stripped = text.strip()
+        if not stripped:
+            return
+        if self.assistant_chunks:
+            self.assistant_chunks[-1] = f"{self.assistant_chunks[-1]}\n{stripped}"
+        else:
+            self.assistant_chunks.append(stripped)
+        self._invalidate_assistant_text_cache()
+        self.current = _current_from_text(stripped)
+        merged = self.assistant_chunks[-1]
+        self._last_recoverable_assistant_text = merged
+        if is_substantive_assistant_text(merged):
+            self._last_substantive_assistant_text = merged
 
     def _record_successful_completion_text(self, text: str) -> None:
         self._record_assistant_text(text, completion=True)

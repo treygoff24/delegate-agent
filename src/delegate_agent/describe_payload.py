@@ -20,6 +20,7 @@ from delegate_agent.argv_builders import (
     _grok_harness_bypass_enabled,
     build_claude_argv,
     build_codex_argv,
+    build_devin_argv,
     build_grok_argv,
 )
 from delegate_agent.command_help import SAFE_WORKSPACE_SYNC_NOTE
@@ -37,6 +38,8 @@ from delegate_agent.constants import (
 from delegate_agent.errors import EXIT_OK, DelegateError
 from delegate_agent.json_types import JsonObject
 from delegate_agent.prompt_transport import (
+    DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
+    DEVIN_AGENT_CONFIG_DISPLAY,
     DROID_PROMPT_FILE_DISPLAY,
     PROMPT_FILE_ARG_PLACEHOLDER,
     PROMPT_FILE_DISPLAY,
@@ -99,7 +102,7 @@ def _commands_catalog() -> list[JsonObject]:
 
 def _launch_options() -> list[str]:
     flags: list[str] = []
-    for command in ("cursor", "droid", "codex", "claude", "grok", "kimi"):
+    for command in ("cursor", "droid", "codex", "claude", "grok", "devin", "kimi"):
         spec = command_help.COMMAND_SPECS[command]
         for option in spec.options:
             if option.flag not in flags:
@@ -235,6 +238,48 @@ def models_payload(
             "workSandbox": config["grok"]["workSandbox"],
             "disableWebSearch": config["grok"]["disableWebSearch"],
             "noSubagents": config["grok"]["noSubagents"],
+        },
+        "devin": {
+            "binary": config["devin"]["binary"],
+            "defaultModel": config["devin"]["defaultModel"],
+            "defaultReasoningEffort": config["devin"].get("defaultReasoningEffort"),
+        },
+    }
+
+
+def _engine_defaults_payload(config: JsonObject) -> JsonObject:
+    return {
+        "cursor": {
+            "defaultModel": config["cursor"]["defaultModel"],
+            "defaultReasoningEffort": config["cursor"].get("defaultReasoningEffort"),
+        },
+        "droid": {
+            "defaultReasoningEffort": config["droid"].get("defaultReasoningEffort"),
+        },
+        "codex": {
+            "binary": config["codex"]["binary"],
+            "defaultModel": config["codex"]["defaultModel"],
+            "defaultReasoningEffort": config["codex"].get("defaultReasoningEffort"),
+        },
+        "kimi": {
+            "binary": config["kimi"]["binary"],
+            "defaultModel": config["kimi"]["defaultModel"],
+            "defaultReasoningEffort": config["kimi"].get("defaultReasoningEffort"),
+        },
+        "claude": {
+            "binary": config["claude"]["binary"],
+            "defaultModel": config["claude"]["defaultModel"],
+            "defaultReasoningEffort": config["claude"].get("defaultReasoningEffort"),
+        },
+        "grok": {
+            "binary": config["grok"]["binary"],
+            "defaultModel": config["grok"]["defaultModel"],
+            "defaultReasoningEffort": config["grok"].get("defaultReasoningEffort"),
+        },
+        "devin": {
+            "binary": config["devin"]["binary"],
+            "defaultModel": config["devin"]["defaultModel"],
+            "defaultReasoningEffort": config["devin"].get("defaultReasoningEffort"),
         },
     }
 
@@ -380,6 +425,7 @@ def _policy_field_support_matrix() -> JsonObject:
         "cursor": unsupported,
         "droid": unsupported,
         "kimi": unsupported,
+        "devin": unsupported,
     }
 
 
@@ -460,6 +506,25 @@ def _grok_describe_argv(
     return [PROMPT_FILE_DISPLAY if item == PROMPT_FILE_ARG_PLACEHOLDER else item for item in argv]
 
 
+def _devin_describe_argv(
+    devin: JsonObject, *, mode: str, call_read_only: bool = False
+) -> list[str]:
+    argv = build_devin_argv(
+        devin,
+        mode,
+        _resolve_default_model(devin),
+        call_read_only=call_read_only,
+    )
+    return [
+        DEVIN_AGENT_CONFIG_DISPLAY
+        if item == DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER
+        else PROMPT_FILE_DISPLAY
+        if item == PROMPT_FILE_ARG_PLACEHOLDER
+        else item
+        for item in argv
+    ]
+
+
 def describe_payload(
     config: JsonObject,
     config_source: str,
@@ -468,6 +533,7 @@ def describe_payload(
     codex = config["codex"]
     claude = config["claude"]
     grok = config["grok"]
+    devin = config["devin"]
     codex_safe_policy = delegate_config.effective_policy(config, engine="codex", mode=MODE_SAFE)
     codex_work_policy = delegate_config.effective_policy(config, engine="codex", mode=MODE_WORK)
     claude_safe_policy = _claude_runtime_policy(config, MODE_SAFE)
@@ -514,6 +580,8 @@ def describe_payload(
         workspace="<workspace>",
         policy=grok_work_policy,
     )
+    devin_safe_argv = _devin_describe_argv(devin, mode=MODE_SAFE)
+    devin_work_argv = _devin_describe_argv(devin, mode=MODE_WORK)
     return {
         "ok": True,
         "summary": False,
@@ -527,6 +595,7 @@ def describe_payload(
         "policyProfiles": list(delegate_config.POLICY_PROFILES),
         "policyFieldSupport": _policy_field_support_matrix(),
         "engineCapabilities": _engine_capabilities(),
+        "engineDefaults": _engine_defaults_payload(config),
         "effectivePolicy": {
             "codex": {
                 "safe": codex_safe_policy,
@@ -550,6 +619,7 @@ def describe_payload(
             "kimi": PROMPT_TRANSPORT_ARGV,
             "claude": PROMPT_TRANSPORT_STDIN,
             "grok": PROMPT_TRANSPORT_FILE,
+            "devin": PROMPT_TRANSPORT_FILE,
         },
         "globalOptions": _global_options(),
         "launchOptions": _launch_options(),
@@ -587,6 +657,7 @@ def describe_payload(
                 "kimi": False,
                 "claude": False,
                 "grok": False,
+                "devin": False,
             },
         },
         "worktrees": {
@@ -791,6 +862,22 @@ def describe_payload(
                     "Tracked runs use --output-format streaming-json; pass-through uses plain.",
                 ],
             },
+            "devin": {
+                "safe": devin_safe_argv,
+                "safeNotes": [
+                    SAFE_WORKSPACE_SYNC_NOTE,
+                    "Uses Devin --prompt-file in print mode; Delegate materializes the effective prompt in a temp file.",
+                    "Safe mode passes a Delegate-generated --agent-config that denies edit/write/exec and mcp__* while using --permission-mode auto.",
+                    "Devin safe mode allows slash passthrough because read-only enforcement is argv-level.",
+                ],
+                "work": devin_work_argv,
+                "workNotes": [
+                    "Work mode uses --permission-mode dangerous because non-interactive Devin rejects unapproved edit/exec tools.",
+                    "Model selection uses devin.defaultModel in config or optional JSON input model; Delegate does not validate model names.",
+                    "Reasoning effort is unsupported for Devin in v1.",
+                    "Prompt uses --prompt-file plus -p; tracked and call runs parse plain stdout.",
+                ],
+            },
         },
         "commands": _commands_catalog(),
         "recommendedDiscovery": [
@@ -881,6 +968,14 @@ def _emit_models_text(payload: JsonObject, config_source: str, stdout: TextIO) -
             f"workPermissionMode={grok.get('workPermissionMode')}",
             file=stdout,
         )
+    devin = payload.get("devin")
+    if isinstance(devin, dict):
+        print(
+            "devin: "
+            f"binary={_text_or_none(devin.get('binary'))} "
+            f"defaultModel={_text_or_none(devin.get('defaultModel'))}",
+            file=stdout,
+        )
     kimi = payload.get("kimi")
     if isinstance(kimi, dict):
         print(
@@ -962,7 +1057,7 @@ def emit_describe(
     print(f"delegate {VERSION}", file=stdout)
     print(f"config: {payload['configPath']} ({payload['configSource']})", file=stdout)
     print(f"runtime: {payload['runtime']['modulePath']}", file=stdout)
-    print("engines: cursor, droid, codex, kimi, claude, grok", file=stdout)
+    print(f"engines: {', '.join(KNOWN_ENGINES)}", file=stdout)
     print("modes: safe, work", file=stdout)
     print("prompt sources: direct, --prompt-file, stdin", file=stdout)
     print("global options must appear before the subcommand", file=stdout)
@@ -1006,6 +1101,8 @@ Good defaults:
   delegate claude work "Implement the scoped fix, run the named check, and report changed files."
   delegate grok safe "Review this workspace. Do not edit files."
   delegate grok work "Implement the scoped fix, run the named check, and report changed files."
+  delegate devin safe "Review this workspace. Do not edit files."
+  delegate devin work "Implement the scoped fix, run the named check, and report changed files."
   delegate kimi safe "Review this repo for regressions; report file/line/severity."
   delegate kimi work "Implement the scoped task; report changed files and tests."
 
@@ -1040,6 +1137,14 @@ Grok:
   - Reasoning effort maps to Grok --effort (low, medium, high, xhigh, max).
   - Tracked runs use streaming-json; pass-through uses plain output.
   - --output-schema is unsupported in v1 because Grok --json-schema forces final json output.
+
+Devin:
+  - Uses Devin CLI print mode with --prompt-file and -p; Delegate materializes the effective prompt in a temp file.
+  - {SAFE_WORKSPACE_SYNC_NOTE}
+  - Safe and call --read-only pass a Delegate-generated --agent-config deny-list for edit/write/exec and mcp__* plus --permission-mode auto.
+  - Work and default call mode use --permission-mode dangerous because Devin print mode rejects unapproved edit/exec tools.
+  - Model selection uses devin.defaultModel in config or optional JSON input model; Delegate lets Devin validate unknown model names.
+  - Reasoning effort is unsupported for Devin in v1.
 
 Droid modes:
   - {SAFE_WORKSPACE_SYNC_NOTE}

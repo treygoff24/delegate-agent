@@ -806,6 +806,7 @@ def safe_isolated_request(request: Request) -> Iterator[Request]:
             warnings=request.warnings,
             stdin_text=request.stdin_text,
             prompt_file_text=request.prompt_file_text,
+            agent_config_text=request.agent_config_text,
             prompt_transport=request.prompt_transport,
             display_argv=isolated_display_argv,
             env_overrides=request.env_overrides,

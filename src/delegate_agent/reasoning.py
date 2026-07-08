@@ -71,6 +71,7 @@ INSPECT_REASONING_DISCOVERY_HINT = (
     "`delegate --json capabilities` for reasoning-effort support."
 )
 KIMI_UNSUPPORTED_REASONING_WARNING = "reasoning effort is not supported for kimi."
+DEVIN_UNSUPPORTED_REASONING_WARNING = "reasoning effort is not supported for devin."
 
 
 @dataclass(frozen=True)
@@ -104,6 +105,11 @@ REASONING_PROFILES: dict[str, ReasoningProfile] = {
         "unsupported",
         unsupported_warning=KIMI_UNSUPPORTED_REASONING_WARNING,
     ),
+    "devin": ReasoningProfile(
+        None,
+        "unsupported",
+        unsupported_warning=DEVIN_UNSUPPORTED_REASONING_WARNING,
+    ),
 }
 
 TRANSPORT_BY_HARNESS = {
@@ -117,12 +123,16 @@ def _alias_key_for_default_model(default_model: object) -> str:
     return default_model if isinstance(default_model, str) and default_model else "(default)"
 
 
-def _kimi_unsupported_reasoning_fields() -> JsonObject:
+def _unsupported_reasoning_fields(harness: str) -> JsonObject:
     return {
         "supported": None,
         "source": "none",
-        "warning": REASONING_PROFILES["kimi"].unsupported_warning,
+        "warning": REASONING_PROFILES[harness].unsupported_warning,
     }
+
+
+def _kimi_unsupported_reasoning_fields() -> JsonObject:
+    return _unsupported_reasoning_fields("kimi")
 
 
 def _resolved_model_required_detail(harness: str) -> str:
@@ -618,6 +628,15 @@ def _kimi_alias_reasoning_summary(kimi: JsonObject) -> JsonObject:
     return payload
 
 
+def _devin_alias_reasoning_summary(devin: JsonObject) -> JsonObject:
+    default_model = devin.get("defaultModel")
+    alias = _alias_key_for_default_model(default_model)
+    payload: JsonObject = {"alias": alias, **_unsupported_reasoning_fields("devin")}
+    if isinstance(default_model, str) and default_model:
+        payload["model"] = default_model
+    return payload
+
+
 def build_alias_reasoning_summaries(
     config: JsonObject,
     cache: JsonObject | None,
@@ -694,6 +713,14 @@ def build_alias_reasoning_summaries(
     else:
         summaries["grok"] = {}
 
+    devin = config.get("devin")
+    if isinstance(devin, dict):
+        default_model = devin.get("defaultModel")
+        alias_key = _alias_key_for_default_model(default_model)
+        summaries["devin"] = {alias_key: _devin_alias_reasoning_summary(devin)}
+    else:
+        summaries["devin"] = {}
+
     kimi = config.get("kimi")
     if isinstance(kimi, dict):
         default_model = kimi.get("defaultModel")
@@ -749,6 +776,11 @@ def build_reasoning_capabilities_payload(
     harnesses["kimi"] = {
         "transport": REASONING_PROFILES["kimi"].transport,
         **_kimi_unsupported_reasoning_fields(),
+        "models": {},
+    }
+    harnesses["devin"] = {
+        "transport": REASONING_PROFILES["devin"].transport,
+        **_unsupported_reasoning_fields("devin"),
         "models": {},
     }
     return {"harnesses": harnesses, "aliases": build_alias_reasoning_summaries(config, cache)}

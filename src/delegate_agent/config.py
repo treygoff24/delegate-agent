@@ -25,7 +25,7 @@ ISOLATION_AUTO = "auto"
 ISOLATION_NONE = "none"
 ISOLATION_WORKTREE = "worktree"
 VALID_ISOLATION_VALUES = (ISOLATION_AUTO, ISOLATION_NONE, ISOLATION_WORKTREE)
-SAFE_ISOLATION_REQUIRED_ENGINES = frozenset({"cursor", "droid", "kimi", "claude", "grok"})
+SAFE_ISOLATION_REQUIRED_ENGINES = frozenset({"cursor", "droid", "kimi", "claude", "grok", "devin"})
 
 POLICY_PROFILES = ("safe", "trusted-hooks", "external-sandbox", "custom")
 POLICY_MODE_KEYS = frozenset(
@@ -100,6 +100,11 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
         "workSandbox": None,
         "disableWebSearch": True,
         "noSubagents": False,
+    },
+    "devin": {
+        "binary": "devin",
+        "defaultModel": "swe-1.7",
+        "defaultReasoningEffort": None,
     },
     "policy": {
         "profile": "safe",
@@ -707,6 +712,18 @@ def _validate_grok_section(grok: JsonValue) -> None:
     )
 
 
+def _validate_devin_section(devin: JsonValue) -> None:
+    if not isinstance(devin, dict):
+        raise ConfigError("invalid_devin_config", "devin config must be an object.")
+    require_non_empty_str(devin.get("binary"), path="devin.binary", error="invalid_devin_config")
+    optional_str(devin.get("defaultModel"), path="devin.defaultModel", error="invalid_devin_config")
+    if devin.get("defaultReasoningEffort") is not None:
+        raise ConfigError(
+            "invalid_devin_config",
+            "devin.defaultReasoningEffort is not supported; set it to null.",
+        )
+
+
 def _validate_provider_default_reasoning_effort(
     value: JsonValue,
     *,
@@ -1123,6 +1140,7 @@ def validate_config(config: JsonObject) -> None:
     _validate_kimi_section(config.get("kimi"))
     _validate_claude_section(config.get("claude"))
     _validate_grok_section(config.get("grok"))
+    _validate_devin_section(config.get("devin"))
     _validate_reasoning_section(config.get("reasoning"))
     _validate_isolation_section(config.get("isolation"))
     _validate_worktrees_section(config.get("worktrees"))

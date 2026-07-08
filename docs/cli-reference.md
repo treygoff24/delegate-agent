@@ -444,7 +444,7 @@ Supported input keys:
 }
 ```
 
-- `engine`: `cursor`, `droid`, `codex`, `claude`, `grok`, or `kimi`.
+- `engine`: `cursor`, `droid`, `codex`, `claude`, `grok`, `devin`, or `kimi`.
 - `mode`: `safe`, `work`, or `call`.
 - `model`: Droid requires a configured local alias; Codex, Claude, and Kimi treat a non-empty string as a model override; Cursor does not accept per-run model aliases in v1.
 - `cwd`: optional workspace path. Git directories resolve to the repo root. Omit it for `mode: "call"`, which always uses an empty temporary cwd.

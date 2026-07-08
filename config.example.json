@@ -81,6 +81,11 @@
     "disableWebSearch": true,
     "noSubagents": false
   },
+  "devin": {
+    "binary": "devin",
+    "defaultModel": "swe-1.7",
+    "defaultReasoningEffort": null
+  },
   "kimi": {
     "binary": "kimi",
     "defaultModel": "kimi-code/kimi-for-coding",

@@ -24,6 +24,7 @@ class CapabilityCommandTests(unittest.TestCase):
         self.assertEqual(harness_binary({}, "codex"), "codex")
         self.assertEqual(harness_binary({}, "droid"), "droid")
         self.assertEqual(harness_binary({}, "kimi"), "kimi")
+        self.assertEqual(harness_binary({}, "devin"), "devin")
 
     def test_harness_binary_uses_configured_binary(self):
         self.assertEqual(
@@ -91,6 +92,10 @@ class CapabilityCommandTests(unittest.TestCase):
             kimi = payload["reasoningAliases"]["kimi"][kimi_key]
             self.assertIsNone(kimi["supported"])
             self.assertIn("not supported", kimi["warning"])
+            devin_key = config["devin"]["defaultModel"]
+            devin = payload["reasoningAliases"]["devin"][devin_key]
+            self.assertIsNone(devin["supported"])
+            self.assertIn("not supported", devin["warning"])
 
             summary = models_summary_payload(
                 config,

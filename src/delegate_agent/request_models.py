@@ -152,6 +152,7 @@ class Request:
     warnings: tuple[str, ...] = ()
     stdin_text: str | None = None
     prompt_file_text: str | None = None
+    agent_config_text: str | None = None
     prompt_transport: str = PROMPT_TRANSPORT_ARGV
     display_argv: list[str] | None = None
     env_overrides: dict[str, str] | None = None
@@ -177,6 +178,7 @@ class EngineRequestParts:
     warnings: tuple[str, ...] = ()
     stdin_text: str | None = None
     prompt_file_text: str | None = None
+    agent_config_text: str | None = None
     reasoning_effort: str | None = None
     reasoning_effort_source: str | None = None
     reasoning_capability_source: str | None = None

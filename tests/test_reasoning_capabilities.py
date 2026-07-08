@@ -10,6 +10,7 @@ if SRC not in sys.path:
 
 from delegate_agent.reasoning import (  # noqa: E402
     CLAUDE_NATIVE_EFFORTS,
+    DEVIN_UNSUPPORTED_REASONING_WARNING,
     INSPECT_REASONING_DISCOVERY_HINT,
     KIMI_UNSUPPORTED_REASONING_WARNING,
     REASONING_PROFILES,
@@ -264,6 +265,14 @@ class ReasoningCapabilityTests(unittest.TestCase):
         self.assertEqual(kimi["source"], "none")
         self.assertEqual(kimi["warning"], KIMI_UNSUPPORTED_REASONING_WARNING)
 
+    def test_capabilities_payload_marks_devin_unsupported(self):
+        payload = build_reasoning_capabilities_payload({}, cache=None)
+        devin = payload["harnesses"]["devin"]
+        self.assertIsNone(devin["transport"])
+        self.assertIsNone(devin["supported"])
+        self.assertEqual(devin["source"], "none")
+        self.assertEqual(devin["warning"], DEVIN_UNSUPPORTED_REASONING_WARNING)
+
     def test_alias_summary_reports_supported_droid_alias(self):
         config = {
             "droid": {
@@ -359,6 +368,7 @@ class ReasoningCapabilityTests(unittest.TestCase):
                 "defaultReasoningEffort": "medium",
             },
             "kimi": {"defaultModel": ""},
+            "devin": {"defaultModel": "swe-1.7"},
         }
         expected_aliases = {
             "droid": {
@@ -406,6 +416,15 @@ class ReasoningCapabilityTests(unittest.TestCase):
                     "warning": KIMI_UNSUPPORTED_REASONING_WARNING,
                 }
             },
+            "devin": {
+                "swe-1.7": {
+                    "alias": "swe-1.7",
+                    "supported": None,
+                    "source": "none",
+                    "warning": DEVIN_UNSUPPORTED_REASONING_WARNING,
+                    "model": "swe-1.7",
+                }
+            },
             "grok": {},
         }
 
@@ -420,6 +439,16 @@ class ReasoningCapabilityTests(unittest.TestCase):
                 "supported": None,
                 "source": "none",
                 "warning": KIMI_UNSUPPORTED_REASONING_WARNING,
+                "models": {},
+            },
+        )
+        self.assertEqual(
+            capabilities["harnesses"]["devin"],
+            {
+                "transport": None,
+                "supported": None,
+                "source": "none",
+                "warning": DEVIN_UNSUPPORTED_REASONING_WARNING,
                 "models": {},
             },
         )
@@ -465,11 +494,16 @@ class ReasoningCapabilityTests(unittest.TestCase):
         self.assertEqual(REASONING_PROFILES["cursor"].transport, TRANSPORT_CURSOR_MODEL_SELECTION)
         self.assertEqual(REASONING_PROFILES["claude"].transport, TRANSPORT_CLAUDE_EFFORT_FLAG)
         self.assertIsNone(REASONING_PROFILES["kimi"].transport)
+        self.assertIsNone(REASONING_PROFILES["devin"].transport)
         self.assertEqual(REASONING_PROFILES["claude"].strategy, "static-enum")
         self.assertEqual(REASONING_PROFILES["claude"].static_efforts, CLAUDE_NATIVE_EFFORTS)
         self.assertEqual(
             REASONING_PROFILES["kimi"].unsupported_warning,
             KIMI_UNSUPPORTED_REASONING_WARNING,
+        )
+        self.assertEqual(
+            REASONING_PROFILES["devin"].unsupported_warning,
+            DEVIN_UNSUPPORTED_REASONING_WARNING,
         )
 
     def test_transport_by_harness_derived_set(self):

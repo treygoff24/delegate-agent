@@ -342,7 +342,7 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(parsed.launch.mode, "work")
 
     def test_modeless_call_mode_parses(self):
-        for engine in ("cursor", "codex", "kimi", "claude", "grok"):
+        for engine in ("cursor", "codex", "kimi", "claude", "grok", "devin"):
             with self.subTest(engine=engine):
                 parsed = self.delegate.parse_cli([engine, "call", "summarize"])
                 self.assertEqual(parsed.subcommand, engine)
@@ -539,6 +539,25 @@ class ParserTests(unittest.TestCase):
         )
         self.assertEqual(parsed.launch.prompt_file, "task.md")
 
+    def test_devin_direct_commands_parse(self):
+        parsed = self.delegate.parse_cli(["devin", "safe", "review"])
+        self.assertEqual(parsed.subcommand, "devin")
+        self.assertEqual(parsed.launch.engine, "devin")
+        self.assertEqual(parsed.launch.mode, "safe")
+        parsed = self.delegate.parse_cli(
+            ["devin", "safe", "--prompt-file", "task.md"],
+        )
+        self.assertEqual(parsed.launch.prompt_file, "task.md")
+
+    def test_dry_run_devin_parses(self):
+        parsed = self.delegate.parse_cli(["dry-run", "devin", "work", "fix"])
+        self.assertEqual(parsed.subcommand, "devin")
+        self.assertTrue(parsed.launch.dry_run)
+        parsed = self.delegate.parse_cli(
+            ["dry-run", "devin", "safe", "--prompt-file", "task.md"],
+        )
+        self.assertEqual(parsed.launch.prompt_file, "task.md")
+
     def test_dry_run_codex_parses(self):
         parsed = self.delegate.parse_cli(["dry-run", "codex", "safe", "review"])
         self.assertEqual(parsed.subcommand, "codex")
@@ -557,8 +576,10 @@ class ParserTests(unittest.TestCase):
         self.assertIn("cursor", payload["modeMapping"])
         self.assertIn("claude", payload["modeMapping"])
         self.assertIn("codex", payload["modeMapping"])
+        self.assertIn("devin", payload["modeMapping"])
         self.assertIn("claude", payload["engines"])
         self.assertIn("grok", payload["engines"])
+        self.assertIn("devin", payload["engines"])
         self.assertIn("codex", payload["engines"])
         self.assertIn("policyProfiles", payload)
         self.assertIn("policyFieldSupport", payload)

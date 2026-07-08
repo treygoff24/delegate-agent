@@ -367,6 +367,42 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         see_also=("cursor", "codex", "droid", "claude", "models", "agent-help"),
     ),
+    "devin": CommandSpec(
+        name="devin",
+        summary="Run Cognition Devin CLI in safe, work, or stateless call mode.",
+        usage=(
+            "delegate [--json] [--isolation auto|none|worktree] "
+            "devin {safe,work} [--reasoning-effort LEVEL] [--progress] "
+            "[--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
+            "delegate [--json] devin call [--read-only] [--reasoning-effort LEVEL] "
+            "[--prompt-file PATH] [prompt...]",
+        ),
+        arguments=(_MODE_ARG, _PROMPT_ARG),
+        options=(
+            _REASONING_EFFORT_OPTION,
+            _PROGRESS_OPTION,
+            _NO_PROGRESS_OPTION,
+            _FORBID_COMMIT_OPTION,
+            _INCLUDE_DIRTY_OPTION,
+            _READ_ONLY_OPTION,
+            _PROMPT_FILE_OPTION,
+        ),
+        examples=(
+            'delegate devin safe "Review this workspace. Do not edit files."',
+            'delegate devin work "Implement the scoped fix, run the named check, report changes."',
+            "delegate devin call --read-only --prompt-file judge.md",
+        ),
+        notes=(
+            "Prompt uses Delegate temp file via Devin --prompt-file plus -p; dry-run argv shows <prompt file>.",
+            SAFE_WORKSPACE_SYNC_NOTE,
+            CALL_MODE_NOTE,
+            "Safe and call --read-only pass a Delegate-generated --agent-config deny-list for edit/write/exec and mcp__* plus --permission-mode auto.",
+            "Work and default call mode use --permission-mode dangerous because Devin print mode rejects unapproved edit/exec tools.",
+            "Model selection uses devin.defaultModel in config or the run-input JSON model; unknown models are left to Devin CLI validation.",
+            "Reasoning effort is unsupported for Devin in v1.",
+        ),
+        see_also=("cursor", "codex", "droid", "grok", "models", "agent-help"),
+    ),
     "droid": CommandSpec(
         name="droid",
         summary="Run a Factory Droid BYOK model alias in safe, work, or stateless call mode.",
@@ -413,13 +449,13 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
     ),
     "dry-run": CommandSpec(
         name="dry-run",
-        summary="Resolve a cursor/codex/droid/kimi/claude/grok invocation and print the planned argv without running it.",
+        summary="Resolve a cursor/codex/droid/kimi/claude/grok/devin invocation and print the planned argv without running it.",
         usage=(
             "delegate [--json] [--isolation auto|none|worktree] "
-            "dry-run {cursor,kimi,claude,grok} {safe,work} [--reasoning-effort LEVEL] "
+            "dry-run {cursor,kimi,claude,grok,devin} {safe,work} [--reasoning-effort LEVEL] "
             "[--progress] [--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
             "delegate [--json] [--isolation auto|none|worktree] "
-            "dry-run {cursor,kimi,claude,grok} call [--read-only] [--reasoning-effort LEVEL] "
+            "dry-run {cursor,kimi,claude,grok,devin} call [--read-only] [--reasoning-effort LEVEL] "
             "[--prompt-file PATH] [prompt...]",
             "delegate [--json] [--isolation auto|none|worktree] "
             "dry-run codex {safe,work} [--reasoning-effort LEVEL] [--output-schema FILE] "
@@ -435,7 +471,11 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "[--prompt-file PATH] [prompt...]",
         ),
         arguments=(
-            ArgSpec("engine", True, "Engine to plan: cursor, codex, kimi, claude, grok, or droid."),
+            ArgSpec(
+                "engine",
+                True,
+                "Engine to plan: cursor, codex, kimi, claude, grok, devin, or droid.",
+            ),
             _PROMPT_ARG,
         ),
         options=(
@@ -452,6 +492,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             'delegate dry-run cursor work "Refactor the parser"',
             "delegate --json dry-run droid reviewer safe --prompt-file task.md",
             'delegate dry-run grok safe "Review this repo."',
+            'delegate dry-run devin safe "Review this repo."',
             'delegate dry-run claude safe "Review this repo."',
             'delegate dry-run kimi safe "Review this repo."',
         ),
@@ -1257,6 +1298,8 @@ def render_overview_text() -> str:
         f"delegate [--cwd PATH] [--json] {iso} claude call [--read-only] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} grok {{safe,work}} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} grok call [--read-only] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} devin {{safe,work}} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} devin call [--read-only] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} kimi {{safe,work}} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} kimi call [--read-only] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} dry-run cursor {{safe,work}} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
@@ -1269,6 +1312,8 @@ def render_overview_text() -> str:
         f"delegate [--cwd PATH] [--json] {iso} dry-run claude call [--read-only] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} dry-run grok {{safe,work}} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} dry-run grok call [--read-only] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} dry-run devin {{safe,work}} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} dry-run devin call [--read-only] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} dry-run kimi {{safe,work}} [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} dry-run kimi call [--read-only] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} run --input-json FILE",

@@ -828,7 +828,7 @@ def parse_dry_run(
     if not rest:
         raise DelegateError(
             "missing_engine",
-            "dry-run requires cursor, droid, codex, kimi, claude, or grok.",
+            f"dry-run requires {ENGINES_PROSE}.",
         )
     engine = rest[0]
     if engine.startswith("-"):
