@@ -915,31 +915,44 @@ def _materialize_prompt_file_argv(
     prompt_file_placeholder: str | None,
     agent_config_text: str | None = None,
     agent_config_placeholder: str | None = None,
+    agent_config_dir: Path | None = None,
 ) -> tuple[list[str], Path | None]:
     if prompt_file_text is None and agent_config_text is None:
         return list(argv), None
-    files: list[tuple[str, str, str]] = []
+    temp_dir: Path | None = None
+    replacements: dict[str, str] = {}
     if prompt_file_text is not None:
         if prompt_file_placeholder is None or prompt_file_placeholder not in argv:
             raise ValueError("prompt_file_placeholder must be present in argv")
-        files.append((prompt_file_placeholder, "prompt.txt", prompt_file_text))
-    if agent_config_text is not None:
-        if agent_config_placeholder is None or agent_config_placeholder not in argv:
-            raise ValueError("agent_config_placeholder must be present in argv")
-        files.append((agent_config_placeholder, "agent-config.json", agent_config_text))
-    temp_dir = Path(tempfile.mkdtemp(prefix="delegate-prompt-"))
-    os.chmod(temp_dir, run_registry.PRIVATE_DIR_MODE)
-    replacements: dict[str, str] = {}
-    for placeholder, filename, text in files:
-        path = temp_dir / filename
+        temp_dir = Path(tempfile.mkdtemp(prefix="delegate-prompt-"))
+        os.chmod(temp_dir, run_registry.PRIVATE_DIR_MODE)
+        prompt_path = temp_dir / "prompt.txt"
         fd = os.open(
-            path,
+            prompt_path,
             os.O_CREAT | os.O_EXCL | os.O_WRONLY,
             run_registry.PRIVATE_FILE_MODE,
         )
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(text)
-        replacements[placeholder] = str(path)
+            handle.write(prompt_file_text)
+        replacements[prompt_file_placeholder] = str(prompt_path)
+    if agent_config_text is not None:
+        if agent_config_placeholder is None or agent_config_placeholder not in argv:
+            raise ValueError("agent_config_placeholder must be present in argv")
+        if agent_config_dir is None:
+            if temp_dir is None:
+                temp_dir = Path(tempfile.mkdtemp(prefix="delegate-prompt-"))
+                os.chmod(temp_dir, run_registry.PRIVATE_DIR_MODE)
+            agent_config_dir = temp_dir
+        path = agent_config_dir / "agent-config.json"
+        fd = os.open(
+            path,
+            os.O_CREAT | os.O_TRUNC | os.O_WRONLY,
+            run_registry.PRIVATE_FILE_MODE,
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(agent_config_text)
+        os.chmod(path, run_registry.PRIVATE_FILE_MODE)
+        replacements[agent_config_placeholder] = str(path)
     return [replacements.get(item, item) for item in argv], temp_dir
 
 
@@ -1646,6 +1659,7 @@ def execute_tracked(
         prompt_file_placeholder=prompt_file_placeholder,
         agent_config_text=agent_config_text,
         agent_config_placeholder=agent_config_placeholder,
+        agent_config_dir=files.run_path,
     )
     workspace_baseline = profiles.capture_workspace_baseline(cwd) if ctx.mode == "work" else None
     fallback_extra: JsonObject | None = None
