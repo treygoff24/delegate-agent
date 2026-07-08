@@ -18,7 +18,8 @@ from delegate_agent.workflows import script as workflow_script
 
 WORKFLOW_COMMAND_SCHEMA = "delegate.workflow-command.v1"
 TERMINAL_WORKFLOW_STATUSES = {"succeeded", "failed", "killed"}
-WAIT_DONE_WORKFLOW_STATUSES = TERMINAL_WORKFLOW_STATUSES | {"paused"}
+WAIT_DONE_WORKFLOW_STATUSES = TERMINAL_WORKFLOW_STATUSES | {"paused", "stalled"}
+LIVE_WORKFLOW_STATUSES = {"running", "starting"}
 
 
 def _delegate_cli_argv() -> list[str]:
@@ -279,11 +280,17 @@ def emit_status(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) ->
     payload = registry.read_json(root / registry.STATUS_FILE)
     if payload is None:
         raise DelegateError("workflow_not_found", f"Workflow status not found: {command.wf_id}")
+    view = _status_view(root, payload)
     if command.json_mode:
-        rendering.print_json(payload, stdout)
+        rendering.print_json(view, stdout)
     else:
-        print(f"{payload.get('wfId')}: {payload.get('status')}", file=stdout)
-        print(f"journalPath: {payload.get('journalPath')}", file=stdout)
+        print(f"{view.get('wfId')}: {view.get('status')}", file=stdout)
+        print(f"journalPath: {view.get('journalPath')}", file=stdout)
+        if view.get("status") == "stalled":
+            print(
+                f"supervisor dead; resume with: workflow run --resume {view.get('wfId')}",
+                file=stdout,
+            )
     return EXIT_OK
 
 
@@ -307,6 +314,7 @@ def emit_watch(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) -> 
     root = _workflow_dir_for_command(command, workspace)
     since = command.since
     collected: list[dict[str, Any]] = []
+    stalled = False
     while True:
         events = [
             event
@@ -321,21 +329,28 @@ def emit_watch(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) -> 
                 collected.append(event)
             else:
                 print(json.dumps(event, sort_keys=True), file=stdout, flush=True)
-        status = registry.read_json(root / registry.STATUS_FILE) or {}
+        status = _status_view(root, registry.read_json(root / registry.STATUS_FILE) or {})
         if status.get("status") in WAIT_DONE_WORKFLOW_STATUSES:
+            stalled = status.get("status") == "stalled"
             break
         time.sleep(1)
     if command.json_mode:
         rendering.print_json(
             {
-                "ok": True,
+                "ok": not stalled,
                 "schema": WORKFLOW_COMMAND_SCHEMA,
                 "events": collected,
                 "lastSeq": since,
+                **({"status": "stalled"} if stalled else {}),
             },
             stdout,
         )
-    return EXIT_OK
+    elif stalled:
+        print(
+            f"stalled: supervisor dead; resume with: workflow run --resume {command.wf_id}",
+            file=stdout,
+        )
+    return 1 if stalled else EXIT_OK
 
 
 def emit_result(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) -> int:
@@ -357,7 +372,8 @@ def emit_wait(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) -> i
     deadline = time.monotonic() + (command.timeout or 3600)
     payload: JsonObject | None = None
     while True:
-        payload = registry.read_json(root / registry.STATUS_FILE)
+        on_disk = registry.read_json(root / registry.STATUS_FILE)
+        payload = _status_view(root, on_disk) if isinstance(on_disk, dict) else on_disk
         status = payload.get("status") if isinstance(payload, dict) else None
         if status in WAIT_DONE_WORKFLOW_STATUSES or time.monotonic() >= deadline:
             break
@@ -376,6 +392,11 @@ def emit_wait(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) -> i
         rendering.print_json(result, stdout)
     else:
         print(f"{command.wf_id}: {(payload or {}).get('status', 'unknown')}", file=stdout)
+        if status == "stalled":
+            print(
+                f"supervisor dead; resume with: workflow run --resume {command.wf_id}",
+                file=stdout,
+            )
     if timed_out:
         return 124
     return 0 if result["ok"] else 1
@@ -455,7 +476,11 @@ def emit_list(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) -> i
         for child in sorted(root.iterdir()):
             if child.is_dir() and registry.WORKFLOW_ID_RE.fullmatch(child.name):
                 status = registry.read_json(child / registry.STATUS_FILE) or {}
-                workflows.append({"wfId": child.name, "status": status.get("status")})
+                view = _status_view(child, status)
+                entry: JsonObject = {"wfId": child.name, "status": view.get("status")}
+                if "statusOnDisk" in view:
+                    entry["statusOnDisk"] = view["statusOnDisk"]
+                workflows.append(entry)
     saved: list[str] = []
     saved_root = registry.user_workflow_root()
     if saved_root.exists():
@@ -554,10 +579,31 @@ def _append_command_event(root: Path, event_type: str, **payload: Any) -> None:
 
 
 def _acquire_workflow_lock(root: Path, wf_id: str) -> int:
+    # Retry briefly: the read-path stalled probe holds the flock for a moment,
+    # and a resume racing that probe must not fail spuriously.
+    for _ in range(3):
+        try:
+            return registry.acquire_workflow_lock(root)
+        except BlockingIOError:
+            time.sleep(0.05)
     try:
         return registry.acquire_workflow_lock(root)
     except BlockingIOError as exc:
         raise DelegateError("workflow_locked", f"Workflow is already running: {wf_id}") from exc
+
+
+def _status_view(root: Path, payload: JsonObject) -> JsonObject:
+    """Overlay stalled detection onto a status payload without mutating disk."""
+    on_disk = payload.get("status")
+    if on_disk not in LIVE_WORKFLOW_STATUSES:
+        return payload
+    if registry.supervisor_alive(root):
+        return payload
+    view = dict(payload)
+    view["status"] = "stalled"
+    view["statusOnDisk"] = on_disk
+    view["ok"] = False
+    return view
 
 
 def _validate_wf_id(wf_id: str) -> str:

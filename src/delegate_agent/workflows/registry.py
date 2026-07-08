@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -101,6 +102,36 @@ def acquire_workflow_lock(root: Path) -> int:
         os.close(fd)
         raise
     return fd
+
+
+def supervisor_alive(root: Path) -> bool:
+    """Return True if the workflow lock is held (supervisor still alive).
+
+    Non-blocking probe: if the lock is acquirable, the supervisor is dead —
+    release immediately so the read path never retains the lock.
+    """
+    path = root / LOCK_FILE
+    if not path.exists():
+        return False
+    try:
+        fd = os.open(path, os.O_RDWR)
+    except OSError:
+        # Unexpected probe failure (EMFILE, permissions drift): fail toward
+        # "alive" so a transient error never fabricates a stalled overlay.
+        return True
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    except OSError:
+        return True
+    else:
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(fd)
 
 
 def append_jsonl(path: Path, event: dict[str, Any]) -> None:

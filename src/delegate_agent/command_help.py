@@ -769,7 +769,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
     ),
     "workflow status": CommandSpec(
         name="workflow status",
-        summary="Read a workflow status snapshot.",
+        summary="Read a workflow status snapshot (reports stalled if the supervisor died).",
         usage=("delegate [--json] workflow status <wfId>",),
         see_also=("workflow events", "workflow result"),
     ),

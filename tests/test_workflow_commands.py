@@ -1593,6 +1593,104 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertNotEqual(approve.returncode, 0)
         self.assertEqual(json.loads(approve.stdout)["error"], "workflow_not_gated")
 
+    def _seed_running_workflow(self, wf_id: str = "wf_aaaaaaaaaaaa") -> Path:
+        root = workflow_registry.ensure_workflow_dir(self.workspace, wf_id)
+        workflow_registry.write_status(
+            root,
+            {
+                "ok": True,
+                "wfId": wf_id,
+                "status": "running",
+                "workspace": str(self.workspace),
+                "scriptPath": str(root / "script.py"),
+                "journalPath": str(root / "journal.jsonl"),
+                "resultPath": str(root / "result.json"),
+            },
+        )
+        (root / "script.py").write_text(
+            'meta = {"name": "seeded"}\nreturn None\n', encoding="utf-8"
+        )
+        # Real post-crash state: the lock file exists but nobody holds the flock.
+        (root / workflow_registry.LOCK_FILE).touch()
+        return root
+
+    def test_status_reports_stalled_when_running_without_lock(self) -> None:
+        wf_id = "wf_bbbbbbbbbbbb"
+        self._seed_running_workflow(wf_id)
+        status = self.run_delegate(["--json", "workflow", "status", wf_id])
+        self.assertEqual(status.returncode, 0, status.stderr)
+        payload = json.loads(status.stdout)
+        self.assertEqual(payload["status"], "stalled")
+        self.assertEqual(payload["statusOnDisk"], "running")
+        on_disk = json.loads(
+            (self.workspace / ".delegate" / "workflows" / wf_id / "status.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(on_disk["status"], "running")
+        listed = json.loads(self.run_delegate(["--json", "workflow", "list"]).stdout)
+        entry = next(item for item in listed["workflows"] if item["wfId"] == wf_id)
+        self.assertEqual(entry["status"], "stalled")
+        self.assertEqual(entry["statusOnDisk"], "running")
+
+    def test_status_reports_running_when_lock_held(self) -> None:
+        wf_id = "wf_cccccccccccc"
+        root = self._seed_running_workflow(wf_id)
+        lock_fd = workflow_registry.acquire_workflow_lock(root)
+        self.addCleanup(lambda: os.close(lock_fd))
+        status = self.run_delegate(["--json", "workflow", "status", wf_id])
+        self.assertEqual(status.returncode, 0, status.stderr)
+        payload = json.loads(status.stdout)
+        self.assertEqual(payload["status"], "running")
+        self.assertNotIn("statusOnDisk", payload)
+
+    def test_wait_exits_promptly_on_stalled_supervisor(self) -> None:
+        wf_id = "wf_dddddddddddd"
+        self._seed_running_workflow(wf_id)
+        started = time.monotonic()
+        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "5"])
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 2.0, f"wait hung for {elapsed:.2f}s on stalled workflow")
+        self.assertNotEqual(waited.returncode, 0)
+        self.assertNotEqual(waited.returncode, 124)
+        payload = json.loads(waited.stdout)
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload.get("timedOut", False))
+        self.assertEqual(payload["workflow"]["status"], "stalled")
+        self.assertEqual(payload["workflow"]["statusOnDisk"], "running")
+        human = self.run_delegate(["workflow", "wait", wf_id, "--timeout", "5"])
+        self.assertIn("stalled", human.stdout.lower())
+        self.assertIn("resume", human.stdout.lower())
+
+    def test_workflow_failure_includes_traceback(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "boom-traceback"}
+            missing = {}
+            return missing["files"]
+            """
+        )
+        launch = self.run_delegate(["--json", "workflow", "run", str(script)])
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
+        self.assertNotEqual(waited.returncode, 0)
+        events = json.loads(
+            self.run_delegate(["--json", "workflow", "events", wf_id, "--since", "0"]).stdout
+        )["events"]
+        failed = [event for event in events if event["type"] == "workflow_failed"]
+        self.assertEqual(len(failed), 1)
+        self.assertIn("traceback", failed[0])
+        self.assertIn("KeyError", failed[0]["traceback"])
+        self.assertIn("files", failed[0]["traceback"])
+        result = json.loads(self.run_delegate(["--json", "workflow", "result", wf_id]).stdout)
+        self.assertIn("traceback", result)
+        self.assertIn("KeyError", result["traceback"])
+        status = json.loads(self.run_delegate(["--json", "workflow", "status", wf_id]).stdout)
+        self.assertEqual(status["status"], "failed")
+        self.assertIn("traceback", status)
+        self.assertIn("KeyError", status["traceback"])
+
 
 if __name__ == "__main__":
     unittest.main()

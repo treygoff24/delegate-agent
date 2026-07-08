@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import traceback
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1379,9 +1380,12 @@ def run_supervisor(
         except GateExit:
             return 0
         except BaseException as exc:
-            state.append_event("workflow_failed", error=str(exc))
-            registry.write_result(root, {"ok": False, "wfId": wf_id, "error": str(exc)})
-            state.write_status("failed", error=str(exc))
+            tb = traceback.format_exc()[-4000:]
+            state.append_event("workflow_failed", error=str(exc), traceback=tb)
+            registry.write_result(
+                root, {"ok": False, "wfId": wf_id, "error": str(exc), "traceback": tb}
+            )
+            state.write_status("failed", error=str(exc), traceback=tb)
             return 1
         registry.write_result(root, {"ok": True, "wfId": wf_id, "result": result})
         state.append_event("workflow_finished", result=result)
