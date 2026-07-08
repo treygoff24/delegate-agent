@@ -138,6 +138,11 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
         "initialDelaySec": 30,
         "intervalSec": 60,
     },
+    "workflows": {
+        "engineCaps": {},
+        "itemThreads": 64,
+        "structuredOutputRetries": 2,
+    },
 }
 
 
@@ -402,6 +407,37 @@ def _validate_worktrees_section(worktrees: JsonValue) -> None:
                 auto_prune["mergedOlderThanDays"],
                 path="worktrees.autoPrune.mergedOlderThanDays",
                 error="invalid_worktrees_config",
+            )
+
+
+def _validate_workflows_section(workflows: JsonValue) -> None:
+    if workflows is None:
+        return
+    if not isinstance(workflows, dict):
+        raise ConfigError("invalid_workflows_config", "workflows config must be an object.")
+    engine_caps = workflows.get("engineCaps")
+    if engine_caps is not None:
+        if not isinstance(engine_caps, dict):
+            raise ConfigError("invalid_workflows_config", "workflows.engineCaps must be an object.")
+        for engine, cap in engine_caps.items():
+            if not isinstance(engine, str) or not engine:
+                raise ConfigError(
+                    "invalid_workflows_config",
+                    "workflows.engineCaps keys must be non-empty engine names.",
+                )
+            if not isinstance(cap, int) or isinstance(cap, bool) or cap <= 0:
+                raise ConfigError(
+                    "invalid_workflows_config",
+                    f"workflows.engineCaps.{engine} must be a positive integer.",
+                )
+    for key in ("itemThreads", "structuredOutputRetries"):
+        if key not in workflows:
+            continue
+        value = workflows[key]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ConfigError(
+                "invalid_workflows_config",
+                f"workflows.{key} must be a non-negative integer.",
             )
 
 
@@ -1091,6 +1127,7 @@ def validate_config(config: JsonObject) -> None:
     _validate_isolation_section(config.get("isolation"))
     _validate_worktrees_section(config.get("worktrees"))
     _validate_progress_section(config.get("progress"))
+    _validate_workflows_section(config.get("workflows"))
 
 
 def completion_report_default_mode(config: JsonObject) -> str:

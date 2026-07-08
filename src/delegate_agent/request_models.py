@@ -24,6 +24,7 @@ from delegate_agent.constants import PROMPT_INSTRUCTION_MODE_WRAPPED
 from delegate_agent.isolation import IsolationContext
 from delegate_agent.json_types import JsonObject
 from delegate_agent.prompt_transport import PROMPT_TRANSPORT_ARGV
+from delegate_agent.workflows import commands as workflow_commands
 
 
 @dataclass
@@ -76,6 +77,7 @@ class ParsedCommand:
     run_output: run_output_commands.RunOutputCommand | None = None
     wait_command: wait_cancel_commands.WaitCommand | None = None
     cancel_command: wait_cancel_commands.CancelCommand | None = None
+    workflow_command: workflow_commands.WorkflowCommand | None = None
     worktree: worktree_commands.WorktreeCommand | None = None
     config_command: config_commands.ConfigCommand | None = None
     capabilities: capability_commands.CapabilitiesCommand | None = None
@@ -95,6 +97,7 @@ class ParsedCommand:
         run_output: run_output_commands.RunOutputCommand | None = None,
         wait_command: wait_cancel_commands.WaitCommand | None = None,
         cancel_command: wait_cancel_commands.CancelCommand | None = None,
+        workflow_command: workflow_commands.WorkflowCommand | None = None,
         worktree: worktree_commands.WorktreeCommand | None = None,
         config_command: config_commands.ConfigCommand | None = None,
         capabilities: capability_commands.CapabilitiesCommand | None = None,
@@ -111,6 +114,7 @@ class ParsedCommand:
         self.run_output = run_output
         self.wait_command = wait_command
         self.cancel_command = cancel_command
+        self.workflow_command = workflow_command
         self.worktree = worktree
         self.config_command = config_command
         self.capabilities = capabilities

@@ -87,6 +87,7 @@ RUN_INPUT_KEYS = {
     "forbidCommit",
     "readOnly",
     "includeDirty",
+    "promptInstructionMode",
 }
 
 OUTPUT_SCHEMA_COMPLETION_REPORT_WARNING = (
@@ -353,6 +354,32 @@ def resolve_prompt_instruction_mode(
             f"{engine} work mode.",
         )
     return PROMPT_INSTRUCTION_MODE_SLASH
+
+
+def resolve_input_json_prompt_instruction_mode(
+    raw_mode: object,
+    prompt: str,
+    *,
+    engine: str,
+    mode: str,
+) -> str:
+    if raw_mode is None:
+        return resolve_prompt_instruction_mode(prompt, engine=engine, mode=mode)
+    if raw_mode not in {PROMPT_INSTRUCTION_MODE_WRAPPED, PROMPT_INSTRUCTION_MODE_SLASH}:
+        raise DelegateError(
+            "invalid_prompt_instruction_mode",
+            "promptInstructionMode must be wrapped or slash-passthrough.",
+        )
+    if raw_mode == PROMPT_INSTRUCTION_MODE_SLASH:
+        if mode == MODE_SAFE and engine in PROMPT_ENFORCED_SAFE_ENGINES:
+            raise DelegateError(
+                "slash_passthrough_unsupported",
+                f"{engine} safe mode is prompt-enforced; a verbatim prompt would strip "
+                "the read-only review contract. Use codex/claude/grok safe, or "
+                f"{engine} work mode.",
+            )
+        return PROMPT_INSTRUCTION_MODE_SLASH
+    return PROMPT_INSTRUCTION_MODE_WRAPPED
 
 
 def resolve_completion_report_mode(parsed: ParsedCommand, config: JsonObject) -> str:
@@ -913,6 +940,7 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
             "invalid_model", "cursor model override must match configured Composer model."
         )
     output_schema = resolve_output_schema(str(engine), raw.get("outputSchema"))
+    raw_instruction_mode = raw.get("promptInstructionMode")
 
     if mode == MODE_CALL:
         _validate_call_input_json_options(
@@ -925,13 +953,20 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         if engine == "droid":
             _validate_droid_model_alias(config, model_alias)
         workspace, cleanup_workspace = _call_workspace(False)
+        call_prompt = validate_prompt(prompt)
+        if raw_instruction_mode == PROMPT_INSTRUCTION_MODE_SLASH and raw_read_only:
+            raise DelegateError(
+                "slash_passthrough_unsupported",
+                "call --read-only wraps the prompt in the read-only contract; "
+                "slash-command prompts cannot run verbatim there. Use plain call mode.",
+            )
         try:
             return build_request(
                 str(engine),
                 str(mode),
                 model_alias,
                 workspace,
-                _call_effective_prompt(validate_prompt(prompt), read_only=raw_read_only),
+                _call_effective_prompt(call_prompt, read_only=raw_read_only),
                 config,
                 dry_run=False,
                 stream_capture=True,
@@ -945,6 +980,12 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
                 cleanup_workspace=cleanup_workspace,
                 call_read_only=raw_read_only,
                 group=global_options.group,
+                prompt_instruction_mode=resolve_input_json_prompt_instruction_mode(
+                    raw_instruction_mode,
+                    call_prompt,
+                    engine=str(engine),
+                    mode=str(mode),
+                ),
             )
         except BaseException:
             if cleanup_workspace:
@@ -1043,7 +1084,8 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         output_schema,
     )
     prompt = validate_prompt(prompt)
-    instruction_mode = resolve_prompt_instruction_mode(
+    instruction_mode = resolve_input_json_prompt_instruction_mode(
+        raw_instruction_mode,
         prompt,
         engine=str(engine),
         mode=str(mode),
