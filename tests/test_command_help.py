@@ -41,6 +41,7 @@ TOP_LEVEL_COMMANDS = (
     "wait",
     "cancel",
     "worktree",
+    "workflow",
     "models",
     "describe",
     "agent-help",
