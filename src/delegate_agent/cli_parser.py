@@ -42,6 +42,7 @@ from delegate_agent.request_models import (
     RunJsonOptions,
 )
 from delegate_agent.run_output_commands import RUN_OUTPUT_DEFAULT_TAIL_LINES
+from delegate_agent.workflows import commands as workflow_commands
 
 MISPLACED_GLOBAL_OPTIONS = frozenset(
     {
@@ -496,6 +497,13 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
                 "--isolation is not supported with delegate worktree commands.",
             )
         return parse_worktree(rest, json_mode, cwd)
+    if subcommand == "workflow":
+        if isolation is not None:
+            raise DelegateError(
+                "invalid_option_combination",
+                "--isolation is not supported with delegate workflow commands.",
+            )
+        return parse_workflow(rest, json_mode, cwd)
     if subcommand == "profiles":
         if isolation is not None:
             raise DelegateError(
@@ -1383,6 +1391,180 @@ def parse_cancel(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCom
         "cancel",
         global_options=GlobalOptions(json_mode=json_mode, cwd=cwd),
         cancel_command=wait_cancel_commands.CancelCommand(tuple(handles), json_mode=json_mode),
+    )
+
+
+def parse_workflow(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
+    rest, json_mode = consume_json_option(rest, json_mode)
+    if not rest or command_help.is_help_token(rest[0]):
+        return help_command(json_mode, "workflow")
+    action = rest[0]
+    args = rest[1:]
+    if action == "_supervise":
+        if len(args) != 1:
+            raise DelegateError("missing_workflow", "workflow _supervise requires <wfId>.")
+        return ParsedCommand(
+            "workflow",
+            global_options=GlobalOptions(json_mode=json_mode, cwd=cwd),
+            workflow_command=workflow_commands.WorkflowCommand(
+                action="_supervise", wf_id=args[0], json_mode=json_mode
+            ),
+        )
+    if any(command_help.is_help_token(token) for token in args):
+        return help_command(json_mode, f"workflow {action}")
+    if action in {"run", "check", "save"}:
+        return _parse_workflow_path_action(action, args, json_mode, cwd)
+    if action in {"status", "watch", "events", "result", "wait", "approve", "kill"}:
+        return _parse_workflow_id_action(action, args, json_mode, cwd)
+    if action == "list":
+        require_no_extra(args, "workflow list")
+        return ParsedCommand(
+            "workflow",
+            global_options=GlobalOptions(json_mode=json_mode, cwd=cwd),
+            workflow_command=workflow_commands.WorkflowCommand("list", json_mode=json_mode),
+        )
+    raise DelegateError("unknown_workflow_action", f"Unknown workflow action: {action}")
+
+
+def _parse_workflow_path_action(
+    action: str,
+    args: list[str],
+    json_mode: bool,
+    cwd: str | None,
+) -> ParsedCommand:
+    script: str | None = None
+    args_json: str | None = None
+    budget: int | None = None
+    dry_run = False
+    resume: str | None = None
+    name: str | None = None
+    i = 0
+    while i < len(args):
+        token = args[i]
+        if token == "--args" and action == "run":
+            if i + 1 >= len(args):
+                raise DelegateError("missing_workflow_args", "workflow run --args requires JSON.")
+            args_json = args[i + 1]
+            i += 2
+            continue
+        if token == "--budget" and action == "run":
+            budget, i = parse_required_positive_int_option(
+                args,
+                i,
+                option_label="workflow run --budget",
+                missing_error="missing_budget",
+                invalid_error="invalid_budget",
+            )
+            continue
+        if token == "--dry-run" and action == "run":
+            dry_run = True
+            i += 1
+            continue
+        if token == "--resume" and action == "run":
+            if i + 1 >= len(args):
+                raise DelegateError("missing_workflow", "workflow run --resume requires <wfId>.")
+            resume = args[i + 1]
+            i += 2
+            continue
+        if token == "--name" and action in {"run", "save"}:
+            if i + 1 >= len(args):
+                raise DelegateError("missing_workflow_name", "workflow --name requires a name.")
+            name = args[i + 1]
+            i += 2
+            continue
+        if token.startswith("-"):
+            raise DelegateError(
+                "unknown_option", unknown_option_message(f"workflow {action}", token)
+            )
+        if script is not None:
+            raise DelegateError(
+                "unexpected_argument", f"workflow {action} accepts one script path."
+            )
+        script = token
+        i += 1
+    if action == "check" and (script is None or name is not None or resume is not None):
+        raise DelegateError("missing_workflow_script", "workflow check requires <script.py>.")
+    if action == "save" and (script is None or name is None or resume is not None):
+        raise DelegateError("missing_workflow_script", f"workflow {action} requires <script.py>.")
+    if action == "run":
+        target_count = sum(1 for item in (script, name, resume) if item is not None)
+        if target_count != 1:
+            raise DelegateError(
+                "invalid_workflow_target",
+                "workflow run requires exactly one of <script.py>, --name, or --resume.",
+            )
+        if resume is not None and args_json is not None:
+            raise DelegateError(
+                "invalid_workflow_args",
+                "workflow run --resume does not accept --args; resume uses the pinned args.",
+            )
+    if action == "run" and resume is None and script is None and name is None:
+        raise DelegateError(
+            "missing_workflow_script", "workflow run requires <script.py>, --name, or --resume."
+        )
+    return ParsedCommand(
+        "workflow",
+        global_options=GlobalOptions(json_mode=json_mode, cwd=cwd),
+        workflow_command=workflow_commands.WorkflowCommand(
+            action,
+            script=script,
+            args_json=args_json,
+            budget=budget,
+            dry_run=dry_run,
+            resume=resume,
+            name=name,
+            json_mode=json_mode,
+        ),
+    )
+
+
+def _parse_workflow_id_action(
+    action: str,
+    args: list[str],
+    json_mode: bool,
+    cwd: str | None,
+) -> ParsedCommand:
+    wf_id: str | None = None
+    since = 0
+    timeout: int | None = None
+    i = 0
+    while i < len(args):
+        token = args[i]
+        if token == "--since" and action in {"events", "watch"}:
+            if i + 1 >= len(args):
+                raise DelegateError("missing_since", f"workflow {action} --since requires a value.")
+            since = parse_non_negative_int(args[i + 1], option=f"workflow {action} --since")
+            i += 2
+            continue
+        if token == "--timeout" and action == "wait":
+            timeout, i = parse_required_positive_int_option(
+                args,
+                i,
+                option_label="workflow wait --timeout",
+                missing_error="missing_timeout",
+                invalid_error="invalid_timeout",
+            )
+            continue
+        if token.startswith("-"):
+            raise DelegateError(
+                "unknown_option", unknown_option_message(f"workflow {action}", token)
+            )
+        if wf_id is not None:
+            raise DelegateError("unexpected_argument", f"workflow {action} accepts one wfId.")
+        wf_id = token
+        i += 1
+    if wf_id is None:
+        raise DelegateError("missing_workflow", f"workflow {action} requires <wfId>.")
+    return ParsedCommand(
+        "workflow",
+        global_options=GlobalOptions(json_mode=json_mode, cwd=cwd),
+        workflow_command=workflow_commands.WorkflowCommand(
+            action,
+            wf_id=wf_id,
+            since=since,
+            timeout=timeout,
+            json_mode=json_mode,
+        ),
     )
 
 

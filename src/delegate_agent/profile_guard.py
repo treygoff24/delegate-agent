@@ -44,6 +44,9 @@ READ_ONLY_SUBCOMMANDS = frozenset(
     }
 )
 READ_ONLY_WORKTREE_ACTIONS = frozenset({"show", "list"})
+READ_ONLY_WORKFLOW_ACTIONS = frozenset(
+    {"check", "status", "watch", "events", "result", "wait", "list"}
+)
 
 
 def is_read_only_command(parsed: ParsedCommand) -> bool:
@@ -62,6 +65,11 @@ def is_read_only_command(parsed: ParsedCommand) -> bool:
         return parsed.capabilities is not None and not parsed.capabilities.refresh
     if subcommand == "worktree":
         return parsed.worktree is not None and parsed.worktree.action in READ_ONLY_WORKTREE_ACTIONS
+    if subcommand == "workflow":
+        return (
+            parsed.workflow_command is not None
+            and parsed.workflow_command.action in READ_ONLY_WORKFLOW_ACTIONS
+        )
     return False
 
 

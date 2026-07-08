@@ -135,6 +135,7 @@ from delegate_agent.safe_workspace import (  # noqa: F401  # re-exported for tes
     safe_isolated_request,
     write_cursor_safe_project_config,
 )
+from delegate_agent.workflows import commands as workflow_commands
 
 _replace_ws_by_engine = argv_utils.replace_workspace_arg_in_argv
 
@@ -235,6 +236,25 @@ def emit_worktree(
         workspace_path=workspace.path,
         config=config,
         stdout=stdout,
+    )
+
+
+def emit_workflow(
+    parsed: ParsedCommand,
+    workspace: ResolvedWorkspace,
+    config: JsonObject,
+    stdout: TextIO,
+    stderr: TextIO,
+) -> int:
+    command = parsed.workflow_command
+    if command is None:
+        raise DelegateError("invalid_command", "workflow options are required.")
+    return workflow_commands.emit(
+        command,
+        workspace_path=workspace.path,
+        config=config,
+        stdout=stdout,
+        stderr=stderr,
     )
 
 
@@ -902,7 +922,15 @@ def main(
                 stdout=stdout,
             )
 
-        if parsed.subcommand in {"snapshot", "runs", "run-output", "wait", "cancel", "worktree"}:
+        if parsed.subcommand in {
+            "snapshot",
+            "runs",
+            "run-output",
+            "wait",
+            "cancel",
+            "worktree",
+            "workflow",
+        }:
             existing_registry = run_registry.registry_root_if_exists(Path(workspace.path))
             if existing_registry is not None:
                 maybe_run_retention_pass(existing_registry, config)
@@ -918,6 +946,8 @@ def main(
             return emit_cancel(parsed, workspace, stdout)
         if parsed.subcommand == "worktree":
             return emit_worktree(parsed, workspace, config, stdout)
+        if parsed.subcommand == "workflow":
+            return emit_workflow(parsed, workspace, config, stdout, stderr)
 
         if parsed.subcommand == "profiles":
             return emit_profiles_command(parsed, config, source, stdout)
