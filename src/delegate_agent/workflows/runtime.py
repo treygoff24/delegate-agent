@@ -90,6 +90,7 @@ class WorkflowState:
     replay: dict[str, Any] = field(default_factory=dict)
     replay_keys: set[str] = field(default_factory=set)
     started_without_result: set[str] = field(default_factory=set)
+    claimed_keys: set[str] = field(default_factory=set)
     sequence: int = 0
     journal_lock: threading.Lock = field(default_factory=threading.Lock)
     scope_lock: threading.Lock = field(default_factory=threading.Lock)
@@ -124,7 +125,10 @@ class WorkflowState:
             key = event.get("key")
             if not isinstance(key, str):
                 continue
-            if event.get("type") == "agent_started":
+            if event.get("type") == "budget":
+                # Idempotent resume: keys already charged must not re-claim.
+                self.claimed_keys.add(key)
+            elif event.get("type") == "agent_started":
                 self.started_without_result.add(key)
             elif event.get("type") in {"agent_finished", "agent_result"}:
                 self.replay_keys.add(key)
@@ -540,6 +544,7 @@ class WorkflowDsl:
             replay=self.state.replay,
             replay_keys=self.state.replay_keys,
             started_without_result=self.state.started_without_result,
+            claimed_keys=self.state.claimed_keys,
             lifetime_counter=self.state.lifetime_counter,
             gate_state=self.state.gate_state,
         )
@@ -638,14 +643,21 @@ class WorkflowDsl:
                 return adopted
             # Failed/cancelled/unparseable/schema-invalid: keep the key in
             # started_without_result and fall through to a live respawn.
-        self.state.claim_agent_lifetime()
+        already_claimed = key in self.state.claimed_keys
+        if not already_claimed:
+            self.state.claim_agent_lifetime()
         if self.state.dry_run:
-            spent = self.state.dry_run_budget_tick()
+            if already_claimed:
+                spent = self.state.dry_run_budget_spent
+            else:
+                spent = self.state.dry_run_budget_tick()
+                self.state.claimed_keys.add(key)
             remaining = (
                 None if self.state.budget.total is None else max(self.state.budget.total - spent, 0)
             )
             self.state.append_event(
                 "budget",
+                key=key,
                 spent=spent,
                 total=self.state.budget.total,
                 remaining=remaining,
@@ -665,9 +677,14 @@ class WorkflowDsl:
             self.state.append_event("agent_started", key=key, scope=path, dryRun=True)
             self.state.append_event("agent_finished", key=key, scope=path, result=placeholder)
             return placeholder
-        spent = self.state.budget.claim()
+        if already_claimed:
+            spent = self.state.budget.spent()
+        else:
+            spent = self.state.budget.claim()
+            self.state.claimed_keys.add(key)
         self.state.append_event(
             "budget",
+            key=key,
             spent=spent,
             total=self.state.budget.total,
             remaining=_budget_remaining_json(self.state.budget),
@@ -742,8 +759,10 @@ class WorkflowDsl:
         if not _workflow_run_terminal(self.state.workspace, run_id):
             waited = _wait_for_workflow_agent_run(self.state.workspace, run_id, timeout)
             if not waited:
+                # Match live-path timeout: cancel the child; timeout is definitive.
+                cancel_workflow_agent_child(self.state.workspace, self.state.wf_id, key)
                 self.state.append_event("agent_timeout", key=key, scope=scope, runId=run_id)
-                return _MISSING
+                return None
         text = _workflow_agent_run_result(
             self.state.workspace,
             run_id,

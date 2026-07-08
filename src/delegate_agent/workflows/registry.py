@@ -23,16 +23,21 @@ APPROVAL_FILE = "approval.json"
 LOCK_FILE = "workflow.lock"
 WORKFLOW_ID_HEX = 12
 WORKFLOW_ID_RE = __import__("re").compile(r"^wf_[0-9a-f]{12}$")
-# Durable events are fsynced: result events plus agent_started (the resume
-# adoption anchor). Phase/log/budget ticks stay unfsynced.
+# Durable events are fsynced: result events, agent_started (resume adoption
+# anchor), adopt/timeout audit lines, and budget claims (idempotent-claim set
+# must survive crashes — status.spent alone is not enough to skip re-claim).
+# Phase/log ticks stay unfsynced.
 DURABLE_EVENT_TYPES = {
     "agent_started",
     "agent_finished",
     "agent_result",
+    "agent_adopt_rejected",
+    "agent_timeout",
+    "budget",
     "gate",
     "workflow_finished",
 }
-RESULT_EVENT_TYPES = DURABLE_EVENT_TYPES - {"agent_started"}
+RESULT_EVENT_TYPES = DURABLE_EVENT_TYPES - {"agent_started", "budget"}
 
 
 def workflow_root(workspace: Path) -> Path:
