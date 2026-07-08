@@ -16,6 +16,31 @@ Workflow registries use this file set as needed:
 - `approval.json`: gate approval state, present after `workflow approve`.
 - `workflow.lock`: process lock held while a supervisor is active.
 
+## Terminology
+
+Canonical terms — use these in code, docs, and prompts rather than synonyms:
+
+- **Workflow**: one registered execution of a workflow script, identified by
+  `wf_<12 hex>` and rooted at `.delegate/workflows/<wfId>/`.
+- **Supervisor**: the detached process that executes the script body and owns
+  the journal, status snapshot, and workflow lock for its lifetime.
+- **Journal**: the append-only `journal.jsonl` event log with monotonic
+  sequence numbers; result-bearing events are fsynced and are the durable
+  source of truth on resume.
+- **Structural key**: the deterministic identity of one `agent()` call —
+  `sha256` over its scope path, prompt, and canonical options — used for
+  replay, claim idempotency, and adoption across resumes.
+- **Child run**: an ordinary Delegate run launched by `agent()`/`judges()`,
+  tagged `--group <wfId>` so the standard run commands apply to it.
+- **Replay**: returning a journaled result for a structural key instantly on
+  resume instead of re-running the child.
+- **Adoption**: on resume, recognizing a child run that already exists in the
+  run registry for a started-without-result key and taking its outcome instead
+  of respawning a duplicate.
+- **Gate**: a human checkpoint — the supervisor stops admitting new agents,
+  drains in-flight ones to the journal, records a `gate` event, and exits with
+  status `paused` until `workflow approve` (or `run --resume`) relaunches it.
+
 ## Script shape
 
 ```python
