@@ -564,6 +564,32 @@ class InputJsonModelResolutionTests(CommandTestBase):
             request = self.delegate.request_from_input_json(parsed, config)
             self.assertEqual(request.model, "gpt-5.5")
 
+    def test_droid_model_flag_alias_worktree_plan_matches_alias(self):
+        # Isolation-context planning must predict the same model_alias the
+        # execution path records: --model alias-hit plans a droid-<alias> branch.
+        repo = make_git_repo(with_commit=True)
+        self.addCleanup(repo.cleanup)
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["droid"]["models"] = {"fast": "glm-5.1"}
+        parsed = self.delegate.parse_cli(
+            [
+                "--cwd",
+                repo.name,
+                "--isolation",
+                "worktree",
+                "dry-run",
+                "droid",
+                "work",
+                "--model",
+                "fast",
+                "task",
+            ]
+        )
+        request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+        payload = self.delegate.dry_run_payload(request)
+        self.assertEqual(request.model_alias, "fast")
+        self.assertIn("droid-fast", str(payload["plannedBranch"]))
+
     def test_droid_input_json_preserves_model_alias_and_resolution(self):
         with tempfile.TemporaryDirectory() as tmp:
             task = Path(tmp) / "task.json"

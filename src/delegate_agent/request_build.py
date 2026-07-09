@@ -591,6 +591,22 @@ def _resolve_engine_model(section: JsonObject, build: EngineBuildInput) -> str |
     return _resolve_default_model(section)
 
 
+def _effective_cli_model_alias(launch: LaunchOptions, config: JsonObject) -> str | None:
+    """The alias the built Request will carry — for isolation-context parity.
+
+    Worktree branch/path planning happens before request parts resolve, so it
+    must predict the same model_alias the execution path will record: droid's
+    positional, a droid --model value that hits the alias map, or the modeless
+    --model selection token.
+    """
+    alias, _ = _classify_cli_model(launch)
+    if launch.engine == "droid" and launch.model is not None:
+        models = config.get("droid", {}).get("models")
+        if isinstance(models, dict) and launch.model in models:
+            return launch.model
+    return alias
+
+
 def _classify_cli_model(launch: LaunchOptions) -> tuple[str | None, str | None]:
     """Split a CLI launch's model selection into (model_alias, model_override).
 
@@ -870,7 +886,7 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         resolved_isolation=effective_isolation,
         engine=launch.engine,
         mode=launch.mode,
-        model_alias=launch.model_alias,
+        model_alias=_effective_cli_model_alias(launch, config),
         config=config,
         run_short_id="<short-run-id-placeholder>" if launch.dry_run else None,
         source_git_root=git_root,
