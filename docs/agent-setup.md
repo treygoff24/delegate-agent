@@ -36,6 +36,8 @@ This guide covers both human setup and non-interactive setup for agents or CI jo
    command -v codex || echo "Codex CLI missing"
    command -v claude || echo "Claude Code CLI missing"
    command -v grok || echo "Grok Build CLI missing"
+   command -v devin || echo "Devin CLI missing"
+   command -v opencode || echo "OpenCode CLI missing"
    command -v kimi || echo "Kimi Code CLI missing"
    ```
 
@@ -94,12 +96,33 @@ When running on Windows through WSL, treat Delegate as a Linux CLI:
    delegate --json dry-run claude safe --reasoning-effort high "Review only. Do not edit files."
    delegate --json dry-run grok safe "Review only. Do not edit files."
    delegate --json dry-run grok safe --reasoning-effort high "Review only. Do not edit files."
+   delegate --json dry-run devin safe "Review only. Do not edit files."
+   delegate --json dry-run opencode safe "Review only. Do not edit files."
+   delegate --json dry-run opencode safe --reasoning-effort high "Review only. Do not edit files."
    delegate --json dry-run cursor safe "Review only. Do not edit files."
    delegate --json dry-run droid reviewer safe "Review only. Do not edit files."
    delegate --json dry-run kimi safe "Review only. Do not edit files."
    ```
 
-   The Codex, Claude, Grok, Cursor, and Kimi dry-runs succeed with the unedited example config when no reasoning effort is requested. Explicit Codex reasoning-effort dry-runs can target the harness default model when no default model is configured. Claude and Grok reasoning effort map to native `--effort` flags. The Droid dry-run validates the alias, so it returns `unconfigured_model` until you replace the `reviewer` placeholder in `config.json` with a real model ID.
+   The Codex, Claude, Grok, Devin, OpenCode, Cursor, and Kimi dry-runs succeed with the unedited example config when no reasoning effort is requested. Explicit Codex reasoning-effort dry-runs can target the harness default model when no default model is configured. Claude and Grok reasoning effort map to native `--effort` flags; OpenCode reasoning effort maps to `--variant` without model validation. The Droid dry-run validates the alias, so it returns `unconfigured_model` until you replace the `reviewer` placeholder in `config.json` with a real model ID.
+
+### OpenCode
+
+Install OpenCode with the curl installer from [opencode.ai](https://opencode.ai).
+The installer normally writes the binary to `~/.opencode/bin`, which is often
+not on `PATH` in non-interactive shells. Add that directory to `PATH`, or set an
+absolute path in Delegate config:
+
+```json
+{
+  "opencode": {
+    "binary": "/home/<user>/.opencode/bin/opencode"
+  }
+}
+```
+
+Run `opencode auth login` before the first real launch. Delegate uses OpenCode's
+existing global authentication state and does not manage login itself.
 
 ## Non-interactive agent setup
 
@@ -141,6 +164,8 @@ For an orchestrating agent, script, or CI job:
    command -v codex >/dev/null || exit 3
    command -v claude >/dev/null || exit 3
    command -v grok >/dev/null || exit 3
+   command -v devin >/dev/null || exit 3
+   command -v opencode >/dev/null || exit 3
    command -v kimi >/dev/null || exit 3
    ```
 
@@ -166,7 +191,9 @@ For an orchestrating agent, script, or CI job:
 
 ## CI expectations
 
-The required test suite does not need real Cursor, Droid, Codex, Claude, or Kimi binaries. Tests use dry-run paths and fake binaries where needed:
+The required test suite does not need real Cursor, Droid, Codex, Claude, Grok,
+Devin, OpenCode, or Kimi binaries. Tests use dry-run paths and fake binaries
+where needed:
 
 ```bash
 python3 -m compileall -q src tests bin

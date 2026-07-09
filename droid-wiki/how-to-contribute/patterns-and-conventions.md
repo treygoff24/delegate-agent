@@ -20,6 +20,6 @@ Prompt transport is declared in `src/delegate_agent/prompt_transport.py`. Dry-ru
 
 ## Test behavior, not provider availability
 
-Tests use fake child binaries and temporary homes. Avoid test assumptions that require real Cursor, Droid, Codex, Claude, or Kimi installations.
+Tests use fake child binaries and temporary homes. Avoid test assumptions that require real Cursor, Droid, Codex, Claude, Grok, Devin, OpenCode, or Kimi installations.
 
 For subsystem boundaries, see [architecture](../overview/architecture.md).

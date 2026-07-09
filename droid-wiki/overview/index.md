@@ -1,6 +1,6 @@
 # Delegate Agent overview
 
-Delegate Agent is a Python CLI for handing bounded software-engineering tasks to another coding-agent runtime. It normalizes calls to Cursor Agent, Factory Droid, OpenAI Codex, Claude Code, and Kimi Code, records local run metadata, and gives parent agents stable inspection commands.
+Delegate Agent is a Python CLI for handing bounded software-engineering tasks to another coding-agent runtime. It normalizes calls to Cursor Agent, Factory Droid, OpenAI Codex, Claude Code, xAI Grok Build, Devin, OpenCode, and Kimi Code, records local run metadata, and gives parent agents stable inspection commands.
 
 ## What it does
 
@@ -12,7 +12,7 @@ It is intentionally a launcher and recorder. `README.md` and `CONTRIBUTING.md` b
 
 | Capability | Source files | Notes |
 | --- | --- | --- |
-| Runtime dispatch | `src/delegate_agent/cli.py` | Parses `cursor`, `droid`, `codex`, `claude`, and `kimi` commands. |
+| Runtime dispatch | `src/delegate_agent/cli.py` | Parses `cursor`, `droid`, `codex`, `claude`, `grok`, `devin`, `opencode`, and `kimi` commands. |
 | Safe and work modes | `src/delegate_agent/cli.py`, `src/delegate_agent/config.py`, `src/delegate_agent/isolation.py` | Separates review/investigation from edit-capable runs. |
 | Run registry | `src/delegate_agent/run_registry.py`, `src/delegate_agent/runner.py` | Stores manifests, state, snapshots, logs, aliases, and completion reports. |
 | Inspection commands | `src/delegate_agent/inspection_commands.py`, `src/delegate_agent/run_output_commands.py` | Implements `runs`, `snapshot`, and `run-output`. |

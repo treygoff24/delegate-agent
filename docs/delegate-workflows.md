@@ -72,6 +72,9 @@ workflow result in `result.json`. Injected globals are `agent`, `pipeline`,
 - `workflow(name_or_path, args=None, gate=False)` nests another workflow. Use `gate=True` or `gate="on-failure"` for approval checkpoints.
 - `judges(prompt, schema, engines=[...])` runs one `call --read-only` judge lane per engine and returns the votes.
 
+Workflow `engine` values and `workflows.engineCaps` keys accept `cursor`,
+`droid`, `codex`, `claude`, `grok`, `devin`, `opencode`, and `kimi`.
+
 ## Gates and resume
 
 A workflow gate checkpoints the whole workflow tree, not just the nested child

@@ -26,7 +26,7 @@ Delegate separates child-agent execution into `safe` and `work` modes. Safe mode
 
 ## How it works
 
-Safe mode combines prompt framing, provider flags, and isolation. Codex safe emits a read-only sandbox, Claude safe uses plan permission mode and limited tools, Droid safe avoids work-mode unsafe flags, and Kimi safe relies on temporary isolation as the effective write boundary. Work mode enables edit-capable behavior where the runtime supports it.
+Safe mode combines prompt framing, provider flags, and isolation. Codex safe emits a read-only sandbox, Claude safe uses plan permission mode and limited tools, Droid safe avoids work-mode unsafe flags, OpenCode safe injects read-only permissions and disables repository plugins with `--pure`, and Kimi safe relies on temporary isolation as the effective write boundary. Work mode enables edit-capable behavior where the runtime supports it.
 
 ## Integration points
 

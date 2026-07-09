@@ -109,6 +109,18 @@ layers. This is read-only observability; inspecting it does not modify
     "disableWebSearch": true,
     "noSubagents": false
   },
+  "devin": {
+    "binary": "devin",
+    "defaultModel": "swe-1.7",
+    "defaultReasoningEffort": null
+  },
+  "opencode": {
+    "binary": "opencode",
+    "defaultModel": null,
+    "defaultReasoningEffort": null,
+    "defaultAgent": null,
+    "models": {}
+  },
   "kimi": {
     "binary": "kimi",
     "defaultModel": "kimi-code/kimi-for-coding",
@@ -370,6 +382,44 @@ Controls local run recording.
 - `defaultReasoningEffort`: not supported in v1; must be `null`.
 - Discover live Devin model IDs with `delegate models devin --live`.
 
+### `opencode`
+
+```json
+{
+  "opencode": {
+    "binary": "opencode",
+    "defaultModel": null,
+    "defaultReasoningEffort": null,
+    "defaultAgent": null,
+    "models": {
+      "fast": "replace-with-provider/model-id",
+      "reviewer": {
+        "model": "replace-with-provider/model-id",
+        "variant": "high"
+      }
+    }
+  }
+}
+```
+
+- `binary`: path to the OpenCode executable. The curl installer normally writes
+  it under `~/.opencode/bin`, so an absolute path is useful when that directory
+  is not on `PATH`.
+- `defaultModel`: optional OpenCode `provider/model` ID. `null` lets OpenCode use
+  its configured default.
+- `defaultReasoningEffort`: optional OpenCode variant. Delegate emits it as
+  `--variant` without model validation; OpenCode silently ignores bogus variants.
+- `defaultAgent`: optional OpenCode agent name used when a run does not pass
+  `--agent`.
+- `models`: optional map of local aliases. A value may be a model string or an
+  object with `model` and `variant`, which pins that variant to the alias.
+- Delegate rejects OpenCode model, variant, agent, and alias values that start
+  with `-` in config and per-run input.
+
+`delegate models opencode --live` shells out to `opencode --pure models`. Live
+discovery returns more than 450 `provider/model` IDs and includes any models.dev
+provider, including configured custom or local providers.
+
 ### `reasoning`
 
 ```json
@@ -436,7 +486,7 @@ Supported boolean policy keys: `networkAccess`, `webSearch`, `bypassApprovalsAnd
 ```
 
 Allowed values are `auto`, `none`, and `worktree`. For Cursor, Claude, Grok,
-Droid, and Kimi safe mode, an effective value of `none` is normalized to `auto`
+Devin, OpenCode, Droid, and Kimi safe mode, an effective value of `none` is normalized to `auto`
 because those safe contracts depend on Delegate's temporary workspace/config
 boundary. Explicit per-run CLI/JSON `none` requests also emit a warning; a
 config default is normalized without a separate per-run warning. Codex safe can
@@ -444,7 +494,7 @@ use `none` because the Codex read-only sandbox remains active.
 
 Embedded defaults:
 
-- `safe`: `auto`. Cursor, Claude, Grok, Droid, Codex, and Kimi safe use temporary workspace isolation by default.
+- `safe`: `auto`. Cursor, Claude, Grok, Devin, OpenCode, Droid, Codex, and Kimi safe use temporary workspace isolation by default.
 - `work`: `none`. Work mode runs in the real workspace unless you opt into worktree isolation.
 
 ### `worktrees`

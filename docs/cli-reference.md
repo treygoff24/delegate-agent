@@ -144,7 +144,7 @@ delegate [--json] [--isolation auto|none|worktree] codex {safe,work,call} [--mod
 - Prompt text is delivered on stdin to `codex exec`; dry-run argv and tracked run manifests do not contain the prompt.
 - Model selection uses `--model` (alias from `codex.models` or a raw model ID), the run-input JSON `model`, or `codex.defaultModel`.
 - `--reasoning-effort` maps to a Codex `model_reasoning_effort` config override after the model is resolved.
-- `--output-schema FILE` is **codex-only**. Cursor, Droid, Kimi, and Claude reject it. `FILE` is a path to a JSON Schema that OpenAI enforces on Codex's final message, for machine-parseable output in fan-outs and JSON run input. Relative paths resolve against the process launch cwd, the same rule as `--prompt-file`. When set, Delegate suppresses the completion-report prompt injection for that run so the schema owns the whole final message. Missing or unreadable files fail fast before launch.
+- `--output-schema FILE` is **codex-only**. Every other engine rejects it. `FILE` is a path to a JSON Schema that OpenAI enforces on Codex's final message, for machine-parseable output in fan-outs and JSON run input. Relative paths resolve against the process launch cwd, the same rule as `--prompt-file`. When set, Delegate suppresses the completion-report prompt injection for that run so the schema owns the whole final message. Missing or unreadable files fail fast before launch.
 
 Examples:
 
@@ -247,7 +247,7 @@ delegate [--json] opencode call [--read-only] [--model <alias-or-model>] [--reas
   names, so a typo can have no effect.
 - `--agent NAME` selects an OpenCode agent for one run. With no flag,
   `opencode.defaultAgent` is used when configured.
-- `delegate models opencode --live` runs `opencode models`. Live discovery has
+- `delegate models opencode --live` runs `opencode --pure models`. Live discovery has
   returned 452+ models and includes any provider in OpenCode's models.dev
   catalog, plus configured custom or local providers.
 - OpenCode is available to workflow `agent()` calls and
@@ -438,7 +438,7 @@ Typical dry-run JSON fields:
 
 When a profile is active, dry-run and completion payloads add `authProfile` (the resolved profile name) and, when a Codex fallback profile is configured, `fallbackProfile`. Dry-run also adds `profileEnv` (the injected env map, with values redacted). These keys are omitted when no profile is active.
 
-For Cursor, Claude, Grok, Droid, and Kimi safe mode, an explicit `--isolation none`
+For Cursor, Claude, Grok, Devin, OpenCode, Droid, and Kimi safe mode, an explicit `--isolation none`
 is normalized to `auto` with a warning because those safe contracts depend on
 the temporary workspace/config boundary. Codex safe can use `none` because Codex
 still runs with its read-only sandbox.
@@ -521,11 +521,11 @@ Supported input keys:
 }
 ```
 
-- `engine`: `cursor`, `droid`, `codex`, `claude`, `grok`, `devin`, or `kimi`.
+- `engine`: `cursor`, `droid`, `codex`, `claude`, `grok`, `devin`, `opencode`, or `kimi`.
 - `mode`: `safe`, `work`, or `call`.
 - `model`: optional alias-or-id for every engine. Resolved against `<engine>.models` when it matches an alias; otherwise passed through as a raw model ID. For Droid, a positional alias remains alias-only/strict; JSON/`--model` is alias-or-id. Cursor honors an explicit model even when it differs from `cursor.defaultModel`.
 - `cwd`: optional workspace path. Git directories resolve to the repo root. Omit it for `mode: "call"`, which always uses an empty temporary cwd.
-- `isolation`: optional `auto`, `none`, or `worktree`. `null` is invalid. `mode: "call"` rejects isolation. For Cursor, Claude, Grok, Droid, and Kimi safe mode, `none` is normalized to `auto` with a warning.
+- `isolation`: optional `auto`, `none`, or `worktree`. `null` is invalid. `mode: "call"` rejects isolation. For Cursor, Claude, Grok, Devin, OpenCode, Droid, and Kimi safe mode, `none` is normalized to `auto` with a warning.
 - `reasoningEffort`: optional non-empty effort string. It overrides provider `defaultReasoningEffort` for that JSON run.
 - `progress`: optional boolean. `true` enables parent progress heartbeats on stderr; `false` disables them even when `progress.enabled` is true in config. When omitted, config `progress.enabled` applies (default `false`). `mode: "call"` rejects progress.
 - `forbidCommit`: optional boolean. `true` requires `mode: "work"` with persistent worktree isolation and fails the run if the child creates commits. `mode: "call"` rejects commit policy.
@@ -553,7 +553,7 @@ delegate --json capabilities refresh
 delegate agent-help
 ```
 
-`describe` reports version, engines, modes, supported isolation values, prompt transforms, effective policy, top-level profile config metadata, and representative argv shapes. It also includes a `commands` catalog derived from the help registry; each full entry includes stable `name`/`command`, usage, arguments, options, and launchOptions fields. Full `describe` is a strict superset of `describe --summary`, so fields present in summary keep the same names in the full payload. `models` reports configured Cursor, Droid, Codex, Claude, Grok, Devin, and Kimi model settings, including non-empty `<engine>.models` alias maps. `models <engine>` returns an advisory per-engine catalog (bundled + config); `--live` merges a harness probe for cursor, droid, and devin when available. Discovery output applies best-effort credential scrubbing, so secret-shaped values (including model IDs or paths that resemble credentials) are redacted — copy exact values from your config file rather than from scrubbed output. Agents should start with `--summary` for a compact inventory, then use raw output only when needed.
+`describe` reports version, engines, modes, supported isolation values, prompt transforms, effective policy, top-level profile config metadata, and representative argv shapes. It also includes a `commands` catalog derived from the help registry; each full entry includes stable `name`/`command`, usage, arguments, options, and launchOptions fields. Full `describe` is a strict superset of `describe --summary`, so fields present in summary keep the same names in the full payload. `models` reports configured Cursor, Droid, Codex, Claude, Grok, Devin, OpenCode, and Kimi model settings, including non-empty `<engine>.models` alias maps. `models <engine>` returns an advisory per-engine catalog (bundled + config); `--live` merges a harness probe for cursor, droid, devin, and opencode when available. Discovery output applies best-effort credential scrubbing, so secret-shaped values (including model IDs or paths that resemble credentials) are redacted; copy exact values from your config file rather than from scrubbed output. Agents should start with `--summary` for a compact inventory, then use raw output only when needed.
 
 Both `describe` and `models` include provenance fields useful for detecting installed-runtime drift:
 

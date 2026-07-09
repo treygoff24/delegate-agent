@@ -25,7 +25,7 @@ A reasoning capability records whether a runtime/model pair supports a requested
 
 ## How it works
 
-For Codex and Droid, Delegate looks up declarations in config, then cache, then bundled fallback. Cursor uses `cursor.reasoningEffortModels`. Claude uses static native labels. Kimi is unsupported in v1.
+For Codex and Droid, Delegate looks up declarations in config, then cache, then bundled fallback. Cursor uses `cursor.reasoningEffortModels`. Claude uses static native labels. OpenCode passes effort through as `--variant` without model validation. Kimi is unsupported in v1.
 
 ## Integration points
 

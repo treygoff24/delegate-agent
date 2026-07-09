@@ -27,7 +27,7 @@ Reasoning effort lets callers request provider-specific model thinking depth wit
 
 ## How it works
 
-Codex emits a config override, Droid emits `--reasoning-effort`, Cursor maps effort to configured models, Claude emits native `--effort`, and Kimi is unsupported in v1. Config declarations win over cache declarations, which win over bundled fallback data.
+Codex emits a config override, Droid emits `--reasoning-effort`, Cursor maps effort to configured models, Claude emits native `--effort`, OpenCode passes effort through as `--variant` without model validation, and Kimi is unsupported in v1. Config declarations win over cache declarations, which win over bundled fallback data.
 
 ## Integration points
 

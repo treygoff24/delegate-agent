@@ -18,6 +18,6 @@
 
 ## Prompt transport is explicit
 
-Prompt transport lives in `src/delegate_agent/prompt_transport.py` and is recorded in manifests. Codex and Claude use stdin, Droid uses private prompt files, and Cursor/Kimi use argv with public redaction placeholders.
+Prompt transport lives in `src/delegate_agent/prompt_transport.py` and is recorded in manifests. Codex, Claude, and OpenCode use stdin; Droid, Grok, and Devin use private prompt files; Cursor and Kimi use argv with public redaction placeholders.
 
 See [security](../security.md) for boundary details.
