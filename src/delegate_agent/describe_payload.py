@@ -8,6 +8,7 @@ agent-help. Reference output only — no run execution happens here.
 from __future__ import annotations
 
 import os
+import shlex
 import sys
 from pathlib import Path
 from typing import TextIO
@@ -20,6 +21,7 @@ from delegate_agent.argv_builders import (
     _grok_harness_bypass_enabled,
     build_claude_argv,
     build_codex_argv,
+    build_devin_argv,
     build_grok_argv,
 )
 from delegate_agent.command_help import SAFE_WORKSPACE_SYNC_NOTE
@@ -30,10 +32,15 @@ from delegate_agent.constants import (
     MODE_SAFE,
     MODE_WORK,
     MODEL_SUMMARY_ENGINES,
+    PROMPT_ENFORCED_SAFE_ENGINES,
+    PROMPT_INSTRUCTION_MODE_SLASH,
+    PROMPT_INSTRUCTION_MODE_WRAPPED,
 )
 from delegate_agent.errors import EXIT_OK, DelegateError
 from delegate_agent.json_types import JsonObject
 from delegate_agent.prompt_transport import (
+    DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
+    DEVIN_AGENT_CONFIG_DISPLAY,
     DROID_PROMPT_FILE_DISPLAY,
     PROMPT_FILE_ARG_PLACEHOLDER,
     PROMPT_FILE_DISPLAY,
@@ -46,8 +53,22 @@ from delegate_agent.request_build import _resolve_default_model
 CONFIG_ENV = delegate_config.CONFIG_ENV
 
 
+def _redact_keys(value: object) -> object:
+    # redact_value scrubs string leaves but leaves dict KEYS untouched; alias
+    # maps (`<engine>.models`) put user-chosen strings in key position, so a
+    # secret-shaped alias key would otherwise pass through discovery verbatim.
+    if isinstance(value, dict):
+        return {
+            redaction.redact_string(key) if isinstance(key, str) else key: _redact_keys(child)
+            for key, child in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_keys(item) for item in value]
+    return value
+
+
 def _scrub_discovery_payload(payload: JsonObject) -> JsonObject:
-    scrubbed = redaction.redact_value(payload)
+    scrubbed = _redact_keys(redaction.redact_value(payload))
     return scrubbed if isinstance(scrubbed, dict) else {"ok": False}
 
 
@@ -96,7 +117,7 @@ def _commands_catalog() -> list[JsonObject]:
 
 def _launch_options() -> list[str]:
     flags: list[str] = []
-    for command in ("cursor", "droid", "codex", "claude", "grok", "kimi"):
+    for command in ("cursor", "droid", "codex", "claude", "grok", "devin", "kimi"):
         spec = command_help.COMMAND_SPECS[command]
         for option in spec.options:
             if option.flag not in flags:
@@ -181,57 +202,125 @@ def config_resolution_payload(config_source: str, workspace: Path | None = None)
     }
 
 
+def _nonempty_engine_models(section: JsonObject) -> JsonObject | None:
+    models = section.get("models")
+    if isinstance(models, dict) and models:
+        return models
+    return None
+
+
 def models_payload(
     config: JsonObject,
     config_source: str,
     workspace: Path | None = None,
 ) -> JsonObject:
     cache = reasoning.load_reasoning_capability_cache(workspace) if workspace is not None else None
+    cursor: JsonObject = {
+        "defaultModel": config["cursor"]["defaultModel"],
+        "argvPrefix": config["cursor"]["argvPrefix"],
+        "defaultReasoningEffort": config["cursor"].get("defaultReasoningEffort"),
+        "reasoningEffortModels": config["cursor"].get("reasoningEffortModels", {}),
+    }
+    codex: JsonObject = {
+        "binary": config["codex"]["binary"],
+        "defaultModel": config["codex"]["defaultModel"],
+        "defaultReasoningEffort": config["codex"].get("defaultReasoningEffort"),
+        "profile": config["codex"]["profile"],
+    }
+    claude: JsonObject = {
+        "binary": config["claude"]["binary"],
+        "defaultModel": config["claude"]["defaultModel"],
+        "defaultReasoningEffort": config["claude"].get("defaultReasoningEffort"),
+        "workPermissionMode": config["claude"]["workPermissionMode"],
+        "noSessionPersistence": config["claude"]["noSessionPersistence"],
+        "bare": config["claude"]["bare"],
+    }
+    kimi: JsonObject = {
+        "binary": config["kimi"]["binary"],
+        "defaultModel": config["kimi"]["defaultModel"],
+        "defaultReasoningEffort": config["kimi"].get("defaultReasoningEffort"),
+    }
+    grok: JsonObject = {
+        "binary": config["grok"]["binary"],
+        "defaultModel": config["grok"]["defaultModel"],
+        "defaultReasoningEffort": config["grok"].get("defaultReasoningEffort"),
+        "workPermissionMode": config["grok"]["workPermissionMode"],
+        "safePermissionMode": config["grok"]["safePermissionMode"],
+        "safeSandbox": config["grok"]["safeSandbox"],
+        "workSandbox": config["grok"]["workSandbox"],
+        "disableWebSearch": config["grok"]["disableWebSearch"],
+        "noSubagents": config["grok"]["noSubagents"],
+    }
+    devin: JsonObject = {
+        "binary": config["devin"]["binary"],
+        "defaultModel": config["devin"]["defaultModel"],
+        "defaultReasoningEffort": config["devin"].get("defaultReasoningEffort"),
+    }
+    for engine, section in (
+        ("cursor", cursor),
+        ("codex", codex),
+        ("claude", claude),
+        ("kimi", kimi),
+        ("grok", grok),
+        ("devin", devin),
+    ):
+        models = _nonempty_engine_models(config[engine])
+        if models is not None:
+            section["models"] = models
     return {
         "ok": True,
         "configSource": config_source,
         "configResolution": config_resolution_payload(config_source, workspace),
         "runtime": runtime_payload(),
         "reasoningAliases": reasoning.build_alias_reasoning_summaries(config, cache),
-        "cursor": {
-            "defaultModel": config["cursor"]["defaultModel"],
-            "argvPrefix": config["cursor"]["argvPrefix"],
-            "defaultReasoningEffort": config["cursor"].get("defaultReasoningEffort"),
-            "reasoningEffortModels": config["cursor"].get("reasoningEffortModels", {}),
-        },
+        "cursor": cursor,
         "droid": {
             "models": config["droid"]["models"],
+            "defaultModel": config["droid"].get("defaultModel"),
+            "defaultReasoningEffort": config["droid"].get("defaultReasoningEffort"),
+        },
+        "codex": codex,
+        "claude": claude,
+        "kimi": kimi,
+        "grok": grok,
+        "devin": devin,
+    }
+
+
+def _engine_defaults_payload(config: JsonObject) -> JsonObject:
+    return {
+        "cursor": {
+            "defaultModel": config["cursor"]["defaultModel"],
+            "defaultReasoningEffort": config["cursor"].get("defaultReasoningEffort"),
+        },
+        "droid": {
+            "defaultModel": config["droid"].get("defaultModel"),
             "defaultReasoningEffort": config["droid"].get("defaultReasoningEffort"),
         },
         "codex": {
             "binary": config["codex"]["binary"],
             "defaultModel": config["codex"]["defaultModel"],
             "defaultReasoningEffort": config["codex"].get("defaultReasoningEffort"),
-            "profile": config["codex"]["profile"],
-        },
-        "claude": {
-            "binary": config["claude"]["binary"],
-            "defaultModel": config["claude"]["defaultModel"],
-            "defaultReasoningEffort": config["claude"].get("defaultReasoningEffort"),
-            "workPermissionMode": config["claude"]["workPermissionMode"],
-            "noSessionPersistence": config["claude"]["noSessionPersistence"],
-            "bare": config["claude"]["bare"],
         },
         "kimi": {
             "binary": config["kimi"]["binary"],
             "defaultModel": config["kimi"]["defaultModel"],
             "defaultReasoningEffort": config["kimi"].get("defaultReasoningEffort"),
         },
+        "claude": {
+            "binary": config["claude"]["binary"],
+            "defaultModel": config["claude"]["defaultModel"],
+            "defaultReasoningEffort": config["claude"].get("defaultReasoningEffort"),
+        },
         "grok": {
             "binary": config["grok"]["binary"],
             "defaultModel": config["grok"]["defaultModel"],
             "defaultReasoningEffort": config["grok"].get("defaultReasoningEffort"),
-            "workPermissionMode": config["grok"]["workPermissionMode"],
-            "safePermissionMode": config["grok"]["safePermissionMode"],
-            "safeSandbox": config["grok"]["safeSandbox"],
-            "workSandbox": config["grok"]["workSandbox"],
-            "disableWebSearch": config["grok"]["disableWebSearch"],
-            "noSubagents": config["grok"]["noSubagents"],
+        },
+        "devin": {
+            "binary": config["devin"]["binary"],
+            "defaultModel": config["devin"]["defaultModel"],
+            "defaultReasoningEffort": config["devin"].get("defaultReasoningEffort"),
         },
     }
 
@@ -326,7 +415,7 @@ def models_summary_payload(
                 entry = {
                     "alias": alias,
                     "provider": "droid",
-                    "command": f"delegate droid {alias} {{safe,work,call}}",
+                    "command": f"delegate droid {shlex.quote(alias)} {{safe,work,call}}",
                     "available": isinstance(model_id, str) and bool(model_id),
                     "safeSupported": True,
                     "workSupported": True,
@@ -338,6 +427,32 @@ def models_summary_payload(
                     )
                 )
                 aliases.append(entry)
+
+    for engine in MODEL_SUMMARY_ENGINES:
+        section = config.get(engine)
+        if not isinstance(section, dict):
+            continue
+        models = section.get("models")
+        if not isinstance(models, dict) or not models:
+            continue
+        for alias, model_id in sorted(models.items()):
+            if not isinstance(alias, str) or not alias:
+                continue
+            entry = {
+                "alias": alias,
+                "provider": engine,
+                "command": f"delegate {engine} {{safe,work,call}} --model {shlex.quote(alias)}",
+                "available": isinstance(model_id, str) and bool(model_id),
+                "safeSupported": True,
+                "workSupported": True,
+                "model": model_id if isinstance(model_id, str) else None,
+            }
+            entry.update(
+                _summary_reasoning_fields(
+                    _reasoning_for_alias(reasoning_aliases, engine, alias),
+                )
+            )
+            aliases.append(entry)
 
     return {
         "ok": True,
@@ -377,6 +492,7 @@ def _policy_field_support_matrix() -> JsonObject:
         "cursor": unsupported,
         "droid": unsupported,
         "kimi": unsupported,
+        "devin": unsupported,
     }
 
 
@@ -457,6 +573,25 @@ def _grok_describe_argv(
     return [PROMPT_FILE_DISPLAY if item == PROMPT_FILE_ARG_PLACEHOLDER else item for item in argv]
 
 
+def _devin_describe_argv(
+    devin: JsonObject, *, mode: str, call_read_only: bool = False
+) -> list[str]:
+    argv = build_devin_argv(
+        devin,
+        mode,
+        _resolve_default_model(devin),
+        call_read_only=call_read_only,
+    )
+    return [
+        DEVIN_AGENT_CONFIG_DISPLAY
+        if item == DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER
+        else PROMPT_FILE_DISPLAY
+        if item == PROMPT_FILE_ARG_PLACEHOLDER
+        else item
+        for item in argv
+    ]
+
+
 def describe_payload(
     config: JsonObject,
     config_source: str,
@@ -465,6 +600,7 @@ def describe_payload(
     codex = config["codex"]
     claude = config["claude"]
     grok = config["grok"]
+    devin = config["devin"]
     codex_safe_policy = delegate_config.effective_policy(config, engine="codex", mode=MODE_SAFE)
     codex_work_policy = delegate_config.effective_policy(config, engine="codex", mode=MODE_WORK)
     claude_safe_policy = _claude_runtime_policy(config, MODE_SAFE)
@@ -511,6 +647,8 @@ def describe_payload(
         workspace="<workspace>",
         policy=grok_work_policy,
     )
+    devin_safe_argv = _devin_describe_argv(devin, mode=MODE_SAFE)
+    devin_work_argv = _devin_describe_argv(devin, mode=MODE_WORK)
     return {
         "ok": True,
         "summary": False,
@@ -524,6 +662,7 @@ def describe_payload(
         "policyProfiles": list(delegate_config.POLICY_PROFILES),
         "policyFieldSupport": _policy_field_support_matrix(),
         "engineCapabilities": _engine_capabilities(),
+        "engineDefaults": _engine_defaults_payload(config),
         "effectivePolicy": {
             "codex": {
                 "safe": codex_safe_policy,
@@ -547,14 +686,31 @@ def describe_payload(
             "kimi": PROMPT_TRANSPORT_ARGV,
             "claude": PROMPT_TRANSPORT_STDIN,
             "grok": PROMPT_TRANSPORT_FILE,
+            "devin": PROMPT_TRANSPORT_FILE,
         },
         "globalOptions": _global_options(),
         "launchOptions": _launch_options(),
         "completionReportModes": list(delegate_config.COMPLETION_REPORT_MODES),
         "promptTransforms": [
-            "Always prepends mandatory skill review instructions before the operator prompt.",
+            "Prepends mandatory skill review instructions before the operator prompt "
+            "(suppressed under slash-passthrough).",
             "Optionally appends completion-report instructions unless disabled.",
         ],
+        "promptInstructionModes": {
+            "modes": [PROMPT_INSTRUCTION_MODE_WRAPPED, PROMPT_INSTRUCTION_MODE_SLASH],
+            "detection": (
+                "A top-level launch prompt starting with a harness slash command "
+                "(regex ^/[A-Za-z][A-Za-z0-9_-]*(\\s|$), e.g. Codex /goal) is sent "
+                "verbatim: skill preamble, safe-review prefix, and completion-report "
+                "suffix are all suppressed. --pass-through suppresses the skill "
+                "preamble and completion report but keeps the safe-review prefix. "
+                "Reported as promptInstructionMode in run metadata."
+            ),
+            "safeModeAllowed": {
+                engine: engine not in PROMPT_ENFORCED_SAFE_ENGINES for engine in KNOWN_ENGINES
+            },
+            "callReadOnlyAllowed": False,
+        },
         "profiles": _profiles_config_payload(config),
         "passThrough": "Opt-in raw child stdout/stderr streaming; incompatible with --json.",
         "cwdResolution": "Git directories resolve to the repository root; non-Git directories are used directly.",
@@ -568,11 +724,67 @@ def describe_payload(
                 "kimi": False,
                 "claude": False,
                 "grok": False,
+                "devin": False,
             },
         },
         "worktrees": {
             "dataHome": config["worktrees"]["dataHome"],
             "autoPrune": config["worktrees"]["autoPrune"],
+        },
+        "workflows": {
+            "registry": ".delegate/workflows/<wfId>/",
+            "idFormat": "wf_<12 hex>",
+            "files": [
+                "script.py",
+                "args.json",
+                "journal.jsonl",
+                "status.json",
+                "result.json",
+                "approval.json",
+                "workflow.lock",
+            ],
+            "config": config.get("workflows", {}),
+            "dsl": {
+                "globals": [
+                    "agent",
+                    "pipeline",
+                    "parallel",
+                    "phase",
+                    "log",
+                    "workflow",
+                    "judges",
+                    "args",
+                    "budget",
+                ],
+                "agent": {
+                    "signature": (
+                        "agent(prompt, engine=None, mode=None, model=None, effort=None, "
+                        "schema=None, label=None, phase=None, isolation=None, "
+                        "passthrough=False, timeout=None, retries=None)"
+                    ),
+                    "returns": "parent-facing output string, schema object, or None",
+                    "notes": [
+                        "engine may be a fallback list; child runs are tagged --group <wfId>.",
+                        "passthrough=True is explicit and mutually exclusive with schema= and mode='call'.",
+                        "cursor/kimi argv transport rejects prompts around 100KB; route large stages to codex/claude/droid.",
+                    ],
+                },
+                "phase": "phase(title) emits a phase event for human-readable progress.",
+                "log": "log(message) emits a log event with JSON-safe message text.",
+                "pipeline": "pipeline(items, stage1, ...) chains per item with no inter-stage barrier; stage(prev, item, index).",
+                "parallel": "parallel([lambda: ...]) is a barrier and preserves order.",
+                "workflow": "workflow(name_or_path, args=None, gate=False) nests to depth 3; gate=True pauses through resume/approve.",
+                "judges": "judges(prompt, schema, engines=[...]) runs call --read-only judge lanes and returns votes.",
+                "budget": "run-count budget: total, spent(), remaining().",
+                "schemaSubset": [
+                    "type",
+                    "required",
+                    "properties",
+                    "items",
+                    "enum",
+                    "additionalProperties",
+                ],
+            },
         },
         "modeMapping": {
             "cursor": {
@@ -717,6 +929,22 @@ def describe_payload(
                     "Tracked runs use --output-format streaming-json; pass-through uses plain.",
                 ],
             },
+            "devin": {
+                "safe": devin_safe_argv,
+                "safeNotes": [
+                    SAFE_WORKSPACE_SYNC_NOTE,
+                    "Uses Devin --prompt-file in print mode; Delegate materializes the effective prompt in a temp file.",
+                    "Safe mode passes a Delegate-generated --agent-config that denies edit/write/exec and mcp__* while using --permission-mode auto.",
+                    "Devin safe mode allows slash passthrough because read-only enforcement is argv-level.",
+                ],
+                "work": devin_work_argv,
+                "workNotes": [
+                    "Work mode uses --permission-mode dangerous because non-interactive Devin rejects unapproved edit/exec tools.",
+                    "Model selection uses --model (alias from devin.models or a raw model ID), optional JSON input model, or devin.defaultModel; Delegate does not validate model names.",
+                    "Reasoning effort is unsupported for Devin in v1.",
+                    "Prompt uses --prompt-file plus -p; tracked and call runs parse plain stdout.",
+                ],
+            },
         },
         "commands": _commands_catalog(),
         "recommendedDiscovery": [
@@ -744,6 +972,13 @@ def describe_summary_payload(
         "profiles": _profiles_config_payload(config),
         "globalOptions": _global_options(),
         "launchOptions": _launch_options(),
+        "workflows": {
+            "registry": ".delegate/workflows/<wfId>/",
+            "idFormat": "wf_<12 hex>",
+            "commands": [
+                command for command in command_help.COMMAND_SPECS if command.startswith("workflow")
+            ],
+        },
         "commands": _commands_catalog(),
         "recommendedDiscovery": [
             "delegate --json describe --summary",
@@ -751,6 +986,13 @@ def describe_summary_payload(
             "delegate --json help <command>",
         ],
     }
+
+
+def _print_engine_aliases(section: JsonObject, stdout: TextIO) -> None:
+    models = section.get("models")
+    if isinstance(models, dict):
+        for alias, model_id in sorted(models.items()):
+            print(f"  {alias} -> {_text_or_none(model_id)}", file=stdout)
 
 
 def _emit_models_text(payload: JsonObject, config_source: str, stdout: TextIO) -> None:
@@ -764,13 +1006,15 @@ def _emit_models_text(payload: JsonObject, config_source: str, stdout: TextIO) -
             f"({_text_argv_prefix_label(cursor.get('argvPrefix'))})",
             file=stdout,
         )
-    print("droid:", file=stdout)
+        _print_engine_aliases(cursor, stdout)
     droid = payload.get("droid")
+    droid_default = droid.get("defaultModel") if isinstance(droid, dict) else None
+    if isinstance(droid_default, str) and droid_default:
+        print(f"droid: defaultModel={droid_default}", file=stdout)
+    else:
+        print("droid:", file=stdout)
     if isinstance(droid, dict):
-        models = droid.get("models")
-        if isinstance(models, dict):
-            for alias, model_id in sorted(models.items()):
-                print(f"  {alias} -> {_text_or_none(model_id)}", file=stdout)
+        _print_engine_aliases(droid, stdout)
     codex = payload.get("codex")
     if isinstance(codex, dict):
         profile = codex.get("profile")
@@ -782,6 +1026,7 @@ def _emit_models_text(payload: JsonObject, config_source: str, stdout: TextIO) -
             f"profile={profile_label}",
             file=stdout,
         )
+        _print_engine_aliases(codex, stdout)
     claude = payload.get("claude")
     if isinstance(claude, dict):
         print(
@@ -791,6 +1036,7 @@ def _emit_models_text(payload: JsonObject, config_source: str, stdout: TextIO) -
             f"workPermissionMode={claude.get('workPermissionMode')}",
             file=stdout,
         )
+        _print_engine_aliases(claude, stdout)
     grok = payload.get("grok")
     if isinstance(grok, dict):
         print(
@@ -800,6 +1046,16 @@ def _emit_models_text(payload: JsonObject, config_source: str, stdout: TextIO) -
             f"workPermissionMode={grok.get('workPermissionMode')}",
             file=stdout,
         )
+        _print_engine_aliases(grok, stdout)
+    devin = payload.get("devin")
+    if isinstance(devin, dict):
+        print(
+            "devin: "
+            f"binary={_text_or_none(devin.get('binary'))} "
+            f"defaultModel={_text_or_none(devin.get('defaultModel'))}",
+            file=stdout,
+        )
+        _print_engine_aliases(devin, stdout)
     kimi = payload.get("kimi")
     if isinstance(kimi, dict):
         print(
@@ -808,6 +1064,7 @@ def _emit_models_text(payload: JsonObject, config_source: str, stdout: TextIO) -
             f"defaultModel={_text_or_none(kimi.get('defaultModel'))}",
             file=stdout,
         )
+        _print_engine_aliases(kimi, stdout)
     runtime = payload.get("runtime")
     if isinstance(runtime, dict):
         print(
@@ -824,7 +1081,20 @@ def emit_models(
     *,
     workspace: Path | None = None,
     summary: bool = False,
+    engine: str | None = None,
+    live: bool = False,
 ) -> int:
+    if engine is not None:
+        from delegate_agent import model_discovery
+
+        payload = _scrub_discovery_payload(
+            model_discovery.engine_models_payload(config, engine, live=live)
+        )
+        if json_mode:
+            delegate_rendering.print_json(payload, stdout)
+        else:
+            model_discovery.emit_engine_models_text(payload, stdout)
+        return EXIT_OK
     if summary:
         payload = _scrub_discovery_payload(models_summary_payload(config, config_source, workspace))
         if json_mode:
@@ -881,7 +1151,7 @@ def emit_describe(
     print(f"delegate {VERSION}", file=stdout)
     print(f"config: {payload['configPath']} ({payload['configSource']})", file=stdout)
     print(f"runtime: {payload['runtime']['modulePath']}", file=stdout)
-    print("engines: cursor, droid, codex, kimi, claude, grok", file=stdout)
+    print(f"engines: {', '.join(KNOWN_ENGINES)}", file=stdout)
     print("modes: safe, work", file=stdout)
     print("prompt sources: direct, --prompt-file, stdin", file=stdout)
     print("global options must appear before the subcommand", file=stdout)
@@ -925,18 +1195,20 @@ Good defaults:
   delegate claude work "Implement the scoped fix, run the named check, and report changed files."
   delegate grok safe "Review this workspace. Do not edit files."
   delegate grok work "Implement the scoped fix, run the named check, and report changed files."
+  delegate devin safe "Review this workspace. Do not edit files."
+  delegate devin work "Implement the scoped fix, run the named check, and report changed files."
   delegate kimi safe "Review this repo for regressions; report file/line/severity."
   delegate kimi work "Implement the scoped task; report changed files and tests."
 
 Kimi:
   - {SAFE_WORKSPACE_SYNC_NOTE}
-  - Model selection uses kimi.defaultModel in config or optional JSON input model; no CLI model alias in v1.
+  - Model selection uses --model (alias from kimi.models or a raw model ID), optional JSON input model, or kimi.defaultModel in config.
   - Reasoning effort is unsupported for Kimi in v1.
   - No CLI workspace flag; Delegate sets subprocess cwd.
 
 Codex:
   - {SAFE_WORKSPACE_SYNC_NOTE}
-  - Model selection uses codex.defaultModel in config or optional JSON input model; no CLI model alias in v1.
+  - Model selection uses --model (alias from codex.models or a raw model ID), optional JSON input model, or codex.defaultModel in config.
   - Codex profile (codex.profile) is config-only; run input JSON must not include profile.
 
 Claude:
@@ -960,12 +1232,20 @@ Grok:
   - Tracked runs use streaming-json; pass-through uses plain output.
   - --output-schema is unsupported in v1 because Grok --json-schema forces final json output.
 
+Devin:
+  - Uses Devin CLI print mode with --prompt-file and -p; Delegate materializes the effective prompt in a temp file.
+  - {SAFE_WORKSPACE_SYNC_NOTE}
+  - Safe and call --read-only pass a Delegate-generated --agent-config deny-list for edit/write/exec and mcp__* plus --permission-mode auto.
+  - Work and default call mode use --permission-mode dangerous because Devin print mode rejects unapproved edit/exec tools.
+  - Model selection uses --model (alias from devin.models or a raw model ID), optional JSON input model, or devin.defaultModel; Delegate lets Devin validate unknown model names.
+  - Reasoning effort is unsupported for Devin in v1.
+
 Droid modes:
   - {SAFE_WORKSPACE_SYNC_NOTE}
   - Droid safe mode remains read-only: no --auto, --use-spec, or unsafe skip.
   - Uses Factory Droid --skip-permissions-unsafe, not --auto high.
   - Work mode is intentionally no-prompt; use only for bounded tasks in workspaces you trust.
-  - --reasoning-effort requires a resolved Droid model alias from droid.models.
+  - Positional MODEL_ALIAS is alias-only (strict); --model is alias-or-id pass-through. Give one or the other, not both. With neither, droid.defaultModel is used.
 
 Cursor safe mode:
   - {SAFE_WORKSPACE_SYNC_NOTE}

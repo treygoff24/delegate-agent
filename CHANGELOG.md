@@ -5,6 +5,48 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-07-09
+
+Three features in one train: Delegate Workflows (multi-agent orchestration with durable resume), per-run model selection + discovery across all seven engines, and the Devin engine. Model selection was built as the inaugural Delegate Workflows dogfood: three implementation waves plus a twelve-round two-lane adversarial review loop driven through `workflow run --resume`.
+
+### Added
+
+- Per-run model selection: every engine accepts `--model <alias-or-id>` (alias
+  from `<engine>.models`, or a raw model ID passed through verbatim). Alias maps
+  are generalized beyond Droid to all engines; Droid keeps its optional
+  positional alias and gains optional `droid.defaultModel`. `delegate models
+  <engine>` merges bundled + config catalogs; `--live` probes cursor/droid/devin
+  when available. Non-droid aliases also appear in `models` / `models --summary`.
+- Delegate Workflows: a Python DSL supervisor for multi-agent fan-out, durable
+  journaling, nested workflow calls, schema-validated `agent()` results,
+  approval gates, resume, kill, saved workflows, and workflow discovery in
+  `describe`/help/docs. Status/list report `stalled` when a supervisor died
+  without finalizing (non-blocking lock probe; `wait`/`watch` exit instead of
+  hanging), and supervisor failures record a traceback tail in the journal,
+  result, and status.
+- Slash pass-through: launch prompts that intentionally start with a harness
+  slash command can be sent verbatim when the target mode's safety boundary does
+  not depend on Delegate's prompt preamble. `--pass-through` also suppresses the
+  skill preamble and completion-report suffix while preserving safe-mode
+  boundaries.
+- Added `devin` as a first-class engine for Cognition's Devin CLI across
+  `safe`, `work`, and `call` modes. Devin uses prompt-file transport,
+  config-driven model selection (`devin.defaultModel`, default `swe-1.7`),
+  read-only safe/call enforcement through a Delegate-generated
+  `--agent-config`, and `--permission-mode dangerous` for work/default-call
+  print-mode runs.
+
+### Changed
+
+- Config migration: a `<engine>.models` alias key named after a mode (`safe`,
+  `work`, or `call`) or after its own engine is now a config validation error —
+  rename the alias (aliases naming a *different* engine, like a `droid.models`
+  alias called `grok`, remain valid). Cursor input-JSON `"model"` values that differ from
+  `cursor.defaultModel` are now honored instead of rejected. Droid run-input
+  JSON `"model"` is now alias-or-id like `--model`: a `droid.models` key keeps
+  alias semantics, anything else passes through verbatim to the harness
+  (previously a hard `invalid_alias` error).
+
 ## [0.11.0] - 2026-07-05
 
 Profile-guard calibration fix for issue #9: a shell carrying `AI_PROFILE=work|personal` with no matching `~/.delegate/config.<profile>.json` no longer presents a half-configured install as a total CLI outage.

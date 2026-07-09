@@ -108,6 +108,14 @@ class UtilityModuleTests(unittest.TestCase):
             prompt_transport.DROID_PROMPT_FILE_ARG_PLACEHOLDER, "<delegate-prompt-file>"
         )
         self.assertEqual(prompt_transport.DROID_PROMPT_FILE_DISPLAY, "<prompt file>")
+        self.assertEqual(
+            prompt_transport.DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
+            "<delegate-devin-agent-config>",
+        )
+        self.assertEqual(
+            prompt_transport.DEVIN_AGENT_CONFIG_DISPLAY,
+            "<devin agent config>",
+        )
 
     def test_run_registry_commands_can_include_cwd(self):
         self.assertEqual(run_registry.snapshot_command("codex"), "delegate snapshot codex")

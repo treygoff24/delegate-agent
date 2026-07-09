@@ -28,6 +28,7 @@ from delegate_agent import (
     run_registry,
     worktree_summary,
 )
+from delegate_agent.constants import PROMPT_INSTRUCTION_MODE_WRAPPED
 from delegate_agent.json_types import JsonObject
 
 STDOUT_LOG = run_registry.STDOUT_LOG
@@ -70,6 +71,7 @@ SKILL_REVIEW_PREFIX = prompt_instructions.SKILL_REVIEW_PREFIX
 COMPLETION_REPORT_SUFFIX = prompt_instructions.COMPLETION_REPORT_SUFFIX
 prepend_skill_review_instructions = prompt_instructions.prepend_skill_review_instructions
 append_completion_report_instructions = prompt_instructions.append_completion_report_instructions
+detect_slash_command = prompt_instructions.detect_slash_command
 
 
 def _bounded_call_fallback_text(text: str) -> str:
@@ -129,6 +131,7 @@ class RunContext:
     include_dirty: bool = False
     synced_files: int = 0
     group: str | None = None
+    prompt_instruction_mode: str = PROMPT_INSTRUCTION_MODE_WRAPPED
 
 
 def write_manifest(run_path: Path, manifest: JsonObject) -> None:
@@ -230,6 +233,7 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
         "startedAt": ctx.started_at,
         "argv": argv,
         "promptTransport": ctx.prompt_transport,
+        "promptInstructionMode": ctx.prompt_instruction_mode,
     }
     run_metadata.add_run_metadata_payload_fields(payload, ctx)
     reasoning.add_reasoning_payload_fields(payload, ctx)
@@ -834,6 +838,7 @@ def completion_json_payload(
     if ctx.include_dirty:
         payload["includeDirty"] = True
         payload["syncedFiles"] = ctx.synced_files
+    payload["promptInstructionMode"] = ctx.prompt_instruction_mode
     run_metadata.add_run_metadata_payload_fields(payload, ctx)
     reasoning.add_reasoning_payload_fields(payload, ctx)
     if assistant_meta is not None:
@@ -908,24 +913,47 @@ def _materialize_prompt_file_argv(
     *,
     prompt_file_text: str | None,
     prompt_file_placeholder: str | None,
+    agent_config_text: str | None = None,
+    agent_config_placeholder: str | None = None,
+    agent_config_dir: Path | None = None,
 ) -> tuple[list[str], Path | None]:
-    if prompt_file_text is None:
+    if prompt_file_text is None and agent_config_text is None:
         return list(argv), None
-    if prompt_file_placeholder is None or prompt_file_placeholder not in argv:
-        raise ValueError("prompt_file_placeholder must be present in argv")
-    temp_dir = Path(tempfile.mkdtemp(prefix="delegate-prompt-"))
-    os.chmod(temp_dir, run_registry.PRIVATE_DIR_MODE)
-    prompt_path = temp_dir / "prompt.txt"
-    fd = os.open(
-        prompt_path,
-        os.O_CREAT | os.O_EXCL | os.O_WRONLY,
-        run_registry.PRIVATE_FILE_MODE,
-    )
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(prompt_file_text)
-    return [
-        str(prompt_path) if item == prompt_file_placeholder else item for item in argv
-    ], temp_dir
+    temp_dir: Path | None = None
+    replacements: dict[str, str] = {}
+    if prompt_file_text is not None:
+        if prompt_file_placeholder is None or prompt_file_placeholder not in argv:
+            raise ValueError("prompt_file_placeholder must be present in argv")
+        temp_dir = Path(tempfile.mkdtemp(prefix="delegate-prompt-"))
+        os.chmod(temp_dir, run_registry.PRIVATE_DIR_MODE)
+        prompt_path = temp_dir / "prompt.txt"
+        fd = os.open(
+            prompt_path,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+            run_registry.PRIVATE_FILE_MODE,
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(prompt_file_text)
+        replacements[prompt_file_placeholder] = str(prompt_path)
+    if agent_config_text is not None:
+        if agent_config_placeholder is None or agent_config_placeholder not in argv:
+            raise ValueError("agent_config_placeholder must be present in argv")
+        if agent_config_dir is None:
+            if temp_dir is None:
+                temp_dir = Path(tempfile.mkdtemp(prefix="delegate-prompt-"))
+                os.chmod(temp_dir, run_registry.PRIVATE_DIR_MODE)
+            agent_config_dir = temp_dir
+        path = agent_config_dir / "agent-config.json"
+        fd = os.open(
+            path,
+            os.O_CREAT | os.O_TRUNC | os.O_WRONLY,
+            run_registry.PRIVATE_FILE_MODE,
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(agent_config_text)
+        os.chmod(path, run_registry.PRIVATE_FILE_MODE)
+        replacements[agent_config_placeholder] = str(path)
+    return [replacements.get(item, item) for item in argv], temp_dir
 
 
 def _cleanup_prompt_file_dir(temp_dir: Path | None) -> None:
@@ -1606,6 +1634,8 @@ def execute_tracked(
     stdin_text: str | None = None,
     prompt_file_text: str | None = None,
     prompt_file_placeholder: str | None = None,
+    agent_config_text: str | None = None,
+    agent_config_placeholder: str | None = None,
     manifest_argv: list[str] | None = None,
     progress: bool = False,
     progress_initial_delay_sec: float = PROGRESS_INITIAL_DELAY_SEC,
@@ -1627,6 +1657,9 @@ def execute_tracked(
         run_argv,
         prompt_file_text=prompt_file_text,
         prompt_file_placeholder=prompt_file_placeholder,
+        agent_config_text=agent_config_text,
+        agent_config_placeholder=agent_config_placeholder,
+        agent_config_dir=files.run_path,
     )
     workspace_baseline = profiles.capture_workspace_baseline(cwd) if ctx.mode == "work" else None
     fallback_extra: JsonObject | None = None
@@ -1711,6 +1744,8 @@ def execute_call(
     stdin_text: str | None = None,
     prompt_file_text: str | None = None,
     prompt_file_placeholder: str | None = None,
+    agent_config_text: str | None = None,
+    agent_config_placeholder: str | None = None,
     env_overrides: dict[str, str] | None = None,
 ) -> CallResult:
     """Run a one-shot stateless model call and return parsed assistant text."""
@@ -1720,6 +1755,8 @@ def execute_call(
         argv,
         prompt_file_text=prompt_file_text,
         prompt_file_placeholder=prompt_file_placeholder,
+        agent_config_text=agent_config_text,
+        agent_config_placeholder=agent_config_placeholder,
     )
     env = profiles.child_environment(overrides=env_overrides)
     started = time.monotonic()
@@ -1790,6 +1827,8 @@ def execute_passthrough(
     stdin_text: str | None = None,
     prompt_file_text: str | None = None,
     prompt_file_placeholder: str | None = None,
+    agent_config_text: str | None = None,
+    agent_config_placeholder: str | None = None,
     env_overrides: dict[str, str] | None = None,
 ) -> int:
     """Stream child stdout/stderr to the caller. JSON mode is not supported."""
@@ -1799,6 +1838,8 @@ def execute_passthrough(
         argv,
         prompt_file_text=prompt_file_text,
         prompt_file_placeholder=prompt_file_placeholder,
+        agent_config_text=agent_config_text,
+        agent_config_placeholder=agent_config_placeholder,
     )
     env = profiles.child_environment(overrides=env_overrides)
     try:

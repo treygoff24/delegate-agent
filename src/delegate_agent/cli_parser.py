@@ -31,6 +31,7 @@ from delegate_agent.constants import (
     ENGINES_PROSE,
     KNOWN_ENGINES,
     MODELESS_ENGINES,
+    VALID_MODES,
     validate_mode,
 )
 from delegate_agent.errors import DelegateError
@@ -42,6 +43,7 @@ from delegate_agent.request_models import (
     RunJsonOptions,
 )
 from delegate_agent.run_output_commands import RUN_OUTPUT_DEFAULT_TAIL_LINES
+from delegate_agent.workflows import commands as workflow_commands
 
 MISPLACED_GLOBAL_OPTIONS = frozenset(
     {
@@ -174,12 +176,37 @@ def parse_simple_inspection_subcommand(
     if any(command_help.is_help_token(token) for token in rest):
         return help_command(json_mode, name)
     summary = False
+    engine: str | None = None
+    live = False
     if name in INSPECTION_OPTION_SUBCOMMANDS:
         for token in rest:
             if token == "--summary":
                 summary = True
                 continue
+            if name == "models" and token == "--live":
+                live = True
+                continue
+            if name == "models" and not token.startswith("-"):
+                if engine is not None:
+                    require_no_extra([token], name)
+                engine = token
+                continue
             require_no_extra([token], name)
+        if live and engine is None:
+            raise DelegateError(
+                "invalid_option_combination",
+                "--live requires an engine argument (delegate models <engine> --live).",
+            )
+        if summary and engine is not None:
+            raise DelegateError(
+                "invalid_option_combination",
+                "--summary is not supported with models <engine>.",
+            )
+        if engine is not None and engine not in KNOWN_ENGINES:
+            raise DelegateError(
+                "invalid_engine",
+                f"engine must be {ENGINES_PROSE}.",
+            )
     else:
         require_no_extra(rest, name)
     return ParsedCommand(
@@ -192,7 +219,7 @@ def parse_simple_inspection_subcommand(
             isolation=isolation,
             auth_profile=auth_profile,
         ),
-        inspection=InspectionOptions(summary=summary),
+        inspection=InspectionOptions(summary=summary, engine=engine, live=live),
     )
 
 
@@ -496,6 +523,13 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
                 "--isolation is not supported with delegate worktree commands.",
             )
         return parse_worktree(rest, json_mode, cwd)
+    if subcommand == "workflow":
+        if isolation is not None:
+            raise DelegateError(
+                "invalid_option_combination",
+                "--isolation is not supported with delegate workflow commands.",
+            )
+        return parse_workflow(rest, json_mode, cwd)
     if subcommand == "profiles":
         if isolation is not None:
             raise DelegateError(
@@ -676,6 +710,7 @@ def parse_modeless_engine(
         isolation,
         read_only,
         include_dirty,
+        model,
     ) = parse_prompt_tail(rest[1:], json_mode, isolation, command_prefix=[engine, mode])
     forbid_commit_implied_isolation = False
     if forbid_commit and mode == "work" and isolation is None:
@@ -711,6 +746,7 @@ def parse_modeless_engine(
             include_dirty=include_dirty,
             read_only=read_only,
             dry_run=dry_run,
+            model=model,
         ),
     )
 
@@ -732,24 +768,42 @@ def parse_droid(
     # Help wins before the alias is consumed: `droid --help` needs no alias.
     if rest and command_help.is_help_token(rest[0]):
         return help_command(json_mode, topic)
-    if len(rest) < 2:
-        raise DelegateError("missing_droid_args", "droid requires MODEL_ALIAS and mode.")
-    model_alias = rest[0]
-    if model_alias.startswith("-"):
+    if not rest:
+        raise DelegateError(
+            "missing_droid_args",
+            "droid requires mode (and optionally a MODEL_ALIAS before the mode).",
+        )
+    if rest[0].startswith("-"):
         raise DelegateError(
             "misplaced_global_option", "Global options must appear before the subcommand."
         )
-    # Help wins after the alias, before the mode: `droid x --help`.
-    if command_help.is_help_token(rest[1]):
-        return help_command(json_mode, topic)
-    mode = rest[1]
-    if mode.startswith("-"):
-        raise DelegateError(
-            "misplaced_global_option", "Global options must appear before the subcommand."
-        )
-    validate_mode(mode)
-    # Help wins after the mode, before prompt capture: `droid x safe --help`.
-    if len(rest) >= 3 and command_help.is_help_token(rest[2]):
+    # First token is the mode when it is a known mode name; otherwise it is the
+    # positional alias and the mode follows.
+    if rest[0] in VALID_MODES:
+        model_alias = None
+        mode = rest[0]
+        tail = rest[1:]
+        command_prefix = ["droid", mode]
+    else:
+        if len(rest) < 2:
+            raise DelegateError(
+                "missing_droid_args",
+                "droid requires MODEL_ALIAS and mode.",
+            )
+        model_alias = rest[0]
+        # Help wins after the alias, before the mode: `droid x --help`.
+        if command_help.is_help_token(rest[1]):
+            return help_command(json_mode, topic)
+        mode = rest[1]
+        if mode.startswith("-"):
+            raise DelegateError(
+                "misplaced_global_option", "Global options must appear before the subcommand."
+            )
+        validate_mode(mode)
+        tail = rest[2:]
+        command_prefix = ["droid", model_alias, mode]
+    # Help wins after the mode, before prompt capture: `droid [alias] safe --help`.
+    if tail and command_help.is_help_token(tail[0]):
         return help_command(json_mode, topic)
     (
         prompt_file,
@@ -762,18 +816,18 @@ def parse_droid(
         isolation,
         read_only,
         include_dirty,
-    ) = parse_prompt_tail(
-        rest[2:], json_mode, isolation, command_prefix=["droid", model_alias, mode]
-    )
+        model,
+    ) = parse_prompt_tail(tail, json_mode, isolation, command_prefix=command_prefix)
     forbid_commit_implied_isolation = False
     if forbid_commit and mode == "work" and isolation is None:
         isolation = "worktree"
         forbid_commit_implied_isolation = True
     if forbid_commit and mode == "work" and isolation == "none":
+        droid_tokens = ["droid", *([model_alias] if model_alias else []), mode]
         raise DelegateError(
             "invalid_option_combination",
             "--forbid-commit cannot be combined with --isolation none. "
-            f"Corrected command: {_shell_command(['--isolation', 'worktree', 'droid', model_alias, mode, '--forbid-commit', *(prompt_parts or [])])}.",
+            f"Corrected command: {_shell_command(['--isolation', 'worktree', *droid_tokens, '--forbid-commit', *(prompt_parts or [])])}.",
         )
     return ParsedCommand(
         "droid",
@@ -800,6 +854,7 @@ def parse_droid(
             include_dirty=include_dirty,
             read_only=read_only,
             dry_run=dry_run,
+            model=model,
         ),
     )
 
@@ -820,7 +875,7 @@ def parse_dry_run(
     if not rest:
         raise DelegateError(
             "missing_engine",
-            "dry-run requires cursor, droid, codex, kimi, claude, or grok.",
+            f"dry-run requires {ENGINES_PROSE}.",
         )
     engine = rest[0]
     if engine.startswith("-"):
@@ -877,6 +932,7 @@ def parse_prompt_tail(
     str | None,
     bool,
     bool,
+    str | None,
 ]:
     prompt_file: str | None = None
     output_schema: str | None = None
@@ -885,6 +941,7 @@ def parse_prompt_tail(
     forbid_commit = False
     include_dirty = False
     read_only = False
+    model: str | None = None
     prompt_parts: list[str] = []
     i = 0
     while i < len(rest):
@@ -953,6 +1010,26 @@ def parse_prompt_tail(
             except reasoning.ReasoningCapabilityError as exc:
                 corrected = corrected_drop_option_suffix(command_prefix, rest, i, takes_value=True)
                 raise DelegateError(exc.error, f"{exc.message}{corrected}") from exc
+            i += 2
+            continue
+        if token == "--model":
+            if model is not None:
+                raise DelegateError(
+                    "invalid_model",
+                    "Only one --model is allowed.",
+                )
+            if i + 1 >= len(rest):
+                raise DelegateError(
+                    "missing_model",
+                    "--model requires a value.",
+                )
+            value = rest[i + 1]
+            if not value.strip() or value.startswith("-") or command_help.is_help_token(value):
+                raise DelegateError(
+                    "missing_model",
+                    "--model requires a non-empty value.",
+                )
+            model = value
             i += 2
             continue
         if token == "--progress":
@@ -1032,6 +1109,7 @@ def parse_prompt_tail(
         isolation,
         read_only,
         include_dirty,
+        model,
     )
 
 
@@ -1383,6 +1461,180 @@ def parse_cancel(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCom
         "cancel",
         global_options=GlobalOptions(json_mode=json_mode, cwd=cwd),
         cancel_command=wait_cancel_commands.CancelCommand(tuple(handles), json_mode=json_mode),
+    )
+
+
+def parse_workflow(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
+    rest, json_mode = consume_json_option(rest, json_mode)
+    if not rest or command_help.is_help_token(rest[0]):
+        return help_command(json_mode, "workflow")
+    action = rest[0]
+    args = rest[1:]
+    if action == "_supervise":
+        if len(args) != 1:
+            raise DelegateError("missing_workflow", "workflow _supervise requires <wfId>.")
+        return ParsedCommand(
+            "workflow",
+            global_options=GlobalOptions(json_mode=json_mode, cwd=cwd),
+            workflow_command=workflow_commands.WorkflowCommand(
+                action="_supervise", wf_id=args[0], json_mode=json_mode
+            ),
+        )
+    if any(command_help.is_help_token(token) for token in args):
+        return help_command(json_mode, f"workflow {action}")
+    if action in {"run", "check", "save"}:
+        return _parse_workflow_path_action(action, args, json_mode, cwd)
+    if action in {"status", "watch", "events", "result", "wait", "approve", "kill"}:
+        return _parse_workflow_id_action(action, args, json_mode, cwd)
+    if action == "list":
+        require_no_extra(args, "workflow list")
+        return ParsedCommand(
+            "workflow",
+            global_options=GlobalOptions(json_mode=json_mode, cwd=cwd),
+            workflow_command=workflow_commands.WorkflowCommand("list", json_mode=json_mode),
+        )
+    raise DelegateError("unknown_workflow_action", f"Unknown workflow action: {action}")
+
+
+def _parse_workflow_path_action(
+    action: str,
+    args: list[str],
+    json_mode: bool,
+    cwd: str | None,
+) -> ParsedCommand:
+    script: str | None = None
+    args_json: str | None = None
+    budget: int | None = None
+    dry_run = False
+    resume: str | None = None
+    name: str | None = None
+    i = 0
+    while i < len(args):
+        token = args[i]
+        if token == "--args" and action == "run":
+            if i + 1 >= len(args):
+                raise DelegateError("missing_workflow_args", "workflow run --args requires JSON.")
+            args_json = args[i + 1]
+            i += 2
+            continue
+        if token == "--budget" and action == "run":
+            budget, i = parse_required_positive_int_option(
+                args,
+                i,
+                option_label="workflow run --budget",
+                missing_error="missing_budget",
+                invalid_error="invalid_budget",
+            )
+            continue
+        if token == "--dry-run" and action == "run":
+            dry_run = True
+            i += 1
+            continue
+        if token == "--resume" and action == "run":
+            if i + 1 >= len(args):
+                raise DelegateError("missing_workflow", "workflow run --resume requires <wfId>.")
+            resume = args[i + 1]
+            i += 2
+            continue
+        if token == "--name" and action in {"run", "save"}:
+            if i + 1 >= len(args):
+                raise DelegateError("missing_workflow_name", "workflow --name requires a name.")
+            name = args[i + 1]
+            i += 2
+            continue
+        if token.startswith("-"):
+            raise DelegateError(
+                "unknown_option", unknown_option_message(f"workflow {action}", token)
+            )
+        if script is not None:
+            raise DelegateError(
+                "unexpected_argument", f"workflow {action} accepts one script path."
+            )
+        script = token
+        i += 1
+    if action == "check" and (script is None or name is not None or resume is not None):
+        raise DelegateError("missing_workflow_script", "workflow check requires <script.py>.")
+    if action == "save" and (script is None or name is None or resume is not None):
+        raise DelegateError("missing_workflow_script", f"workflow {action} requires <script.py>.")
+    if action == "run":
+        target_count = sum(1 for item in (script, name, resume) if item is not None)
+        if target_count != 1:
+            raise DelegateError(
+                "invalid_workflow_target",
+                "workflow run requires exactly one of <script.py>, --name, or --resume.",
+            )
+        if resume is not None and args_json is not None:
+            raise DelegateError(
+                "invalid_workflow_args",
+                "workflow run --resume does not accept --args; resume uses the pinned args.",
+            )
+    if action == "run" and resume is None and script is None and name is None:
+        raise DelegateError(
+            "missing_workflow_script", "workflow run requires <script.py>, --name, or --resume."
+        )
+    return ParsedCommand(
+        "workflow",
+        global_options=GlobalOptions(json_mode=json_mode, cwd=cwd),
+        workflow_command=workflow_commands.WorkflowCommand(
+            action,
+            script=script,
+            args_json=args_json,
+            budget=budget,
+            dry_run=dry_run,
+            resume=resume,
+            name=name,
+            json_mode=json_mode,
+        ),
+    )
+
+
+def _parse_workflow_id_action(
+    action: str,
+    args: list[str],
+    json_mode: bool,
+    cwd: str | None,
+) -> ParsedCommand:
+    wf_id: str | None = None
+    since = 0
+    timeout: int | None = None
+    i = 0
+    while i < len(args):
+        token = args[i]
+        if token == "--since" and action in {"events", "watch"}:
+            if i + 1 >= len(args):
+                raise DelegateError("missing_since", f"workflow {action} --since requires a value.")
+            since = parse_non_negative_int(args[i + 1], option=f"workflow {action} --since")
+            i += 2
+            continue
+        if token == "--timeout" and action == "wait":
+            timeout, i = parse_required_positive_int_option(
+                args,
+                i,
+                option_label="workflow wait --timeout",
+                missing_error="missing_timeout",
+                invalid_error="invalid_timeout",
+            )
+            continue
+        if token.startswith("-"):
+            raise DelegateError(
+                "unknown_option", unknown_option_message(f"workflow {action}", token)
+            )
+        if wf_id is not None:
+            raise DelegateError("unexpected_argument", f"workflow {action} accepts one wfId.")
+        wf_id = token
+        i += 1
+    if wf_id is None:
+        raise DelegateError("missing_workflow", f"workflow {action} requires <wfId>.")
+    return ParsedCommand(
+        "workflow",
+        global_options=GlobalOptions(json_mode=json_mode, cwd=cwd),
+        workflow_command=workflow_commands.WorkflowCommand(
+            action,
+            wf_id=wf_id,
+            since=since,
+            timeout=timeout,
+            json_mode=json_mode,
+        ),
     )
 
 

@@ -33,6 +33,7 @@ def load_delegate():
 TOP_LEVEL_COMMANDS = (
     "cursor",
     "claude",
+    "devin",
     "codex",
     "droid",
     "dry-run",
@@ -44,6 +45,7 @@ TOP_LEVEL_COMMANDS = (
     "wait",
     "cancel",
     "worktree",
+    "workflow",
     "models",
     "describe",
     "agent-help",
@@ -196,7 +198,7 @@ class HelpSubcommandTests(HelpCliTestBase):
                 self.assertIn(f"delegate --json {command} --summary", out)
 
     def test_engine_help_includes_progress_and_commit_policy_launch_options(self):
-        for command in ("cursor", "claude", "codex", "droid", "kimi", "dry-run"):
+        for command in ("cursor", "claude", "devin", "codex", "droid", "kimi", "dry-run"):
             with self.subTest(command=command):
                 code, out, _err = self.run_main([command, "--help"])
                 self.assertEqual(code, self.delegate.EXIT_OK)
@@ -475,25 +477,31 @@ class KimiHelpTests(HelpCliTestBase):
 
     def test_safe_workspace_sync_note_is_shared_across_help_surfaces(self):
         note = self.delegate.command_help.SAFE_WORKSPACE_SYNC_NOTE
-        for command in ("cursor", "kimi", "codex", "claude", "droid"):
+        for command in ("cursor", "kimi", "codex", "claude", "devin", "droid"):
             with self.subTest(command=command):
                 code, out, _err = self.run_main([command, "--help"])
                 self.assertEqual(code, self.delegate.EXIT_OK)
                 self.assertIn(note, out)
                 if command == "droid":
-                    self.assertIn("--reasoning-effort requires a resolved Droid model alias", out)
+                    self.assertIn(
+                        "Positional MODEL_ALIAS is alias-only (strict); --model is alias-or-id",
+                        out,
+                    )
 
         code, out, _err = self.run_main(["--json", "describe"])
         self.assertEqual(code, self.delegate.EXIT_OK)
         payload = json.loads(out)
-        for command in ("cursor", "kimi", "codex", "claude", "droid"):
+        for command in ("cursor", "kimi", "codex", "claude", "devin", "droid"):
             with self.subTest(describe=command):
                 self.assertIn(note, payload["modeMapping"][command]["safeNotes"])
 
         code, out, _err = self.run_main(["agent-help"])
         self.assertEqual(code, self.delegate.EXIT_OK)
         self.assertIn(note, out)
-        self.assertIn("--reasoning-effort requires a resolved Droid model alias", out)
+        self.assertIn(
+            "Positional MODEL_ALIAS is alias-only (strict); --model is alias-or-id",
+            out,
+        )
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, TypeAlias, cast
@@ -71,6 +71,7 @@ INSPECT_REASONING_DISCOVERY_HINT = (
     "`delegate --json capabilities` for reasoning-effort support."
 )
 KIMI_UNSUPPORTED_REASONING_WARNING = "reasoning effort is not supported for kimi."
+DEVIN_UNSUPPORTED_REASONING_WARNING = "reasoning effort is not supported for devin."
 
 
 @dataclass(frozen=True)
@@ -104,6 +105,11 @@ REASONING_PROFILES: dict[str, ReasoningProfile] = {
         "unsupported",
         unsupported_warning=KIMI_UNSUPPORTED_REASONING_WARNING,
     ),
+    "devin": ReasoningProfile(
+        None,
+        "unsupported",
+        unsupported_warning=DEVIN_UNSUPPORTED_REASONING_WARNING,
+    ),
 }
 
 TRANSPORT_BY_HARNESS = {
@@ -117,12 +123,16 @@ def _alias_key_for_default_model(default_model: object) -> str:
     return default_model if isinstance(default_model, str) and default_model else "(default)"
 
 
-def _kimi_unsupported_reasoning_fields() -> JsonObject:
+def _unsupported_reasoning_fields(harness: str) -> JsonObject:
     return {
         "supported": None,
         "source": "none",
-        "warning": REASONING_PROFILES["kimi"].unsupported_warning,
+        "warning": REASONING_PROFILES[harness].unsupported_warning,
     }
+
+
+def _kimi_unsupported_reasoning_fields() -> JsonObject:
+    return _unsupported_reasoning_fields("kimi")
 
 
 def _resolved_model_required_detail(harness: str) -> str:
@@ -618,6 +628,37 @@ def _kimi_alias_reasoning_summary(kimi: JsonObject) -> JsonObject:
     return payload
 
 
+def _devin_alias_reasoning_summary(devin: JsonObject) -> JsonObject:
+    default_model = devin.get("defaultModel")
+    alias = _alias_key_for_default_model(default_model)
+    payload: JsonObject = {"alias": alias, **_unsupported_reasoning_fields("devin")}
+    if isinstance(default_model, str) and default_model:
+        payload["model"] = default_model
+    return payload
+
+
+def _add_static_alias_summaries(
+    aliases: JsonObject,
+    section: JsonObject,
+    summary_fn: Callable[[JsonObject], JsonObject],
+) -> None:
+    """Add `<engine>.models` alias entries for a static-enum engine.
+
+    Effort validity is model-independent for these engines, so each alias
+    reuses the section summary with the alias key and its mapped model.
+    """
+    models = section.get("models")
+    if not isinstance(models, dict):
+        return
+    for alias, model_id in sorted(models.items()):
+        if not (isinstance(alias, str) and alias and isinstance(model_id, str) and model_id):
+            continue
+        entry = dict(summary_fn(section))
+        entry["alias"] = alias
+        entry["model"] = model_id
+        aliases[alias] = entry
+
+
 def build_alias_reasoning_summaries(
     config: JsonObject,
     cache: JsonObject | None,
@@ -668,6 +709,24 @@ def build_alias_reasoning_summaries(
                 "source": "none",
                 "warning": "codex.defaultModel is not set; reasoning effort requires a resolved model.",
             }
+        # codex.models aliases are CLI-selectable (--model <alias>) and their
+        # effort validity is per-model, so give each the same table-backed
+        # summary droid aliases get.
+        models = codex.get("models")
+        if isinstance(models, dict):
+            for alias, model_id in sorted(models.items()):
+                if not (
+                    isinstance(alias, str) and alias and isinstance(model_id, str) and model_id
+                ):
+                    continue
+                codex_aliases[alias] = _model_reasoning_summary(
+                    harness="codex",
+                    alias=alias,
+                    model=model_id,
+                    config=config,
+                    cache=cache,
+                    config_default=default_effort,
+                )
     summaries["codex"] = codex_aliases
 
     cursor = config.get("cursor")
@@ -682,7 +741,9 @@ def build_alias_reasoning_summaries(
     if isinstance(claude, dict):
         default_model = claude.get("defaultModel")
         alias_key = _alias_key_for_default_model(default_model)
-        summaries["claude"] = {alias_key: _claude_alias_reasoning_summary(claude)}
+        claude_aliases: JsonObject = {alias_key: _claude_alias_reasoning_summary(claude)}
+        _add_static_alias_summaries(claude_aliases, claude, _claude_alias_reasoning_summary)
+        summaries["claude"] = claude_aliases
     else:
         summaries["claude"] = {}
 
@@ -690,15 +751,29 @@ def build_alias_reasoning_summaries(
     if isinstance(grok, dict):
         default_model = grok.get("defaultModel")
         alias_key = _alias_key_for_default_model(default_model)
-        summaries["grok"] = {alias_key: _grok_alias_reasoning_summary(grok)}
+        grok_aliases: JsonObject = {alias_key: _grok_alias_reasoning_summary(grok)}
+        _add_static_alias_summaries(grok_aliases, grok, _grok_alias_reasoning_summary)
+        summaries["grok"] = grok_aliases
     else:
         summaries["grok"] = {}
+
+    devin = config.get("devin")
+    if isinstance(devin, dict):
+        default_model = devin.get("defaultModel")
+        alias_key = _alias_key_for_default_model(default_model)
+        devin_aliases: JsonObject = {alias_key: _devin_alias_reasoning_summary(devin)}
+        _add_static_alias_summaries(devin_aliases, devin, _devin_alias_reasoning_summary)
+        summaries["devin"] = devin_aliases
+    else:
+        summaries["devin"] = {}
 
     kimi = config.get("kimi")
     if isinstance(kimi, dict):
         default_model = kimi.get("defaultModel")
         alias_key = _alias_key_for_default_model(default_model)
-        summaries["kimi"] = {alias_key: _kimi_alias_reasoning_summary(kimi)}
+        kimi_aliases: JsonObject = {alias_key: _kimi_alias_reasoning_summary(kimi)}
+        _add_static_alias_summaries(kimi_aliases, kimi, _kimi_alias_reasoning_summary)
+        summaries["kimi"] = kimi_aliases
     else:
         summaries["kimi"] = {}
 
@@ -749,6 +824,11 @@ def build_reasoning_capabilities_payload(
     harnesses["kimi"] = {
         "transport": REASONING_PROFILES["kimi"].transport,
         **_kimi_unsupported_reasoning_fields(),
+        "models": {},
+    }
+    harnesses["devin"] = {
+        "transport": REASONING_PROFILES["devin"].transport,
+        **_unsupported_reasoning_fields("devin"),
         "models": {},
     }
     return {"harnesses": harnesses, "aliases": build_alias_reasoning_summaries(config, cache)}

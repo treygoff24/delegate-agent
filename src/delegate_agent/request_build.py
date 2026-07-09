@@ -32,6 +32,7 @@ from delegate_agent.argv_builders import (
     build_claude_argv,
     build_codex_argv,
     build_cursor_argv,
+    build_devin_argv,
     build_droid_argv,
     build_grok_argv,
     build_kimi_argv,
@@ -44,7 +45,10 @@ from delegate_agent.constants import (
     MODE_CALL,
     MODE_SAFE,
     MODE_WORK,
-    MODELESS_NONCURSOR_ENGINES,
+    MODELESS_ENGINES,
+    PROMPT_ENFORCED_SAFE_ENGINES,
+    PROMPT_INSTRUCTION_MODE_SLASH,
+    PROMPT_INSTRUCTION_MODE_WRAPPED,
     SAFE_REVIEW_PREFIX_INJECTED_HERE_ENGINES,
     validate_mode,
 )
@@ -54,6 +58,8 @@ from delegate_agent.git_utils import run_git as _run_git
 from delegate_agent.isolation import IsolationContext, build_isolation_context
 from delegate_agent.json_types import JsonObject, JsonValue
 from delegate_agent.prompt_transport import (
+    DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
+    DEVIN_AGENT_CONFIG_DISPLAY,
     DROID_PROMPT_FILE_ARG_PLACEHOLDER,
     DROID_PROMPT_FILE_DISPLAY,
     KIMI_PROMPT_REDACTION,
@@ -66,6 +72,7 @@ from delegate_agent.prompt_transport import (
 from delegate_agent.request_models import (
     EngineBuildInput,
     EngineRequestParts,
+    LaunchOptions,
     ParsedCommand,
     Request,
     ResolvedWorkspace,
@@ -84,6 +91,8 @@ RUN_INPUT_KEYS = {
     "forbidCommit",
     "readOnly",
     "includeDirty",
+    "promptInstructionMode",
+    "workflowAgentKey",
 }
 
 OUTPUT_SCHEMA_COMPLETION_REPORT_WARNING = (
@@ -92,6 +101,13 @@ OUTPUT_SCHEMA_COMPLETION_REPORT_WARNING = (
 )
 CALL_TEMP_CWD_PLACEHOLDER = "<delegate-call-temp-cwd>"
 CODEX_HARNESS_DEFAULT_REASONING_EFFORTS = ("low", "medium", "high", "xhigh")
+DEVIN_READ_ONLY_AGENT_CONFIG = {
+    "permissions": {
+        "allow": ["read", "grep", "glob", "Read(/**)"],
+        "deny": ["edit", "write", "exec", "Write(/**)", "mcp__*"],
+    }
+}
+DEVIN_READ_ONLY_AGENT_CONFIG_TEXT = json.dumps(DEVIN_READ_ONLY_AGENT_CONFIG, separators=(",", ":"))
 
 # Read-only call is the stateless "judge/completion" contract: text in, text out,
 # no tree. These harnesses default to a coding-agent framing ("inspect the
@@ -329,6 +345,55 @@ def _completion_report_prompt_mode(
     return completion_report_mode, ()
 
 
+def resolve_prompt_instruction_mode(
+    prompt: str,
+    *,
+    engine: str,
+    mode: str,
+) -> str:
+    """Resolve wrapped vs slash-passthrough for a top-level launch prompt.
+
+    Auto-detection applies only here, where position zero is invoker-controlled;
+    interpolated content (e.g. workflow stage output) must never be sniffed.
+    """
+    if not delegate_runner.detect_slash_command(prompt):
+        return PROMPT_INSTRUCTION_MODE_WRAPPED
+    if mode == MODE_SAFE and engine in PROMPT_ENFORCED_SAFE_ENGINES:
+        raise DelegateError(
+            "slash_passthrough_unsupported",
+            f"{engine} safe mode is prompt-enforced; a verbatim prompt would strip "
+            "the read-only review contract. Use codex/claude/grok safe, or "
+            f"{engine} work mode.",
+        )
+    return PROMPT_INSTRUCTION_MODE_SLASH
+
+
+def resolve_input_json_prompt_instruction_mode(
+    raw_mode: object,
+    prompt: str,
+    *,
+    engine: str,
+    mode: str,
+) -> str:
+    if raw_mode is None:
+        return resolve_prompt_instruction_mode(prompt, engine=engine, mode=mode)
+    if raw_mode not in {PROMPT_INSTRUCTION_MODE_WRAPPED, PROMPT_INSTRUCTION_MODE_SLASH}:
+        raise DelegateError(
+            "invalid_prompt_instruction_mode",
+            "promptInstructionMode must be wrapped or slash-passthrough.",
+        )
+    if raw_mode == PROMPT_INSTRUCTION_MODE_SLASH:
+        if mode == MODE_SAFE and engine in PROMPT_ENFORCED_SAFE_ENGINES:
+            raise DelegateError(
+                "slash_passthrough_unsupported",
+                f"{engine} safe mode is prompt-enforced; a verbatim prompt would strip "
+                "the read-only review contract. Use codex/claude/grok safe, or "
+                f"{engine} work mode.",
+            )
+        return PROMPT_INSTRUCTION_MODE_SLASH
+    return PROMPT_INSTRUCTION_MODE_WRAPPED
+
+
 def resolve_completion_report_mode(parsed: ParsedCommand, config: JsonObject) -> str:
     global_options = parsed.global_options
     if global_options.pass_through:
@@ -344,20 +409,33 @@ def effective_prompt(
     engine: str = "",
     mode: str = "",
     completion_report_mode: str,
+    instruction_mode: str = PROMPT_INSTRUCTION_MODE_WRAPPED,
+    skip_skill_preamble: bool = False,
 ) -> str:
+    if instruction_mode == PROMPT_INSTRUCTION_MODE_SLASH:
+        # Verbatim means verbatim: no skill preamble, no safe prefix, no
+        # completion-report suffix. Harness slash commands need position zero.
+        return prompt
     if mode == MODE_CALL:
         return prompt
-    prompt = delegate_runner.prepend_skill_review_instructions(prompt)
+    if not skip_skill_preamble:
+        # --pass-through suppresses delegate's instruction wrapping but keeps the
+        # safe-review prefix: that prefix is the write boundary for prompt-enforced
+        # safe engines, not report plumbing.
+        prompt = delegate_runner.prepend_skill_review_instructions(prompt)
     safe_prefix = (
         SAFE_REVIEW_PREFIX_BY_ENGINE.get(engine)
         if engine in SAFE_REVIEW_PREFIX_INJECTED_HERE_ENGINES
         else None
     )
     if mode == MODE_SAFE and safe_prefix is not None and safe_prefix not in prompt:
-        # prepend_skill_review_instructions guarantees SKILL_REVIEW_PREFIX at index 0,
-        # so provider-specific safe prefixes slot in cleanly between skill-review
-        # and the user prompt.
-        insert_at = len(delegate_runner.SKILL_REVIEW_PREFIX)
+        # When the skill preamble is present it is guaranteed at index 0, so the
+        # provider-specific safe prefix slots in between it and the user prompt.
+        insert_at = (
+            len(delegate_runner.SKILL_REVIEW_PREFIX)
+            if prompt.startswith(delegate_runner.SKILL_REVIEW_PREFIX)
+            else 0
+        )
         prompt = prompt[:insert_at] + safe_prefix + prompt[insert_at:]
     if completion_report_mode == delegate_config.COMPLETION_REPORT_MODE_MARKDOWN:
         return delegate_runner.append_completion_report_instructions(prompt)
@@ -477,10 +555,95 @@ def _apply_forbid_commit_isolation_implication(
     return json_isolation, None, False
 
 
+def _droid_models_map(config: JsonObject) -> dict:
+    # config validation treats a null/absent models map as empty for every
+    # engine; mirror that here so droid never crashes on `"models": null`.
+    models = config["droid"].get("models")
+    return models if isinstance(models, dict) else {}
+
+
 def _validate_droid_model_alias(config: JsonObject, model_alias: str | None) -> None:
-    models = config["droid"]["models"]
-    if model_alias is None or model_alias not in models:
+    if model_alias is None or model_alias not in _droid_models_map(config):
         raise DelegateError("invalid_alias", f"Unknown Droid model alias: {model_alias}")
+
+
+def resolve_model_selection(engine_section: JsonObject, value: str) -> str:
+    """Resolve ``value`` against ``<engine>.models`` aliases, else pass through."""
+    models = engine_section.get("models")
+    if isinstance(models, dict) and value in models:
+        mapped = models[value]
+        if isinstance(mapped, str):
+            return mapped
+    return value
+
+
+def _resolve_engine_model(section: JsonObject, build: EngineBuildInput) -> str | None:
+    """Per-run model: ``model_override`` > ``model_alias`` > ``defaultModel``.
+
+    Both override and alias values go through ``resolve_model_selection``
+    (alias-or-id). Computed before reasoning-capability resolution so effort
+    validation follows the selected model.
+    """
+    if build.model_override is not None:
+        return resolve_model_selection(section, build.model_override)
+    if isinstance(build.model_alias, str) and build.model_alias:
+        return resolve_model_selection(section, build.model_alias)
+    return _resolve_default_model(section)
+
+
+def _effective_cli_model_alias(launch: LaunchOptions, config: JsonObject) -> str | None:
+    """The alias the built Request will carry — for isolation-context parity.
+
+    Worktree branch/path planning happens before request parts resolve, so it
+    must predict the same model_alias the execution path will record: droid's
+    positional, a droid --model value that hits the alias map, or the modeless
+    --model selection token.
+    """
+    alias, _ = _classify_cli_model(launch)
+    if launch.engine == "droid" and launch.model is not None:
+        models = config.get("droid", {}).get("models")
+        if isinstance(models, dict) and launch.model in models:
+            return launch.model
+    return alias
+
+
+def _classify_cli_model(launch: LaunchOptions) -> tuple[str | None, str | None]:
+    """Split a CLI launch's model selection into (model_alias, model_override).
+
+    Modeless engines route --model through the model_alias channel — the same
+    one input-JSON uses — so manifests record modelAlias identically for both
+    (``codex:fast`` selectors keep working) while resolution stays alias-or-id.
+    Droid keeps its positional in model_alias (strict) and --model in
+    model_override (alias-or-id, classified inside _droid_request_parts).
+    """
+    if launch.engine == "droid":
+        return launch.model_alias, launch.model
+    if launch.model is not None:
+        return launch.model, None
+    return launch.model_alias, None
+
+
+def _reject_droid_model_conflict(model_alias: str | None, model_override: str | None) -> None:
+    if model_alias is not None and model_override is not None:
+        raise DelegateError(
+            "model_conflict",
+            "Give either the positional droid model alias or --model, not both.",
+        )
+
+
+def _guard_droid_placeholder_model(model: str, *, alias: str | None) -> None:
+    if model.startswith("replace-with-") or model in {
+        "your-droid-model-id",
+        "real-droid-model-id",
+    }:
+        label = f"'{alias}'" if alias else "selection"
+        raise DelegateError(
+            "unconfigured_model",
+            (
+                f"Droid model {label} is still a placeholder. "
+                "Copy config.example.json to ~/.delegate/config.json and set a real Droid model ID."
+            ),
+        )
 
 
 def _validate_include_dirty(
@@ -518,7 +681,10 @@ def _validate_call_cli_options(global_options: object, launch: object) -> None:
     progress_intent = getattr(launch, "progress_intent", None)
     forbid_commit = getattr(launch, "forbid_commit", False)
     include_dirty = getattr(launch, "include_dirty", False)
-    if cwd is not None:
+    group = getattr(global_options, "group", None)
+    # Grouped call runs may take --cwd so the run registers in the invocation
+    # workspace registry; ungrouped call still rejects --cwd.
+    if cwd is not None and group is None:
         raise DelegateError("invalid_option_combination", "call mode does not use --cwd.")
     if isolation is not None:
         raise DelegateError("invalid_option_combination", "call mode does not use --isolation.")
@@ -556,7 +722,8 @@ def _validate_call_input_json_options(
     raw_forbid_commit: bool,
     raw_include_dirty: bool,
 ) -> None:
-    if getattr(global_options, "cwd", None) is not None:
+    group = getattr(global_options, "group", None)
+    if getattr(global_options, "cwd", None) is not None and group is None:
         raise DelegateError("invalid_option_combination", "call mode does not use --cwd.")
     if getattr(global_options, "isolation", None) is not None:
         raise DelegateError("invalid_option_combination", "call mode does not use --isolation.")
@@ -632,18 +799,25 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         _validate_call_cli_options(global_options, launch)
         read_only = getattr(launch, "read_only", False)
         if launch.engine == "droid":
-            _validate_droid_model_alias(config, launch.model_alias)
+            _reject_droid_model_conflict(launch.model_alias, launch.model)
+            if launch.model_alias is not None:
+                _validate_droid_model_alias(config, launch.model_alias)
         output_schema = resolve_output_schema(launch.engine, launch.output_schema)
-        prompt = _call_effective_prompt(
-            resolve_prompt(launch.prompt_parts, launch.prompt_file, stdin),
-            read_only=read_only,
-        )
+        raw_prompt = resolve_prompt(launch.prompt_parts, launch.prompt_file, stdin)
+        if read_only and delegate_runner.detect_slash_command(raw_prompt):
+            raise DelegateError(
+                "slash_passthrough_unsupported",
+                "call --read-only wraps the prompt in the read-only contract; "
+                "slash-command prompts cannot run verbatim there. Use plain call mode.",
+            )
+        prompt = _call_effective_prompt(raw_prompt, read_only=read_only)
         workspace, cleanup_workspace = _call_workspace(launch.dry_run)
+        cli_model_alias, cli_model_override = _classify_cli_model(launch)
         try:
             return build_request(
                 launch.engine,
                 launch.mode,
-                launch.model_alias,
+                cli_model_alias,
                 workspace,
                 prompt,
                 config,
@@ -659,6 +833,7 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
                 cleanup_workspace=cleanup_workspace,
                 call_read_only=read_only,
                 group=global_options.group,
+                model_override=cli_model_override,
             )
         except BaseException:
             if cleanup_workspace:
@@ -711,7 +886,7 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         resolved_isolation=effective_isolation,
         engine=launch.engine,
         mode=launch.mode,
-        model_alias=launch.model_alias,
+        model_alias=_effective_cli_model_alias(launch, config),
         config=config,
         run_short_id="<short-run-id-placeholder>" if launch.dry_run else None,
         source_git_root=git_root,
@@ -731,22 +906,34 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         mode=launch.mode,
         isolation_context=isolation_context,
     )
+    if launch.engine == "droid":
+        _reject_droid_model_conflict(launch.model_alias, launch.model)
+        if launch.model_alias is not None:
+            _validate_droid_model_alias(config, launch.model_alias)
 
     completion_report_mode = resolve_completion_report_mode(parsed, config)
     completion_report_prompt_mode, output_schema_warnings = _completion_report_prompt_mode(
         completion_report_mode,
         output_schema,
     )
+    instruction_mode = resolve_prompt_instruction_mode(
+        prompt,
+        engine=launch.engine,
+        mode=launch.mode,
+    )
     prompt = effective_prompt(
         prompt,
         engine=launch.engine,
         mode=launch.mode,
         completion_report_mode=completion_report_prompt_mode,
+        instruction_mode=instruction_mode,
+        skip_skill_preamble=global_options.pass_through,
     )
+    cli_model_alias, cli_model_override = _classify_cli_model(launch)
     return build_request(
         launch.engine,
         launch.mode,
-        launch.model_alias,
+        cli_model_alias,
         workspace,
         prompt,
         config,
@@ -764,6 +951,8 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         output_schema=output_schema,
         warnings=(*output_schema_warnings, *isolation_warnings),
         group=global_options.group,
+        prompt_instruction_mode=instruction_mode,
+        model_override=cli_model_override,
     )
 
 
@@ -847,21 +1036,36 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
     raw_include_dirty = raw.get("includeDirty", False)
     if not isinstance(raw_include_dirty, bool):
         raise DelegateError("invalid_include_dirty", "includeDirty must be true or false.")
+    json_model_alias: str | None = model_alias if isinstance(model_alias, str) else None
+    json_model_override: str | None = None
     if engine == "droid":
-        if not isinstance(model_alias, str) or not model_alias:
-            raise DelegateError("missing_model", "droid run input requires model alias.")
-    elif engine in MODELESS_NONCURSOR_ENGINES:
+        if model_alias is None and _resolve_default_model(config.get("droid", {})) is not None:
+            pass  # droid.defaultModel covers the omitted key.
+        elif not isinstance(model_alias, str) or not model_alias.strip():
+            raise DelegateError(
+                "missing_model",
+                "droid run input requires a model alias or id (or set droid.defaultModel).",
+            )
+        else:
+            # Alias-or-id, matching --model: a droid.models key keeps alias
+            # semantics (modelAlias metadata, placeholder guard); anything else
+            # passes through verbatim and the harness validates it.
+            droid_models = config.get("droid", {}).get("models")
+            if not (isinstance(droid_models, dict) and model_alias in droid_models):
+                json_model_alias = None
+                json_model_override = model_alias
+    elif engine in MODELESS_ENGINES:
         if model_alias is not None and not isinstance(model_alias, str):
             raise DelegateError("invalid_model", f"model must be a string or null for {engine}.")
-        if model_alias == "":
+        if isinstance(model_alias, str) and not model_alias.strip():
             raise DelegateError(
                 "invalid_model", f"model must be a non-empty string or omitted for {engine}."
             )
-    elif model_alias is not None and model_alias != config["cursor"]["defaultModel"]:
-        raise DelegateError(
-            "invalid_model", "cursor model override must match configured Composer model."
-        )
     output_schema = resolve_output_schema(str(engine), raw.get("outputSchema"))
+    raw_instruction_mode = raw.get("promptInstructionMode")
+    raw_workflow_agent_key = raw.get("workflowAgentKey")
+    if raw_workflow_agent_key is not None and not isinstance(raw_workflow_agent_key, str):
+        raise DelegateError("invalid_workflow_agent_key", "workflowAgentKey must be a string.")
 
     if mode == MODE_CALL:
         _validate_call_input_json_options(
@@ -871,16 +1075,21 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
             raw_forbid_commit=raw_forbid_commit,
             raw_include_dirty=raw_include_dirty,
         )
-        if engine == "droid":
-            _validate_droid_model_alias(config, model_alias)
         workspace, cleanup_workspace = _call_workspace(False)
+        call_prompt = validate_prompt(prompt)
+        if raw_instruction_mode == PROMPT_INSTRUCTION_MODE_SLASH and raw_read_only:
+            raise DelegateError(
+                "slash_passthrough_unsupported",
+                "call --read-only wraps the prompt in the read-only contract; "
+                "slash-command prompts cannot run verbatim there. Use plain call mode.",
+            )
         try:
             return build_request(
                 str(engine),
                 str(mode),
-                model_alias,
+                json_model_alias,
                 workspace,
-                _call_effective_prompt(validate_prompt(prompt), read_only=raw_read_only),
+                _call_effective_prompt(call_prompt, read_only=raw_read_only),
                 config,
                 dry_run=False,
                 stream_capture=True,
@@ -894,6 +1103,14 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
                 cleanup_workspace=cleanup_workspace,
                 call_read_only=raw_read_only,
                 group=global_options.group,
+                workflow_agent_key=raw_workflow_agent_key,
+                prompt_instruction_mode=resolve_input_json_prompt_instruction_mode(
+                    raw_instruction_mode,
+                    call_prompt,
+                    engine=str(engine),
+                    mode=str(mode),
+                ),
+                model_override=json_model_override,
             )
         except BaseException:
             if cleanup_workspace:
@@ -983,24 +1200,30 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         mode=str(mode),
         isolation_context=isolation_context,
     )
-    if engine == "droid":
-        _validate_droid_model_alias(config, model_alias)
-
     completion_report_mode = resolve_completion_report_mode(parsed, config)
     completion_report_prompt_mode, output_schema_warnings = _completion_report_prompt_mode(
         completion_report_mode,
         output_schema,
     )
+    prompt = validate_prompt(prompt)
+    instruction_mode = resolve_input_json_prompt_instruction_mode(
+        raw_instruction_mode,
+        prompt,
+        engine=str(engine),
+        mode=str(mode),
+    )
     prompt = effective_prompt(
-        validate_prompt(prompt),
+        prompt,
         engine=str(engine),
         mode=str(mode),
         completion_report_mode=completion_report_prompt_mode,
+        instruction_mode=instruction_mode,
+        skip_skill_preamble=global_options.pass_through,
     )
     return build_request(
         str(engine),
         str(mode),
-        model_alias,
+        json_model_alias,
         workspace,
         prompt,
         config,
@@ -1018,6 +1241,9 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         output_schema=output_schema,
         warnings=(*output_schema_warnings, *isolation_warnings),
         group=global_options.group,
+        workflow_agent_key=raw_workflow_agent_key,
+        prompt_instruction_mode=instruction_mode,
+        model_override=json_model_override,
     )
 
 
@@ -1045,6 +1271,9 @@ def build_request(
     cleanup_workspace: bool = False,
     call_read_only: bool = False,
     group: str | None = None,
+    workflow_agent_key: str | None = None,
+    prompt_instruction_mode: str = PROMPT_INSTRUCTION_MODE_WRAPPED,
+    model_override: str | None = None,
 ) -> Request:
     if not isinstance(workspace, ResolvedWorkspace):
         raise TypeError(
@@ -1082,18 +1311,42 @@ def build_request(
         cleanup_workspace=cleanup_workspace,
         call_read_only=call_read_only,
         group=group,
+        workflow_agent_key=workflow_agent_key,
+        prompt_instruction_mode=prompt_instruction_mode,
+        model_override=model_override,
     )
 
 
 def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
-    _ = build.model_alias, build.cache
+    _ = build.cache
     cursor = build.config["cursor"]
-    capability, reasoning_warnings = _capability_with_config_fallback(
-        lambda: resolve_cursor_reasoning_capability(cursor, build.requested_effort),
-        engine="cursor",
-        effort_source=build.effort_source,
-    )
-    model = capability.model if capability is not None else cursor["defaultModel"]
+    pinned = None
+    if build.model_override is not None:
+        pinned = resolve_model_selection(cursor, build.model_override)
+    elif isinstance(build.model_alias, str) and build.model_alias:
+        pinned = resolve_model_selection(cursor, build.model_alias)
+
+    warnings: list[str] = []
+    if pinned is not None:
+        model = pinned
+        capability = None
+        # Warn regardless of where the effort came from (flag, input-json, or
+        # cursor.defaultReasoningEffort): if routing would have applied, the
+        # pinned model materially bypassed it.
+        if build.requested_effort is not None:
+            warnings.append(
+                "cursor reasoning-effort routing was bypassed by the pinned model; "
+                "proceeding with the explicit model selection."
+            )
+    else:
+        capability, reasoning_warnings = _capability_with_config_fallback(
+            lambda: resolve_cursor_reasoning_capability(cursor, build.requested_effort),
+            engine="cursor",
+            effort_source=build.effort_source,
+        )
+        warnings.extend(reasoning_warnings)
+        model = capability.model if capability is not None else cursor["defaultModel"]
+
     argv = build_cursor_argv(
         cursor["argvPrefix"],
         build.mode,
@@ -1106,30 +1359,43 @@ def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     return EngineRequestParts(
         model=model,
         argv=argv,
-        model_alias=None,
+        model_alias=build.model_alias,
         prompt_transport=PROMPT_TRANSPORT_ARGV,
         display_argv=redacted_prompt_argv(argv),
-        warnings=reasoning_warnings,
+        warnings=tuple(warnings),
         **reasoning_request_kwargs(capability, build.effort_source),
     )
 
 
 def _droid_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     droid = build.config["droid"]
-    models = droid["models"]
-    _validate_droid_model_alias(build.config, build.model_alias)
-    model = models[build.model_alias]
-    if model.startswith("replace-with-") or model in {
-        "your-droid-model-id",
-        "real-droid-model-id",
-    }:
-        raise DelegateError(
-            "unconfigured_model",
-            (
-                f"Droid model alias '{build.model_alias}' is still a placeholder. "
-                "Copy config.example.json to ~/.delegate/config.json and set a real Droid model ID."
-            ),
-        )
+    models = _droid_models_map(build.config)
+    _reject_droid_model_conflict(build.model_alias, build.model_override)
+
+    if build.model_override is not None:
+        # A droid.models key keeps full alias semantics (modelAlias metadata,
+        # placeholder guard context) — parity with the positional and
+        # input-JSON alias paths.
+        if isinstance(models, dict) and build.model_override in models:
+            model = models[build.model_override]
+            alias_for_errors = build.model_override
+        else:
+            model = build.model_override
+            alias_for_errors = None
+    elif build.model_alias is not None:
+        _validate_droid_model_alias(build.config, build.model_alias)
+        model = models[build.model_alias]
+        alias_for_errors = build.model_alias
+    else:
+        model = _resolve_default_model(droid)
+        alias_for_errors = None
+        if model is None:
+            raise DelegateError(
+                "missing_model",
+                "droid requires a positional model alias, --model, or droid.defaultModel.",
+            )
+
+    _guard_droid_placeholder_model(model, alias=alias_for_errors)
     capability, reasoning_warnings = _capability_with_config_fallback(
         lambda: reasoning.resolve_reasoning_capability(
             harness="droid",
@@ -1137,7 +1403,7 @@ def _droid_request_parts(build: EngineBuildInput) -> EngineRequestParts:
             requested_effort=build.requested_effort,
             config=build.config,
             cache=build.cache,
-            alias=build.model_alias,
+            alias=alias_for_errors,
         ),
         engine="droid",
         effort_source=build.effort_source,
@@ -1163,7 +1429,7 @@ def _droid_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     return EngineRequestParts(
         model=model,
         argv=argv,
-        model_alias=build.model_alias,
+        model_alias=alias_for_errors if alias_for_errors is not None else build.model_alias,
         prompt_transport=PROMPT_TRANSPORT_FILE,
         prompt_file_text=prompt,
         display_argv=display_argv,
@@ -1174,10 +1440,7 @@ def _droid_request_parts(build: EngineBuildInput) -> EngineRequestParts:
 
 def _codex_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     codex = build.config["codex"]
-    if isinstance(build.model_alias, str) and build.model_alias:
-        model = build.model_alias
-    else:
-        model = _resolve_default_model(codex)
+    model = _resolve_engine_model(codex, build)
     policy = delegate_config.effective_policy(
         build.config, engine="codex", mode=_policy_mode(build)
     )
@@ -1247,10 +1510,7 @@ def _codex_request_parts(build: EngineBuildInput) -> EngineRequestParts:
 
 def _claude_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     claude = build.config["claude"]
-    if isinstance(build.model_alias, str) and build.model_alias:
-        model = build.model_alias
-    else:
-        model = _resolve_default_model(claude)
+    model = _resolve_engine_model(claude, build)
     policy = delegate_config.effective_policy(
         build.config, engine="claude", mode=_policy_mode(build)
     )
@@ -1291,10 +1551,7 @@ def _claude_request_parts(build: EngineBuildInput) -> EngineRequestParts:
 
 def _grok_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     grok = build.config["grok"]
-    if isinstance(build.model_alias, str) and build.model_alias:
-        model = build.model_alias
-    else:
-        model = _resolve_default_model(grok)
+    model = _resolve_engine_model(grok, build)
     policy = delegate_config.effective_policy(build.config, engine="grok", mode=_policy_mode(build))
     effort: str | None = None
     warnings: tuple[str, ...] = ()
@@ -1335,12 +1592,52 @@ def _grok_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     )
 
 
+def _devin_request_parts(build: EngineBuildInput) -> EngineRequestParts:
+    _ = build.effort_source, build.cache
+    devin = build.config["devin"]
+    model = _resolve_engine_model(devin, build)
+    if build.requested_effort is not None:
+        raise DelegateError(
+            "unsupported_reasoning_effort",
+            reasoning.format_explicit_reasoning_effort_error(
+                harness="devin",
+                alias=build.model_alias,
+                model=model,
+                effort=build.requested_effort,
+                detail="reasoning effort is not supported",
+            ),
+        )
+    argv = build_devin_argv(
+        devin,
+        build.mode,
+        model,
+        call_read_only=build.call_read_only,
+    )
+    display_argv = [
+        DEVIN_AGENT_CONFIG_DISPLAY
+        if item == DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER
+        else PROMPT_FILE_DISPLAY
+        if item == PROMPT_FILE_ARG_PLACEHOLDER
+        else item
+        for item in argv
+    ]
+    read_only = build.mode == MODE_SAFE or (build.mode == MODE_CALL and build.call_read_only)
+    return EngineRequestParts(
+        model=model,
+        argv=argv,
+        model_alias=build.model_alias,
+        prompt_transport=PROMPT_TRANSPORT_FILE,
+        prompt_file_text=build.prompt,
+        agent_config_text=DEVIN_READ_ONLY_AGENT_CONFIG_TEXT if read_only else None,
+        display_argv=display_argv,
+    )
+
+
 def _kimi_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     _ = build.effort_source, build.cache
+    kimi = build.config["kimi"]
+    model = _resolve_engine_model(kimi, build)
     if build.requested_effort is not None:
-        kimi = build.config.get("kimi")
-        default_model = kimi.get("defaultModel") if isinstance(kimi, dict) else None
-        model = default_model if isinstance(default_model, str) and default_model else None
         raise DelegateError(
             "unsupported_reasoning_effort",
             reasoning.format_explicit_reasoning_effort_error(
@@ -1351,11 +1648,6 @@ def _kimi_request_parts(build: EngineBuildInput) -> EngineRequestParts:
                 detail="reasoning effort is not supported",
             ),
         )
-    kimi = build.config["kimi"]
-    if isinstance(build.model_alias, str) and build.model_alias:
-        model = build.model_alias
-    else:
-        model = _resolve_default_model(kimi)
     argv = build_kimi_argv(
         kimi,
         build.mode,
@@ -1381,6 +1673,7 @@ ENGINE_REQUEST_PARTS_BUILDERS: dict[str, EngineRequestPartsBuilder] = {
     "codex": _codex_request_parts,
     "claude": _claude_request_parts,
     "grok": _grok_request_parts,
+    "devin": _devin_request_parts,
     "kimi": _kimi_request_parts,
 }
 
@@ -1423,8 +1716,12 @@ def _build_request_for_workspace(
     cleanup_workspace: bool,
     call_read_only: bool = False,
     group: str | None = None,
+    workflow_agent_key: str | None = None,
+    prompt_instruction_mode: str = PROMPT_INSTRUCTION_MODE_WRAPPED,
+    model_override: str | None = None,
 ) -> Request:
-    prompt = _append_safe_dirty_tree_note(prompt, resolved, mode, isolation_context)
+    if prompt_instruction_mode != PROMPT_INSTRUCTION_MODE_SLASH:
+        prompt = _append_safe_dirty_tree_note(prompt, resolved, mode, isolation_context)
     workspace_warning = wsl.drivefs_workspace_warning(resolved.path)
     if workspace_warning is not None:
         warnings = (*warnings, workspace_warning)
@@ -1447,6 +1744,7 @@ def _build_request_for_workspace(
             cache=cache,
             output_schema=output_schema,
             call_read_only=call_read_only,
+            model_override=model_override,
         ),
     )
     return _apply_profile_resolution(
@@ -1474,10 +1772,13 @@ def _build_request_for_workspace(
             warnings=(*warnings, *parts.warnings),
             stdin_text=parts.stdin_text,
             prompt_file_text=parts.prompt_file_text,
+            agent_config_text=parts.agent_config_text,
             prompt_transport=parts.prompt_transport,
             display_argv=parts.display_argv,
             cleanup_workspace=cleanup_workspace,
             group=group,
+            workflow_agent_key=workflow_agent_key,
+            prompt_instruction_mode=prompt_instruction_mode,
         ),
         config,
         auth_profile_override=auth_profile_override,
@@ -1678,4 +1979,5 @@ def grok_reasoning_request_kwargs(effort: str | None, source: str | None) -> Jso
 
 def _resolve_default_model(section: JsonObject) -> str | None:
     default_model = section.get("defaultModel")
-    return default_model if isinstance(default_model, str) and default_model else None
+    # Whitespace-only counts as unset — it would otherwise reach child argv.
+    return default_model if isinstance(default_model, str) and default_model.strip() else None

@@ -18,7 +18,7 @@ VALID_MODES = {MODE_SAFE, MODE_WORK, MODE_CALL}
 # reused wherever engines are enumerated (the describe payload, help prose, the
 # runs/worktree --harness filters). Membership checks and the prose enumeration
 # both derive from it so the list can never drift out of sync.
-KNOWN_ENGINES = ("cursor", "droid", "codex", "kimi", "claude", "grok")
+KNOWN_ENGINES = ("cursor", "droid", "codex", "kimi", "claude", "grok", "devin")
 # "cursor, droid, codex, kimi, claude, or grok" — for error messages and help text.
 ENGINES_PROSE = f"{', '.join(KNOWN_ENGINES[:-1])}, or {KNOWN_ENGINES[-1]}"
 
@@ -26,17 +26,30 @@ ENGINES_PROSE = f"{', '.join(KNOWN_ENGINES[:-1])}, or {KNOWN_ENGINES[-1]}"
 MODELESS_ENGINES = tuple(engine for engine in KNOWN_ENGINES if engine != "droid")
 # Engines whose binary is a simple <engine>.binary config key.
 BINARY_CONFIG_ENGINES = tuple(engine for engine in KNOWN_ENGINES if engine != "cursor")
-# Modeless engines accepted by input JSON's optional model field.
-MODELESS_NONCURSOR_ENGINES = tuple(
-    engine for engine in KNOWN_ENGINES if engine not in {"cursor", "droid"}
-)
 # Engines whose safe-review prompt prefix is injected by request_build.effective_prompt.
 SAFE_REVIEW_PREFIX_INJECTED_HERE_ENGINES = tuple(
-    engine for engine in KNOWN_ENGINES if engine in {"codex", "droid", "claude", "grok"}
+    engine for engine in KNOWN_ENGINES if engine in {"codex", "droid", "claude", "grok", "devin"}
 )
 # Stable public summary order; membership is still derived from the modeless engine set.
 MODEL_SUMMARY_ENGINES = tuple(
-    engine for engine in ("cursor", "codex", "claude", "grok", "kimi") if engine in MODELESS_ENGINES
+    engine
+    for engine in ("cursor", "codex", "claude", "grok", "devin", "kimi")
+    if engine in MODELESS_ENGINES
+)
+
+# Prompt instruction wrapping: "wrapped" gets the skill-review preamble,
+# safe-review prefix, and completion-report suffix; "slash-passthrough" sends
+# the prompt verbatim so harness slash commands (e.g. Codex `/goal`) keep
+# their required position-zero characters.
+PROMPT_INSTRUCTION_MODE_WRAPPED = "wrapped"
+PROMPT_INSTRUCTION_MODE_SLASH = "slash-passthrough"
+# Engines whose safe mode is substantially prompt-enforced: workspace isolation
+# protects the source tree, but the advisory safe-review prefix is what keeps
+# the run review-shaped. A verbatim prompt would strip that contract, so slash
+# pass-through is rejected in safe mode for these engines. codex/claude/grok
+# safe is argv/sandbox-enforced and stays allowed.
+PROMPT_ENFORCED_SAFE_ENGINES = tuple(
+    engine for engine in KNOWN_ENGINES if engine in {"cursor", "droid", "kimi"}
 )
 
 

@@ -20,9 +20,11 @@ from delegate_agent import (
     wait_cancel_commands,
     worktree_commands,
 )
+from delegate_agent.constants import PROMPT_INSTRUCTION_MODE_WRAPPED
 from delegate_agent.isolation import IsolationContext
 from delegate_agent.json_types import JsonObject
 from delegate_agent.prompt_transport import PROMPT_TRANSPORT_ARGV
+from delegate_agent.workflows import commands as workflow_commands
 
 
 @dataclass
@@ -51,6 +53,7 @@ class LaunchOptions:
     include_dirty: bool = False
     read_only: bool = False
     dry_run: bool = False
+    model: str | None = None
 
 
 @dataclass
@@ -61,6 +64,8 @@ class RunJsonOptions:
 @dataclass
 class InspectionOptions:
     summary: bool = False
+    engine: str | None = None
+    live: bool = False
 
 
 @dataclass(init=False)
@@ -75,6 +80,7 @@ class ParsedCommand:
     run_output: run_output_commands.RunOutputCommand | None = None
     wait_command: wait_cancel_commands.WaitCommand | None = None
     cancel_command: wait_cancel_commands.CancelCommand | None = None
+    workflow_command: workflow_commands.WorkflowCommand | None = None
     worktree: worktree_commands.WorktreeCommand | None = None
     config_command: config_commands.ConfigCommand | None = None
     capabilities: capability_commands.CapabilitiesCommand | None = None
@@ -94,6 +100,7 @@ class ParsedCommand:
         run_output: run_output_commands.RunOutputCommand | None = None,
         wait_command: wait_cancel_commands.WaitCommand | None = None,
         cancel_command: wait_cancel_commands.CancelCommand | None = None,
+        workflow_command: workflow_commands.WorkflowCommand | None = None,
         worktree: worktree_commands.WorktreeCommand | None = None,
         config_command: config_commands.ConfigCommand | None = None,
         capabilities: capability_commands.CapabilitiesCommand | None = None,
@@ -110,6 +117,7 @@ class ParsedCommand:
         self.run_output = run_output
         self.wait_command = wait_command
         self.cancel_command = cancel_command
+        self.workflow_command = workflow_command
         self.worktree = worktree
         self.config_command = config_command
         self.capabilities = capabilities
@@ -147,6 +155,7 @@ class Request:
     warnings: tuple[str, ...] = ()
     stdin_text: str | None = None
     prompt_file_text: str | None = None
+    agent_config_text: str | None = None
     prompt_transport: str = PROMPT_TRANSPORT_ARGV
     display_argv: list[str] | None = None
     env_overrides: dict[str, str] | None = None
@@ -155,6 +164,8 @@ class Request:
     cleanup_workspace: bool = False
     include_dirty: bool = False
     group: str | None = None
+    workflow_agent_key: str | None = None
+    prompt_instruction_mode: str = PROMPT_INSTRUCTION_MODE_WRAPPED
     profile_resolution: profiles.ProfileResolution = field(
         default_factory=profiles.empty_profile_resolution
     )
@@ -170,6 +181,7 @@ class EngineRequestParts:
     warnings: tuple[str, ...] = ()
     stdin_text: str | None = None
     prompt_file_text: str | None = None
+    agent_config_text: str | None = None
     reasoning_effort: str | None = None
     reasoning_effort_source: str | None = None
     reasoning_capability_source: str | None = None
@@ -189,3 +201,4 @@ class EngineBuildInput:
     cache: JsonObject | None
     output_schema: str | None = None
     call_read_only: bool = False
+    model_override: str | None = None
