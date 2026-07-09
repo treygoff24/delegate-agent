@@ -42,6 +42,7 @@ _SAFE_REVIEW_LABEL_BY_ENGINE = {
     "claude": "Delegate Claude safe mode",
     "grok": "Delegate Grok safe mode",
     "devin": "Delegate Devin safe mode",
+    "opencode": "Delegate OpenCode safe mode",
     "droid": "Delegate Droid safe mode",
     "kimi": "Delegate Kimi safe mode",
 }
@@ -381,6 +382,34 @@ def build_devin_argv(
             f"Unsupported Devin prompt transport: {prompt_transport}",
         )
     argv.extend(["--prompt-file", PROMPT_FILE_ARG_PLACEHOLDER, "-p"])
+    return argv
+
+
+def build_opencode_argv(
+    opencode: JsonObject,
+    mode: str,
+    workspace: str,
+    model: str | None,
+    agent: str | None,
+    variant: str | None,
+    *,
+    call_read_only: bool = False,
+) -> list[str]:
+    read_only = mode == MODE_SAFE or (mode == MODE_CALL and call_read_only)
+    argv = [str(opencode["binary"])]
+    if read_only:
+        argv.append("--pure")
+    argv.extend(["run", "--format", "json", "--print-logs", "--dir", workspace])
+    if model:
+        argv.extend(["--model", model])
+    if agent:
+        argv.extend(["--agent", agent])
+    if variant:
+        argv.extend(["--variant", variant])
+    if mode == MODE_WORK:
+        argv.append("--auto")
+    elif mode not in (MODE_SAFE, MODE_CALL):
+        validate_mode(mode)
     return argv
 
 

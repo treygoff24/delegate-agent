@@ -52,6 +52,7 @@ PyPI packaging is validated and live: `delegate-agent-cli` published 2026-07-06 
   delegate --json dry-run codex safe "Review only."
   delegate --json dry-run claude safe "Review only."
   delegate --json dry-run grok safe "Review only."
+  delegate --json dry-run opencode safe "Review only."
   delegate --json dry-run kimi safe "Review only."
   ```
 

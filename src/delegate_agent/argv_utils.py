@@ -13,6 +13,7 @@ WORKSPACE_FLAG_BY_ENGINE: dict[str, str | None] = {
     "claude": None,
     "grok": "--cwd",
     "devin": None,
+    "opencode": "--dir",
 }
 
 

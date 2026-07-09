@@ -711,7 +711,10 @@ def parse_modeless_engine(
         read_only,
         include_dirty,
         model,
+        agent,
     ) = parse_prompt_tail(rest[1:], json_mode, isolation, command_prefix=[engine, mode])
+    if agent is not None and engine != "opencode":
+        raise DelegateError("unsupported_agent", "--agent is only supported by opencode.")
     forbid_commit_implied_isolation = False
     if forbid_commit and mode == "work" and isolation is None:
         isolation = "worktree"
@@ -747,6 +750,7 @@ def parse_modeless_engine(
             read_only=read_only,
             dry_run=dry_run,
             model=model,
+            agent=agent,
         ),
     )
 
@@ -817,7 +821,10 @@ def parse_droid(
         read_only,
         include_dirty,
         model,
+        agent,
     ) = parse_prompt_tail(tail, json_mode, isolation, command_prefix=command_prefix)
+    if agent is not None:
+        raise DelegateError("unsupported_agent", "--agent is only supported by opencode.")
     forbid_commit_implied_isolation = False
     if forbid_commit and mode == "work" and isolation is None:
         isolation = "worktree"
@@ -855,6 +862,7 @@ def parse_droid(
             read_only=read_only,
             dry_run=dry_run,
             model=model,
+            agent=agent,
         ),
     )
 
@@ -933,6 +941,7 @@ def parse_prompt_tail(
     bool,
     bool,
     str | None,
+    str | None,
 ]:
     prompt_file: str | None = None
     output_schema: str | None = None
@@ -942,6 +951,7 @@ def parse_prompt_tail(
     include_dirty = False
     read_only = False
     model: str | None = None
+    agent: str | None = None
     prompt_parts: list[str] = []
     i = 0
     while i < len(rest):
@@ -1032,6 +1042,26 @@ def parse_prompt_tail(
             model = value
             i += 2
             continue
+        if token == "--agent":
+            if agent is not None:
+                raise DelegateError(
+                    "invalid_agent",
+                    "Only one --agent is allowed.",
+                )
+            if i + 1 >= len(rest):
+                raise DelegateError(
+                    "missing_agent",
+                    "--agent requires a value.",
+                )
+            value = rest[i + 1]
+            if not value.strip() or value.startswith("-") or command_help.is_help_token(value):
+                raise DelegateError(
+                    "missing_agent",
+                    "--agent requires a non-empty value.",
+                )
+            agent = value
+            i += 2
+            continue
         if token == "--progress":
             if progress_intent == "on":
                 raise DelegateError(
@@ -1110,6 +1140,7 @@ def parse_prompt_tail(
         read_only,
         include_dirty,
         model,
+        agent,
     )
 
 

@@ -19,6 +19,8 @@ delegate --isolation worktree cursor work "Implement the scoped change and run t
 delegate --isolation worktree codex work "Implement the scoped change and report changed files."
 delegate --isolation worktree claude work "Implement the scoped change and report changed files."
 delegate --isolation worktree grok work "Implement the scoped change and report changed files."
+delegate --isolation worktree devin work "Implement the scoped change and report changed files."
+delegate --isolation worktree opencode work "Implement the scoped change and report changed files."
 delegate --isolation worktree droid implementer work "Implement the scoped change and report changed files."
 delegate --isolation worktree kimi work "Implement the scoped change and report changed files."
 ```

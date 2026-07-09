@@ -66,6 +66,7 @@ TRANSPORT_CLAUDE_EFFORT_FLAG = "claude-effort-flag"
 CLAUDE_NATIVE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 TRANSPORT_GROK_EFFORT_FLAG = "grok-effort-flag"
 GROK_NATIVE_EFFORTS = CLAUDE_NATIVE_EFFORTS
+TRANSPORT_OPENCODE_VARIANT_FLAG = "variant-flag"
 INSPECT_REASONING_DISCOVERY_HINT = (
     "Inspect `delegate --json models --summary` or "
     "`delegate --json capabilities` for reasoning-effort support."
@@ -77,7 +78,8 @@ DEVIN_UNSUPPORTED_REASONING_WARNING = "reasoning effort is not supported for dev
 @dataclass(frozen=True)
 class ReasoningProfile:
     transport: str | None
-    strategy: str  # "model-table" | "static-enum" | "effort-routing" | "unsupported"
+    # Strategies: "model-table" | "static-enum" | "effort-routing" | "pass-through" | "unsupported".
+    strategy: str
     static_efforts: tuple[str, ...] | None = None  # static-enum (claude)
     unsupported_warning: str | None = None  # unsupported (kimi)
 
@@ -110,6 +112,7 @@ REASONING_PROFILES: dict[str, ReasoningProfile] = {
         "unsupported",
         unsupported_warning=DEVIN_UNSUPPORTED_REASONING_WARNING,
     ),
+    "opencode": ReasoningProfile(None, "pass-through"),
 }
 
 TRANSPORT_BY_HARNESS = {
@@ -637,6 +640,23 @@ def _devin_alias_reasoning_summary(devin: JsonObject) -> JsonObject:
     return payload
 
 
+def _opencode_alias_reasoning_summary(opencode: JsonObject) -> JsonObject:
+    default_model = opencode.get("defaultModel")
+    alias = _alias_key_for_default_model(default_model)
+    payload: JsonObject = {
+        "alias": alias,
+        "supported": None,
+        "source": "pass-through",
+        "transport": TRANSPORT_OPENCODE_VARIANT_FLAG,
+    }
+    if isinstance(default_model, str) and default_model:
+        payload["model"] = default_model
+    default_effort = opencode.get("defaultReasoningEffort")
+    if isinstance(default_effort, str):
+        payload["configDefault"] = default_effort
+    return payload
+
+
 def _add_static_alias_summaries(
     aliases: JsonObject,
     section: JsonObject,
@@ -656,6 +676,31 @@ def _add_static_alias_summaries(
         entry = dict(summary_fn(section))
         entry["alias"] = alias
         entry["model"] = model_id
+        aliases[alias] = entry
+
+
+def _add_opencode_alias_summaries(aliases: JsonObject, opencode: JsonObject) -> None:
+    models = opencode.get("models")
+    if not isinstance(models, dict):
+        return
+    for alias, mapping in sorted(models.items()):
+        if not isinstance(alias, str) or not alias:
+            continue
+        entry = dict(_opencode_alias_reasoning_summary(opencode))
+        entry["alias"] = alias
+        if isinstance(mapping, str) and mapping:
+            entry["model"] = mapping
+            aliases[alias] = entry
+            continue
+        if not isinstance(mapping, dict):
+            continue
+        model = mapping.get("model")
+        variant = mapping.get("variant")
+        if not (isinstance(model, str) and model and isinstance(variant, str) and variant):
+            continue
+        entry["model"] = model
+        entry["pinnedVariant"] = variant
+        entry["source"] = "alias"
         aliases[alias] = entry
 
 
@@ -767,6 +812,16 @@ def build_alias_reasoning_summaries(
     else:
         summaries["devin"] = {}
 
+    opencode = config.get("opencode")
+    if isinstance(opencode, dict):
+        default_model = opencode.get("defaultModel")
+        alias_key = _alias_key_for_default_model(default_model)
+        opencode_aliases: JsonObject = {alias_key: _opencode_alias_reasoning_summary(opencode)}
+        _add_opencode_alias_summaries(opencode_aliases, opencode)
+        summaries["opencode"] = opencode_aliases
+    else:
+        summaries["opencode"] = {}
+
     kimi = config.get("kimi")
     if isinstance(kimi, dict):
         default_model = kimi.get("defaultModel")
@@ -821,6 +876,13 @@ def build_reasoning_capabilities_payload(
         "supported": list(REASONING_PROFILES["grok"].static_efforts),
         "models": {},
     }
+    for harness in [h for h, p in REASONING_PROFILES.items() if p.strategy == "pass-through"]:
+        harnesses[harness] = {
+            "transport": TRANSPORT_OPENCODE_VARIANT_FLAG,
+            "source": "pass-through",
+            "supported": None,
+            "models": {},
+        }
     harnesses["kimi"] = {
         "transport": REASONING_PROFILES["kimi"].transport,
         **_kimi_unsupported_reasoning_fields(),

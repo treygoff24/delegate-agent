@@ -54,6 +54,7 @@ class LaunchOptions:
     read_only: bool = False
     dry_run: bool = False
     model: str | None = None
+    agent: str | None = None
 
 
 @dataclass
@@ -186,6 +187,7 @@ class EngineRequestParts:
     reasoning_effort_source: str | None = None
     reasoning_capability_source: str | None = None
     reasoning_transport: str | None = None
+    env_overrides: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -202,3 +204,4 @@ class EngineBuildInput:
     output_schema: str | None = None
     call_read_only: bool = False
     model_override: str | None = None
+    agent: str | None = None

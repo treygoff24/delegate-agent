@@ -1,6 +1,6 @@
 # Testing
 
-The test suite uses Python `unittest` and fake child runtimes. Required CI does not need real Cursor, Droid, Codex, Claude, or Kimi binaries.
+The test suite uses Python `unittest` and fake child runtimes. Required CI does not need real Cursor, Droid, Codex, Claude, Grok, Devin, OpenCode, or Kimi binaries.
 
 ## Test layout
 

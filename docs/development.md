@@ -35,7 +35,9 @@ HOME="$clean_home" DELEGATE_CONFIG="$PWD/config.example.json" python3 bin/delega
 HOME="$clean_home" DELEGATE_CONFIG="$PWD/config.example.json" python3 bin/delegate.py --json models
 ```
 
-Droid real runs require non-placeholder model IDs. Cursor, Codex, Claude, and Kimi dry-runs do not require child binaries.
+Droid real runs require non-placeholder model IDs. Dry-runs for Cursor, Droid,
+Codex, Claude, Grok, Devin, OpenCode, and Kimi do not require child binaries.
+OpenCode execution tests use fixtures under `tests/fixtures/opencode/`.
 
 ## Persistent worktree development
 
@@ -59,4 +61,5 @@ git diff --check
 python3 -m unittest discover -s tests
 ```
 
-Required CI does not need real Cursor, Droid, Codex, Claude, or Kimi binaries.
+Required CI does not need real Cursor, Droid, Codex, Claude, Grok, Devin,
+OpenCode, or Kimi binaries.

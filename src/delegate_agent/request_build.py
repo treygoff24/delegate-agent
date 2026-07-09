@@ -36,6 +36,7 @@ from delegate_agent.argv_builders import (
     build_droid_argv,
     build_grok_argv,
     build_kimi_argv,
+    build_opencode_argv,
     prefix_droid_safe_prompt,
     redacted_prompt_argv,
 )
@@ -91,6 +92,7 @@ RUN_INPUT_KEYS = {
     "forbidCommit",
     "readOnly",
     "includeDirty",
+    "agent",
     "promptInstructionMode",
     "workflowAgentKey",
 }
@@ -108,6 +110,20 @@ DEVIN_READ_ONLY_AGENT_CONFIG = {
     }
 }
 DEVIN_READ_ONLY_AGENT_CONFIG_TEXT = json.dumps(DEVIN_READ_ONLY_AGENT_CONFIG, separators=(",", ":"))
+OPENCODE_SAFE_AGENT = "delegate-read-only"
+OPENCODE_SAFE_PERMISSION = {
+    "*": "deny",
+    "read": "allow",
+    "glob": "allow",
+    "grep": "allow",
+    "edit": "deny",
+    "bash": "deny",
+    "task": "deny",
+    "skill": "deny",
+    "external_directory": "deny",
+    "webfetch": "deny",
+}
+OPENCODE_SAFE_PERMISSION_JSON = json.dumps(OPENCODE_SAFE_PERMISSION, separators=(",", ":"))
 
 # Read-only call is the stateless "judge/completion" contract: text in, text out,
 # no tree. These harnesses default to a coding-agent framing ("inspect the
@@ -520,6 +536,11 @@ def _forbid_commit_implied_isolation_note() -> str:
     return "note: --forbid-commit implies --isolation worktree"
 
 
+def _validate_agent_option(engine: str, agent: str | None) -> None:
+    if agent is not None and engine != "opencode":
+        raise DelegateError("unsupported_agent", "agent is only supported for opencode.")
+
+
 def _apply_forbid_commit_isolation_implication(
     *,
     forbid_commit: bool,
@@ -589,6 +610,83 @@ def _resolve_engine_model(section: JsonObject, build: EngineBuildInput) -> str |
     if isinstance(build.model_alias, str) and build.model_alias:
         return resolve_model_selection(section, build.model_alias)
     return _resolve_default_model(section)
+
+
+def _resolve_opencode_alias(section: JsonObject, value: str) -> tuple[str, str | None]:
+    models = section.get("models")
+    if isinstance(models, dict) and value in models:
+        mapped = models[value]
+        if isinstance(mapped, str):
+            return mapped, None
+        if isinstance(mapped, dict):
+            model = mapped.get("model")
+            variant = mapped.get("variant")
+            if isinstance(model, str):
+                return model, variant if isinstance(variant, str) else None
+    return value, None
+
+
+def _reject_opencode_flag_like_value(value: str | None, *, field: str, error: str) -> None:
+    """Reject empty or leading-dash values that would inject argv flags."""
+    if value is None:
+        return
+    if not value.strip() or value.startswith("-"):
+        raise DelegateError(
+            error,
+            f"{field} must be a non-empty string that does not start with '-'.",
+        )
+
+
+def _resolve_opencode_selection_detail(
+    section: JsonObject, build: EngineBuildInput
+) -> tuple[str | None, str | None, str | None]:
+    alias_variant: str | None = None
+    if build.model_override is not None:
+        _reject_opencode_flag_like_value(build.model_override, field="model", error="invalid_model")
+        model, alias_variant = _resolve_opencode_alias(section, build.model_override)
+    elif isinstance(build.model_alias, str) and build.model_alias:
+        _reject_opencode_flag_like_value(build.model_alias, field="model", error="invalid_model")
+        model, alias_variant = _resolve_opencode_alias(section, build.model_alias)
+    else:
+        model = _resolve_default_model(section)
+    _reject_opencode_flag_like_value(model, field="model", error="invalid_model")
+    if build.requested_effort is not None and build.effort_source != "config":
+        _reject_opencode_flag_like_value(
+            build.requested_effort, field="reasoningEffort", error="invalid_reasoning_effort"
+        )
+        return model, build.requested_effort, build.effort_source or "cli"
+    if alias_variant is not None:
+        _reject_opencode_flag_like_value(
+            alias_variant, field="variant", error="invalid_reasoning_effort"
+        )
+        try:
+            return model, reasoning.normalize_effort(alias_variant), "alias"
+        except reasoning.ReasoningCapabilityError as exc:
+            raise DelegateError(exc.error, f"opencode alias variant: {exc.message}") from exc
+    if build.requested_effort is not None:
+        _reject_opencode_flag_like_value(
+            build.requested_effort, field="reasoningEffort", error="invalid_reasoning_effort"
+        )
+        return model, build.requested_effort, build.effort_source or "config"
+    return model, None, None
+
+
+def _resolve_opencode_selection(
+    section: JsonObject, build: EngineBuildInput
+) -> tuple[str | None, str | None]:
+    model, variant, _source = _resolve_opencode_selection_detail(section, build)
+    return model, variant
+
+
+def _resolve_opencode_agent(section: JsonObject, build: EngineBuildInput) -> str | None:
+    if isinstance(build.agent, str) and build.agent.strip():
+        _reject_opencode_flag_like_value(build.agent, field="agent", error="invalid_agent")
+        return build.agent
+    default = section.get("defaultAgent")
+    if isinstance(default, str) and default.strip():
+        _reject_opencode_flag_like_value(default, field="agent", error="invalid_agent")
+        return default
+    return None
 
 
 def _effective_cli_model_alias(launch: LaunchOptions, config: JsonObject) -> str | None:
@@ -795,6 +893,7 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         raise DelegateError("invalid_command", "Command does not map to an execution request.")
     if launch.mode is None:
         raise DelegateError("invalid_command", "Command does not map to an execution request.")
+    _validate_agent_option(launch.engine, launch.agent)
     if launch.mode == MODE_CALL:
         _validate_call_cli_options(global_options, launch)
         read_only = getattr(launch, "read_only", False)
@@ -833,6 +932,7 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
                 cleanup_workspace=cleanup_workspace,
                 call_read_only=read_only,
                 group=global_options.group,
+                agent=launch.agent,
                 model_override=cli_model_override,
             )
         except BaseException:
@@ -952,6 +1052,7 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         warnings=(*output_schema_warnings, *isolation_warnings),
         group=global_options.group,
         prompt_instruction_mode=instruction_mode,
+        agent=launch.agent,
         model_override=cli_model_override,
     )
 
@@ -1001,6 +1102,11 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
     model_alias = raw.get("model")
     raw_reasoning_effort = raw.get("reasoningEffort")
     if raw_reasoning_effort is not None:
+        if isinstance(raw_reasoning_effort, str) and raw_reasoning_effort.startswith("-"):
+            raise DelegateError(
+                "invalid_reasoning_effort",
+                "reasoningEffort must be a non-empty string that does not start with '-'.",
+            )
         try:
             reasoning_effort = reasoning.normalize_effort(raw_reasoning_effort)
         except reasoning.ReasoningCapabilityError as exc:
@@ -1061,6 +1167,15 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
             raise DelegateError(
                 "invalid_model", f"model must be a non-empty string or omitted for {engine}."
             )
+        if engine == "opencode" and isinstance(model_alias, str):
+            _reject_opencode_flag_like_value(model_alias, field="model", error="invalid_model")
+    raw_agent = raw.get("agent")
+    if raw_agent is not None and (not isinstance(raw_agent, str) or not raw_agent.strip()):
+        raise DelegateError("invalid_agent", "agent must be a non-empty string or omitted.")
+    json_agent = raw_agent if isinstance(raw_agent, str) else None
+    _validate_agent_option(str(engine), json_agent)
+    if engine == "opencode" and json_agent is not None:
+        _reject_opencode_flag_like_value(json_agent, field="agent", error="invalid_agent")
     output_schema = resolve_output_schema(str(engine), raw.get("outputSchema"))
     raw_instruction_mode = raw.get("promptInstructionMode")
     raw_workflow_agent_key = raw.get("workflowAgentKey")
@@ -1110,6 +1225,7 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
                     engine=str(engine),
                     mode=str(mode),
                 ),
+                agent=json_agent,
                 model_override=json_model_override,
             )
         except BaseException:
@@ -1243,6 +1359,7 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         group=global_options.group,
         workflow_agent_key=raw_workflow_agent_key,
         prompt_instruction_mode=instruction_mode,
+        agent=json_agent,
         model_override=json_model_override,
     )
 
@@ -1273,8 +1390,10 @@ def build_request(
     group: str | None = None,
     workflow_agent_key: str | None = None,
     prompt_instruction_mode: str = PROMPT_INSTRUCTION_MODE_WRAPPED,
+    agent: str | None = None,
     model_override: str | None = None,
 ) -> Request:
+    _validate_agent_option(engine, agent)
     if not isinstance(workspace, ResolvedWorkspace):
         raise TypeError(
             "build_request requires a ResolvedWorkspace; "
@@ -1313,6 +1432,7 @@ def build_request(
         group=group,
         workflow_agent_key=workflow_agent_key,
         prompt_instruction_mode=prompt_instruction_mode,
+        agent=agent,
         model_override=model_override,
     )
 
@@ -1633,6 +1753,54 @@ def _devin_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     )
 
 
+def _opencode_env_overrides(*, read_only: bool, agent: str | None = None) -> dict[str, str]:
+    env = {"OPENCODE_DISABLE_AUTOUPDATE": "1"}
+    if read_only:
+        if agent is None:
+            raise ValueError("read-only OpenCode requests require an agent")
+        agent_config: JsonObject = {"permission": OPENCODE_SAFE_PERMISSION}
+        if agent == OPENCODE_SAFE_AGENT:
+            agent_config["mode"] = "primary"
+        lockdown: JsonObject = {
+            "permission": OPENCODE_SAFE_PERMISSION,
+            "agent": {agent: agent_config},
+            "autoupdate": False,
+            "share": "disabled",
+        }
+        env["OPENCODE_CONFIG_CONTENT"] = json.dumps(lockdown, separators=(",", ":"))
+        env["OPENCODE_PERMISSION"] = OPENCODE_SAFE_PERMISSION_JSON
+    return env
+
+
+def _opencode_request_parts(build: EngineBuildInput) -> EngineRequestParts:
+    _ = build.cache
+    opencode = build.config["opencode"]
+    model, variant, variant_source = _resolve_opencode_selection_detail(opencode, build)
+    agent = _resolve_opencode_agent(opencode, build)
+    read_only = build.mode == MODE_SAFE or (build.mode == MODE_CALL and build.call_read_only)
+    if read_only and agent is None:
+        agent = OPENCODE_SAFE_AGENT
+    argv = build_opencode_argv(
+        opencode,
+        build.mode,
+        build.resolved.path,
+        model,
+        agent,
+        variant,
+        call_read_only=build.call_read_only,
+    )
+    return EngineRequestParts(
+        model=model,
+        argv=argv,
+        model_alias=build.model_alias,
+        prompt_transport=PROMPT_TRANSPORT_STDIN,
+        stdin_text=build.prompt,
+        display_argv=list(argv),
+        env_overrides=_opencode_env_overrides(read_only=read_only, agent=agent),
+        **opencode_reasoning_request_kwargs(variant, variant_source),
+    )
+
+
 def _kimi_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     _ = build.effort_source, build.cache
     kimi = build.config["kimi"]
@@ -1674,6 +1842,7 @@ ENGINE_REQUEST_PARTS_BUILDERS: dict[str, EngineRequestPartsBuilder] = {
     "claude": _claude_request_parts,
     "grok": _grok_request_parts,
     "devin": _devin_request_parts,
+    "opencode": _opencode_request_parts,
     "kimi": _kimi_request_parts,
 }
 
@@ -1718,6 +1887,7 @@ def _build_request_for_workspace(
     group: str | None = None,
     workflow_agent_key: str | None = None,
     prompt_instruction_mode: str = PROMPT_INSTRUCTION_MODE_WRAPPED,
+    agent: str | None = None,
     model_override: str | None = None,
 ) -> Request:
     if prompt_instruction_mode != PROMPT_INSTRUCTION_MODE_SLASH:
@@ -1745,6 +1915,7 @@ def _build_request_for_workspace(
             output_schema=output_schema,
             call_read_only=call_read_only,
             model_override=model_override,
+            agent=agent,
         ),
     )
     return _apply_profile_resolution(
@@ -1775,6 +1946,7 @@ def _build_request_for_workspace(
             agent_config_text=parts.agent_config_text,
             prompt_transport=parts.prompt_transport,
             display_argv=parts.display_argv,
+            env_overrides=parts.env_overrides,
             cleanup_workspace=cleanup_workspace,
             group=group,
             workflow_agent_key=workflow_agent_key,
@@ -1804,6 +1976,21 @@ def _apply_profile_resolution(
     )
     env_overrides = dict(request.env_overrides or {})
     env_overrides.update(resolution.env)
+    if request.engine == "opencode":
+        # Profiles and ambient environment must not relax a read-only request.
+        request_env = request.env_overrides or {}
+        env_overrides["OPENCODE_DISABLE_AUTOUPDATE"] = "1"
+        if "OPENCODE_PERMISSION" in request_env:
+            env_overrides.update(
+                {
+                    key: request_env[key]
+                    for key in (
+                        "OPENCODE_CONFIG_CONTENT",
+                        "OPENCODE_PERMISSION",
+                        "OPENCODE_DISABLE_AUTOUPDATE",
+                    )
+                }
+            )
     auth_profile = resolution.name
     fallback_profile = None
     if request.engine == "codex":
@@ -1974,6 +2161,15 @@ def grok_reasoning_request_kwargs(effort: str | None, source: str | None) -> Jso
         source,
         transport=reasoning.TRANSPORT_GROK_EFFORT_FLAG,
         capability_source="static",
+    )
+
+
+def opencode_reasoning_request_kwargs(variant: str | None, source: str | None) -> JsonObject:
+    return _native_reasoning_request_kwargs(
+        variant,
+        source,
+        transport=reasoning.TRANSPORT_OPENCODE_VARIANT_FLAG,
+        capability_source="pass-through",
     )
 
 

@@ -45,6 +45,7 @@ from delegate_agent.argv_builders import (  # noqa: F401  # re-exported for test
     build_droid_argv,
     build_grok_argv,
     build_kimi_argv,
+    build_opencode_argv,
     prefix_cursor_safe_prompt,
     prefix_droid_safe_prompt,
     redacted_prompt_argv,

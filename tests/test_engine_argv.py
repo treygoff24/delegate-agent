@@ -1026,7 +1026,9 @@ class EngineArgvTests(CommandTestBase):
         self.assertTrue(payload["engineCapabilities"]["codex"]["outputSchema"])
         self.assertEqual(payload["engineDefaults"]["devin"]["binary"], "devin")
         self.assertEqual(payload["engineDefaults"]["devin"]["defaultModel"], "swe-1.7")
-        for engine in ("cursor", "droid", "kimi", "claude", "grok", "devin"):
+        self.assertEqual(payload["engineDefaults"]["opencode"]["binary"], "opencode")
+        self.assertIsNone(payload["engineDefaults"]["opencode"]["defaultAgent"])
+        for engine in ("cursor", "droid", "kimi", "claude", "grok", "devin", "opencode"):
             with self.subTest(engine=engine):
                 self.assertFalse(payload["engineCapabilities"][engine]["outputSchema"])
         self.assertIn("skill review", payload["promptTransforms"][0])
@@ -1074,6 +1076,14 @@ class EngineArgvTests(CommandTestBase):
         self.assertFalse(payload["isolation"]["safeNoneAllowed"]["devin"])
         self.assertIn("--permission-mode dangerous", " ".join(devin_work))
         self.assertNotIn("--agent-config", devin_work)
+        self.assertEqual(payload["promptTransports"]["opencode"], "stdin")
+        opencode_safe = payload["modeMapping"]["opencode"]["safe"]
+        opencode_work = payload["modeMapping"]["opencode"]["work"]
+        self.assertIn("--dir", opencode_safe)
+        self.assertIn("<isolated-workspace>", opencode_safe)
+        self.assertNotIn("--auto", opencode_safe)
+        self.assertIn("--auto", opencode_work)
+        self.assertFalse(payload["isolation"]["safeNoneAllowed"]["opencode"])
 
     def test_grok_safe_argv_uses_prompt_file_and_read_only_controls(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
@@ -1263,6 +1273,325 @@ class EngineArgvTests(CommandTestBase):
                 reasoning_effort="high",
             )
         self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
+
+    def test_opencode_safe_argv_uses_stdin_dir_and_lockdown_env(self):
+        request = self.build_git_request(
+            "opencode",
+            "safe",
+            None,
+            "/repo",
+            "review task",
+            self.delegate.DEFAULT_CONFIG,
+            dry_run=True,
+        )
+        self.assertEqual(request.prompt_transport, self.delegate.PROMPT_TRANSPORT_STDIN)
+        self.assertEqual(request.stdin_text, "review task")
+        self.assertEqual(
+            request.argv,
+            [
+                "opencode",
+                "--pure",
+                "run",
+                "--format",
+                "json",
+                "--print-logs",
+                "--dir",
+                "/repo",
+                "--agent",
+                "delegate-read-only",
+            ],
+        )
+        permissions = {
+            "*": "deny",
+            "read": "allow",
+            "glob": "allow",
+            "grep": "allow",
+            "edit": "deny",
+            "bash": "deny",
+            "task": "deny",
+            "skill": "deny",
+            "external_directory": "deny",
+            "webfetch": "deny",
+        }
+        self.assertEqual(request.env_overrides["OPENCODE_DISABLE_AUTOUPDATE"], "1")
+        self.assertEqual(json.loads(request.env_overrides["OPENCODE_PERMISSION"]), permissions)
+        lockdown = json.loads(request.env_overrides["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(lockdown["permission"], permissions)
+        self.assertEqual(
+            lockdown["agent"]["delegate-read-only"], {"mode": "primary", "permission": permissions}
+        )
+        self.assertNotIn("--auto", request.argv)
+        for flag in ("--continue", "--session", "--fork", "--share", "--attach", "--command"):
+            self.assertNotIn(flag, request.argv)
+
+    def test_opencode_work_uses_auto_default_agent_model_and_config_variant(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["opencode"]["defaultModel"] = "anthropic/claude-sonnet"
+        config["opencode"]["defaultAgent"] = "builder"
+        config["opencode"]["defaultReasoningEffort"] = "high"
+        request = self.build_git_request(
+            "opencode",
+            "work",
+            None,
+            "/repo",
+            "implement",
+            config,
+            dry_run=True,
+        )
+        self.assertIn("--auto", request.argv)
+        self.assertNotIn("--pure", request.argv)
+        self.assertIn("--model", request.argv)
+        self.assertIn("anthropic/claude-sonnet", request.argv)
+        self.assertIn("--agent", request.argv)
+        self.assertIn("builder", request.argv)
+        self.assertIn("--variant", request.argv)
+        self.assertIn("high", request.argv)
+        self.assertEqual(request.env_overrides, {"OPENCODE_DISABLE_AUTOUPDATE": "1"})
+        self.assertEqual(request.reasoning_transport, "variant-flag")
+        self.assertEqual(request.reasoning_effort_source, "config")
+
+    def test_opencode_call_default_vs_read_only_env(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        default_req = self.delegate.request_from_parsed(
+            self.delegate.parse_cli(["opencode", "call", "answer"]),
+            config,
+            io.StringIO(""),
+        )
+        self.addCleanup(shutil.rmtree, default_req.workspace, ignore_errors=True)
+        self.assertNotIn("--auto", default_req.argv)
+        self.assertNotIn("--pure", default_req.argv)
+        self.assertEqual(default_req.env_overrides, {"OPENCODE_DISABLE_AUTOUPDATE": "1"})
+
+        ro_req = self.delegate.request_from_parsed(
+            self.delegate.parse_cli(["opencode", "call", "--read-only", "score"]),
+            config,
+            io.StringIO(""),
+        )
+        self.addCleanup(shutil.rmtree, ro_req.workspace, ignore_errors=True)
+        self.assertNotIn("--auto", ro_req.argv)
+        self.assertIn("--pure", ro_req.argv)
+        self.assertIn("OPENCODE_CONFIG_CONTENT", ro_req.env_overrides)
+        self.assertIn("OPENCODE_PERMISSION", ro_req.env_overrides)
+        self.assertTrue(ro_req.stdin_text.startswith("You are being called"))
+
+    def test_opencode_safe_agents_preserve_selected_name_with_deny_policy(self):
+        permissions = {
+            "*": "deny",
+            "read": "allow",
+            "glob": "allow",
+            "grep": "allow",
+            "edit": "deny",
+            "bash": "deny",
+            "task": "deny",
+            "skill": "deny",
+            "external_directory": "deny",
+            "webfetch": "deny",
+        }
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["opencode"]["defaultAgent"] = "configured-reviewer"
+        configured = self.build_git_request(
+            "opencode", "safe", None, "/repo", "review", config, dry_run=True
+        )
+        self.assertEqual(
+            configured.argv[configured.argv.index("--agent") + 1], "configured-reviewer"
+        )
+        configured_lockdown = json.loads(configured.env_overrides["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(
+            configured_lockdown["agent"]["configured-reviewer"], {"permission": permissions}
+        )
+
+        explicit_name = 'explicit-reviewer"quoted'
+        explicit = self.build_git_request(
+            "opencode",
+            "safe",
+            None,
+            "/repo",
+            "review",
+            config,
+            dry_run=True,
+            agent=explicit_name,
+        )
+        self.assertEqual(explicit.argv[explicit.argv.index("--agent") + 1], explicit_name)
+        explicit_lockdown = json.loads(explicit.env_overrides["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(explicit_lockdown["agent"][explicit_name], {"permission": permissions})
+
+    def test_opencode_alias_object_variant_and_explicit_effort_precedence(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["opencode"]["defaultReasoningEffort"] = "low"
+        config["opencode"]["models"] = {"fast": {"model": "openai/gpt-5.5", "variant": "high"}}
+        request = self.build_git_request(
+            "opencode",
+            "safe",
+            "fast",
+            "/repo",
+            "review",
+            config,
+            dry_run=True,
+        )
+        self.assertEqual(request.model, "openai/gpt-5.5")
+        self.assertEqual(request.reasoning_effort, "high")
+        self.assertEqual(request.reasoning_effort_source, "alias")
+        self.assertEqual(request.reasoning_transport, "variant-flag")
+        self.assertEqual(request.argv[request.argv.index("--variant") + 1], "high")
+
+        explicit = self.build_git_request(
+            "opencode",
+            "safe",
+            "fast",
+            "/repo",
+            "review",
+            config,
+            dry_run=True,
+            reasoning_effort="xhigh",
+        )
+        self.assertEqual(explicit.reasoning_effort, "xhigh")
+        self.assertEqual(explicit.reasoning_effort_source, "cli")
+        self.assertEqual(explicit.argv[explicit.argv.index("--variant") + 1], "xhigh")
+
+    def test_opencode_profile_cannot_clobber_read_only_lockdown_env(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["profiles"]["definitions"] = {
+            "hostile": {
+                "env": {
+                    "OPENCODE_CONFIG_CONTENT": "{}",
+                    "OPENCODE_PERMISSION": '{"edit":"allow"}',
+                    "OPENCODE_DISABLE_AUTOUPDATE": "0",
+                }
+            }
+        }
+        with mock.patch.dict(
+            os.environ,
+            {
+                "AI_PROFILE": "hostile",
+                "OPENCODE_CONFIG_CONTENT": '{"permission":{"edit":"allow"}}',
+                "OPENCODE_PERMISSION": '{"edit":"allow"}',
+            },
+            clear=False,
+        ):
+            request = self.build_git_request(
+                "opencode",
+                "safe",
+                None,
+                "/repo",
+                "review",
+                config,
+                dry_run=True,
+            )
+        self.assertNotEqual(request.env_overrides["OPENCODE_CONFIG_CONTENT"], "{}")
+        self.assertNotEqual(request.env_overrides["OPENCODE_PERMISSION"], '{"edit":"allow"}')
+        self.assertEqual(request.env_overrides["OPENCODE_DISABLE_AUTOUPDATE"], "1")
+        payload = self.delegate.dry_run_payload(request)
+        self.assertNotIn("env", payload)
+        self.assertNotIn("OPENCODE_CONFIG_CONTENT", payload["argv"])
+
+    def test_opencode_profile_cannot_clobber_disable_autoupdate_on_work(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["profiles"]["definitions"] = {
+            "hostile": {
+                "env": {
+                    "OPENCODE_DISABLE_AUTOUPDATE": "0",
+                }
+            }
+        }
+        with mock.patch.dict(os.environ, {"AI_PROFILE": "hostile"}, clear=False):
+            request = self.build_git_request(
+                "opencode",
+                "work",
+                None,
+                "/repo",
+                "implement",
+                config,
+                dry_run=True,
+            )
+        self.assertEqual(request.env_overrides["OPENCODE_DISABLE_AUTOUPDATE"], "1")
+        self.assertNotIn("OPENCODE_CONFIG_CONTENT", request.env_overrides)
+
+    def test_opencode_safe_workspace_rewrites_dir_arg(self):
+        request = self.build_git_request(
+            "opencode",
+            "safe",
+            None,
+            "/repo",
+            "review",
+            self.delegate.DEFAULT_CONFIG,
+            dry_run=True,
+        )
+        from delegate_agent import safe_workspace
+
+        updated = safe_workspace.replace_safe_workspace_arg_in_argv(
+            request,
+            request.argv,
+            "/safe-repo",
+        )
+        self.assertEqual(updated[updated.index("--dir") + 1], "/safe-repo")
+
+    def test_opencode_input_json_agent_and_non_opencode_rejection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "task.json"
+            task.write_text(
+                json.dumps(
+                    {
+                        "engine": "opencode",
+                        "mode": "safe",
+                        "cwd": tmp,
+                        "prompt": "review",
+                        "agent": "reviewer",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            parsed = self.delegate.ParsedCommand(
+                "run",
+                global_options=self.delegate.GlobalOptions(json_mode=True),
+                run_json=self.delegate.RunJsonOptions(str(task)),
+            )
+            request = self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+            self.assertIn("--agent", request.argv)
+            self.assertEqual(request.argv[request.argv.index("--agent") + 1], "reviewer")
+
+            task.write_text(
+                json.dumps(
+                    {
+                        "engine": "codex",
+                        "mode": "safe",
+                        "cwd": tmp,
+                        "prompt": "review",
+                        "agent": "reviewer",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+            self.assertEqual(ctx.exception.error, "unsupported_agent")
+
+    def test_opencode_input_json_rejects_leading_dash_agent_and_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "task.json"
+            parsed = self.delegate.ParsedCommand(
+                "run",
+                global_options=self.delegate.GlobalOptions(json_mode=True),
+                run_json=self.delegate.RunJsonOptions(str(task)),
+            )
+            cases = (
+                ({"agent": "--auto"}, "invalid_agent"),
+                ({"model": "--continue"}, "invalid_model"),
+                ({"reasoningEffort": "--session"}, "invalid_reasoning_effort"),
+            )
+            for override, error in cases:
+                with self.subTest(override=override):
+                    payload = {
+                        "engine": "opencode",
+                        "mode": "safe",
+                        "cwd": tmp,
+                        "prompt": "review",
+                        **override,
+                    }
+                    task.write_text(json.dumps(payload), encoding="utf-8")
+                    with self.assertRaises(self.delegate.DelegateError) as ctx:
+                        self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+                    self.assertEqual(ctx.exception.error, error)
+                    self.assertIn("does not start with '-'", ctx.exception.message)
 
     def test_describe_and_models_include_runtime_and_config_provenance(self):
         workspace = Path("/tmp/delegate-provenance-test")

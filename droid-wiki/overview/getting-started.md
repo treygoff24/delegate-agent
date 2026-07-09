@@ -4,7 +4,7 @@ Use the checkout-local entry point when working in this repository. Do not overw
 
 ## Prerequisites
 
-Delegate requires Python 3.11 or newer. The package has no runtime Python dependencies, but development checks use the optional `dev` group from `pyproject.toml`. Install child runtimes only if you plan to run them for real: `agent`, `droid`, `codex`, `claude`, or `kimi`.
+Delegate requires Python 3.11 or newer. The package has no runtime Python dependencies, but development checks use the optional `dev` group from `pyproject.toml`. Install child runtimes only if you plan to run them for real: `agent`, `droid`, `codex`, `claude`, `grok`, `devin`, `opencode`, or `kimi`.
 
 Dry-runs and unit tests do not require the real child binaries.
 

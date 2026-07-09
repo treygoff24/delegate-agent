@@ -4,7 +4,7 @@
 
 | Command group | Source files | Notes |
 | --- | --- | --- |
-| `cursor`, `droid`, `codex`, `claude`, `kimi` | `src/delegate_agent/cli.py` | Direct runtime launch in safe or work mode. |
+| `cursor`, `droid`, `codex`, `claude`, `grok`, `devin`, `opencode`, `kimi` | `src/delegate_agent/cli.py` | Direct runtime launch in safe or work mode. |
 | `dry-run` | `src/delegate_agent/cli.py` | Builds a request without launching a child runtime. |
 | `run --input-json` | `src/delegate_agent/cli.py` | Programmatic JSON task input. |
 | `runs` | `src/delegate_agent/inspection_commands.py`, `src/delegate_agent/run_registry.py` | Lists tracked runs. |

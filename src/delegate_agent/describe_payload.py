@@ -23,6 +23,7 @@ from delegate_agent.argv_builders import (
     build_codex_argv,
     build_devin_argv,
     build_grok_argv,
+    build_opencode_argv,
 )
 from delegate_agent.command_help import SAFE_WORKSPACE_SYNC_NOTE
 from delegate_agent.config import config_path
@@ -48,7 +49,7 @@ from delegate_agent.prompt_transport import (
     PROMPT_TRANSPORT_FILE,
     PROMPT_TRANSPORT_STDIN,
 )
-from delegate_agent.request_build import _resolve_default_model
+from delegate_agent.request_build import OPENCODE_SAFE_AGENT, _resolve_default_model
 
 CONFIG_ENV = delegate_config.CONFIG_ENV
 
@@ -117,7 +118,7 @@ def _commands_catalog() -> list[JsonObject]:
 
 def _launch_options() -> list[str]:
     flags: list[str] = []
-    for command in ("cursor", "droid", "codex", "claude", "grok", "devin", "kimi"):
+    for command in ("cursor", "droid", "codex", "claude", "grok", "devin", "opencode", "kimi"):
         spec = command_help.COMMAND_SPECS[command]
         for option in spec.options:
             if option.flag not in flags:
@@ -256,6 +257,12 @@ def models_payload(
         "defaultModel": config["devin"]["defaultModel"],
         "defaultReasoningEffort": config["devin"].get("defaultReasoningEffort"),
     }
+    opencode: JsonObject = {
+        "binary": config["opencode"]["binary"],
+        "defaultModel": config["opencode"]["defaultModel"],
+        "defaultReasoningEffort": config["opencode"].get("defaultReasoningEffort"),
+        "defaultAgent": config["opencode"].get("defaultAgent"),
+    }
     for engine, section in (
         ("cursor", cursor),
         ("codex", codex),
@@ -263,6 +270,7 @@ def models_payload(
         ("kimi", kimi),
         ("grok", grok),
         ("devin", devin),
+        ("opencode", opencode),
     ):
         models = _nonempty_engine_models(config[engine])
         if models is not None:
@@ -284,6 +292,7 @@ def models_payload(
         "kimi": kimi,
         "grok": grok,
         "devin": devin,
+        "opencode": opencode,
     }
 
 
@@ -321,6 +330,12 @@ def _engine_defaults_payload(config: JsonObject) -> JsonObject:
             "binary": config["devin"]["binary"],
             "defaultModel": config["devin"]["defaultModel"],
             "defaultReasoningEffort": config["devin"].get("defaultReasoningEffort"),
+        },
+        "opencode": {
+            "binary": config["opencode"]["binary"],
+            "defaultModel": config["opencode"]["defaultModel"],
+            "defaultReasoningEffort": config["opencode"].get("defaultReasoningEffort"),
+            "defaultAgent": config["opencode"].get("defaultAgent"),
         },
     }
 
@@ -367,7 +382,29 @@ def _summary_reasoning_fields(reasoning_payload: JsonObject) -> JsonObject:
     warning = reasoning_payload.get("warning")
     if isinstance(warning, str):
         output["warnings"] = [warning]
+    pinned_variant = reasoning_payload.get("pinnedVariant")
+    if isinstance(pinned_variant, str) and pinned_variant:
+        output["pinnedVariant"] = pinned_variant
     return output
+
+
+def _summary_model_fields(engine: str, mapping: object) -> JsonObject:
+    if isinstance(mapping, str):
+        return {
+            "available": bool(mapping),
+            "model": mapping if mapping else None,
+        }
+    if engine == "opencode" and isinstance(mapping, dict):
+        model = mapping.get("model")
+        fields: JsonObject = {
+            "available": isinstance(model, str) and bool(model),
+            "model": model if isinstance(model, str) and model else None,
+        }
+        variant = mapping.get("variant")
+        if isinstance(variant, str) and variant:
+            fields["pinnedVariant"] = variant
+        return fields
+    return {"available": False, "model": None}
 
 
 def models_summary_payload(
@@ -442,11 +479,10 @@ def models_summary_payload(
                 "alias": alias,
                 "provider": engine,
                 "command": f"delegate {engine} {{safe,work,call}} --model {shlex.quote(alias)}",
-                "available": isinstance(model_id, str) and bool(model_id),
                 "safeSupported": True,
                 "workSupported": True,
-                "model": model_id if isinstance(model_id, str) else None,
             }
+            entry.update(_summary_model_fields(engine, model_id))
             entry.update(
                 _summary_reasoning_fields(
                     _reasoning_for_alias(reasoning_aliases, engine, alias),
@@ -493,6 +529,7 @@ def _policy_field_support_matrix() -> JsonObject:
         "droid": unsupported,
         "kimi": unsupported,
         "devin": unsupported,
+        "opencode": unsupported,
     }
 
 
@@ -592,6 +629,28 @@ def _devin_describe_argv(
     ]
 
 
+def _opencode_describe_argv(
+    opencode: JsonObject,
+    *,
+    mode: str,
+    workspace: str,
+) -> list[str]:
+    agent = opencode.get("defaultAgent") if isinstance(opencode.get("defaultAgent"), str) else None
+    if mode == MODE_SAFE and agent is None:
+        agent = OPENCODE_SAFE_AGENT
+    argv = build_opencode_argv(
+        opencode,
+        mode,
+        workspace,
+        _resolve_default_model(opencode),
+        agent,
+        opencode.get("defaultReasoningEffort")
+        if isinstance(opencode.get("defaultReasoningEffort"), str)
+        else None,
+    )
+    return [PROMPT_FILE_DISPLAY if item == PROMPT_FILE_ARG_PLACEHOLDER else item for item in argv]
+
+
 def describe_payload(
     config: JsonObject,
     config_source: str,
@@ -601,6 +660,7 @@ def describe_payload(
     claude = config["claude"]
     grok = config["grok"]
     devin = config["devin"]
+    opencode = config["opencode"]
     codex_safe_policy = delegate_config.effective_policy(config, engine="codex", mode=MODE_SAFE)
     codex_work_policy = delegate_config.effective_policy(config, engine="codex", mode=MODE_WORK)
     claude_safe_policy = _claude_runtime_policy(config, MODE_SAFE)
@@ -649,6 +709,16 @@ def describe_payload(
     )
     devin_safe_argv = _devin_describe_argv(devin, mode=MODE_SAFE)
     devin_work_argv = _devin_describe_argv(devin, mode=MODE_WORK)
+    opencode_safe_argv = _opencode_describe_argv(
+        opencode,
+        mode=MODE_SAFE,
+        workspace="<isolated-workspace>",
+    )
+    opencode_work_argv = _opencode_describe_argv(
+        opencode,
+        mode=MODE_WORK,
+        workspace="<workspace>",
+    )
     return {
         "ok": True,
         "summary": False,
@@ -687,6 +757,7 @@ def describe_payload(
             "claude": PROMPT_TRANSPORT_STDIN,
             "grok": PROMPT_TRANSPORT_FILE,
             "devin": PROMPT_TRANSPORT_FILE,
+            "opencode": PROMPT_TRANSPORT_STDIN,
         },
         "globalOptions": _global_options(),
         "launchOptions": _launch_options(),
@@ -725,6 +796,7 @@ def describe_payload(
                 "claude": False,
                 "grok": False,
                 "devin": False,
+                "opencode": False,
             },
         },
         "worktrees": {
@@ -766,7 +838,7 @@ def describe_payload(
                     "notes": [
                         "engine may be a fallback list; child runs are tagged --group <wfId>.",
                         "passthrough=True is explicit and mutually exclusive with schema= and mode='call'.",
-                        "cursor/kimi argv transport rejects prompts around 100KB; route large stages to codex/claude/droid.",
+                        "cursor/kimi argv transport rejects prompts around 100KB; route large stages to codex/claude/droid/opencode.",
                     ],
                 },
                 "phase": "phase(title) emits a phase event for human-readable progress.",
@@ -945,6 +1017,22 @@ def describe_payload(
                     "Prompt uses --prompt-file plus -p; tracked and call runs parse plain stdout.",
                 ],
             },
+            "opencode": {
+                "safe": opencode_safe_argv,
+                "safeNotes": [
+                    SAFE_WORKSPACE_SYNC_NOTE,
+                    "Uses opencode run --format json --print-logs with prompt delivered on stdin.",
+                    "Safe mode uses --pure, a Delegate isolated copy, and matching global/per-agent read-only permissions in OPENCODE_CONFIG_CONTENT and OPENCODE_PERMISSION.",
+                    "stdout is buffered by opencode until completion; --print-logs stderr remains Delegate-visible.",
+                ],
+                "work": opencode_work_argv,
+                "workNotes": [
+                    "Work mode emits --auto; safe and call do not.",
+                    "Reasoning effort maps to opencode --variant and model IDs are passed verbatim.",
+                    "opencode silently ignores bogus variant names, so typos can no-op.",
+                    "Delegate sets OPENCODE_DISABLE_AUTOUPDATE=1; opencode sessions still accumulate in the user's global state.",
+                ],
+            },
         },
         "commands": _commands_catalog(),
         "recommendedDiscovery": [
@@ -991,8 +1079,13 @@ def describe_summary_payload(
 def _print_engine_aliases(section: JsonObject, stdout: TextIO) -> None:
     models = section.get("models")
     if isinstance(models, dict):
-        for alias, model_id in sorted(models.items()):
-            print(f"  {alias} -> {_text_or_none(model_id)}", file=stdout)
+        for alias, mapping in sorted(models.items()):
+            fields = _summary_model_fields("opencode", mapping)
+            suffix = ""
+            pinned_variant = fields.get("pinnedVariant")
+            if isinstance(pinned_variant, str):
+                suffix = f" variant={pinned_variant}"
+            print(f"  {alias} -> {_text_or_none(fields.get('model'))}{suffix}", file=stdout)
 
 
 def _emit_models_text(payload: JsonObject, config_source: str, stdout: TextIO) -> None:
@@ -1056,6 +1149,16 @@ def _emit_models_text(payload: JsonObject, config_source: str, stdout: TextIO) -
             file=stdout,
         )
         _print_engine_aliases(devin, stdout)
+    opencode = payload.get("opencode")
+    if isinstance(opencode, dict):
+        print(
+            "opencode: "
+            f"binary={_text_or_none(opencode.get('binary'))} "
+            f"defaultModel={_text_or_none(opencode.get('defaultModel'))} "
+            f"defaultAgent={_text_or_none(opencode.get('defaultAgent'))}",
+            file=stdout,
+        )
+        _print_engine_aliases(opencode, stdout)
     kimi = payload.get("kimi")
     if isinstance(kimi, dict):
         print(
@@ -1088,7 +1191,7 @@ def emit_models(
         from delegate_agent import model_discovery
 
         payload = _scrub_discovery_payload(
-            model_discovery.engine_models_payload(config, engine, live=live)
+            model_discovery.engine_models_payload(config, engine, live=live, workspace=workspace)
         )
         if json_mode:
             delegate_rendering.print_json(payload, stdout)

@@ -26,6 +26,7 @@ _MODELS_KEYS: dict[str, set[str]] = {
         "kimi",
         "grok",
         "devin",
+        "opencode",
     },
     "cursor": {
         "defaultModel",
@@ -56,6 +57,7 @@ _MODELS_KEYS: dict[str, set[str]] = {
         "noSubagents",
     },
     "devin": {"binary", "defaultModel", "defaultReasoningEffort"},
+    "opencode": {"binary", "defaultModel", "defaultReasoningEffort", "defaultAgent"},
 }
 
 _MODELS_SUMMARY_KEYS: dict[str, set[str]] = {

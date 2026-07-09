@@ -54,7 +54,9 @@ PRIVATE_FILE_MODE = private_io.PRIVATE_FILE_MODE
 GIT_INFO_EXCLUDE_TIMEOUT_SECONDS = 5.0
 BYTES_PER_KIB = 1 << 10
 BYTES_PER_MIB = BYTES_PER_KIB * BYTES_PER_KIB
-HARNESS_NAMES = frozenset({"codex", "cursor", "grok", "kimi", "claude", "droid", "devin"})
+HARNESS_NAMES = frozenset(
+    {"codex", "cursor", "grok", "kimi", "claude", "droid", "devin", "opencode"}
+)
 
 
 def generate_run_id(now: datetime | None = None) -> str:

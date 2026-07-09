@@ -30,6 +30,7 @@ TOP_LEVEL_COMMANDS = (
     "claude",
     "grok",
     "devin",
+    "opencode",
     "codex",
     "droid",
     "kimi",

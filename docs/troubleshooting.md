@@ -17,6 +17,8 @@ command -v droid
 command -v codex
 command -v claude
 command -v grok
+command -v devin
+command -v opencode
 command -v kimi
 ```
 
@@ -32,9 +34,22 @@ binary may work in a terminal and still be invisible to Delegate from an agent,
 cron, launchd, or another non-interactive subprocess.
 
 The durable fix is to set an absolute binary path in the active config, for
-example `codex.binary`, `claude.binary`, `grok.binary`, `droid.binary`, `kimi.binary`, or `cursor.argvPrefix`.
+example `codex.binary`, `claude.binary`, `grok.binary`, `devin.binary`,
+`opencode.binary`, `droid.binary`, `kimi.binary`, or `cursor.argvPrefix`.
 JSON errors include `configPath`, `configKey`, and, when Delegate sees a likely
 user-local install, `suggestedBinaryPath`.
+
+The OpenCode curl installer normally writes `opencode` under
+`~/.opencode/bin`, which is often absent from the `PATH` inherited by agents and
+other non-interactive processes. Add that directory to their `PATH` or set
+`opencode.binary` to the absolute executable path.
+
+## OpenCode exits `1` and mentions `OPENCODE_CONFIG_CONTENT`
+
+OpenCode validates injected config against its current strict schema. If this
+starts after an OpenCode upgrade, the injected lockdown schema and the installed
+OpenCode version may no longer agree. Confirm the OpenCode version and the error
+before changing Delegate's read-only policy.
 
 ## `invalid_alias` or `unconfigured_model`
 
@@ -96,6 +111,17 @@ Refresh is not read-only: it may invoke child CLIs and writes
 `.delegate/capabilities/reasoning.json` only after the refreshed schema
 validates. A malformed cache file is ignored at run time and overwritten by the
 next refresh. That file is runtime state; do not commit it.
+
+## OpenCode silently ignores an unknown variant
+
+Delegate maps OpenCode `--reasoning-effort LEVEL` directly to `--variant LEVEL`
+without model validation. OpenCode silently ignores bogus variant names, so a
+typo can leave the run at its normal variant without an error. Inspect the
+dry-run argv and correct the variant spelling:
+
+```bash
+delegate --json dry-run opencode safe --reasoning-effort high "Review only."
+```
 
 ## Unexpected config source
 
@@ -196,6 +222,10 @@ labels before printing, and do not include raw child output.
 `--progress` is incompatible with `--pass-through`, which already streams raw
 child output.
 
+OpenCode v1.17.17 buffers stdout until completion. A tracked OpenCode run can
+remain at "no events yet" while it is still running; the final events appear
+after the child exits.
+
 ## Need one-hop output instead of a tracked run
 
 Use `call` mode when you just need a prompt answered and do not want Delegate to
@@ -212,15 +242,16 @@ Call mode returns captured assistant text in JSON `text` when available. Use
 
 ## Safe-mode isolation fails
 
-Cursor, Droid, Codex, Claude, Grok, and Kimi safe create an isolated throwaway
-workspace by default. Safe mode reviews your **current working tree** —
+Cursor, Droid, Codex, Claude, Grok, Devin, OpenCode, and Kimi safe create an
+isolated throwaway workspace by default. Safe mode reviews your **current working tree**,
 uncommitted tracked edits and untracked, non-ignored files are mirrored into
 that copy (only gitignored paths are excluded), so you do **not** need to
 commit or stash before a safe review. In Git repositories, Delegate first tries
 a detached worktree and syncs the dirty tree into it; for non-Git directories
 and some Git fallback cases, it uses a directory copy. Codex safe is the only
 safe harness that may opt out with `--isolation none`, because Codex still
-keeps its read-only sandbox active. Cursor, Droid, Claude, Grok, and Kimi safe
+keeps its read-only sandbox active. Cursor, Droid, Claude, Grok, Devin,
+OpenCode, and Kimi safe
 normalize `--isolation none` back to `auto` with a warning because their safe
 contracts depend on Delegate's temporary workspace boundary.
 
@@ -299,7 +330,7 @@ suppresses the completion-report prompt injection for that run, so the report
 will not precede or wrap your payload. Relative schema paths resolve against the
 launch cwd, like `--prompt-file`.
 
-For Cursor, Droid, Kimi, and Claude there is no native schema enforcement.
+For engines other than Codex there is no native schema enforcement.
 Embed the schema in the prompt and parse the final message yourself. Delegate
 still injects completion-report instructions unless you pass
 `--no-completion-report`; when present, the report precedes any operator-requested
@@ -334,7 +365,8 @@ reviewing the worktree.
 
 ## CI does not have child runtimes
 
-That is expected. Required tests do not need real Cursor, Droid, Codex, Claude, or Kimi binaries:
+That is expected. Required tests do not need real Cursor, Droid, Codex, Claude,
+Grok, Devin, OpenCode, or Kimi binaries:
 
 ```bash
 python3 -m compileall -q src tests bin

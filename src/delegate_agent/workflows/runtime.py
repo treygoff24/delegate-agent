@@ -837,7 +837,7 @@ class WorkflowDsl:
         ):
             raise ValueError(
                 "stage output too large for cursor/kimi argv transport; "
-                "route this stage to codex/claude/droid"
+                "route this stage to codex/claude/droid/opencode"
             )
         engine_sem = self.state.engine_semaphores.get(engine)
         with self.state.agent_semaphore:
