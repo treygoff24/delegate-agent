@@ -613,24 +613,47 @@ def _resolve_opencode_alias(section: JsonObject, value: str) -> tuple[str, str |
     return value, None
 
 
+def _reject_opencode_flag_like_value(value: str | None, *, field: str, error: str) -> None:
+    """Reject empty or leading-dash values that would inject argv flags."""
+    if value is None:
+        return
+    if not value.strip() or value.startswith("-"):
+        raise DelegateError(
+            error,
+            f"{field} must be a non-empty string that does not start with '-'.",
+        )
+
+
 def _resolve_opencode_selection_detail(
     section: JsonObject, build: EngineBuildInput
 ) -> tuple[str | None, str | None, str | None]:
     alias_variant: str | None = None
     if build.model_override is not None:
+        _reject_opencode_flag_like_value(build.model_override, field="model", error="invalid_model")
         model, alias_variant = _resolve_opencode_alias(section, build.model_override)
     elif isinstance(build.model_alias, str) and build.model_alias:
+        _reject_opencode_flag_like_value(build.model_alias, field="model", error="invalid_model")
         model, alias_variant = _resolve_opencode_alias(section, build.model_alias)
     else:
         model = _resolve_default_model(section)
+    _reject_opencode_flag_like_value(model, field="model", error="invalid_model")
     if build.requested_effort is not None and build.effort_source != "config":
+        _reject_opencode_flag_like_value(
+            build.requested_effort, field="reasoningEffort", error="invalid_reasoning_effort"
+        )
         return model, build.requested_effort, build.effort_source or "cli"
     if alias_variant is not None:
+        _reject_opencode_flag_like_value(
+            alias_variant, field="variant", error="invalid_reasoning_effort"
+        )
         try:
             return model, reasoning.normalize_effort(alias_variant), "alias"
         except reasoning.ReasoningCapabilityError as exc:
             raise DelegateError(exc.error, f"opencode alias variant: {exc.message}") from exc
     if build.requested_effort is not None:
+        _reject_opencode_flag_like_value(
+            build.requested_effort, field="reasoningEffort", error="invalid_reasoning_effort"
+        )
         return model, build.requested_effort, build.effort_source or "config"
     return model, None, None
 
@@ -644,9 +667,13 @@ def _resolve_opencode_selection(
 
 def _resolve_opencode_agent(section: JsonObject, build: EngineBuildInput) -> str | None:
     if isinstance(build.agent, str) and build.agent.strip():
+        _reject_opencode_flag_like_value(build.agent, field="agent", error="invalid_agent")
         return build.agent
     default = section.get("defaultAgent")
-    return default if isinstance(default, str) and default.strip() else None
+    if isinstance(default, str) and default.strip():
+        _reject_opencode_flag_like_value(default, field="agent", error="invalid_agent")
+        return default
+    return None
 
 
 def _effective_cli_model_alias(launch: LaunchOptions, config: JsonObject) -> str | None:
@@ -1062,6 +1089,11 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
     model_alias = raw.get("model")
     raw_reasoning_effort = raw.get("reasoningEffort")
     if raw_reasoning_effort is not None:
+        if isinstance(raw_reasoning_effort, str) and raw_reasoning_effort.startswith("-"):
+            raise DelegateError(
+                "invalid_reasoning_effort",
+                "reasoningEffort must be a non-empty string that does not start with '-'.",
+            )
         try:
             reasoning_effort = reasoning.normalize_effort(raw_reasoning_effort)
         except reasoning.ReasoningCapabilityError as exc:
@@ -1122,11 +1154,15 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
             raise DelegateError(
                 "invalid_model", f"model must be a non-empty string or omitted for {engine}."
             )
+        if engine == "opencode" and isinstance(model_alias, str):
+            _reject_opencode_flag_like_value(model_alias, field="model", error="invalid_model")
     raw_agent = raw.get("agent")
     if raw_agent is not None and (not isinstance(raw_agent, str) or not raw_agent.strip()):
         raise DelegateError("invalid_agent", "agent must be a non-empty string or omitted.")
     json_agent = raw_agent if isinstance(raw_agent, str) else None
     _validate_agent_option(str(engine), json_agent)
+    if engine == "opencode" and json_agent is not None:
+        _reject_opencode_flag_like_value(json_agent, field="agent", error="invalid_agent")
     output_schema = resolve_output_schema(str(engine), raw.get("outputSchema"))
     raw_instruction_mode = raw.get("promptInstructionMode")
     raw_workflow_agent_key = raw.get("workflowAgentKey")
@@ -1723,7 +1759,6 @@ def _opencode_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         model,
         agent,
         variant,
-        call_read_only=build.call_read_only,
     )
     read_only = build.mode == MODE_SAFE or (build.mode == MODE_CALL and build.call_read_only)
     return EngineRequestParts(
@@ -1913,10 +1948,13 @@ def _apply_profile_resolution(
     )
     env_overrides = dict(request.env_overrides or {})
     env_overrides.update(resolution.env)
-    if request.engine == "opencode" and (
-        request.mode == MODE_SAFE or "OPENCODE_CONFIG_CONTENT" in (request.env_overrides or {})
-    ):
-        env_overrides.update(_opencode_env_overrides(read_only=True))
+    if request.engine == "opencode":
+        # Profiles must never clobber the auto-update pin. Re-apply lockdown
+        # only when the request parts already set it (safe / call --read-only).
+        had_lockdown = "OPENCODE_CONFIG_CONTENT" in (request.env_overrides or {})
+        env_overrides["OPENCODE_DISABLE_AUTOUPDATE"] = "1"
+        if had_lockdown:
+            env_overrides.update(_opencode_env_overrides(read_only=True))
     auth_profile = resolution.name
     fallback_profile = None
     if request.engine == "codex":

@@ -242,6 +242,59 @@ class EngineModelsConfigTests(unittest.TestCase):
                     self.config_mod.validate_config(config)
                 self.assertEqual(ctx.exception.error, "invalid_opencode_config")
 
+    def test_opencode_config_rejects_leading_dash_flag_injection(self):
+        banned = ("--auto", "--session", "--continue", "--fork", "--share", "--attach", "--command")
+        fields = (
+            ("defaultAgent", None),
+            ("defaultModel", None),
+            ("defaultReasoningEffort", None),
+        )
+        for field, _ in fields:
+            for token in ("--auto", "--session"):
+                with self.subTest(field=field, token=token):
+                    config = copy.deepcopy(self.config_mod.DEFAULT_CONFIG)
+                    config["opencode"][field] = token
+                    with self.assertRaises(self.config_mod.ConfigError) as ctx:
+                        self.config_mod.validate_config(config)
+                    self.assertEqual(ctx.exception.error, "invalid_opencode_config")
+                    self.assertIn("does not start with '-'", ctx.exception.message)
+
+        for token in ("--auto", "--session"):
+            with self.subTest(alias="string", token=token):
+                config = copy.deepcopy(self.config_mod.DEFAULT_CONFIG)
+                config["opencode"]["models"] = {"fast": token}
+                with self.assertRaises(self.config_mod.ConfigError) as ctx:
+                    self.config_mod.validate_config(config)
+                self.assertEqual(ctx.exception.error, "invalid_opencode_config")
+
+            with self.subTest(alias="object.model", token=token):
+                config = copy.deepcopy(self.config_mod.DEFAULT_CONFIG)
+                config["opencode"]["models"] = {
+                    "fast": {"model": token, "variant": "high"},
+                }
+                with self.assertRaises(self.config_mod.ConfigError) as ctx:
+                    self.config_mod.validate_config(config)
+                self.assertEqual(ctx.exception.error, "invalid_opencode_config")
+
+            with self.subTest(alias="object.variant", token=token):
+                config = copy.deepcopy(self.config_mod.DEFAULT_CONFIG)
+                config["opencode"]["models"] = {
+                    "fast": {"model": "openai/gpt-5.5", "variant": token},
+                }
+                with self.assertRaises(self.config_mod.ConfigError) as ctx:
+                    self.config_mod.validate_config(config)
+                self.assertEqual(ctx.exception.error, "invalid_opencode_config")
+
+        # Exhaustive banned-token coverage on the highest-risk scalar fields.
+        for field in ("defaultAgent", "defaultModel"):
+            for token in banned:
+                with self.subTest(field=field, banned=token):
+                    config = copy.deepcopy(self.config_mod.DEFAULT_CONFIG)
+                    config["opencode"][field] = token
+                    with self.assertRaises(self.config_mod.ConfigError) as ctx:
+                        self.config_mod.validate_config(config)
+                    self.assertEqual(ctx.exception.error, "invalid_opencode_config")
+
 
 class ModelOverrideThreadingTests(CommandTestBase):
     def test_model_override_reaches_engine_build_input_for_modeless_and_droid(self):

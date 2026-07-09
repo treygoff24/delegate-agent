@@ -754,7 +754,17 @@ def _validate_opencode_section(opencode: JsonValue) -> None:
     optional_str(
         opencode.get("defaultModel"), path="opencode.defaultModel", error="invalid_opencode_config"
     )
+    _reject_opencode_flag_like_value(
+        opencode.get("defaultModel"),
+        path="opencode.defaultModel",
+        error="invalid_opencode_config",
+    )
     _validate_provider_default_reasoning_effort(
+        opencode.get("defaultReasoningEffort"),
+        path="opencode.defaultReasoningEffort",
+        error="invalid_opencode_config",
+    )
+    _reject_opencode_flag_like_value(
         opencode.get("defaultReasoningEffort"),
         path="opencode.defaultReasoningEffort",
         error="invalid_opencode_config",
@@ -762,7 +772,28 @@ def _validate_opencode_section(opencode: JsonValue) -> None:
     optional_str(
         opencode.get("defaultAgent"), path="opencode.defaultAgent", error="invalid_opencode_config"
     )
+    _reject_opencode_flag_like_value(
+        opencode.get("defaultAgent"),
+        path="opencode.defaultAgent",
+        error="invalid_opencode_config",
+    )
     _validate_opencode_models(opencode.get("models"))
+
+
+def _reject_opencode_flag_like_value(
+    value: JsonValue,
+    *,
+    path: str,
+    error: str,
+) -> None:
+    """Reject empty or leading-dash strings that would inject argv flags."""
+    if value is None:
+        return
+    if not isinstance(value, str) or not value.strip() or value.startswith("-"):
+        raise ConfigError(
+            error,
+            f"{path} must be a non-empty string that does not start with '-'.",
+        )
 
 
 def _validate_provider_default_reasoning_effort(
@@ -784,29 +815,9 @@ def _validate_engine_models(models: JsonValue, *, engine: str, error: str) -> No
     if not isinstance(models, dict):
         raise ConfigError(error, f"{path} must be an object.")
     for alias, model_id in models.items():
-        if (
-            not isinstance(alias, str)
-            or not isinstance(model_id, str)
-            or not alias.strip()
-            or not model_id.strip()
-        ):
+        _validate_engine_model_alias(alias, engine=engine, error=error)
+        if not isinstance(model_id, str) or not model_id.strip():
             raise ConfigError(error, f"{engine} model aliases and ids must be non-empty strings.")
-        if alias in VALID_MODES:
-            raise ConfigError(
-                error,
-                f"{path} alias {alias!r} collides with a launch mode name; rename the alias.",
-            )
-        if alias == engine:
-            raise ConfigError(
-                error,
-                f"{path} alias {alias!r} collides with its own engine name "
-                "(shadowing the engine's summary entry); rename the alias.",
-            )
-        if alias.startswith("-"):
-            raise ConfigError(
-                error,
-                f"{path} alias {alias!r} must not start with '-'.",
-            )
 
 
 def _validate_engine_model_alias(alias: object, *, engine: str, error: str) -> None:
@@ -842,8 +853,11 @@ def _validate_opencode_models(models: JsonValue) -> None:
     for alias, mapping in models.items():
         _validate_engine_model_alias(alias, engine=engine, error=error)
         if isinstance(mapping, str):
-            if not mapping.strip():
-                raise ConfigError(error, "opencode model ids must be non-empty strings.")
+            _reject_opencode_flag_like_value(
+                mapping,
+                path=f"{path}.{alias}",
+                error=error,
+            )
             continue
         if not isinstance(mapping, dict):
             raise ConfigError(
@@ -860,8 +874,10 @@ def _validate_opencode_models(models: JsonValue) -> None:
         variant = mapping.get("variant")
         if not isinstance(model, str) or not model.strip():
             raise ConfigError(error, f"{path}.{alias}.model must be a non-empty string.")
+        _reject_opencode_flag_like_value(model, path=f"{path}.{alias}.model", error=error)
         if not isinstance(variant, str) or not variant.strip():
             raise ConfigError(error, f"{path}.{alias}.variant must be a non-empty string.")
+        _reject_opencode_flag_like_value(variant, path=f"{path}.{alias}.variant", error=error)
         try:
             reasoning.normalize_effort(variant)
         except reasoning.ReasoningCapabilityError as exc:

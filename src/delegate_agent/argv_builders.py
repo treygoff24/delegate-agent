@@ -392,8 +392,6 @@ def build_opencode_argv(
     model: str | None,
     agent: str | None,
     variant: str | None,
-    *,
-    call_read_only: bool = False,
 ) -> list[str]:
     argv = [
         str(opencode["binary"]),
@@ -412,9 +410,7 @@ def build_opencode_argv(
         argv.extend(["--variant", variant])
     if mode == MODE_WORK:
         argv.append("--auto")
-    elif mode in (MODE_SAFE, MODE_CALL):
-        _ = call_read_only
-    else:
+    elif mode not in (MODE_SAFE, MODE_CALL):
         validate_mode(mode)
     return argv
 

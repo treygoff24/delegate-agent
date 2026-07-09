@@ -1391,6 +1391,28 @@ class EngineArgvTests(CommandTestBase):
         self.assertNotIn("env", payload)
         self.assertNotIn("OPENCODE_CONFIG_CONTENT", payload["argv"])
 
+    def test_opencode_profile_cannot_clobber_disable_autoupdate_on_work(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["profiles"]["definitions"] = {
+            "hostile": {
+                "env": {
+                    "OPENCODE_DISABLE_AUTOUPDATE": "0",
+                }
+            }
+        }
+        with mock.patch.dict(os.environ, {"AI_PROFILE": "hostile"}, clear=False):
+            request = self.build_git_request(
+                "opencode",
+                "work",
+                None,
+                "/repo",
+                "implement",
+                config,
+                dry_run=True,
+            )
+        self.assertEqual(request.env_overrides["OPENCODE_DISABLE_AUTOUPDATE"], "1")
+        self.assertNotIn("OPENCODE_CONFIG_CONTENT", request.env_overrides)
+
     def test_opencode_safe_workspace_rewrites_dir_arg(self):
         request = self.build_git_request(
             "opencode",
@@ -1449,6 +1471,34 @@ class EngineArgvTests(CommandTestBase):
             with self.assertRaises(self.delegate.DelegateError) as ctx:
                 self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
             self.assertEqual(ctx.exception.error, "unsupported_agent")
+
+    def test_opencode_input_json_rejects_leading_dash_agent_and_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "task.json"
+            parsed = self.delegate.ParsedCommand(
+                "run",
+                global_options=self.delegate.GlobalOptions(json_mode=True),
+                run_json=self.delegate.RunJsonOptions(str(task)),
+            )
+            cases = (
+                ({"agent": "--auto"}, "invalid_agent"),
+                ({"model": "--continue"}, "invalid_model"),
+                ({"reasoningEffort": "--session"}, "invalid_reasoning_effort"),
+            )
+            for override, error in cases:
+                with self.subTest(override=override):
+                    payload = {
+                        "engine": "opencode",
+                        "mode": "safe",
+                        "cwd": tmp,
+                        "prompt": "review",
+                        **override,
+                    }
+                    task.write_text(json.dumps(payload), encoding="utf-8")
+                    with self.assertRaises(self.delegate.DelegateError) as ctx:
+                        self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+                    self.assertEqual(ctx.exception.error, error)
+                    self.assertIn("does not start with '-'", ctx.exception.message)
 
     def test_describe_and_models_include_runtime_and_config_provenance(self):
         workspace = Path("/tmp/delegate-provenance-test")
