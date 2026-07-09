@@ -155,6 +155,19 @@ class EngineModelsConfigTests(unittest.TestCase):
             "droid.models alias 'safe' collides with a launch mode name; rename the alias.",
         )
 
+    def test_models_rejects_whitespace_only_alias_or_id(self):
+        config = copy.deepcopy(self.config_mod.DEFAULT_CONFIG)
+        config["codex"]["models"] = {"   ": "gpt-5.5"}
+        with self.assertRaises(self.config_mod.ConfigError) as ctx:
+            self.config_mod.validate_config(config)
+        self.assertEqual(ctx.exception.error, "invalid_codex_config")
+
+        config = copy.deepcopy(self.config_mod.DEFAULT_CONFIG)
+        config["devin"]["models"] = {"fast": "  \t"}
+        with self.assertRaises(self.config_mod.ConfigError) as ctx:
+            self.config_mod.validate_config(config)
+        self.assertEqual(ctx.exception.error, "invalid_devin_config")
+
     def test_models_alias_must_not_equal_own_engine_name(self):
         config = copy.deepcopy(self.config_mod.DEFAULT_CONFIG)
         config["codex"]["models"] = {"codex": "private-codex"}

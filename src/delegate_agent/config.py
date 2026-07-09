@@ -755,7 +755,12 @@ def _validate_engine_models(models: JsonValue, *, engine: str, error: str) -> No
     if not isinstance(models, dict):
         raise ConfigError(error, f"{path} must be an object.")
     for alias, model_id in models.items():
-        if not isinstance(alias, str) or not isinstance(model_id, str) or not alias or not model_id:
+        if (
+            not isinstance(alias, str)
+            or not isinstance(model_id, str)
+            or not alias.strip()
+            or not model_id.strip()
+        ):
             raise ConfigError(error, f"{engine} model aliases and ids must be non-empty strings.")
         if alias in VALID_MODES:
             raise ConfigError(
