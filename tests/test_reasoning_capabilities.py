@@ -54,32 +54,6 @@ class ReasoningCapabilityTests(unittest.TestCase):
         self.assertEqual(capability.transport, "codex-config")
         self.assertEqual(capability.source, "bundled")
 
-    def test_gpt_56_reasoning_effort_matrix_matches_codex_catalog(self):
-        expected = {
-            "gpt-5.6-sol": ("low", "medium", "high", "xhigh", "max", "ultra"),
-            "gpt-5.6-terra": ("low", "medium", "high", "xhigh", "max", "ultra"),
-            "gpt-5.6-luna": ("low", "medium", "high", "xhigh", "max"),
-        }
-        for model, efforts in expected.items():
-            for effort in efforts:
-                with self.subTest(model=model, effort=effort):
-                    capability = resolve_reasoning_capability(
-                        harness="codex",
-                        model=model,
-                        requested_effort=effort,
-                        config={},
-                    )
-                    self.assertEqual(capability.supported_efforts, efforts)
-
-        with self.assertRaises(ReasoningCapabilityError) as ctx:
-            resolve_reasoning_capability(
-                harness="codex",
-                model="gpt-5.6-luna",
-                requested_effort="ultra",
-                config={},
-            )
-        self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
-
     def test_codex_spark_model_accepts_bundled_effort(self):
         capability = resolve_reasoning_capability(
             harness="codex",

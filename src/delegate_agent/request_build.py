@@ -1116,12 +1116,12 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
             raise DelegateError(exc.error, "reasoningEffort must be a non-empty string.") from exc
     else:
         reasoning_effort = None
+    if "fast" in raw and engine != "codex":
+        raise DelegateError("unsupported_fast", "fast is only supported by codex.")
     raw_fast = raw.get("fast")
     if raw_fast is not None and not isinstance(raw_fast, bool):
         raise DelegateError("invalid_fast", "fast must be true, false, null, or omitted.")
     fast = raw_fast if isinstance(raw_fast, bool) else None
-    if fast is not None and engine != "codex":
-        raise DelegateError("unsupported_fast", "fast is only supported by codex.")
     raw_progress_intent: ProgressIntent
     if "progress" in raw:
         raw_progress = raw["progress"]

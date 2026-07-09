@@ -154,7 +154,7 @@ Examples:
 ```bash
 delegate codex safe "Review this repo for regressions; report file/line/severity."
 delegate codex safe --model gpt-5.5 "Review this repo for regressions; report file/line/severity."
-delegate codex safe --model gpt-5.6-luna --reasoning-effort medium --fast "Explore likely causes."
+delegate codex safe --model my-alias --reasoning-effort medium --fast "Explore likely causes."
 delegate codex work "Implement the scoped task; report changed files and tests."
 delegate codex call "Summarize this context in three bullets."
 delegate --json codex safe --output-schema findings.schema.json "Return one record per finding."

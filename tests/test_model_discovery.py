@@ -41,12 +41,6 @@ class BundledModelsTests(unittest.TestCase):
         codex_ids = {item["id"] for item in BUNDLED_MODELS["codex"]}
         self.assertEqual(codex_ids, set(BUNDLED_REASONING_CAPABILITIES["codex"]))
 
-    def test_codex_bundles_all_gpt_56_models(self):
-        from delegate_agent.bundled_models import BUNDLED_MODELS
-
-        codex_ids = {item["id"] for item in BUNDLED_MODELS["codex"]}
-        self.assertTrue({"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}.issubset(codex_ids))
-
     def test_devin_has_twenty_seven_models(self):
         from delegate_agent.bundled_models import BUNDLED_MODELS
 

@@ -120,7 +120,12 @@ class ParserTests(unittest.TestCase):
                 self.assertIs(request.fast, expected)
 
     def test_run_input_json_fast_rejects_invalid_type_and_non_codex(self):
-        cases = (("codex", "yes", "invalid_fast"), ("claude", True, "unsupported_fast"))
+        cases = (
+            ("codex", "yes", "invalid_fast"),
+            ("claude", True, "unsupported_fast"),
+            ("claude", None, "unsupported_fast"),
+            ("opencode", None, "unsupported_fast"),
+        )
         for engine, value, error in cases:
             with self.subTest(engine=engine), tempfile.TemporaryDirectory() as tmp:
                 path = Path(tmp) / "task.json"

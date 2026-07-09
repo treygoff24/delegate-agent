@@ -12,9 +12,6 @@ class BundledModelEntry(TypedDict, total=False):
 
 BUNDLED_MODELS: dict[str, tuple[BundledModelEntry, ...]] = {
     "codex": (
-        {"id": "gpt-5.6-sol"},
-        {"id": "gpt-5.6-terra"},
-        {"id": "gpt-5.6-luna"},
         {"id": "gpt-5.5"},
         {"id": "gpt-5.4"},
         {"id": "gpt-5.4-mini"},
