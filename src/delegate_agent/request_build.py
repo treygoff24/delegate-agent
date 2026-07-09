@@ -1025,7 +1025,7 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
     if engine == "droid":
         if model_alias is None and _resolve_default_model(config.get("droid", {})) is not None:
             pass  # droid.defaultModel covers the omitted key.
-        elif not isinstance(model_alias, str) or not model_alias:
+        elif not isinstance(model_alias, str) or not model_alias.strip():
             raise DelegateError(
                 "missing_model",
                 "droid run input requires a model alias or id (or set droid.defaultModel).",
@@ -1041,7 +1041,7 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
     elif engine in MODELESS_ENGINES:
         if model_alias is not None and not isinstance(model_alias, str):
             raise DelegateError("invalid_model", f"model must be a string or null for {engine}.")
-        if model_alias == "":
+        if isinstance(model_alias, str) and not model_alias.strip():
             raise DelegateError(
                 "invalid_model", f"model must be a non-empty string or omitted for {engine}."
             )
@@ -1963,4 +1963,5 @@ def grok_reasoning_request_kwargs(effort: str | None, source: str | None) -> Jso
 
 def _resolve_default_model(section: JsonObject) -> str | None:
     default_model = section.get("defaultModel")
-    return default_model if isinstance(default_model, str) and default_model else None
+    # Whitespace-only counts as unset — it would otherwise reach child argv.
+    return default_model if isinstance(default_model, str) and default_model.strip() else None

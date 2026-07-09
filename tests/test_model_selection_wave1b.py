@@ -619,6 +619,37 @@ class InputJsonModelResolutionTests(CommandTestBase):
             self.assertEqual(request.model, "custom:raw-model-id")
             _assert_argv_has_model(self, request.argv, "custom:raw-model-id")
 
+    def test_input_json_rejects_whitespace_only_model(self):
+        for engine, error in (("droid", "missing_model"), ("codex", "invalid_model")):
+            with self.subTest(engine=engine), tempfile.TemporaryDirectory() as tmp:
+                task = Path(tmp) / "task.json"
+                task.write_text(
+                    json.dumps(
+                        {
+                            "engine": engine,
+                            "mode": "safe",
+                            "model": "   ",
+                            "cwd": tmp,
+                            "prompt": "review",
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                parsed = self.delegate.ParsedCommand(
+                    "run",
+                    global_options=self.delegate.GlobalOptions(json_mode=True),
+                    run_json=self.delegate.RunJsonOptions(str(task)),
+                )
+                with self.assertRaises(self.delegate.DelegateError) as ctx:
+                    self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+                self.assertEqual(ctx.exception.error, error)
+
+    def test_whitespace_default_model_treated_as_unset(self):
+        from delegate_agent.request_build import _resolve_default_model
+
+        self.assertIsNone(_resolve_default_model({"defaultModel": "   "}))
+        self.assertEqual(_resolve_default_model({"defaultModel": "gpt-5.5"}), "gpt-5.5")
+
     def test_droid_input_json_still_requires_model_string(self):
         with tempfile.TemporaryDirectory() as tmp:
             task = Path(tmp) / "task.json"
