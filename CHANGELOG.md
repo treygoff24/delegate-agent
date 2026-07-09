@@ -5,7 +5,9 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.12.0] - 2026-07-09
+
+Three features in one train: Delegate Workflows (multi-agent orchestration with durable resume), per-run model selection + discovery across all seven engines, and the Devin engine. Model selection was built as the inaugural Delegate Workflows dogfood: three implementation waves plus a twelve-round two-lane adversarial review loop driven through `workflow run --resume`.
 
 ### Added
 
@@ -18,7 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Delegate Workflows: a Python DSL supervisor for multi-agent fan-out, durable
   journaling, nested workflow calls, schema-validated `agent()` results,
   approval gates, resume, kill, saved workflows, and workflow discovery in
-  `describe`/help/docs.
+  `describe`/help/docs. Status/list report `stalled` when a supervisor died
+  without finalizing (non-blocking lock probe; `wait`/`watch` exit instead of
+  hanging), and supervisor failures record a traceback tail in the journal,
+  result, and status.
 - Slash pass-through: launch prompts that intentionally start with a harness
   slash command can be sent verbatim when the target mode's safety boundary does
   not depend on Delegate's prompt preamble. `--pass-through` also suppresses the
