@@ -1432,7 +1432,7 @@ class WorkflowCommandTests(unittest.TestCase):
         failed = [event for event in events if event["type"] == "agent_failed"]
         self.assertTrue(failed)
         self.assertIn("stage output too large for cursor/kimi argv transport", failed[0]["error"])
-        self.assertIn("route this stage to codex/claude/droid", failed[0]["error"])
+        self.assertIn("route this stage to codex/claude/droid/opencode", failed[0]["error"])
 
     def test_judges_spawns_call_read_only_children_per_engine(self) -> None:
         # §2.4: judges() is one call --read-only child per engine; votes are parsed.
@@ -1577,6 +1577,82 @@ class WorkflowCommandTests(unittest.TestCase):
         )
         self.assertIn("opencode", semaphores)
         self.assertNotIn("not-real", semaphores)
+
+    def test_opencode_engine_caps_bound_concurrent_child_runs(self) -> None:
+        config = json.loads(self.config_path.read_text(encoding="utf-8"))
+        config["opencode"] = {"binary": str(self.bin_dir / "opencode")}
+        config["workflows"]["engineCaps"] = {"opencode": 1}
+        self.config_path.write_text(json.dumps(config), encoding="utf-8")
+        overlap_log = self.workspace / "opencode-spawn-overlap.jsonl"
+        script = self.write_workflow(
+            """
+            meta = {"name": "opencode-engine-caps", "defaults": {"engine": "opencode", "mode": "safe"}}
+            return parallel([
+                lambda: agent("slow a"),
+                lambda: agent("slow b"),
+                lambda: agent("slow c"),
+            ])
+            """
+        )
+        path = self.bin_dir / "opencode"
+        path.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, sys, time\n"
+            "prompt = sys.stdin.read()\n"
+            "log = os.environ.get('FAKE_SPAWN_OVERLAP_LOG')\n"
+            "sleep = float(os.environ.get('FAKE_OPENCODE_SLEEP_SECONDS') or '0.4')\n"
+            "if log:\n"
+            "    import fcntl\n"
+            "    with open(log + '.lock', 'a+', encoding='utf-8') as lock:\n"
+            "        fcntl.flock(lock, fcntl.LOCK_EX)\n"
+            "        active_path = log + '.active'\n"
+            "        try:\n"
+            "            active = int(open(active_path, encoding='utf-8').read() or '0')\n"
+            "        except FileNotFoundError:\n"
+            "            active = 0\n"
+            "        active += 1\n"
+            "        open(active_path, 'w', encoding='utf-8').write(str(active))\n"
+            "        open(log, 'a', encoding='utf-8').write(json.dumps({'active': active}) + '\\n')\n"
+            "        fcntl.flock(lock, fcntl.LOCK_UN)\n"
+            "    time.sleep(sleep)\n"
+            "    with open(log + '.lock', 'a+', encoding='utf-8') as lock:\n"
+            "        fcntl.flock(lock, fcntl.LOCK_EX)\n"
+            "        active = int(open(active_path, encoding='utf-8').read()) - 1\n"
+            "        open(active_path, 'w', encoding='utf-8').write(str(active))\n"
+            "        fcntl.flock(lock, fcntl.LOCK_UN)\n"
+            "else:\n"
+            "    time.sleep(sleep)\n"
+            "text = 'fake completion'\n"
+            "print(json.dumps({'type':'step_start','part':{'type':'step-start'}}))\n"
+            "print(json.dumps({'type':'text','part':{'type':'text','text':text}}))\n"
+            "print(json.dumps({'type':'step_finish','part':{'type':'step-finish','reason':'stop'}}))\n",
+            encoding="utf-8",
+        )
+        path.chmod(0o755)
+        launch = self.run_delegate(
+            ["--json", "workflow", "run", str(script)],
+            env_extra={
+                "FAKE_OPENCODE_SLEEP_SECONDS": "0.5",
+                "FAKE_SPAWN_OVERLAP_LOG": str(overlap_log),
+            },
+        )
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        self.assertEqual(
+            self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "15"]).returncode,
+            0,
+        )
+        result = json.loads(self.run_delegate(["--json", "workflow", "result", wf_id]).stdout)[
+            "result"
+        ]
+        self.assertEqual(result, ["fake completion"] * 3)
+        peaks = [
+            json.loads(line)["active"]
+            for line in overlap_log.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(len(peaks), 3)
+        self.assertLessEqual(max(peaks), 1)
 
     def test_workflow_save_list_watch_and_approve_not_gated(self) -> None:
         # CLI verbs: save → run --name; list shows saved + workspace; watch --json;

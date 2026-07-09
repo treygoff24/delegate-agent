@@ -567,6 +567,17 @@ class StreamAccumulator:
             self.current = _bounded_current_line(text)
         self._record_terminal_event(event="grok.error", status="failed")
 
+    def _reset_opencode_step_text_state(self) -> None:
+        # OpenCode emits one assistant turn per step. Mid-step prose from a
+        # tool-calling step must not pollute the published assistant surface or
+        # recovery fields once the next step begins.
+        self._opencode_step_text_chunks = []
+        self.assistant_chunks = []
+        self.completion_text = None
+        self._last_recoverable_assistant_text = None
+        self._last_substantive_assistant_text = None
+        self._invalidate_assistant_text_cache()
+
     def _ingest_opencode_event(self, payload: JsonObject, event_type: str) -> None:
         if event_type == "error":
             self._ingest_opencode_error(payload)
@@ -576,7 +587,7 @@ class StreamAccumulator:
             return
         part_type = part.get("type")
         if event_type == "step_start" and part_type == "step-start":
-            self._opencode_step_text_chunks = []
+            self._reset_opencode_step_text_state()
             return
         if event_type == "text" and part_type == "text":
             self._ingest_opencode_text(part)
@@ -591,12 +602,18 @@ class StreamAccumulator:
         text = part.get("text")
         if not isinstance(text, str) or not text.strip():
             return
-        stripped = self._record_assistant_text(text)
-        if stripped:
-            self._opencode_step_text_chunks.append(stripped)
-            self._last_recoverable_assistant_text = stripped
-            if is_substantive_assistant_text(stripped):
-                self._last_substantive_assistant_text = stripped
+        stripped = text.strip()
+        # Keep text step-local until step_finish seals a stop turn. Publish the
+        # current step's joined text as the sole assistant_chunks entry so
+        # assistant_text / bounded_assistant_text never concatenate prior steps.
+        self._opencode_step_text_chunks.append(stripped)
+        published = "\n\n".join(self._opencode_step_text_chunks).strip()
+        self.assistant_chunks = [published] if published else []
+        self._invalidate_assistant_text_cache()
+        self.current = _current_from_text(stripped)
+        self._last_recoverable_assistant_text = published
+        if is_substantive_assistant_text(published):
+            self._last_substantive_assistant_text = published
 
     def _ingest_opencode_tool(self, part: JsonObject) -> None:
         # OpenCode does not emit a "permission denied" event for denied tools:
@@ -623,7 +640,9 @@ class StreamAccumulator:
             return
         text = "\n\n".join(self._opencode_step_text_chunks).strip()
         if text:
+            self.assistant_chunks = [text]
             self.completion_text = text
+            self._invalidate_assistant_text_cache()
         self._record_terminal_event(
             event="opencode.step_finish",
             status="succeeded",

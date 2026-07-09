@@ -342,6 +342,97 @@ class HarnessEventsTests(unittest.TestCase):
         self.assertEqual(tool_events[0].status, "success")
         self.assertTrue((tool_events[0].target or "").endswith("note.txt"))
 
+    def test_opencode_multi_step_text_keeps_only_final_stop_step(self):
+        acc = self.events.StreamAccumulator(harness="opencode")
+        for line in [
+            json.dumps(
+                {
+                    "type": "step_start",
+                    "part": {"type": "step-start"},
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "text",
+                    "part": {"type": "text", "text": "thinking about it..."},
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "tool_use",
+                    "part": {
+                        "type": "tool",
+                        "tool": "read",
+                        "state": {"status": "completed", "input": {"filePath": "/tmp/x"}},
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "step_finish",
+                    "part": {"type": "step-finish", "reason": "tool-calls"},
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "step_start",
+                    "part": {"type": "step-start"},
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "text",
+                    "part": {"type": "text", "text": "FINAL ANSWER"},
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "step_finish",
+                    "part": {"type": "step-finish", "reason": "stop"},
+                }
+            ),
+        ]:
+            acc.ingest_line(line)
+
+        self.assertEqual(acc.assistant_text, "FINAL ANSWER")
+        self.assertEqual(acc.completion_text, "FINAL ANSWER")
+        bounded, _meta = acc.bounded_assistant_text()
+        self.assertEqual(bounded, "FINAL ANSWER")
+        self.assertNotIn("thinking about it", acc.assistant_text)
+        self.assertEqual(acc.recoverable_assistant_text, "FINAL ANSWER")
+
+    def test_opencode_truncated_after_second_step_start_recovers_latest_step_only(self):
+        acc = self.events.StreamAccumulator(harness="opencode")
+        for line in [
+            json.dumps({"type": "step_start", "part": {"type": "step-start"}}),
+            json.dumps(
+                {
+                    "type": "text",
+                    "part": {"type": "text", "text": "thinking about it..."},
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "step_finish",
+                    "part": {"type": "step-finish", "reason": "tool-calls"},
+                }
+            ),
+            json.dumps({"type": "step_start", "part": {"type": "step-start"}}),
+            json.dumps(
+                {
+                    "type": "text",
+                    "part": {"type": "text", "text": "FINAL ANSWER"},
+                }
+            ),
+        ]:
+            acc.ingest_line(line)
+
+        self.assertEqual(acc.assistant_text, "FINAL ANSWER")
+        self.assertIsNone(acc.completion_text)
+        self.assertEqual(acc.recoverable_assistant_text, "FINAL ANSWER")
+        self.assertNotIn("thinking about it", acc.assistant_text)
+        self.assertNotIn("thinking about it", acc.recoverable_assistant_text or "")
+
     def test_opencode_error_fixture_records_terminal_failure_detail(self):
         acc = self.ingest_opencode_fixture("error_run.ndjson")
 

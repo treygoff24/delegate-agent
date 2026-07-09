@@ -363,7 +363,9 @@ def parse_opencode_models_output(raw: str) -> list[JsonObject]:
     models: list[JsonObject] = []
     for line in strip_ansi(raw).splitlines():
         model_id = line.strip()
-        if not model_id or any(char.isspace() for char in model_id):
+        # Verified shape: provider/model with no whitespace (e.g. openai/gpt-5).
+        # Reject single-token junk like "warning:" or "loading".
+        if not model_id or any(char.isspace() for char in model_id) or "/" not in model_id:
             continue
         models.append({"id": model_id})
     if not models:

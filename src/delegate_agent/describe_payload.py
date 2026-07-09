@@ -1026,6 +1026,7 @@ def describe_payload(
                 "workNotes": [
                     "Work mode emits --auto; safe and call do not.",
                     "Reasoning effort maps to opencode --variant and model IDs are passed verbatim.",
+                    "opencode silently ignores bogus variant names, so typos can no-op.",
                     "Delegate sets OPENCODE_DISABLE_AUTOUPDATE=1; opencode sessions still accumulate in the user's global state.",
                 ],
             },

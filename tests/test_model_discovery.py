@@ -188,6 +188,8 @@ class LiveProbeParseHelpersTests(unittest.TestCase):
             "\n"
             "openai/gpt-5\n"
             "not a model line\n"
+            "warning:\n"
+            "loading\n"
             "anthropic/claude-sonnet-4-5\n"
             "\t\n"
             "openrouter/deepseek-v4\n"
@@ -200,6 +202,13 @@ class LiveProbeParseHelpersTests(unittest.TestCase):
                 {"id": "openrouter/deepseek-v4"},
             ],
         )
+
+    def test_parse_opencode_models_output_rejects_all_junk(self):
+        from delegate_agent.model_discovery import parse_opencode_models_output
+
+        with self.assertRaises(RuntimeError) as ctx:
+            parse_opencode_models_output("warning:\nloading\n\n  spaced id\n")
+        self.assertIn("no parseable model lines", str(ctx.exception))
 
     def test_parse_droid_custom_models(self):
         from delegate_agent.model_discovery import parse_droid_custom_models
