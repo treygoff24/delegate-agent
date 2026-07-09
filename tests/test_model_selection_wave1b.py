@@ -321,6 +321,18 @@ class DroidModelSelectionTests(CommandTestBase):
         self.assertEqual(request.model, "gpt-5.5")
         self.assertEqual(request.model_alias, "gpt-5.5")
 
+    def test_cursor_model_flag_alias_keeps_alias_metadata(self):
+        repo = make_git_repo(with_commit=True)
+        self.addCleanup(repo.cleanup)
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["cursor"]["models"] = {"fast": "grok-4.5-fast-xhigh"}
+        parsed = self.delegate.parse_cli(
+            ["--cwd", repo.name, "dry-run", "cursor", "safe", "--model", "fast", "review"]
+        )
+        request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+        self.assertEqual(request.model, "grok-4.5-fast-xhigh")
+        self.assertEqual(request.model_alias, "fast")
+
     def test_model_flag_rejects_empty_value(self):
         for value in ("", "   "):
             with self.subTest(value=repr(value)):

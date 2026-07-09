@@ -1343,7 +1343,7 @@ def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     return EngineRequestParts(
         model=model,
         argv=argv,
-        model_alias=None,
+        model_alias=build.model_alias,
         prompt_transport=PROMPT_TRANSPORT_ARGV,
         display_argv=redacted_prompt_argv(argv),
         warnings=tuple(warnings),
