@@ -67,6 +67,29 @@ class ExecutionDryRunTests(ExecutionTestBase):
         self.assertEqual(payload["reasoningCapabilitySource"], "bundled")
         self.assertIn('model_reasoning_effort="high"', payload["argv"])
 
+    def test_dry_run_reports_explicit_fast_but_not_inherited_fast(self):
+        explicit = self.build_git_request(
+            "codex",
+            "safe",
+            None,
+            "/repo",
+            "review",
+            self.delegate.DEFAULT_CONFIG,
+            dry_run=True,
+            fast=False,
+        )
+        inherited = self.build_git_request(
+            "codex",
+            "safe",
+            None,
+            "/repo",
+            "review",
+            self.delegate.DEFAULT_CONFIG,
+            dry_run=True,
+        )
+        self.assertIs(self.delegate.dry_run_payload(explicit)["requestedFast"], False)
+        self.assertNotIn("requestedFast", self.delegate.dry_run_payload(inherited))
+
     def test_dry_run_reports_progress_requested(self):
         with tempfile.TemporaryDirectory() as tmp:
             parsed = self.delegate.parse_cli(

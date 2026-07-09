@@ -298,11 +298,13 @@ class ExecutionWorktreePreflightTests(ExecutionTestBase):
             dry_run=True,
             workspace_kind="git",
             isolation_context=isolation_context,
+            fast=False,
         )
 
         with self.delegate.safe_isolated_request(request) as isolated:
             self.assertEqual(isolated.model, "composer-2.5")
             self.assertEqual(isolated.model_alias, "composer")
+            self.assertIs(isolated.fast, False)
             self.assertTrue(isolated.dry_run)
             self.assertEqual(isolated.workspace_kind, "git")
             self.assertNotEqual(isolated.workspace, repo.name)

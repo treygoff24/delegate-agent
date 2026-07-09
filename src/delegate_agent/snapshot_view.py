@@ -57,6 +57,7 @@ class SnapshotView(TypedDict, total=False):
     reasoningEffortSource: str
     reasoningCapabilitySource: str
     reasoningTransport: str
+    requestedFast: bool
     snapshotCommand: str
     completionReport: JsonObject
     completionReportWritten: bool

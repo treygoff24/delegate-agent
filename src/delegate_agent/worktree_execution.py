@@ -63,6 +63,7 @@ class PersistentExecutionRequest(Protocol):
     reasoning_effort_source: str | None
     reasoning_capability_source: str | None
     reasoning_transport: str | None
+    fast: bool | None
     progress: bool
     forbid_commit: bool
     include_dirty: bool
@@ -253,6 +254,7 @@ def _build_persistent_worktree_run_context(
         reasoning_effort_source=request.reasoning_effort_source,
         reasoning_capability_source=request.reasoning_capability_source,
         reasoning_transport=request.reasoning_transport,
+        fast=request.fast,
         prompt_transport=request.prompt_transport,
         forbid_commit=request.forbid_commit,
         progress_initial_delay_sec=request.progress_initial_delay_sec,

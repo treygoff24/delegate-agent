@@ -138,6 +138,11 @@ layers. This is read-only observability; inspecting it does not modify
 
 Reasoning-effort settings are optional. A per-run `--reasoning-effort LEVEL` or JSON `reasoningEffort` overrides provider defaults. If no effort is requested or defaulted, Delegate emits no reasoning-effort argv and preserves current runtime behavior.
 
+Codex Fast is intentionally not a Delegate config default. Use per-run
+`--fast`, `--no-fast`, or JSON `fast`; omission inherits the active Codex CLI
+configuration. This keeps speed selection independent from model aliases and
+reasoning defaults.
+
 ## Sections
 
 ### `tracking`

@@ -77,6 +77,70 @@ class ParserTests(unittest.TestCase):
         self.assertTrue(parsed.global_options.json_mode)
         self.assertEqual(parsed.global_options.cwd, "/tmp/repo")
 
+    def test_codex_fast_flags_parse_as_tri_state(self):
+        fast = self.delegate.parse_cli(["codex", "safe", "--fast", "review"])
+        standard = self.delegate.parse_cli(["codex", "safe", "--no-fast", "review"])
+        inherited = self.delegate.parse_cli(["codex", "safe", "review"])
+        self.assertIs(fast.launch.fast, True)
+        self.assertIs(standard.launch.fast, False)
+        self.assertIsNone(inherited.launch.fast)
+
+    def test_codex_fast_flags_are_mutually_exclusive_and_codex_only(self):
+        cases = (
+            (["codex", "safe", "--fast", "--no-fast", "review"], "invalid_option_combination"),
+            (["codex", "safe", "--fast", "--fast", "review"], "invalid_option_combination"),
+            (["claude", "safe", "--fast", "review"], "unsupported_fast"),
+            (["droid", "safe", "--no-fast", "review"], "unsupported_fast"),
+        )
+        for argv, error in cases:
+            with self.subTest(argv=argv), self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.delegate.parse_cli(argv)
+            self.assertEqual(ctx.exception.error, error)
+
+    def test_run_input_json_fast_accepts_boolean_or_null_for_codex(self):
+        for value, expected in ((True, True), (False, False), (None, None)):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "task.json"
+                path.write_text(
+                    json.dumps(
+                        {
+                            "engine": "codex",
+                            "mode": "call",
+                            "prompt": "summarize",
+                            "readOnly": True,
+                            "fast": value,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                parsed = self.delegate.parse_cli(["run", "--input-json", str(path)])
+                request = self.delegate.request_from_input_json(
+                    parsed, self.delegate.DEFAULT_CONFIG
+                )
+                self.assertIs(request.fast, expected)
+
+    def test_run_input_json_fast_rejects_invalid_type_and_non_codex(self):
+        cases = (("codex", "yes", "invalid_fast"), ("claude", True, "unsupported_fast"))
+        for engine, value, error in cases:
+            with self.subTest(engine=engine), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "task.json"
+                path.write_text(
+                    json.dumps(
+                        {
+                            "engine": engine,
+                            "mode": "call",
+                            "prompt": "summarize",
+                            "readOnly": True,
+                            "fast": value,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                parsed = self.delegate.parse_cli(["run", "--input-json", str(path)])
+                with self.assertRaises(self.delegate.DelegateError) as ctx:
+                    self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+                self.assertEqual(ctx.exception.error, error)
+
     def test_models_and_describe_reject_redacted_flag(self):
         for subcommand in ("models", "describe"):
             with self.subTest(subcommand=subcommand):

@@ -100,6 +100,9 @@ class WorkflowCommandTests(unittest.TestCase):
             "log = os.environ.get('FAKE_PROMPT_LOG')\n"
             "if log:\n"
             "    open(log, 'a', encoding='utf-8').write(prompt + '\\n---\\n')\n"
+            "argv_log = os.environ.get('FAKE_CODEX_ARGV_LOG')\n"
+            "if argv_log:\n"
+            "    open(argv_log, 'w', encoding='utf-8').write(json.dumps(sys.argv[1:]))\n"
             "structured = '--output-schema' in sys.argv or 'Return ONLY' in prompt\n"
             "attempt_file = os.environ.get('FAKE_CODEX_ATTEMPT_FILE')\n"
             "if structured and attempt_file:\n"
@@ -187,6 +190,18 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertTrue(payload["dryRun"])
         self.assertEqual(payload["result"], {"ok": False})
         self.assertEqual(payload["runTree"]["counts"], {"codex:safe": 1})
+
+    def test_agent_fast_parameter_preserves_legacy_positional_schema(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "positional", "defaults": {"engine": "codex", "mode": "safe"}}
+            SCHEMA = {"type": "object", "properties": {"ok": {"type": "boolean"}}}
+            return agent("structured", "codex", "safe", None, None, SCHEMA)
+            """
+        )
+        result = self.run_delegate(["--json", "workflow", "run", str(script), "--dry-run"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["result"], {"ok": False})
 
     def test_dry_run_stubs_nested_workflow_without_executing_body(self) -> None:
         child = self.write_saved_workflow(
@@ -555,6 +570,28 @@ class WorkflowCommandTests(unittest.TestCase):
         result = self.run_delegate(["--json", "workflow", "result", wf_id])
         self.assertIn("fake completion", json.loads(result.stdout)["result"])
 
+    def test_workflow_agent_threads_explicit_fast_false_to_codex(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "fast-off", "defaults": {"engine": "codex", "mode": "call", "fast": True}}
+            return agent("one-hop", fast=False)
+            """
+        )
+        argv_log = self.workspace / "codex-argv.json"
+        launch = self.run_delegate(
+            ["--json", "workflow", "run", str(script)],
+            env_extra={"FAKE_CODEX_ARGV_LOG": str(argv_log)},
+        )
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
+        self.assertEqual(waited.returncode, 0, waited.stderr)
+        self.assertIn('service_tier="default"', json.loads(argv_log.read_text()))
+        runs = json.loads(self.run_delegate(["--json", "runs", "--group", wf_id]).stdout)["runs"]
+        snapshot = self.run_delegate(["--json", "snapshot", runs[0]["runId"]])
+        self.assertEqual(snapshot.returncode, 0, snapshot.stderr)
+        self.assertIs(json.loads(snapshot.stdout)["requestedFast"], False)
+
     def test_check_rejects_passthrough_call_and_schema(self) -> None:
         passthrough_call = self.write_workflow(
             """
@@ -857,7 +894,9 @@ class WorkflowCommandTests(unittest.TestCase):
     def test_describe_and_help_include_workflows(self) -> None:
         describe = self.run_delegate(["--json", "describe"])
         self.assertEqual(describe.returncode, 0, describe.stderr)
-        self.assertIn("workflows", json.loads(describe.stdout))
+        payload = json.loads(describe.stdout)
+        self.assertIn("workflows", payload)
+        self.assertTrue(payload["workflows"]["dsl"]["agent"]["signature"].endswith("fast=None)"))
         help_result = self.run_delegate(["--json", "help", "workflow"])
         self.assertEqual(help_result.returncode, 0, help_result.stderr)
         self.assertEqual(json.loads(help_result.stdout)["command"], "workflow")

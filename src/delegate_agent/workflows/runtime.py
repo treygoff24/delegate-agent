@@ -593,6 +593,7 @@ class WorkflowDsl:
         passthrough: bool = False,
         timeout: int | float | None = None,
         retries: int | None = None,
+        fast: bool | None = None,
     ) -> Any:
         if not isinstance(prompt, str):
             prompt = str(prompt)
@@ -607,6 +608,9 @@ class WorkflowDsl:
             raise ValueError("passthrough=True is mutually exclusive with schema=")
         resolved_model = model or self.defaults.get("model")
         resolved_effort = effort or self.defaults.get("effort")
+        resolved_fast = fast if fast is not None else self.defaults.get("fast")
+        if resolved_fast is not None and not isinstance(resolved_fast, bool):
+            raise ValueError("fast must be true, false, or None")
         resolved_isolation = isolation or self.defaults.get("isolation")
         resolved_phase = phase or self.current_phase
         opts = {
@@ -614,6 +618,7 @@ class WorkflowDsl:
             "mode": resolved_mode,
             "model": resolved_model,
             "effort": resolved_effort,
+            "fast": resolved_fast,
             "schema": schema,
             "isolation": resolved_isolation,
         }
@@ -720,6 +725,7 @@ class WorkflowDsl:
                         mode=resolved_mode,
                         model=resolved_model,
                         effort=resolved_effort,
+                        fast=resolved_fast,
                         schema=schema,
                         isolation=resolved_isolation,
                         passthrough=passthrough,
@@ -821,6 +827,7 @@ class WorkflowDsl:
         mode: str,
         model: str | None,
         effort: str | None,
+        fast: bool | None,
         schema: dict[str, Any] | None,
         isolation: str | None,
         passthrough: bool,
@@ -848,6 +855,7 @@ class WorkflowDsl:
                     mode=mode,
                     model=model,
                     effort=effort,
+                    fast=fast,
                     schema=schema,
                     isolation=isolation,
                     passthrough=passthrough,
@@ -862,6 +870,7 @@ class WorkflowDsl:
                     mode=mode,
                     model=model,
                     effort=effort,
+                    fast=fast,
                     schema=schema,
                     isolation=isolation,
                     passthrough=passthrough,
@@ -878,6 +887,7 @@ class WorkflowDsl:
         mode: str,
         model: str | None,
         effort: str | None,
+        fast: bool | None,
         schema: dict[str, Any] | None,
         isolation: str | None,
         passthrough: bool,
@@ -892,6 +902,7 @@ class WorkflowDsl:
                 mode=mode,
                 model=model,
                 effort=effort,
+                fast=fast,
                 isolation=isolation,
                 passthrough=passthrough,
                 timeout=timeout,
@@ -918,6 +929,7 @@ class WorkflowDsl:
                         mode=mode,
                         model=model,
                         effort=effort,
+                        fast=fast,
                         isolation=isolation,
                         passthrough=False,
                         timeout=timeout,
@@ -935,6 +947,7 @@ class WorkflowDsl:
                     mode=mode,
                     model=model,
                     effort=effort,
+                    fast=fast,
                     isolation=isolation,
                     passthrough=False,
                     timeout=timeout,
@@ -965,6 +978,7 @@ class WorkflowDsl:
         mode: str,
         model: str | None,
         effort: str | None,
+        fast: bool | None,
         isolation: str | None,
         passthrough: bool,
         timeout: int | float | None,
@@ -983,6 +997,8 @@ class WorkflowDsl:
             payload["model"] = model
         if effort is not None:
             payload["reasoningEffort"] = effort
+        if fast is not None and engine == "codex":
+            payload["fast"] = fast
         if isolation is not None:
             payload["isolation"] = isolation
         if output_schema is not None:

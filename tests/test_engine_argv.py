@@ -300,6 +300,30 @@ class EngineArgvTests(CommandTestBase):
         self.assertIn('model_reasoning_effort="high"', request.argv[:exec_index])
         self.assertEqual(request.reasoning_transport, "codex-config")
 
+    def test_codex_fast_service_tier_is_explicit_and_before_exec(self):
+        for fast, expected in ((True, 'service_tier="fast"'), (False, 'service_tier="default"')):
+            with self.subTest(fast=fast):
+                request = self.build_git_request(
+                    "codex",
+                    "safe",
+                    None,
+                    "/repo",
+                    "hello",
+                    self.delegate.DEFAULT_CONFIG,
+                    True,
+                    fast=fast,
+                )
+                exec_index = request.argv.index("exec")
+                self.assertIn(expected, request.argv[:exec_index])
+                self.assertIs(request.fast, fast)
+
+    def test_codex_omitted_fast_inherits_without_service_tier_override(self):
+        request = self.build_git_request(
+            "codex", "safe", None, "/repo", "hello", self.delegate.DEFAULT_CONFIG, True
+        )
+        self.assertFalse(any(item.startswith("service_tier=") for item in request.argv))
+        self.assertIsNone(request.fast)
+
     def test_codex_reasoning_effort_without_model_uses_harness_default(self):
         request = self.build_git_request(
             "codex",

@@ -424,6 +424,7 @@ def build_codex_argv(
     workspace_kind: str,
     stream_capture: bool = True,
     reasoning_capability: reasoning.ReasoningCapability | None = None,
+    fast: bool | None = None,
     prompt_transport: str = PROMPT_TRANSPORT_ARGV,
     output_schema: str | None = None,
     call_read_only: bool = False,
@@ -455,6 +456,9 @@ def build_codex_argv(
                 f'model_reasoning_effort="{reasoning_capability.effort}"',
             ]
         )
+    if fast is not None:
+        service_tier = "fast" if fast else "default"
+        argv.extend(["-c", f'service_tier="{service_tier}"'])
     argv.append("exec")
     argv.extend(["--cd", workspace])
     if output_schema is not None:

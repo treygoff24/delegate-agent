@@ -210,6 +210,29 @@ delegate --json dry-run codex safe --reasoning-effort high "Review this reposito
 delegate --json dry-run claude safe --reasoning-effort high "Review this repository. Do not edit files."
 ```
 
+Codex GPT-5.6 routing is deliberately model-first rather than aliasing every
+model/effort pair. Select `sol`, `terra`, or `luna` in private `codex.models`,
+then set effort per run:
+
+| Route | Best starting use | Supported effort | Suggested start |
+| --- | --- | --- | --- |
+| `gpt-5.6-sol` | Frontier authoring, difficult debugging, open-ended implementation | `low`, `medium`, `high`, `xhigh`, `max`, `ultra` | `low` or `high`, depending on difficulty |
+| `gpt-5.6-terra` | Balanced everyday implementation, review, and synthesis | `low`, `medium`, `high`, `xhigh`, `max`, `ultra` | `medium` |
+| `gpt-5.6-luna` | Fast exploration, triage, fan-out, and repeatable mechanical work | `low`, `medium`, `high`, `xhigh`, `max` | `medium` |
+
+This routing is provisional until representative Delegate benchmarks are run.
+Codex describes `ultra` as a multi-agent mode, not merely a deeper single-agent
+effort; it only makes sense when the active Codex profile permits nested agents.
+
+Fast mode is an independent per-run serving choice. `--fast` requests Codex's
+Fast service tier, `--no-fast` explicitly requests Standard, and omitting both
+inherits the active Codex configuration:
+
+```bash
+delegate codex safe --model luna --reasoning-effort medium --fast "Explore likely causes."
+delegate codex work --model sol --reasoning-effort high --no-fast "Implement and verify."
+```
+
 Inspect tracked output by alias:
 
 ```bash

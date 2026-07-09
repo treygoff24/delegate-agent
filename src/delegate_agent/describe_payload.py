@@ -534,7 +534,13 @@ def _policy_field_support_matrix() -> JsonObject:
 
 
 def _engine_capabilities() -> JsonObject:
-    return {engine: {"outputSchema": engine == "codex"} for engine in KNOWN_ENGINES}
+    return {
+        engine: {
+            "outputSchema": engine == "codex",
+            "fast": engine == "codex",
+        }
+        for engine in KNOWN_ENGINES
+    }
 
 
 def _runtime_policy(config: JsonObject, mode: str, engine: str, bypass_check) -> JsonObject:
@@ -832,11 +838,12 @@ def describe_payload(
                     "signature": (
                         "agent(prompt, engine=None, mode=None, model=None, effort=None, "
                         "schema=None, label=None, phase=None, isolation=None, "
-                        "passthrough=False, timeout=None, retries=None)"
+                        "passthrough=False, timeout=None, retries=None, fast=None)"
                     ),
                     "returns": "parent-facing output string, schema object, or None",
                     "notes": [
                         "engine may be a fallback list; child runs are tagged --group <wfId>.",
+                        "fast is a Codex-only per-run service-tier preference; non-Codex fallbacks ignore it.",
                         "passthrough=True is explicit and mutually exclusive with schema= and mode='call'.",
                         "cursor/kimi argv transport rejects prompts around 100KB; route large stages to codex/claude/droid/opencode.",
                     ],

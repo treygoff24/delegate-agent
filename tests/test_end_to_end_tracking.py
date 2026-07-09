@@ -845,6 +845,19 @@ class EndToEndTrackingTests(unittest.TestCase):
         self.assertIn(CODEX_ASSISTANT_MARKER, payload["assistantText"])
         self.assertIsNone(payload.get("model"))
 
+    def test_codex_safe_fast_metadata_survives_temporary_isolation(self):
+        self.write_fake_binaries()
+        completed = self.run_cli(["codex", "safe", "--fast", "codex fast e2e"])
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        snapshot = self.run_cli(["--json", "snapshot", "codex"])
+        self.assertEqual(snapshot.returncode, 0, snapshot.stderr)
+        payload = json.loads(snapshot.stdout)
+        self.assertIs(payload["requestedFast"], True)
+        run_id, run_path = self.lookup_run("codex-1")
+        self.assertIsNotNone(run_id)
+        manifest = json.loads((run_path / "manifest.json").read_text(encoding="utf-8"))
+        self.assertIn('service_tier="fast"', manifest["argv"])
+
     def test_pass_through_preserves_raw_output_without_tracked_run(self):
         self.write_fake_binaries(passthrough=True)
         completed = self.run_cli(["--pass-through", "droid", "minimax", "safe", "legacy"])

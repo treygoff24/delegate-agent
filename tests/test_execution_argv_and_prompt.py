@@ -104,6 +104,37 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertEqual(ctx.exception.error, "missing_binary")
         self.assertFalse(call_workspace.exists())
 
+    def test_codex_call_json_reports_explicit_fast_choice(self):
+        parsed = self.delegate.parse_cli(["codex", "call", "--no-fast", "hello"])
+        request = self.delegate.request_from_parsed(
+            parsed, self.delegate.DEFAULT_CONFIG, io.StringIO("")
+        )
+        fake_result = self.delegate.delegate_runner.CallResult(
+            text="ok",
+            exit_code=0,
+            duration_ms=10,
+            stdout_bytes=2,
+            stderr_bytes=0,
+            text_chars=2,
+            text_truncated=False,
+            warnings=(),
+        )
+        with mock.patch.object(
+            self.delegate.delegate_runner, "execute_call", return_value=fake_result
+        ):
+            code, payload = self.delegate.execute_request(
+                request,
+                json_mode=True,
+                config=self.delegate.DEFAULT_CONFIG,
+                pass_through=False,
+                completion_report_mode="none",
+                source_workspace=self.delegate.ResolvedWorkspace("<call-temp-cwd>", "directory"),
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+        self.assertEqual(code, 0)
+        self.assertIs(payload["requestedFast"], False)
+
     def _call_temp_dirs(self):
         return set(Path(tempfile.gettempdir()).glob("delegate-call-*"))
 
