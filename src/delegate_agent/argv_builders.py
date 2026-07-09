@@ -459,6 +459,10 @@ def build_codex_argv(
     if fast is not None:
         service_tier = "fast" if fast else "default"
         argv.extend(["-c", f'service_tier="{service_tier}"'])
+        if fast:
+            # Codex drops a "fast" tier silently when features.fast_mode is off
+            # in the ambient config; enable it so --fast cannot no-op.
+            argv.extend(["-c", "features.fast_mode=true"])
     argv.append("exec")
     argv.extend(["--cd", workspace])
     if output_schema is not None:

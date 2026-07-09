@@ -316,6 +316,11 @@ class EngineArgvTests(CommandTestBase):
                 exec_index = request.argv.index("exec")
                 self.assertIn(expected, request.argv[:exec_index])
                 self.assertIs(request.fast, fast)
+                feature_enable = "features.fast_mode=true"
+                if fast:
+                    self.assertIn(feature_enable, request.argv[:exec_index])
+                else:
+                    self.assertNotIn(feature_enable, request.argv)
 
     def test_codex_omitted_fast_inherits_without_service_tier_override(self):
         request = self.build_git_request(
