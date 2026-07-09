@@ -42,6 +42,7 @@ def engine_models_payload(
     *,
     live: bool = False,
     factory_settings_path: Path | None = None,
+    workspace: Path | None = None,
 ) -> JsonObject:
     validate_engine_name(engine)
     section = config.get(engine)
@@ -84,6 +85,7 @@ def engine_models_payload(
                 config,
                 engine,
                 factory_settings_path=factory_settings_path,
+                workspace=workspace,
             )
             if probe_warning:
                 warning = probe_warning
@@ -190,6 +192,7 @@ def _probe_live_models(
     engine: str,
     *,
     factory_settings_path: Path | None = None,
+    workspace: Path | None = None,
 ) -> tuple[list[JsonObject], str | None]:
     try:
         if engine == "cursor":
@@ -199,7 +202,7 @@ def _probe_live_models(
         if engine == "devin":
             return _probe_devin_models(config), None
         if engine == "opencode":
-            return _probe_opencode_models(config), None
+            return _probe_opencode_models(config, workspace=workspace), None
     except Exception as exc:
         return [], f"live probe failed: {exc}"
     return [], f"live probe unsupported for {engine}"
@@ -339,18 +342,31 @@ def parse_devin_available_models(raw: str) -> list[JsonObject]:
     raise RuntimeError("devin output had no Available: line")
 
 
-def _probe_opencode_models(config: JsonObject) -> list[JsonObject]:
+def _probe_opencode_models(
+    config: JsonObject, *, workspace: Path | None = None
+) -> list[JsonObject]:
     binary = delegate_config.harness_binary(config, "opencode")
-    with tempfile.TemporaryDirectory(prefix="delegate-model-probe-") as probe_cwd:
+    if workspace is not None:
         completed = subprocess.run(
-            [binary, "models"],
+            [binary, "--pure", "models"],
             capture_output=True,
             text=True,
             timeout=LIVE_PROBE_TIMEOUT_SEC,
             check=False,
             stdin=subprocess.DEVNULL,
-            cwd=probe_cwd,
+            cwd=workspace,
         )
+    else:
+        with tempfile.TemporaryDirectory(prefix="delegate-model-probe-") as probe_cwd:
+            completed = subprocess.run(
+                [binary, "--pure", "models"],
+                capture_output=True,
+                text=True,
+                timeout=LIVE_PROBE_TIMEOUT_SEC,
+                check=False,
+                stdin=subprocess.DEVNULL,
+                cwd=probe_cwd,
+            )
     if completed.returncode != 0:
         raise RuntimeError(
             f"opencode models exited {completed.returncode}: "

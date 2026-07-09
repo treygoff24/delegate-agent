@@ -172,6 +172,7 @@ class CapabilityCommandTests(unittest.TestCase):
         self.assertIn("opencode", describe["policyFieldSupport"])
         self.assertIn("opencode", describe["modeMapping"])
         self.assertIn("--dir", describe["modeMapping"]["opencode"]["safe"])
+        self.assertIn("--pure", describe["modeMapping"]["opencode"]["safe"])
         self.assertNotIn("--auto", describe["modeMapping"]["opencode"]["safe"])
         self.assertIn("--auto", describe["modeMapping"]["opencode"]["work"])
 

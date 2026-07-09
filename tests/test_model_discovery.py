@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import stat
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -388,12 +389,14 @@ class LiveProbeIntegrationTests(unittest.TestCase):
             )
 
     def test_opencode_live_merge(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as workspace:
             argv_log = Path(tmp) / "argv.log"
+            cwd_log = Path(tmp) / "cwd.log"
             fake = _write_executable(
                 Path(tmp) / "fake-opencode",
                 "#!/usr/bin/env bash\n"
                 f'printf \'%s\\n\' "$@" > "{argv_log}"\n'
+                f'pwd > "{cwd_log}"\n'
                 "echo 'openai/gpt-5'\n"
                 "echo 'junk with spaces'\n"
                 "echo 'anthropic/claude-sonnet-4-5'\n"
@@ -401,13 +404,27 @@ class LiveProbeIntegrationTests(unittest.TestCase):
             )
             config = self.embedded_default_config()
             config["opencode"]["binary"] = str(fake)
-            payload = self.engine_models_payload(config, "opencode", live=True)
+            workspace_path = Path(workspace)
+            with mock.patch(
+                "delegate_agent.model_discovery.subprocess.run", wraps=subprocess.run
+            ) as run:
+                payload = self.engine_models_payload(
+                    config, "opencode", live=True, workspace=workspace_path
+                )
             self.assertIs(payload["live"], True)
             by_id = {item["id"]: item for item in payload["models"]}
             self.assertEqual(by_id["openai/gpt-5"]["source"], "live")
             self.assertEqual(by_id["anthropic/claude-sonnet-4-5"]["source"], "live")
             self.assertIn("opencode/gpt-5", by_id)
-            self.assertEqual(argv_log.read_text(encoding="utf-8").splitlines(), ["models"])
+            self.assertEqual(
+                argv_log.read_text(encoding="utf-8").splitlines(), ["--pure", "models"]
+            )
+            self.assertEqual(run.call_args.args[0], [str(fake), "--pure", "models"])
+            self.assertEqual(run.call_args.kwargs["cwd"], workspace_path)
+            self.assertEqual(
+                Path(cwd_log.read_text(encoding="utf-8").strip()).resolve(),
+                workspace_path.resolve(),
+            )
 
     def test_live_degrades_on_missing_binary(self):
         config = self.embedded_default_config()

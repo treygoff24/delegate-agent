@@ -392,16 +392,14 @@ def build_opencode_argv(
     model: str | None,
     agent: str | None,
     variant: str | None,
+    *,
+    call_read_only: bool = False,
 ) -> list[str]:
-    argv = [
-        str(opencode["binary"]),
-        "run",
-        "--format",
-        "json",
-        "--print-logs",
-        "--dir",
-        workspace,
-    ]
+    read_only = mode == MODE_SAFE or (mode == MODE_CALL and call_read_only)
+    argv = [str(opencode["binary"])]
+    if read_only:
+        argv.append("--pure")
+    argv.extend(["run", "--format", "json", "--print-logs", "--dir", workspace])
     if model:
         argv.extend(["--model", model])
     if agent:

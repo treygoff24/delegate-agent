@@ -110,7 +110,20 @@ DEVIN_READ_ONLY_AGENT_CONFIG = {
     }
 }
 DEVIN_READ_ONLY_AGENT_CONFIG_TEXT = json.dumps(DEVIN_READ_ONLY_AGENT_CONFIG, separators=(",", ":"))
-OPENCODE_SAFE_LOCKDOWN_JSON = '{"permission":{"*":"deny","read":"allow","glob":"allow","grep":"allow","edit":"deny","bash":"deny","task":"deny","skill":"deny","external_directory":"deny","webfetch":"deny"},"autoupdate":false,"share":"disabled"}'
+OPENCODE_SAFE_AGENT = "delegate-read-only"
+OPENCODE_SAFE_PERMISSION = {
+    "*": "deny",
+    "read": "allow",
+    "glob": "allow",
+    "grep": "allow",
+    "edit": "deny",
+    "bash": "deny",
+    "task": "deny",
+    "skill": "deny",
+    "external_directory": "deny",
+    "webfetch": "deny",
+}
+OPENCODE_SAFE_PERMISSION_JSON = json.dumps(OPENCODE_SAFE_PERMISSION, separators=(",", ":"))
 
 # Read-only call is the stateless "judge/completion" contract: text in, text out,
 # no tree. These harnesses default to a coding-agent framing ("inspect the
@@ -1740,10 +1753,22 @@ def _devin_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     )
 
 
-def _opencode_env_overrides(*, read_only: bool) -> dict[str, str]:
+def _opencode_env_overrides(*, read_only: bool, agent: str | None = None) -> dict[str, str]:
     env = {"OPENCODE_DISABLE_AUTOUPDATE": "1"}
     if read_only:
-        env["OPENCODE_CONFIG_CONTENT"] = OPENCODE_SAFE_LOCKDOWN_JSON
+        if agent is None:
+            raise ValueError("read-only OpenCode requests require an agent")
+        agent_config: JsonObject = {"permission": OPENCODE_SAFE_PERMISSION}
+        if agent == OPENCODE_SAFE_AGENT:
+            agent_config["mode"] = "primary"
+        lockdown: JsonObject = {
+            "permission": OPENCODE_SAFE_PERMISSION,
+            "agent": {agent: agent_config},
+            "autoupdate": False,
+            "share": "disabled",
+        }
+        env["OPENCODE_CONFIG_CONTENT"] = json.dumps(lockdown, separators=(",", ":"))
+        env["OPENCODE_PERMISSION"] = OPENCODE_SAFE_PERMISSION_JSON
     return env
 
 
@@ -1752,6 +1777,9 @@ def _opencode_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     opencode = build.config["opencode"]
     model, variant, variant_source = _resolve_opencode_selection_detail(opencode, build)
     agent = _resolve_opencode_agent(opencode, build)
+    read_only = build.mode == MODE_SAFE or (build.mode == MODE_CALL and build.call_read_only)
+    if read_only and agent is None:
+        agent = OPENCODE_SAFE_AGENT
     argv = build_opencode_argv(
         opencode,
         build.mode,
@@ -1759,8 +1787,8 @@ def _opencode_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         model,
         agent,
         variant,
+        call_read_only=build.call_read_only,
     )
-    read_only = build.mode == MODE_SAFE or (build.mode == MODE_CALL and build.call_read_only)
     return EngineRequestParts(
         model=model,
         argv=argv,
@@ -1768,7 +1796,7 @@ def _opencode_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         prompt_transport=PROMPT_TRANSPORT_STDIN,
         stdin_text=build.prompt,
         display_argv=list(argv),
-        env_overrides=_opencode_env_overrides(read_only=read_only),
+        env_overrides=_opencode_env_overrides(read_only=read_only, agent=agent),
         **opencode_reasoning_request_kwargs(variant, variant_source),
     )
 
@@ -1949,12 +1977,20 @@ def _apply_profile_resolution(
     env_overrides = dict(request.env_overrides or {})
     env_overrides.update(resolution.env)
     if request.engine == "opencode":
-        # Profiles must never clobber the auto-update pin. Re-apply lockdown
-        # only when the request parts already set it (safe / call --read-only).
-        had_lockdown = "OPENCODE_CONFIG_CONTENT" in (request.env_overrides or {})
+        # Profiles and ambient environment must not relax a read-only request.
+        request_env = request.env_overrides or {}
         env_overrides["OPENCODE_DISABLE_AUTOUPDATE"] = "1"
-        if had_lockdown:
-            env_overrides.update(_opencode_env_overrides(read_only=True))
+        if "OPENCODE_PERMISSION" in request_env:
+            env_overrides.update(
+                {
+                    key: request_env[key]
+                    for key in (
+                        "OPENCODE_CONFIG_CONTENT",
+                        "OPENCODE_PERMISSION",
+                        "OPENCODE_DISABLE_AUTOUPDATE",
+                    )
+                }
+            )
     auth_profile = resolution.name
     fallback_profile = None
     if request.engine == "codex":

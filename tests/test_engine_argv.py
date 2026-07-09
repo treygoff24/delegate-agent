@@ -1288,10 +1288,38 @@ class EngineArgvTests(CommandTestBase):
         self.assertEqual(request.stdin_text, "review task")
         self.assertEqual(
             request.argv,
-            ["opencode", "run", "--format", "json", "--print-logs", "--dir", "/repo"],
+            [
+                "opencode",
+                "--pure",
+                "run",
+                "--format",
+                "json",
+                "--print-logs",
+                "--dir",
+                "/repo",
+                "--agent",
+                "delegate-read-only",
+            ],
         )
+        permissions = {
+            "*": "deny",
+            "read": "allow",
+            "glob": "allow",
+            "grep": "allow",
+            "edit": "deny",
+            "bash": "deny",
+            "task": "deny",
+            "skill": "deny",
+            "external_directory": "deny",
+            "webfetch": "deny",
+        }
         self.assertEqual(request.env_overrides["OPENCODE_DISABLE_AUTOUPDATE"], "1")
-        self.assertIn("OPENCODE_CONFIG_CONTENT", request.env_overrides)
+        self.assertEqual(json.loads(request.env_overrides["OPENCODE_PERMISSION"]), permissions)
+        lockdown = json.loads(request.env_overrides["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(lockdown["permission"], permissions)
+        self.assertEqual(
+            lockdown["agent"]["delegate-read-only"], {"mode": "primary", "permission": permissions}
+        )
         self.assertNotIn("--auto", request.argv)
         for flag in ("--continue", "--session", "--fork", "--share", "--attach", "--command"):
             self.assertNotIn(flag, request.argv)
@@ -1311,6 +1339,7 @@ class EngineArgvTests(CommandTestBase):
             dry_run=True,
         )
         self.assertIn("--auto", request.argv)
+        self.assertNotIn("--pure", request.argv)
         self.assertIn("--model", request.argv)
         self.assertIn("anthropic/claude-sonnet", request.argv)
         self.assertIn("--agent", request.argv)
@@ -1330,6 +1359,7 @@ class EngineArgvTests(CommandTestBase):
         )
         self.addCleanup(shutil.rmtree, default_req.workspace, ignore_errors=True)
         self.assertNotIn("--auto", default_req.argv)
+        self.assertNotIn("--pure", default_req.argv)
         self.assertEqual(default_req.env_overrides, {"OPENCODE_DISABLE_AUTOUPDATE": "1"})
 
         ro_req = self.delegate.request_from_parsed(
@@ -1339,8 +1369,51 @@ class EngineArgvTests(CommandTestBase):
         )
         self.addCleanup(shutil.rmtree, ro_req.workspace, ignore_errors=True)
         self.assertNotIn("--auto", ro_req.argv)
+        self.assertIn("--pure", ro_req.argv)
         self.assertIn("OPENCODE_CONFIG_CONTENT", ro_req.env_overrides)
+        self.assertIn("OPENCODE_PERMISSION", ro_req.env_overrides)
         self.assertTrue(ro_req.stdin_text.startswith("You are being called"))
+
+    def test_opencode_safe_agents_preserve_selected_name_with_deny_policy(self):
+        permissions = {
+            "*": "deny",
+            "read": "allow",
+            "glob": "allow",
+            "grep": "allow",
+            "edit": "deny",
+            "bash": "deny",
+            "task": "deny",
+            "skill": "deny",
+            "external_directory": "deny",
+            "webfetch": "deny",
+        }
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["opencode"]["defaultAgent"] = "configured-reviewer"
+        configured = self.build_git_request(
+            "opencode", "safe", None, "/repo", "review", config, dry_run=True
+        )
+        self.assertEqual(
+            configured.argv[configured.argv.index("--agent") + 1], "configured-reviewer"
+        )
+        configured_lockdown = json.loads(configured.env_overrides["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(
+            configured_lockdown["agent"]["configured-reviewer"], {"permission": permissions}
+        )
+
+        explicit_name = 'explicit-reviewer"quoted'
+        explicit = self.build_git_request(
+            "opencode",
+            "safe",
+            None,
+            "/repo",
+            "review",
+            config,
+            dry_run=True,
+            agent=explicit_name,
+        )
+        self.assertEqual(explicit.argv[explicit.argv.index("--agent") + 1], explicit_name)
+        explicit_lockdown = json.loads(explicit.env_overrides["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(explicit_lockdown["agent"][explicit_name], {"permission": permissions})
 
     def test_opencode_alias_object_variant_and_explicit_effort_precedence(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
@@ -1381,11 +1454,20 @@ class EngineArgvTests(CommandTestBase):
             "hostile": {
                 "env": {
                     "OPENCODE_CONFIG_CONTENT": "{}",
+                    "OPENCODE_PERMISSION": '{"edit":"allow"}',
                     "OPENCODE_DISABLE_AUTOUPDATE": "0",
                 }
             }
         }
-        with mock.patch.dict(os.environ, {"AI_PROFILE": "hostile"}, clear=False):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "AI_PROFILE": "hostile",
+                "OPENCODE_CONFIG_CONTENT": '{"permission":{"edit":"allow"}}',
+                "OPENCODE_PERMISSION": '{"edit":"allow"}',
+            },
+            clear=False,
+        ):
             request = self.build_git_request(
                 "opencode",
                 "safe",
@@ -1396,6 +1478,7 @@ class EngineArgvTests(CommandTestBase):
                 dry_run=True,
             )
         self.assertNotEqual(request.env_overrides["OPENCODE_CONFIG_CONTENT"], "{}")
+        self.assertNotEqual(request.env_overrides["OPENCODE_PERMISSION"], '{"edit":"allow"}')
         self.assertEqual(request.env_overrides["OPENCODE_DISABLE_AUTOUPDATE"], "1")
         payload = self.delegate.dry_run_payload(request)
         self.assertNotIn("env", payload)

@@ -49,7 +49,7 @@ from delegate_agent.prompt_transport import (
     PROMPT_TRANSPORT_FILE,
     PROMPT_TRANSPORT_STDIN,
 )
-from delegate_agent.request_build import _resolve_default_model
+from delegate_agent.request_build import OPENCODE_SAFE_AGENT, _resolve_default_model
 
 CONFIG_ENV = delegate_config.CONFIG_ENV
 
@@ -635,12 +635,15 @@ def _opencode_describe_argv(
     mode: str,
     workspace: str,
 ) -> list[str]:
+    agent = opencode.get("defaultAgent") if isinstance(opencode.get("defaultAgent"), str) else None
+    if mode == MODE_SAFE and agent is None:
+        agent = OPENCODE_SAFE_AGENT
     argv = build_opencode_argv(
         opencode,
         mode,
         workspace,
         _resolve_default_model(opencode),
-        opencode.get("defaultAgent") if isinstance(opencode.get("defaultAgent"), str) else None,
+        agent,
         opencode.get("defaultReasoningEffort")
         if isinstance(opencode.get("defaultReasoningEffort"), str)
         else None,
@@ -1019,7 +1022,7 @@ def describe_payload(
                 "safeNotes": [
                     SAFE_WORKSPACE_SYNC_NOTE,
                     "Uses opencode run --format json --print-logs with prompt delivered on stdin.",
-                    "Safe mode uses Delegate isolated copy plus OPENCODE_CONFIG_CONTENT read-only lockdown.",
+                    "Safe mode uses --pure, a Delegate isolated copy, and matching global/per-agent read-only permissions in OPENCODE_CONFIG_CONTENT and OPENCODE_PERMISSION.",
                     "stdout is buffered by opencode until completion; --print-logs stderr remains Delegate-visible.",
                 ],
                 "work": opencode_work_argv,
@@ -1188,7 +1191,7 @@ def emit_models(
         from delegate_agent import model_discovery
 
         payload = _scrub_discovery_payload(
-            model_discovery.engine_models_payload(config, engine, live=live)
+            model_discovery.engine_models_payload(config, engine, live=live, workspace=workspace)
         )
         if json_mode:
             delegate_rendering.print_json(payload, stdout)
