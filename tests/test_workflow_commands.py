@@ -1557,6 +1557,27 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertEqual(len(peaks), 3)
         self.assertLessEqual(max(peaks), 1)
 
+    def test_opencode_workflow_engine_and_engine_cap(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "opencode-dry", "defaults": {"engine": "opencode", "mode": "safe"}}
+            return agent("review")
+            """
+        )
+        result = self.run_delegate(["--json", "workflow", "run", str(script), "--dry-run"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["dryRun"])
+        self.assertEqual(payload["runTree"]["counts"], {"opencode:safe": 1})
+
+        from delegate_agent.workflows import runtime as workflow_runtime
+
+        semaphores = workflow_runtime._engine_semaphores(
+            {"workflows": {"engineCaps": {"opencode": 1, "not-real": 1}}}
+        )
+        self.assertIn("opencode", semaphores)
+        self.assertNotIn("not-real", semaphores)
+
     def test_workflow_save_list_watch_and_approve_not_gated(self) -> None:
         # CLI verbs: save → run --name; list shows saved + workspace; watch --json;
         # approve on a non-gated workflow → workflow_not_gated.

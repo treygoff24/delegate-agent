@@ -54,8 +54,9 @@ def engine_models_payload(
     alias_map = section.get("models")
     aliases: list[JsonObject] = []
     if isinstance(alias_map, dict):
-        for alias, model_id in sorted(alias_map.items()):
-            if isinstance(alias, str) and isinstance(model_id, str) and alias and model_id:
+        for alias, mapping in sorted(alias_map.items()):
+            model_id = _model_id_from_mapping(mapping)
+            if isinstance(alias, str) and alias and model_id:
                 aliases.append({"alias": alias, "model": model_id})
 
     entries: dict[str, JsonObject] = {}
@@ -140,6 +141,16 @@ def _merge_config_models(
                     _merge_entry(entries, model_id, source="config")
 
 
+def _model_id_from_mapping(mapping: object) -> str | None:
+    if isinstance(mapping, str) and mapping:
+        return mapping
+    if isinstance(mapping, dict):
+        model = mapping.get("model")
+        if isinstance(model, str) and model:
+            return model
+    return None
+
+
 def _merge_entry(
     entries: dict[str, JsonObject],
     model_id: str,
@@ -187,6 +198,8 @@ def _probe_live_models(
             return _probe_droid_models(factory_settings_path=factory_settings_path), None
         if engine == "devin":
             return _probe_devin_models(config), None
+        if engine == "opencode":
+            return _probe_opencode_models(config), None
     except Exception as exc:
         return [], f"live probe failed: {exc}"
     return [], f"live probe unsupported for {engine}"
@@ -324,6 +337,38 @@ def parse_devin_available_models(raw: str) -> list[JsonObject]:
             raise RuntimeError("devin Available line was empty")
         return [{"id": model_id} for model_id in ids]
     raise RuntimeError("devin output had no Available: line")
+
+
+def _probe_opencode_models(config: JsonObject) -> list[JsonObject]:
+    binary = delegate_config.harness_binary(config, "opencode")
+    with tempfile.TemporaryDirectory(prefix="delegate-model-probe-") as probe_cwd:
+        completed = subprocess.run(
+            [binary, "models"],
+            capture_output=True,
+            text=True,
+            timeout=LIVE_PROBE_TIMEOUT_SEC,
+            check=False,
+            stdin=subprocess.DEVNULL,
+            cwd=probe_cwd,
+        )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"opencode models exited {completed.returncode}: "
+            f"{(completed.stderr or completed.stdout or '').strip()[:200]}"
+        )
+    return parse_opencode_models_output(completed.stdout or "")
+
+
+def parse_opencode_models_output(raw: str) -> list[JsonObject]:
+    models: list[JsonObject] = []
+    for line in strip_ansi(raw).splitlines():
+        model_id = line.strip()
+        if not model_id or any(char.isspace() for char in model_id):
+            continue
+        models.append({"id": model_id})
+    if not models:
+        raise RuntimeError("opencode models output had no parseable model lines")
+    return models
 
 
 def emit_engine_models_text(payload: JsonObject, stdout: TextIO) -> None:

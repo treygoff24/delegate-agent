@@ -619,6 +619,7 @@ class ParserTests(unittest.TestCase):
         self.assertIn("claude", payload["modeMapping"])
         self.assertIn("codex", payload["modeMapping"])
         self.assertIn("devin", payload["modeMapping"])
+        self.assertIn("opencode", payload["modeMapping"])
         self.assertIn("claude", payload["engines"])
         self.assertIn("grok", payload["engines"])
         self.assertIn("devin", payload["engines"])

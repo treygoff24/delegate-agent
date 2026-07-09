@@ -1026,7 +1026,9 @@ class EngineArgvTests(CommandTestBase):
         self.assertTrue(payload["engineCapabilities"]["codex"]["outputSchema"])
         self.assertEqual(payload["engineDefaults"]["devin"]["binary"], "devin")
         self.assertEqual(payload["engineDefaults"]["devin"]["defaultModel"], "swe-1.7")
-        for engine in ("cursor", "droid", "kimi", "claude", "grok", "devin"):
+        self.assertEqual(payload["engineDefaults"]["opencode"]["binary"], "opencode")
+        self.assertIsNone(payload["engineDefaults"]["opencode"]["defaultAgent"])
+        for engine in ("cursor", "droid", "kimi", "claude", "grok", "devin", "opencode"):
             with self.subTest(engine=engine):
                 self.assertFalse(payload["engineCapabilities"][engine]["outputSchema"])
         self.assertIn("skill review", payload["promptTransforms"][0])
@@ -1074,6 +1076,14 @@ class EngineArgvTests(CommandTestBase):
         self.assertFalse(payload["isolation"]["safeNoneAllowed"]["devin"])
         self.assertIn("--permission-mode dangerous", " ".join(devin_work))
         self.assertNotIn("--agent-config", devin_work)
+        self.assertEqual(payload["promptTransports"]["opencode"], "stdin")
+        opencode_safe = payload["modeMapping"]["opencode"]["safe"]
+        opencode_work = payload["modeMapping"]["opencode"]["work"]
+        self.assertIn("--dir", opencode_safe)
+        self.assertIn("<isolated-workspace>", opencode_safe)
+        self.assertNotIn("--auto", opencode_safe)
+        self.assertIn("--auto", opencode_work)
+        self.assertFalse(payload["isolation"]["safeNoneAllowed"]["opencode"])
 
     def test_grok_safe_argv_uses_prompt_file_and_read_only_controls(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))

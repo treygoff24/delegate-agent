@@ -96,6 +96,10 @@ class CapabilityCommandTests(unittest.TestCase):
             devin = payload["reasoningAliases"]["devin"][devin_key]
             self.assertIsNone(devin["supported"])
             self.assertIn("not supported", devin["warning"])
+            opencode_key = "(default)"
+            opencode = payload["reasoningAliases"]["opencode"][opencode_key]
+            self.assertIsNone(opencode["supported"])
+            self.assertEqual(opencode["transport"], "variant-flag")
 
             summary = models_summary_payload(
                 config,
@@ -116,6 +120,10 @@ class CapabilityCommandTests(unittest.TestCase):
                 by_provider_alias[("cursor", "cursor")]["reasoningEffortRouting"],
                 [{"effort": "high", "model": "cursor-thinking"}],
             )
+            self.assertEqual(
+                by_provider_alias[("opencode", "opencode")]["command"],
+                "delegate opencode {safe,work,call}",
+            )
 
             describe_summary = describe_summary_payload(
                 config,
@@ -128,6 +136,51 @@ class CapabilityCommandTests(unittest.TestCase):
                 "delegate --json models --summary",
                 describe_summary["recommendedDiscovery"],
             )
+
+    def test_opencode_describe_and_models_surfaces(self):
+        from delegate_agent.config import embedded_default_config
+        from delegate_agent.describe_payload import (
+            describe_payload,
+            models_payload,
+            models_summary_payload,
+        )
+
+        config = embedded_default_config()
+        config["opencode"]["defaultModel"] = "openai/gpt-5"
+        config["opencode"]["defaultAgent"] = "reviewer"
+        config["opencode"]["defaultReasoningEffort"] = "high"
+        config["opencode"]["models"] = {
+            "deep": {"model": "anthropic/claude-sonnet-4-5", "variant": "xhigh"}
+        }
+        models = models_payload(config, "test-config")
+        self.assertEqual(
+            models["opencode"],
+            {
+                "binary": "opencode",
+                "defaultModel": "openai/gpt-5",
+                "defaultReasoningEffort": "high",
+                "defaultAgent": "reviewer",
+                "models": {"deep": {"model": "anthropic/claude-sonnet-4-5", "variant": "xhigh"}},
+            },
+        )
+
+        describe = describe_payload(config, "test-config")
+        self.assertEqual(describe["engineDefaults"]["opencode"]["binary"], "opencode")
+        self.assertEqual(describe["engineDefaults"]["opencode"]["defaultAgent"], "reviewer")
+        self.assertEqual(describe["promptTransports"]["opencode"], "stdin")
+        self.assertFalse(describe["isolation"]["safeNoneAllowed"]["opencode"])
+        self.assertIn("opencode", describe["policyFieldSupport"])
+        self.assertIn("opencode", describe["modeMapping"])
+        self.assertIn("--dir", describe["modeMapping"]["opencode"]["safe"])
+        self.assertNotIn("--auto", describe["modeMapping"]["opencode"]["safe"])
+        self.assertIn("--auto", describe["modeMapping"]["opencode"]["work"])
+
+        summary = models_summary_payload(config, "test-config")
+        by_provider_alias = {(item["provider"], item["alias"]): item for item in summary["aliases"]}
+        deep = by_provider_alias[("opencode", "deep")]
+        self.assertEqual(deep["model"], "anthropic/claude-sonnet-4-5")
+        self.assertEqual(deep["pinnedVariant"], "xhigh")
+        self.assertTrue(deep["available"])
 
     def test_describe_summary_matches_full_slice_without_building_argv(self):
         from delegate_agent import describe_payload as describe_module

@@ -34,6 +34,7 @@ TOP_LEVEL_COMMANDS = (
     "cursor",
     "claude",
     "devin",
+    "opencode",
     "codex",
     "droid",
     "dry-run",
@@ -134,6 +135,7 @@ class JsonCommandHelpTests(HelpCliTestBase):
     CASES = (
         (["--json", "cursor", "--help"], "cursor"),
         (["--json", "claude", "--help"], "claude"),
+        (["--json", "opencode", "--help"], "opencode"),
         (["--json", "codex", "--help"], "codex"),
         (["--json", "droid", "--help"], "droid"),
         (["--json", "dry-run", "--help"], "dry-run"),
@@ -151,6 +153,7 @@ class JsonCommandHelpTests(HelpCliTestBase):
         (["--json", "worktree", "remove", "--help"], "worktree remove"),
         (["--json", "cursor", "safe", "--help"], "cursor"),
         (["--json", "claude", "safe", "--help"], "claude"),
+        (["--json", "opencode", "safe", "--help"], "opencode"),
     )
 
     def test_json_command_help(self):
@@ -198,7 +201,16 @@ class HelpSubcommandTests(HelpCliTestBase):
                 self.assertIn(f"delegate --json {command} --summary", out)
 
     def test_engine_help_includes_progress_and_commit_policy_launch_options(self):
-        for command in ("cursor", "claude", "devin", "codex", "droid", "kimi", "dry-run"):
+        for command in (
+            "cursor",
+            "claude",
+            "devin",
+            "opencode",
+            "codex",
+            "droid",
+            "kimi",
+            "dry-run",
+        ):
             with self.subTest(command=command):
                 code, out, _err = self.run_main([command, "--help"])
                 self.assertEqual(code, self.delegate.EXIT_OK)
@@ -477,7 +489,7 @@ class KimiHelpTests(HelpCliTestBase):
 
     def test_safe_workspace_sync_note_is_shared_across_help_surfaces(self):
         note = self.delegate.command_help.SAFE_WORKSPACE_SYNC_NOTE
-        for command in ("cursor", "kimi", "codex", "claude", "devin", "droid"):
+        for command in ("cursor", "kimi", "codex", "claude", "devin", "opencode", "droid"):
             with self.subTest(command=command):
                 code, out, _err = self.run_main([command, "--help"])
                 self.assertEqual(code, self.delegate.EXIT_OK)
@@ -491,7 +503,7 @@ class KimiHelpTests(HelpCliTestBase):
         code, out, _err = self.run_main(["--json", "describe"])
         self.assertEqual(code, self.delegate.EXIT_OK)
         payload = json.loads(out)
-        for command in ("cursor", "kimi", "codex", "claude", "devin", "droid"):
+        for command in ("cursor", "kimi", "codex", "claude", "devin", "opencode", "droid"):
             with self.subTest(describe=command):
                 self.assertIn(note, payload["modeMapping"][command]["safeNotes"])
 

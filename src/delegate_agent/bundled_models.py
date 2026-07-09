@@ -73,5 +73,10 @@ BUNDLED_MODELS: dict[str, tuple[BundledModelEntry, ...]] = {
         {"id": "kimi-code/kimi-for-coding"},
         {"id": "kimi-k2.7"},
     ),
-    "opencode": (),
+    "opencode": (
+        {"id": "opencode/claude-opus-4-5"},
+        {"id": "opencode/gpt-5"},
+        {"id": "anthropic/claude-sonnet-4-5"},
+        {"id": "openai/gpt-5"},
+    ),
 }

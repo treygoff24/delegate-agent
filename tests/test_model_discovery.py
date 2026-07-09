@@ -31,9 +31,6 @@ class BundledModelsTests(unittest.TestCase):
 
         for engine in KNOWN_ENGINES:
             self.assertIn(engine, BUNDLED_MODELS)
-            if engine == "opencode":
-                self.assertEqual(BUNDLED_MODELS[engine], ())
-                continue
             self.assertGreater(len(BUNDLED_MODELS[engine]), 0)
 
     def test_codex_mirrors_reasoning_ids(self):
@@ -135,6 +132,13 @@ class ModelsCommandParseTests(unittest.TestCase):
         self.assertTrue(parsed.inspection.live)
         self.assertFalse(parsed.inspection.summary)
 
+    def test_opencode_engine_and_live_parse(self):
+        parsed = self.parse_cli(["models", "opencode", "--live"])
+        self.assertEqual(parsed.subcommand, "models")
+        assert parsed.inspection is not None
+        self.assertEqual(parsed.inspection.engine, "opencode")
+        self.assertTrue(parsed.inspection.live)
+
 
 class LiveProbeParseHelpersTests(unittest.TestCase):
     def test_strip_ansi(self):
@@ -174,6 +178,26 @@ class LiveProbeParseHelpersTests(unittest.TestCase):
                 {"id": "adaptive"},
                 {"id": "claude-fable-5"},
                 {"id": "gpt-5.5"},
+            ],
+        )
+
+    def test_parse_opencode_models_output_skips_junk(self):
+        from delegate_agent.model_discovery import parse_opencode_models_output
+
+        models = parse_opencode_models_output(
+            "\n"
+            "openai/gpt-5\n"
+            "not a model line\n"
+            "anthropic/claude-sonnet-4-5\n"
+            "\t\n"
+            "openrouter/deepseek-v4\n"
+        )
+        self.assertEqual(
+            models,
+            [
+                {"id": "openai/gpt-5"},
+                {"id": "anthropic/claude-sonnet-4-5"},
+                {"id": "openrouter/deepseek-v4"},
             ],
         )
 
@@ -354,6 +378,28 @@ class LiveProbeIntegrationTests(unittest.TestCase):
                 ["--model", DEVIN_LIVE_SENTINEL, "-p", "--", "probe"],
             )
 
+    def test_opencode_live_merge(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            argv_log = Path(tmp) / "argv.log"
+            fake = _write_executable(
+                Path(tmp) / "fake-opencode",
+                "#!/usr/bin/env bash\n"
+                f'printf \'%s\\n\' "$@" > "{argv_log}"\n'
+                "echo 'openai/gpt-5'\n"
+                "echo 'junk with spaces'\n"
+                "echo 'anthropic/claude-sonnet-4-5'\n"
+                "exit 0\n",
+            )
+            config = self.embedded_default_config()
+            config["opencode"]["binary"] = str(fake)
+            payload = self.engine_models_payload(config, "opencode", live=True)
+            self.assertIs(payload["live"], True)
+            by_id = {item["id"]: item for item in payload["models"]}
+            self.assertEqual(by_id["openai/gpt-5"]["source"], "live")
+            self.assertEqual(by_id["anthropic/claude-sonnet-4-5"]["source"], "live")
+            self.assertIn("opencode/gpt-5", by_id)
+            self.assertEqual(argv_log.read_text(encoding="utf-8").splitlines(), ["models"])
+
     def test_live_degrades_on_missing_binary(self):
         config = self.embedded_default_config()
         config["cursor"]["argvPrefix"] = ["/nonexistent/cursor-agent-xyz"]
@@ -378,6 +424,24 @@ class LiveProbeIntegrationTests(unittest.TestCase):
             payload = self.engine_models_payload(config, "cursor", live=True)
             self.assertIs(payload["live"], False)
             self.assertIn("warning", payload)
+
+    def test_opencode_live_degrades_on_failure_to_bundled_and_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = _write_executable(
+                Path(tmp) / "fake-opencode",
+                "#!/usr/bin/env bash\necho nope >&2\nexit 7\n",
+            )
+            config = self.embedded_default_config()
+            config["opencode"]["binary"] = str(fake)
+            config["opencode"]["models"] = {"deep": {"model": "vendor/deep", "variant": "high"}}
+            payload = self.engine_models_payload(config, "opencode", live=True)
+            self.assertIs(payload["live"], False)
+            self.assertIn("warning", payload)
+            self.assertEqual(payload["aliases"], [{"alias": "deep", "model": "vendor/deep"}])
+            by_id = {item["id"]: item for item in payload["models"]}
+            self.assertEqual(by_id["vendor/deep"]["source"], "config")
+            self.assertEqual(by_id["vendor/deep"]["aliases"], ["deep"])
+            self.assertEqual(by_id["opencode/gpt-5"]["source"], "bundled")
 
     def test_live_degrades_on_timeout(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -408,6 +472,11 @@ class LiveProbeIntegrationTests(unittest.TestCase):
                 self.assertTrue(sources <= {"bundled", "config"})
                 self.assertNotIn("live", sources)
 
+    def test_opencode_is_not_live_unsupported(self):
+        from delegate_agent.model_discovery import LIVE_UNSUPPORTED_ENGINES
+
+        self.assertNotIn("opencode", LIVE_UNSUPPORTED_ENGINES)
+
 
 class NonDroidModelsSummaryExtensionTests(unittest.TestCase):
     """Wave 3 §1.3: non-droid <engine>.models appear in full + summary payloads."""
@@ -437,6 +506,9 @@ class NonDroidModelsSummaryExtensionTests(unittest.TestCase):
         config["claude"]["models"] = {"opus": "claude-opus-4-8"}
         config["kimi"]["models"] = {"kfast": "kimi-k2.7"}
         config["devin"]["models"] = {"swift": "swe-1.7-lightning"}
+        config["opencode"]["models"] = {
+            "deep": {"model": "anthropic/claude-sonnet-4-5", "variant": "xhigh"}
+        }
         with tempfile.TemporaryDirectory() as workspace:
             summary = models_summary_payload(config, "fixture-config", Path(workspace))
             by_provider_alias = {
@@ -462,6 +534,11 @@ class NonDroidModelsSummaryExtensionTests(unittest.TestCase):
             self.assertIn("reasoningEfforts", by_provider_alias[("kimi", "kfast")])
             self.assertIsNone(by_provider_alias[("kimi", "kfast")]["reasoningEfforts"])
             self.assertIsNone(by_provider_alias[("devin", "swift")]["reasoningEfforts"])
+            opencode_deep = by_provider_alias[("opencode", "deep")]
+            self.assertTrue(opencode_deep["available"])
+            self.assertEqual(opencode_deep["model"], "anthropic/claude-sonnet-4-5")
+            self.assertEqual(opencode_deep["pinnedVariant"], "xhigh")
+            self.assertIsNone(opencode_deep["reasoningEfforts"])
             droid_glm = by_provider_alias[("droid", "glm")]
             self.assertEqual(droid_glm["model"], "glm-5.1")
             self.assertEqual(
