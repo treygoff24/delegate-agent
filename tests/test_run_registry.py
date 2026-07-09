@@ -335,6 +335,31 @@ class RunRegistryTests(unittest.TestCase):
             self.assertEqual(resolved.run_id, new_glm)
             self.assertEqual(resolved.resolution_kind, "latest_model")
 
+    def test_opencode_handle_resolution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
+            first, _ = self.registry.register_run(
+                root, harness="opencode", metadata={"modelAlias": "fast"}
+            )
+            second, _ = self.registry.register_run(
+                root, harness="opencode", metadata={"modelAlias": "fast"}
+            )
+            for run_id, ts in (
+                (first, "2026-05-20T10:00:00Z"),
+                (second, "2026-05-20T10:10:00Z"),
+            ):
+                self.registry.write_json_atomic(
+                    self.registry.run_directory(root, run_id) / "state.json",
+                    {"status": "succeeded", "lastActivityAt": ts},
+                )
+            index = self.registry.load_index(root)
+            latest = self.registry.resolve_handle(index, "opencode", registry_root=root)
+            self.assertEqual(latest.run_id, second)
+            self.assertEqual(latest.resolution_kind, "latest")
+            aliased = self.registry.resolve_handle(index, "opencode:fast", registry_root=root)
+            self.assertEqual(aliased.run_id, second)
+            self.assertEqual(aliased.resolution_kind, "latest_model")
+
     def test_latest_run_id_for_harness_model_falls_back_to_manifest_alias(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")

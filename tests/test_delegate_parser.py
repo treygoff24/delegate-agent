@@ -342,7 +342,7 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(parsed.launch.mode, "work")
 
     def test_modeless_call_mode_parses(self):
-        for engine in ("cursor", "codex", "kimi", "claude", "grok", "devin"):
+        for engine in ("cursor", "codex", "kimi", "claude", "grok", "devin", "opencode"):
             with self.subTest(engine=engine):
                 parsed = self.delegate.parse_cli([engine, "call", "summarize"])
                 self.assertEqual(parsed.subcommand, engine)
@@ -557,6 +557,48 @@ class ParserTests(unittest.TestCase):
             ["dry-run", "devin", "safe", "--prompt-file", "task.md"],
         )
         self.assertEqual(parsed.launch.prompt_file, "task.md")
+
+    def test_opencode_direct_commands_parse(self):
+        parsed = self.delegate.parse_cli(
+            ["opencode", "safe", "--model", "openai/gpt-5.5", "--agent", "reviewer", "review"]
+        )
+        self.assertEqual(parsed.subcommand, "opencode")
+        self.assertEqual(parsed.launch.engine, "opencode")
+        self.assertEqual(parsed.launch.mode, "safe")
+        self.assertEqual(parsed.launch.model, "openai/gpt-5.5")
+        self.assertEqual(parsed.launch.agent, "reviewer")
+        self.assertEqual(parsed.launch.prompt_parts, ["review"])
+
+        parsed = self.delegate.parse_cli(["opencode", "work", "--agent", "builder", "fix"])
+        self.assertEqual(parsed.launch.mode, "work")
+        self.assertEqual(parsed.launch.agent, "builder")
+
+        parsed = self.delegate.parse_cli(["opencode", "call", "--agent", "judge", "score"])
+        self.assertEqual(parsed.launch.mode, "call")
+        self.assertEqual(parsed.launch.agent, "judge")
+
+    def test_dry_run_opencode_parses(self):
+        parsed = self.delegate.parse_cli(
+            ["dry-run", "opencode", "work", "--agent", "builder", "fix"]
+        )
+        self.assertEqual(parsed.subcommand, "opencode")
+        self.assertTrue(parsed.launch.dry_run)
+        self.assertEqual(parsed.launch.agent, "builder")
+        parsed = self.delegate.parse_cli(
+            ["dry-run", "opencode", "safe", "--prompt-file", "task.md"],
+        )
+        self.assertEqual(parsed.launch.prompt_file, "task.md")
+
+    def test_agent_flag_rejected_for_non_opencode_engines(self):
+        for engine in ("cursor", "codex", "kimi", "claude", "grok", "devin"):
+            with self.subTest(engine=engine):
+                with self.assertRaises(self.delegate.DelegateError) as ctx:
+                    self.delegate.parse_cli([engine, "safe", "--agent", "reviewer", "review"])
+                self.assertEqual(ctx.exception.error, "unsupported_agent")
+
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(["droid", "safe", "--agent", "reviewer", "review"])
+        self.assertEqual(ctx.exception.error, "unsupported_agent")
 
     def test_dry_run_codex_parses(self):
         parsed = self.delegate.parse_cli(["dry-run", "codex", "safe", "review"])

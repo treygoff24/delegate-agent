@@ -31,6 +31,9 @@ class BundledModelsTests(unittest.TestCase):
 
         for engine in KNOWN_ENGINES:
             self.assertIn(engine, BUNDLED_MODELS)
+            if engine == "opencode":
+                self.assertEqual(BUNDLED_MODELS[engine], ())
+                continue
             self.assertGreater(len(BUNDLED_MODELS[engine]), 0)
 
     def test_codex_mirrors_reasoning_ids(self):

@@ -9,6 +9,7 @@ SLACK_WEBHOOK_SCHEME = "https"
 URL_SCHEME_SEPARATOR = "://"
 SLACK_WEBHOOK_HOST_PATTERN = r"hooks\.slack(?:-gov)?\.com"
 SLACK_WEBHOOK_PATH_PATTERN = r"/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]+"
+SENSITIVE_ENV_KEYS = frozenset({"OPENCODE_CONFIG_CONTENT"})
 
 REDACT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # Authorization header value, quoted or bare. The optional quote after the key
@@ -170,7 +171,7 @@ def redact_progress_label(value: str) -> str:
 
 
 def key_looks_secret(key: str) -> bool:
-    return _SECRET_KEY_RE.search(key) is not None
+    return key in SENSITIVE_ENV_KEYS or _SECRET_KEY_RE.search(key) is not None
 
 
 def redact_mapping_value(key: str, value: JsonValue) -> JsonValue:

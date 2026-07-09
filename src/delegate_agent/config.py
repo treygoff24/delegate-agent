@@ -26,7 +26,9 @@ ISOLATION_AUTO = "auto"
 ISOLATION_NONE = "none"
 ISOLATION_WORKTREE = "worktree"
 VALID_ISOLATION_VALUES = (ISOLATION_AUTO, ISOLATION_NONE, ISOLATION_WORKTREE)
-SAFE_ISOLATION_REQUIRED_ENGINES = frozenset({"cursor", "droid", "kimi", "claude", "grok", "devin"})
+SAFE_ISOLATION_REQUIRED_ENGINES = frozenset(
+    {"cursor", "droid", "kimi", "claude", "grok", "devin", "opencode"}
+)
 
 POLICY_PROFILES = ("safe", "trusted-hooks", "external-sandbox", "custom")
 POLICY_MODE_KEYS = frozenset(
@@ -110,6 +112,13 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
         "binary": "devin",
         "defaultModel": "swe-1.7",
         "defaultReasoningEffort": None,
+        "models": {},
+    },
+    "opencode": {
+        "binary": "opencode",
+        "defaultModel": None,
+        "defaultReasoningEffort": None,
+        "defaultAgent": None,
         "models": {},
     },
     "policy": {
@@ -736,6 +745,26 @@ def _validate_devin_section(devin: JsonValue) -> None:
     _validate_engine_models(devin.get("models"), engine="devin", error="invalid_devin_config")
 
 
+def _validate_opencode_section(opencode: JsonValue) -> None:
+    if not isinstance(opencode, dict):
+        raise ConfigError("invalid_opencode_config", "opencode config must be an object.")
+    require_non_empty_str(
+        opencode.get("binary"), path="opencode.binary", error="invalid_opencode_config"
+    )
+    optional_str(
+        opencode.get("defaultModel"), path="opencode.defaultModel", error="invalid_opencode_config"
+    )
+    _validate_provider_default_reasoning_effort(
+        opencode.get("defaultReasoningEffort"),
+        path="opencode.defaultReasoningEffort",
+        error="invalid_opencode_config",
+    )
+    optional_str(
+        opencode.get("defaultAgent"), path="opencode.defaultAgent", error="invalid_opencode_config"
+    )
+    _validate_opencode_models(opencode.get("models"))
+
+
 def _validate_provider_default_reasoning_effort(
     value: JsonValue,
     *,
@@ -778,6 +807,65 @@ def _validate_engine_models(models: JsonValue, *, engine: str, error: str) -> No
                 error,
                 f"{path} alias {alias!r} must not start with '-'.",
             )
+
+
+def _validate_engine_model_alias(alias: object, *, engine: str, error: str) -> None:
+    path = f"{engine}.models"
+    if not isinstance(alias, str) or not alias.strip():
+        raise ConfigError(error, f"{engine} model aliases must be non-empty strings.")
+    if alias in VALID_MODES:
+        raise ConfigError(
+            error,
+            f"{path} alias {alias!r} collides with a launch mode name; rename the alias.",
+        )
+    if alias == engine:
+        raise ConfigError(
+            error,
+            f"{path} alias {alias!r} collides with its own engine name "
+            "(shadowing the engine's summary entry); rename the alias.",
+        )
+    if alias.startswith("-"):
+        raise ConfigError(
+            error,
+            f"{path} alias {alias!r} must not start with '-'.",
+        )
+
+
+def _validate_opencode_models(models: JsonValue) -> None:
+    engine = "opencode"
+    error = "invalid_opencode_config"
+    path = f"{engine}.models"
+    if models is None:
+        return
+    if not isinstance(models, dict):
+        raise ConfigError(error, f"{path} must be an object.")
+    for alias, mapping in models.items():
+        _validate_engine_model_alias(alias, engine=engine, error=error)
+        if isinstance(mapping, str):
+            if not mapping.strip():
+                raise ConfigError(error, "opencode model ids must be non-empty strings.")
+            continue
+        if not isinstance(mapping, dict):
+            raise ConfigError(
+                error,
+                f"{path}.{alias} must be a non-empty string or an object with model and variant.",
+            )
+        unknown = sorted(set(mapping) - {"model", "variant"})
+        if unknown:
+            raise ConfigError(
+                error,
+                f"{path}.{alias} has unknown keys: {', '.join(unknown)}.",
+            )
+        model = mapping.get("model")
+        variant = mapping.get("variant")
+        if not isinstance(model, str) or not model.strip():
+            raise ConfigError(error, f"{path}.{alias}.model must be a non-empty string.")
+        if not isinstance(variant, str) or not variant.strip():
+            raise ConfigError(error, f"{path}.{alias}.variant must be a non-empty string.")
+        try:
+            reasoning.normalize_effort(variant)
+        except reasoning.ReasoningCapabilityError as exc:
+            raise ConfigError(error, f"{path}.{alias}.variant: {exc.message}") from exc
 
 
 def _validate_reasoning_effort_value(value: JsonValue, *, path: str) -> str:
@@ -1180,6 +1268,7 @@ def validate_config(config: JsonObject) -> None:
     _validate_claude_section(config.get("claude"))
     _validate_grok_section(config.get("grok"))
     _validate_devin_section(config.get("devin"))
+    _validate_opencode_section(config.get("opencode"))
     _validate_reasoning_section(config.get("reasoning"))
     _validate_isolation_section(config.get("isolation"))
     _validate_worktrees_section(config.get("worktrees"))

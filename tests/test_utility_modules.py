@@ -48,8 +48,13 @@ class UtilityModuleTests(unittest.TestCase):
             ),
             (
                 "droid",
-                ["opencode", "run", "--cwd", "/old", "prompt"],
-                ["opencode", "run", "--cwd", "/new", "prompt"],
+                ["droid", "exec", "--cwd", "/old", "prompt"],
+                ["droid", "exec", "--cwd", "/new", "prompt"],
+            ),
+            (
+                "opencode",
+                ["opencode", "run", "--dir", "/old"],
+                ["opencode", "run", "--dir", "/new"],
             ),
             ("kimi", ["kimi", "--prompt", "prompt"], ["kimi", "--prompt", "prompt"]),
             (

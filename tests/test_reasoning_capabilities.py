@@ -19,6 +19,7 @@ from delegate_agent.reasoning import (  # noqa: E402
     TRANSPORT_CODEX_CONFIG,
     TRANSPORT_CURSOR_MODEL_SELECTION,
     TRANSPORT_DROID_FLAG,
+    TRANSPORT_OPENCODE_VARIANT_FLAG,
     ReasoningCapabilityError,
     _alias_key_for_default_model,
     build_alias_reasoning_summaries,
@@ -273,6 +274,14 @@ class ReasoningCapabilityTests(unittest.TestCase):
         self.assertEqual(devin["source"], "none")
         self.assertEqual(devin["warning"], DEVIN_UNSUPPORTED_REASONING_WARNING)
 
+    def test_capabilities_payload_marks_opencode_pass_through(self):
+        payload = build_reasoning_capabilities_payload({}, cache=None)
+        opencode = payload["harnesses"]["opencode"]
+        self.assertEqual(opencode["transport"], TRANSPORT_OPENCODE_VARIANT_FLAG)
+        self.assertIsNone(opencode["supported"])
+        self.assertEqual(opencode["source"], "pass-through")
+        self.assertEqual(opencode["models"], {})
+
     def test_alias_summary_reports_supported_droid_alias(self):
         config = {
             "droid": {
@@ -333,6 +342,23 @@ class ReasoningCapabilityTests(unittest.TestCase):
         self.assertIsNone(kimi["supported"])
         self.assertEqual(kimi["warning"], KIMI_UNSUPPORTED_REASONING_WARNING)
 
+    def test_alias_summary_renders_opencode_pinned_variant(self):
+        config = {
+            "opencode": {
+                "defaultModel": "openai/gpt-5.5",
+                "defaultReasoningEffort": "medium",
+                "models": {"deep": {"model": "anthropic/claude-sonnet", "variant": "xhigh"}},
+            }
+        }
+        summaries = build_alias_reasoning_summaries(config, cache=None)
+        default = summaries["opencode"]["openai/gpt-5.5"]
+        self.assertEqual(default["transport"], TRANSPORT_OPENCODE_VARIANT_FLAG)
+        self.assertEqual(default["configDefault"], "medium")
+        deep = summaries["opencode"]["deep"]
+        self.assertEqual(deep["model"], "anthropic/claude-sonnet")
+        self.assertEqual(deep["pinnedVariant"], "xhigh")
+        self.assertEqual(deep["source"], "alias")
+
     def test_alias_key_for_default_model_preserves_placeholder_semantics(self):
         self.assertEqual(_alias_key_for_default_model("gpt-5.5"), "gpt-5.5")
         for value in ("", None, 0, [], object()):
@@ -369,6 +395,11 @@ class ReasoningCapabilityTests(unittest.TestCase):
             },
             "kimi": {"defaultModel": ""},
             "devin": {"defaultModel": "swe-1.7"},
+            "opencode": {
+                "defaultModel": "openai/gpt-5.5",
+                "defaultReasoningEffort": "medium",
+                "models": {"deep": {"model": "anthropic/claude-sonnet", "variant": "xhigh"}},
+            },
         }
         expected_aliases = {
             "droid": {
@@ -425,6 +456,25 @@ class ReasoningCapabilityTests(unittest.TestCase):
                     "model": "swe-1.7",
                 }
             },
+            "opencode": {
+                "openai/gpt-5.5": {
+                    "alias": "openai/gpt-5.5",
+                    "supported": None,
+                    "source": "pass-through",
+                    "transport": "variant-flag",
+                    "model": "openai/gpt-5.5",
+                    "configDefault": "medium",
+                },
+                "deep": {
+                    "alias": "deep",
+                    "supported": None,
+                    "source": "alias",
+                    "transport": "variant-flag",
+                    "model": "anthropic/claude-sonnet",
+                    "configDefault": "medium",
+                    "pinnedVariant": "xhigh",
+                },
+            },
             "grok": {},
         }
 
@@ -449,6 +499,15 @@ class ReasoningCapabilityTests(unittest.TestCase):
                 "supported": None,
                 "source": "none",
                 "warning": DEVIN_UNSUPPORTED_REASONING_WARNING,
+                "models": {},
+            },
+        )
+        self.assertEqual(
+            capabilities["harnesses"]["opencode"],
+            {
+                "transport": "variant-flag",
+                "supported": None,
+                "source": "pass-through",
                 "models": {},
             },
         )
@@ -495,7 +554,9 @@ class ReasoningCapabilityTests(unittest.TestCase):
         self.assertEqual(REASONING_PROFILES["claude"].transport, TRANSPORT_CLAUDE_EFFORT_FLAG)
         self.assertIsNone(REASONING_PROFILES["kimi"].transport)
         self.assertIsNone(REASONING_PROFILES["devin"].transport)
+        self.assertIsNone(REASONING_PROFILES["opencode"].transport)
         self.assertEqual(REASONING_PROFILES["claude"].strategy, "static-enum")
+        self.assertEqual(REASONING_PROFILES["opencode"].strategy, "pass-through")
         self.assertEqual(REASONING_PROFILES["claude"].static_efforts, CLAUDE_NATIVE_EFFORTS)
         self.assertEqual(
             REASONING_PROFILES["kimi"].unsupported_warning,

@@ -73,4 +73,5 @@ BUNDLED_MODELS: dict[str, tuple[BundledModelEntry, ...]] = {
         {"id": "kimi-code/kimi-for-coding"},
         {"id": "kimi-k2.7"},
     ),
+    "opencode": (),
 }
