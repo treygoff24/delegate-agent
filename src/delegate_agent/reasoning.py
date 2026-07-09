@@ -761,7 +761,9 @@ def build_alias_reasoning_summaries(
     if isinstance(devin, dict):
         default_model = devin.get("defaultModel")
         alias_key = _alias_key_for_default_model(default_model)
-        summaries["devin"] = {alias_key: _devin_alias_reasoning_summary(devin)}
+        devin_aliases: JsonObject = {alias_key: _devin_alias_reasoning_summary(devin)}
+        _add_static_alias_summaries(devin_aliases, devin, _devin_alias_reasoning_summary)
+        summaries["devin"] = devin_aliases
     else:
         summaries["devin"] = {}
 
@@ -769,7 +771,9 @@ def build_alias_reasoning_summaries(
     if isinstance(kimi, dict):
         default_model = kimi.get("defaultModel")
         alias_key = _alias_key_for_default_model(default_model)
-        summaries["kimi"] = {alias_key: _kimi_alias_reasoning_summary(kimi)}
+        kimi_aliases: JsonObject = {alias_key: _kimi_alias_reasoning_summary(kimi)}
+        _add_static_alias_summaries(kimi_aliases, kimi, _kimi_alias_reasoning_summary)
+        summaries["kimi"] = kimi_aliases
     else:
         summaries["kimi"] = {}
 

@@ -431,6 +431,9 @@ class NonDroidModelsSummaryExtensionTests(unittest.TestCase):
         config = embedded_default_config()
         config["droid"]["models"] = {"glm": "glm-5.1"}
         config["codex"]["models"] = {"fast": "gpt-5.5"}
+        config["claude"]["models"] = {"opus": "claude-opus-4-8"}
+        config["kimi"]["models"] = {"kfast": "kimi-k2.7"}
+        config["devin"]["models"] = {"swift": "swe-1.7-lightning"}
         with tempfile.TemporaryDirectory() as workspace:
             summary = models_summary_payload(config, "fixture-config", Path(workspace))
             by_provider_alias = {
@@ -446,8 +449,16 @@ class NonDroidModelsSummaryExtensionTests(unittest.TestCase):
             self.assertTrue(codex_fast["available"])
             self.assertTrue(codex_fast["safeSupported"])
             self.assertTrue(codex_fast["workSupported"])
-            # Non-droid alias entries carry reasoning fields like droid's do.
+            # Non-droid alias entries carry reasoning fields like droid's do,
+            # across the table-backed, static-enum, and unsupported engines.
             self.assertEqual(codex_fast.get("reasoningEfforts"), ["low", "medium", "high", "xhigh"])
+            self.assertEqual(
+                by_provider_alias[("claude", "opus")].get("reasoningEfforts"),
+                ["low", "medium", "high", "xhigh", "max"],
+            )
+            self.assertIn("reasoningEfforts", by_provider_alias[("kimi", "kfast")])
+            self.assertIsNone(by_provider_alias[("kimi", "kfast")]["reasoningEfforts"])
+            self.assertIsNone(by_provider_alias[("devin", "swift")]["reasoningEfforts"])
             droid_glm = by_provider_alias[("droid", "glm")]
             self.assertEqual(droid_glm["model"], "glm-5.1")
             self.assertEqual(
