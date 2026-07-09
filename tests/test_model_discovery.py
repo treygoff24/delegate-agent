@@ -214,6 +214,22 @@ class LiveProbeIntegrationTests(unittest.TestCase):
             self.assertEqual(by_id["live-cursor-model"]["note"], "Live Cursor")
             self.assertIn("composer-2.5", by_id)
 
+    def test_secret_shaped_alias_keys_scrubbed_in_discovery(self):
+        import io as io_mod
+        import json as json_mod
+
+        from delegate_agent.describe_payload import emit_models
+
+        secret_key = "sk-proj-abcdefghijklmnopqrstuvwxyz012345"
+        config = self.embedded_default_config()
+        config["codex"]["models"] = {secret_key: "gpt-5.5"}
+        buf = io_mod.StringIO()
+        emit_models(config, "embedded-default", True, buf)
+        raw = buf.getvalue()
+        self.assertNotIn(secret_key, raw)
+        payload = json_mod.loads(raw)
+        self.assertIn("codex", payload)
+
     def test_models_payload_exposes_droid_default_model(self):
         from delegate_agent.describe_payload import _engine_defaults_payload, models_payload
 
