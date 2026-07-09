@@ -446,6 +446,8 @@ class NonDroidModelsSummaryExtensionTests(unittest.TestCase):
             self.assertTrue(codex_fast["available"])
             self.assertTrue(codex_fast["safeSupported"])
             self.assertTrue(codex_fast["workSupported"])
+            # Non-droid alias entries carry reasoning fields like droid's do.
+            self.assertEqual(codex_fast.get("reasoningEfforts"), ["low", "medium", "high", "xhigh"])
             droid_glm = by_provider_alias[("droid", "glm")]
             self.assertEqual(droid_glm["model"], "glm-5.1")
             self.assertEqual(
