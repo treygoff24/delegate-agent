@@ -87,6 +87,7 @@ RUN_INPUT_KEYS = {
     "prompt",
     "isolation",
     "reasoningEffort",
+    "fast",
     "outputSchema",
     "progress",
     "forbidCommit",
@@ -925,6 +926,7 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
                 isolation_context=None,
                 reasoning_effort=launch.reasoning_effort,
                 reasoning_effort_source="cli" if launch.reasoning_effort is not None else None,
+                fast=launch.fast,
                 progress=False,
                 forbid_commit=False,
                 auth_profile_override=global_options.auth_profile,
@@ -1042,6 +1044,7 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         isolation_context=isolation_context,
         reasoning_effort=launch.reasoning_effort,
         reasoning_effort_source="cli" if launch.reasoning_effort is not None else None,
+        fast=launch.fast,
         progress=effective_progress,
         progress_initial_delay_sec=progress_initial_delay_sec,
         progress_interval_sec=progress_interval_sec,
@@ -1113,6 +1116,12 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
             raise DelegateError(exc.error, "reasoningEffort must be a non-empty string.") from exc
     else:
         reasoning_effort = None
+    if "fast" in raw and engine != "codex":
+        raise DelegateError("unsupported_fast", "fast is only supported by codex.")
+    raw_fast = raw.get("fast")
+    if raw_fast is not None and not isinstance(raw_fast, bool):
+        raise DelegateError("invalid_fast", "fast must be true, false, null, or omitted.")
+    fast = raw_fast if isinstance(raw_fast, bool) else None
     raw_progress_intent: ProgressIntent
     if "progress" in raw:
         raw_progress = raw["progress"]
@@ -1211,6 +1220,7 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
                 isolation_context=None,
                 reasoning_effort=reasoning_effort,
                 reasoning_effort_source="input-json" if reasoning_effort is not None else None,
+                fast=fast,
                 progress=False,
                 forbid_commit=False,
                 auth_profile_override=global_options.auth_profile,
@@ -1348,6 +1358,7 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         isolation_context=isolation_context,
         reasoning_effort=reasoning_effort,
         reasoning_effort_source="input-json" if reasoning_effort is not None else None,
+        fast=fast,
         progress=effective_progress,
         progress_initial_delay_sec=progress_initial_delay_sec,
         progress_interval_sec=progress_interval_sec,
@@ -1377,6 +1388,7 @@ def build_request(
     isolation_context: IsolationContext | None = None,
     reasoning_effort: str | None = None,
     reasoning_effort_source: str | None = None,
+    fast: bool | None = None,
     progress: bool = False,
     progress_initial_delay_sec: float = delegate_runner.PROGRESS_INITIAL_DELAY_SEC,
     progress_interval_sec: float = delegate_runner.PROGRESS_HEARTBEAT_INTERVAL_SEC,
@@ -1405,6 +1417,8 @@ def build_request(
         reasoning_effort,
         reasoning_effort_source=reasoning_effort_source,
     )
+    if fast is not None and engine != "codex":
+        raise DelegateError("unsupported_fast", "fast is only supported by codex.")
     output_schema = resolve_output_schema(engine, output_schema)
 
     return _build_request_for_workspace(
@@ -1419,6 +1433,7 @@ def build_request(
         isolation_context=isolation_context,
         requested_effort=requested_effort,
         effort_source=effort_source,
+        fast=fast,
         progress=progress,
         progress_initial_delay_sec=progress_initial_delay_sec,
         progress_interval_sec=progress_interval_sec,
@@ -1612,6 +1627,7 @@ def _codex_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         workspace_kind=build.resolved.kind,
         stream_capture=build.stream_capture,
         reasoning_capability=capability,
+        fast=build.fast,
         prompt_transport=PROMPT_TRANSPORT_STDIN,
         output_schema=build.output_schema,
         call_read_only=build.call_read_only,
@@ -1874,6 +1890,7 @@ def _build_request_for_workspace(
     isolation_context: IsolationContext | None,
     requested_effort: str | None,
     effort_source: str | None,
+    fast: bool | None,
     progress: bool,
     progress_initial_delay_sec: float,
     progress_interval_sec: float,
@@ -1912,6 +1929,7 @@ def _build_request_for_workspace(
             requested_effort=requested_effort,
             effort_source=effort_source,
             cache=cache,
+            fast=fast,
             output_schema=output_schema,
             call_read_only=call_read_only,
             model_override=model_override,
@@ -1935,6 +1953,7 @@ def _build_request_for_workspace(
             reasoning_effort_source=parts.reasoning_effort_source,
             reasoning_capability_source=parts.reasoning_capability_source,
             reasoning_transport=parts.reasoning_transport,
+            fast=fast,
             progress=progress,
             progress_initial_delay_sec=progress_initial_delay_sec,
             progress_interval_sec=progress_interval_sec,

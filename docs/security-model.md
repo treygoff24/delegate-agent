@@ -118,6 +118,14 @@ combinations before launch. OpenCode is the exception: Delegate passes the value
 through as `--variant`, and OpenCode may silently ignore an unknown variant.
 Treat higher effort as a possible latency/cost change, not as a safety control.
 
+## Codex Fast boundary
+
+`--fast`, `--no-fast`, and JSON `fast` select a Codex service tier for one run.
+They do not change the selected model, reasoning effort, sandbox, approvals,
+isolation, network policy, credentials, or edit capability. Fast may consume
+plan usage at a different rate; treat it as a latency/usage choice, never a
+security control.
+
 ## Isolation boundaries
 
 ### Temporary safe isolation

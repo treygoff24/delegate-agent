@@ -703,6 +703,7 @@ def parse_modeless_engine(
         prompt_file,
         output_schema,
         reasoning_effort,
+        fast,
         progress_intent,
         forbid_commit,
         prompt_parts,
@@ -715,6 +716,8 @@ def parse_modeless_engine(
     ) = parse_prompt_tail(rest[1:], json_mode, isolation, command_prefix=[engine, mode])
     if agent is not None and engine != "opencode":
         raise DelegateError("unsupported_agent", "--agent is only supported by opencode.")
+    if fast is not None and engine != "codex":
+        raise DelegateError("unsupported_fast", "--fast and --no-fast are only supported by codex.")
     forbid_commit_implied_isolation = False
     if forbid_commit and mode == "work" and isolation is None:
         isolation = "worktree"
@@ -743,6 +746,7 @@ def parse_modeless_engine(
             prompt_file=prompt_file,
             output_schema=output_schema,
             reasoning_effort=reasoning_effort,
+            fast=fast,
             progress_intent=progress_intent,
             forbid_commit=forbid_commit,
             forbid_commit_implied_isolation=forbid_commit_implied_isolation,
@@ -813,6 +817,7 @@ def parse_droid(
         prompt_file,
         output_schema,
         reasoning_effort,
+        fast,
         progress_intent,
         forbid_commit,
         prompt_parts,
@@ -825,6 +830,8 @@ def parse_droid(
     ) = parse_prompt_tail(tail, json_mode, isolation, command_prefix=command_prefix)
     if agent is not None:
         raise DelegateError("unsupported_agent", "--agent is only supported by opencode.")
+    if fast is not None:
+        raise DelegateError("unsupported_fast", "--fast and --no-fast are only supported by codex.")
     forbid_commit_implied_isolation = False
     if forbid_commit and mode == "work" and isolation is None:
         isolation = "worktree"
@@ -855,6 +862,7 @@ def parse_droid(
             prompt_file=prompt_file,
             output_schema=output_schema,
             reasoning_effort=reasoning_effort,
+            fast=fast,
             progress_intent=progress_intent,
             forbid_commit=forbid_commit,
             forbid_commit_implied_isolation=forbid_commit_implied_isolation,
@@ -933,6 +941,7 @@ def parse_prompt_tail(
     str | None,
     str | None,
     str | None,
+    bool | None,
     str | None,
     bool,
     list[str],
@@ -946,6 +955,7 @@ def parse_prompt_tail(
     prompt_file: str | None = None
     output_schema: str | None = None
     reasoning_effort: str | None = None
+    fast: bool | None = None
     progress_intent: str | None = None
     forbid_commit = False
     include_dirty = False
@@ -1021,6 +1031,28 @@ def parse_prompt_tail(
                 corrected = corrected_drop_option_suffix(command_prefix, rest, i, takes_value=True)
                 raise DelegateError(exc.error, f"{exc.message}{corrected}") from exc
             i += 2
+            continue
+        if token == "--fast":
+            if fast is not None:
+                detail = (
+                    "Only one --fast flag is allowed."
+                    if fast
+                    else "--fast and --no-fast cannot be combined."
+                )
+                raise DelegateError("invalid_option_combination", detail)
+            fast = True
+            i += 1
+            continue
+        if token == "--no-fast":
+            if fast is not None:
+                detail = (
+                    "Only one --no-fast flag is allowed."
+                    if not fast
+                    else "--fast and --no-fast cannot be combined."
+                )
+                raise DelegateError("invalid_option_combination", detail)
+            fast = False
+            i += 1
             continue
         if token == "--model":
             if model is not None:
@@ -1132,6 +1164,7 @@ def parse_prompt_tail(
         prompt_file,
         output_schema,
         reasoning_effort,
+        fast,
         progress_intent,
         forbid_commit,
         prompt_parts,

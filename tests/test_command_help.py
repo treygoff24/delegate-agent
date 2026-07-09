@@ -237,6 +237,17 @@ class OverviewTests(unittest.TestCase):
         self.assertIn("codex call", self.overview)
         self.assertIn("--output-schema FILE", self.overview)
 
+    def test_overview_advertises_codex_fast_on_every_codex_line(self):
+        codex_lines = [
+            line for line in self.overview.splitlines() if " codex " in line and "[--model" in line
+        ]
+        self.assertEqual(len(codex_lines), 4)
+        for line in codex_lines:
+            self.assertIn("[--fast|--no-fast]", line)
+        for line in self.overview.splitlines():
+            if "[--fast|--no-fast]" in line:
+                self.assertIn(" codex ", line)
+
     def test_overview_call_lines_omit_forbid_commit(self):
         """The overview must not advertise --forbid-commit for call mode.
 

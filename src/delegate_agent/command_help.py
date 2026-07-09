@@ -133,6 +133,16 @@ _OUTPUT_SCHEMA_OPTION = OptionSpec(
     "FILE",
     "Codex-only JSON Schema for the final message; also suppresses the completion-report instruction.",
 )
+_FAST_OPTION = OptionSpec(
+    "--fast",
+    None,
+    "Codex only: request the Fast service tier for this run (higher usage).",
+)
+_NO_FAST_OPTION = OptionSpec(
+    "--no-fast",
+    None,
+    "Codex only: request the Standard service tier for this run, overriding inherited Fast mode.",
+)
 _PROGRESS_OPTION = OptionSpec(
     "--progress",
     None,
@@ -258,14 +268,16 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         usage=(
             "delegate [--json] [--isolation auto|none|worktree] "
             "codex {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] "
-            "[--output-schema FILE] [--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
+            "[--fast|--no-fast] [--output-schema FILE] [--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
             "delegate [--json] codex call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] "
-            "[--output-schema FILE] [--prompt-file PATH] [prompt...]",
+            "[--fast|--no-fast] [--output-schema FILE] [--prompt-file PATH] [prompt...]",
         ),
         arguments=(_MODE_ARG, _PROMPT_ARG),
         options=(
             _MODEL_OPTION,
             _REASONING_EFFORT_OPTION,
+            _FAST_OPTION,
+            _NO_FAST_OPTION,
             _OUTPUT_SCHEMA_OPTION,
             _PROGRESS_OPTION,
             _NO_PROGRESS_OPTION,
@@ -287,6 +299,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "Reasoning effort is validated against the resolved model and emitted as a Codex "
             "config override; with no codex.defaultModel, explicit --reasoning-effort applies "
             "to the Codex harness default model.",
+            "--fast and --no-fast are per-run service-tier overrides. Omitting both inherits "
+            "the active Codex configuration; neither changes permissions or reasoning effort.",
             "--output-schema resolves relative paths from the launch cwd and is native Codex "
             "schema enforcement for the final message.",
             "codex.profile is a Codex CLI config overlay; top-level profiles selects "
@@ -519,10 +533,10 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "[--prompt-file PATH] [prompt...]",
             "delegate [--json] [--isolation auto|none|worktree] "
             "dry-run codex {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--output-schema FILE] "
-            "[--progress] [--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
+            "[--fast|--no-fast] [--progress] [--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
             "delegate [--json] [--isolation auto|none|worktree] "
             "dry-run codex call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--output-schema FILE] "
-            "[--prompt-file PATH] [prompt...]",
+            "[--fast|--no-fast] [--prompt-file PATH] [prompt...]",
             "delegate [--json] [--isolation auto|none|worktree] "
             "dry-run droid [MODEL_ALIAS] {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] "
             "[--progress] [--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
@@ -542,6 +556,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             _MODEL_OPTION,
             _REASONING_EFFORT_OPTION,
             _AGENT_OPTION,
+            _FAST_OPTION,
+            _NO_FAST_OPTION,
             _OUTPUT_SCHEMA_OPTION,
             _PROGRESS_OPTION,
             _NO_PROGRESS_OPTION,
@@ -562,6 +578,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         notes=(
             "dry-run shares the full engine grammar but launches no child process.",
             "--output-schema is accepted only for codex dry-runs.",
+            "--fast and --no-fast are accepted only for codex dry-runs.",
             "Reasoning effort is resolved from config/cache/bundled capabilities without invoking child binaries.",
         ),
         see_also=("cursor", "codex", "droid", "kimi", "claude", "grok", "opencode", "describe"),
@@ -582,7 +599,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         examples=("delegate run --input-json task.json",),
         notes=(
             "Accepted JSON keys: engine, mode, model, cwd, prompt, isolation, "
-            "reasoningEffort, outputSchema, progress, forbidCommit.",
+            "reasoningEffort, fast, outputSchema, progress, forbidCommit.",
             "Use this for long prompts or programmatic invocation.",
         ),
         see_also=("cursor", "codex", "droid", "claude", "grok", "agent-help"),
@@ -1376,8 +1393,8 @@ def render_overview_text() -> str:
         f"delegate [--cwd PATH] [--json] {iso} cursor call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} droid [MODEL_ALIAS] {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} droid [MODEL_ALIAS] call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} codex {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--output-schema FILE] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} codex call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--output-schema FILE] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} codex {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--output-schema FILE] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} codex call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--output-schema FILE] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} claude {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} claude call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} grok {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
@@ -1392,8 +1409,8 @@ def render_overview_text() -> str:
         f"delegate [--cwd PATH] [--json] {iso} dry-run cursor call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} dry-run droid [MODEL_ALIAS] {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} dry-run droid [MODEL_ALIAS] call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} dry-run codex {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--output-schema FILE] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} dry-run codex call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--output-schema FILE] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} dry-run codex {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--output-schema FILE] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} dry-run codex call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--output-schema FILE] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} dry-run claude {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} dry-run claude call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} dry-run grok {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",

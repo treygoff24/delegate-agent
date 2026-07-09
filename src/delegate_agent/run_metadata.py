@@ -30,6 +30,8 @@ REASONING_METADATA_KEYS: MetadataKeyGroup = (
     "reasoningTransport",
 )
 
+SPEED_METADATA_KEYS: MetadataKeyGroup = ("requestedFast",)
+
 SNAPSHOT_STATE_FALLBACK_KEYS: MetadataKeyGroup = (
     "worktreeStatus",
     "safeWorkspaceMethod",
@@ -40,7 +42,17 @@ SNAPSHOT_MANIFEST_FALLBACK_KEYS: MetadataKeyGroup = (
     *PERSISTENT_WORKTREE_METADATA_KEYS,
     "worktreeCleanupCommands",
     *REASONING_METADATA_KEYS,
+    *SPEED_METADATA_KEYS,
 )
+
+
+class SpeedMetadataCarrier(Protocol):
+    fast: bool | None
+
+
+def add_speed_payload_fields(payload: JsonObject, carrier: SpeedMetadataCarrier) -> None:
+    if carrier.fast is not None:
+        payload["requestedFast"] = carrier.fast
 
 
 class RunMetadataCarrier(Protocol):

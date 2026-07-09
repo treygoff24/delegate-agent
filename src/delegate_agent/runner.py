@@ -120,6 +120,7 @@ class RunContext:
     reasoning_effort_source: str | None = None
     reasoning_capability_source: str | None = None
     reasoning_transport: str | None = None
+    fast: bool | None = None
     prompt_transport: str = "argv"
     forbid_commit: bool = False
     progress_initial_delay_sec: float = PROGRESS_INITIAL_DELAY_SEC
@@ -237,6 +238,7 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
     }
     run_metadata.add_run_metadata_payload_fields(payload, ctx)
     reasoning.add_reasoning_payload_fields(payload, ctx)
+    run_metadata.add_speed_payload_fields(payload, ctx)
     if ctx.forbid_commit:
         payload["commitPolicy"] = {"forbidCommit": True}
     if ctx.auth_profile is not None:
@@ -364,6 +366,7 @@ def build_snapshot(
     }
     run_metadata.add_run_metadata_payload_fields(snapshot, ctx)
     reasoning.add_reasoning_payload_fields(snapshot, ctx)
+    run_metadata.add_speed_payload_fields(snapshot, ctx)
 
     # Worktree cleanup commands for persistent worktrees.
     cleanup = _worktree_cleanup_commands(ctx)
@@ -841,6 +844,7 @@ def completion_json_payload(
     payload["promptInstructionMode"] = ctx.prompt_instruction_mode
     run_metadata.add_run_metadata_payload_fields(payload, ctx)
     reasoning.add_reasoning_payload_fields(payload, ctx)
+    run_metadata.add_speed_payload_fields(payload, ctx)
     if assistant_meta is not None:
         payload.update(assistant_meta)
 

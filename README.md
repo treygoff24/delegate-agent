@@ -210,6 +210,21 @@ delegate --json dry-run codex safe --reasoning-effort high "Review this reposito
 delegate --json dry-run claude safe --reasoning-effort high "Review this repository. Do not edit files."
 ```
 
+Codex model routing is deliberately model-first rather than aliasing every
+model/effort pair: define model aliases in `codex.models`, then set effort per
+run with `--reasoning-effort`. Per-model effort menus (including any efforts
+newer than the bundled data) belong in the private `reasoning.capabilities`
+config block, which overrides the bundled defaults.
+
+Fast mode is an independent per-run serving choice. `--fast` requests Codex's
+Fast service tier, `--no-fast` explicitly requests Standard, and omitting both
+inherits the active Codex configuration:
+
+```bash
+delegate codex safe --model my-alias --reasoning-effort medium --fast "Explore likely causes."
+delegate codex work --model my-alias --reasoning-effort high --no-fast "Implement and verify."
+```
+
 Inspect tracked output by alias:
 
 ```bash

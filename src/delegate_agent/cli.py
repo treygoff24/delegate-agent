@@ -22,6 +22,7 @@ from delegate_agent import (
     profiles,
     reasoning,
     redaction,
+    run_metadata,
     run_output_commands,
     run_registry,
     wait_cancel_commands,
@@ -305,6 +306,7 @@ def dry_run_payload(request: Request) -> JsonObject:
         "promptInstructionMode": request.prompt_instruction_mode,
     }
     reasoning.add_reasoning_payload_fields(payload, request)
+    run_metadata.add_speed_payload_fields(payload, request)
     if request.warnings:
         payload["warnings"] = list(request.warnings)
     if request.progress:
@@ -554,6 +556,7 @@ def make_run_context(
         reasoning_effort_source=request.reasoning_effort_source,
         reasoning_capability_source=request.reasoning_capability_source,
         reasoning_transport=request.reasoning_transport,
+        fast=request.fast,
         prompt_transport=request.prompt_transport,
         forbid_commit=request.forbid_commit,
         progress_initial_delay_sec=request.progress_initial_delay_sec,
@@ -688,6 +691,7 @@ def execute_request(
                             merged.append(warning)
                     payload["warnings"] = merged
                 reasoning.add_reasoning_payload_fields(payload, request)
+                run_metadata.add_speed_payload_fields(payload, request)
                 if result.exit_code != 0:
                     payload["error"] = "child_failed"
                     payload["message"] = "Child command failed."

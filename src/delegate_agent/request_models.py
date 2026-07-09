@@ -47,6 +47,7 @@ class LaunchOptions:
     prompt_file: str | None = None
     output_schema: str | None = None
     reasoning_effort: str | None = None
+    fast: bool | None = None
     progress_intent: str | None = None
     forbid_commit: bool = False
     forbid_commit_implied_isolation: bool = False
@@ -149,6 +150,7 @@ class Request:
     reasoning_effort_source: str | None = None
     reasoning_capability_source: str | None = None
     reasoning_transport: str | None = None
+    fast: bool | None = None
     progress: bool = False
     progress_initial_delay_sec: float = 30.0
     progress_interval_sec: float = 60.0
@@ -201,6 +203,7 @@ class EngineBuildInput:
     requested_effort: str | None
     effort_source: str | None
     cache: JsonObject | None
+    fast: bool | None = None
     output_schema: str | None = None
     call_read_only: bool = False
     model_override: str | None = None
