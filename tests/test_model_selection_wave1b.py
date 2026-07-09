@@ -294,6 +294,40 @@ class DroidModelSelectionTests(CommandTestBase):
         # positional and input-JSON alias paths.
         self.assertEqual(request.model_alias, "fast")
 
+    def test_modeless_model_flag_alias_keeps_alias_metadata(self):
+        # CLI --model and input-JSON "model" share the model_alias channel for
+        # modeless engines, so manifests record modelAlias identically and
+        # `codex:fast` selectors work for CLI launches.
+        repo = make_git_repo(with_commit=True)
+        self.addCleanup(repo.cleanup)
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["codex"]["models"] = {"fast": "gpt-5.4-mini"}
+        parsed = self.delegate.parse_cli(
+            ["--cwd", repo.name, "dry-run", "codex", "safe", "--model", "fast", "review"]
+        )
+        request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+        self.assertEqual(request.model, "gpt-5.4-mini")
+        self.assertEqual(request.model_alias, "fast")
+
+    def test_modeless_model_flag_raw_id_recorded_as_selection(self):
+        # Raw IDs keep input-JSON parity: the selection token is recorded.
+        repo = make_git_repo(with_commit=True)
+        self.addCleanup(repo.cleanup)
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        parsed = self.delegate.parse_cli(
+            ["--cwd", repo.name, "dry-run", "codex", "safe", "--model", "gpt-5.5", "review"]
+        )
+        request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+        self.assertEqual(request.model, "gpt-5.5")
+        self.assertEqual(request.model_alias, "gpt-5.5")
+
+    def test_model_flag_rejects_empty_value(self):
+        for value in ("", "   "):
+            with self.subTest(value=repr(value)):
+                with self.assertRaises(self.delegate.DelegateError) as ctx:
+                    self.delegate.parse_cli(["codex", "safe", "--model", value, "review"])
+                self.assertEqual(ctx.exception.error, "missing_model")
+
     def test_droid_model_flag_raw_id_has_no_alias_metadata(self):
         repo = make_git_repo(with_commit=True)
         self.addCleanup(repo.cleanup)

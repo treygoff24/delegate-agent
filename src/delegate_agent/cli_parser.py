@@ -1024,10 +1024,10 @@ def parse_prompt_tail(
                     "--model requires a value.",
                 )
             value = rest[i + 1]
-            if value.startswith("-") or command_help.is_help_token(value):
+            if not value.strip() or value.startswith("-") or command_help.is_help_token(value):
                 raise DelegateError(
                     "missing_model",
-                    "--model requires a value.",
+                    "--model requires a non-empty value.",
                 )
             model = value
             i += 2

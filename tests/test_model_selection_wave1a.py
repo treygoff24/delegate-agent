@@ -209,15 +209,19 @@ class ModelOverrideThreadingTests(CommandTestBase):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
         config["droid"]["models"] = {"reviewer": "gpt-5.5"}
 
+        # Channel contract: modeless engines route CLI --model through the
+        # model_alias channel (input-JSON parity, modelAlias metadata); droid
+        # keeps --model in model_override (positional stays strict-alias).
         cases = (
-            (["codex", "safe", "--model", "gpt-5.5", "review"], "codex", "gpt-5.5"),
+            (["codex", "safe", "--model", "gpt-5.5", "review"], "codex", "gpt-5.5", "alias"),
             (
                 ["droid", "safe", "--model", "override-id", "review"],
                 "droid",
                 "override-id",
+                "override",
             ),
         )
-        for argv, engine, expected in cases:
+        for argv, engine, expected, channel in cases:
             with self.subTest(engine=engine):
                 parsed = self.delegate.parse_cli(["--cwd", repo.name, *argv])
                 self.assertEqual(parsed.launch.model, expected)
@@ -234,7 +238,12 @@ class ModelOverrideThreadingTests(CommandTestBase):
                     self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
                 self.assertEqual(len(captured), 1)
                 build = captured[0]
-                self.assertEqual(build.model_override, expected)
+                if channel == "override":
+                    self.assertEqual(build.model_override, expected)
+                    self.assertIsNone(build.model_alias)
+                else:
+                    self.assertEqual(build.model_alias, expected)
+                    self.assertIsNone(build.model_override)
 
 
 class ModelOptionHelpTests(unittest.TestCase):

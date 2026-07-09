@@ -72,6 +72,7 @@ from delegate_agent.prompt_transport import (
 from delegate_agent.request_models import (
     EngineBuildInput,
     EngineRequestParts,
+    LaunchOptions,
     ParsedCommand,
     Request,
     ResolvedWorkspace,
@@ -590,6 +591,22 @@ def _resolve_engine_model(section: JsonObject, build: EngineBuildInput) -> str |
     return _resolve_default_model(section)
 
 
+def _classify_cli_model(launch: LaunchOptions) -> tuple[str | None, str | None]:
+    """Split a CLI launch's model selection into (model_alias, model_override).
+
+    Modeless engines route --model through the model_alias channel — the same
+    one input-JSON uses — so manifests record modelAlias identically for both
+    (``codex:fast`` selectors keep working) while resolution stays alias-or-id.
+    Droid keeps its positional in model_alias (strict) and --model in
+    model_override (alias-or-id, classified inside _droid_request_parts).
+    """
+    if launch.engine == "droid":
+        return launch.model_alias, launch.model
+    if launch.model is not None:
+        return launch.model, None
+    return launch.model_alias, None
+
+
 def _reject_droid_model_conflict(model_alias: str | None, model_override: str | None) -> None:
     if model_alias is not None and model_override is not None:
         raise DelegateError(
@@ -779,11 +796,12 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
             )
         prompt = _call_effective_prompt(raw_prompt, read_only=read_only)
         workspace, cleanup_workspace = _call_workspace(launch.dry_run)
+        cli_model_alias, cli_model_override = _classify_cli_model(launch)
         try:
             return build_request(
                 launch.engine,
                 launch.mode,
-                launch.model_alias,
+                cli_model_alias,
                 workspace,
                 prompt,
                 config,
@@ -799,7 +817,7 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
                 cleanup_workspace=cleanup_workspace,
                 call_read_only=read_only,
                 group=global_options.group,
-                model_override=launch.model,
+                model_override=cli_model_override,
             )
         except BaseException:
             if cleanup_workspace:
@@ -895,10 +913,11 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         instruction_mode=instruction_mode,
         skip_skill_preamble=global_options.pass_through,
     )
+    cli_model_alias, cli_model_override = _classify_cli_model(launch)
     return build_request(
         launch.engine,
         launch.mode,
-        launch.model_alias,
+        cli_model_alias,
         workspace,
         prompt,
         config,
@@ -917,7 +936,7 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         warnings=(*output_schema_warnings, *isolation_warnings),
         group=global_options.group,
         prompt_instruction_mode=instruction_mode,
-        model_override=launch.model,
+        model_override=cli_model_override,
     )
 
 
