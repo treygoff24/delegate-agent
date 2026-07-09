@@ -86,6 +86,13 @@
     "defaultModel": "swe-1.7",
     "defaultReasoningEffort": null
   },
+  "opencode": {
+    "binary": "opencode",
+    "defaultModel": null,
+    "defaultReasoningEffort": null,
+    "defaultAgent": null,
+    "models": {}
+  },
   "kimi": {
     "binary": "kimi",
     "defaultModel": "kimi-code/kimi-for-coding",

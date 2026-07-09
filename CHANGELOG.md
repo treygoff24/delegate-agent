@@ -5,6 +5,21 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Added `opencode` as a first-class engine across `safe`, `work`, `call`, and
+  workflow runs. OpenCode drives any provider/model in the models.dev catalog
+  (75+ providers, plus custom/local providers) through one harness. Safe mode
+  and `call --read-only` enforce a deny-all-but-read permission lockdown via
+  `OPENCODE_CONFIG_CONTENT` (merges last, beating hostile repo config; verified
+  live against v1.17.17 including a git-worktree write-barrier test). Live
+  model discovery via `opencode models`, string or `{"model", "variant"}`
+  object aliases that can pin a reasoning variant, `--reasoning-effort` mapped
+  to OpenCode `--variant`, and per-run `--agent` selection with
+  `opencode.defaultAgent` fallback.
+
 ## [0.12.0] - 2026-07-09
 
 Three features in one train: Delegate Workflows (multi-agent orchestration with durable resume), per-run model selection + discovery across all seven engines, and the Devin engine. Model selection was built as the inaugural Delegate Workflows dogfood: three implementation waves plus a twelve-round two-lane adversarial review loop driven through `workflow run --resume`.

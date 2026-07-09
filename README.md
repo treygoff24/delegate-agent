@@ -4,7 +4,7 @@
 
 # Delegate Agent
 
-Delegate Agent is a small CLI for handing a bounded task to another coding-agent runtime. It normalizes common calls to Cursor Agent, Factory Droid, OpenAI Codex, Claude Code, Grok Build, Devin, and Kimi Code so humans or other agents can launch review, investigation, and implementation jobs without remembering each tool's flags.
+Delegate Agent is a small CLI for handing a bounded task to another coding-agent runtime. It normalizes common calls to Cursor Agent, Factory Droid, OpenAI Codex, Claude Code, Grok Build, Devin, OpenCode, and Kimi Code so humans or other agents can launch review, investigation, and implementation jobs without remembering each tool's flags.
 
 Use it when you want a predictable wrapper around prompts like:
 
@@ -14,7 +14,7 @@ Use it when you want a predictable wrapper around prompts like:
 
 Delegate does **not** commit, push, merge, deploy, publish, or run a background service. It builds the child command, adds safety framing, launches the selected runtime, and records local run metadata for later inspection.
 
-Prompt handling is provider-specific: Codex and Claude prompts are delivered to the child
+Prompt handling is provider-specific: Codex, Claude, and OpenCode prompts are delivered to the child
 runtime over stdin; Droid, Grok, and Devin prompts are delivered through private
 temporary prompt files; Cursor Agent and Kimi Code currently
 require prompt argv. Delegate redacts Cursor and Kimi prompt argv in dry-run
@@ -65,10 +65,15 @@ command -v codex   # OpenAI Codex CLI, used by delegate codex ...
 command -v claude  # Claude Code CLI, used by delegate claude ...
 command -v grok    # xAI Grok Build CLI, used by delegate grok ...
 command -v devin   # Cognition Devin CLI, used by delegate devin ...
+command -v opencode # OpenCode CLI, used by delegate opencode ...
 command -v kimi    # Kimi Code CLI, used by delegate kimi ...
 ```
 
 Runtime authentication is owned by each child CLI. Delegate cannot log in for you. Dry-runs and CI tests do not require the real child binaries.
+
+Install OpenCode from [opencode.ai](https://opencode.ai). Its curl installer
+normally writes the binary to `~/.opencode/bin`, which may not be on `PATH`.
+Extend `PATH` or set `opencode.binary` to the absolute binary path.
 
 Initialize a starter config and replace placeholder Droid model IDs before real Droid runs:
 
@@ -92,6 +97,7 @@ delegate --json describe
 delegate --json models
 delegate --json models codex          # per-engine advisory catalog
 delegate --json models cursor --live  # merge live harness probe when supported
+delegate --json models opencode --live # query every model visible to OpenCode
 delegate --json capabilities
 ```
 
@@ -115,6 +121,7 @@ Preview the command without launching a child runtime:
 ```bash
 delegate --json dry-run codex safe "Review this repository. Do not edit files."
 delegate --json dry-run claude safe "Review this repository. Do not edit files."
+delegate --json dry-run opencode safe "Review this repository. Do not edit files."
 ```
 
 Run a read-only review in an isolated throwaway workspace:
@@ -124,6 +131,7 @@ delegate codex safe "Review this repository for correctness risks. Do not edit f
 delegate claude safe "Review this repository for correctness risks. Do not edit files."
 delegate grok safe "Review this repository for correctness risks. Do not edit files."
 delegate devin safe "Review this repository for correctness risks. Do not edit files."
+delegate opencode safe "Review this repository for correctness risks. Do not edit files."
 delegate cursor safe "Review the current diff for regressions. Do not edit files."
 delegate kimi safe "Review this repository for regressions. Do not edit files."
 ```
@@ -141,6 +149,7 @@ Run an edit-capable task in a workspace you trust:
 delegate cursor work "Fix the parser bug. Run python3 -m unittest tests.test_delegate_parser. Report changed files."
 delegate claude work "Implement the scoped change and run the named check. Report changed files."
 delegate devin work "Implement the scoped change and run the named check. Report changed files."
+delegate opencode work "Implement the scoped change and run the named check. Report changed files."
 delegate kimi work "Implement the scoped change and run the named check. Report changed files."
 ```
 
@@ -194,7 +203,7 @@ python3 bin/delegate.py workflow approve wf_0123abcdef45
 See [Delegate Workflows](docs/delegate-workflows.md) for the DSL, safety
 limits, config, and gate semantics.
 
-Reasoning effort is provider-aware. Unsupported combinations fail before launch. It changes only the requested model thinking depth/cost/latency; it does not change safe/work/call mode, sandboxing, approvals, or edit capability. Codex/Droid validate effort against model capability metadata, Cursor maps effort to configured model selection, Claude maps to Claude Code `--effort`, and Grok maps to Grok `--effort` (`low`, `medium`, `high`, `xhigh`, `max`). Devin and Kimi do not expose a Delegate reasoning-effort flag. Explicit Codex effort can target the harness default model even when `codex.defaultModel` is unset:
+Reasoning effort is provider-aware. Unsupported combinations fail before launch. It changes only the requested model thinking depth/cost/latency; it does not change safe/work/call mode, sandboxing, approvals, or edit capability. Codex/Droid validate effort against model capability metadata, Cursor maps effort to configured model selection, Claude maps to Claude Code `--effort`, Grok maps to Grok `--effort` (`low`, `medium`, `high`, `xhigh`, `max`), and OpenCode passes it through as `--variant`. Devin and Kimi do not expose a Delegate reasoning-effort flag. Explicit Codex effort can target the harness default model even when `codex.defaultModel` is unset:
 
 ```bash
 delegate --json dry-run codex safe --reasoning-effort high "Review this repository. Do not edit files."
@@ -258,9 +267,10 @@ Delegate separates three ideas:
 
 Defaults are intentionally conservative for review paths:
 
-- `delegate cursor safe`, `delegate codex safe`, `delegate claude safe`, `delegate grok safe`, `delegate devin safe`, `delegate droid ALIAS safe`, and `delegate kimi safe` run in an isolated throwaway workspace. Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff.
+- `delegate cursor safe`, `delegate codex safe`, `delegate claude safe`, `delegate grok safe`, `delegate devin safe`, `delegate opencode safe`, `delegate droid ALIAS safe`, and `delegate kimi safe` run in an isolated throwaway workspace. Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff.
 - Grok safe mode uses Delegate isolated copy plus Grok read-only sandbox/permission controls (`--sandbox read-only`, `--permission-mode dontAsk` by default). It does not use Grok `plan` mode. Prompts are delivered via Grok `--prompt-file` from a Delegate temp file.
 - Devin safe mode uses Delegate isolated copy plus a Delegate-generated `--agent-config` deny-list for edit/write/exec and `mcp__*`, with Devin `--permission-mode auto`. Work mode uses Devin `--permission-mode dangerous` because Devin print mode rejects unapproved edit/exec tools.
+- OpenCode safe mode uses Delegate's isolated copy plus an `OPENCODE_CONFIG_CONTENT` permission lockdown that allows only read, glob, and grep operations. OpenCode merges this override last, so repository configuration cannot restore write-capable tools. `opencode call --read-only` uses the same lockdown; plain `call` does not.
 - Claude safe mode invokes `claude -p` with prompt text on stdin, `--permission-mode plan`, `--strict-mcp-config`, Read/Grep/Glob plus selected read-only Bash tools, and `--no-session-persistence` by default. Delegate does not currently prove that Claude Code hooks, plugins, user settings, or other non-MCP customization surfaces are disabled.
 - `work` mode can edit. By default it runs in the real workspace for backward compatibility.
 
@@ -287,7 +297,7 @@ To carry uncommitted local work into the worktree instead of stashing it, add
 the worktree through the same snapshot primitives as safe mode, and tears the
 worktree down before launching the child if that sync fails.
 
-Safe isolation and `--include-dirty` recreate an untracked symlink only when it is relative, resolves inside the source workspace, and its target is not gitignored; any symlink that fails those checks — an absolute target, an escape out of the tree, or a target that is itself a gitignored secret — is replaced with an inert placeholder file, failing closed on any ambiguity. Delegate reports a warning listing the symlink paths it blocked. In Git repositories with no commits yet, Cursor/Codex/Claude/Droid/Grok/Devin/Kimi safe isolation falls back to a directory copy because Git cannot create a detached worktree from an unborn `HEAD`.
+Safe isolation and `--include-dirty` recreate an untracked symlink only when it is relative, resolves inside the source workspace, and its target is not gitignored; any symlink that fails those checks — an absolute target, an escape out of the tree, or a target that is itself a gitignored secret — is replaced with an inert placeholder file, failing closed on any ambiguity. Delegate reports a warning listing the symlink paths it blocked. In Git repositories with no commits yet, Cursor/Codex/Claude/Droid/Grok/Devin/OpenCode/Kimi safe isolation falls back to a directory copy because Git cannot create a detached worktree from an unborn `HEAD`.
 
 Snapshots and `run-output` redact common credential shapes by default, including authorization headers, bearer/basic tokens, JWT-like strings, and common `token=` / `api_key=` / `password=` values. Use `--no-redact` only when exact output is necessary and safe to display.
 

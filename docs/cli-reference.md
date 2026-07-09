@@ -40,13 +40,17 @@ delegate grok safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prog
 delegate grok work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 delegate grok call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 
+delegate opencode safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate opencode work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate opencode call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--prompt-file PATH] [prompt...]
+
 delegate kimi safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 delegate kimi work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 delegate kimi call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 ```
 
 Prompt sources are direct arguments, `--prompt-file`, or Delegate stdin. Raw C0 control characters other than newline, carriage return, and tab are stripped before launch; a prompt that becomes empty fails fast. After
-Delegate resolves the prompt, Codex and Claude prompts are passed to the child runtime over
+Delegate resolves the prompt, Codex, Claude, and OpenCode prompts are passed to the child runtime over
 stdin. Droid and Grok prompts are written to a private temporary prompt file and passed
 with Droid's documented `--file` option or Grok's `--prompt-file`. Cursor Agent currently only exposes
 positional prompt input, and Kimi Code prompt mode currently uses `--prompt`,
@@ -68,10 +72,10 @@ matches an alias key; otherwise it is passed through verbatim as a raw model ID
 `MODEL_ALIAS` (alias-only/strict); give either the positional or `--model`, not
 both. With neither, Droid uses `droid.defaultModel` when set. Discover aliases
 and advisory catalogs with `delegate models`, `delegate models <engine>`, and
-`delegate models <engine> --live` (live probes for cursor/droid/devin; other
+`delegate models <engine> --live` (live probes for cursor/droid/devin/opencode; other
 engines report live unsupported).
 
-`--reasoning-effort LEVEL` is optional and parsed only before prompt text begins. Unsupported model/effort pairs fail closed before launch with `unsupported_reasoning_effort`. It affects only model reasoning depth, cost, or latency; it does not change `safe`/`work`/`call` permissions, sandboxing, approvals, network policy, or edit capability. Cursor effort is model-selection based and requires `cursor.reasoningEffortModels`; an explicit `--model` wins over effort→model routing. Droid emits `--reasoning-effort LEVEL`; Codex emits a `model_reasoning_effort` config override for the resolved model, or for the Codex harness default model when no `codex.defaultModel` is configured and the request was explicit; Claude emits Claude Code `--effort LEVEL`; Grok emits Grok `--effort LEVEL` (`low`, `medium`, `high`, `xhigh`, `max`). Kimi does not support reasoning effort in v1.
+`--reasoning-effort LEVEL` is optional and parsed only before prompt text begins. Engines with capability metadata reject unsupported model/effort pairs before launch with `unsupported_reasoning_effort`. It affects only model reasoning depth, cost, or latency; it does not change `safe`/`work`/`call` permissions, sandboxing, approvals, network policy, or edit capability. Cursor effort is model-selection based and requires `cursor.reasoningEffortModels`; an explicit `--model` wins over effort→model routing. Droid emits `--reasoning-effort LEVEL`; Codex emits a `model_reasoning_effort` config override for the resolved model, or for the Codex harness default model when no `codex.defaultModel` is configured and the request was explicit; Claude emits Claude Code `--effort LEVEL`; Grok emits Grok `--effort LEVEL` (`low`, `medium`, `high`, `xhigh`, `max`); OpenCode emits `--variant LEVEL` without validating it against the selected model. Kimi does not support reasoning effort in v1.
 
 `--progress` enables parent progress heartbeats on stderr for tracked foreground
 runs. `--no-progress` disables them even when `progress.enabled` is true in
@@ -200,6 +204,65 @@ delegate grok safe "Review this repo for regressions; report file/line/severity.
 delegate grok work "Implement the scoped task; report changed files and tests."
 delegate grok call "Summarize this context in three bullets."
 delegate --isolation worktree grok work "Implement the feature in a persistent worktree."
+```
+
+### `delegate opencode`
+
+Wraps OpenCode's non-interactive `run` command.
+
+```bash
+delegate [--json] [--isolation auto|none|worktree] opencode {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate [--json] opencode call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--prompt-file PATH] [prompt...]
+```
+
+- Safe mode reviews the current working tree in an isolated throwaway copy. It
+  injects an `OPENCODE_CONFIG_CONTENT` permission lockdown that allows only
+  read, glob, and grep operations; OpenCode merges the override last, so a
+  repository config cannot restore write-capable tools. `call --read-only`
+  uses the same lockdown. Plain `call` has no permission lockdown.
+- Prompt text is delivered on stdin. The child argv starts with `opencode run
+  --format json --print-logs --dir <workspace>`; work mode adds `--auto`, while
+  safe and call modes do not.
+- Model selection uses `--model`, the run-input JSON `model`, or
+  `opencode.defaultModel`. IDs use OpenCode's `provider/model` form and pass
+  through verbatim. An `opencode.models` alias may be a model string or an
+  object that pins both model and variant:
+
+  ```json
+  {
+    "opencode": {
+      "models": {
+        "sonnet": "anthropic/claude-sonnet-4-5",
+        "sonnet-high": {
+          "model": "anthropic/claude-sonnet-4-5",
+          "variant": "high"
+        }
+      }
+    }
+  }
+  ```
+
+- `--reasoning-effort LEVEL` maps directly to OpenCode `--variant LEVEL` and
+  overrides an alias-pinned variant. OpenCode silently ignores bogus variant
+  names, so a typo can have no effect.
+- `--agent NAME` selects an OpenCode agent for one run. With no flag,
+  `opencode.defaultAgent` is used when configured.
+- `delegate models opencode --live` runs `opencode models`. Live discovery has
+  returned 452+ models and includes any provider in OpenCode's models.dev
+  catalog, plus configured custom or local providers.
+- OpenCode is available to workflow `agent()` calls and
+  `workflows.engineCaps` like other engines.
+- OpenCode currently buffers stdout until completion, so progress can remain
+  silent even though `--print-logs` stderr is visible. Sessions accumulate in
+  the user's global OpenCode state. Call mode has no Delegate timeout.
+
+Examples:
+
+```bash
+delegate opencode safe "Review this repo for regressions; report file/line/severity."
+delegate opencode work --agent build "Implement the scoped task; report changed files and tests."
+delegate opencode call --read-only --model anthropic/claude-sonnet-4-5 --prompt-file rubric.md
+delegate --isolation worktree opencode work "Implement the feature in a persistent worktree."
 ```
 
 ### `delegate kimi`
