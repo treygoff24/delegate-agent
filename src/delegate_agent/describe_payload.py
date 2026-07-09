@@ -261,6 +261,7 @@ def models_payload(
         "cursor": cursor,
         "droid": {
             "models": config["droid"]["models"],
+            "defaultModel": config["droid"].get("defaultModel"),
             "defaultReasoningEffort": config["droid"].get("defaultReasoningEffort"),
         },
         "codex": codex,
@@ -278,6 +279,7 @@ def _engine_defaults_payload(config: JsonObject) -> JsonObject:
             "defaultReasoningEffort": config["cursor"].get("defaultReasoningEffort"),
         },
         "droid": {
+            "defaultModel": config["droid"].get("defaultModel"),
             "defaultReasoningEffort": config["droid"].get("defaultReasoningEffort"),
         },
         "codex": {
@@ -971,6 +973,13 @@ def describe_summary_payload(
     }
 
 
+def _print_engine_aliases(section: JsonObject, stdout: TextIO) -> None:
+    models = section.get("models")
+    if isinstance(models, dict):
+        for alias, model_id in sorted(models.items()):
+            print(f"  {alias} -> {_text_or_none(model_id)}", file=stdout)
+
+
 def _emit_models_text(payload: JsonObject, config_source: str, stdout: TextIO) -> None:
     if config_source == "embedded-default":
         print("warning: using embedded default config", file=stdout)
@@ -982,13 +991,15 @@ def _emit_models_text(payload: JsonObject, config_source: str, stdout: TextIO) -
             f"({_text_argv_prefix_label(cursor.get('argvPrefix'))})",
             file=stdout,
         )
-    print("droid:", file=stdout)
+        _print_engine_aliases(cursor, stdout)
     droid = payload.get("droid")
+    droid_default = droid.get("defaultModel") if isinstance(droid, dict) else None
+    if isinstance(droid_default, str) and droid_default:
+        print(f"droid: defaultModel={droid_default}", file=stdout)
+    else:
+        print("droid:", file=stdout)
     if isinstance(droid, dict):
-        models = droid.get("models")
-        if isinstance(models, dict):
-            for alias, model_id in sorted(models.items()):
-                print(f"  {alias} -> {_text_or_none(model_id)}", file=stdout)
+        _print_engine_aliases(droid, stdout)
     codex = payload.get("codex")
     if isinstance(codex, dict):
         profile = codex.get("profile")
@@ -1000,6 +1011,7 @@ def _emit_models_text(payload: JsonObject, config_source: str, stdout: TextIO) -
             f"profile={profile_label}",
             file=stdout,
         )
+        _print_engine_aliases(codex, stdout)
     claude = payload.get("claude")
     if isinstance(claude, dict):
         print(
@@ -1009,6 +1021,7 @@ def _emit_models_text(payload: JsonObject, config_source: str, stdout: TextIO) -
             f"workPermissionMode={claude.get('workPermissionMode')}",
             file=stdout,
         )
+        _print_engine_aliases(claude, stdout)
     grok = payload.get("grok")
     if isinstance(grok, dict):
         print(
@@ -1018,6 +1031,7 @@ def _emit_models_text(payload: JsonObject, config_source: str, stdout: TextIO) -
             f"workPermissionMode={grok.get('workPermissionMode')}",
             file=stdout,
         )
+        _print_engine_aliases(grok, stdout)
     devin = payload.get("devin")
     if isinstance(devin, dict):
         print(
@@ -1026,6 +1040,7 @@ def _emit_models_text(payload: JsonObject, config_source: str, stdout: TextIO) -
             f"defaultModel={_text_or_none(devin.get('defaultModel'))}",
             file=stdout,
         )
+        _print_engine_aliases(devin, stdout)
     kimi = payload.get("kimi")
     if isinstance(kimi, dict):
         print(
@@ -1034,6 +1049,7 @@ def _emit_models_text(payload: JsonObject, config_source: str, stdout: TextIO) -
             f"defaultModel={_text_or_none(kimi.get('defaultModel'))}",
             file=stdout,
         )
+        _print_engine_aliases(kimi, stdout)
     runtime = payload.get("runtime")
     if isinstance(runtime, dict):
         print(

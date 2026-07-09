@@ -214,6 +214,28 @@ class LiveProbeIntegrationTests(unittest.TestCase):
             self.assertEqual(by_id["live-cursor-model"]["note"], "Live Cursor")
             self.assertIn("composer-2.5", by_id)
 
+    def test_models_payload_exposes_droid_default_model(self):
+        from delegate_agent.describe_payload import _engine_defaults_payload, models_payload
+
+        config = self.embedded_default_config()
+        config["droid"]["defaultModel"] = "factory/default"
+        payload = models_payload(config, "embedded-default")
+        self.assertEqual(payload["droid"]["defaultModel"], "factory/default")
+        defaults = _engine_defaults_payload(config)
+        self.assertEqual(defaults["droid"]["defaultModel"], "factory/default")
+
+    def test_models_text_lists_non_droid_aliases(self):
+        import io as io_mod
+
+        from delegate_agent.describe_payload import _emit_models_text, models_payload
+
+        config = self.embedded_default_config()
+        config["codex"]["models"] = {"fast": "gpt-5.5"}
+        payload = models_payload(config, "embedded-default")
+        buf = io_mod.StringIO()
+        _emit_models_text(payload, "embedded-default", buf)
+        self.assertIn("fast -> gpt-5.5", buf.getvalue())
+
     def test_live_probes_run_in_throwaway_cwd(self):
         # A harness that writes relative files during a listing must not
         # touch the caller's working directory.
