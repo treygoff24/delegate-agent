@@ -27,6 +27,25 @@ class HarnessEventsTests(unittest.TestCase):
     def setUp(self):
         self.events = load_harness_events()
 
+    def ingest_opencode_fixture(self, name: str):
+        fixture = ROOT / "tests" / "fixtures" / "opencode" / name
+        acc = self.events.StreamAccumulator(harness="opencode")
+        for line in fixture.read_text(encoding="utf-8").splitlines():
+            acc.ingest_line(line)
+        return acc
+
+    def opencode_text_parts(self, name: str) -> list[str]:
+        fixture = ROOT / "tests" / "fixtures" / "opencode" / name
+        texts: list[str] = []
+        for line in fixture.read_text(encoding="utf-8").splitlines():
+            payload = json.loads(line)
+            part = payload.get("part")
+            if isinstance(part, dict) and part.get("type") == "text":
+                text = part.get("text")
+                if isinstance(text, str):
+                    texts.append(text)
+        return texts
+
     def test_assistant_message_text_is_captured(self):
         acc = self.events.StreamAccumulator()
         acc.ingest_line(
@@ -292,6 +311,74 @@ class HarnessEventsTests(unittest.TestCase):
                 ("tool.completed", "failed"),
             ],
         )
+
+    def test_opencode_simple_text_fixture_sets_completion_from_stop_step(self):
+        acc = self.ingest_opencode_fixture("simple_text.ndjson")
+        expected = self.opencode_text_parts("simple_text.ndjson")[-1].strip()
+
+        self.assertEqual(expected, "pong")
+        self.assertEqual(acc.assistant_text, expected)
+        self.assertEqual(acc.completion_text, expected)
+        self.assertEqual(acc.terminal_status, "succeeded")
+        self.assertEqual(
+            acc.terminal_event,
+            {"event": "opencode.step_finish", "status": "succeeded", "reason": "stop"},
+        )
+        self.assertEqual(acc.assistant_recovery_quality(), "explicit_completion")
+        self.assertIn("opencode", self.events.ASSISTANT_RECOVERY_HARNESSES)
+
+    def test_opencode_tool_run_fixture_recovers_final_text_not_tool_output(self):
+        acc = self.ingest_opencode_fixture("tool_run.ndjson")
+        expected = self.opencode_text_parts("tool_run.ndjson")[-1].strip()
+
+        self.assertEqual(expected, "banana42")
+        self.assertEqual(acc.assistant_text, expected)
+        self.assertEqual(acc.completion_text, expected)
+        self.assertNotIn("The secret word is", acc.assistant_text)
+        tool_events = [event for event in acc.events if event.tool]
+        self.assertEqual(len(tool_events), 1)
+        self.assertEqual(tool_events[0].kind, "tool.completed")
+        self.assertEqual(tool_events[0].tool, "read")
+        self.assertEqual(tool_events[0].status, "success")
+        self.assertTrue((tool_events[0].target or "").endswith("note.txt"))
+
+    def test_opencode_error_fixture_records_terminal_failure_detail(self):
+        acc = self.ingest_opencode_fixture("error_run.ndjson")
+
+        self.assertEqual(acc.assistant_text, "")
+        self.assertIsNone(acc.completion_text)
+        self.assertEqual(acc.terminal_status, "failed")
+        self.assertEqual(
+            acc.terminal_event,
+            {
+                "event": "opencode.error",
+                "status": "failed",
+                "reason": "UnknownError: Unexpected server error. Check server logs for details.",
+            },
+        )
+        completed = [event for event in acc.events if event.kind == "run.completed"]
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(completed[0].status, "failed")
+        self.assertIn("UnknownError", completed[0].message or "")
+        self.assertIn("Unexpected server error", completed[0].message or "")
+
+    def test_opencode_unknown_and_malformed_lines_are_ignored(self):
+        acc = self.events.StreamAccumulator(harness="opencode")
+
+        for line in [
+            '{"type":"surprise","part":{"type":"text","text":"nope"}}',
+            '{"type":"text"}',
+            '{"type":"text","part":"bad"}',
+            '{"type":"tool_use","part":null}',
+            '{"type":"step_finish","part":{"type":"step-finish","reason":7}}',
+            "not json at all",
+        ]:
+            acc.ingest_line(line)
+
+        self.assertEqual(acc.assistant_text, "")
+        self.assertEqual(acc.events, [])
+        self.assertIsNone(acc.completion_text)
+        self.assertIsNone(acc.terminal_status)
 
     def test_invalid_json_falls_back_to_bounded_text_event(self):
         acc = self.events.StreamAccumulator()

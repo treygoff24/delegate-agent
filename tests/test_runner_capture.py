@@ -941,6 +941,56 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertIn("final from kimi", report)
             self.assertIn("final from kimi", snapshot["assistantText"])
 
+    def test_tracked_opencode_fixtures_write_reports_without_no_assistant_text(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        script = Path(temp.name) / "opencode_fixture.py"
+        script.write_text(
+            "import sys\n"
+            "from pathlib import Path\n"
+            "sys.stdout.write(Path(sys.argv[1]).read_text(encoding='utf-8'))\n",
+            encoding="utf-8",
+        )
+        fixture_dir = ROOT / "tests" / "fixtures" / "opencode"
+        for fixture_name, expected in (
+            ("simple_text.ndjson", "pong"),
+            ("tool_run.ndjson", "banana42"),
+        ):
+            with self.subTest(fixture=fixture_name), tempfile.TemporaryDirectory() as workspace:
+                root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+                run_id, alias = self.registry.register_run(root, harness="opencode")
+                ctx = self.runner.RunContext(
+                    registry_root=root,
+                    run_id=run_id,
+                    alias=alias,
+                    harness="opencode",
+                    engine="opencode",
+                    mode="safe",
+                    model=None,
+                    source_cwd=workspace,
+                    execution_cwd=workspace,
+                    workspace_kind="directory",
+                    isolated_workspace=False,
+                    started_at="2026-05-20T21:42:33Z",
+                )
+                code, payload = self.runner.execute_tracked(
+                    [sys.executable, str(script), str(fixture_dir / fixture_name)],
+                    workspace,
+                    ctx,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+                self.assertEqual(code, 0)
+                assert payload is not None
+                self.assertEqual(payload["completionReportSource"], "child")
+                self.assertNotEqual(payload["resultQuality"], "no_assistant_text")
+                run_path = self.registry.run_directory(root, run_id)
+                report = (run_path / "completion-report.md").read_text(encoding="utf-8")
+                snapshot = json.loads((run_path / "snapshot.json").read_text(encoding="utf-8"))
+                self.assertIn(expected, report)
+                self.assertIn(expected, snapshot["assistantText"])
+
     def test_tracked_codex_progress_message_before_command_does_not_write_report(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)

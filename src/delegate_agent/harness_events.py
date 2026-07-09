@@ -155,7 +155,9 @@ EVENT_TAIL = 400
 # completion event. Codex is excluded on purpose: its agent_message events can
 # be preamble ("I'll start by..."), and only a message sealed by turn.completed
 # is the real answer.
-ASSISTANT_RECOVERY_HARNESSES = frozenset({"cursor", "droid", "kimi", "claude", "grok", "devin"})
+ASSISTANT_RECOVERY_HARNESSES = frozenset(
+    {"cursor", "droid", "kimi", "claude", "grok", "devin", "opencode"}
+)
 
 
 @dataclass
@@ -213,6 +215,7 @@ class StreamAccumulator:
     _pending_tool_uses: dict[str, tuple[str, str | None]] = field(default_factory=dict, repr=False)
     _grok_text_buffer: str = field(default="", repr=False)
     _grok_current_line: str = field(default="", repr=False)
+    _opencode_step_text_chunks: list[str] = field(default_factory=list, repr=False)
     terminal_event: JsonObject | None = None
     terminal_status: str | None = None
     structured_events_seen: int = 0
@@ -249,9 +252,13 @@ class StreamAccumulator:
         try:
             payload: JsonValue = json.loads(stripped)
         except json.JSONDecodeError:
+            if self.harness == "opencode":
+                return
             self._ingest_text_fallback(stripped)
             return
         if not isinstance(payload, dict):
+            if self.harness == "opencode":
+                return
             self._ingest_text_fallback(stripped)
             return
         self.structured_events_seen += 1
@@ -268,6 +275,9 @@ class StreamAccumulator:
         event_type = payload.get("type")
         if not isinstance(event_type, str):
             self._ingest_role_content_message(payload)
+            return
+        if self.harness == "opencode":
+            self._ingest_opencode_event(payload, event_type)
             return
         if event_type == "reasoning":
             return
@@ -557,6 +567,86 @@ class StreamAccumulator:
             self.current = _bounded_current_line(text)
         self._record_terminal_event(event="grok.error", status="failed")
 
+    def _ingest_opencode_event(self, payload: JsonObject, event_type: str) -> None:
+        if event_type == "error":
+            self._ingest_opencode_error(payload)
+            return
+        part = payload.get("part")
+        if not isinstance(part, dict):
+            return
+        part_type = part.get("type")
+        if event_type == "step_start" and part_type == "step-start":
+            self._opencode_step_text_chunks = []
+            return
+        if event_type == "text" and part_type == "text":
+            self._ingest_opencode_text(part)
+            return
+        if event_type == "tool_use" and part_type == "tool":
+            self._ingest_opencode_tool(part)
+            return
+        if event_type == "step_finish" and part_type == "step-finish":
+            self._ingest_opencode_step_finish(part)
+
+    def _ingest_opencode_text(self, part: JsonObject) -> None:
+        text = part.get("text")
+        if not isinstance(text, str) or not text.strip():
+            return
+        stripped = self._record_assistant_text(text)
+        if stripped:
+            self._opencode_step_text_chunks.append(stripped)
+            self._last_recoverable_assistant_text = stripped
+            if is_substantive_assistant_text(stripped):
+                self._last_substantive_assistant_text = stripped
+
+    def _ingest_opencode_tool(self, part: JsonObject) -> None:
+        # OpenCode does not emit a "permission denied" event for denied tools:
+        # denied tools are removed from the model's schema, and the run usually
+        # continues as ordinary text with exit 0. Do not infer denial here.
+        tool = _string_field(part, "tool") or "tool"
+        state = part.get("state")
+        status = _opencode_tool_status(state.get("status") if isinstance(state, dict) else None)
+        target = _opencode_tool_target(part)
+        self.events.append(
+            NormalizedEvent(
+                kind="tool.completed",
+                tool=tool,
+                target=target,
+                path=target,
+                status=status,
+            )
+        )
+        self.current = _tool_current(tool, target)
+
+    def _ingest_opencode_step_finish(self, part: JsonObject) -> None:
+        reason = _string_field(part, "reason")
+        if reason != "stop":
+            return
+        text = "\n\n".join(self._opencode_step_text_chunks).strip()
+        if text:
+            self.completion_text = text
+        self._record_terminal_event(
+            event="opencode.step_finish",
+            status="succeeded",
+            reason=reason,
+        )
+
+    def _ingest_opencode_error(self, payload: JsonObject) -> None:
+        error = payload.get("error")
+        if not isinstance(error, dict):
+            self._record_terminal_event(event="opencode.error", status="failed")
+            return
+        name = _string_field(error, "name")
+        data = error.get("data")
+        message = _string_field(data, "message") if isinstance(data, dict) else None
+        reason = ": ".join(part for part in (name, message) if part)
+        self._record_terminal_event(
+            event="opencode.error",
+            status="failed",
+            reason=reason or None,
+        )
+        if reason:
+            self.current = _bounded_current_line(reason)
+
     def _ingest_tool_call(self, payload: JsonObject) -> None:
         tool = _string_field(payload, "tool", "name", "toolName") or "tool"
         target = _tool_target(payload)
@@ -708,6 +798,32 @@ def _codex_command_status(status: str | None, *, completed: bool) -> str | None:
     if status == "completed":
         return "success"
     return status
+
+
+def _opencode_tool_status(status: JsonValue) -> str | None:
+    if not isinstance(status, str) or not status.strip():
+        return None
+    stripped = status.strip()
+    if stripped == "completed":
+        return "success"
+    return stripped
+
+
+def _opencode_tool_target(part: JsonObject) -> str | None:
+    state = part.get("state")
+    if not isinstance(state, dict):
+        return None
+    title = _string_field(state, "title")
+    if title:
+        return title
+    tool_input = state.get("input")
+    if not isinstance(tool_input, dict):
+        return None
+    for key in ("filePath", "file_path", "path", "command", "pattern", "url"):
+        value = tool_input.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
 
 
 def _tool_use_target(block: JsonObject) -> str | None:
