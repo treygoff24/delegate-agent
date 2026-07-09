@@ -214,6 +214,23 @@ class LiveProbeIntegrationTests(unittest.TestCase):
             self.assertEqual(by_id["live-cursor-model"]["note"], "Live Cursor")
             self.assertIn("composer-2.5", by_id)
 
+    def test_summary_commands_quote_whitespace_aliases(self):
+        from delegate_agent.describe_payload import models_summary_payload
+
+        config = self.embedded_default_config()
+        config["codex"]["models"] = {"fast model": "gpt-5.5"}
+        config["droid"]["models"] = {"deepseek v4 pro": "custom:dsv4"}
+        payload = models_summary_payload(config, "embedded-default")
+        commands = {e["alias"]: e["command"] for e in payload["aliases"]}
+        self.assertIn("--model 'fast model'", commands["fast model"])
+        self.assertIn("'deepseek v4 pro'", commands["deepseek v4 pro"])
+        # Simple aliases stay unquoted.
+        config2 = self.embedded_default_config()
+        config2["codex"]["models"] = {"fast": "gpt-5.5"}
+        payload2 = models_summary_payload(config2, "embedded-default")
+        commands2 = {e["alias"]: e["command"] for e in payload2["aliases"]}
+        self.assertIn("--model fast", commands2["fast"])
+
     def test_secret_shaped_alias_keys_scrubbed_in_discovery(self):
         import io as io_mod
         import json as json_mod

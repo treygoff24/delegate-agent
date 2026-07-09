@@ -8,6 +8,7 @@ agent-help. Reference output only — no run execution happens here.
 from __future__ import annotations
 
 import os
+import shlex
 import sys
 from pathlib import Path
 from typing import TextIO
@@ -414,7 +415,7 @@ def models_summary_payload(
                 entry = {
                     "alias": alias,
                     "provider": "droid",
-                    "command": f"delegate droid {alias} {{safe,work,call}}",
+                    "command": f"delegate droid {shlex.quote(alias)} {{safe,work,call}}",
                     "available": isinstance(model_id, str) and bool(model_id),
                     "safeSupported": True,
                     "workSupported": True,
@@ -440,7 +441,7 @@ def models_summary_payload(
             entry = {
                 "alias": alias,
                 "provider": engine,
-                "command": f"delegate {engine} {{safe,work,call}} --model {alias}",
+                "command": f"delegate {engine} {{safe,work,call}} --model {shlex.quote(alias)}",
                 "available": isinstance(model_id, str) and bool(model_id),
                 "safeSupported": True,
                 "workSupported": True,
