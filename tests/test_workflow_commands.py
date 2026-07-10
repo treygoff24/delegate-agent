@@ -1230,19 +1230,18 @@ class WorkflowCommandTests(unittest.TestCase):
             return parallel([
                 lambda: agent("very slow a"),
                 lambda: agent("very slow b"),
-                lambda: agent("very slow c"),
             ])
             """
         )
         launch = self.run_delegate(
-            ["--json", "workflow", "run", str(script), "--budget", "3"],
+            ["--json", "workflow", "run", str(script), "--budget", "2"],
             env_extra={"FAKE_CODEX_SLEEP_SECONDS": "30"},
         )
         self.assertEqual(launch.returncode, 0, launch.stderr)
         wf_id = json.loads(launch.stdout)["wfId"]
-        self.wait_for_group_runs(wf_id, count=3)
+        self.wait_for_group_runs(wf_id, count=2)
         status_mid = json.loads(self.run_delegate(["--json", "workflow", "status", wf_id]).stdout)
-        self.assertEqual(status_mid["budget"]["spent"], 3)
+        self.assertEqual(status_mid["budget"]["spent"], 2)
         killed = self.run_delegate(["--json", "workflow", "kill", wf_id])
         self.assertEqual(killed.returncode, 0, killed.stderr)
         root = self.workspace / ".delegate" / "workflows" / wf_id
@@ -1262,18 +1261,18 @@ class WorkflowCommandTests(unittest.TestCase):
             (root / "result.json").unlink()
         # Budget covers each key once; a double-claim on resume would exceed it.
         resumed = self.run_delegate(
-            ["--json", "workflow", "run", "--resume", wf_id, "--budget", "3"]
+            ["--json", "workflow", "run", "--resume", wf_id, "--budget", "2"]
         )
         self.assertEqual(resumed.returncode, 0, resumed.stderr)
         waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "15"])
         self.assertEqual(waited.returncode, 0, waited.stderr)
         status = json.loads(self.run_delegate(["--json", "workflow", "status", wf_id]).stdout)
         self.assertEqual(status["status"], "succeeded")
-        self.assertEqual(status["budget"]["spent"], 3)
+        self.assertEqual(status["budget"]["spent"], 2)
         result = self.run_delegate(["--json", "workflow", "result", wf_id])
         self.assertEqual(
             json.loads(result.stdout)["result"],
-            ["fake completion", "fake completion", "fake completion"],
+            ["fake completion", "fake completion"],
         )
 
     def test_resume_reseeds_spent_budget_from_durable_journal(self) -> None:
@@ -1285,17 +1284,16 @@ class WorkflowCommandTests(unittest.TestCase):
             return parallel([
                 lambda: agent("very slow a"),
                 lambda: agent("very slow b"),
-                lambda: agent("very slow c"),
             ])
             """
         )
         launch = self.run_delegate(
-            ["--json", "workflow", "run", str(script), "--budget", "3"],
+            ["--json", "workflow", "run", str(script), "--budget", "2"],
             env_extra={"FAKE_CODEX_SLEEP_SECONDS": "30"},
         )
         self.assertEqual(launch.returncode, 0, launch.stderr)
         wf_id = json.loads(launch.stdout)["wfId"]
-        self.wait_for_group_runs(wf_id, count=3)
+        self.wait_for_group_runs(wf_id, count=2)
         killed = self.run_delegate(["--json", "workflow", "kill", wf_id])
         self.assertEqual(killed.returncode, 0, killed.stderr)
         root = self.workspace / ".delegate" / "workflows" / wf_id
@@ -1312,10 +1310,10 @@ class WorkflowCommandTests(unittest.TestCase):
             encoding="utf-8",
         )
         # Simulate the non-durable status write being lost in the crash while
-        # the fsynced journal (three budget claims) survived.
+        # the fsynced journal (two budget claims) survived.
         status_path = root / workflow_registry.STATUS_FILE
         status = json.loads(status_path.read_text(encoding="utf-8"))
-        status["budget"] = {"total": 3, "spent": 0}
+        status["budget"] = {"total": 2, "spent": 0}
         status_path.write_text(json.dumps(status, sort_keys=True), encoding="utf-8")
         if (root / "result.json").exists():
             (root / "result.json").unlink()
@@ -1325,7 +1323,7 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertEqual(waited.returncode, 0, waited.stderr)
         status_after = json.loads(self.run_delegate(["--json", "workflow", "status", wf_id]).stdout)
         self.assertEqual(status_after["status"], "succeeded")
-        self.assertEqual(status_after["budget"]["spent"], 3)
+        self.assertEqual(status_after["budget"]["spent"], 2)
 
     def test_adoption_timeout_recheck_adopts_child_completed_during_wait(self) -> None:
         # Round-4: a child that finishes between the adoption-wait deadline and

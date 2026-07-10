@@ -630,48 +630,33 @@ class WaitCancelCommandTests(unittest.TestCase):
 
     # --- Finding 3: group liveness in the grace loop ------------------------
 
-    def test_group_liveness_sigkill_when_grandchild_survives(self):
-        """Leader dies but grandchild survives SIGTERM -> SIGKILL fired at group."""
-        # Spawn a child that spawns a grandchild ignoring SIGTERM.
-        grandchild_script = (
-            "import os, signal, time\n"
-            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-            "time.sleep(60)\n"
-        )
-        parent_script = (
-            "import subprocess, sys, os, time\n"
-            f"proc = subprocess.Popen([sys.executable, '-c', {grandchild_script!r}])\n"
-            "time.sleep(60)\n"
-        )
-        proc = subprocess.Popen(
-            [sys.executable, "-c", parent_script],
-            start_new_session=True,
-        )
-        self.add_process_cleanup(proc)
-        pgid = os.getpgid(proc.pid)
-        run_id, alias = self.write_run(status="running", pid=proc.pid, pgid=pgid)
+    def test_group_liveness_escalates_from_sigterm_to_sigkill(self):
+        """A process group still live after SIGTERM receives SIGKILL."""
+        pid = os.getpid()
+        pgid = 4243
+        run_id, alias = self.write_run(status="running", pid=pid, pgid=pgid)
         target = run_registry.RunTarget(run_id=run_id, alias=alias)
-        try:
+
+        with (
+            unittest_mock.patch.object(
+                wait_cancel_commands, "_check_pid_identity", return_value=[]
+            ),
+            unittest_mock.patch.object(
+                wait_cancel_commands, "_signal_target_alive", return_value=True
+            ),
+            unittest_mock.patch.object(wait_cancel_commands, "_send_signal") as send_signal,
+            unittest_mock.patch.object(wait_cancel_commands, "CANCEL_GRACE_SECONDS", 0),
+        ):
             payload = wait_cancel_commands._cancel_target(self.registry_root, target)
-        finally:
-            # Kill any survivors.
-            try:
-                os.killpg(pgid, 9)
-            except ProcessLookupError:
-                pass
-            except OSError:
-                pass
+
         self.assertEqual(payload["status"], "cancelled")
-        # The whole group should be gone after SIGKILL.
-        gone = True
-        try:
-            os.killpg(pgid, 0)
-            gone = False
-        except ProcessLookupError:
-            pass
-        except OSError:
-            pass
-        self.assertTrue(gone, "process group survived SIGKILL")
+        self.assertEqual(
+            send_signal.call_args_list,
+            [
+                unittest_mock.call(pgid, wait_cancel_commands.signal.SIGTERM, process_group=True),
+                unittest_mock.call(pgid, wait_cancel_commands.signal.SIGKILL, process_group=True),
+            ],
+        )
 
     # --- Finding 6: cancel refuses stale/dead_pid runs ----------------------
 

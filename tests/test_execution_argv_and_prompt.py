@@ -119,8 +119,11 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
             text_truncated=False,
             warnings=(),
         )
-        with mock.patch.object(
-            self.delegate.delegate_runner, "execute_call", return_value=fake_result
+        with (
+            mock.patch.object(self.delegate, "ensure_binary"),
+            mock.patch.object(
+                self.delegate.delegate_runner, "execute_call", return_value=fake_result
+            ),
         ):
             code, payload = self.delegate.execute_request(
                 request,
@@ -1183,8 +1186,11 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
             text_truncated=False,
             warnings=(duplicate_warning, "result-only warning"),
         )
-        with mock.patch.object(
-            self.delegate.delegate_runner, "execute_call", return_value=fake_result
+        with (
+            mock.patch.object(self.delegate, "ensure_binary"),
+            mock.patch.object(
+                self.delegate.delegate_runner, "execute_call", return_value=fake_result
+            ),
         ):
             code, payload = self.delegate.execute_request(
                 request,
