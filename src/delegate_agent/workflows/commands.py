@@ -121,6 +121,9 @@ def emit_run(
 ) -> int:
     warnings: list[str] = []
     lock_fd: int | None = None
+    previous_status: JsonObject | None = None
+    previous_result: bytes | None = None
+    previous_result_exists = False
     if command.resume:
         wf_id = _validate_wf_id(command.resume)
         root = registry.workflow_dir(workspace, wf_id)
@@ -129,29 +132,43 @@ def emit_run(
         # Acquire the lock before any approval/budget mutation so a failed
         # resume cannot clobber a live supervisor's status.json.
         lock_fd = _acquire_workflow_lock(root, wf_id)
-        status = registry.read_json(root / registry.STATUS_FILE) or {}
-        gate_key = status.get("gateKey") if isinstance(status, dict) else None
-        if status.get("status") == "paused" and isinstance(gate_key, str):
-            registry.write_json(
-                root / registry.APPROVAL_FILE, {"approved": True, "gateKey": gate_key}
-            )
-        script_path = root / registry.SCRIPT_FILE
-        args_value = status.get("args") if isinstance(status, dict) else None
-        budget_total = command.budget
-        if budget_total is None:
-            budget_payload = status.get("budget") if isinstance(status, dict) else None
-            if isinstance(budget_payload, dict) and isinstance(budget_payload.get("total"), int):
-                budget_total = budget_payload["total"]
-        else:
-            budget_payload = status.get("budget") if isinstance(status, dict) else None
-            spent = budget_payload.get("spent") if isinstance(budget_payload, dict) else 0
-            spent = spent if isinstance(spent, int) and spent >= 0 else 0
-            status["budget"] = {
-                "total": budget_total,
-                "spent": spent,
-                "remaining": max(budget_total - spent, 0),
-            }
-            registry.write_status(root, status)
+        try:
+            status = registry.read_json(root / registry.STATUS_FILE) or {}
+            previous_status = dict(status)
+            result_path = root / registry.RESULT_FILE
+            try:
+                previous_result = result_path.read_bytes()
+                previous_result_exists = True
+            except FileNotFoundError:
+                pass
+            gate_key = status.get("gateKey") if isinstance(status, dict) else None
+            if status.get("status") == "paused" and isinstance(gate_key, str):
+                registry.write_json(
+                    root / registry.APPROVAL_FILE, {"approved": True, "gateKey": gate_key}
+                )
+            script_path = root / registry.SCRIPT_FILE
+            args_value = status.get("args") if isinstance(status, dict) else None
+            budget_total = command.budget
+            if budget_total is None:
+                budget_payload = status.get("budget") if isinstance(status, dict) else None
+                if isinstance(budget_payload, dict) and isinstance(
+                    budget_payload.get("total"), int
+                ):
+                    budget_total = budget_payload["total"]
+            else:
+                budget_payload = status.get("budget") if isinstance(status, dict) else None
+                spent = budget_payload.get("spent") if isinstance(budget_payload, dict) else 0
+                spent = spent if isinstance(spent, int) and spent >= 0 else 0
+                status["budget"] = {
+                    "total": budget_total,
+                    "spent": spent,
+                    "remaining": max(budget_total - spent, 0),
+                }
+                registry.write_status(root, status)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.close(lock_fd)
+            raise
     else:
         source = _script_path_for_command(command)
         check_result = check_script(source)
@@ -210,7 +227,27 @@ def emit_run(
         wf_id,
     ]
     try:
+        if command.resume:
+            status.update(
+                {
+                    "ok": True,
+                    "status": "starting",
+                    "updatedAt": run_registry.utc_now_iso(),
+                }
+            )
+            registry.write_status(root, status)
+            with contextlib.suppress(FileNotFoundError):
+                result_path.unlink()
         runtime.detach_supervisor(supervisor_argv, cwd=workspace, lock_fd=lock_fd)
+    except BaseException:
+        if previous_status is not None:
+            registry.write_json(root / registry.STATUS_FILE, previous_status)
+            if previous_result_exists and previous_result is not None:
+                run_registry.write_private_bytes(result_path, previous_result)
+            else:
+                with contextlib.suppress(FileNotFoundError):
+                    result_path.unlink()
+        raise
     finally:
         with contextlib.suppress(OSError):
             os.close(lock_fd)

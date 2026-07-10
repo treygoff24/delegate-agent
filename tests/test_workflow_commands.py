@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fcntl
+import io
 import json
 import os
 import subprocess
@@ -15,6 +16,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from delegate_agent.workflows import commands as workflow_commands  # noqa: E402
 from delegate_agent.workflows import registry as workflow_registry  # noqa: E402
 from delegate_agent.workflows import runtime as workflow_runtime  # noqa: E402
 from delegate_agent.workflows import schema as workflow_schema  # noqa: E402
@@ -816,6 +818,128 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertNotEqual(resumed.returncode, 0)
         self.assertEqual(json.loads(resumed.stdout)["error"], "workflow_locked")
         self.run_delegate(["--json", "workflow", "kill", wf_id])
+
+    def test_resume_hides_prior_terminal_status_and_result_before_supervisor_finishes(
+        self,
+    ) -> None:
+        resume_marker = self.workspace / "resume-started"
+        release_marker = self.workspace / "resume-release"
+        script = self.write_workflow(
+            f"""
+            meta = {{"name": "resume-barrier"}}
+            import time
+            from pathlib import Path
+            if Path({str(resume_marker)!r}).exists():
+                while not Path({str(release_marker)!r}).exists():
+                    time.sleep(0.05)
+                return "new"
+            return "old"
+            """
+        )
+        launch = self.run_delegate(["--json", "workflow", "run", str(script)])
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        self.assertEqual(
+            self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"]).returncode,
+            0,
+        )
+        prior = self.run_delegate(["--json", "workflow", "result", wf_id])
+        self.assertEqual(json.loads(prior.stdout)["result"], "old")
+
+        resume_marker.touch()
+        resumed = self.run_delegate(["--json", "workflow", "run", "--resume", wf_id])
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        try:
+            immediate_result = self.run_delegate(["--json", "workflow", "result", wf_id])
+            self.assertNotEqual(immediate_result.returncode, 0)
+            self.assertEqual(
+                json.loads(immediate_result.stdout)["error"], "workflow_result_missing"
+            )
+
+            immediate_wait = self.run_delegate(
+                ["--json", "workflow", "wait", wf_id, "--timeout", "1"]
+            )
+            self.assertEqual(immediate_wait.returncode, 124, immediate_wait.stderr)
+            wait_payload = json.loads(immediate_wait.stdout)
+            self.assertTrue(wait_payload["timedOut"])
+            self.assertIn(wait_payload["workflow"]["status"], {"starting", "running"})
+        finally:
+            release_marker.touch()
+
+        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
+        self.assertEqual(waited.returncode, 0, waited.stderr)
+        result = self.run_delegate(["--json", "workflow", "result", wf_id])
+        self.assertEqual(json.loads(result.stdout)["result"], "new")
+
+    def test_resume_launch_failure_restores_prior_status_and_result(self) -> None:
+        wf_id = "wf_123456789abc"
+        root = self._seed_completed_workflow(
+            wf_id,
+            created_at="2026-01-01T00:00:00Z",
+            result={"value": "old"},
+        )
+        (root / workflow_registry.SCRIPT_FILE).write_text(
+            'meta = {"name": "restore"}\nreturn "new"\n', encoding="utf-8"
+        )
+        status_path = root / workflow_registry.STATUS_FILE
+        result_path = root / workflow_registry.RESULT_FILE
+        status = workflow_registry.read_json(status_path) or {}
+        status["budget"] = {"total": 1, "spent": 1, "remaining": 0}
+        workflow_registry.write_status(root, status)
+        prior_status = workflow_registry.read_json(status_path)
+        prior_result = result_path.read_bytes()
+
+        def fail_detach(*_args, **_kwargs) -> None:
+            self.assertEqual(workflow_registry.read_json(status_path)["status"], "starting")
+            self.assertFalse(result_path.exists())
+            self.assertTrue(workflow_registry.supervisor_alive(root))
+            raise RuntimeError("launch failed")
+
+        with (
+            mock.patch.object(
+                workflow_runtime,
+                "detach_supervisor",
+                side_effect=fail_detach,
+            ),
+            self.assertRaisesRegex(RuntimeError, "launch failed"),
+        ):
+            workflow_commands.emit_run(
+                workflow_commands.WorkflowCommand("run", resume=wf_id, budget=99, json_mode=True),
+                workspace=self.workspace,
+                config={},
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+
+        self.assertEqual(workflow_registry.read_json(status_path), prior_status)
+        self.assertEqual(result_path.read_bytes(), prior_result)
+        self.assertEqual(result_path.stat().st_mode & 0o777, 0o600)
+
+    def test_resume_snapshot_failure_releases_workflow_lock(self) -> None:
+        wf_id = "wf_123456789abc"
+        root = self._seed_completed_workflow(
+            wf_id,
+            created_at="2026-01-01T00:00:00Z",
+            result={"value": "old"},
+        )
+        prior_result = (root / workflow_registry.RESULT_FILE).read_bytes()
+
+        with (
+            mock.patch.object(Path, "read_bytes", side_effect=RuntimeError("snapshot failed")),
+            self.assertRaisesRegex(RuntimeError, "snapshot failed"),
+        ):
+            workflow_commands.emit_run(
+                workflow_commands.WorkflowCommand("run", resume=wf_id, json_mode=True),
+                workspace=self.workspace,
+                config={},
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+
+        self.assertFalse(workflow_registry.supervisor_alive(root))
+        self.assertEqual((root / workflow_registry.RESULT_FILE).read_bytes(), prior_result)
+        lock_fd = workflow_registry.acquire_workflow_lock(root)
+        os.close(lock_fd)
 
     def test_resume_adopts_completed_child_run_with_missing_result_event(self) -> None:
         script = self.write_workflow(
