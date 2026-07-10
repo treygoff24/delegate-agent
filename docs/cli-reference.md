@@ -57,6 +57,13 @@ positional prompt input, and Kimi Code prompt mode currently uses `--prompt`,
 so those launches still use argv transport; Delegate redacts Cursor and Kimi
 prompt argv in dry-run output and run manifests.
 
+Temporary safe isolation also re-roots absolute paths under the source workspace
+when it transports the prompt, so `/source/repo/src/app.py` becomes the matching
+path inside the isolated copy. Paths outside the workspace and prefix lookalikes
+are left unchanged. The safe prompt asks the child to cite workspace-relative
+paths in its report; consumers should not depend on temporary isolation paths.
+Verbatim slash pass-through prompts are not rewritten.
+
 For launch and `dry-run` commands, `--json` and `--isolation auto|none|worktree`
 are unambiguous before inline prompt text starts and may appear with launch
 options, such as `delegate codex work --prompt-file task.md --json` or
@@ -317,8 +324,8 @@ delegate [--json] workflow run --resume <wfId> [--budget N]
 delegate [--json] workflow status <wfId>
 delegate [--json] workflow events <wfId> [--since SEQ]
 delegate [--json] workflow watch <wfId> [--since SEQ]
-delegate [--json] workflow wait <wfId> [--timeout SEC]
-delegate [--json] workflow result <wfId>
+delegate [--json] workflow wait [<wfId>] [--timeout SEC]
+delegate [--json] workflow result [<wfId>] [--field KEY]
 delegate [--json] workflow approve <wfId>
 delegate [--json] workflow kill <wfId>
 delegate [--json] workflow list
@@ -328,9 +335,18 @@ delegate [--json] workflow save <script.py> --name NAME
 - `check` validates the workflow script, including literal preflight checks for
   unsupported `agent()` combinations.
 - `run` launches a detached supervisor; `--dry-run` renders planned stubs
-  without launching child agents or consuming real budget.
+  without launching child agents or consuming real budget. Each entry in
+  `runTree.calls` includes the resolved `model`, `effort`, `fast`, `isolation`,
+  and UTF-8 `promptBytes`; Cursor/Kimi prompts over 102400 bytes add a warning
+  before their argv transport limit can fail a real run.
 - `--resume` replays the journal, adopts matching child runs by workflow agent
   key, and continues from missing work.
+- `wait` and `result` accept an explicit workflow ID or, when omitted, resolve
+  the latest eligible workflow. JSON output for implicit selection includes the
+  selected `wfId` and `resolutionKind: "latest"`.
+- `result --field KEY` extracts a top-level field from an object result. Text
+  mode prints strings directly and JSON-encodes other values; JSON mode returns
+  a field/value envelope.
 - `approve` releases a paused gate (and resumes). Do not also run
   `run --resume` for the same gate — approve already is that resume. `kill`
   validates the supervisor process group before signaling and always attempts
@@ -349,6 +365,7 @@ Codes raised as `DelegateError` from workflow commands (`workflows/commands.py`)
 | `invalid_workflow_name` | Saved-workflow `--name` is not a simple file stem. |
 | `invalid_workflow_script` | Script failed `check` / load validation. |
 | `missing_workflow` | A verb that needs `<wfId>` was invoked without one. |
+| `missing_workflow_result_field` | `result --field` was invoked without a key. |
 | `missing_workflow_save_args` | `save` needs both `<script.py>` and `--name`. |
 | `missing_workflow_script` | `run`/`check` need `<script.py>` or `--name`. |
 | `unknown_workflow_action` | Unrecognized `workflow` subcommand. |
@@ -357,6 +374,8 @@ Codes raised as `DelegateError` from workflow commands (`workflows/commands.py`)
 | `workflow_not_found` | No workflow directory / status for that `wfId`. |
 | `workflow_not_gated` | `approve` on a workflow that is not paused on a gate. |
 | `workflow_result_missing` | `result` before `result.json` exists. |
+| `workflow_result_field_missing` | The requested top-level result field does not exist. |
+| `workflow_result_not_object` | `--field` was requested for a non-object result. |
 | `workflow_script_not_found` | Resolved script path is missing or not a file. |
 
 See [Delegate Workflows](delegate-workflows.md) for the DSL, caps, config, and

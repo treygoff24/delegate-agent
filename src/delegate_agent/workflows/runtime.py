@@ -170,10 +170,11 @@ class WorkflowState:
         last_event: dict[str, Any] | None = None,
         extra: JsonObject | None = None,
     ) -> None:
+        effective_status = "dry_run" if self.dry_run else status
         payload: JsonObject = {
-            "ok": status not in {"failed", "killed"},
+            "ok": effective_status not in {"failed", "killed"},
             "wfId": self.wf_id,
-            "status": status,
+            "status": effective_status,
             "workspace": str(self.workspace),
             "scriptPath": str(self.script_path),
             "journalPath": str(self.journal_path),
@@ -680,16 +681,29 @@ class WorkflowDsl:
                 simulated=True,
             )
             placeholder = workflow_schema.placeholder(schema) if schema else ""
-            self.state.dry_runs.append(
-                {
-                    "scope": path,
-                    "engine": engines,
-                    "mode": resolved_mode,
-                    "phase": resolved_phase,
-                    "label": label,
-                    "schema": bool(schema),
-                }
-            )
+            prompt_bytes = len(prompt.encode("utf-8"))
+            dry_run_entry = {
+                "scope": path,
+                "engine": engines,
+                "mode": resolved_mode,
+                "model": resolved_model,
+                "effort": resolved_effort,
+                "fast": resolved_fast,
+                "isolation": resolved_isolation,
+                "promptBytes": prompt_bytes,
+                "phase": resolved_phase,
+                "label": label,
+                "schema": bool(schema),
+            }
+            constrained = [item for item in engines if item in ENGINE_ARGV_TRANSPORT]
+            if constrained and prompt_bytes > PROMPT_ARGV_GUARD_BYTES:
+                dry_run_entry["warnings"] = [
+                    f"prompt is {prompt_bytes} UTF-8 bytes, exceeding the "
+                    f"{PROMPT_ARGV_GUARD_BYTES}-byte argv transport limit for "
+                    f"{', '.join(constrained)}; route this stage to "
+                    "codex/claude/droid/opencode"
+                ]
+            self.state.dry_runs.append(dry_run_entry)
             self.state.append_event("agent_started", key=key, scope=path, dryRun=True)
             self.state.append_event("agent_finished", key=key, scope=path, result=placeholder)
             return placeholder
@@ -1044,18 +1058,18 @@ class WorkflowDsl:
         run_id = result.get("runId")
         if isinstance(run_id, str):
             self.state.append_event("agent_child", engine=engine, runId=run_id)
+        structured_codex = engine == "codex" and output_schema is not None
+        if structured_codex:
+            return _live_child_completion_report(result, self.state.workspace)
         if isinstance(result.get("text"), str):
             return result["text"]
         assistant = result.get("assistantText")
         if prefer_assistant and isinstance(assistant, str) and assistant.strip():
             return assistant
         report_path = result.get("completionReportPath")
-        if isinstance(report_path, str):
-            path = Path(report_path)
-            if not path.is_absolute():
-                path = self.state.workspace / path
-            if path.exists():
-                return path.read_text(encoding="utf-8", errors="replace").strip()
+        report = _read_completion_report(report_path, self.state.workspace)
+        if report is not None:
+            return report
         if isinstance(assistant, str):
             return assistant
         return ""
@@ -1325,19 +1339,50 @@ def _workflow_agent_run_result(
         return None
     snapshot = run_registry.load_run_snapshot_or_none(root, run_id)
     assistant = snapshot.get("assistantText") if isinstance(snapshot, dict) else None
+    structured_codex = (
+        prefer_assistant
+        and isinstance(snapshot, dict)
+        and (snapshot.get("harness") == "codex" or snapshot.get("engine") == "codex")
+    )
+    if structured_codex:
+        return _snapshot_child_completion_report(snapshot, workspace)
     if prefer_assistant and isinstance(assistant, str) and assistant.strip():
         return assistant
     completion = snapshot.get("completionReport") if isinstance(snapshot, dict) else None
     report_path = completion.get("path") if isinstance(completion, dict) else None
-    if isinstance(report_path, str):
-        path = Path(report_path)
-        if not path.is_absolute():
-            path = workspace / path
-        if path.exists():
-            return path.read_text(encoding="utf-8", errors="replace").strip()
+    report = _read_completion_report(report_path, workspace)
+    if report is not None:
+        return report
     if isinstance(assistant, str):
         return assistant
     return ""
+
+
+def _live_child_completion_report(result: dict[str, Any], workspace: Path) -> str | None:
+    if result.get("completionReportSource") != "child":
+        return None
+    report_path = result.get("completionReportPath")
+    return _read_completion_report(report_path, workspace)
+
+
+def _snapshot_child_completion_report(snapshot: dict[str, Any], workspace: Path) -> str | None:
+    if snapshot.get("completionReportSource") != "child":
+        return None
+    completion = snapshot.get("completionReport")
+    report_path = completion.get("path") if isinstance(completion, dict) else None
+    return _read_completion_report(report_path, workspace)
+
+
+def _read_completion_report(report_path: object, workspace: Path) -> str | None:
+    if not isinstance(report_path, str):
+        return None
+    path = Path(report_path)
+    if not path.is_absolute():
+        path = workspace / path
+    try:
+        return path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
 
 
 @contextlib.contextmanager

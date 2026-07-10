@@ -18,8 +18,8 @@ from delegate_agent.workflows import script as workflow_script
 
 WORKFLOW_COMMAND_SCHEMA = "delegate.workflow-command.v1"
 TERMINAL_WORKFLOW_STATUSES = {"succeeded", "failed", "killed"}
-WAIT_DONE_WORKFLOW_STATUSES = TERMINAL_WORKFLOW_STATUSES | {"paused", "stalled"}
-LIVE_WORKFLOW_STATUSES = {"running", "starting"}
+WAIT_DONE_WORKFLOW_STATUSES = TERMINAL_WORKFLOW_STATUSES | {"dry_run", "paused", "stalled"}
+LIVE_WORKFLOW_STATUSES = {"created", "running", "starting"}
 
 
 def _delegate_cli_argv() -> list[str]:
@@ -38,6 +38,7 @@ class WorkflowCommand:
     name: str | None = None
     since: int = 0
     timeout: int | None = None
+    result_field: str | None = None
     json_mode: bool = False
 
 
@@ -163,7 +164,8 @@ def emit_run(
         args_value = _parse_args(command.args_json)
         budget_total = command.budget
         registry.write_json(root / registry.ARGS_FILE, {"args": args_value})
-        registry.write_status(
+        registry.register_workflow(
+            workspace,
             root,
             {
                 "ok": True,
@@ -179,6 +181,9 @@ def emit_run(
             },
         )
     if command.dry_run:
+        status = registry.read_json(root / registry.STATUS_FILE) or {}
+        status.update({"status": "dry_run", "updatedAt": run_registry.utc_now_iso()})
+        registry.write_status(root, status)
         if lock_fd is not None:
             with contextlib.suppress(OSError):
                 os.close(lock_fd)
@@ -354,21 +359,52 @@ def emit_watch(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) -> 
 
 
 def emit_result(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) -> int:
-    root = _workflow_dir_for_command(command, workspace)
+    root, wf_id, resolution_kind = _resolve_wait_or_result(command, workspace, require_result=True)
     payload = registry.read_json(root / registry.RESULT_FILE)
     if payload is None:
-        raise DelegateError(
-            "workflow_result_missing", f"Workflow result not found: {command.wf_id}"
-        )
+        raise DelegateError("workflow_result_missing", f"Workflow result not found: {wf_id}")
+    if command.result_field is not None:
+        result = payload.get("result")
+        if not isinstance(result, dict):
+            raise DelegateError(
+                "workflow_result_not_object",
+                f"Workflow result is not an object: {wf_id}",
+            )
+        if command.result_field not in result:
+            raise DelegateError(
+                "workflow_result_field_missing",
+                f"Workflow result field not found: {command.result_field}",
+            )
+        value = result[command.result_field]
+        if command.json_mode:
+            envelope: JsonObject = {
+                "ok": True,
+                "schema": WORKFLOW_COMMAND_SCHEMA,
+                "wfId": wf_id,
+                "field": command.result_field,
+                "value": value,
+            }
+            if resolution_kind is not None:
+                envelope["resolutionKind"] = resolution_kind
+            rendering.print_json(envelope, stdout)
+        elif isinstance(value, str):
+            print(value, file=stdout)
+        else:
+            print(json.dumps(value, sort_keys=True), file=stdout)
+        return EXIT_OK
     if command.json_mode:
-        rendering.print_json(payload, stdout)
+        output = dict(payload)
+        if resolution_kind is not None:
+            output["wfId"] = wf_id
+            output["resolutionKind"] = resolution_kind
+        rendering.print_json(output, stdout)
     else:
         print(json.dumps(payload.get("result"), indent=2, sort_keys=True), file=stdout)
     return EXIT_OK
 
 
 def emit_wait(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) -> int:
-    root = _workflow_dir_for_command(command, workspace)
+    root, wf_id, resolution_kind = _resolve_wait_or_result(command, workspace, require_result=False)
     deadline = time.monotonic() + (command.timeout or 3600)
     payload: JsonObject | None = None
     while True:
@@ -388,13 +424,16 @@ def emit_wait(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) -> i
         "timedOut": timed_out,
         "workflow": payload or {},
     }
+    if resolution_kind is not None:
+        result["wfId"] = wf_id
+        result["resolutionKind"] = resolution_kind
     if command.json_mode:
         rendering.print_json(result, stdout)
     else:
-        print(f"{command.wf_id}: {(payload or {}).get('status', 'unknown')}", file=stdout)
+        print(f"{wf_id}: {(payload or {}).get('status', 'unknown')}", file=stdout)
         if status == "stalled":
             print(
-                f"supervisor dead; resume with: workflow run --resume {command.wf_id}",
+                f"supervisor dead; resume with: workflow run --resume {wf_id}",
                 file=stdout,
             )
     if timed_out:
@@ -555,6 +594,27 @@ def _workflow_dir_for_command(command: WorkflowCommand, workspace: Path) -> Path
     if not root.exists():
         raise DelegateError("workflow_not_found", f"Workflow not found: {command.wf_id}")
     return root
+
+
+def _resolve_wait_or_result(
+    command: WorkflowCommand,
+    workspace: Path,
+    *,
+    require_result: bool,
+) -> tuple[Path, str, str | None]:
+    if command.wf_id is not None:
+        root = _workflow_dir_for_command(command, workspace)
+        return root, command.wf_id, None
+    root = registry.latest_workflow_dir(
+        workspace,
+        require_result=require_result,
+        exclude_dry_run=not require_result,
+    )
+    if root is None:
+        if require_result:
+            raise DelegateError("workflow_result_missing", "No workflow results found.")
+        raise DelegateError("workflow_not_found", "No workflows available to wait for.")
+    return root, root.name, "latest"
 
 
 def _parse_args(raw: str | None) -> Any:

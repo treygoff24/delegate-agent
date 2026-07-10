@@ -3,7 +3,16 @@ from __future__ import annotations
 import json
 from typing import Any
 
-SUPPORTED_KEYS = {"type", "required", "properties", "items", "enum", "additionalProperties"}
+SUPPORTED_KEYS = {
+    "type",
+    "required",
+    "properties",
+    "items",
+    "enum",
+    "additionalProperties",
+    "minLength",
+    "minItems",
+}
 
 
 class SchemaError(ValueError):
@@ -47,6 +56,15 @@ def validate_schema_subset(schema: object, *, path: str = "schema") -> None:
     additional = schema.get("additionalProperties")
     if additional is not None and not isinstance(additional, bool):
         raise SchemaError(f"{path}.additionalProperties must be a boolean.")
+    for keyword, applicable_type in (("minLength", "string"), ("minItems", "array")):
+        if keyword not in schema:
+            continue
+        minimum = schema[keyword]
+        if isinstance(minimum, bool) or not isinstance(minimum, int) or minimum < 0:
+            raise SchemaError(f"{path}.{keyword} must be a non-negative integer.")
+        declared_types = schema_type if isinstance(schema_type, list) else [schema_type]
+        if schema_type is not None and applicable_type not in declared_types:
+            raise SchemaError(f"{path}.{keyword} only applies to {applicable_type} values.")
 
 
 def validate_value(value: object, schema: dict[str, Any], *, path: str = "value") -> None:
@@ -56,6 +74,12 @@ def validate_value(value: object, schema: dict[str, Any], *, path: str = "value"
     schema_type = schema.get("type")
     if schema_type is not None and not _matches_type(value, schema_type):
         raise SchemaError(f"{path} must be {schema_type!r}.")
+    if isinstance(value, str) and len(value) < schema.get("minLength", 0):
+        raise SchemaError(
+            f"{path} must contain at least {schema['minLength']} characters (minLength)."
+        )
+    if isinstance(value, list) and len(value) < schema.get("minItems", 0):
+        raise SchemaError(f"{path} must contain at least {schema['minItems']} items (minItems).")
     if isinstance(value, dict):
         required = schema.get("required", [])
         for key in required:
@@ -133,8 +157,14 @@ def placeholder(schema: dict[str, Any]) -> object:
             key: placeholder(child if isinstance(child, dict) else {})
             for key, child in keys.items()
         }
-    if schema_type == "array":
-        return []
+    if schema_type == "array" or (
+        schema_type is None and ("items" in schema or "minItems" in schema)
+    ):
+        item_schema = schema.get("items", {})
+        return [
+            placeholder(item_schema if isinstance(item_schema, dict) else {})
+            for _ in range(schema.get("minItems", 0))
+        ]
     if schema_type == "integer":
         return 0
     if schema_type == "number":
@@ -143,4 +173,4 @@ def placeholder(schema: dict[str, Any]) -> object:
         return False
     if schema_type == "null":
         return None
-    return ""
+    return "x" * schema.get("minLength", 0)

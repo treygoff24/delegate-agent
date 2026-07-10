@@ -99,6 +99,8 @@ class MultiLevelHelpTests(HelpCliTestBase):
         (["worktree", "list", "--help"], "worktree list"),
         (["worktree", "show", "--help"], "worktree show"),
         (["worktree", "gc", "--help"], "worktree gc"),
+        (["workflow", "wait", "--help"], "workflow wait"),
+        (["workflow", "result", "--help"], "workflow result"),
     )
 
     def test_multi_level_help_paths(self):
@@ -108,6 +110,17 @@ class MultiLevelHelpTests(HelpCliTestBase):
                 self.assertEqual(code, self.delegate.EXIT_OK)
                 self.assertTrue(out.strip(), f"{argv} printed nothing")
                 self.assertIn(topic, out, f"{argv} help missing topic {topic!r}")
+
+    def test_workflow_wait_and_result_focused_contracts(self):
+        code, out, err = self.run_main(["workflow", "wait", "--help"])
+        self.assertEqual(code, self.delegate.EXIT_OK, err)
+        self.assertIn("workflow wait [<wfId>]", out)
+        self.assertIn("resolutionKind", out)
+
+        code, out, err = self.run_main(["workflow", "result", "--help"])
+        self.assertEqual(code, self.delegate.EXIT_OK, err)
+        self.assertIn("workflow result [<wfId>] [--field KEY]", out)
+        self.assertIn("--field KEY", out)
 
 
 class FocusedCallHelpTests(HelpCliTestBase):
