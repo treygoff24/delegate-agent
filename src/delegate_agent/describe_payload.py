@@ -1301,6 +1301,7 @@ Good defaults:
   delegate droid <alias> work "Implement this bounded change; run the named check."
   delegate codex safe "Review this workspace. Do not edit files."
   delegate codex work "Implement the scoped fix, run the named check, and report changed files."
+  delegate codex work --isolation worktree --forbid-commit --prompt-file task.md
   delegate claude safe "Review this workspace. Do not edit files."
   delegate claude work "Implement the scoped fix, run the named check, and report changed files."
   delegate grok safe "Review this workspace. Do not edit files."

@@ -110,6 +110,56 @@ class MultiLevelHelpTests(HelpCliTestBase):
                 self.assertIn(topic, out, f"{argv} help missing topic {topic!r}")
 
 
+class FocusedCallHelpTests(HelpCliTestBase):
+    """Call help reflects call's narrower option contract after real CLI routing."""
+
+    CASES = (
+        (["cursor", "call", "--help"], "cursor call"),
+        (["codex", "call", "--help"], "codex call"),
+        (["opencode", "call", "--help"], "opencode call"),
+        (["droid", "call", "--help"], "droid call"),
+        (["droid", "reviewer", "call", "--help"], "droid call"),
+        (["dry-run", "cursor", "call", "--help"], "dry-run call"),
+        (["dry-run", "codex", "call", "--help"], "dry-run call"),
+        (["dry-run", "droid", "reviewer", "call", "--help"], "dry-run call"),
+    )
+
+    def test_call_help_routes_to_focused_mode_spec(self):
+        for argv, topic in self.CASES:
+            with self.subTest(argv=argv):
+                parsed = self.delegate.parse_cli(argv)
+                self.assertEqual(parsed.help_topic, topic)
+                code, out, err = self.run_main(argv)
+                self.assertEqual(code, self.delegate.EXIT_OK, err)
+                self.assertIn(f"delegate {topic} --", out)
+                for option in (
+                    "--isolation",
+                    "--progress",
+                    "--no-progress",
+                    "--forbid-commit",
+                    "--include-dirty",
+                    "--pass-through",
+                    "--completion-report",
+                    "--no-completion-report",
+                ):
+                    self.assertNotIn(option, out)
+                self.assertIn("--cwd PATH", out)
+                self.assertIn("only with --group", out)
+                self.assertIn("never changes the child's throwaway execution cwd", out)
+
+    def test_json_call_help_exposes_same_filtered_contract(self):
+        code, out, err = self.run_main(["--json", "codex", "call", "--help"])
+        self.assertEqual(code, self.delegate.EXIT_OK, err)
+        payload = json.loads(out)
+        self.assertEqual(payload["command"], "codex call")
+        self.assertEqual(
+            {option["flag"] for option in payload["options"]}
+            & {"--progress", "--no-progress", "--forbid-commit", "--include-dirty"},
+            set(),
+        )
+        self.assertIn("--cwd", {option["flag"] for option in payload["globalOptions"]})
+
+
 class DashHAliasTests(HelpCliTestBase):
     """`-h` is an alias for `--help` everywhere."""
 
@@ -233,6 +283,14 @@ class HelpSubcommandTests(HelpCliTestBase):
         self.assertIn("delegate", out)
         self.assertIn("launch options:", out)
         self.assertIn("recommended discovery:", out)
+
+    def test_agent_help_includes_canonical_review_before_commit_example(self):
+        code, out, err = self.run_main(["agent-help"])
+        self.assertEqual(code, self.delegate.EXIT_OK, err)
+        self.assertIn(
+            "delegate codex work --isolation worktree --forbid-commit --prompt-file task.md",
+            out,
+        )
 
 
 class JsonPositionIndependenceTests(HelpCliTestBase):

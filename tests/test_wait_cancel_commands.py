@@ -35,6 +35,8 @@ class WaitCancelCommandTests(unittest.TestCase):
         pgid: int | None = None,
         started_at: str | None = None,
         group: str | None = None,
+        execution_cwd: str | None = None,
+        isolated_workspace: bool | None = None,
     ):
         metadata = {"mode": "work", "cwd": str(self.workspace)}
         if group is not None:
@@ -69,6 +71,12 @@ class WaitCancelCommandTests(unittest.TestCase):
                 "engine": "codex",
                 "mode": "work",
                 "cwd": str(self.workspace),
+                **({"executionCwd": execution_cwd} if execution_cwd is not None else {}),
+                **(
+                    {"isolatedWorkspace": isolated_workspace}
+                    if isolated_workspace is not None
+                    else {}
+                ),
                 "startedAt": started_at or run_registry.utc_now_iso(),
             },
         )
@@ -81,6 +89,12 @@ class WaitCancelCommandTests(unittest.TestCase):
                 "harness": "codex",
                 "status": status,
                 **({"group": group} if group is not None else {}),
+                **({"executionCwd": execution_cwd} if execution_cwd is not None else {}),
+                **(
+                    {"isolatedWorkspace": isolated_workspace}
+                    if isolated_workspace is not None
+                    else {}
+                ),
             },
         )
         return run_id, alias
@@ -161,6 +175,80 @@ class WaitCancelCommandTests(unittest.TestCase):
         self.assertEqual(payload["error"], "no_matching_runs")
         self.assertIn("No runs found for group: missing", payload["message"])
         self.assertEqual(err, "")
+
+    def test_wait_group_warns_when_work_runs_share_nonisolated_workspace_json(self):
+        for _ in range(2):
+            self.write_run(
+                status="succeeded",
+                group="wave4",
+                execution_cwd=f"{self.workspace}/.",
+                isolated_workspace=False,
+            )
+
+        code, out, err = self.run_cli(["--json", "wait", "--group", "wave4"])
+
+        self.assertEqual(code, 0, err)
+        payload = json.loads(out)
+        self.assertEqual(len(payload["warnings"]), 1)
+        self.assertIn("share the same non-isolated execution workspace", payload["warnings"][0])
+
+    def test_wait_group_warns_after_table_in_text_mode(self):
+        for _ in range(2):
+            self.write_run(
+                status="succeeded",
+                group="wave4",
+                execution_cwd=str(self.workspace),
+                isolated_workspace=False,
+            )
+
+        code, out, err = self.run_cli(["wait", "--group", "wave4"])
+
+        self.assertEqual(code, 0, err)
+        self.assertGreater(out.index("warning:"), out.index("alias        status"))
+        self.assertIn("share the same non-isolated execution workspace", out)
+
+    def test_wait_group_does_not_warn_for_one_run(self):
+        self.write_run(
+            status="succeeded",
+            group="wave4",
+            execution_cwd=str(self.workspace),
+            isolated_workspace=False,
+        )
+
+        code, out, err = self.run_cli(["--json", "wait", "--group", "wave4"])
+
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("warnings", json.loads(out))
+
+    def test_wait_handles_do_not_warn_without_group_selector(self):
+        aliases = [
+            self.write_run(
+                status="succeeded",
+                group="wave4",
+                execution_cwd=str(self.workspace),
+                isolated_workspace=False,
+            )[1]
+            for _ in range(2)
+        ]
+
+        code, out, err = self.run_cli(["--json", "wait", *aliases])
+
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("warnings", json.loads(out))
+
+    def test_wait_group_does_not_warn_for_distinct_isolated_worktrees(self):
+        for name in ("one", "two"):
+            self.write_run(
+                status="succeeded",
+                group="wave4",
+                execution_cwd=str(self.workspace / name),
+                isolated_workspace=True,
+            )
+
+        code, out, err = self.run_cli(["--json", "wait", "--group", "wave4"])
+
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("warnings", json.loads(out))
 
     def test_cancel_refuses_terminal_run(self):
         _run_id, alias = self.write_run(status="succeeded")

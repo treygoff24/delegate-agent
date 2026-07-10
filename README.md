@@ -261,6 +261,9 @@ cancelled, and `124` on timeout. `cancel` signals the run's process group
 start-identity check against PID reuse; a cancelled run reports `cancelled`
 rather than a false success. Tag a batch of launches with `--group NAME` and
 `wait`, `runs`, and the worktree commands can select the whole group at once.
+Commit between grouped feature waves that edit the same workspace. If features
+need separate review or commits, give each a persistent worktree and integrate
+them separately; `wait --group` warns about shared non-isolated workspaces.
 
 ## Task design: cluster related work into fewer, richer delegations
 

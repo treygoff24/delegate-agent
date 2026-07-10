@@ -12,6 +12,10 @@ Use persistent worktree isolation when:
 
 Use the real workspace instead when the task depends on uncommitted local files that you do not want to commit or mirror into a worktree. If you do want a persistent worktree that starts from your current dirty checkout, use `--include-dirty`.
 
+For grouped feature waves, commit between waves when they share the real
+workspace. If each feature needs its own review or commit, use one persistent
+worktree per feature and integrate those worktrees separately.
+
 ## Launch
 
 ```bash

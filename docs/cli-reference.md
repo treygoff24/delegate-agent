@@ -125,6 +125,11 @@ A few boundaries are worth stating explicitly:
 create an orchestration manifest; it only enables selectors such as
 `delegate runs --group NAME`, `delegate wait --group NAME`, and worktree
 management filters. Group names must match `[A-Za-z0-9._-]{1,64}`.
+If grouped feature waves run in the same non-isolated workspace, commit between
+waves so later edits do not become interleaved with earlier work. When features
+need separate review or commits, launch each in a persistent worktree and
+integrate them separately; `wait --group` warns when it sees shared same-tree
+work runs.
 
 `--auth-profile NAME` selects a top-level `profiles.definitions` entry and
 injects that profile's flat env map into child processes. It overrides ambient
@@ -139,7 +144,8 @@ auth/env selection happens.
 Usage:
 
 ```bash
-delegate [--json] [--isolation auto|none|worktree] codex {safe,work,call} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--progress] [--forbid-commit] [--prompt-file PATH] [--output-schema FILE] [prompt...]
+delegate [--json] [--isolation auto|none|worktree] codex {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--progress] [--forbid-commit] [--prompt-file PATH] [--output-schema FILE] [prompt...]
+delegate [--json] codex call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--prompt-file PATH] [--output-schema FILE] [prompt...]
 ```
 
 - Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff. Codex safe always uses `--sandbox read-only`. Under `--isolation auto`, Codex safe is the only safe harness that may opt out with `--isolation none`, because Codex still keeps its read-only sandbox active.
@@ -166,7 +172,8 @@ delegate --isolation worktree codex work "Implement the feature in a persistent 
 Usage:
 
 ```bash
-delegate [--json] [--isolation auto|none|worktree] claude {safe,work,call} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate [--json] [--isolation auto|none|worktree] claude {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate [--json] claude call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 ```
 
 - Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff. Under `--isolation auto`, Claude safe uses `--permission-mode plan`, `--strict-mcp-config`, Read/Grep/Glob, and selected read-only Bash tools such as `git diff`/`git status`.
@@ -191,7 +198,8 @@ delegate --isolation worktree claude work "Implement the feature in a persistent
 Usage:
 
 ```bash
-delegate [--json] [--isolation auto|none|worktree] grok {safe,work,call} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate [--json] [--isolation auto|none|worktree] grok {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate [--json] grok call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 ```
 
 - Safe mode reviews your **current working tree** in an isolated throwaway copy plus Grok read-only controls (`--sandbox read-only`, `--permission-mode dontAsk` by default). Delegate does not use Grok `plan` mode for safe review.
@@ -274,7 +282,8 @@ delegate --isolation worktree opencode work "Implement the feature in a persiste
 Usage:
 
 ```bash
-delegate [--json] [--isolation auto|none|worktree] kimi {safe,work,call} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate [--json] [--isolation auto|none|worktree] kimi {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate [--json] kimi call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 ```
 
 - Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff. Under `--isolation auto`, Kimi safe uses a read-only safety prompt. Delegate intentionally avoids Kimi `--plan` in safe mode. Kimi prompt mode auto-approves tool actions, so the isolation is the effective write boundary; the safety prompt is advisory.
@@ -356,10 +365,10 @@ gate semantics.
 ### Stateless `call` mode
 
 `call` is the one-hop model-call form of Delegate: "work mode minus a repo." It
-gives a child runtime a prompt with no project tree to resolve, captures the
-final assistant text, and exits without creating a tracked run — so you can call
-a model to *do something* (or to *judge something*) from anywhere, including a
-non-git directory.
+gives a child runtime a prompt with no project tree to resolve and captures the
+final assistant text, so you can call a model to *do something* (or to *judge
+something*) from anywhere, including a non-git directory. Calls are untracked
+by default; grouped calls are the narrow exception described below.
 
 ```bash
 delegate codex call "Write a Python script that finds the 500th prime and run it."
@@ -368,9 +377,9 @@ delegate --json codex call --read-only --output-schema verdict.json --prompt-fil
 ```
 
 Call mode uses an empty temporary cwd instead of resolving the current repo, and
-it deletes that cwd after the child exits. It does not write `.delegate/runs`,
-create snapshots, inject safe/work skill or completion-report framing, emit
-progress heartbeats, or honor persistent worktree/commit policy options. JSON
+it deletes that cwd after the child exits. It does not create snapshots, inject
+safe/work skill or completion-report framing, emit progress heartbeats, or honor
+persistent worktree/commit policy options. JSON
 output returns fields such as `ok`, `status`, `exitCode`, `engine`, `mode`,
 `model`, `text`, `textChars`, `textTruncated`, `stdoutBytes`, `stderrBytes`,
 reasoning metadata, and `warnings`. Failed calls include a redacted `stderrTail`.
@@ -393,10 +402,23 @@ for structured verdicts. Use `--read-only` for any LLM-as-judge, grader, or
 oracle use where the text is the product and the model must not act.
 
 `--read-only` applies only to `call`; passing it with `safe`/`work` is rejected.
-Because call mode is stateless, `--cwd`, `--isolation`, `--pass-through`,
+Because the child call is stateless, `--isolation`, `--pass-through`,
 `--progress`, `--forbid-commit`, and markdown completion reports are rejected.
-Use `safe` or `work` when the child should see the project tree or when you need
-run registry inspection.
+An ordinary call also rejects `--cwd`.
+
+**Grouped calls preserve workflow tracking without exposing the workspace to the
+child.** `--group NAME` registers the call in the invocation workspace so
+workflow kill/adopt and group selectors can find it. In that one combination,
+`--cwd PATH` may select the registry/config workspace:
+
+```bash
+delegate --cwd /path/to/project --group wf_0123abcdef45 codex call "Summarize this input."
+```
+
+The child still executes in an empty temporary cwd; `--cwd` does not give it the
+project tree. Dry-run accepts the same combination for faithful planning but
+creates no run entry. Use `safe` or `work` when the child should see the project
+tree.
 
 ### Dry-run
 
@@ -734,7 +756,8 @@ signals the recorded process group with SIGTERM, waits a 5s grace period, then
 uses SIGKILL if needed. It never signals pid/pgid `<= 1`. Legacy runs without a
 recorded pgid fall back to the recorded pid with a warning. Cancel marks the run
 `cancelled` with `failureReason: cancelled_by_user` and records current captured
-stdout/stderr byte counts. `call` mode is untracked and therefore not cancellable.
+stdout/stderr byte counts. Ungrouped `call` mode is untracked; grouped calls are
+registered and can be selected for cancellation.
 
 Before sending any signal, cancel stamps a `cancelRequested: true` marker (with
 a `cancelRequestedAt` timestamp) on the run state under the registry lock, so

@@ -146,6 +146,55 @@ class ParserTests(unittest.TestCase):
                     self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
                 self.assertEqual(ctx.exception.error, error)
 
+    def test_run_input_json_agent_rejected_by_presence_for_non_opencode(self):
+        cases = (
+            ("codex", None),
+            ("claude", "reviewer"),
+            ("cursor", 1),
+            ("droid", False),
+            ("grok", []),
+            ("devin", {}),
+            ("kimi", ""),
+        )
+        for engine, value in cases:
+            with self.subTest(engine=engine, value=value), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "task.json"
+                payload = {
+                    "engine": engine,
+                    "mode": "call",
+                    "prompt": "summarize",
+                    "agent": value,
+                }
+                if engine == "droid":
+                    payload["model"] = "minimax"
+                path.write_text(json.dumps(payload), encoding="utf-8")
+                parsed = self.delegate.parse_cli(["run", "--input-json", str(path)])
+                with self.assertRaises(self.delegate.DelegateError) as ctx:
+                    self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+                self.assertEqual(ctx.exception.error, "unsupported_agent")
+
+    def test_run_input_json_opencode_null_agent_matches_omission(self):
+        requests = []
+        with tempfile.TemporaryDirectory() as tmp:
+            for suffix, agent in (("omitted", ...), ("null", None)):
+                payload = {"engine": "opencode", "mode": "call", "prompt": "summarize"}
+                if agent is not ...:
+                    payload["agent"] = agent
+                path = Path(tmp) / f"task-{suffix}.json"
+                path.write_text(json.dumps(payload), encoding="utf-8")
+                parsed = self.delegate.parse_cli(["run", "--input-json", str(path)])
+                requests.append(
+                    self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+                )
+
+        normalized_argv = []
+        for request in requests:
+            argv = list(request.argv)
+            argv[argv.index("--dir") + 1] = "<call-cwd>"
+            normalized_argv.append(argv)
+        self.assertEqual(normalized_argv[0], normalized_argv[1])
+        self.assertEqual(requests[0].env_overrides, requests[1].env_overrides)
+
     def test_models_and_describe_reject_redacted_flag(self):
         for subcommand in ("models", "describe"):
             with self.subTest(subcommand=subcommand):
