@@ -41,7 +41,6 @@ from delegate_agent.argv_builders import (
     redacted_prompt_argv,
 )
 from delegate_agent.constants import (
-    ENGINE_CAPABILITIES,
     ENGINES_PROSE,
     KNOWN_ENGINES,
     MODE_CALL,
@@ -53,6 +52,7 @@ from delegate_agent.constants import (
     PROMPT_INSTRUCTION_MODE_WRAPPED,
     PURE_CALL_ENGINES,
     SAFE_REVIEW_PREFIX_INJECTED_HERE_ENGINES,
+    pure_call_supported,
     validate_mode,
 )
 from delegate_agent.errors import DelegateError
@@ -848,8 +848,7 @@ def _validate_pure_call(
         raise DelegateError(
             "pure_conflicts_read_only", "--pure cannot be combined with --read-only."
         )
-    capability = ENGINE_CAPABILITIES.get(engine, {})
-    if capability.get("pureCall") is not True:
+    if not pure_call_supported(engine):
         supported = ", ".join(PURE_CALL_ENGINES)
         raise DelegateError(
             "unsupported_pure_call",

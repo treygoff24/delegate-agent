@@ -655,6 +655,10 @@ def execute_request(
                     schema_index = request.argv.index("--json-schema") + 1
                     if schema_index < len(request.argv):
                         sensitive_texts.append(request.argv[schema_index])
+                if request.engine == "codex" and "--output-schema" in request.argv:
+                    schema_index = request.argv.index("--output-schema") + 1
+                    if schema_index < len(request.argv):
+                        sensitive_texts.append(request.argv[schema_index])
                 result = delegate_runner.execute_call(
                     request.argv,
                     request.workspace,

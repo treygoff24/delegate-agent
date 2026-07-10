@@ -7,6 +7,7 @@ importing ``cli``.
 
 from __future__ import annotations
 
+from delegate_agent import seatbelt
 from delegate_agent.errors import DelegateError
 
 MODE_SAFE = "safe"
@@ -22,11 +23,18 @@ KNOWN_ENGINES = ("cursor", "droid", "codex", "kimi", "claude", "grok", "devin", 
 # "<engine>, ..., or <engine>" — for error messages and help text.
 ENGINES_PROSE = f"{', '.join(KNOWN_ENGINES[:-1])}, or {KNOWN_ENGINES[-1]}"
 
+
+def pure_call_supported(engine: str) -> bool:
+    return engine in {"claude", "opencode"} or (
+        engine == "codex" and seatbelt.codex_pure_available()
+    )
+
+
 # Public harness capability contract. Request validation and describe output both
 # derive from this map so enabling a capability cannot drift between the two.
 ENGINE_CAPABILITIES = {
     engine: {
-        "pureCall": engine in {"claude", "opencode"},
+        "pureCall": pure_call_supported(engine),
         "pureTripwire": engine == "claude",
         "structuredOutput": engine in {"codex", "claude"},
         "noSessionPersistence": engine in {"codex", "claude"},

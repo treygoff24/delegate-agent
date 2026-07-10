@@ -394,15 +394,18 @@ changed files…" on a repo-flavored prompt. Pair it with `--output-schema` (Cod
 for structured verdicts. Use `--read-only` for any LLM-as-judge, grader, or
 oracle use where the text is the product and the model must not act.
 
-**`--pure` is the hostile-content completion boundary.** It is currently
-supported by Claude and OpenCode; every other engine fails before launch with
-`unsupported_pure_call`. Pure mode sends the prompt verbatim, drops ambient
+**`--pure` is the hostile-content completion boundary.** It is supported by
+Claude, OpenCode, and Codex on macOS when `sandbox-exec` is available; unsupported
+engines and non-macOS Codex fail before launch with `unsupported_pure_call`. Pure
+mode sends the prompt verbatim, drops ambient
 environment variables outside the documented allowlist, and cannot be combined
 with `--read-only`. Claude uses `--safe-mode`, disables every tool, ignores MCP
 and ambient customization, disables session persistence, and receives the prompt
 only on stdin. OpenCode uses its native `--pure` flag plus a deny-all permission
-overlay and stdin prompt transport. Use `--output-schema FILE` with Claude or
-Codex; Claude receives the schema contents inline while Codex receives the path.
+overlay and stdin prompt transport. macOS Codex adds a Seatbelt deny-home read
+boundary and suppresses ambient user config and rules. Use `--output-schema FILE`
+with Claude or Codex; Claude receives the schema contents inline while Codex
+receives the path.
 
 `--timeout SECONDS` is a positive integer available on every call-mode engine.
 On expiry Delegate terminates the whole child process group and returns

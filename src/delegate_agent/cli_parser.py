@@ -28,12 +28,12 @@ from delegate_agent import (
 )
 from delegate_agent import config as delegate_config
 from delegate_agent.constants import (
-    ENGINE_CAPABILITIES,
     ENGINES_PROSE,
     KNOWN_ENGINES,
     MODELESS_ENGINES,
     PURE_CALL_ENGINES,
     VALID_MODES,
+    pure_call_supported,
     validate_mode,
 )
 from delegate_agent.errors import DelegateError
@@ -1235,7 +1235,7 @@ def _validate_pure_options(
         raise DelegateError(
             "pure_conflicts_read_only", "--pure cannot be combined with --read-only."
         )
-    if not ENGINE_CAPABILITIES[engine]["pureCall"]:
+    if not pure_call_supported(engine):
         supported = ", ".join(PURE_CALL_ENGINES)
         raise DelegateError(
             "unsupported_pure_call",

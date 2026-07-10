@@ -166,17 +166,38 @@ class PureCallTests(CommandTestBase):
 
     def test_pure_rejects_engine_without_required_capabilities(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.build_codex_argv(
+            self.delegate.build_cursor_argv(
+                ["agent"],
+                "call",
+                "/tmp/call",
+                "requested-model",
+                "answer",
+                pure=True,
+            )
+        self.assertEqual(ctx.exception.error, "unsupported_pure_call")
+
+    def test_codex_pure_argv_suppresses_ambient_config_and_rules(self):
+        with mock.patch(
+            "delegate_agent.argv_builders.seatbelt.codex_pure_available", return_value=True
+        ):
+            argv = self.delegate.build_codex_argv(
                 self.delegate.DEFAULT_CONFIG["codex"],
                 "call",
                 "/tmp/call",
-                None,
+                "requested-model",
                 "answer",
                 {},
                 workspace_kind="directory",
                 pure=True,
             )
-        self.assertEqual(ctx.exception.error, "unsupported_pure_call")
+        self.assertIn("--ignore-user-config", argv)
+        self.assertIn("--ignore-rules", argv)
+        self.assertIn("--skip-git-repo-check", argv)
+        self.assertEqual(argv[argv.index("--sandbox") + 1], "read-only")
+        self.assertEqual(argv[-1], "-")
+        self.assertNotIn("answer", argv)
+        self.assertNotIn("--profile", argv)
+        self.assertNotIn("--ask-for-approval", argv)
 
     def test_call_json_reports_resolved_model_and_usage_basis(self):
         event = [

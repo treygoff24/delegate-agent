@@ -38,6 +38,7 @@ from delegate_agent.constants import (
     PROMPT_ENFORCED_SAFE_ENGINES,
     PROMPT_INSTRUCTION_MODE_SLASH,
     PROMPT_INSTRUCTION_MODE_WRAPPED,
+    pure_call_supported,
 )
 from delegate_agent.errors import EXIT_OK, DelegateError
 from delegate_agent.json_types import JsonObject
@@ -597,6 +598,7 @@ def _engine_capabilities() -> JsonObject:
             "outputSchema": engine == "codex",
             "fast": engine == "codex",
             **ENGINE_CAPABILITIES[engine],
+            "pureCall": pure_call_supported(engine),
         }
         for engine in KNOWN_ENGINES
     }

@@ -243,7 +243,10 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(ctx.exception.error, "missing_output_schema")
 
     def test_pure_and_timeout_parse_for_supported_call_engines(self):
-        for engine in ("claude", "opencode"):
+        engines = ["claude", "opencode"]
+        if sys.platform == "darwin" and shutil.which("sandbox-exec"):
+            engines.append("codex")
+        for engine in engines:
             with self.subTest(engine=engine):
                 parsed = self.delegate.parse_cli(
                     [engine, "call", "--pure", "--timeout", "12", "answer this"]
@@ -262,7 +265,7 @@ class ParserTests(unittest.TestCase):
                 ["--group", "g", "claude", "call", "--pure", "x"],
                 "pure_conflicts_group",
             ),
-            (["codex", "call", "--pure", "x"], "unsupported_pure_call"),
+            (["cursor", "call", "--pure", "x"], "unsupported_pure_call"),
         )
         for argv, error in cases:
             with self.subTest(argv=argv), self.assertRaises(self.delegate.DelegateError) as ctx:

@@ -11,7 +11,7 @@ read-only flag sets. Preserve those branches exactly.
 
 from __future__ import annotations
 
-from delegate_agent import reasoning
+from delegate_agent import reasoning, seatbelt
 from delegate_agent.constants import MODE_CALL, MODE_SAFE, MODE_WORK, validate_mode
 from delegate_agent.errors import DelegateError
 from delegate_agent.json_types import JsonObject
@@ -470,8 +470,37 @@ def build_codex_argv(
     call_read_only: bool = False,
     pure: bool = False,
 ) -> list[str]:
-    _reject_pure("codex", mode, pure)
+    _reject_pure("codex", mode, pure, supported=seatbelt.codex_pure_available())
     binary = str(codex["binary"])
+    if pure:
+        argv = [binary]
+        if model:
+            argv.extend(["--model", model])
+        if reasoning_capability is not None:
+            argv.extend(["-c", f'model_reasoning_effort="{reasoning_capability.effort}"'])
+        if fast is not None:
+            service_tier = "fast" if fast else "default"
+            argv.extend(["-c", f'service_tier="{service_tier}"'])
+            if fast:
+                argv.extend(["-c", "features.fast_mode=true"])
+        argv.extend(
+            [
+                "exec",
+                "--ignore-user-config",
+                "--ignore-rules",
+                "--skip-git-repo-check",
+                "--sandbox",
+                "read-only",
+            ]
+        )
+        if output_schema is not None:
+            argv.extend(["--output-schema", output_schema])
+        if stream_capture:
+            argv.extend(["--color", "never", "--json"])
+            if codex.get("ephemeral", True) is True:
+                argv.append("--ephemeral")
+        argv.append("-")
+        return argv
     argv = [binary]
     # Safe mode is read-only by contract: never emit the dangerous bypass flags,
     # even if a policy block somehow carries them. Config validation rejects such

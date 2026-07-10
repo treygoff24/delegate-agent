@@ -100,17 +100,45 @@ you need registry inspection.
 OpenCode `call --read-only` uses the same protected environment settings and
 `--pure` plugin restriction as OpenCode safe mode.
 
-`call --pure` is a separate, stronger completion boundary currently supported by
-Claude and OpenCode. Delegate sends the prompt verbatim, starts the child in an
-empty temporary cwd, and builds the child environment from only `PATH`, `HOME`,
-`USER`, `LOGNAME`, `SHELL`, `TMPDIR`, `LANG`, `LC_ALL`, `LC_CTYPE`, and `TERM`,
-then applies trusted Delegate profile overrides. Claude additionally uses
-`--safe-mode --tools "" --strict-mcp-config --no-session-persistence`; OpenCode
-uses its native `--pure` flag plus a deny-all tool permission overlay. Pure mode
-does not make a general OS sandbox claim, which is why Codex remains ineligible
-until its later OS-enforced sandbox slice. OpenCode pure has no delegate-side
-permission-denial tripwire; callers requiring hostile-content isolation should
-prefer the Claude pure route.
+`call --pure` is a separate, stronger completion boundary supported by Claude,
+OpenCode, and Codex on macOS when `sandbox-exec` is available. Delegate sends the
+prompt verbatim, starts the child in an empty temporary cwd, and builds the child
+environment from only `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR`, `LANG`,
+`LC_ALL`, `LC_CTYPE`, and `TERM`, then applies trusted Delegate profile overrides.
+Claude additionally uses `--safe-mode --tools "" --strict-mcp-config
+--no-session-persistence`; OpenCode uses its native `--pure` flag plus a deny-all
+tool permission overlay.
+
+Codex pure adds a macOS Seatbelt profile outside the Codex process. The profile
+allows normal runtime and network operations, denies reads under the user's home
+directory, then re-allows only the empty call cwd, the exact output-schema file
+when supplied, Codex and Node runtime directories, and an ephemeral
+`CODEX_HOME` that contains only the resolved `auth.json` credential. It does not
+allow the real `~/.codex` directory, its skills, history, `config.toml`, or rules.
+It also passes `--ignore-user-config --ignore-rules` to suppress ambient Codex
+configuration, rules, and hooks. The ephemeral `CODEX_HOME` is created for each
+call, copied/hardlinked with `0600` permissions, and removed when the call ends.
+These exceptions are for Codex runtime data, not user or prompt-packet data. Network
+stays open so Codex can reach the OpenAI API. The read boundary prevents the model
+from reading other local files to exfiltrate through that channel.
+
+Codex pure is OS-enforced prevention, not a post-run detection tripwire. The
+sandbox blocks reads at the syscall level; the `pureTripwire` capability is `false`
+for Codex. A downstream consumer should not wait for a `pure_boundary_violation`
+style signal from Codex the way it would for Claude.
+
+Codex pure adds additional denies for `/Users/Shared`, `/tmp`, and `/private/tmp`.
+`$TMPDIR` (`/var/folders/...`) and other non-home system paths remain readable because
+the Codex runtime needs to read its own temporary files there; the boundary protects
+the home tree and the real `~/.codex`, not the entire filesystem. A pre-positioned
+hardlink in a still-readable path is a known path-MAC limitation of deny-list
+Seatbelt profiles; high-assurance isolation should not rely on deny-home alone.
+
+Codex pure is ineligible on non-macOS platforms until Delegate gains an equivalent
+OS-enforced read boundary there.
+
+OpenCode pure has no delegate-side permission-denial tripwire; callers requiring
+hostile-content isolation should prefer Claude pure or macOS Codex pure.
 
 ## Reasoning-effort boundary
 

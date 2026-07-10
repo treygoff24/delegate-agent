@@ -28,6 +28,7 @@ from delegate_agent import (
     rendering,
     run_metadata,
     run_registry,
+    seatbelt,
     worktree_summary,
 )
 from delegate_agent.constants import PROMPT_INSTRUCTION_MODE_WRAPPED
@@ -1954,6 +1955,36 @@ def _parse_claude_call_json(
     )
 
 
+def _resolve_codex_auth_file(env: dict[str, str]) -> str:
+    """Return the resolved real path to the codex auth.json credential.
+
+    The auth file is resolved from the effective CODEX_HOME (or ~/.codex) so
+    symlinked credentials outside the real home are copied/hardlinked into the
+    ephemeral home correctly.
+    """
+    codex_home = env.get("CODEX_HOME")
+    if not codex_home:
+        home = env.get("HOME") or str(Path.home())
+        codex_home = os.path.join(os.path.expanduser(home), ".codex")
+    auth_file = os.path.join(os.path.expanduser(codex_home), "auth.json")
+    real_auth_file = os.path.realpath(auth_file)
+    if not os.path.isfile(real_auth_file):
+        raise RunnerLaunchError(
+            "codex_auth_unavailable",
+            f"Codex pure call requires a readable auth.json; not found at {auth_file}.",
+        )
+    return real_auth_file
+
+
+def _copy_or_link_auth(src: str, dst: str) -> None:
+    """Copy *src* to *dst*, preferring a hardlink when the filesystem permits."""
+    try:
+        os.link(src, dst)
+    except OSError:
+        shutil.copy2(src, dst)
+    os.chmod(dst, 0o600)
+
+
 def execute_call(
     argv: list[str],
     cwd: str,
@@ -1982,7 +2013,44 @@ def execute_call(
     )
     env = profiles.child_environment(overrides=env_overrides, pure=pure)
     started = time.monotonic()
+    seatbelt_profile_path: str | None = None
+    ephemeral_codex_home: str | None = None
     try:
+        if harness == "codex" and pure:
+            if not seatbelt.codex_pure_available():
+                raise RunnerLaunchError(
+                    "unsupported_pure_call",
+                    "Codex pure call requires macOS with sandbox-exec available.",
+                )
+            real_auth_file = _resolve_codex_auth_file(env)
+            ephemeral_codex_home = tempfile.mkdtemp(prefix="delegate-codex-pure-")
+            os.chmod(ephemeral_codex_home, 0o700)
+            ephemeral_auth_file = os.path.join(ephemeral_codex_home, "auth.json")
+            _copy_or_link_auth(real_auth_file, ephemeral_auth_file)
+            env["CODEX_HOME"] = ephemeral_codex_home
+
+            extra_read_roots: list[str] = []
+            resolved_auth_file = os.path.realpath(ephemeral_auth_file)
+            resolved_ephemeral_home = os.path.realpath(ephemeral_codex_home)
+            if not resolved_auth_file.startswith(resolved_ephemeral_home + os.sep):
+                extra_read_roots.append(resolved_auth_file)
+            if "--output-schema" in launch_argv:
+                schema_index = launch_argv.index("--output-schema") + 1
+                if schema_index < len(launch_argv):
+                    extra_read_roots.append(launch_argv[schema_index])
+            profile = seatbelt.build_codex_pure_profile(
+                home=env.get("HOME", str(Path.home())),
+                temp_cwd=cwd,
+                codex_home=ephemeral_codex_home,
+                extra_read_roots=extra_read_roots,
+                env=env,
+            )
+            profile_fd, seatbelt_profile_path = tempfile.mkstemp(
+                prefix="delegate-codex-pure-", suffix=".sb"
+            )
+            with os.fdopen(profile_fd, "w", encoding="utf-8") as profile_file:
+                profile_file.write(profile)
+            launch_argv = ["sandbox-exec", "-f", seatbelt_profile_path, *launch_argv]
         try:
             popen_kwargs: dict[str, object] = {
                 "cwd": cwd,
@@ -2006,6 +2074,12 @@ def execute_call(
         except OSError as exc:
             raise _runner_launch_error(launch_argv, cwd, exc) from exc
     finally:
+        if seatbelt_profile_path is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(seatbelt_profile_path)
+        if ephemeral_codex_home is not None:
+            with contextlib.suppress(OSError):
+                shutil.rmtree(ephemeral_codex_home, ignore_errors=True)
         _cleanup_prompt_file_dir(prompt_temp_dir)
 
     stdout_bytes = len(stdout_data or b"")
@@ -2035,7 +2109,15 @@ def execute_call(
     accumulator = harness_events.StreamAccumulator(harness=harness)
     for line in stdout_text.splitlines():
         accumulator.ingest_line(line)
-    text, meta = accumulator.bounded_assistant_text()
+    if harness == "codex" and structured_output and accumulator.completion_text:
+        raw_text = accumulator.completion_text
+        text = _bounded_call_fallback_text(raw_text)
+        meta: JsonObject = {
+            "assistantTextChars": len(raw_text),
+            "assistantTextTruncated": len(raw_text) > harness_events.ASSISTANT_TEXT_LIMIT,
+        }
+    else:
+        text, meta = accumulator.bounded_assistant_text()
     warnings: tuple[str, ...] = ()
     if text:
         text_chars = int(meta.get("assistantTextChars", len(text)))

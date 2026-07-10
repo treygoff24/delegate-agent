@@ -15,6 +15,7 @@ if SRC not in sys.path:
 from delegate_agent import (  # noqa: E402
     capability_commands,
     reasoning,
+    seatbelt,
 )
 from delegate_agent.config import harness_binary  # noqa: E402
 
@@ -178,7 +179,7 @@ class CapabilityCommandTests(unittest.TestCase):
         capabilities = describe["engineCapabilities"]
         self.assertTrue(capabilities["claude"]["pureCall"])
         self.assertTrue(capabilities["opencode"]["pureCall"])
-        self.assertFalse(capabilities["codex"]["pureCall"])
+        self.assertEqual(capabilities["codex"]["pureCall"], seatbelt.codex_pure_available())
         self.assertTrue(capabilities["claude"]["pureTripwire"])
         self.assertFalse(capabilities["opencode"]["pureTripwire"])
         self.assertFalse(capabilities["codex"]["pureTripwire"])
