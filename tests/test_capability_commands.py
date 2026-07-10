@@ -15,7 +15,6 @@ if SRC not in sys.path:
 from delegate_agent import (  # noqa: E402
     capability_commands,
     reasoning,
-    seatbelt,
 )
 from delegate_agent.config import harness_binary  # noqa: E402
 
@@ -178,13 +177,18 @@ class CapabilityCommandTests(unittest.TestCase):
         self.assertIn("--auto", describe["modeMapping"]["opencode"]["work"])
         capabilities = describe["engineCapabilities"]
         self.assertTrue(capabilities["claude"]["pureCall"])
-        self.assertTrue(capabilities["opencode"]["pureCall"])
-        self.assertEqual(capabilities["codex"]["pureCall"], seatbelt.codex_pure_available())
+        self.assertFalse(capabilities["opencode"]["pureCall"])
+        self.assertFalse(capabilities["codex"]["pureCall"])
         self.assertTrue(capabilities["claude"]["pureTripwire"])
         self.assertFalse(capabilities["opencode"]["pureTripwire"])
         self.assertFalse(capabilities["codex"]["pureTripwire"])
         self.assertTrue(capabilities["claude"]["structuredOutput"])
         self.assertTrue(capabilities["codex"]["structuredOutput"])
+        # Legacy outputSchema alias must mirror structuredOutput, not contradict it.
+        for engine, caps in capabilities.items():
+            self.assertEqual(
+                caps["outputSchema"], caps["structuredOutput"], f"{engine} outputSchema drift"
+            )
         self.assertTrue(capabilities["claude"]["usageEvents"])
         self.assertTrue(capabilities["claude"]["promptStdin"])
         self.assertTrue(capabilities["opencode"]["promptStdin"])

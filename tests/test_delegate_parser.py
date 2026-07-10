@@ -243,16 +243,11 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(ctx.exception.error, "missing_output_schema")
 
     def test_pure_and_timeout_parse_for_supported_call_engines(self):
-        engines = ["claude", "opencode"]
-        if sys.platform == "darwin" and shutil.which("sandbox-exec"):
-            engines.append("codex")
-        for engine in engines:
-            with self.subTest(engine=engine):
-                parsed = self.delegate.parse_cli(
-                    [engine, "call", "--pure", "--timeout", "12", "answer this"]
-                )
-                self.assertTrue(parsed.launch.pure)
-                self.assertEqual(parsed.launch.timeout, 12)
+        parsed = self.delegate.parse_cli(
+            ["claude", "call", "--pure", "--timeout", "12", "answer this"]
+        )
+        self.assertTrue(parsed.launch.pure)
+        self.assertEqual(parsed.launch.timeout, 12)
 
     def test_pure_rejects_non_call_conflict_and_unsupported_engine(self):
         cases = (
@@ -266,6 +261,8 @@ class ParserTests(unittest.TestCase):
                 "pure_conflicts_group",
             ),
             (["cursor", "call", "--pure", "x"], "unsupported_pure_call"),
+            (["opencode", "call", "--pure", "x"], "unsupported_pure_call"),
+            (["codex", "call", "--pure", "x"], "unsupported_pure_call"),
         )
         for argv, error in cases:
             with self.subTest(argv=argv), self.assertRaises(self.delegate.DelegateError) as ctx:
@@ -273,7 +270,8 @@ class ParserTests(unittest.TestCase):
             self.assertEqual(ctx.exception.error, error)
         self.assertTrue(ctx.exception.next_actions)
         self.assertIn("claude", ctx.exception.next_actions[0])
-        self.assertIn("opencode", ctx.exception.next_actions[0])
+        self.assertNotIn("opencode", ctx.exception.next_actions[0])
+        self.assertNotIn("codex", ctx.exception.next_actions[0])
 
     def test_timeout_is_positive_integer_and_call_only(self):
         invalid = (

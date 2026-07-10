@@ -15,11 +15,20 @@ if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
 from delegate_agent import runner, seatbelt  # noqa: E402
+from delegate_agent.constants import pure_call_supported  # noqa: E402
 from delegate_agent.errors import DelegateError  # noqa: E402
 from tests.delegate_commands_test_base import CommandTestBase  # noqa: E402
 
 
 def _live_codex_pure_available() -> bool:
+    # Dormant: Codex pure is disabled at the eligibility layer, so a live
+    # `codex call --pure` is rejected and these success-asserting canaries
+    # cannot pass. Keep them for when Codex pure is re-enabled, but skip even
+    # with the opt-in flag until then.
+    if not pure_call_supported("codex"):
+        return False
+    if os.environ.get("DELEGATE_RUN_LIVE_CODEX_PURE_TESTS") != "1":
+        return False
     auth_file = Path.home() / ".codex" / "auth.json"
     if not (
         sys.platform == "darwin"
@@ -333,7 +342,6 @@ class CodexPureSandboxUnitTests(CommandTestBase):
                         "--json",
                         "codex",
                         "call",
-                        "--pure",
                         "--output-schema",
                         str(schema),
                         "answer",
@@ -345,15 +353,12 @@ class CodexPureSandboxUnitTests(CommandTestBase):
         _, kwargs = execute_call.call_args
         self.assertIn(str(schema.resolve()), kwargs["sensitive_texts"])
 
-    def test_non_darwin_codex_pure_is_rejected_at_parse(self):
-        with (
-            mock.patch.object(seatbelt.sys, "platform", "linux"),
-            mock.patch.object(seatbelt.shutil, "which", return_value="/usr/bin/sandbox-exec"),
-            self.assertRaises(self.delegate.DelegateError) as ctx,
-        ):
+    def test_codex_pure_is_rejected_at_parse(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
             self.delegate.parse_cli(["codex", "call", "--pure", "answer"])
         self.assertEqual(ctx.exception.error, "unsupported_pure_call")
         self.assertIn("claude", ctx.exception.next_actions[0])
+        self.assertNotIn("codex", ctx.exception.next_actions[0])
 
     def test_codex_structured_call_returns_only_final_schema_message(self):
         events = [
@@ -383,7 +388,8 @@ class CodexPureSandboxUnitTests(CommandTestBase):
 
 @unittest.skipUnless(
     _live_codex_pure_available(),
-    "requires macOS, sandbox-exec, Codex, and ~/.codex authenticated login",
+    "set DELEGATE_RUN_LIVE_CODEX_PURE_TESTS=1; requires macOS, sandbox-exec, "
+    "Codex, and ~/.codex authenticated login",
 )
 class CodexPureSandboxLiveTests(unittest.TestCase):
     maxDiff = None

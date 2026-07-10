@@ -395,17 +395,13 @@ for structured verdicts. Use `--read-only` for any LLM-as-judge, grader, or
 oracle use where the text is the product and the model must not act.
 
 **`--pure` is the hostile-content completion boundary.** It is supported by
-Claude, OpenCode, and Codex on macOS when `sandbox-exec` is available; unsupported
-engines and non-macOS Codex fail before launch with `unsupported_pure_call`. Pure
+Claude only; other engines fail before launch with `unsupported_pure_call`. Pure
 mode sends the prompt verbatim, drops ambient
 environment variables outside the documented allowlist, and cannot be combined
 with `--read-only`. Claude uses `--safe-mode`, disables every tool, ignores MCP
 and ambient customization, disables session persistence, and receives the prompt
-only on stdin. OpenCode uses its native `--pure` flag plus a deny-all permission
-overlay and stdin prompt transport. macOS Codex adds a Seatbelt deny-home read
-boundary and suppresses ambient user config and rules. Use `--output-schema FILE`
-with Claude or Codex; Claude receives the schema contents inline while Codex
-receives the path.
+only on stdin. Use `--output-schema FILE` with Claude (schema contents inline)
+or with ordinary Codex call mode (schema path).
 
 `--timeout SECONDS` is a positive integer available on every call-mode engine.
 On expiry Delegate terminates the whole child process group and returns
@@ -556,7 +552,7 @@ Supported input keys:
 - `progress`: optional boolean. `true` enables parent progress heartbeats on stderr; `false` disables them even when `progress.enabled` is true in config. When omitted, config `progress.enabled` applies (default `false`). `mode: "call"` rejects progress.
 - `forbidCommit`: optional boolean. `true` requires `mode: "work"` with persistent worktree isolation and fails the run if the child creates commits. `mode: "call"` rejects commit policy.
 - `includeDirty`: optional boolean. `true` requires `mode: "work"` with persistent worktree isolation and syncs tracked edits plus untracked non-ignored files into the new worktree before launch.
-- `outputSchema`: optional path to a JSON Schema for Codex's final message. Codex-only; same semantics as `--output-schema`. Other engines fail with `unsupported_output_schema`.
+- `outputSchema`: optional path to a JSON Schema for the final message. Supported for Codex and Claude call mode (same semantics as `--output-schema`). Other engines fail with `unsupported_output_schema`.
 - `prompt`: required task prompt.
 
 `profile` is not accepted in run input JSON. Configure the Codex CLI config

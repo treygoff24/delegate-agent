@@ -270,18 +270,24 @@ class OverviewTests(unittest.TestCase):
 
 
 class PureCallHelpIntegrationTests(unittest.TestCase):
-    def test_call_help_advertises_pure_timeout_and_claude_schema(self):
+    def test_call_help_advertises_pure_only_for_eligible_engines(self):
         from delegate_agent import cli
 
-        for engine in ("claude", "opencode", "codex"):
+        stdout = io.StringIO()
+        code = cli.main(["claude", "--help"], stdout=stdout, stderr=io.StringIO())
+        self.assertEqual(code, 0)
+        help_text = stdout.getvalue()
+        self.assertIn("[--pure] [--timeout SECONDS]", help_text)
+        self.assertIn("--output-schema FILE", help_text)
+
+        for engine in ("cursor", "opencode", "codex"):
             with self.subTest(engine=engine):
                 stdout = io.StringIO()
                 code = cli.main([engine, "--help"], stdout=stdout, stderr=io.StringIO())
                 self.assertEqual(code, 0)
-                self.assertIn("[--pure] [--timeout SECONDS]", stdout.getvalue())
-        stdout = io.StringIO()
-        cli.main(["claude", "--help"], stdout=stdout, stderr=io.StringIO())
-        self.assertIn("--output-schema FILE", stdout.getvalue())
+                text = stdout.getvalue()
+                self.assertNotIn("[--pure]", text)
+                self.assertIn("[--timeout SECONDS]", text)
 
 
 class FocusedGlobalOptionsTests(unittest.TestCase):

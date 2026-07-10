@@ -1773,17 +1773,27 @@ def _bounded_call_communicate(
     max_stdout: int,
     max_stderr: int,
 ) -> tuple[bytes, bytes]:
-    """Read child stdout/stderr under fixed byte caps; kill on overflow or timeout."""
+    """Read child stdout/stderr under fixed byte caps; kill on overflow or timeout.
+
+    The deadline starts immediately. Stdin is fed on a writer thread so a child
+    that stops reading cannot block the parent past ``timeout``.
+    """
     stdout_buf = io.BytesIO()
     stderr_buf = io.BytesIO()
     overflow = threading.Event()
     overflow_message: list[str] = [""]
+    overflow_stream: list[str | None] = [None]
+    start = time.monotonic()
+
+    def _deadline_exceeded() -> bool:
+        return timeout is not None and (time.monotonic() - start) >= timeout
 
     def _drain_to_buffer(
         pipe: BinaryIO,
         buf: io.BytesIO,
         limit: int,
         message: str,
+        stream: str,
     ) -> None:
         try:
             while not overflow.is_set():
@@ -1793,17 +1803,44 @@ def _bounded_call_communicate(
                 available = limit - buf.tell()
                 if available <= 0:
                     overflow_message[0] = message
+                    overflow_stream[0] = stream
                     overflow.set()
                     break
                 if len(chunk) > available:
                     buf.write(chunk[:available])
                     overflow_message[0] = message
+                    overflow_stream[0] = stream
                     overflow.set()
                     break
                 buf.write(chunk)
         finally:
             with contextlib.suppress(OSError):
                 pipe.close()
+
+    def _write_stdin() -> None:
+        assert process.stdin is not None and stdin_bytes is not None
+        try:
+            view = memoryview(stdin_bytes)
+            offset = 0
+            chunk_size = 65536
+            while offset < len(view):
+                if overflow.is_set() or _deadline_exceeded():
+                    break
+                end = min(offset + chunk_size, len(view))
+                try:
+                    written = process.stdin.write(view[offset:end])
+                except (BrokenPipeError, OSError):
+                    return
+                if not written:
+                    break
+                offset += written
+            with contextlib.suppress(BrokenPipeError, OSError):
+                process.stdin.flush()
+        except (BrokenPipeError, OSError):
+            pass
+        finally:
+            with contextlib.suppress(OSError):
+                process.stdin.close()
 
     stdout_thread = threading.Thread(
         target=_drain_to_buffer,
@@ -1812,6 +1849,7 @@ def _bounded_call_communicate(
             stdout_buf,
             max_stdout,
             f"Child call stdout exceeded the maximum allowed size of {max_stdout} bytes.",
+            "stdout",
         ),
         daemon=True,
     )
@@ -1822,23 +1860,18 @@ def _bounded_call_communicate(
             stderr_buf,
             max_stderr,
             f"Child call stderr exceeded the maximum allowed size of {max_stderr} bytes.",
+            "stderr",
         ),
         daemon=True,
     )
     stdout_thread.start()
     stderr_thread.start()
 
+    stdin_thread: threading.Thread | None = None
     if stdin_bytes is not None and process.stdin is not None:
-        try:
-            process.stdin.write(stdin_bytes)
-            process.stdin.flush()
-        except (BrokenPipeError, OSError):
-            pass
-        finally:
-            with contextlib.suppress(OSError):
-                process.stdin.close()
+        stdin_thread = threading.Thread(target=_write_stdin, daemon=True)
+        stdin_thread.start()
 
-    start = time.monotonic()
     while True:
         poll_interval = 0.05
         if timeout is not None:
@@ -1855,14 +1888,29 @@ def _bounded_call_communicate(
         else:
             break
 
-    if overflow.is_set() or (timeout is not None and process.poll() is None):
-        if process.poll() is None:
-            _terminate_call_process(process)
+    def _join_io_threads() -> None:
+        if stdin_thread is not None:
+            stdin_thread.join(timeout=DRAIN_JOIN_TIMEOUT_SEC)
         stdout_thread.join(timeout=DRAIN_JOIN_TIMEOUT_SEC)
         stderr_thread.join(timeout=DRAIN_JOIN_TIMEOUT_SEC)
+
+    timed_out = _deadline_exceeded() and process.poll() is None
+    if overflow.is_set() or timed_out:
+        # Terminate BEFORE closing stdin. On a real full pipe the writer thread
+        # is blocked in write() holding the buffered-writer lock, so a parent
+        # close() would deadlock on that same lock. Killing the process group
+        # closes the child's read end first, so the blocked write() raises and
+        # releases the lock; only then can we close and join safely.
+        if process.poll() is None:
+            _terminate_call_process(process)
+        if process.stdin is not None:
+            with contextlib.suppress(OSError):
+                process.stdin.close()
+        _join_io_threads()
         if overflow.is_set():
+            stream = overflow_stream[0] or "stdout"
             raise RunnerLaunchError(
-                "call_stdout_overflow",
+                f"call_{stream}_overflow",
                 overflow_message[0],
                 1,
             )
@@ -1872,8 +1920,7 @@ def _bounded_call_communicate(
             1,
         )
 
-    stdout_thread.join(timeout=DRAIN_JOIN_TIMEOUT_SEC)
-    stderr_thread.join(timeout=DRAIN_JOIN_TIMEOUT_SEC)
+    _join_io_threads()
     return stdout_buf.getvalue(), stderr_buf.getvalue()
 
 
@@ -1933,16 +1980,27 @@ def _parse_claude_call_json(
     if not isinstance(result, dict) or not isinstance(result.get("result"), str):
         return "", 1, (), None, {"basis": "unavailable"}, "call_output_invalid", None
     denials = result.get("permission_denials")
-    if pure and isinstance(denials, list) and denials:
-        return (
-            result["result"],
-            1,
-            (),
-            _claude_model_resolved(result),
-            _claude_usage(result),
-            "pure_boundary_violation",
-            f"Pure boundary violation: {len(denials)} permission denial(s).",
-        )
+    if pure:
+        if not isinstance(denials, list):
+            return (
+                result["result"],
+                1,
+                (),
+                _claude_model_resolved(result),
+                _claude_usage(result),
+                "pure_boundary_unverified",
+                "Pure boundary unverified: permission_denials missing or malformed.",
+            )
+        if denials:
+            return (
+                result["result"],
+                1,
+                (),
+                _claude_model_resolved(result),
+                _claude_usage(result),
+                "pure_boundary_violation",
+                f"Pure boundary violation: {len(denials)} permission denial(s).",
+            )
     exit_code = 1 if result.get("is_error") is True else 0
     return (
         result["result"],
@@ -1959,7 +2017,7 @@ def _resolve_codex_auth_file(env: dict[str, str]) -> str:
     """Return the resolved real path to the codex auth.json credential.
 
     The auth file is resolved from the effective CODEX_HOME (or ~/.codex) so
-    symlinked credentials outside the real home are copied/hardlinked into the
+    symlinked credentials outside the real home are copied into the
     ephemeral home correctly.
     """
     codex_home = env.get("CODEX_HOME")
@@ -1976,12 +2034,9 @@ def _resolve_codex_auth_file(env: dict[str, str]) -> str:
     return real_auth_file
 
 
-def _copy_or_link_auth(src: str, dst: str) -> None:
-    """Copy *src* to *dst*, preferring a hardlink when the filesystem permits."""
-    try:
-        os.link(src, dst)
-    except OSError:
-        shutil.copy2(src, dst)
+def _copy_auth(src: str, dst: str) -> None:
+    """Copy *src* to *dst* as a private file. Never hardlink (avoids inode aliasing)."""
+    shutil.copy2(src, dst)
     os.chmod(dst, 0o600)
 
 
@@ -2026,7 +2081,7 @@ def execute_call(
             ephemeral_codex_home = tempfile.mkdtemp(prefix="delegate-codex-pure-")
             os.chmod(ephemeral_codex_home, 0o700)
             ephemeral_auth_file = os.path.join(ephemeral_codex_home, "auth.json")
-            _copy_or_link_auth(real_auth_file, ephemeral_auth_file)
+            _copy_auth(real_auth_file, ephemeral_auth_file)
             env["CODEX_HOME"] = ephemeral_codex_home
 
             extra_read_roots: list[str] = []

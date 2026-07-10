@@ -11,7 +11,7 @@ read-only flag sets. Preserve those branches exactly.
 
 from __future__ import annotations
 
-from delegate_agent import reasoning, seatbelt
+from delegate_agent import reasoning
 from delegate_agent.constants import MODE_CALL, MODE_SAFE, MODE_WORK, validate_mode
 from delegate_agent.errors import DelegateError
 from delegate_agent.json_types import JsonObject
@@ -434,7 +434,7 @@ def build_opencode_argv(
     call_read_only: bool = False,
     pure: bool = False,
 ) -> list[str]:
-    _reject_pure("opencode", mode, pure, supported=True)
+    _reject_pure("opencode", mode, pure)
     read_only = mode == MODE_SAFE or (mode == MODE_CALL and (call_read_only or pure))
     argv = [str(opencode["binary"])]
     if read_only:
@@ -470,7 +470,7 @@ def build_codex_argv(
     call_read_only: bool = False,
     pure: bool = False,
 ) -> list[str]:
-    _reject_pure("codex", mode, pure, supported=seatbelt.codex_pure_available())
+    _reject_pure("codex", mode, pure)
     binary = str(codex["binary"])
     if pure:
         argv = [binary]

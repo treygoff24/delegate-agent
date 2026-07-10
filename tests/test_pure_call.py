@@ -43,24 +43,19 @@ class PureCallTests(CommandTestBase):
         self.assertNotIn("--permission-mode", argv)
         self.assertNotIn("--bare", argv)
 
-    def test_opencode_pure_keeps_binary_pure_and_denies_every_tool(self):
-        request = self.delegate.build_request(
-            "opencode",
-            "call",
-            None,
-            self.delegate.ResolvedWorkspace("/tmp/empty", "directory"),
-            "hostile prompt",
-            self.delegate.DEFAULT_CONFIG,
-            True,
-            pure=True,
-        )
-        self.assertIn("--pure", request.argv)
-        self.assertNotIn("hostile prompt", request.argv)
-        permissions = json.loads(request.env_overrides["OPENCODE_PERMISSION"])
-        self.assertTrue(permissions)
-        self.assertEqual(set(permissions.values()), {"deny"})
-        for tool in ("read", "glob", "grep", "edit", "bash", "task", "webfetch"):
-            self.assertEqual(permissions[tool], "deny")
+    def test_opencode_pure_is_rejected(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.build_request(
+                "opencode",
+                "call",
+                None,
+                self.delegate.ResolvedWorkspace("/tmp/empty", "directory"),
+                "hostile prompt",
+                self.delegate.DEFAULT_CONFIG,
+                True,
+                pure=True,
+            )
+        self.assertEqual(ctx.exception.error, "unsupported_pure_call")
 
     def test_call_pure_prompt_uses_stdin_not_argv(self):
         prompt = "HOSTILE_PROMPT_SENTINEL"
@@ -176,11 +171,9 @@ class PureCallTests(CommandTestBase):
             )
         self.assertEqual(ctx.exception.error, "unsupported_pure_call")
 
-    def test_codex_pure_argv_suppresses_ambient_config_and_rules(self):
-        with mock.patch(
-            "delegate_agent.argv_builders.seatbelt.codex_pure_available", return_value=True
-        ):
-            argv = self.delegate.build_codex_argv(
+    def test_codex_pure_is_rejected(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.build_codex_argv(
                 self.delegate.DEFAULT_CONFIG["codex"],
                 "call",
                 "/tmp/call",
@@ -190,14 +183,7 @@ class PureCallTests(CommandTestBase):
                 workspace_kind="directory",
                 pure=True,
             )
-        self.assertIn("--ignore-user-config", argv)
-        self.assertIn("--ignore-rules", argv)
-        self.assertIn("--skip-git-repo-check", argv)
-        self.assertEqual(argv[argv.index("--sandbox") + 1], "read-only")
-        self.assertEqual(argv[-1], "-")
-        self.assertNotIn("answer", argv)
-        self.assertNotIn("--profile", argv)
-        self.assertNotIn("--ask-for-approval", argv)
+        self.assertEqual(ctx.exception.error, "unsupported_pure_call")
 
     def test_call_json_reports_resolved_model_and_usage_basis(self):
         event = [
@@ -228,7 +214,14 @@ class PureCallTests(CommandTestBase):
         self.assertEqual(result.message, "Pure boundary violation: 1 permission denial(s).")
         self.assertEqual(result.warnings, ())
 
-        no_usage = [{"type": "result", "result": "ok", "is_error": False}]
+        no_usage = [
+            {
+                "type": "result",
+                "result": "ok",
+                "is_error": False,
+                "permission_denials": [],
+            }
+        ]
         with tempfile.TemporaryDirectory() as tmp:
             script = Path(tmp) / "claude_no_usage.py"
             script.write_text(f"print({json.dumps(json.dumps(no_usage))})\n", encoding="utf-8")
@@ -236,6 +229,48 @@ class PureCallTests(CommandTestBase):
                 [sys.executable, str(script)], tmp, harness="claude", pure=True
             )
         self.assertEqual(result.usage, {"basis": "unavailable"})
+        self.assertEqual(result.exit_code, 0)
+        self.assertIsNone(result.error)
+
+    def test_pure_tripwire_requires_permission_denials_list(self):
+        cases = (
+            (
+                [{"type": "result", "result": "ok", "is_error": False}],
+                "pure_boundary_unverified",
+            ),
+            (
+                [
+                    {
+                        "type": "result",
+                        "result": "ok",
+                        "is_error": False,
+                        "permission_denials": None,
+                    }
+                ],
+                "pure_boundary_unverified",
+            ),
+            (
+                [
+                    {
+                        "type": "result",
+                        "result": "ok",
+                        "is_error": False,
+                        "permission_denials": {"tool": "Bash"},
+                    }
+                ],
+                "pure_boundary_unverified",
+            ),
+        )
+        for events, error in cases:
+            with self.subTest(events=events), tempfile.TemporaryDirectory() as tmp:
+                script = Path(tmp) / "claude_tripwire.py"
+                script.write_text(f"print({json.dumps(json.dumps(events))})\n", encoding="utf-8")
+                result = self.delegate.delegate_runner.execute_call(
+                    [sys.executable, str(script)], tmp, harness="claude", pure=True
+                )
+                self.assertEqual(result.exit_code, 1)
+                self.assertEqual(result.error, error)
+                self.assertIn("permission_denials", result.message or "")
 
     def test_call_envelope_reports_pure_schema_model_and_usage(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -339,6 +374,157 @@ class PureCallTests(CommandTestBase):
                 time.sleep(0.05)
             else:
                 self.fail(f"process-group child {pid} survived timeout")
+
+    def test_call_timeout_covers_blocked_stdin_write(self):
+        import subprocess
+        import threading
+
+        runner = self.delegate.delegate_runner
+
+        class BlockingStdin:
+            def __init__(self) -> None:
+                self.closed = False
+                self.write_started = threading.Event()
+
+            def write(self, data: bytes) -> int:
+                self.write_started.set()
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    if self.closed:
+                        raise BrokenPipeError()
+                    time.sleep(0.05)
+                return len(data)
+
+            def flush(self) -> None:
+                return None
+
+            def close(self) -> None:
+                self.closed = True
+
+        class EmptyPipe:
+            def read(self, _size: int = -1) -> bytes:
+                time.sleep(0.05)
+                return b""
+
+            def close(self) -> None:
+                return None
+
+        stdin = BlockingStdin()
+        process = mock.Mock()
+        process.stdin = stdin
+        process.stdout = EmptyPipe()
+        process.stderr = EmptyPipe()
+        process.poll = mock.Mock(return_value=None)
+        process.wait = mock.Mock(side_effect=subprocess.TimeoutExpired(cmd="x", timeout=0.05))
+
+        started = time.monotonic()
+        with (
+            mock.patch.object(runner, "_terminate_call_process") as terminate,
+            self.assertRaises(runner.RunnerLaunchError) as ctx,
+        ):
+            runner._bounded_call_communicate(
+                process,
+                b"x" * 1024,
+                timeout=1,
+                max_stdout=1024,
+                max_stderr=1024,
+            )
+        elapsed = time.monotonic() - started
+        self.assertEqual(ctx.exception.error, "call_timeout")
+        self.assertTrue(stdin.write_started.wait(timeout=1))
+        self.assertTrue(stdin.closed)
+        terminate.assert_called_once_with(process)
+        self.assertLess(elapsed, 3.0)
+
+    def test_call_timeout_covers_real_full_pipe(self):
+        # Regression for the close-before-terminate deadlock: a real child that
+        # never reads stdin, fed a payload larger than the pipe buffer. The
+        # cooperative BlockingStdin fake above cannot catch this because a real
+        # buffered writer's close() contends with the blocked write() lock.
+        import subprocess
+
+        runner = self.delegate.delegate_runner
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,  # so termination hits the child's group, not ours
+        )
+        self.addCleanup(lambda: process.poll() is None and process.kill())
+        started = time.monotonic()
+        with self.assertRaises(runner.RunnerLaunchError) as ctx:
+            runner._bounded_call_communicate(
+                process,
+                b"x" * (1024 * 1024),
+                timeout=1,
+                max_stdout=1024,
+                max_stderr=1024,
+            )
+        elapsed = time.monotonic() - started
+        self.assertEqual(ctx.exception.error, "call_timeout")
+        # Without the fix this hangs on the full pipe far past the deadline.
+        self.assertLess(elapsed, 8.0)
+        # The child was terminated as part of the timeout path.
+        self.assertIsNotNone(process.poll())
+
+    def test_copy_auth_is_private_copy_not_hardlink(self):
+        runner = self.delegate.delegate_runner
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "auth.json"
+            dst = Path(tmp) / "ephemeral" / "auth.json"
+            dst.parent.mkdir()
+            src.write_text('{"token":"secret"}', encoding="utf-8")
+            runner._copy_auth(str(src), str(dst))
+            self.assertNotEqual(src.stat().st_ino, dst.stat().st_ino)
+            dst.write_text('{"token":"mutated"}', encoding="utf-8")
+            self.assertEqual(src.read_text(encoding="utf-8"), '{"token":"secret"}')
+
+    def test_call_stderr_overflow_uses_distinct_error(self):
+        import subprocess
+
+        runner = self.delegate.delegate_runner
+
+        class GrowingStderr:
+            def __init__(self) -> None:
+                self._sent = False
+
+            def read(self, _size: int = -1) -> bytes:
+                if self._sent:
+                    return b""
+                self._sent = True
+                return b"e" * 64
+
+            def close(self) -> None:
+                return None
+
+        class EmptyStdout:
+            def read(self, _size: int = -1) -> bytes:
+                return b""
+
+            def close(self) -> None:
+                return None
+
+        process = mock.Mock()
+        process.stdin = None
+        process.stdout = EmptyStdout()
+        process.stderr = GrowingStderr()
+        process.poll = mock.Mock(return_value=None)
+        process.wait = mock.Mock(side_effect=subprocess.TimeoutExpired(cmd="x", timeout=0.05))
+
+        with (
+            mock.patch.object(runner, "_terminate_call_process"),
+            self.assertRaises(runner.RunnerLaunchError) as ctx,
+        ):
+            runner._bounded_call_communicate(
+                process,
+                None,
+                timeout=2,
+                max_stdout=1024,
+                max_stderr=16,
+            )
+        self.assertEqual(ctx.exception.error, "call_stderr_overflow")
+        self.assertIn("stderr", ctx.exception.message)
 
     def test_call_timeout_main_returns_stable_json_error(self):
         temp = tempfile.TemporaryDirectory()

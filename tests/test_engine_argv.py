@@ -1053,11 +1053,12 @@ class EngineArgvTests(CommandTestBase):
         payload = self.delegate.describe_payload(self.delegate.DEFAULT_CONFIG, "embedded-default")
         self.assertIn("promptTransforms", payload)
         self.assertTrue(payload["engineCapabilities"]["codex"]["outputSchema"])
+        self.assertTrue(payload["engineCapabilities"]["claude"]["outputSchema"])
         self.assertEqual(payload["engineDefaults"]["devin"]["binary"], "devin")
         self.assertEqual(payload["engineDefaults"]["devin"]["defaultModel"], "swe-1.7")
         self.assertEqual(payload["engineDefaults"]["opencode"]["binary"], "opencode")
         self.assertIsNone(payload["engineDefaults"]["opencode"]["defaultAgent"])
-        for engine in ("cursor", "droid", "kimi", "claude", "grok", "devin", "opencode"):
+        for engine in ("cursor", "droid", "kimi", "grok", "devin", "opencode"):
             with self.subTest(engine=engine):
                 self.assertFalse(payload["engineCapabilities"][engine]["outputSchema"])
         self.assertIn("skill review", payload["promptTransforms"][0])

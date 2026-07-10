@@ -7,7 +7,6 @@ importing ``cli``.
 
 from __future__ import annotations
 
-from delegate_agent import seatbelt
 from delegate_agent.errors import DelegateError
 
 MODE_SAFE = "safe"
@@ -25,9 +24,9 @@ ENGINES_PROSE = f"{', '.join(KNOWN_ENGINES[:-1])}, or {KNOWN_ENGINES[-1]}"
 
 
 def pure_call_supported(engine: str) -> bool:
-    return engine in {"claude", "opencode"} or (
-        engine == "codex" and seatbelt.codex_pure_available()
-    )
+    # Claude-only for dogfood. Codex/OpenCode remain ineligible until their
+    # boundaries meet the hostile-input contract (credential transport / tripwire).
+    return engine == "claude"
 
 
 # Public harness capability contract. Request validation and describe output both
@@ -39,6 +38,7 @@ ENGINE_CAPABILITIES = {
         "structuredOutput": engine in {"codex", "claude"},
         "noSessionPersistence": engine in {"codex", "claude"},
         "usageEvents": engine == "claude",
+        # OpenCode uses stdin for all modes (not pure-only); keep the capability.
         "promptStdin": engine in {"codex", "claude", "opencode"},
     }
     for engine in KNOWN_ENGINES

@@ -132,13 +132,24 @@ def _launch_options() -> list[str]:
 def _call_help_spec(spec: command_help.CommandSpec) -> command_help.CommandSpec:
     if spec.name not in KNOWN_ENGINES and spec.name != "dry-run":
         return spec
-    usage = tuple(
-        line.replace(
-            " call [--read-only]",
-            " call [--read-only] [--pure] [--timeout SECONDS]",
+
+    def _augment_call_usage(line: str) -> str:
+        if " call [--read-only]" not in line:
+            return line
+        advertise_pure = (
+            "claude call" in line if spec.name == "dry-run" else pure_call_supported(spec.name)
         )
-        for line in spec.usage
-    )
+        if advertise_pure:
+            return line.replace(
+                " call [--read-only]",
+                " call [--read-only] [--pure] [--timeout SECONDS]",
+            )
+        return line.replace(
+            " call [--read-only]",
+            " call [--read-only] [--timeout SECONDS]",
+        )
+
+    usage = tuple(_augment_call_usage(line) for line in spec.usage)
     if spec.name == "claude":
         usage = tuple(
             line.replace(
@@ -158,24 +169,42 @@ def _call_help_spec(spec: command_help.CommandSpec) -> command_help.CommandSpec:
                 "Call mode only: JSON Schema passed inline to Claude Code for the final response.",
             )
         )
-    options.extend(
-        [
-            command_help.OptionSpec(
-                "--pure", None, "Call mode only: use the engine's pure completion boundary."
-            ),
-            command_help.OptionSpec(
-                "--timeout", "SECONDS", "Call mode only: positive process timeout in seconds."
-            ),
-        ]
+    advertise_pure_option = (
+        any(pure_call_supported(engine) for engine in KNOWN_ENGINES)
+        if spec.name == "dry-run"
+        else pure_call_supported(spec.name)
+    )
+    if advertise_pure_option:
+        pure_desc = (
+            "Call mode only (Claude only): use the engine's pure completion boundary."
+            if spec.name == "dry-run"
+            else "Call mode only: use the engine's pure completion boundary."
+        )
+        options.append(command_help.OptionSpec("--pure", None, pure_desc))
+    options.append(
+        command_help.OptionSpec(
+            "--timeout", "SECONDS", "Call mode only: positive process timeout in seconds."
+        )
     )
     return replace(spec, usage=usage, options=tuple(options))
 
 
 def _call_overview_text() -> str:
-    text = command_help.render_overview_text().replace(
-        " call [--read-only]",
-        " call [--read-only] [--pure] [--timeout SECONDS]",
-    )
+    lines: list[str] = []
+    for line in command_help.render_overview_text().splitlines(keepends=True):
+        if " call [--read-only]" in line:
+            if "claude call" in line:
+                line = line.replace(
+                    " call [--read-only]",
+                    " call [--read-only] [--pure] [--timeout SECONDS]",
+                )
+            else:
+                line = line.replace(
+                    " call [--read-only]",
+                    " call [--read-only] [--timeout SECONDS]",
+                )
+        lines.append(line)
+    text = "".join(lines)
     return text.replace(
         "claude call [--read-only] [--pure] [--timeout SECONDS] "
         "[--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH]",
@@ -595,7 +624,9 @@ def _policy_field_support_matrix() -> JsonObject:
 def _engine_capabilities() -> JsonObject:
     return {
         engine: {
-            "outputSchema": engine == "codex",
+            # Legacy alias for structuredOutput; derive it so the two keys can
+            # never contradict (was hard-coded codex-only, wrong for Claude).
+            "outputSchema": ENGINE_CAPABILITIES[engine]["structuredOutput"],
             "fast": engine == "codex",
             **ENGINE_CAPABILITIES[engine],
             "pureCall": pure_call_supported(engine),
