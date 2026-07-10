@@ -242,6 +242,49 @@ class ParserTests(unittest.TestCase):
             self.delegate.parse_cli(["codex", "safe", "--output-schema"])
         self.assertEqual(ctx.exception.error, "missing_output_schema")
 
+    def test_pure_and_timeout_parse_for_supported_call_engines(self):
+        for engine in ("claude", "opencode"):
+            with self.subTest(engine=engine):
+                parsed = self.delegate.parse_cli(
+                    [engine, "call", "--pure", "--timeout", "12", "answer this"]
+                )
+                self.assertTrue(parsed.launch.pure)
+                self.assertEqual(parsed.launch.timeout, 12)
+
+    def test_pure_rejects_non_call_conflict_and_unsupported_engine(self):
+        cases = (
+            (["claude", "safe", "--pure", "x"], "unsupported_pure_call"),
+            (
+                ["claude", "call", "--pure", "--read-only", "x"],
+                "pure_conflicts_read_only",
+            ),
+            (
+                ["--group", "g", "claude", "call", "--pure", "x"],
+                "pure_conflicts_group",
+            ),
+            (["codex", "call", "--pure", "x"], "unsupported_pure_call"),
+        )
+        for argv, error in cases:
+            with self.subTest(argv=argv), self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.delegate.parse_cli(argv)
+            self.assertEqual(ctx.exception.error, error)
+        self.assertTrue(ctx.exception.next_actions)
+        self.assertIn("claude", ctx.exception.next_actions[0])
+        self.assertIn("opencode", ctx.exception.next_actions[0])
+
+    def test_timeout_is_positive_integer_and_call_only(self):
+        invalid = (
+            (["claude", "call", "--timeout", "0", "x"], "invalid_timeout"),
+            (["claude", "call", "--timeout", "-1", "x"], "invalid_timeout"),
+            (["claude", "call", "--timeout", "1.5", "x"], "invalid_timeout"),
+            (["claude", "call", "--timeout"], "missing_timeout"),
+            (["claude", "safe", "--timeout", "1", "x"], "invalid_option_combination"),
+        )
+        for argv, error in invalid:
+            with self.subTest(argv=argv), self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.delegate.parse_cli(argv)
+            self.assertEqual(ctx.exception.error, error)
+
     def test_prompt_file_after_prompt_text_is_rejected(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:
             self.delegate.parse_cli(["cursor", "safe", "hello", "--prompt-file", "task.md"])
@@ -1061,6 +1104,8 @@ class ParserTests(unittest.TestCase):
     def test_run_input_keys_contains_isolation(self):
         self.assertIn("isolation", self.delegate.RUN_INPUT_KEYS)
         self.assertIn("progress", self.delegate.RUN_INPUT_KEYS)
+        self.assertIn("pure", self.delegate.RUN_INPUT_KEYS)
+        self.assertIn("timeout", self.delegate.RUN_INPUT_KEYS)
 
     def test_run_input_json_unknown_key_still_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1425,6 +1470,54 @@ class ParserTests(unittest.TestCase):
             self.assertEqual(request.mode, "work")
             self.assertEqual(request.model, "claude-opus-4-8")
             self.assertIn("claude-opus-4-8", request.argv)
+
+    def test_call_run_input_json_pure_and_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "task.json"
+            task.write_text(
+                json.dumps(
+                    {
+                        "engine": "claude",
+                        "mode": "call",
+                        "prompt": "hello",
+                        "pure": True,
+                        "timeout": 12,
+                    }
+                )
+            )
+            parsed = self.delegate.ParsedCommand(
+                "run",
+                global_options=self.delegate.GlobalOptions(json_mode=True),
+                run_json=self.delegate.RunJsonOptions(str(task)),
+            )
+            request = self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+            self.assertTrue(request.pure)
+            self.assertEqual(request.timeout, 12)
+
+    def test_call_run_input_json_pure_rejects_group(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "task.json"
+            task.write_text(
+                json.dumps(
+                    {
+                        "engine": "claude",
+                        "mode": "call",
+                        "prompt": "hello",
+                        "pure": True,
+                    }
+                )
+            )
+            parsed = self.delegate.ParsedCommand(
+                "run",
+                global_options=self.delegate.GlobalOptions(
+                    json_mode=True,
+                    group="g",
+                ),
+                run_json=self.delegate.RunJsonOptions(str(task)),
+            )
+            with self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+            self.assertEqual(ctx.exception.error, "pure_conflicts_group")
 
     def test_run_input_json_workspace_config_resolves_isolation(self):
         with tempfile.TemporaryDirectory() as tmp:

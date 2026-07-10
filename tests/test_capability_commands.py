@@ -175,6 +175,18 @@ class CapabilityCommandTests(unittest.TestCase):
         self.assertIn("--pure", describe["modeMapping"]["opencode"]["safe"])
         self.assertNotIn("--auto", describe["modeMapping"]["opencode"]["safe"])
         self.assertIn("--auto", describe["modeMapping"]["opencode"]["work"])
+        capabilities = describe["engineCapabilities"]
+        self.assertTrue(capabilities["claude"]["pureCall"])
+        self.assertTrue(capabilities["opencode"]["pureCall"])
+        self.assertFalse(capabilities["codex"]["pureCall"])
+        self.assertTrue(capabilities["claude"]["pureTripwire"])
+        self.assertFalse(capabilities["opencode"]["pureTripwire"])
+        self.assertFalse(capabilities["codex"]["pureTripwire"])
+        self.assertTrue(capabilities["claude"]["structuredOutput"])
+        self.assertTrue(capabilities["codex"]["structuredOutput"])
+        self.assertTrue(capabilities["claude"]["usageEvents"])
+        self.assertTrue(capabilities["claude"]["promptStdin"])
+        self.assertTrue(capabilities["opencode"]["promptStdin"])
 
         summary = models_summary_payload(config, "test-config")
         by_provider_alias = {(item["provider"], item["alias"]): item for item in summary["aliases"]}

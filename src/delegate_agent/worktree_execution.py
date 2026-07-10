@@ -9,7 +9,7 @@ from typing import Protocol, TextIO
 
 from delegate_agent import harness_events, profiles, retention, run_registry, safe_workspace
 from delegate_agent import runner as delegate_runner
-from delegate_agent.argv_utils import replace_workspace_arg_in_argv
+from delegate_agent.argv_utils import public_argv, replace_workspace_arg_in_argv
 from delegate_agent.git_utils import (
     GIT_MUTATION_TIMEOUT_SECONDS,
     GIT_QUICK_TIMEOUT_SECONDS,
@@ -579,7 +579,7 @@ def _launch_child_in_persistent_worktree(
 
 
 def _public_argv(request: PersistentExecutionRequest) -> list[str]:
-    return list(request.display_argv if request.display_argv is not None else request.argv)
+    return public_argv(request)
 
 
 def _cleanup_partial_worktree(

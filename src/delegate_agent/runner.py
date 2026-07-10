@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import contextlib
+import io
 import json
 import math
 import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import tempfile
 import threading
@@ -43,6 +45,8 @@ PROGRESS_PERSIST_LINE_INTERVAL = 10
 PROGRESS_PERSIST_TIME_INTERVAL_SEC = 0.5
 DRAIN_JOIN_TIMEOUT_SEC = 5.0
 MILLISECONDS_PER_SECOND = 1000
+CALL_STDOUT_MAX_BYTES = 16 * 1024 * 1024
+CALL_STDERR_MAX_BYTES = 16 * 1024 * 1024
 PROGRESS_INITIAL_DELAY_SEC = delegate_config.default_progress_initial_delay_sec()
 PROGRESS_HEARTBEAT_INTERVAL_SEC = delegate_config.default_progress_interval_sec()
 PROGRESS_INITIAL_DELAY_ENV = "DELEGATE_PROGRESS_INITIAL_DELAY_SEC"
@@ -84,10 +88,11 @@ def _bounded_call_fallback_text(text: str) -> str:
 
 
 class RunnerLaunchError(RuntimeError):
-    def __init__(self, error: str, message: str) -> None:
+    def __init__(self, error: str, message: str, exit_code: int = 2) -> None:
         super().__init__(message)
         self.error = error
         self.message = message
+        self.exit_code = exit_code
 
 
 @dataclass(frozen=True)
@@ -996,6 +1001,10 @@ class CallResult:
     text_truncated: bool
     stderr_tail: str = ""
     warnings: tuple[str, ...] = ()
+    error: str | None = None
+    message: str | None = None
+    model_resolved: str | None = None
+    usage: JsonObject = field(default_factory=lambda: {"basis": "unavailable"})
 
 
 @dataclass(frozen=True)
@@ -1740,6 +1749,211 @@ def execute_tracked(
     return _tracked_result(ctx, capture, finalization, json_mode=json_mode, stdout=stdout)
 
 
+def _kill_process_group(process: subprocess.Popen[bytes], sig: signal.Signals) -> None:
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(process.pid, sig)
+
+
+def _terminate_call_process(process: subprocess.Popen[bytes]) -> None:
+    """Send SIGTERM, wait for graceful exit, then SIGKILL if needed."""
+    _kill_process_group(process, signal.SIGTERM)
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        _kill_process_group(process, signal.SIGKILL)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=5)
+
+
+def _bounded_call_communicate(
+    process: subprocess.Popen[bytes],
+    stdin_bytes: bytes | None,
+    timeout: int | None,
+    max_stdout: int,
+    max_stderr: int,
+) -> tuple[bytes, bytes]:
+    """Read child stdout/stderr under fixed byte caps; kill on overflow or timeout."""
+    stdout_buf = io.BytesIO()
+    stderr_buf = io.BytesIO()
+    overflow = threading.Event()
+    overflow_message: list[str] = [""]
+
+    def _drain_to_buffer(
+        pipe: BinaryIO,
+        buf: io.BytesIO,
+        limit: int,
+        message: str,
+    ) -> None:
+        try:
+            while not overflow.is_set():
+                chunk = pipe.read(65536)
+                if not chunk:
+                    break
+                available = limit - buf.tell()
+                if available <= 0:
+                    overflow_message[0] = message
+                    overflow.set()
+                    break
+                if len(chunk) > available:
+                    buf.write(chunk[:available])
+                    overflow_message[0] = message
+                    overflow.set()
+                    break
+                buf.write(chunk)
+        finally:
+            with contextlib.suppress(OSError):
+                pipe.close()
+
+    stdout_thread = threading.Thread(
+        target=_drain_to_buffer,
+        args=(
+            process.stdout,
+            stdout_buf,
+            max_stdout,
+            f"Child call stdout exceeded the maximum allowed size of {max_stdout} bytes.",
+        ),
+        daemon=True,
+    )
+    stderr_thread = threading.Thread(
+        target=_drain_to_buffer,
+        args=(
+            process.stderr,
+            stderr_buf,
+            max_stderr,
+            f"Child call stderr exceeded the maximum allowed size of {max_stderr} bytes.",
+        ),
+        daemon=True,
+    )
+    stdout_thread.start()
+    stderr_thread.start()
+
+    if stdin_bytes is not None and process.stdin is not None:
+        try:
+            process.stdin.write(stdin_bytes)
+            process.stdin.flush()
+        except (BrokenPipeError, OSError):
+            pass
+        finally:
+            with contextlib.suppress(OSError):
+                process.stdin.close()
+
+    start = time.monotonic()
+    while True:
+        poll_interval = 0.05
+        if timeout is not None:
+            remaining = timeout - (time.monotonic() - start)
+            if remaining <= 0:
+                break
+            poll_interval = min(poll_interval, remaining)
+        try:
+            process.wait(timeout=poll_interval)
+        except subprocess.TimeoutExpired:
+            if overflow.is_set():
+                break
+            continue
+        else:
+            break
+
+    if overflow.is_set() or (timeout is not None and process.poll() is None):
+        if process.poll() is None:
+            _terminate_call_process(process)
+        stdout_thread.join(timeout=DRAIN_JOIN_TIMEOUT_SEC)
+        stderr_thread.join(timeout=DRAIN_JOIN_TIMEOUT_SEC)
+        if overflow.is_set():
+            raise RunnerLaunchError(
+                "call_stdout_overflow",
+                overflow_message[0],
+                1,
+            )
+        raise RunnerLaunchError(
+            "call_timeout",
+            f"Child call exceeded timeout of {timeout} seconds.",
+            1,
+        )
+
+    stdout_thread.join(timeout=DRAIN_JOIN_TIMEOUT_SEC)
+    stderr_thread.join(timeout=DRAIN_JOIN_TIMEOUT_SEC)
+    return stdout_buf.getvalue(), stderr_buf.getvalue()
+
+
+def _call_stderr_tail(data: bytes, sensitive_texts: tuple[str, ...]) -> str:
+    tail = data.decode("utf-8", errors="replace")
+    for value in sensitive_texts:
+        if value:
+            tail = tail.replace(value, "[REDACTED]")
+    return redaction.redact_string(tail)[-profiles.STDERR_TAIL_LIMIT :]
+
+
+def _claude_model_resolved(event: JsonObject) -> str | None:
+    model_usage = event.get("modelUsage")
+    if not isinstance(model_usage, dict):
+        return None
+    candidates: list[tuple[int, str]] = []
+    for model, values in model_usage.items():
+        if not isinstance(model, str) or not isinstance(values, dict):
+            continue
+        output_tokens = values.get("outputTokens")
+        if isinstance(output_tokens, int) and not isinstance(output_tokens, bool):
+            candidates.append((output_tokens, model))
+    return max(candidates)[1] if candidates else None
+
+
+def _claude_usage(event: JsonObject) -> JsonObject:
+    usage = event.get("usage")
+    if not isinstance(usage, dict):
+        return {"basis": "unavailable"}
+    input_tokens = usage.get("input_tokens")
+    output_tokens = usage.get("output_tokens")
+    if not all(
+        isinstance(value, int) and not isinstance(value, bool)
+        for value in (input_tokens, output_tokens)
+    ):
+        return {"basis": "unavailable"}
+    return {"inputTokens": input_tokens, "outputTokens": output_tokens, "basis": "exact"}
+
+
+def _parse_claude_call_json(
+    stdout_text: str, *, pure: bool
+) -> tuple[str, int, tuple[str, ...], str | None, JsonObject, str | None, str | None]:
+    try:
+        events = json.loads(stdout_text)
+    except json.JSONDecodeError:
+        return "", 1, (), None, {"basis": "unavailable"}, "call_output_invalid", None
+    if not isinstance(events, list):
+        return "", 1, (), None, {"basis": "unavailable"}, "call_output_invalid", None
+    result = next(
+        (
+            event
+            for event in reversed(events)
+            if isinstance(event, dict) and event.get("type") == "result"
+        ),
+        None,
+    )
+    if not isinstance(result, dict) or not isinstance(result.get("result"), str):
+        return "", 1, (), None, {"basis": "unavailable"}, "call_output_invalid", None
+    denials = result.get("permission_denials")
+    if pure and isinstance(denials, list) and denials:
+        return (
+            result["result"],
+            1,
+            (),
+            _claude_model_resolved(result),
+            _claude_usage(result),
+            "pure_boundary_violation",
+            f"Pure boundary violation: {len(denials)} permission denial(s).",
+        )
+    exit_code = 1 if result.get("is_error") is True else 0
+    return (
+        result["result"],
+        exit_code,
+        (),
+        _claude_model_resolved(result),
+        _claude_usage(result),
+        "child_failed" if exit_code else None,
+        None,
+    )
+
+
 def execute_call(
     argv: list[str],
     cwd: str,
@@ -1751,6 +1965,10 @@ def execute_call(
     agent_config_text: str | None = None,
     agent_config_placeholder: str | None = None,
     env_overrides: dict[str, str] | None = None,
+    pure: bool = False,
+    timeout: int | None = None,
+    structured_output: bool = False,
+    sensitive_texts: tuple[str, ...] = (),
 ) -> CallResult:
     """Run a one-shot stateless model call and return parsed assistant text."""
     if stdin_text is not None and prompt_file_text is not None:
@@ -1762,34 +1980,58 @@ def execute_call(
         agent_config_text=agent_config_text,
         agent_config_placeholder=agent_config_placeholder,
     )
-    env = profiles.child_environment(overrides=env_overrides)
+    env = profiles.child_environment(overrides=env_overrides, pure=pure)
     started = time.monotonic()
     try:
         try:
-            run_kwargs: dict[str, object] = {
+            popen_kwargs: dict[str, object] = {
                 "cwd": cwd,
                 "env": env,
+                "stdin": subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
                 "stdout": subprocess.PIPE,
                 "stderr": subprocess.PIPE,
-                "check": False,
+                "start_new_session": True,
             }
-            if stdin_text is None:
-                run_kwargs["stdin"] = subprocess.DEVNULL
-            else:
-                run_kwargs["input"] = stdin_text.encode("utf-8")
-            completed = subprocess.run(  # nosec B603 - Delegate intentionally launches validated harness argv with shell=False.
+            process = subprocess.Popen(  # nosec B603 - Delegate intentionally launches validated harness argv with shell=False.
                 launch_argv,
-                **run_kwargs,
+                **popen_kwargs,
+            )
+            stdout_data, stderr_data = _bounded_call_communicate(
+                process,
+                stdin_text.encode("utf-8") if stdin_text is not None else None,
+                timeout,
+                CALL_STDOUT_MAX_BYTES,
+                CALL_STDERR_MAX_BYTES,
             )
         except OSError as exc:
             raise _runner_launch_error(launch_argv, cwd, exc) from exc
     finally:
         _cleanup_prompt_file_dir(prompt_temp_dir)
 
-    stdout_bytes = len(completed.stdout or b"")
-    stderr_bytes = len(completed.stderr or b"")
-    stdout_text = (completed.stdout or b"").decode("utf-8", errors="replace")
-    stderr_tail = _redacted_tail_from_bytes(completed.stderr or b"")
+    stdout_bytes = len(stdout_data or b"")
+    stderr_bytes = len(stderr_data or b"")
+    stdout_text = (stdout_data or b"").decode("utf-8", errors="replace")
+    stderr_tail = _call_stderr_tail(stderr_data or b"", sensitive_texts)
+    if harness == "claude" and (pure or structured_output):
+        raw_text, parsed_exit, warnings, model_resolved, usage, error, message = (
+            _parse_claude_call_json(stdout_text, pure=pure)
+        )
+        text = _bounded_call_fallback_text(raw_text)
+        return CallResult(
+            text=text,
+            exit_code=parsed_exit if process.returncode == 0 else process.returncode,
+            duration_ms=int((time.monotonic() - started) * MILLISECONDS_PER_SECOND),
+            stdout_bytes=stdout_bytes,
+            stderr_bytes=stderr_bytes,
+            text_chars=len(raw_text),
+            text_truncated=len(raw_text) > harness_events.ASSISTANT_TEXT_LIMIT,
+            stderr_tail=stderr_tail,
+            warnings=warnings,
+            error=error,
+            message=message,
+            model_resolved=model_resolved,
+            usage=usage,
+        )
     accumulator = harness_events.StreamAccumulator(harness=harness)
     for line in stdout_text.splitlines():
         accumulator.ingest_line(line)
@@ -1813,7 +2055,7 @@ def execute_call(
         text_truncated = len(raw) > harness_events.ASSISTANT_TEXT_LIMIT
     return CallResult(
         text=text,
-        exit_code=completed.returncode,
+        exit_code=process.returncode,
         duration_ms=int((time.monotonic() - started) * MILLISECONDS_PER_SECOND),
         stdout_bytes=stdout_bytes,
         stderr_bytes=stderr_bytes,

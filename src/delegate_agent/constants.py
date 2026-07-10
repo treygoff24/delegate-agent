@@ -22,6 +22,23 @@ KNOWN_ENGINES = ("cursor", "droid", "codex", "kimi", "claude", "grok", "devin", 
 # "<engine>, ..., or <engine>" — for error messages and help text.
 ENGINES_PROSE = f"{', '.join(KNOWN_ENGINES[:-1])}, or {KNOWN_ENGINES[-1]}"
 
+# Public harness capability contract. Request validation and describe output both
+# derive from this map so enabling a capability cannot drift between the two.
+ENGINE_CAPABILITIES = {
+    engine: {
+        "pureCall": engine in {"claude", "opencode"},
+        "pureTripwire": engine == "claude",
+        "structuredOutput": engine in {"codex", "claude"},
+        "noSessionPersistence": engine in {"codex", "claude"},
+        "usageEvents": engine == "claude",
+        "promptStdin": engine in {"codex", "claude", "opencode"},
+    }
+    for engine in KNOWN_ENGINES
+}
+PURE_CALL_ENGINES = tuple(
+    engine for engine in KNOWN_ENGINES if ENGINE_CAPABILITIES[engine]["pureCall"]
+)
+
 # Engines launched without a model-alias positional argument.
 MODELESS_ENGINES = tuple(engine for engine in KNOWN_ENGINES if engine != "droid")
 # Engines whose binary is a simple <engine>.binary config key.

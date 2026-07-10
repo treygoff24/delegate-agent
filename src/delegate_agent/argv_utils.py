@@ -35,4 +35,12 @@ def replace_workspace_arg_in_argv(engine: str, argv: list[str], value: str) -> l
 
 def public_argv(request: Request) -> list[str]:
     """Return the display-safe argv for a request (redacted form when present)."""
-    return list(request.display_argv if request.display_argv is not None else request.argv)
+    argv = list(request.display_argv if request.display_argv is not None else request.argv)
+    output_schema = getattr(request, "output_schema", None)
+    if output_schema and request.engine == "claude" and "--json-schema" in argv:
+        redacted = list(argv)
+        idx = redacted.index("--json-schema")
+        if idx + 1 < len(redacted):
+            redacted[idx + 1] = f"<json-schema:{len(redacted[idx + 1])} bytes>"
+        return redacted
+    return argv

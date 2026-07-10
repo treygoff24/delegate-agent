@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import json
 import re
 import sys
@@ -266,6 +267,21 @@ class OverviewTests(unittest.TestCase):
         for line in call_lines:
             self.assertNotIn("--forbid-commit", line)
             self.assertNotIn("--include-dirty", line)
+
+
+class PureCallHelpIntegrationTests(unittest.TestCase):
+    def test_call_help_advertises_pure_timeout_and_claude_schema(self):
+        from delegate_agent import cli
+
+        for engine in ("claude", "opencode", "codex"):
+            with self.subTest(engine=engine):
+                stdout = io.StringIO()
+                code = cli.main([engine, "--help"], stdout=stdout, stderr=io.StringIO())
+                self.assertEqual(code, 0)
+                self.assertIn("[--pure] [--timeout SECONDS]", stdout.getvalue())
+        stdout = io.StringIO()
+        cli.main(["claude", "--help"], stdout=stdout, stderr=io.StringIO())
+        self.assertIn("--output-schema FILE", stdout.getvalue())
 
 
 class FocusedGlobalOptionsTests(unittest.TestCase):

@@ -100,6 +100,18 @@ you need registry inspection.
 OpenCode `call --read-only` uses the same protected environment settings and
 `--pure` plugin restriction as OpenCode safe mode.
 
+`call --pure` is a separate, stronger completion boundary currently supported by
+Claude and OpenCode. Delegate sends the prompt verbatim, starts the child in an
+empty temporary cwd, and builds the child environment from only `PATH`, `HOME`,
+`USER`, `LOGNAME`, `SHELL`, `TMPDIR`, `LANG`, `LC_ALL`, `LC_CTYPE`, and `TERM`,
+then applies trusted Delegate profile overrides. Claude additionally uses
+`--safe-mode --tools "" --strict-mcp-config --no-session-persistence`; OpenCode
+uses its native `--pure` flag plus a deny-all tool permission overlay. Pure mode
+does not make a general OS sandbox claim, which is why Codex remains ineligible
+until its later OS-enforced sandbox slice. OpenCode pure has no delegate-side
+permission-denial tripwire; callers requiring hostile-content isolation should
+prefer the Claude pure route.
+
 ## Reasoning-effort boundary
 
 `--reasoning-effort LEVEL` and JSON `reasoningEffort` request model thinking depth only. They do not change:
