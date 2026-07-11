@@ -530,6 +530,70 @@ class CodexProfileExecutionTests(unittest.TestCase):
             self.assertIn("codexAuthFallback", payload)
             self.assertEqual(attempts.read_text(encoding="utf-8").splitlines(), [personal, work])
 
+    def test_usage_limit_on_stdout_events_retries_with_fallback_profile(self):
+        # Regression (2026-07-11): the real codex --json harness reports quota
+        # exhaustion as stdout events with a clean stderr; the failover
+        # classifier must see the stdout-borne message too.
+        repo = make_git_repo()
+        self.addCleanup(repo.cleanup)
+        with tempfile.TemporaryDirectory() as tmp:
+            personal = write_codex_home(Path(tmp), "personal")
+            work = write_codex_home(Path(tmp), "work")
+            attempts = Path(tmp) / "attempts.txt"
+            fake_bin = Path(tmp) / "codex"
+            fake_bin.write_text(
+                "#!/usr/bin/env bash\n"
+                f'echo "${{CODEX_HOME:-}}" >> "{attempts}"\n'
+                f'if [ "${{CODEX_HOME}}" = "{work}" ]; then\n'
+                '  printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}\'\n'
+                "  exit 0\n"
+                "fi\n"
+                "printf '%s\\n' '{\"type\":\"turn.started\"}'\n"
+                "printf '%s\\n' "
+                "'{\"type\":\"error\",\"message\":\"You have hit your usage limit. Try again at 3:48 PM.\"}'\n"
+                "printf '%s\\n' "
+                "'{\"type\":\"turn.failed\",\"error\":{\"message\":\"You have hit your usage limit. Try again at 3:48 PM.\"}}'\n"
+                "exit 1\n",
+                encoding="utf-8",
+            )
+            fake_bin.chmod(0o755)
+            config = base_config(personal=personal, work=work)
+            config["codex"] = dict(config["codex"], binary=str(fake_bin), fallbackProfile="work")
+            config["profiles"]["default"] = "personal"
+            config["profiles"]["detectFrom"] = []
+            request = self.delegate.build_request(
+                "codex",
+                "safe",
+                None,
+                self.delegate.ResolvedWorkspace(repo.name, "git"),
+                "task",
+                config,
+                dry_run=False,
+            )
+            registry_root = self.registry.ensure_registry(Path(repo.name), workspace_kind="git")
+            run_id, alias = self.registry.register_run(registry_root, harness="codex")
+            ctx = self.delegate.make_run_context(
+                registry_root,
+                request,
+                run_id=run_id,
+                alias=alias,
+                source_workspace=self.delegate.ResolvedWorkspace(repo.name, "git"),
+            )
+            exit_code, payload = self.runner.execute_tracked(
+                request.argv,
+                repo.name,
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+                stdin_text="task",
+            )
+            self.assertEqual(exit_code, 0)
+            self.assertIsNotNone(payload)
+            assert payload is not None
+            self.assertIn("codexAuthFallback", payload)
+            self.assertEqual(attempts.read_text(encoding="utf-8").splitlines(), [personal, work])
+
     def test_runtime_fallback_same_profile_is_noop(self):
         repo = make_git_repo()
         self.addCleanup(repo.cleanup)

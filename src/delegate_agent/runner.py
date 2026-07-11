@@ -192,11 +192,15 @@ def _terminal_override_extra(accumulator: harness_events.StreamAccumulator) -> J
         run_registry.STATUS_CANCELLED,
     }:
         return {}
+    if accumulator.terminal_status == run_registry.STATUS_CANCELLED:
+        failure_reason = "harness_cancelled"
+    elif profiles.classify_codex_usage_limit(_accumulator_message_text(accumulator)):
+        failure_reason = "usage_limit"
+    else:
+        failure_reason = "harness_error"
     extra: JsonObject = {
         "terminalStatus": accumulator.terminal_status,
-        "failureReason": "harness_cancelled"
-        if accumulator.terminal_status == run_registry.STATUS_CANCELLED
-        else "harness_error",
+        "failureReason": failure_reason,
     }
     if accumulator.terminal_event is not None:
         extra["terminalEvent"] = accumulator.terminal_event
@@ -608,6 +612,11 @@ def _failure_reason(
         return "auth_failed"
     if status == run_registry.STATUS_CANCELLED:
         return "harness_cancelled"
+    quota_signal = "\n".join(
+        part for part in (stderr_tail, _accumulator_message_text(accumulator)) if part
+    )
+    if profiles.classify_codex_usage_limit(quota_signal):
+        return "usage_limit"
     return "child_failed"
 
 
@@ -659,6 +668,10 @@ def _completion_report_text_and_source(
             f"Status: {status}",
             f"Failure reason: {failure_reason or 'child_failed'}",
         ]
+        terminal = accumulator.terminal_event or {}
+        terminal_reason = terminal.get("reason")
+        if isinstance(terminal_reason, str) and terminal_reason.strip():
+            lines.append(f"Harness error: {redaction.redact_string(terminal_reason.strip())}")
         if failure_reason == "auth_failed":
             lines.append(_auth_remediation_line(ctx))
         if stderr_tail.strip():
@@ -1579,6 +1592,10 @@ def _append_attempt_delimiter(stderr_log: Path, *, label: str) -> None:
         handle.write(marker.encode("utf-8"))
 
 
+def _accumulator_message_text(accumulator: harness_events.StreamAccumulator) -> str:
+    return "\n".join(event.message for event in accumulator.events if event.message)
+
+
 def _should_retry_profiles(
     ctx: RunContext,
     capture: TrackedCaptureResult,
@@ -1591,8 +1608,12 @@ def _should_retry_profiles(
         return False
     if capture.exit_code == 0:
         return False
+    # Codex --json reports usage limits as stdout events, not stderr, so the
+    # classifier must see both channels (stderr-only missed real quota walls).
     stderr_tail = profiles.read_bounded_stderr_tail(stderr_log)
-    if not profiles.classify_codex_usage_limit(stderr_tail):
+    event_text = _accumulator_message_text(capture.accumulator)
+    signal_text = "\n".join(part for part in (stderr_tail, event_text) if part)
+    if not profiles.classify_codex_usage_limit(signal_text):
         return False
     if profiles.accumulator_had_tool_events(capture.accumulator):
         return False
