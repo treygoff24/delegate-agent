@@ -203,7 +203,7 @@ python3 bin/delegate.py workflow approve wf_0123abcdef45
 See [Delegate Workflows](docs/delegate-workflows.md) for the DSL, safety
 limits, config, and gate semantics.
 
-Reasoning effort is provider-aware. Unsupported combinations fail before launch. It changes only the requested model thinking depth/cost/latency; it does not change safe/work/call mode, sandboxing, approvals, or edit capability. Codex/Droid validate effort against model capability metadata, Cursor maps effort to configured model selection, Claude maps to Claude Code `--effort`, Grok maps to Grok `--effort` (`low`, `medium`, `high`, `xhigh`, `max`), and OpenCode passes it through as `--variant`. Devin and Kimi do not expose a Delegate reasoning-effort flag. Explicit Codex effort can target the harness default model even when `codex.defaultModel` is unset:
+Reasoning effort is provider-aware. Unsupported combinations fail before launch. It changes only the requested model thinking depth/cost/latency; it does not change safe/work/call mode, sandboxing, approvals, or edit capability. Codex/Droid validate effort against model capability metadata, Cursor maps effort to configured model selection, Claude maps to Claude Code `--effort`, and OpenCode passes it through as `--variant`. Grok maps to `--effort` with model-aware validation: `grok-4.5`, unresolved harness defaults, and unknown/raw model IDs use the conservative `low`, `medium`, `high` set; `grok-composer-2.5-fast` also accepts `xhigh` and `max`. Devin and Kimi do not expose a Delegate reasoning-effort flag. Explicit Codex effort can target the harness default model even when `codex.defaultModel` is unset:
 
 ```bash
 delegate --json dry-run codex safe --reasoning-effort high "Review this repository. Do not edit files."

@@ -52,19 +52,31 @@ def make_git_repo(*, with_commit: bool = False):
 class CommandTestBase(unittest.TestCase):
     def setUp(self):
         self.delegate = load_delegate()
-        # Hermetic config: main() must never read the developer's real
-        # ~/.delegate/config.json (its codex.binary would bypass the PATH-prefixed
-        # fake executables and shell out to the real CLI).
-        config_dir = tempfile.TemporaryDirectory()
-        self.addCleanup(config_dir.cleanup)
-        config_path = Path(config_dir.name) / "config.json"
+        test_home = tempfile.TemporaryDirectory()
+        self.addCleanup(test_home.cleanup)
+        self.test_home = Path(test_home.name)
+        codex_home = self.test_home / "codex"
+        codex_home.mkdir()
+        config_path = self.test_home / "config.json"
         config_path.write_text("{}", encoding="utf-8")
-        self._config_env = {"DELEGATE_CONFIG": str(config_path)}
+        self._config_env = os.environ.copy()
+        self._config_env.update(
+            {
+                "HOME": str(self.test_home),
+                "CODEX_HOME": str(codex_home),
+                "DELEGATE_CONFIG": str(config_path),
+            }
+        )
+        self._config_env.pop("DELEGATE_PROFILE", None)
+        self._config_env.pop("AI_PROFILE", None)
+        env_patch = mock.patch.dict(os.environ, self._config_env, clear=True)
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
 
     def run_main(self, argv, *, path_prefix: Path | None = None):
         stdout = io.StringIO()
         stderr = io.StringIO()
-        env = dict(self._config_env)
+        env = {}
         if path_prefix is not None:
             env["PATH"] = str(path_prefix) + os.pathsep + os.environ.get("PATH", "")
         with mock.patch.dict(os.environ, env, clear=False):

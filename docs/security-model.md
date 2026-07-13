@@ -34,6 +34,7 @@ Safe mode is for review and investigation.
 - Droid safe uses Delegate's read-only safety prompt, does not add Droid work-mode unsafe flags, and uses the isolated temporary workspace as a defense-in-depth boundary.
 - Kimi safe uses Delegate's read-only safety prompt and does not enable Kimi `--plan`. Kimi prompt mode auto-approves tool actions, so there is no runtime read-only enforcement for Kimi safe; the isolated temporary workspace is the effective boundary and the safety prompt is advisory.
 - Grok safe uses Delegate's read-only safety prompt plus Grok `--sandbox read-only` and `--permission-mode dontAsk`. Delegate does not use Grok `plan` mode for safe review. Prompts are delivered via Grok `--prompt-file`.
+- Devin safe uses a Delegate-generated `--agent-config` that denies edit, write, exec, and `mcp__*`, plus `--permission-mode auto`. It does not enable Devin's research-preview OS sandbox; the denied exec tool and isolated throwaway workspace are the effective boundaries.
 - OpenCode safe uses `--pure` plus environment-injected runtime enforcement. `OPENCODE_CONFIG_CONTENT` merges after repository config, disables sharing and autoupdate, applies deny-all-but-read/glob/grep permissions globally and to the selected agent, and creates a synthetic `delegate-read-only` agent when none is selected. `OPENCODE_PERMISSION` applies the same tool policy. Delegate re-applies these protected settings after profile resolution. `--pure` also disables repository-local plugins that could otherwise execute code during a safe run.
 - Explicit `--isolation none` is normalized to `auto` with a warning for Cursor, Claude, Grok, Devin, OpenCode, Droid, and Kimi safe mode because it would remove the isolation/config boundary those safe contracts rely on. Codex safe may opt out of Delegate workspace isolation because the Codex read-only sandbox remains active.
 
@@ -64,6 +65,7 @@ Work mode is edit-capable. Use it only for bounded tasks in workspaces you trust
 - Codex work uses the configured Codex policy and sandbox settings.
 - Claude work uses `claude.workPermissionMode`; Delegate policy can explicitly map `policy.harness.claude.work.bypassApprovalsAndSandbox` to Claude `--permission-mode bypassPermissions`.
 - Grok work uses `grok.workPermissionMode` and `grok.workSandbox`; Delegate policy can explicitly map `policy.harness.grok.work.bypassApprovalsAndSandbox` to Grok `--permission-mode bypassPermissions`.
+- Devin work uses `--permission-mode dangerous` because non-interactive print mode rejects unapproved edit/exec tools.
 - OpenCode work adds `--auto` and does not apply the read-only environment lockdown.
 - Kimi work uses edit-capable prompt mode. Delegate does not emit `--yolo` because Kimi rejects combining `--yolo` with `--prompt`.
 
@@ -99,6 +101,8 @@ you need registry inspection.
 
 OpenCode `call --read-only` uses the same protected environment settings and
 `--pure` plugin restriction as OpenCode safe mode.
+Devin `call --read-only` uses the same deny-list agent config and `auto`
+permission mode as Devin safe; default call uses `dangerous` permission mode.
 
 ## Reasoning-effort boundary
 

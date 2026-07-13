@@ -14,6 +14,7 @@ import time
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = str(ROOT / "src")
@@ -148,10 +149,15 @@ class EndToEndTrackingTests(unittest.TestCase):
         self.workspace = Path(self.workspace_temp.name)
         self.bin_temp = tempfile.TemporaryDirectory()
         self.bin_dir = Path(self.bin_temp.name)
+        self.home_temp = tempfile.TemporaryDirectory()
+        self.test_home = Path(self.home_temp.name)
+        self.codex_home = self.test_home / "codex"
+        self.codex_home.mkdir()
         self.registry_root = self.registry.delegate_root(self.workspace)
         self.config_path = self.write_workspace_config()
 
     def tearDown(self):
+        self.home_temp.cleanup()
         self.bin_temp.cleanup()
         self.workspace_temp.cleanup()
 
@@ -219,10 +225,30 @@ class EndToEndTrackingTests(unittest.TestCase):
     ) -> dict[str, str]:
         env = os.environ.copy()
         env["PATH"] = str(self.bin_dir) + os.pathsep + env.get("PATH", "")
+        env["HOME"] = str(self.test_home)
+        env["CODEX_HOME"] = str(self.codex_home)
         env["DELEGATE_CONFIG"] = str(config_path or self.config_path)
+        env.pop("DELEGATE_PROFILE", None)
+        env.pop("AI_PROFILE", None)
         if fake_exit is not None:
             env["FAKE_EXIT"] = fake_exit
         return env
+
+    def test_delegate_env_isolated_from_user_routing(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "HOME": "/real-home",
+                "CODEX_HOME": "/real-codex-home",
+                "DELEGATE_PROFILE": "work",
+                "AI_PROFILE": "personal",
+            },
+        ):
+            env = self.delegate_env()
+        self.assertEqual(env["HOME"], str(self.test_home))
+        self.assertEqual(env["CODEX_HOME"], str(self.codex_home))
+        self.assertNotIn("DELEGATE_PROFILE", env)
+        self.assertNotIn("AI_PROFILE", env)
 
     def run_cli(
         self,

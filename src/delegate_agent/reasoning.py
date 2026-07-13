@@ -66,6 +66,10 @@ TRANSPORT_CLAUDE_EFFORT_FLAG = "claude-effort-flag"
 CLAUDE_NATIVE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 TRANSPORT_GROK_EFFORT_FLAG = "grok-effort-flag"
 GROK_NATIVE_EFFORTS = CLAUDE_NATIVE_EFFORTS
+GROK_CONSERVATIVE_NATIVE_EFFORTS = ("low", "medium", "high")
+GROK_NATIVE_EFFORTS_BY_MODEL = {
+    "grok-composer-2.5-fast": GROK_NATIVE_EFFORTS,
+}
 TRANSPORT_OPENCODE_VARIANT_FLAG = "variant-flag"
 INSPECT_REASONING_DISCOVERY_HINT = (
     "Inspect `delegate --json models --summary` or "
@@ -233,12 +237,13 @@ def resolve_native_effort(
     *,
     alias: str | None = None,
     model: str | None = None,
+    supported_efforts: tuple[str, ...] | None = None,
 ) -> str | None:
     """Validate static native --effort values for harnesses that expose one."""
     if requested_effort is None:
         return None
     profile = REASONING_PROFILES[harness]
-    supported = profile.static_efforts or ()
+    supported = supported_efforts if supported_efforts is not None else profile.static_efforts or ()
     effort = normalize_effort(requested_effort)
     if effort not in supported:
         raise ReasoningCapabilityError(
@@ -277,8 +282,15 @@ def resolve_grok_native_effort(
     alias: str | None = None,
     model: str | None = None,
 ) -> str | None:
-    """Validate Grok Build CLI native --effort values."""
-    return resolve_native_effort("grok", requested_effort, alias=alias, model=model)
+    """Validate Grok Build CLI native --effort values for the resolved model."""
+    supported = GROK_NATIVE_EFFORTS_BY_MODEL.get(model, GROK_CONSERVATIVE_NATIVE_EFFORTS)
+    return resolve_native_effort(
+        "grok",
+        requested_effort,
+        alias=alias,
+        model=model,
+        supported_efforts=supported,
+    )
 
 
 def _as_models_map(source: JsonValue) -> dict[str, JsonObject]:
@@ -605,17 +617,27 @@ def _claude_alias_reasoning_summary(claude: JsonObject) -> JsonObject:
     return payload
 
 
-def _grok_alias_reasoning_summary(grok: JsonObject) -> JsonObject:
-    default_model = grok.get("defaultModel")
-    alias = _alias_key_for_default_model(default_model)
+def _grok_alias_reasoning_summary(
+    grok: JsonObject,
+    *,
+    alias: str | None = None,
+    model: str | None = None,
+) -> JsonObject:
+    if model is None:
+        default_model = grok.get("defaultModel")
+        model = default_model if isinstance(default_model, str) and default_model else None
+    if alias is None:
+        alias = _alias_key_for_default_model(model)
     payload: JsonObject = {
         "alias": alias,
-        "supported": list(REASONING_PROFILES["grok"].static_efforts),
+        "supported": list(
+            GROK_NATIVE_EFFORTS_BY_MODEL.get(model, GROK_CONSERVATIVE_NATIVE_EFFORTS)
+        ),
         "source": "static",
         "transport": REASONING_PROFILES["grok"].transport,
     }
-    if isinstance(default_model, str) and default_model:
-        payload["model"] = default_model
+    if model:
+        payload["model"] = model
     default_effort = grok.get("defaultReasoningEffort")
     if isinstance(default_effort, str):
         payload["configDefault"] = default_effort
@@ -797,7 +819,15 @@ def build_alias_reasoning_summaries(
         default_model = grok.get("defaultModel")
         alias_key = _alias_key_for_default_model(default_model)
         grok_aliases: JsonObject = {alias_key: _grok_alias_reasoning_summary(grok)}
-        _add_static_alias_summaries(grok_aliases, grok, _grok_alias_reasoning_summary)
+        models = grok.get("models")
+        if isinstance(models, dict):
+            for alias, model in sorted(models.items()):
+                if isinstance(alias, str) and alias and isinstance(model, str) and model:
+                    grok_aliases[alias] = _grok_alias_reasoning_summary(
+                        grok,
+                        alias=alias,
+                        model=model,
+                    )
         summaries["grok"] = grok_aliases
     else:
         summaries["grok"] = {}
@@ -873,8 +903,11 @@ def build_reasoning_capabilities_payload(
     harnesses["grok"] = {
         "transport": REASONING_PROFILES["grok"].transport,
         "source": "static",
-        "supported": list(REASONING_PROFILES["grok"].static_efforts),
-        "models": {},
+        "supported": list(GROK_CONSERVATIVE_NATIVE_EFFORTS),
+        "models": {
+            model: {"supported": list(efforts), "source": "static"}
+            for model, efforts in GROK_NATIVE_EFFORTS_BY_MODEL.items()
+        },
     }
     for harness in [h for h, p in REASONING_PROFILES.items() if p.strategy == "pass-through"]:
         harnesses[harness] = {

@@ -678,7 +678,9 @@ def _validate_grok_section(grok: JsonValue) -> None:
                 "grok.defaultReasoningEffort must be a string or null.",
             )
         try:
-            reasoning.resolve_grok_native_effort(default_effort)
+            # Config has no resolved run model, so validate against the Grok
+            # native union; request building applies the model-specific subset.
+            reasoning.resolve_native_effort("grok", default_effort)
         except reasoning.ReasoningCapabilityError as exc:
             raise ConfigError(
                 "invalid_grok_config",

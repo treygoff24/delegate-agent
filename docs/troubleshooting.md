@@ -97,11 +97,12 @@ Common causes:
 - Claude effort must be one of Claude Code's native labels: `low`, `medium`, `high`, `xhigh`, or `max`.
 - Cursor effort was requested but `cursor.reasoningEffortModels.<level>` is missing. Cursor effort uses model selection rather than a standalone effort flag.
 - Droid or Codex model support is not in config, the workspace cache, or bundled fallback data.
+- Grok `xhigh` or `max` effort was requested for `grok-4.5` or an unknown/raw model ID; those labels are supported only by `grok-composer-2.5-fast`.
 - The effort string is misspelled. Delegate treats labels literally and does not translate between provider naming schemes.
 
-These failures apply to explicit per-run effort (`--reasoning-effort` or JSON run input). For Cursor, Droid, and Codex, a config `defaultReasoningEffort` that cannot be satisfied does not fail the run; the run proceeds without reasoning effort and records a warning in the dry-run payload, manifest, and snapshot. Claude config defaults are validated against its static native labels at config load. Kimi does not support reasoning effort, so `kimi.defaultReasoningEffort` must stay `null`.
+These failures apply to explicit per-run effort (`--reasoning-effort` or JSON run input). For Cursor, Droid, Codex, and Grok, a config `defaultReasoningEffort` that cannot be satisfied does not fail the run; the run proceeds without reasoning effort and records a warning in the dry-run payload, manifest, and snapshot. Grok validates the config label against the union of its known model capabilities, then resolves support for the selected model at run time. Claude config defaults are validated against its static native labels at config load. Kimi does not support reasoning effort, so `kimi.defaultReasoningEffort` must stay `null`.
 
-For private or newly released models, declare support in `reasoning.capabilities` in config. Inspect first with plain `capabilities`. To refresh workspace-local discovered data, run:
+For private or newly released Codex or Droid models, declare support in `reasoning.capabilities` in config. Grok unknown/raw model IDs intentionally use the conservative `low`, `medium`, `high` set. Inspect first with plain `capabilities`. To refresh workspace-local discovered data, run:
 
 ```bash
 delegate --json capabilities refresh

@@ -41,10 +41,54 @@ class BundledModelsTests(unittest.TestCase):
         codex_ids = {item["id"] for item in BUNDLED_MODELS["codex"]}
         self.assertEqual(codex_ids, set(BUNDLED_REASONING_CAPABILITIES["codex"]))
 
-    def test_devin_has_twenty_seven_models(self):
+    def test_devin_models_match_live_inventory(self):
         from delegate_agent.bundled_models import BUNDLED_MODELS
 
-        self.assertEqual(len(BUNDLED_MODELS["devin"]), 27)
+        self.assertEqual(
+            [item["id"] for item in BUNDLED_MODELS["devin"]],
+            [
+                "adaptive",
+                "claude-fable-5",
+                "claude-haiku-4.5",
+                "claude-opus-4.5",
+                "claude-opus-4.6",
+                "claude-opus-4.7",
+                "claude-opus-4.8",
+                "claude-sonnet-4.5",
+                "claude-sonnet-4.6",
+                "claude-sonnet-5",
+                "deepseek-v4-pro",
+                "gemini-3-flash",
+                "gemini-3.1-pro",
+                "gemini-3.5-flash",
+                "glm-5.2",
+                "gpt-5.2",
+                "gpt-5.3-codex",
+                "gpt-5.4",
+                "gpt-5.4-mini",
+                "gpt-5.5",
+                "gpt-5.6-luna",
+                "gpt-5.6-sol",
+                "gpt-5.6-terra",
+                "grok-4.5",
+                "kimi-k2.6",
+                "kimi-k2.7",
+                "nemotron-3-ultra",
+                "swe-1.5",
+                "swe-1.6",
+                "swe-1.6-fast",
+                "swe-1.7",
+                "swe-1.7-lightning",
+            ],
+        )
+
+    def test_grok_models_match_installed_harness(self):
+        from delegate_agent.bundled_models import BUNDLED_MODELS
+
+        self.assertEqual(
+            [item["id"] for item in BUNDLED_MODELS["grok"]],
+            ["grok-4.5", "grok-composer-2.5-fast"],
+        )
 
 
 class EngineModelsPayloadTests(unittest.TestCase):

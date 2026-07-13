@@ -1004,7 +1004,7 @@ def describe_payload(
                 "work": grok_work_argv,
                 "workNotes": [
                     "Uses grok.workPermissionMode unless policy.harness.grok.work.bypassApprovalsAndSandbox explicitly requests bypassPermissions.",
-                    "Reasoning effort maps to Grok --effort (low, medium, high, xhigh, max).",
+                    "Reasoning effort maps to Grok --effort: grok-4.5 and unknown/raw model IDs support low, medium, high; grok-composer-2.5-fast also supports xhigh, max.",
                     "Tracked runs use --output-format streaming-json; pass-through uses plain.",
                 ],
             },
@@ -1338,7 +1338,8 @@ Grok:
   - Safe mode uses Delegate isolated copy plus Grok read-only sandbox/permission controls; not Grok plan mode.
   - Work mode uses grok.workPermissionMode, or bypassPermissions only when
     Delegate policy explicitly enables policy.harness.grok.work.bypassApprovalsAndSandbox.
-  - Reasoning effort maps to Grok --effort (low, medium, high, xhigh, max).
+  - Reasoning effort maps to Grok --effort: grok-4.5 and unknown/raw model IDs
+    support low, medium, high; grok-composer-2.5-fast also supports xhigh, max.
   - Tracked runs use streaming-json; pass-through uses plain output.
   - --output-schema is unsupported in v1 because Grok --json-schema forces final json output.
 

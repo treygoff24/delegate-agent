@@ -973,6 +973,20 @@ class ValidationTests(unittest.TestCase):
         }
         config_mod.validate_config(config)
 
+    def test_grok_default_reasoning_effort_validates_against_native_union(self):
+        config_mod = load_config_module()
+        for effort in ("low", "medium", "high", "xhigh", "max"):
+            with self.subTest(effort=effort):
+                config = copy.deepcopy(config_mod.DEFAULT_CONFIG)
+                config["grok"]["defaultReasoningEffort"] = effort
+                config_mod.validate_config(config)
+
+        config = copy.deepcopy(config_mod.DEFAULT_CONFIG)
+        config["grok"]["defaultReasoningEffort"] = "off"
+        with self.assertRaises(config_mod.ConfigError) as ctx:
+            config_mod.validate_config(config)
+        self.assertEqual(ctx.exception.error, "invalid_grok_config")
+
     def test_kimi_config_rejects_non_string_binary(self):
         config_mod = load_config_module()
         config = copy.deepcopy(config_mod.DEFAULT_CONFIG)

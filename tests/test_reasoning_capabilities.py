@@ -11,6 +11,8 @@ if SRC not in sys.path:
 from delegate_agent.reasoning import (  # noqa: E402
     CLAUDE_NATIVE_EFFORTS,
     DEVIN_UNSUPPORTED_REASONING_WARNING,
+    GROK_CONSERVATIVE_NATIVE_EFFORTS,
+    GROK_NATIVE_EFFORTS,
     INSPECT_REASONING_DISCOVERY_HINT,
     KIMI_UNSUPPORTED_REASONING_WARNING,
     REASONING_PROFILES,
@@ -208,10 +210,21 @@ class ReasoningCapabilityTests(unittest.TestCase):
             resolve_claude_native_effort("off")
         self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
 
-    def test_grok_native_effort_accepts_static_cli_levels(self):
-        for effort in ("low", "medium", "high", "xhigh", "max"):
+    def test_grok_native_effort_uses_conservative_unknown_model_fallback(self):
+        for effort in GROK_CONSERVATIVE_NATIVE_EFFORTS:
             with self.subTest(effort=effort):
                 self.assertEqual(resolve_grok_native_effort(effort), effort)
+        for effort in ("xhigh", "max"):
+            with self.subTest(effort=effort), self.assertRaises(ReasoningCapabilityError):
+                resolve_grok_native_effort(effort, model="grok-4.5")
+
+    def test_grok_composer_accepts_full_native_effort_union(self):
+        for effort in GROK_NATIVE_EFFORTS:
+            with self.subTest(effort=effort):
+                self.assertEqual(
+                    resolve_grok_native_effort(effort, model="grok-composer-2.5-fast"),
+                    effort,
+                )
 
     def test_grok_native_effort_rejects_invalid_levels(self):
         with self.assertRaises(ReasoningCapabilityError) as ctx:
@@ -225,12 +238,19 @@ class ReasoningCapabilityTests(unittest.TestCase):
                     resolve_grok_native_effort(bad)
                 self.assertEqual(ctx.exception.error, "invalid_reasoning_effort")
 
-    def test_capabilities_payload_includes_static_grok_efforts(self):
+    def test_capabilities_payload_includes_grok_fallback_and_model_override(self):
         payload = build_reasoning_capabilities_payload({}, cache=None)
         grok = payload["harnesses"]["grok"]
         self.assertEqual(grok["transport"], "grok-effort-flag")
         self.assertEqual(grok["source"], "static")
-        self.assertEqual(grok["supported"], ["low", "medium", "high", "xhigh", "max"])
+        self.assertEqual(grok["supported"], ["low", "medium", "high"])
+        self.assertEqual(
+            grok["models"]["grok-composer-2.5-fast"],
+            {
+                "supported": ["low", "medium", "high", "xhigh", "max"],
+                "source": "static",
+            },
+        )
 
     def test_cursor_capabilities_aggregate_efforts_by_model(self):
         payload = build_reasoning_capabilities_payload(
@@ -312,6 +332,26 @@ class ReasoningCapabilityTests(unittest.TestCase):
         claude = summaries["claude"]["claude-sonnet-4-6"]
         self.assertEqual(claude["supported"], ["low", "medium", "high", "xhigh", "max"])
         self.assertEqual(claude["source"], "static")
+
+    def test_alias_summary_reports_model_aware_grok_efforts(self):
+        config = {
+            "grok": {
+                "defaultModel": "grok-4.5",
+                "defaultReasoningEffort": "high",
+                "models": {
+                    "composer": "grok-composer-2.5-fast",
+                    "custom": "vendor/custom-grok",
+                },
+            }
+        }
+        summaries = build_alias_reasoning_summaries(config, cache=None)["grok"]
+        self.assertEqual(summaries["grok-4.5"]["supported"], ["low", "medium", "high"])
+        self.assertEqual(
+            summaries["composer"]["supported"],
+            ["low", "medium", "high", "xhigh", "max"],
+        )
+        self.assertEqual(summaries["custom"]["supported"], ["low", "medium", "high"])
+        self.assertEqual(summaries["composer"]["model"], "grok-composer-2.5-fast")
 
     def test_alias_summary_maps_cursor_efforts_from_config(self):
         config = {

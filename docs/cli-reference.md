@@ -40,6 +40,10 @@ delegate grok safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prog
 delegate grok work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 delegate grok call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 
+delegate devin safe [--model <alias-or-model>] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate devin work [--model <alias-or-model>] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate devin call [--read-only] [--model <alias-or-model>] [--prompt-file PATH] [prompt...]
+
 delegate opencode safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 delegate opencode work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
 delegate opencode call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--prompt-file PATH] [prompt...]
@@ -51,8 +55,8 @@ delegate kimi call [--read-only] [--model <alias-or-model>] [--reasoning-effort 
 
 Prompt sources are direct arguments, `--prompt-file`, or Delegate stdin. Raw C0 control characters other than newline, carriage return, and tab are stripped before launch; a prompt that becomes empty fails fast. After
 Delegate resolves the prompt, Codex, Claude, and OpenCode prompts are passed to the child runtime over
-stdin. Droid and Grok prompts are written to a private temporary prompt file and passed
-with Droid's documented `--file` option or Grok's `--prompt-file`. Cursor Agent currently only exposes
+stdin. Droid, Grok, and Devin prompts are written to a private temporary prompt file and passed
+with Droid's documented `--file` option or the other runtimes' `--prompt-file`. Cursor Agent currently only exposes
 positional prompt input, and Kimi Code prompt mode currently uses `--prompt`,
 so those launches still use argv transport; Delegate redacts Cursor and Kimi
 prompt argv in dry-run output and run manifests.
@@ -75,7 +79,7 @@ and advisory catalogs with `delegate models`, `delegate models <engine>`, and
 `delegate models <engine> --live` (live probes for cursor/droid/devin/opencode; other
 engines report live unsupported).
 
-`--reasoning-effort LEVEL` is optional and parsed only before prompt text begins. Engines with capability metadata reject unsupported model/effort pairs before launch with `unsupported_reasoning_effort`. It affects only model reasoning depth, cost, or latency; it does not change `safe`/`work`/`call` permissions, sandboxing, approvals, network policy, or edit capability. Cursor effort is model-selection based and requires `cursor.reasoningEffortModels`; an explicit `--model` wins over effort→model routing. Droid emits `--reasoning-effort LEVEL`; Codex emits a `model_reasoning_effort` config override for the resolved model, or for the Codex harness default model when no `codex.defaultModel` is configured and the request was explicit; Claude emits Claude Code `--effort LEVEL`; Grok emits Grok `--effort LEVEL` (`low`, `medium`, `high`, `xhigh`, `max`); OpenCode emits `--variant LEVEL` without validating it against the selected model. Kimi does not support reasoning effort in v1.
+`--reasoning-effort LEVEL` is optional and parsed only before prompt text begins. Engines with capability metadata reject unsupported model/effort pairs before launch with `unsupported_reasoning_effort`. It affects only model reasoning depth, cost, or latency; it does not change `safe`/`work`/`call` permissions, sandboxing, approvals, network policy, or edit capability. Cursor effort is model-selection based and requires `cursor.reasoningEffortModels`; an explicit `--model` wins over effort→model routing. Droid emits `--reasoning-effort LEVEL`; Codex emits a `model_reasoning_effort` config override for the resolved model, or for the Codex harness default model when no `codex.defaultModel` is configured and the request was explicit; Claude emits Claude Code `--effort LEVEL`; Grok emits model-aware `--effort` values as described in its section below; OpenCode emits `--variant LEVEL` without validating it against the selected model. Devin and Kimi do not support reasoning effort in v1.
 
 `--fast` and `--no-fast` are Codex-only, mutually exclusive per-run service-tier overrides. `--fast` emits `service_tier="fast"` plus `features.fast_mode=true` (Codex silently drops a Fast tier when that feature flag is off in the ambient config, so Delegate enables it explicitly); `--no-fast` emits `service_tier="default"` so a globally enabled Fast setting can be turned off for one child. Omitting both emits no override and inherits Codex configuration. Fast is orthogonal to model selection, reasoning effort, and Delegate safety policy. Two upstream caveats: Codex strips the service tier when authenticated with an API key (Fast is a ChatGPT-plan feature), and neither Codex nor the API fails on a tier the model does not offer — Delegate's flag validation is the only fail-closed layer, so an unsupported combination degrades silently to standard routing rather than erroring.
 
@@ -198,7 +202,7 @@ delegate [--json] [--isolation auto|none|worktree] grok {safe,work,call} [--mode
 - Prompt text is delivered via Grok `--prompt-file` from a Delegate temp file; dry-run argv and tracked run manifests do not contain the prompt.
 - Work mode uses `grok.workPermissionMode` and `grok.workSandbox` from config, unless Delegate policy explicitly enables `policy.harness.grok.work.bypassApprovalsAndSandbox`, which maps to Grok `--permission-mode bypassPermissions`.
 - Model selection uses `--model` (alias from `grok.models` or a raw model ID), the run-input JSON `model`, or `grok.defaultModel`.
-- `--reasoning-effort` maps to Grok `--effort` and accepts `low`, `medium`, `high`, `xhigh`, or `max`.
+- `--reasoning-effort` maps to Grok `--effort`. `grok-4.5`, an unresolved harness default, and unknown/raw model IDs conservatively accept `low`, `medium`, or `high`; `grok-composer-2.5-fast` also accepts `xhigh` and `max`. Explicit unsupported combinations fail before launch; an unsupported config-sourced default is omitted with a warning.
 - `--output-schema` is unsupported for Grok in v1 because Grok `--json-schema` forces final JSON output and weakens live snapshot parity.
 
 Examples:
@@ -208,6 +212,30 @@ delegate grok safe "Review this repo for regressions; report file/line/severity.
 delegate grok work "Implement the scoped task; report changed files and tests."
 delegate grok call "Summarize this context in three bullets."
 delegate --isolation worktree grok work "Implement the feature in a persistent worktree."
+```
+
+### `delegate devin`
+
+Wraps Devin CLI print mode.
+
+```bash
+delegate [--json] [--isolation auto|none|worktree] devin {safe,work} [--model <alias-or-model>] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate [--json] devin call [--read-only] [--model <alias-or-model>] [--prompt-file PATH] [prompt...]
+```
+
+- Safe mode reviews the current working tree in an isolated throwaway copy. It passes a Delegate-generated `--agent-config` that denies edit, write, exec, and `mcp__*`, plus `--permission-mode auto`.
+- `call --read-only` uses the same deny-list and permission mode in a disposable cwd. Work and default call use `--permission-mode dangerous` because non-interactive Devin rejects unapproved edit/exec tools.
+- Prompt text is materialized in a private temporary file and passed with Devin `--prompt-file` plus `-p`; dry-run argv and tracked run manifests do not contain the prompt.
+- Model selection uses `--model` (alias from `devin.models` or a raw model ID), the run-input JSON `model`, or `devin.defaultModel`. Delegate leaves unknown names to Devin validation.
+- Devin reasoning effort is unsupported in v1.
+
+Examples:
+
+```bash
+delegate devin safe "Review this repo for regressions; report file/line/severity."
+delegate devin work "Implement the scoped task; report changed files and tests."
+delegate devin call --read-only "Score this answer against the rubric."
+delegate --isolation worktree devin work "Implement the feature in a persistent worktree."
 ```
 
 ### `delegate opencode`

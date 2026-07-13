@@ -219,6 +219,12 @@ class HelpSubcommandTests(HelpCliTestBase):
                 self.assertIn("--forbid-commit", out)
                 self.assertIn("persistent worktree", out)
 
+    def test_grok_help_documents_model_aware_effort(self):
+        code, out, _err = self.run_main(["grok", "--help"])
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertIn("grok-4.5 and unknown/raw model IDs", out)
+        self.assertIn("grok-composer-2.5-fast also supports xhigh, max", out)
+
     def test_describe_summary_lists_launch_options(self):
         code, out, _err = self.run_main(["--json", "describe", "--summary"])
         self.assertEqual(code, self.delegate.EXIT_OK)
@@ -460,6 +466,11 @@ class KimiHelpTests(HelpCliTestBase):
         self.assertEqual(code, self.delegate.EXIT_OK)
         self.assertNotIn("--yolo by default", out)
         self.assertIn("does not emit --yolo", out)
+
+    def test_devin_help_omits_unsupported_reasoning_effort(self):
+        code, out, _err = self.run_main(["devin", "--help"])
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertNotIn("--reasoning-effort", out)
 
     def test_kimi_in_describe_engines(self):
         code, out, _err = self.run_main(["--json", "describe"])

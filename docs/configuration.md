@@ -337,7 +337,7 @@ Controls local run recording.
 - `binary`: path to the Grok Build CLI executable. Delegate also searches `~/.grok/bin`.
 - `defaultModel`: optional Grok model string. `null` lets Grok choose its own default.
 - `models`: optional map of local aliases to Grok model IDs for `--model` / JSON `model`. Alias keys must not collide with mode names, equal the engine's own name, or start with `-`.
-- `defaultReasoningEffort`: optional Grok effort string: `low`, `medium`, `high`, `xhigh`, or `max`. Delegate emits it as `--effort`.
+- `defaultReasoningEffort`: optional Grok effort string syntactically validated against the native union `low`, `medium`, `high`, `xhigh`, or `max`. At request time, `grok-4.5`, an unresolved harness default, and unknown/raw model IDs conservatively support `low`, `medium`, and `high`; `grok-composer-2.5-fast` also supports `xhigh` and `max`. An unsupported config default is omitted with a warning, while an explicit per-run effort fails before launch.
 - `workPermissionMode`: Grok permission mode for work runs. Allowed values include `acceptEdits`, `auto`, `default`, and `dontAsk`.
 - `workPermissionMode` cannot be `bypassPermissions`; use `policy.harness.grok.work.bypassApprovalsAndSandbox` when you explicitly want Delegate to emit Grok `--permission-mode bypassPermissions`.
 - `safePermissionMode`: Grok permission mode for safe runs. Allowed values are `dontAsk`, `default`, and `auto`. Defaults to `dontAsk`.
@@ -448,7 +448,7 @@ provider, including configured custom or local providers.
 }
 ```
 
-- `capabilities`: optional map of harness name (`codex` or `droid` only; cursor uses `cursor.reasoningEffortModels`, and Claude uses static native `--effort` labels) to model capability declarations.
+- `capabilities`: optional map of harness name (`codex` or `droid` only; cursor uses `cursor.reasoningEffortModels`, Claude uses static native `--effort` labels, and Grok uses Delegate's built-in conservative fallback plus known-model overrides) to model capability declarations.
 - `supported`: non-empty array of exact effort strings. Delegate treats these literally; it does not translate `xhigh` to another provider spelling.
 - `default`: optional effort string that must be present in `supported`. It is informational only (shown by `delegate capabilities`); launches apply `<engine>.defaultReasoningEffort`, not per-model defaults.
 - Effort strings may not contain whitespace, double quotes, or backslashes.

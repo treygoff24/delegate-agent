@@ -1113,6 +1113,9 @@ class EngineArgvTests(CommandTestBase):
         self.assertNotIn("--auto", opencode_safe)
         self.assertIn("--auto", opencode_work)
         self.assertFalse(payload["isolation"]["safeNoneAllowed"]["opencode"])
+        grok_notes = " ".join(payload["modeMapping"]["grok"]["workNotes"])
+        self.assertIn("grok-4.5 and unknown/raw model IDs", grok_notes)
+        self.assertIn("grok-composer-2.5-fast also supports xhigh, max", grok_notes)
 
     def test_grok_safe_argv_uses_prompt_file_and_read_only_controls(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
@@ -1160,6 +1163,54 @@ class EngineArgvTests(CommandTestBase):
         self.assertEqual(request.reasoning_capability_source, "static")
         payload = self.delegate.dry_run_payload(request)
         self.assertEqual(payload["reasoningCapabilitySource"], "static")
+
+    def test_grok_reasoning_effort_is_model_aware(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["grok"]["models"] = {"composer": "grok-composer-2.5-fast"}
+        request = self.build_git_request(
+            "grok",
+            "safe",
+            "composer",
+            "/repo",
+            "review task",
+            config,
+            dry_run=True,
+            reasoning_effort="xhigh",
+        )
+        self.assertEqual(request.model, "grok-composer-2.5-fast")
+        self.assertEqual(request.argv[request.argv.index("--effort") + 1], "xhigh")
+
+        for model in ("grok-4.5", "vendor/unknown-grok"):
+            with self.subTest(model=model), self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.build_git_request(
+                    "grok",
+                    "safe",
+                    model,
+                    "/repo",
+                    "review task",
+                    config,
+                    dry_run=True,
+                    reasoning_effort="xhigh",
+                )
+            self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
+
+    def test_grok_config_default_softly_omits_model_unsupported_effort(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["grok"]["defaultModel"] = "grok-4.5"
+        config["grok"]["defaultReasoningEffort"] = "max"
+        request = self.build_git_request(
+            "grok",
+            "safe",
+            None,
+            "/repo",
+            "review task",
+            config,
+            dry_run=True,
+        )
+        self.assertIsNone(request.reasoning_effort)
+        self.assertNotIn("--effort", request.argv)
+        self.assertEqual(len(request.warnings), 1)
+        self.assertIn("ignoring grok.defaultReasoningEffort", request.warnings[0])
 
     def test_grok_work_harness_bypass_requires_harness_scoped_policy(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
