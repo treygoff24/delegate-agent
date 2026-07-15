@@ -218,6 +218,7 @@ class EndToEndTrackingTests(unittest.TestCase):
         fake_exit: str | None = None,
     ) -> dict[str, str]:
         env = os.environ.copy()
+        env["HOME"] = str(self.workspace)
         env["PATH"] = str(self.bin_dir) + os.pathsep + env.get("PATH", "")
         env["DELEGATE_CONFIG"] = str(config_path or self.config_path)
         if fake_exit is not None:

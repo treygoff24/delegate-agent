@@ -905,6 +905,7 @@ class EngineArgvTests(CommandTestBase):
                 os.environ,
                 {
                     "DELEGATE_CONFIG": str(config_path),
+                    "HOME": self._config_env["HOME"],
                     "PATH": str(empty_path),
                 },
                 clear=False,

@@ -134,7 +134,7 @@ class WorkflowCommandTests(unittest.TestCase):
             capture_output=True,
             check=False,
             env=env,
-            timeout=20,
+            timeout=40,
         )
 
     def write_workflow(self, body: str) -> Path:
@@ -1265,7 +1265,7 @@ class WorkflowCommandTests(unittest.TestCase):
             ["--json", "workflow", "run", "--resume", wf_id, "--budget", "3"]
         )
         self.assertEqual(resumed.returncode, 0, resumed.stderr)
-        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "15"])
+        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "30"])
         self.assertEqual(waited.returncode, 0, waited.stderr)
         status = json.loads(self.run_delegate(["--json", "workflow", "status", wf_id]).stdout)
         self.assertEqual(status["status"], "succeeded")

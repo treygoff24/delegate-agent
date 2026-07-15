@@ -59,7 +59,10 @@ class CommandTestBase(unittest.TestCase):
         self.addCleanup(config_dir.cleanup)
         config_path = Path(config_dir.name) / "config.json"
         config_path.write_text("{}", encoding="utf-8")
-        self._config_env = {"DELEGATE_CONFIG": str(config_path)}
+        self._config_env = {
+            "DELEGATE_CONFIG": str(config_path),
+            "HOME": config_dir.name,
+        }
 
     def run_main(self, argv, *, path_prefix: Path | None = None):
         stdout = io.StringIO()
