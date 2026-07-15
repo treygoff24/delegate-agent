@@ -904,7 +904,7 @@ class EngineArgvTests(CommandTestBase):
             with mock.patch.dict(
                 os.environ,
                 {
-                    "DELEGATE_CONFIG": str(config_path),
+                    **self._config_env,
                     "PATH": str(empty_path),
                 },
                 clear=False,

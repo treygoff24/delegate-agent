@@ -1661,6 +1661,7 @@ def _parse_workflow_id_action(
     wf_id: str | None = None
     since = 0
     timeout: int | None = None
+    result_field: str | None = None
     i = 0
     while i < len(args):
         token = args[i]
@@ -1679,6 +1680,15 @@ def _parse_workflow_id_action(
                 invalid_error="invalid_timeout",
             )
             continue
+        if token == "--field" and action == "result":
+            if i + 1 >= len(args) or not args[i + 1] or args[i + 1].startswith("-"):
+                raise DelegateError(
+                    "missing_workflow_result_field",
+                    "workflow result --field requires a non-empty key that does not start with '-'.",
+                )
+            result_field = args[i + 1]
+            i += 2
+            continue
         if token.startswith("-"):
             raise DelegateError(
                 "unknown_option", unknown_option_message(f"workflow {action}", token)
@@ -1687,7 +1697,7 @@ def _parse_workflow_id_action(
             raise DelegateError("unexpected_argument", f"workflow {action} accepts one wfId.")
         wf_id = token
         i += 1
-    if wf_id is None:
+    if wf_id is None and action not in {"wait", "result"}:
         raise DelegateError("missing_workflow", f"workflow {action} requires <wfId>.")
     return ParsedCommand(
         "workflow",
@@ -1697,6 +1707,7 @@ def _parse_workflow_id_action(
             wf_id=wf_id,
             since=since,
             timeout=timeout,
+            result_field=result_field,
             json_mode=json_mode,
         ),
     )

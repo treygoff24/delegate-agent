@@ -55,7 +55,9 @@ SAFE_WORKSPACE_SYNC_NOTE = (
     "Safe mode reviews your **current working tree** — uncommitted tracked edits "
     "and untracked, non-ignored files are mirrored into an isolated throwaway copy "
     "(only gitignored paths are excluded), so you can review local changes without "
-    "committing first or pasting a diff."
+    "committing first or pasting a diff. Absolute source-workspace paths in the prompt "
+    "are mapped into that copy; reports should cite workspace-relative paths rather than "
+    "temporary isolation paths. Verbatim slash pass-through prompts are not rewritten."
 )
 CALL_MODE_NOTE = (
     "call mode runs the child in a throwaway temp cwd with no project tree, isolation, "
@@ -802,7 +804,9 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "delegate [--json] workflow run --resume <wfId> [--budget N]",
             "delegate [--json] workflow run --name <saved-name> [--args JSON] [--budget N]",
             "delegate [--json] workflow check <script.py>",
-            "delegate [--json] workflow status|events|result|wait|approve|kill <wfId>",
+            "delegate [--json] workflow status|events|approve|kill <wfId>",
+            "delegate [--json] workflow wait [<wfId>] [--timeout SEC]",
+            "delegate [--json] workflow result [<wfId>] [--field KEY]",
             "delegate [--json] workflow list",
             "delegate [--json] workflow save <script.py> --name <name>",
         ),
@@ -814,15 +818,19 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             OptionSpec("--name", "NAME", "Use or save a user-level workflow name."),
             OptionSpec("--since", "SEQ", "For events/watch, emit events after sequence number."),
             OptionSpec("--timeout", "SEC", "For wait, maximum seconds to wait."),
+            OptionSpec("--field", "KEY", "For result, print one top-level result object field."),
         ),
         examples=(
             'delegate workflow run review.py --args \'{"files":["src/cli.py"]}\' --budget 10',
             "delegate workflow run --resume wf_0123abcdef45",
             "delegate workflow events wf_0123abcdef45 --since 12 --json",
+            "delegate workflow wait --timeout 60",
+            "delegate workflow result --field summary",
             "delegate workflow save review.py --name review-changes",
         ),
         notes=(
             "Workflow IDs are wf_<12 hex> and live under .delegate/workflows/, separate from run IDs.",
+            "Omit wfId from wait/result to select the latest eligible workflow; JSON adds resolutionKind=latest.",
             "Each agent() child is tagged with --group <wfId>, so runs/snapshot/run-output/cancel still work.",
             "Scripts execute as the invoking user; v1 accepts explicit paths and ~/.delegate/workflows names only.",
         ),
@@ -874,15 +882,39 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
     ),
     "workflow result": CommandSpec(
         name="workflow result",
-        summary="Print result.json for a completed workflow.",
-        usage=("delegate [--json] workflow result <wfId>",),
+        summary="Print a completed workflow result or one top-level result field.",
+        usage=("delegate [--json] workflow result [<wfId>] [--field KEY]",),
+        arguments=(
+            ArgSpec(
+                "wfId", False, "Workflow ID; omit to select the latest workflow with a result."
+            ),
+        ),
+        options=(OptionSpec("--field", "KEY", "Print one top-level result object field."),),
+        examples=(
+            "delegate workflow result",
+            "delegate workflow result wf_0123abcdef45 --field summary",
+        ),
+        notes=(
+            "When wfId is omitted, JSON output identifies the selected wfId and sets resolutionKind to latest.",
+            "Text --field output prints strings directly and JSON-encodes other values.",
+        ),
         see_also=("workflow wait",),
     ),
     "workflow wait": CommandSpec(
         name="workflow wait",
         summary="Wait for a workflow to reach a terminal status.",
-        usage=("delegate [--json] workflow wait <wfId> [--timeout SEC]",),
+        usage=("delegate [--json] workflow wait [<wfId>] [--timeout SEC]",),
+        arguments=(
+            ArgSpec("wfId", False, "Workflow ID; omit to select the latest eligible workflow."),
+        ),
         options=(OptionSpec("--timeout", "SEC", "Maximum seconds to wait."),),
+        examples=(
+            "delegate workflow wait --timeout 60",
+            "delegate workflow wait wf_0123abcdef45 --timeout 60",
+        ),
+        notes=(
+            "When wfId is omitted, JSON output identifies the selected wfId and sets resolutionKind to latest.",
+        ),
         see_also=("workflow status", "workflow result"),
     ),
     "workflow approve": CommandSpec(
@@ -1500,7 +1532,9 @@ def render_overview_text() -> str:
         "delegate [--cwd PATH] [--json] workflow run <script.py> "
         "[--args JSON] [--budget N] [--dry-run]",
         "delegate [--cwd PATH] [--json] workflow run --resume <wfId>",
-        "delegate [--cwd PATH] [--json] workflow status|events|result|wait|approve|kill <wfId>",
+        "delegate [--cwd PATH] [--json] workflow status|events|approve|kill <wfId>",
+        "delegate [--cwd PATH] [--json] workflow wait [<wfId>] [--timeout SEC]",
+        "delegate [--cwd PATH] [--json] workflow result [<wfId>] [--field KEY]",
         "delegate [--cwd PATH] [--json] workflow list",
         "delegate [--cwd PATH] [--json] [--auth-profile NAME] profiles",
         "delegate [--json] models [--summary]",

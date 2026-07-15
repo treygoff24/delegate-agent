@@ -82,8 +82,44 @@ def read_json(path: Path) -> JsonObject | None:
 
 
 def write_status(root: Path, payload: JsonObject) -> None:
-    merged: JsonObject = {"schema": WORKFLOW_SCHEMA, **payload}
+    existing = read_json(root / STATUS_FILE)
+    created_at = existing.get("createdAt") if isinstance(existing, dict) else None
+    if not isinstance(created_at, str):
+        candidate = payload.get("createdAt")
+        created_at = candidate if isinstance(candidate, str) else run_registry.utc_now_iso()
+    merged: JsonObject = {"schema": WORKFLOW_SCHEMA, **payload, "createdAt": created_at}
+    created_ordinal = existing.get("createdOrdinal") if isinstance(existing, dict) else None
+    if isinstance(created_ordinal, int) and not isinstance(created_ordinal, bool):
+        merged["createdOrdinal"] = created_ordinal
+    else:
+        merged.pop("createdOrdinal", None)
     write_json(root / STATUS_FILE, merged)
+
+
+def register_workflow(workspace: Path, root: Path, payload: JsonObject) -> None:
+    """Write the first status with a registry-serialized creation ordinal."""
+    registry_root = run_registry.registry_root(workspace)
+    with run_registry.registry_lock(registry_root):
+        # ponytail: O(n) registration scan; add a workflow index only if real
+        # registries grow enough for this lock-held scan to become measurable.
+        latest_ordinal = 0
+        workflows = workflow_root(workspace)
+        if workflows.exists():
+            for child in workflows.iterdir():
+                status = read_json(child / STATUS_FILE) if child.is_dir() else None
+                ordinal = status.get("createdOrdinal") if isinstance(status, dict) else None
+                if isinstance(ordinal, int) and not isinstance(ordinal, bool):
+                    latest_ordinal = max(latest_ordinal, ordinal)
+        created_at = payload.get("createdAt")
+        if not isinstance(created_at, str):
+            created_at = run_registry.utc_now_iso()
+        merged: JsonObject = {
+            "schema": WORKFLOW_SCHEMA,
+            **payload,
+            "createdAt": created_at,
+            "createdOrdinal": latest_ordinal + 1,
+        }
+        write_json(root / STATUS_FILE, merged)
 
 
 def write_result(root: Path, payload: JsonObject) -> None:
@@ -132,6 +168,46 @@ def supervisor_alive(root: Path) -> bool:
     finally:
         with contextlib.suppress(OSError):
             os.close(fd)
+
+
+def latest_workflow_dir(
+    workspace: Path,
+    *,
+    require_result: bool = False,
+    exclude_dry_run: bool = False,
+) -> Path | None:
+    root = workflow_root(workspace)
+    if not root.exists():
+        return None
+    ordered: list[tuple[int, Path]] = []
+    legacy: list[tuple[str, str, str, Path]] = []
+    for child in root.iterdir():
+        if not child.is_dir() or not WORKFLOW_ID_RE.fullmatch(child.name):
+            continue
+        status = read_json(child / STATUS_FILE)
+        if status is None:
+            continue
+        if require_result and not (child / RESULT_FILE).is_file():
+            continue
+        if exclude_dry_run and status.get("status") == "dry_run":
+            continue
+        ordinal = status.get("createdOrdinal")
+        if isinstance(ordinal, int) and not isinstance(ordinal, bool):
+            ordered.append((ordinal, child))
+            continue
+        created_at = status.get("createdAt")
+        updated_at = status.get("updatedAt")
+        legacy.append(
+            (
+                created_at if isinstance(created_at, str) else "",
+                updated_at if isinstance(updated_at, str) else "",
+                child.name,
+                child,
+            )
+        )
+    if ordered:
+        return max(ordered, key=lambda item: item[0])[1]
+    return max(legacy)[3] if legacy else None
 
 
 def append_jsonl(path: Path, event: dict[str, Any]) -> None:

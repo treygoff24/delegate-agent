@@ -335,6 +335,25 @@ class FocusedGlobalOptionsTests(unittest.TestCase):
                 self.assertTrue(any("only with --group" in note for note in payload["notes"]))
 
 
+class WorkflowHelpContractTests(unittest.TestCase):
+    def test_wait_and_result_advertise_latest_selection(self):
+        for command in ("workflow wait", "workflow result"):
+            with self.subTest(command=command):
+                payload = command_help.command_help_payload(command_help.COMMAND_SPECS[command])
+                self.assertIn("[<wfId>]", payload["usage"][0])
+                self.assertFalse(payload["arguments"][0]["required"])
+                self.assertTrue(any("resolutionKind" in note for note in payload["notes"]))
+
+    def test_result_advertises_field_extraction(self):
+        payload = command_help.command_help_payload(command_help.COMMAND_SPECS["workflow result"])
+        self.assertIn("--field KEY", payload["usage"][0])
+        self.assertIn("--field", {option["flag"] for option in payload["options"]})
+
+    def test_safe_workspace_note_requires_relative_report_paths(self):
+        self.assertIn("Absolute source-workspace paths", command_help.SAFE_WORKSPACE_SYNC_NOTE)
+        self.assertIn("workspace-relative paths", command_help.SAFE_WORKSPACE_SYNC_NOTE)
+
+
 class HelpIndexPayloadTests(unittest.TestCase):
     """help_index_payload shape and coverage."""
 

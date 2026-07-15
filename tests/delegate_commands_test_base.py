@@ -52,14 +52,20 @@ def make_git_repo(*, with_commit: bool = False):
 class CommandTestBase(unittest.TestCase):
     def setUp(self):
         self.delegate = load_delegate()
-        # Hermetic config: main() must never read the developer's real
-        # ~/.delegate/config.json (its codex.binary would bypass the PATH-prefixed
-        # fake executables and shell out to the real CLI).
+        # Hermetic config: load_config merges the global file before an explicit
+        # DELEGATE_CONFIG layer, so isolate HOME as well as providing that layer.
+        # Otherwise a developer's codex.binary can bypass PATH-prefixed fakes and
+        # shell out to the real CLI.
         config_dir = tempfile.TemporaryDirectory()
         self.addCleanup(config_dir.cleanup)
         config_path = Path(config_dir.name) / "config.json"
         config_path.write_text("{}", encoding="utf-8")
-        self._config_env = {"DELEGATE_CONFIG": str(config_path)}
+        home = Path(config_dir.name) / "home"
+        home.mkdir()
+        self._config_env = {
+            "DELEGATE_CONFIG": str(config_path),
+            "HOME": str(home),
+        }
 
     def run_main(self, argv, *, path_prefix: Path | None = None):
         stdout = io.StringIO()

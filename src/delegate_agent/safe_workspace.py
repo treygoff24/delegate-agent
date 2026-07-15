@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess  # nosec B404 - Delegate launches configured git/harness commands with shell=False.
@@ -27,6 +28,7 @@ from pathlib import Path
 
 from delegate_agent.argv_utils import public_argv
 from delegate_agent.argv_utils import replace_workspace_arg_in_argv as _replace_ws_by_engine
+from delegate_agent.constants import PROMPT_INSTRUCTION_MODE_SLASH
 from delegate_agent.errors import DelegateError
 from delegate_agent.git_utils import (
     GIT_MUTATION_TIMEOUT_SECONDS,
@@ -36,6 +38,7 @@ from delegate_agent.git_utils import run_git as _run_git
 from delegate_agent.git_utils import run_git_bytes as _run_git_bytes
 from delegate_agent.isolation import IsolationContext
 from delegate_agent.json_types import JsonObject
+from delegate_agent.prompt_transport import PROMPT_TRANSPORT_ARGV
 from delegate_agent.request_models import Request
 
 # Project .cursor/cli.json is permissions-only; global cli-config examples may
@@ -83,6 +86,11 @@ SAFE_CHECK_IGNORE_FAIL_CLOSED_WARNING = (
     "symlink target(s); fail-closed replaced all queried symlinks with placeholders."
 )
 
+SAFE_ISOLATION_REPORT_INSTRUCTION = (
+    "\n\nSafe-isolation note: cite files relative to the workspace in your report; "
+    "do not include the temporary workspace path."
+)
+
 
 def _ensure_codex_skip_git_repo_check(argv: list[str]) -> list[str]:
     if "--skip-git-repo-check" in argv:
@@ -104,6 +112,50 @@ def replace_safe_workspace_arg_in_argv(
     updated = _replace_ws_by_engine(request.engine, argv, isolated_workspace)
     if request.engine == "codex" and workspace_kind == "directory":
         updated = _ensure_codex_skip_git_repo_check(updated)
+    return updated
+
+
+def replace_workspace_path_prefix(
+    text: str,
+    source_workspace: str,
+    isolated_workspace: str,
+) -> str:
+    """Re-root exact source-workspace paths without touching prefix lookalikes."""
+    source = os.path.normpath(source_workspace)
+    isolated = os.path.normpath(isolated_workspace)
+    if source == os.sep:
+        return isolated if text == source else text
+    return re.sub(
+        rf"(?<![\w./~+-]){re.escape(source)}(?=$|{re.escape(os.sep)})",
+        lambda _match: isolated,
+        text,
+    )
+
+
+def _isolated_prompt_text(
+    text: str | None,
+    source_workspace: str,
+    isolated_workspace: str,
+) -> str | None:
+    if text is None:
+        return None
+    updated = replace_workspace_path_prefix(text, source_workspace, isolated_workspace)
+    if SAFE_ISOLATION_REPORT_INSTRUCTION not in updated:
+        updated += SAFE_ISOLATION_REPORT_INSTRUCTION
+    return updated
+
+
+def _isolated_prompt_argv(
+    request: Request,
+    argv: list[str],
+    isolated_workspace: str,
+) -> list[str]:
+    if request.prompt_transport != PROMPT_TRANSPORT_ARGV or not argv:
+        return argv
+    updated = list(argv)
+    prompt = _isolated_prompt_text(updated[-1], request.workspace, isolated_workspace)
+    if prompt is not None:
+        updated[-1] = prompt
     return updated
 
 
@@ -776,17 +828,40 @@ def safe_isolated_request(request: Request) -> Iterator[Request]:
             isolated_workspace,
             workspace_kind=workspace_kind,
         )
+        slash_passthrough = request.prompt_instruction_mode == PROMPT_INSTRUCTION_MODE_SLASH
+        if not slash_passthrough:
+            isolated_argv = _isolated_prompt_argv(request, isolated_argv, isolated_workspace)
         isolated_display_argv = replace_safe_workspace_arg_in_argv(
             request,
             public_argv(request),
             isolated_workspace,
             workspace_kind=workspace_kind,
         )
+        if slash_passthrough:
+            isolated_prompt = request.prompt
+            isolated_stdin_text = request.stdin_text
+            isolated_prompt_file_text = request.prompt_file_text
+        else:
+            isolated_prompt = _isolated_prompt_text(
+                request.prompt,
+                request.workspace,
+                isolated_workspace,
+            )
+            isolated_stdin_text = _isolated_prompt_text(
+                request.stdin_text,
+                request.workspace,
+                isolated_workspace,
+            )
+            isolated_prompt_file_text = _isolated_prompt_text(
+                request.prompt_file_text,
+                request.workspace,
+                isolated_workspace,
+            )
         yield Request(
             engine=request.engine,
             mode=request.mode,
             workspace=isolated_workspace,
-            prompt=request.prompt,
+            prompt=isolated_prompt or "",
             argv=isolated_argv,
             model=request.model,
             model_alias=request.model_alias,
@@ -805,8 +880,8 @@ def safe_isolated_request(request: Request) -> Iterator[Request]:
             forbid_commit=request.forbid_commit,
             include_dirty=request.include_dirty,
             warnings=request.warnings,
-            stdin_text=request.stdin_text,
-            prompt_file_text=request.prompt_file_text,
+            stdin_text=isolated_stdin_text,
+            prompt_file_text=isolated_prompt_file_text,
             agent_config_text=request.agent_config_text,
             prompt_transport=request.prompt_transport,
             display_argv=isolated_display_argv,
