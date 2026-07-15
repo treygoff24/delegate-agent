@@ -57,6 +57,13 @@ positional prompt input, and Kimi Code prompt mode currently uses `--prompt`,
 so those launches still use argv transport; Delegate redacts Cursor and Kimi
 prompt argv in dry-run output and run manifests.
 
+Temporary safe isolation also re-roots absolute paths under the source workspace
+when it transports the prompt, so `/source/repo/src/app.py` becomes the matching
+path inside the isolated copy. Paths outside the workspace and prefix lookalikes
+are left unchanged. The safe prompt asks the child to cite workspace-relative
+paths in its report; consumers should not depend on temporary isolation paths.
+Verbatim slash pass-through prompts are not rewritten.
+
 For launch and `dry-run` commands, `--json` and `--isolation auto|none|worktree`
 are unambiguous before inline prompt text starts and may appear with launch
 options, such as `delegate codex work --prompt-file task.md --json` or
@@ -125,6 +132,11 @@ A few boundaries are worth stating explicitly:
 create an orchestration manifest; it only enables selectors such as
 `delegate runs --group NAME`, `delegate wait --group NAME`, and worktree
 management filters. Group names must match `[A-Za-z0-9._-]{1,64}`.
+If grouped feature waves run in the same non-isolated workspace, commit between
+waves so later edits do not become interleaved with earlier work. When features
+need separate review or commits, launch each in a persistent worktree and
+integrate them separately; `wait --group` warns when it sees shared same-tree
+work runs.
 
 `--auth-profile NAME` selects a top-level `profiles.definitions` entry and
 injects that profile's flat env map into child processes. It overrides ambient
@@ -139,7 +151,8 @@ auth/env selection happens.
 Usage:
 
 ```bash
-delegate [--json] [--isolation auto|none|worktree] codex {safe,work,call} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--progress] [--forbid-commit] [--prompt-file PATH] [--output-schema FILE] [prompt...]
+delegate [--json] [--isolation auto|none|worktree] codex {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--progress] [--forbid-commit] [--prompt-file PATH] [--output-schema FILE] [prompt...]
+delegate [--json] codex call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--prompt-file PATH] [--output-schema FILE] [prompt...]
 ```
 
 - Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff. Codex safe always uses `--sandbox read-only`. Under `--isolation auto`, Codex safe is the only safe harness that may opt out with `--isolation none`, because Codex still keeps its read-only sandbox active.
@@ -166,7 +179,8 @@ delegate --isolation worktree codex work "Implement the feature in a persistent 
 Usage:
 
 ```bash
-delegate [--json] [--isolation auto|none|worktree] claude {safe,work,call} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate [--json] [--isolation auto|none|worktree] claude {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate [--json] claude call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 ```
 
 - Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff. Under `--isolation auto`, Claude safe uses `--permission-mode plan`, `--strict-mcp-config`, Read/Grep/Glob, and selected read-only Bash tools such as `git diff`/`git status`.
@@ -191,7 +205,8 @@ delegate --isolation worktree claude work "Implement the feature in a persistent
 Usage:
 
 ```bash
-delegate [--json] [--isolation auto|none|worktree] grok {safe,work,call} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate [--json] [--isolation auto|none|worktree] grok {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate [--json] grok call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 ```
 
 - Safe mode reviews your **current working tree** in an isolated throwaway copy plus Grok read-only controls (`--sandbox read-only`, `--permission-mode dontAsk` by default). Delegate does not use Grok `plan` mode for safe review.
@@ -274,7 +289,8 @@ delegate --isolation worktree opencode work "Implement the feature in a persiste
 Usage:
 
 ```bash
-delegate [--json] [--isolation auto|none|worktree] kimi {safe,work,call} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate [--json] [--isolation auto|none|worktree] kimi {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate [--json] kimi call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 ```
 
 - Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff. Under `--isolation auto`, Kimi safe uses a read-only safety prompt. Delegate intentionally avoids Kimi `--plan` in safe mode. Kimi prompt mode auto-approves tool actions, so the isolation is the effective write boundary; the safety prompt is advisory.
@@ -308,8 +324,8 @@ delegate [--json] workflow run --resume <wfId> [--budget N]
 delegate [--json] workflow status <wfId>
 delegate [--json] workflow events <wfId> [--since SEQ]
 delegate [--json] workflow watch <wfId> [--since SEQ]
-delegate [--json] workflow wait <wfId> [--timeout SEC]
-delegate [--json] workflow result <wfId>
+delegate [--json] workflow wait [<wfId>] [--timeout SEC]
+delegate [--json] workflow result [<wfId>] [--field KEY]
 delegate [--json] workflow approve <wfId>
 delegate [--json] workflow kill <wfId>
 delegate [--json] workflow list
@@ -319,9 +335,18 @@ delegate [--json] workflow save <script.py> --name NAME
 - `check` validates the workflow script, including literal preflight checks for
   unsupported `agent()` combinations.
 - `run` launches a detached supervisor; `--dry-run` renders planned stubs
-  without launching child agents or consuming real budget.
+  without launching child agents or consuming real budget. Each entry in
+  `runTree.calls` includes the resolved `model`, `effort`, `fast`, `isolation`,
+  and UTF-8 `promptBytes`; Cursor/Kimi prompts over 102400 bytes add a warning
+  before their argv transport limit can fail a real run.
 - `--resume` replays the journal, adopts matching child runs by workflow agent
   key, and continues from missing work.
+- `wait` and `result` accept an explicit workflow ID or, when omitted, resolve
+  the latest eligible workflow. JSON output for implicit selection includes the
+  selected `wfId` and `resolutionKind: "latest"`.
+- `result --field KEY` extracts a top-level field from an object result. Text
+  mode prints strings directly and JSON-encodes other values; JSON mode returns
+  a field/value envelope.
 - `approve` releases a paused gate (and resumes). Do not also run
   `run --resume` for the same gate — approve already is that resume. `kill`
   validates the supervisor process group before signaling and always attempts
@@ -340,6 +365,7 @@ Codes raised as `DelegateError` from workflow commands (`workflows/commands.py`)
 | `invalid_workflow_name` | Saved-workflow `--name` is not a simple file stem. |
 | `invalid_workflow_script` | Script failed `check` / load validation. |
 | `missing_workflow` | A verb that needs `<wfId>` was invoked without one. |
+| `missing_workflow_result_field` | `result --field` was invoked without a key. |
 | `missing_workflow_save_args` | `save` needs both `<script.py>` and `--name`. |
 | `missing_workflow_script` | `run`/`check` need `<script.py>` or `--name`. |
 | `unknown_workflow_action` | Unrecognized `workflow` subcommand. |
@@ -348,6 +374,8 @@ Codes raised as `DelegateError` from workflow commands (`workflows/commands.py`)
 | `workflow_not_found` | No workflow directory / status for that `wfId`. |
 | `workflow_not_gated` | `approve` on a workflow that is not paused on a gate. |
 | `workflow_result_missing` | `result` before `result.json` exists. |
+| `workflow_result_field_missing` | The requested top-level result field does not exist. |
+| `workflow_result_not_object` | `--field` was requested for a non-object result. |
 | `workflow_script_not_found` | Resolved script path is missing or not a file. |
 
 See [Delegate Workflows](delegate-workflows.md) for the DSL, caps, config, and
@@ -356,10 +384,10 @@ gate semantics.
 ### Stateless `call` mode
 
 `call` is the one-hop model-call form of Delegate: "work mode minus a repo." It
-gives a child runtime a prompt with no project tree to resolve, captures the
-final assistant text, and exits without creating a tracked run — so you can call
-a model to *do something* (or to *judge something*) from anywhere, including a
-non-git directory.
+gives a child runtime a prompt with no project tree to resolve and captures the
+final assistant text, so you can call a model to *do something* (or to *judge
+something*) from anywhere, including a non-git directory. Calls are untracked
+by default; grouped calls are the narrow exception described below.
 
 ```bash
 delegate codex call "Write a Python script that finds the 500th prime and run it."
@@ -369,9 +397,9 @@ delegate --json claude call --pure --timeout 60 --output-schema verdict.json < r
 ```
 
 Call mode uses an empty temporary cwd instead of resolving the current repo, and
-it deletes that cwd after the child exits. It does not write `.delegate/runs`,
-create snapshots, inject safe/work skill or completion-report framing, emit
-progress heartbeats, or honor persistent worktree/commit policy options. JSON
+it deletes that cwd after the child exits. It does not create snapshots, inject
+safe/work skill or completion-report framing, emit progress heartbeats, or honor
+persistent worktree/commit policy options. JSON
 output returns fields such as `ok`, `status`, `exitCode`, `engine`, `mode`,
 `model`, `pure`, `structuredOutput`, `modelRequested`, `modelResolved`, `usage`,
 `text`, `textChars`, `textTruncated`, `stdoutBytes`, `stderrBytes`, reasoning
@@ -409,10 +437,23 @@ On expiry Delegate terminates the whole child process group and returns
 
 `--read-only`, `--pure`, and `--timeout` apply only to `call`; passing them with
 `safe`/`work` is rejected.
-Because call mode is stateless, `--cwd`, `--isolation`, `--pass-through`,
+Because the child call is stateless, `--isolation`, `--pass-through`,
 `--progress`, `--forbid-commit`, and markdown completion reports are rejected.
-Use `safe` or `work` when the child should see the project tree or when you need
-run registry inspection.
+An ordinary call also rejects `--cwd`.
+
+**Grouped calls preserve workflow tracking without exposing the workspace to the
+child.** `--group NAME` registers the call in the invocation workspace so
+workflow kill/adopt and group selectors can find it. In that one combination,
+`--cwd PATH` may select the registry/config workspace:
+
+```bash
+delegate --cwd /path/to/project --group wf_0123abcdef45 codex call "Summarize this input."
+```
+
+The child still executes in an empty temporary cwd; `--cwd` does not give it the
+project tree. Dry-run accepts the same combination for faithful planning but
+creates no run entry. Use `safe` or `work` when the child should see the project
+tree.
 
 ### Dry-run
 
@@ -750,7 +791,8 @@ signals the recorded process group with SIGTERM, waits a 5s grace period, then
 uses SIGKILL if needed. It never signals pid/pgid `<= 1`. Legacy runs without a
 recorded pgid fall back to the recorded pid with a warning. Cancel marks the run
 `cancelled` with `failureReason: cancelled_by_user` and records current captured
-stdout/stderr byte counts. `call` mode is untracked and therefore not cancellable.
+stdout/stderr byte counts. Ungrouped `call` mode is untracked; grouped calls are
+registered and can be selected for cancellation.
 
 Before sending any signal, cancel stamps a `cancelRequested: true` marker (with
 a `cancelRequestedAt` timestamp) on the run state under the registry lock, so

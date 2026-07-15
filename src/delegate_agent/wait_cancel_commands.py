@@ -164,6 +164,36 @@ def _print_wait_table(runs: list[JsonObject], stdout: TextIO) -> None:
         print(f"{alias:<12} {status:<10} {quality:<16} {failure}", file=stdout)
 
 
+def _group_workspace_warnings(command: WaitCommand, runs: list[JsonObject]) -> list[str]:
+    if command.group is None:
+        return []
+    counts: dict[str, int] = {}
+    for run in runs:
+        mode = run.get("mode")
+        isolated = run.get("isolatedWorkspace")
+        execution_cwd = run.get("executionCwd")
+        if (
+            not isinstance(mode, str)
+            or mode.strip().lower() != "work"
+            or isolated is not False
+            or not isinstance(execution_cwd, str)
+            or not execution_cwd.strip()
+        ):
+            continue
+        normalized_cwd = os.path.normcase(
+            os.path.abspath(os.path.expanduser(execution_cwd.strip()))
+        )
+        counts[normalized_cwd] = counts.get(normalized_cwd, 0) + 1
+    shared = sorted(path for path, count in counts.items() if count >= 2)
+    if not shared:
+        return []
+    return [
+        f"group {command.group} has work-mode runs that share the same non-isolated "
+        "execution workspace; commit between feature waves or use persistent worktree "
+        f"isolation and integrate separately: {', '.join(shared)}"
+    ]
+
+
 def _append_reports(
     runs: list[JsonObject],
     *,
@@ -215,6 +245,7 @@ def emit_wait(command: WaitCommand, *, workspace_path: str, stdout: TextIO) -> i
         time.sleep(command.interval_seconds)
 
     runs = [_terminal_payload(registry_root, target) for target in targets]
+    warnings = _group_workspace_warnings(command, runs)
     if command.completion_report and command.json_mode:
         _append_reports(
             runs,
@@ -224,18 +255,20 @@ def emit_wait(command: WaitCommand, *, workspace_path: str, stdout: TextIO) -> i
             stdout=stdout,
         )
     if command.json_mode:
-        delegate_rendering.print_json(
-            {
-                "ok": not timed_out
-                and all(_status_label(run) == run_registry.STATUS_SUCCEEDED for run in runs),
-                "schema": WAIT_SCHEMA,
-                "timedOut": timed_out,
-                "runs": runs,
-            },
-            stdout,
-        )
+        payload: JsonObject = {
+            "ok": not timed_out
+            and all(_status_label(run) == run_registry.STATUS_SUCCEEDED for run in runs),
+            "schema": WAIT_SCHEMA,
+            "timedOut": timed_out,
+            "runs": runs,
+        }
+        if warnings:
+            payload["warnings"] = warnings
+        delegate_rendering.print_json(payload, stdout)
     else:
         _print_wait_table(runs, stdout)
+        for warning in warnings:
+            print(f"warning: {warning}", file=stdout)
         if command.completion_report:
             _append_reports(
                 runs,

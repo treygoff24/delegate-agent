@@ -128,6 +128,11 @@ The top-level `workflows` config block controls concurrency and schema retries:
 - `itemThreads`: maximum concurrent workflow item worker threads across `pipeline()` and `parallel()`. Positive integers override the default; `0` or a missing value falls back to the default.
 - `structuredOutputRetries`: retry count for `agent(schema=...)` validation failures. Retries include the previous invalid output and validation error as correction context.
 
+The supported schema subset includes `minLength` for strings and `minItems` for
+arrays. Both take non-negative integers and are enforced recursively. `required`
+only requires a property to exist, so use `minLength: 1` or `minItems: 1` when
+the contract explicitly requires a non-empty value.
+
 ## Nested workflow references
 
 Explicit CLI script paths and saved workflow names are accepted at launch. Nested
@@ -151,6 +156,47 @@ intentionally deferred.
 - Use `--budget N` for run-count control. `budget.spent()` and `budget.remaining()` are available inside scripts. Dry-runs simulate budget ticks but do not consume real budget.
 - Use `schema=` when a stage must return structured JSON. Codex uses native `--output-schema`; other engines get schema instructions and validation retries.
 
+## Cross-family parallel review
+
+Workflows are user-authored scripts; Delegate does not ship a built-in review
+workflow. This compact recipe uses each harness's configured default model, or
+model IDs/aliases supplied through `args`, so it does not depend on private
+aliases:
+
+```python
+meta = {"name": "cross-family-review"}
+
+engines = args.get("engines", ["codex", "claude", "cursor"])
+models = args.get("models", {})
+prompt = args["prompt"]
+
+def reviewer(engine):
+    return lambda: agent(
+        prompt,
+        engine=engine,
+        mode="safe",
+        model=models.get(engine),
+        phase=f"Review ({engine})",
+    )
+
+reviews = parallel([reviewer(engine) for engine in engines])
+return {"reviews": dict(zip(engines, reviews))}
+```
+
+Save it as (for example) `review.py`, optionally cap each family with
+`workflows.engineCaps`, and preview its exact routing before launch:
+
+```bash
+python3 bin/delegate.py --json workflow run review.py \
+  --args '{"prompt":"Review the current changes; return prioritized findings."}' \
+  --dry-run
+```
+
+The preview's `runTree.calls` records each call's resolved `model`, `effort`,
+`fast`, `isolation`, and UTF-8 `promptBytes`. Cursor and Kimi calls whose prompts
+exceed 102400 bytes also carry a warning because those harnesses transport the
+prompt in argv.
+
 ## CLI
 
 ```bash
@@ -158,7 +204,8 @@ python3 bin/delegate.py workflow check review.py
 python3 bin/delegate.py --json workflow run review.py --args '{"files":["src/cli.py"]}' --budget 10
 python3 bin/delegate.py workflow events wf_0123abcdef45 --since 12
 python3 bin/delegate.py workflow watch wf_0123abcdef45 --since 12
-python3 bin/delegate.py workflow wait wf_0123abcdef45 --timeout 60
+python3 bin/delegate.py workflow wait --timeout 60
+python3 bin/delegate.py workflow result --field summary
 python3 bin/delegate.py workflow approve wf_0123abcdef45
 python3 bin/delegate.py workflow kill wf_0123abcdef45
 python3 bin/delegate.py workflow save review.py --name review-changes

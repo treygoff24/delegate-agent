@@ -19,6 +19,7 @@ if SRC not in sys.path:
 # Imported after the base (which bootstraps sys.path); the two timeout tests
 # monkeypatch safe_workspace._run_git / _run_git_bytes directly on this module.
 from delegate_agent import safe_workspace  # noqa: E402
+from delegate_agent.constants import PROMPT_INSTRUCTION_MODE_SLASH  # noqa: E402
 
 
 class SafeWorkspaceIsolationTests(CommandTestBase):
@@ -582,6 +583,148 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
         )
 
         self.assertNotIn("uncommitted/untracked changes synced", request.stdin_text or "")
+
+    def _assert_safe_prompt_paths_are_rerooted(self, engine, transport_field):
+        repo = make_git_repo(with_commit=True)
+        self.addCleanup(repo.cleanup)
+        source = repo.name
+        external = f"/delegate-external{source}/reference.txt"
+        prompt = (
+            f"Review {source}/src/module.py and {external}; "
+            f"leave {source}-backup/src/module.py unchanged."
+        )
+        iso_ctx = self.delegate.build_isolation_context(
+            source_workspace=source,
+            resolved_isolation="auto",
+            engine=engine,
+            mode="safe",
+            source_git_root=source,
+        )
+        request = self.delegate.build_request(
+            engine,
+            "safe",
+            None,
+            self.delegate.ResolvedWorkspace(source, "git"),
+            prompt,
+            self.delegate.DEFAULT_CONFIG,
+            dry_run=False,
+            isolation_context=iso_ctx,
+        )
+
+        with self.delegate.safe_isolated_request(request) as isolated:
+            if transport_field == "argv":
+                transported = isolated.argv[-1]
+            else:
+                transported = getattr(isolated, transport_field)
+            self.assertIsNotNone(transported)
+            self.assertIn(f"{isolated.workspace}/src/module.py", transported)
+            self.assertNotIn(f"{source}/src/module.py", transported)
+            self.assertIn(external, transported)
+            self.assertIn(f"{source}-backup/src/module.py", transported)
+            self.assertIn("cite files relative to the workspace", transported)
+            self.assertIn(f"{isolated.workspace}/src/module.py", isolated.prompt)
+
+    def test_safe_isolation_reroots_argv_prompt_paths(self):
+        self._assert_safe_prompt_paths_are_rerooted("cursor", "argv")
+
+    def test_safe_isolation_reroots_stdin_prompt_paths(self):
+        self._assert_safe_prompt_paths_are_rerooted("codex", "stdin_text")
+
+    def test_safe_isolation_reroots_prompt_file_paths(self):
+        self._assert_safe_prompt_paths_are_rerooted("grok", "prompt_file_text")
+
+    def _assert_safe_slash_prompt_is_verbatim(self, engine, transport_field, workspace_flag):
+        repo = make_git_repo(with_commit=True)
+        self.addCleanup(repo.cleanup)
+        source = repo.name
+        prompt = f"/goal inspect {source}/src/module.py byte-for-byte"
+        iso_ctx = self.delegate.build_isolation_context(
+            source_workspace=source,
+            resolved_isolation="auto",
+            engine=engine,
+            mode="safe",
+            source_git_root=source,
+        )
+        request = self.delegate.build_request(
+            engine,
+            "safe",
+            None,
+            self.delegate.ResolvedWorkspace(source, "git"),
+            prompt,
+            self.delegate.DEFAULT_CONFIG,
+            dry_run=False,
+            isolation_context=iso_ctx,
+            prompt_instruction_mode=PROMPT_INSTRUCTION_MODE_SLASH,
+        )
+        if transport_field == "argv":
+            # Cursor safe rejects slash prompts before this isolation layer, so
+            # provide the already-resolved verbatim payload directly here.
+            request.argv[-1] = prompt
+
+        with self.delegate.safe_isolated_request(request) as isolated:
+            transported = (
+                isolated.argv[-1]
+                if transport_field == "argv"
+                else getattr(isolated, transport_field)
+            )
+            self.assertEqual(isolated.prompt, prompt)
+            self.assertEqual(transported, prompt)
+            self.assertNotIn("Safe-isolation note", transported)
+            self.assertEqual(
+                isolated.argv[isolated.argv.index(workspace_flag) + 1],
+                isolated.workspace,
+            )
+
+    def test_safe_isolation_preserves_slash_argv_prompt(self):
+        self._assert_safe_slash_prompt_is_verbatim("cursor", "argv", "--workspace")
+
+    def test_safe_isolation_preserves_slash_stdin_prompt(self):
+        self._assert_safe_slash_prompt_is_verbatim("codex", "stdin_text", "--cd")
+
+    def test_safe_isolation_preserves_slash_prompt_file(self):
+        self._assert_safe_slash_prompt_is_verbatim("grok", "prompt_file_text", "--cwd")
+
+    def test_safe_workspace_path_replacement_requires_exact_prefix_boundary(self):
+        source = "/workspace/repo"
+        isolated = "/tmp/delegate-safe/wt"
+        self.assertEqual(
+            safe_workspace.replace_workspace_path_prefix(source, source, isolated),
+            isolated,
+        )
+        self.assertEqual(
+            safe_workspace.replace_workspace_path_prefix(
+                f"{source}/src/main.py {source}-backup/src/main.py /external{source}/main.py",
+                source,
+                isolated,
+            ),
+            f"{isolated}/src/main.py {source}-backup/src/main.py /external{source}/main.py",
+        )
+
+    def test_safe_isolated_request_does_not_rewrite_work_mode(self):
+        repo = make_git_repo(with_commit=True)
+        self.addCleanup(repo.cleanup)
+        prompt = f"Edit {repo.name}/src/module.py"
+        iso_ctx = self.delegate.build_isolation_context(
+            source_workspace=repo.name,
+            resolved_isolation="auto",
+            engine="cursor",
+            mode="work",
+            source_git_root=repo.name,
+        )
+        request = self.delegate.build_request(
+            "cursor",
+            "work",
+            None,
+            self.delegate.ResolvedWorkspace(repo.name, "git"),
+            prompt,
+            self.delegate.DEFAULT_CONFIG,
+            dry_run=False,
+            isolation_context=iso_ctx,
+        )
+
+        with self.delegate.safe_isolated_request(request) as unchanged:
+            self.assertIs(unchanged, request)
+            self.assertEqual(unchanged.prompt, prompt)
 
     def test_create_git_safe_workspace_reports_worktree_timeout(self):
         timeout = subprocess.CompletedProcess(

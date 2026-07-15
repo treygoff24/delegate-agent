@@ -249,15 +249,8 @@ class OverviewTests(unittest.TestCase):
             if "[--fast|--no-fast]" in line:
                 self.assertIn(" codex ", line)
 
-    def test_overview_call_lines_omit_forbid_commit(self):
-        """The overview must not advertise --forbid-commit for call mode.
-
-        Round 2 split the per-engine overview lines into {safe,work} (which
-        carries --forbid-commit) and call (which carries --read-only only),
-        consistent with the per-command help done in round 1. Every overview
-        usage line whose mode token is literally ``call`` must omit both
-        ``--forbid-commit`` and ``--include-dirty``.
-        """
+    def test_overview_call_lines_omit_workspace_options(self):
+        """Stateless call usage must not advertise workspace-only options."""
         call_lines = [
             line.strip()
             for line in self.overview.splitlines()
@@ -265,8 +258,19 @@ class OverviewTests(unittest.TestCase):
         ]
         self.assertTrue(call_lines, "overview must contain call-mode usage lines")
         for line in call_lines:
-            self.assertNotIn("--forbid-commit", line)
-            self.assertNotIn("--include-dirty", line)
+            for option in ("--cwd", "--isolation", "--forbid-commit", "--include-dirty"):
+                with self.subTest(line=line, option=option):
+                    self.assertNotIn(option, line)
+
+    def test_dry_run_call_usage_omits_workspace_options(self):
+        call_lines = [
+            usage for usage in command_help.COMMAND_SPECS["dry-run"].usage if " call " in usage
+        ]
+        self.assertEqual(len(call_lines), 3)
+        for line in call_lines:
+            for option in ("--cwd", "--isolation", "--forbid-commit", "--include-dirty"):
+                with self.subTest(line=line, option=option):
+                    self.assertNotIn(option, line)
 
 
 class PureCallHelpIntegrationTests(unittest.TestCase):
@@ -322,6 +326,54 @@ class FocusedGlobalOptionsTests(unittest.TestCase):
         text = command_help.render_command_help_text(command_help.COMMAND_SPECS["codex"])
         self.assertIn("--output-schema", text)
         self.assertIn("JSON Schema", text)
+
+    def test_focused_call_specs_hide_work_only_options(self):
+        for key, spec in command_help.COMMAND_SPECS.items():
+            if not key.endswith(" call"):
+                continue
+            with self.subTest(command=key):
+                payload = command_help.command_help_payload(spec)
+                self.assertTrue(payload["usage"])
+                self.assertTrue(all(" call " in usage for usage in payload["usage"]))
+                option_flags = {option["flag"] for option in payload["options"]}
+                self.assertTrue(
+                    option_flags.isdisjoint(
+                        {"--progress", "--no-progress", "--forbid-commit", "--include-dirty"}
+                    )
+                )
+                global_flags = {option["flag"] for option in payload["globalOptions"]}
+                self.assertTrue(
+                    global_flags.isdisjoint(
+                        {
+                            "--isolation",
+                            "--pass-through",
+                            "--completion-report",
+                            "--no-completion-report",
+                        }
+                    )
+                )
+                self.assertIn("--group", global_flags)
+                self.assertIn("--cwd", global_flags)
+                self.assertTrue(any("only with --group" in note for note in payload["notes"]))
+
+
+class WorkflowHelpContractTests(unittest.TestCase):
+    def test_wait_and_result_advertise_latest_selection(self):
+        for command in ("workflow wait", "workflow result"):
+            with self.subTest(command=command):
+                payload = command_help.command_help_payload(command_help.COMMAND_SPECS[command])
+                self.assertIn("[<wfId>]", payload["usage"][0])
+                self.assertFalse(payload["arguments"][0]["required"])
+                self.assertTrue(any("resolutionKind" in note for note in payload["notes"]))
+
+    def test_result_advertises_field_extraction(self):
+        payload = command_help.command_help_payload(command_help.COMMAND_SPECS["workflow result"])
+        self.assertIn("--field KEY", payload["usage"][0])
+        self.assertIn("--field", {option["flag"] for option in payload["options"]})
+
+    def test_safe_workspace_note_requires_relative_report_paths(self):
+        self.assertIn("Absolute source-workspace paths", command_help.SAFE_WORKSPACE_SYNC_NOTE)
+        self.assertIn("workspace-relative paths", command_help.SAFE_WORKSPACE_SYNC_NOTE)
 
 
 class HelpIndexPayloadTests(unittest.TestCase):
