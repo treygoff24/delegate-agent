@@ -81,8 +81,7 @@ def _resolve_targets(
     latest_harness: str | None,
     group: str | None = None,
 ):
-    targets = []
-    seen: set[str] = set()
+    targets: dict[str, run_registry.RunTarget] = {}
     for handle in handles:
         target = run_registry.resolve_run_target(
             registry_root,
@@ -91,9 +90,7 @@ def _resolve_targets(
         )
         if isinstance(target, run_registry.RunTargetLookupError):
             raise WaitCancelError(target.error, target.message)
-        if target.run_id not in seen:
-            targets.append(target)
-            seen.add(target.run_id)
+        targets.setdefault(target.run_id, target)
     if latest_harness is not None:
         target = run_registry.resolve_run_target(
             registry_root,
@@ -102,18 +99,15 @@ def _resolve_targets(
         )
         if isinstance(target, run_registry.RunTargetLookupError):
             raise WaitCancelError(target.error, target.message)
-        if target.run_id not in seen:
-            targets.append(target)
+        targets.setdefault(target.run_id, target)
     if group is not None:
         for target in _group_targets(registry_root, group):
-            if target.run_id not in seen:
-                targets.append(target)
-                seen.add(target.run_id)
+            targets.setdefault(target.run_id, target)
     if not targets:
         if group is not None:
             raise WaitCancelError("no_matching_runs", f"No runs found for group: {group}")
         raise WaitCancelError("missing_handle", "wait/cancel requires at least one run handle.")
-    return targets
+    return list(targets.values())
 
 
 def _merged_view(registry_root: Path, run_id: str, target: run_registry.RunTarget) -> JsonObject:

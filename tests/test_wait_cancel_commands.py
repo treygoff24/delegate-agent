@@ -151,6 +151,20 @@ class WaitCancelCommandTests(unittest.TestCase):
         payload = json.loads(out)
         self.assertEqual([run["alias"] for run in payload["runs"]], [first_alias, second_alias])
 
+    def test_wait_latest_and_group_emit_overlapping_run_once(self):
+        _first_id, first_alias = self.write_run(status="succeeded", group="wave4")
+        _latest_id, latest_alias = self.write_run(status="succeeded", group="wave4")
+
+        code, out, err = self.run_cli(
+            ["--json", "wait", "--latest", "codex", "--group", "wave4", "--interval", "1"]
+        )
+
+        self.assertEqual(code, 0, err)
+        runs = json.loads(out)["runs"]
+        self.assertEqual([run["alias"] for run in runs], [latest_alias, first_alias])
+        self.assertEqual(runs[0]["resolutionKind"], "latest")
+        self.assertEqual(runs[0]["resolvedHandle"], latest_alias)
+
     def test_wait_group_selector_reports_no_matches(self):
         self.write_run(status="succeeded", group="wave4")
 
