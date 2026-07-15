@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- `wait`/`cancel`: a run matched by both `--latest HARNESS` and `--group NAME`
+- `wait`: a run matched by both `--latest HARNESS` and `--group NAME`
   was emitted twice in the resolved-target list; it now appears once, with
   first-selection precedence and ordering preserved.
 - `git_root_for` degrades any `OSError` from the git probe (not just
