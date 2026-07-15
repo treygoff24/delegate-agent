@@ -5,10 +5,35 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.14.0] - 2026-07-15
+
+### Added
+
+- `workflow result --field` for extracting a single field from a workflow
+  result, reliable latest-workflow selection, immutable creation ordering,
+  dry-run visibility, and orphan detection (PR #14).
+- Schema validation for `agent()` results supports `minLength` and
+  `minItems`, including in retries and dry-run placeholders (PR #14).
+- Grouped work runs sharing one non-isolated workspace now emit a warning
+  with guidance for commit boundaries and persistent worktrees (PR #13).
+
+### Changed
+
+- Focused call help (`delegate <engine> call --help`) now reflects
+  call-mode option boundaries and documents the grouped-call tracking
+  exception (`--cwd` accepted only with `--group`); explicit `agent` input
+  is rejected on engines that do not support it (PR #13).
+- Overview, dry-run, agent-help, README, CLI reference, and worktree docs
+  corrected from user feedback (PR #13).
 
 ### Fixed
 
+- Structured Codex workflows consume the child-authored completion report
+  (including on resume) and fail closed when it is missing; workflow resume
+  transitions atomically to `starting`, hides stale results, rolls back
+  failed launches, and releases locks on preparation errors (PR #14).
+- Safe isolation re-roots exact source-workspace paths while preserving
+  slash-command payloads verbatim (PR #14).
 - `wait`: a run matched by both `--latest HARNESS` and `--group NAME`
   was emitted twice in the resolved-target list; it now appears once, with
   first-selection precedence and ordering preserved.
@@ -325,6 +350,7 @@ Usage-audit fix wave: 82 sessions and 1,241 delegate invocations from one week o
 
 - Releases before 0.1.3 predate this changelog.
 
+[0.14.0]: https://github.com/treygoff24/delegate-agent/compare/v0.13.1...v0.14.0
 [0.13.1]: https://github.com/treygoff24/delegate-agent/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/treygoff24/delegate-agent/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/treygoff24/delegate-agent/compare/v0.11.0...v0.12.0
