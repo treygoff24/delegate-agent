@@ -10,8 +10,6 @@ from tests.execution_test_base import ExecutionTestBase
 
 
 class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
-    # -- Finding 2: Pre-launch failure inspectable via snapshot ----------------
-
     def test_prelaunch_failure_inspectable_via_snapshot(self):
         """Pre-launch worktree creation failure is inspectable via delegate snapshot main()."""
         with (
@@ -62,15 +60,12 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
                     )
                 self.assertEqual(ctx.exception.error, "worktree_create_failed")
 
-                # Now invoke delegate snapshot <alias> via main() to verify
-                # it surfaces the pre-launch failure fields.
                 registry_root = Path(repo.name) / ".delegate"
                 runs_dir = registry_root / "runs"
                 run_dirs = list(runs_dir.glob("del_*"))
                 self.assertTrue(len(run_dirs) > 0)
                 run_id = run_dirs[0].name
 
-                # Invoke main() with the snapshot subcommand.
                 snapshot_stdout = io.StringIO()
                 snapshot_code = self.delegate.main(
                     ["--cwd", repo.name, "--json", "snapshot", run_id],
@@ -306,8 +301,6 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
             self.assertNotIn("manualCleanup", snapshot)
             self.assertEqual(stderr.getvalue(), "")
 
-    # -- Finding 4: Popen-launch failure after git worktree add succeeds --------
-
     def test_popen_failure_after_worktree_create_preserves_worktree(self):
         """Popen-launch failure after git worktree add succeeds preserves worktree
         and records run as failed with error captured."""
@@ -317,13 +310,10 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
         ):
             repo, _git_cd = self._make_git_repo_with_commit()
 
-            # Create a fake binary that exists but has a bad shebang
-            # (this will cause Popen to fail after ensure_binary passes).
+            # An invalid interpreter passes ensure_binary but makes Popen raise.
             bad_bin_dir = tempfile.TemporaryDirectory()
             self.addCleanup(bad_bin_dir.cleanup)
             bad_agent = Path(bad_bin_dir.name) / "agent"
-            # Write a binary that fails after Popen (invalid shebang
-            # causes OSError / ENOEXEC when subprocess tries to exec).
             bad_agent.write_text(
                 "#!/usr/bin/env bash_does_not_exist_xyz\necho 'this should never run'\n"
             )
@@ -499,7 +489,6 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
                 # Pre-checkout the predicted branch in a separate
                 # worktree so git refuses to create it.
                 branch_wt_path = tempfile.mkdtemp()
-                # Create the branch reference first; then check it out.
                 subprocess.run(
                     ["git", "-C", repo.name, "branch", "--no-track", predicted_branch, "HEAD"],
                     check=True,

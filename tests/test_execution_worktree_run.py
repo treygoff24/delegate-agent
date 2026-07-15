@@ -470,7 +470,6 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
                     stderr=io.StringIO(),
                 )
             self.assertEqual(code, 0)
-            # Check state.json in registry for worktreeStatus
             registry_root = Path(repo.name) / ".delegate"
             runs_dir = registry_root / "runs"
             run_dirs = list(runs_dir.glob("del_*"))
@@ -531,7 +530,6 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
                     stderr=io.StringIO(),
                 )
             self.assertEqual(code, 0)
-            # Check manifest.json
             registry_root = Path(repo.name) / ".delegate"
             runs_dir = registry_root / "runs"
             run_dirs = list(runs_dir.glob("del_*"))
@@ -544,8 +542,6 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             self.assertIn("plannedExecutionCwd", cc)
             self.assertTrue(cc["plannedBranch"].startswith("delegate/cursor-"))
             self.assertIn("/worktrees/", cc["plannedExecutionCwd"])
-
-    # -- Finding 1: Prompt injection reaches the child ------------------------
 
     def _make_logging_fake_bin(self, name, log_file):
         """Make a fake binary that logs its argv to a file."""
@@ -1140,13 +1136,10 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             logged = Path(log_file).read_text() if Path(log_file).exists() else ""
             self.assertIn("You are running in a Delegate-created isolated Git worktree", logged)
 
-    # -- Finding 3: Droid branch labels use alias, not resolved id -------------
-
     def test_droid_branch_uses_alias_not_resolved_id(self):
         """Droid persistent worktree branch label uses alias (e.g. qwen), not resolved model id."""
         from delegate_agent.isolation import branch_label
 
-        # Verify that branch_label uses the alias, not the resolved id.
         alias = "qwen"
         resolved_id = "custom:OpenRouter-:-Qwen-3.7-Max-0"
         label_alias = branch_label("droid", alias)
@@ -1210,7 +1203,6 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
                     stderr=io.StringIO(),
                 )
             self.assertEqual(code, 0)
-            # Verify branch contains "droid-qwen" not the resolved id slug.
             branches = subprocess.run(
                 ["git", "-C", repo.name, "branch", "--list", "delegate/droid-*"],
                 capture_output=True,

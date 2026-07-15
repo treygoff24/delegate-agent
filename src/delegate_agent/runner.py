@@ -580,12 +580,6 @@ def _classify_result_quality(
     return RESULT_QUALITY_OK
 
 
-def _redacted_tail_from_bytes(data: bytes, *, limit: int = profiles.STDERR_TAIL_LIMIT) -> str:
-    if limit <= 0:
-        return ""
-    return redaction.redact_string(data[-limit:].decode("utf-8", errors="replace"))
-
-
 def _auth_failure_seen(stderr_tail: str, accumulator: harness_events.StreamAccumulator) -> bool:
     # Match against the redacted stderr tail ONLY. Inspecting the normalized
     # events haystack would misclassify a child report that merely DISCUSSES a
@@ -916,7 +910,7 @@ def _write_stdin(pipe: BinaryIO | None, stdin_text: str, failures: list[str]) ->
     try:
         pipe.write(stdin_text.encode("utf-8"))
         pipe.flush()
-    except (BrokenPipeError, OSError) as exc:
+    except OSError as exc:
         # The child may have exited or closed stdin before reading the prompt.
         # Record it so the run can report possibly-undelivered prompt text
         # instead of silently proceeding as if delivery succeeded.
@@ -1357,7 +1351,7 @@ def _capture_tracked_process(
             emit_progress = True
             try:
                 _emit_progress_started(ctx, progress_stderr)
-            except (BrokenPipeError, OSError):
+            except OSError:
                 emit_progress = False
             initial_delay = _progress_interval_from_env(
                 PROGRESS_INITIAL_DELAY_ENV,
@@ -1384,7 +1378,7 @@ def _capture_tracked_process(
                             started=started,
                             stderr=progress_stderr,
                         )
-                    except (BrokenPipeError, OSError):
+                    except OSError:
                         emit_progress = False
                     next_progress_at = time.monotonic() + interval
         else:
@@ -1850,15 +1844,13 @@ def _bounded_call_communicate(
                 end = min(offset + chunk_size, len(view))
                 try:
                     written = process.stdin.write(view[offset:end])
-                except (BrokenPipeError, OSError):
+                except OSError:
                     return
                 if not written:
                     break
                 offset += written
-            with contextlib.suppress(BrokenPipeError, OSError):
+            with contextlib.suppress(OSError):
                 process.stdin.flush()
-        except (BrokenPipeError, OSError):
-            pass
         finally:
             with contextlib.suppress(OSError):
                 process.stdin.close()

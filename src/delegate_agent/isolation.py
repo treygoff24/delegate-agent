@@ -173,7 +173,7 @@ def build_isolation_context(
     if lifecycle == "persistent" and source_git_common_dir is not None:
         try:
             fp = compute_repo_fingerprint_from_common_dir(source_git_common_dir)
-        except (FileNotFoundError, OSError):
+        except OSError:
             fp = None
         if fp is not None:
             short_id = run_short_id if run_short_id else "<short-run-id-placeholder>"

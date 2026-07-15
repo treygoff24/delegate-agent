@@ -67,9 +67,7 @@ CALL_MODE_NOTE = (
 )
 
 
-# --------------------------------------------------------------------------- #
 # Global options (must appear before the subcommand).
-# --------------------------------------------------------------------------- #
 
 GLOBAL_OPTIONS: tuple[OptionSpec, ...] = (
     OptionSpec("--cwd", "PATH", "Resolve the workspace from PATH (repo root inside Git)."),
@@ -182,9 +180,7 @@ _MODE_ARG = ArgSpec(
 )
 
 
-# --------------------------------------------------------------------------- #
 # Command registry.
-# --------------------------------------------------------------------------- #
 
 COMMAND_SPECS: dict[str, CommandSpec] = {
     "cursor": CommandSpec(
@@ -1302,9 +1298,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
 }
 
 
-# --------------------------------------------------------------------------- #
 # Help-token detection.
-# --------------------------------------------------------------------------- #
 
 
 def is_help_token(tok: str) -> bool:
@@ -1313,9 +1307,7 @@ def is_help_token(tok: str) -> bool:
     return tok in ("--help", "-h")
 
 
-# --------------------------------------------------------------------------- #
 # Text renderers.
-# --------------------------------------------------------------------------- #
 
 
 def _format_option(opt: OptionSpec) -> str:
@@ -1490,9 +1482,7 @@ def render_overview_text() -> str:
     return "\n".join(lines) + "\n"
 
 
-# --------------------------------------------------------------------------- #
 # JSON payloads.
-# --------------------------------------------------------------------------- #
 
 
 def _option_payload(opt: OptionSpec) -> JsonObject:

@@ -174,7 +174,7 @@ def _append_reports(
 ) -> None:
     for run, target in zip(runs, targets, strict=True):
         # Keep JSON/text behavior simple and local: read the report file the same
-        # run-output command would prefer after Wave 2 synthesized failure reports.
+        # run-output command would prefer after synthesized failure reports.
         path = (
             run_registry.run_directory(registry_root, target.run_id)
             / run_registry.COMPLETION_REPORT_FILE
@@ -296,7 +296,7 @@ def _process_start_datetime(pid: int) -> datetime | None:
             env={**os.environ, "LC_ALL": "C"},
             timeout=5.0,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+    except (OSError, subprocess.TimeoutExpired):
         return None
     raw = completed.stdout.strip()
     if not raw or completed.returncode != 0:

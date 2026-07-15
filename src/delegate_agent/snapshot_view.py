@@ -173,12 +173,10 @@ def merge_snapshot_view(
         ):
             if key in state and key not in view:
                 view[key] = state[key]
-        # Surface pre-launch failure fields when status is "failed".
         if state.get("status") == "failed":
             for key in ("error", "message", "plannedBranch", "plannedExecutionCwd"):
                 if key in state and key not in view:
                     view[key] = state[key]
-        # Surface isolation metadata from state when present.
         for key in run_metadata.SNAPSHOT_STATE_FALLBACK_KEYS:
             if key in state and key not in view:
                 view[key] = state[key]

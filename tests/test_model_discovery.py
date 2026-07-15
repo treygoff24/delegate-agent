@@ -1,4 +1,4 @@
-"""Wave 2: per-engine model discovery (bundled + config + --live probes)."""
+"""Per-engine model discovery from bundled data, config, and live probes."""
 
 from __future__ import annotations
 
@@ -505,7 +505,7 @@ class LiveProbeIntegrationTests(unittest.TestCase):
 
 
 class NonDroidModelsSummaryExtensionTests(unittest.TestCase):
-    """Wave 3 §1.3: non-droid <engine>.models appear in full + summary payloads."""
+    """Non-Droid engine models appear in full and summary payloads."""
 
     def test_full_payload_includes_nonempty_non_droid_models_maps(self):
         from delegate_agent.config import embedded_default_config

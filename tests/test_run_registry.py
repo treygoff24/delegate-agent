@@ -698,11 +698,9 @@ class RunRegistryTests(unittest.TestCase):
             }
             self.registry.write_json_atomic(run_path / "state.json", state)
 
-            # Set to present.
             updated = self.registry.set_worktree_status(root, run_id, "present")
             self.assertEqual(updated["worktreeStatus"], "present")
 
-            # Set to removed with timestamp.
             removed_at = "2026-05-24T12:00:00Z"
             updated2 = self.registry.set_worktree_status(
                 root, run_id, "removed", removed_at=removed_at

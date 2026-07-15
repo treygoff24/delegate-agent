@@ -550,9 +550,9 @@ class CodexProfileExecutionTests(unittest.TestCase):
                 "fi\n"
                 "printf '%s\\n' '{\"type\":\"turn.started\"}'\n"
                 "printf '%s\\n' "
-                "'{\"type\":\"error\",\"message\":\"You have hit your usage limit. Try again at 3:48 PM.\"}'\n"
+                '\'{"type":"error","message":"You have hit your usage limit. Try again at 3:48 PM."}\'\n'
                 "printf '%s\\n' "
-                "'{\"type\":\"turn.failed\",\"error\":{\"message\":\"You have hit your usage limit. Try again at 3:48 PM.\"}}'\n"
+                '\'{"type":"turn.failed","error":{"message":"You have hit your usage limit. Try again at 3:48 PM."}}\'\n'
                 "exit 1\n",
                 encoding="utf-8",
             )

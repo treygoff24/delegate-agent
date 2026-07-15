@@ -1044,8 +1044,6 @@ class ParserTests(unittest.TestCase):
             self.assertEqual(loaded["cursor"]["defaultModel"], "cli-model")
             self.assertEqual(source, "cli-overrides")
 
-    # -- Wave 1 isolation parser tests ------------------------------------------------
-
     def test_isolation_worktree_cursor_work_parses(self):
         parsed = self.delegate.parse_cli(["--isolation", "worktree", "cursor", "work", "fix this"])
         self.assertEqual(parsed.global_options.isolation, "worktree")
@@ -1584,8 +1582,6 @@ class ParserTests(unittest.TestCase):
             self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
         self.assertEqual(ctx.exception.error, "ambiguous_cwd")
 
-    # -- Missing coverage: launch-tail --isolation on codex, droid, dry-run --
-
     def test_isolation_after_subcommand_codex_work_is_accepted(self):
         parsed = self.delegate.parse_cli(["codex", "work", "--isolation", "worktree", "fix"])
         self.assertEqual(parsed.global_options.isolation, "worktree")
@@ -1607,14 +1603,10 @@ class ParserTests(unittest.TestCase):
         )
         self.assertEqual(parsed.global_options.isolation, "worktree")
 
-    # -- Missing coverage: isolation.work unknown value --
-
     def test_isolation_work_unknown_value_raises(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:
             self.delegate.parse_cli(["--isolation", "bananas", "codex", "work", "fix"])
         self.assertEqual(ctx.exception.error, "invalid_isolation")
-
-    # -- Missing coverage: run-input-json isolation = null --
 
     def test_run_input_json_isolation_null_raises(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1635,14 +1627,11 @@ class ParserTests(unittest.TestCase):
                 self.delegate.pre_read_run_json_for_config(str(task), None)
             self.assertEqual(ctx.exception.error, "invalid_isolation")
 
-    # -- Missing coverage: run --input-json cwd with workspace-local config resolves isolation --
-
     def test_run_input_json_workspace_config_resolves_isolation_before_request(self):
-        """Canonical test: JSON cwd pointing at a repo with .delegate/config.json
+        """JSON cwd pointing at a repo with .delegate/config.json
         containing isolation.work = worktree resolves isolation to worktree even when
         CLI cwd has different config."""
         with tempfile.TemporaryDirectory() as global_tmp:
-            # Create a "global" config with isolation.work = none (the default)
             global_config = Path(global_tmp) / "global_config.json"
             global_config.write_text(
                 json.dumps(
@@ -1654,7 +1643,6 @@ class ParserTests(unittest.TestCase):
                 )
             )
             with tempfile.TemporaryDirectory() as workspace_tmp:
-                # Create a workspace with local config that has isolation.work = worktree
                 workspace = Path(workspace_tmp)
                 local_delegate = workspace / ".delegate"
                 local_delegate.mkdir()
@@ -1667,7 +1655,6 @@ class ParserTests(unittest.TestCase):
                         }
                     )
                 )
-                # Create a task.json pointing at the workspace with local config
                 task = workspace / "task.json"
                 task.write_text(
                     json.dumps(
@@ -1688,7 +1675,6 @@ class ParserTests(unittest.TestCase):
                     "Config loaded from JSON-resolved workspace should have isolation.work = worktree",
                 )
 
-                # Now resolve isolation: no CLI flag, no JSON isolation, should use config default
                 result = self.delegate.delegate_config.resolve_isolation(
                     cli_value=None,
                     input_json_value=None,
@@ -1698,7 +1684,6 @@ class ParserTests(unittest.TestCase):
                 )
                 self.assertEqual(result, "worktree")
 
-                # CLI --isolation auto should bypass the config
                 result = self.delegate.delegate_config.resolve_isolation(
                     cli_value="auto",
                     input_json_value=None,
@@ -1708,7 +1693,6 @@ class ParserTests(unittest.TestCase):
                 )
                 self.assertEqual(result, "auto")
 
-                # JSON isolation overrides config
                 result = self.delegate.delegate_config.resolve_isolation(
                     cli_value=None,
                     input_json_value="none",
@@ -1718,7 +1702,6 @@ class ParserTests(unittest.TestCase):
                 )
                 self.assertEqual(result, "none")
 
-                # Build a full request from the JSON and verify it uses the resolved config
                 parsed = self.delegate.ParsedCommand(
                     "run",
                     global_options=self.delegate.GlobalOptions(json_mode=False),
@@ -1727,8 +1710,6 @@ class ParserTests(unittest.TestCase):
                 request = self.delegate.request_from_input_json(parsed, cfg)
                 self.assertEqual(request.engine, "cursor")
                 self.assertEqual(request.mode, "work")
-
-    # -- Finding #5: end-to-end main() integration test for run --input-json config discovery --
 
     def test_main_run_input_json_uses_workspace_config(self):
         """End-to-end main(): JSON cwd config discovery loads workspace-local config

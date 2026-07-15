@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-from typing import Any
 
 from delegate_agent.git_utils import (
     GIT_QUICK_TIMEOUT_SECONDS,
@@ -15,7 +14,7 @@ MAX_CHANGED_FILES_REPORTED = 50
 MAX_COMMITS_REPORTED = 20
 
 
-def _str(value: Any) -> str | None:
+def _str(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 

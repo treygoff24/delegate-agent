@@ -197,14 +197,6 @@ def changed_files_vs_head(git_root: str) -> tuple[str, ...]:
     return tuple(paths)
 
 
-def _is_relative_to(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-        return True
-    except ValueError:
-        return False
-
-
 def symlink_target_resolves_outside(path: Path, source_root: Path) -> bool:
     """Return true when ``path`` is a symlink whose target leaves ``source_root``."""
     if not path.is_symlink():
@@ -214,7 +206,7 @@ def symlink_target_resolves_outside(path: Path, source_root: Path) -> bool:
         target = (path.parent / os.readlink(path)).resolve(strict=False)
     except OSError:
         return False
-    return not _is_relative_to(target, root_resolved)
+    return not target.is_relative_to(root_resolved)
 
 
 def _git_check_ignore(git_root: str, paths: list[str]) -> tuple[set[str], bool]:
@@ -309,7 +301,7 @@ def _classify_untracked_symlink_leaks(
         except OSError:
             leak_blocked.add(relative)
             continue
-        if not _is_relative_to(resolved, root_resolved):
+        if not resolved.is_relative_to(root_resolved):
             # Escaping relative link; resolves_outside handles it.
             continue
         try:
@@ -507,15 +499,14 @@ def _external_symlink_warning_path(path: Path, *, root: Path, root_resolved: Pat
         if not path.is_symlink():
             return None
         target = (path.parent / os.readlink(path)).resolve(strict=False)
-        target.relative_to(root_resolved)
-        return None
-    except ValueError:
-        with suppress(ValueError):
-            return path.relative_to(root).as_posix()
-        return path.name
     except OSError:
         # Filesystem walks can race with edits; skip only the unstable entry.
         return None
+    if target.is_relative_to(root_resolved):
+        return None
+    with suppress(ValueError):
+        return path.relative_to(root).as_posix()
+    return path.name
 
 
 def external_symlink_warnings(source_workspace: str, *, limit: int = 5) -> tuple[str, ...]:

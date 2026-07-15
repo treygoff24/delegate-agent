@@ -435,7 +435,6 @@ class WorktreeListShowTests(WorktreeMgmtTestBase):
                 creation_oid=base_oid,
             )
             self._create_worktree_at(path, branch, wt_path)
-            # Build a payload with all fields populated.
             from delegate_agent import rendering as delegate_rendering
 
             payload = {

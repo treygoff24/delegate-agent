@@ -203,8 +203,6 @@ class WaitCancelCommandTests(unittest.TestCase):
         self.assertEqual(state["status"], "cancelled")
         self.assertEqual(state["failureReason"], "cancelled_by_user")
 
-    # --- Finding 1c: cancel/finalize race, both orders -----------------------
-
     def test_race_runner_finalizes_first_cancel_wins(self):
         """Runner finalizer writes terminal state during the cancel grace window,
         then cancel reconciles to cancelled (cancel wins)."""
@@ -253,8 +251,6 @@ class WaitCancelCommandTests(unittest.TestCase):
         self.assertEqual(state["failureReason"], "cancelled_by_user")
         proc.kill()
 
-    # --- DEFECT 2: marker protocol -----------------------------------------
-
     def test_cancel_stamps_cancel_requested_marker_before_signal(self):
         """Cancel stamps cancelRequested:true + cancelRequestedAt on a live run
         under the registry lock BEFORE sending any signal. The marker survives
@@ -301,8 +297,10 @@ class WaitCancelCommandTests(unittest.TestCase):
         proc.wait(timeout=5)
 
     def test_cancel_does_not_stamp_marker_on_already_terminal_run(self):
-        """DEFECT 2 scenario iv: cancelRequested is never stamped on an
-        already-terminal run. A terminal run is refused before the marker stamp."""
+        """cancelRequested is never stamped on an already-terminal run.
+
+        A terminal run is refused before the marker stamp.
+        """
         _run_id, alias = self.write_run(status="succeeded")
         target = run_registry.RunTarget(run_id=_run_id, alias=alias)
         original_write = run_registry.write_json_atomic
@@ -329,8 +327,6 @@ class WaitCancelCommandTests(unittest.TestCase):
         cancelled instead of downgrading to failed/succeeded."""
         run_id, alias = self.write_run(status="running", pid=os.getpid(), pgid=os.getpgid(0))
         run_path = run_registry.run_directory(self.registry_root, run_id)
-        # Simulate cancel writing 'cancelled' first.
-        # Bypass the signal by directly writing cancelled state (cancel-first).
         cancel_state = json.loads((run_path / run_registry.STATE_FILE).read_text())
         cancel_state.update(
             {
@@ -458,8 +454,6 @@ class WaitCancelCommandTests(unittest.TestCase):
         self.assertEqual(state["failureReason"], "cancelled_by_user")
         self.assertEqual(state.get("exitCode"), 1)
 
-    # --- Finding 2: PID-reuse start-identity check --------------------------
-
     def test_pid_identity_mismatch_refuses_stale_pid(self):
         """A pid that predates the run beyond skew is refused.
 
@@ -554,8 +548,6 @@ class WaitCancelCommandTests(unittest.TestCase):
         self.assertTrue(any("identity" in w or "ps" in w for w in payload.get("warnings") or []))
         proc.wait(timeout=5)
 
-    # --- Finding 3: group liveness in the grace loop ------------------------
-
     def test_group_liveness_sigkill_when_grandchild_survives(self):
         """Leader dies but grandchild survives SIGTERM -> SIGKILL fired at group."""
         # Spawn a child that spawns a grandchild ignoring SIGTERM.
@@ -599,8 +591,6 @@ class WaitCancelCommandTests(unittest.TestCase):
             pass
         self.assertTrue(gone, "process group survived SIGKILL")
 
-    # --- Finding 6: cancel refuses stale/dead_pid runs ----------------------
-
     def test_cancel_refuses_stale_dead_pid_run(self):
         """A running run with a dead pid is stale and cancel refuses it."""
         _run_id, alias = self.write_run(status="running", pid=999999999)
@@ -615,15 +605,11 @@ class WaitCancelCommandTests(unittest.TestCase):
         self.assertEqual(code, cli.EXIT_USAGE)
         self.assertIn("run_already_terminal", err or out)
 
-    # --- Finding 6: pid/pgid <= 1 refusal ------------------------------------
-
     def test_cancel_refuses_pid_le_one(self):
         _run_id, alias = self.write_run(status="running", pid=1, pgid=1)
         code, out, err = self.run_cli(["cancel", alias])
         self.assertEqual(code, cli.EXIT_USAGE)
         self.assertIn("unsafe_signal_target", err or out)
-
-    # --- Finding 6: legacy pid-only fallback emits warning ------------------
 
     def test_cancel_legacy_pid_only_emits_warning(self):
         """A run with pid but no pgid falls back to pid signal with a warning."""
@@ -645,8 +631,6 @@ class WaitCancelCommandTests(unittest.TestCase):
             )
         )
         proc.wait(timeout=5)
-
-    # --- Finding 6: multi-handle wait exit codes -----------------------------
 
     def test_wait_multi_handle_one_failed_returns_one(self):
         _run_id1, alias1 = self.write_run(status="succeeded")

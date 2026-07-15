@@ -5,7 +5,7 @@ import subprocess  # nosec B404 - persistent worktree cleanup intentionally runs
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Protocol, TextIO
+from typing import TextIO
 
 from delegate_agent import harness_events, profiles, retention, run_registry, safe_workspace
 from delegate_agent import runner as delegate_runner
@@ -37,6 +37,7 @@ from delegate_agent.prompt_transport import (
     PROMPT_TRANSPORT_FILE,
     PROMPT_TRANSPORT_STDIN,
 )
+from delegate_agent.request_models import Request, ResolvedWorkspace
 
 
 class PersistentWorktreeError(Exception):
@@ -48,53 +49,17 @@ class PersistentWorktreeError(Exception):
         self.message = message
 
 
-class PersistentExecutionRequest(Protocol):
-    engine: str
-    mode: str
-    workspace: str
-    prompt: str
-    argv: list[str]
-    model: str | None
-    model_alias: str | None
-    workspace_kind: str
-    isolation_context: IsolationContext | None
-    warnings: tuple[str, ...]
-    reasoning_effort: str | None
-    reasoning_effort_source: str | None
-    reasoning_capability_source: str | None
-    reasoning_transport: str | None
-    fast: bool | None
-    progress: bool
-    forbid_commit: bool
-    include_dirty: bool
-    stdin_text: str | None
-    prompt_file_text: str | None
-    agent_config_text: str | None
-    prompt_transport: str
-    display_argv: list[str] | None
-    env_overrides: dict[str, str] | None
-    group: str | None
-    auth_profile: str | None
-    fallback_auth_profile: str | None
-    profile_resolution: profiles.ProfileResolution
-
-
-class SourceWorkspace(Protocol):
-    path: str
-    kind: str
-
-
 BinaryValidator = Callable[[list[str], str], None]
 
 
 @dataclass(frozen=True)
 class PersistentWorktreeExecution:
-    request: PersistentExecutionRequest
+    request: Request
     json_mode: bool
     config: JsonObject
     pass_through: bool
     completion_report_mode: str
-    source_workspace: SourceWorkspace
+    source_workspace: ResolvedWorkspace
     stdout: TextIO
     stderr: TextIO
     binary_validator: BinaryValidator
@@ -332,7 +297,7 @@ def _register_persistent_worktree_run(
     run_path.mkdir(parents=True, exist_ok=True)
     delegate_runner.write_manifest(
         run_path,
-        delegate_runner.build_manifest(pre_ctx, _public_argv(request)),
+        delegate_runner.build_manifest(pre_ctx, public_argv(request)),
     )
 
     delegate_runner.write_state(
@@ -422,7 +387,7 @@ def _create_persistent_worktree_or_record_failure(
                 registration.run_path,
                 delegate_runner.build_manifest(
                     registration.pre_ctx,
-                    _public_argv(execution.request),
+                    public_argv(execution.request),
                 ),
             )
     except IsolationExecutionError as exc:
@@ -461,7 +426,7 @@ def _create_persistent_worktree_or_record_failure(
 
 
 def _request_for_execution_workspace(
-    request: PersistentExecutionRequest,
+    request: Request,
     execution_workspace: str,
 ) -> ExecutionWorkspaceRequest:
     execution_argv = replace_workspace_arg_in_argv(
@@ -486,7 +451,7 @@ def _request_for_execution_workspace(
         execution_argv[-1] = execution_prompt
     execution_display_argv = replace_workspace_arg_in_argv(
         request.engine,
-        _public_argv(request),
+        public_argv(request),
         execution_workspace,
     )
     return ExecutionWorkspaceRequest(
@@ -576,10 +541,6 @@ def _launch_child_in_persistent_worktree(
     )
 
     return exit_code, payload
-
-
-def _public_argv(request: PersistentExecutionRequest) -> list[str]:
-    return public_argv(request)
 
 
 def _cleanup_partial_worktree(

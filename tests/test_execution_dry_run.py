@@ -286,8 +286,6 @@ class ExecutionDryRunTests(ExecutionTestBase):
                 )
         self.assertEqual(ctx.exception.error, "invalid_option_combination")
 
-    # -- Wave 2: dry-run structured isolation fields --------------------------------
-
     def test_dry_run_cursor_safe_includes_structured_isolation_fields(self):
         request = self.build_git_request(
             "cursor",
@@ -355,8 +353,6 @@ class ExecutionDryRunTests(ExecutionTestBase):
         self.assertIsInstance(payload["isolation"], str)
         self.assertGreater(len(payload["isolation"]), 5)
 
-    # -- Wave 2: dry-run no-artifact assertions ------------------------------------
-
     def test_dry_run_isolation_worktree_creates_no_filesystem_artifacts_under_tmp_home(self):
         """Assert dry-run with --isolation worktree creates NO filesystem entries
         (no worktree dir, no branches, no registry)."""
@@ -406,10 +402,8 @@ class ExecutionDryRunTests(ExecutionTestBase):
                 stdout=stdout_buf,
             )
             self.assertEqual(code, self.delegate.EXIT_OK)
-            # Verify no worktree dir was created under fake home
             worktree_dir = Path(fake_home) / ".delegate" / "worktrees"
             self.assertFalse(worktree_dir.exists())
-            # Verify no delegate/* branches were created
             branch_result = subprocess.run(
                 ["git", "-C", repo_dir, "branch", "--list", "delegate/*"],
                 capture_output=True,
@@ -417,7 +411,6 @@ class ExecutionDryRunTests(ExecutionTestBase):
                 check=False,
             )
             self.assertEqual(branch_result.stdout.strip(), "")
-            # Verify no .delegate/ registry was written in source workspace
             self.assertFalse((Path(repo_dir) / ".delegate").exists())
 
     def test_dry_run_isolation_worktree_codex_creates_no_artifacts(self):
@@ -470,7 +463,6 @@ class ExecutionDryRunTests(ExecutionTestBase):
             self.assertEqual(code, self.delegate.EXIT_OK)
             worktree_dir = Path(fake_home) / ".delegate" / "worktrees"
             self.assertFalse(worktree_dir.exists())
-            # Verify no delegate/* branches were created
             branch_result = subprocess.run(
                 ["git", "-C", repo_dir, "branch", "--list", "delegate/*"],
                 capture_output=True,
@@ -478,10 +470,7 @@ class ExecutionDryRunTests(ExecutionTestBase):
                 check=False,
             )
             self.assertEqual(branch_result.stdout.strip(), "")
-            # Verify no .delegate/ registry was written in source workspace
             self.assertFalse((Path(repo_dir) / ".delegate").exists())
-
-    # -- Finding A: isolatedWorkspace always emitted as explicit boolean ----------
 
     def test_dry_run_isolated_workspace_contract_by_harness_mode(self):
         """Work mode stays in place; all safe harnesses with auto isolation are isolated."""

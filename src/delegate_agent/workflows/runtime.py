@@ -12,7 +12,7 @@ import tempfile
 import threading
 import time
 import traceback
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -215,7 +215,7 @@ class WorkflowState:
             return f"{scope}/{kind}@{value}"
 
     @contextlib.contextmanager
-    def scope(self, value: str):
+    def scope(self, value: str) -> Iterator[None]:
         previous = self.current_scope()
         previous_counters = getattr(self.thread_local, "counters", None)
         self.thread_local.scope = value
@@ -246,7 +246,7 @@ class WorkflowState:
             return self.lifetime_counter[0]
 
     @contextlib.contextmanager
-    def active_agent(self):
+    def active_agent(self) -> Iterator[None]:
         with self.gate_condition:
             if self.gate_state["stop_admitting"]:
                 raise GateExit("workflow gate is closed to new agent calls")
@@ -268,7 +268,7 @@ class WorkflowState:
         return bool(getattr(self.thread_local, "item_depth", 0))
 
     @contextlib.contextmanager
-    def item_slot(self, *, bypass: bool = False, pre_acquired: bool = False):
+    def item_slot(self, *, bypass: bool = False, pre_acquired: bool = False) -> Iterator[None]:
         manager = contextlib.nullcontext() if bypass or pre_acquired else self.item_semaphore
         with manager:
             previous = getattr(self.thread_local, "item_depth", 0)
@@ -797,6 +797,7 @@ class WorkflowDsl:
                 value = workflow_schema.parse_json_tolerant(text)
                 workflow_schema.validate_value(value, schema)
                 result = value
+            # Child output is untrusted; parse/validation blowups must not kill the supervisor.
             except Exception as exc:
                 self.state.append_event(
                     "agent_adopt_rejected",
@@ -959,6 +960,7 @@ class WorkflowDsl:
                 value = workflow_schema.parse_json_tolerant(text or "")
                 workflow_schema.validate_value(value, schema)
                 return value
+            # Child output is untrusted; parse/validation blowups must not kill the supervisor.
             except Exception as exc:
                 prior_output = text or ""
                 prior_error = str(exc)
@@ -1095,7 +1097,7 @@ def _run_child_command(
 
 
 def _terminate_process_group(process: subprocess.Popen[bytes], sig: signal.Signals) -> None:
-    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+    with contextlib.suppress(OSError):
         os.killpg(os.getpgid(process.pid), sig)
 
 
@@ -1183,14 +1185,6 @@ def _approval_allows(root: Path, key: str) -> bool:
     )
 
 
-def _is_relative_to(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-    except ValueError:
-        return False
-    return True
-
-
 def resolve_workflow_reference(name_or_path: str, parent_script_dir: Path) -> Path:
     raw = str(name_or_path)
     try:
@@ -1203,7 +1197,7 @@ def resolve_workflow_reference(name_or_path: str, parent_script_dir: Path) -> Pa
     user_root = registry.user_workflow_root().resolve()
     if candidate.is_absolute():
         resolved = candidate.resolve()
-        if resolved.exists() and _is_relative_to(resolved, user_root):
+        if resolved.exists() and resolved.is_relative_to(user_root):
             return resolved
         raise RuntimeError(
             "nested workflow paths must be saved workflow names, absolute paths inside "
@@ -1211,7 +1205,7 @@ def resolve_workflow_reference(name_or_path: str, parent_script_dir: Path) -> Pa
         )
     parent_root = parent_script_dir.resolve()
     resolved = (parent_root / candidate).resolve()
-    if resolved.exists() and _is_relative_to(resolved, parent_root):
+    if resolved.exists() and resolved.is_relative_to(parent_root):
         return resolved
     raise RuntimeError(
         "nested workflow paths must be saved workflow names, absolute paths inside "
@@ -1341,7 +1335,7 @@ def _workflow_agent_run_result(
 
 
 @contextlib.contextmanager
-def _held_workflow_lock(root: Path):
+def _held_workflow_lock(root: Path) -> Iterator[None]:
     raw_fd = os.environ.get(WORKFLOW_LOCK_FD_ENV)
     if raw_fd is not None:
         try:

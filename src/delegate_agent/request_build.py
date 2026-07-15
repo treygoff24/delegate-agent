@@ -251,7 +251,7 @@ def git_root_for(path: Path) -> str | None:
             ["rev-parse", "--show-toplevel"],
             timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
         )
-    except (FileNotFoundError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError):
         return None
     if result.returncode != 0:
         return None
@@ -275,21 +275,15 @@ def resolve_prompt(
         )
     if has_direct:
         return validate_prompt(direct)
-    if has_prompt_file:
-        prompt_file_path = prompt_file
-        if prompt_file_path is None:
-            raise DelegateError("missing_prompt_file", "--prompt-file requires a path.")
-        _reject_windows_path(prompt_file_path, "--prompt-file")
-        path = Path(prompt_file_path).expanduser()
+    if prompt_file is not None:
+        _reject_windows_path(prompt_file, "--prompt-file")
+        path = Path(prompt_file).expanduser()
         try:
             return validate_prompt(path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             raise DelegateError("prompt_file_not_found", f"Prompt file not found: {path}") from None
-    if has_stdin:
-        stdin_prompt = stdin_text
-        if stdin_prompt is None:
-            raise DelegateError("missing_prompt", "Missing stdin prompt.")
-        return validate_prompt(stdin_prompt)
+    if stdin_text is not None:
+        return validate_prompt(stdin_text)
     raise DelegateError(
         "missing_prompt", "Missing prompt; pass prompt text, --prompt-file, or stdin."
     )
@@ -683,13 +677,6 @@ def _resolve_opencode_selection_detail(
         )
         return model, build.requested_effort, build.effort_source or "config"
     return model, None, None
-
-
-def _resolve_opencode_selection(
-    section: JsonObject, build: EngineBuildInput
-) -> tuple[str | None, str | None]:
-    model, variant, _source = _resolve_opencode_selection_detail(section, build)
-    return model, variant
 
 
 def _resolve_opencode_agent(section: JsonObject, build: EngineBuildInput) -> str | None:
