@@ -1178,6 +1178,8 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
             )
         if engine == "opencode" and isinstance(model_alias, str):
             _reject_opencode_flag_like_value(model_alias, field="model", error="invalid_model")
+    if "agent" in raw and engine != "opencode":
+        raise DelegateError("unsupported_agent", "agent is only supported for opencode.")
     raw_agent = raw.get("agent")
     if raw_agent is not None and (not isinstance(raw_agent, str) or not raw_agent.strip()):
         raise DelegateError("invalid_agent", "agent must be a non-empty string or omitted.")

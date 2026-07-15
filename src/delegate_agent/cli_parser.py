@@ -698,7 +698,7 @@ def parse_modeless_engine(
     # `cursor safe --help`. Once a prompt positional begins, a later --help is
     # prompt text (`cursor work explain --help`).
     if len(rest) >= 2 and command_help.is_help_token(rest[1]):
-        return help_command(json_mode, topic)
+        return help_command(json_mode, f"{topic} call" if mode == "call" else topic)
     (
         prompt_file,
         output_schema,
@@ -812,7 +812,7 @@ def parse_droid(
         command_prefix = ["droid", model_alias, mode]
     # Help wins after the mode, before prompt capture: `droid [alias] safe --help`.
     if tail and command_help.is_help_token(tail[0]):
-        return help_command(json_mode, topic)
+        return help_command(json_mode, f"{topic} call" if mode == "call" else topic)
     (
         prompt_file,
         output_schema,

@@ -152,6 +152,18 @@ class ExecutionTestBase(unittest.TestCase):
             stderr=subprocess.DEVNULL,
         )
         subprocess.run(
+            ["git", "-C", repo.name, "config", "maintenance.autoDetach", "false"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            ["git", "-C", repo.name, "config", "gc.autoDetach", "false"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(
             ["git", "-C", repo.name, "commit", "--allow-empty", "-m", "init"],
             check=True,
             stdout=subprocess.DEVNULL,

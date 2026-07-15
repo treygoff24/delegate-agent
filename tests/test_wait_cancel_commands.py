@@ -35,6 +35,8 @@ class WaitCancelCommandTests(unittest.TestCase):
         pgid: int | None = None,
         started_at: str | None = None,
         group: str | None = None,
+        execution_cwd: str | None = None,
+        isolated_workspace: bool | None = None,
     ):
         metadata = {"mode": "work", "cwd": str(self.workspace)}
         if group is not None:
@@ -69,6 +71,12 @@ class WaitCancelCommandTests(unittest.TestCase):
                 "engine": "codex",
                 "mode": "work",
                 "cwd": str(self.workspace),
+                **({"executionCwd": execution_cwd} if execution_cwd is not None else {}),
+                **(
+                    {"isolatedWorkspace": isolated_workspace}
+                    if isolated_workspace is not None
+                    else {}
+                ),
                 "startedAt": started_at or run_registry.utc_now_iso(),
             },
         )
@@ -81,6 +89,12 @@ class WaitCancelCommandTests(unittest.TestCase):
                 "harness": "codex",
                 "status": status,
                 **({"group": group} if group is not None else {}),
+                **({"executionCwd": execution_cwd} if execution_cwd is not None else {}),
+                **(
+                    {"isolatedWorkspace": isolated_workspace}
+                    if isolated_workspace is not None
+                    else {}
+                ),
             },
         )
         return run_id, alias
@@ -161,6 +175,80 @@ class WaitCancelCommandTests(unittest.TestCase):
         self.assertEqual(payload["error"], "no_matching_runs")
         self.assertIn("No runs found for group: missing", payload["message"])
         self.assertEqual(err, "")
+
+    def test_wait_group_warns_when_work_runs_share_nonisolated_workspace_json(self):
+        for _ in range(2):
+            self.write_run(
+                status="succeeded",
+                group="wave4",
+                execution_cwd=f"{self.workspace}/.",
+                isolated_workspace=False,
+            )
+
+        code, out, err = self.run_cli(["--json", "wait", "--group", "wave4"])
+
+        self.assertEqual(code, 0, err)
+        payload = json.loads(out)
+        self.assertEqual(len(payload["warnings"]), 1)
+        self.assertIn("share the same non-isolated execution workspace", payload["warnings"][0])
+
+    def test_wait_group_warns_after_table_in_text_mode(self):
+        for _ in range(2):
+            self.write_run(
+                status="succeeded",
+                group="wave4",
+                execution_cwd=str(self.workspace),
+                isolated_workspace=False,
+            )
+
+        code, out, err = self.run_cli(["wait", "--group", "wave4"])
+
+        self.assertEqual(code, 0, err)
+        self.assertGreater(out.index("warning:"), out.index("alias        status"))
+        self.assertIn("share the same non-isolated execution workspace", out)
+
+    def test_wait_group_does_not_warn_for_one_run(self):
+        self.write_run(
+            status="succeeded",
+            group="wave4",
+            execution_cwd=str(self.workspace),
+            isolated_workspace=False,
+        )
+
+        code, out, err = self.run_cli(["--json", "wait", "--group", "wave4"])
+
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("warnings", json.loads(out))
+
+    def test_wait_handles_do_not_warn_without_group_selector(self):
+        aliases = [
+            self.write_run(
+                status="succeeded",
+                group="wave4",
+                execution_cwd=str(self.workspace),
+                isolated_workspace=False,
+            )[1]
+            for _ in range(2)
+        ]
+
+        code, out, err = self.run_cli(["--json", "wait", *aliases])
+
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("warnings", json.loads(out))
+
+    def test_wait_group_does_not_warn_for_distinct_isolated_worktrees(self):
+        for name in ("one", "two"):
+            self.write_run(
+                status="succeeded",
+                group="wave4",
+                execution_cwd=str(self.workspace / name),
+                isolated_workspace=True,
+            )
+
+        code, out, err = self.run_cli(["--json", "wait", "--group", "wave4"])
+
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("warnings", json.loads(out))
 
     def test_cancel_refuses_terminal_run(self):
         _run_id, alias = self.write_run(status="succeeded")
@@ -542,48 +630,33 @@ class WaitCancelCommandTests(unittest.TestCase):
 
     # --- Finding 3: group liveness in the grace loop ------------------------
 
-    def test_group_liveness_sigkill_when_grandchild_survives(self):
-        """Leader dies but grandchild survives SIGTERM -> SIGKILL fired at group."""
-        # Spawn a child that spawns a grandchild ignoring SIGTERM.
-        grandchild_script = (
-            "import os, signal, time\n"
-            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-            "time.sleep(60)\n"
-        )
-        parent_script = (
-            "import subprocess, sys, os, time\n"
-            f"proc = subprocess.Popen([sys.executable, '-c', {grandchild_script!r}])\n"
-            "time.sleep(60)\n"
-        )
-        proc = subprocess.Popen(
-            [sys.executable, "-c", parent_script],
-            start_new_session=True,
-        )
-        self.add_process_cleanup(proc)
-        pgid = os.getpgid(proc.pid)
-        run_id, alias = self.write_run(status="running", pid=proc.pid, pgid=pgid)
+    def test_group_liveness_escalates_from_sigterm_to_sigkill(self):
+        """A process group still live after SIGTERM receives SIGKILL."""
+        pid = os.getpid()
+        pgid = 4243
+        run_id, alias = self.write_run(status="running", pid=pid, pgid=pgid)
         target = run_registry.RunTarget(run_id=run_id, alias=alias)
-        try:
+
+        with (
+            unittest_mock.patch.object(
+                wait_cancel_commands, "_check_pid_identity", return_value=[]
+            ),
+            unittest_mock.patch.object(
+                wait_cancel_commands, "_signal_target_alive", return_value=True
+            ),
+            unittest_mock.patch.object(wait_cancel_commands, "_send_signal") as send_signal,
+            unittest_mock.patch.object(wait_cancel_commands, "CANCEL_GRACE_SECONDS", 0),
+        ):
             payload = wait_cancel_commands._cancel_target(self.registry_root, target)
-        finally:
-            # Kill any survivors.
-            try:
-                os.killpg(pgid, 9)
-            except ProcessLookupError:
-                pass
-            except OSError:
-                pass
+
         self.assertEqual(payload["status"], "cancelled")
-        # The whole group should be gone after SIGKILL.
-        gone = True
-        try:
-            os.killpg(pgid, 0)
-            gone = False
-        except ProcessLookupError:
-            pass
-        except OSError:
-            pass
-        self.assertTrue(gone, "process group survived SIGKILL")
+        self.assertEqual(
+            send_signal.call_args_list,
+            [
+                unittest_mock.call(pgid, wait_cancel_commands.signal.SIGTERM, process_group=True),
+                unittest_mock.call(pgid, wait_cancel_commands.signal.SIGKILL, process_group=True),
+            ],
+        )
 
     # --- Finding 6: cancel refuses stale/dead_pid runs ----------------------
 
