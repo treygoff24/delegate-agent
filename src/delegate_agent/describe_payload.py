@@ -10,7 +10,6 @@ from __future__ import annotations
 import os
 import shlex
 import sys
-from dataclasses import replace
 from pathlib import Path
 from typing import TextIO
 
@@ -96,7 +95,7 @@ def _commands_catalog() -> list[JsonObject]:
             "name": spec.name,
             "command": spec.name,
             "summary": spec.summary,
-            "usage": list(_call_help_spec(spec).usage),
+            "usage": list(spec.usage),
             "arguments": [
                 {
                     "name": arg.name,
@@ -111,9 +110,9 @@ def _commands_catalog() -> list[JsonObject]:
                     "arg": option.arg,
                     "description": option.description,
                 }
-                for option in _call_help_spec(spec).options
+                for option in spec.options
             ],
-            "launchOptions": [option.flag for option in _call_help_spec(spec).options],
+            "launchOptions": [option.flag for option in spec.options],
         }
         for spec in command_help.COMMAND_SPECS.values()
     ]
@@ -122,96 +121,15 @@ def _commands_catalog() -> list[JsonObject]:
 def _launch_options() -> list[str]:
     flags: list[str] = []
     for command in ("cursor", "droid", "codex", "claude", "grok", "devin", "opencode", "kimi"):
-        spec = _call_help_spec(command_help.COMMAND_SPECS[command])
+        spec = command_help.COMMAND_SPECS[command]
         for option in spec.options:
             if option.flag not in flags:
                 flags.append(option.flag)
     return flags
 
 
-def _call_help_spec(spec: command_help.CommandSpec) -> command_help.CommandSpec:
-    if spec.name not in KNOWN_ENGINES and spec.name != "dry-run":
-        return spec
-
-    def _augment_call_usage(line: str) -> str:
-        if " call [--read-only]" not in line:
-            return line
-        advertise_pure = (
-            "claude call" in line if spec.name == "dry-run" else pure_call_supported(spec.name)
-        )
-        if advertise_pure:
-            return line.replace(
-                " call [--read-only]",
-                " call [--read-only] [--pure] [--timeout SECONDS]",
-            )
-        return line.replace(
-            " call [--read-only]",
-            " call [--read-only] [--timeout SECONDS]",
-        )
-
-    usage = tuple(_augment_call_usage(line) for line in spec.usage)
-    if spec.name == "claude":
-        usage = tuple(
-            line.replace(
-                "[--prompt-file PATH]",
-                "[--output-schema FILE] [--prompt-file PATH]",
-            )
-            if " call " in line
-            else line
-            for line in usage
-        )
-    options = list(spec.options)
-    if spec.name == "claude" and not any(option.flag == "--output-schema" for option in options):
-        options.append(
-            command_help.OptionSpec(
-                "--output-schema",
-                "FILE",
-                "Call mode only: JSON Schema passed inline to Claude Code for the final response.",
-            )
-        )
-    advertise_pure_option = (
-        any(pure_call_supported(engine) for engine in KNOWN_ENGINES)
-        if spec.name == "dry-run"
-        else pure_call_supported(spec.name)
-    )
-    if advertise_pure_option:
-        pure_desc = (
-            "Call mode only (Claude only): use the engine's pure completion boundary."
-            if spec.name == "dry-run"
-            else "Call mode only: use the engine's pure completion boundary."
-        )
-        options.append(command_help.OptionSpec("--pure", None, pure_desc))
-    options.append(
-        command_help.OptionSpec(
-            "--timeout", "SECONDS", "Call mode only: positive process timeout in seconds."
-        )
-    )
-    return replace(spec, usage=usage, options=tuple(options))
-
-
 def _call_overview_text() -> str:
-    lines: list[str] = []
-    for line in command_help.render_overview_text().splitlines(keepends=True):
-        if " call [--read-only]" in line:
-            if "claude call" in line:
-                line = line.replace(
-                    " call [--read-only]",
-                    " call [--read-only] [--pure] [--timeout SECONDS]",
-                )
-            else:
-                line = line.replace(
-                    " call [--read-only]",
-                    " call [--read-only] [--timeout SECONDS]",
-                )
-        lines.append(line)
-    text = "".join(lines)
-    return text.replace(
-        "claude call [--read-only] [--pure] [--timeout SECONDS] "
-        "[--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH]",
-        "claude call [--read-only] [--pure] [--timeout SECONDS] "
-        "[--model <alias-or-model>] [--reasoning-effort LEVEL] [--output-schema FILE] "
-        "[--prompt-file PATH]",
-    )
+    return command_help.render_overview_text()
 
 
 def _profiles_config_payload(config: JsonObject) -> JsonObject:
@@ -1375,7 +1293,6 @@ def emit_command_help(topic: str | None, json_mode: bool, stdout: TextIO) -> int
             "unknown_help_topic",
             f"Unknown help topic: {topic}. Run delegate help for the command list.",
         )
-    spec = _call_help_spec(spec)
     if json_mode:
         delegate_rendering.print_json(command_help.command_help_payload(spec), stdout)
     else:
