@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import contextlib
+import io
 import json
 import math
 import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import tempfile
 import threading
@@ -26,6 +28,7 @@ from delegate_agent import (
     rendering,
     run_metadata,
     run_registry,
+    seatbelt,
     worktree_summary,
 )
 from delegate_agent.constants import PROMPT_INSTRUCTION_MODE_WRAPPED
@@ -43,6 +46,8 @@ PROGRESS_PERSIST_LINE_INTERVAL = 10
 PROGRESS_PERSIST_TIME_INTERVAL_SEC = 0.5
 DRAIN_JOIN_TIMEOUT_SEC = 5.0
 MILLISECONDS_PER_SECOND = 1000
+CALL_STDOUT_MAX_BYTES = 16 * 1024 * 1024
+CALL_STDERR_MAX_BYTES = 16 * 1024 * 1024
 PROGRESS_INITIAL_DELAY_SEC = delegate_config.default_progress_initial_delay_sec()
 PROGRESS_HEARTBEAT_INTERVAL_SEC = delegate_config.default_progress_interval_sec()
 PROGRESS_INITIAL_DELAY_ENV = "DELEGATE_PROGRESS_INITIAL_DELAY_SEC"
@@ -84,10 +89,11 @@ def _bounded_call_fallback_text(text: str) -> str:
 
 
 class RunnerLaunchError(RuntimeError):
-    def __init__(self, error: str, message: str) -> None:
+    def __init__(self, error: str, message: str, exit_code: int = 2) -> None:
         super().__init__(message)
         self.error = error
         self.message = message
+        self.exit_code = exit_code
 
 
 @dataclass(frozen=True)
@@ -186,11 +192,15 @@ def _terminal_override_extra(accumulator: harness_events.StreamAccumulator) -> J
         run_registry.STATUS_CANCELLED,
     }:
         return {}
+    if accumulator.terminal_status == run_registry.STATUS_CANCELLED:
+        failure_reason = "harness_cancelled"
+    elif profiles.classify_codex_usage_limit(_accumulator_message_text(accumulator)):
+        failure_reason = "usage_limit"
+    else:
+        failure_reason = "harness_error"
     extra: JsonObject = {
         "terminalStatus": accumulator.terminal_status,
-        "failureReason": "harness_cancelled"
-        if accumulator.terminal_status == run_registry.STATUS_CANCELLED
-        else "harness_error",
+        "failureReason": failure_reason,
     }
     if accumulator.terminal_event is not None:
         extra["terminalEvent"] = accumulator.terminal_event
@@ -570,12 +580,6 @@ def _classify_result_quality(
     return RESULT_QUALITY_OK
 
 
-def _redacted_tail_from_bytes(data: bytes, *, limit: int = profiles.STDERR_TAIL_LIMIT) -> str:
-    if limit <= 0:
-        return ""
-    return redaction.redact_string(data[-limit:].decode("utf-8", errors="replace"))
-
-
 def _auth_failure_seen(stderr_tail: str, accumulator: harness_events.StreamAccumulator) -> bool:
     # Match against the redacted stderr tail ONLY. Inspecting the normalized
     # events haystack would misclassify a child report that merely DISCUSSES a
@@ -602,6 +606,11 @@ def _failure_reason(
         return "auth_failed"
     if status == run_registry.STATUS_CANCELLED:
         return "harness_cancelled"
+    quota_signal = "\n".join(
+        part for part in (stderr_tail, _accumulator_message_text(accumulator)) if part
+    )
+    if profiles.classify_codex_usage_limit(quota_signal):
+        return "usage_limit"
     return "child_failed"
 
 
@@ -653,6 +662,10 @@ def _completion_report_text_and_source(
             f"Status: {status}",
             f"Failure reason: {failure_reason or 'child_failed'}",
         ]
+        terminal = accumulator.terminal_event or {}
+        terminal_reason = terminal.get("reason")
+        if isinstance(terminal_reason, str) and terminal_reason.strip():
+            lines.append(f"Harness error: {redaction.redact_string(terminal_reason.strip())}")
         if failure_reason == "auth_failed":
             lines.append(_auth_remediation_line(ctx))
         if stderr_tail.strip():
@@ -897,7 +910,7 @@ def _write_stdin(pipe: BinaryIO | None, stdin_text: str, failures: list[str]) ->
     try:
         pipe.write(stdin_text.encode("utf-8"))
         pipe.flush()
-    except (BrokenPipeError, OSError) as exc:
+    except OSError as exc:
         # The child may have exited or closed stdin before reading the prompt.
         # Record it so the run can report possibly-undelivered prompt text
         # instead of silently proceeding as if delivery succeeded.
@@ -996,6 +1009,10 @@ class CallResult:
     text_truncated: bool
     stderr_tail: str = ""
     warnings: tuple[str, ...] = ()
+    error: str | None = None
+    message: str | None = None
+    model_resolved: str | None = None
+    usage: JsonObject = field(default_factory=lambda: {"basis": "unavailable"})
 
 
 @dataclass(frozen=True)
@@ -1334,7 +1351,7 @@ def _capture_tracked_process(
             emit_progress = True
             try:
                 _emit_progress_started(ctx, progress_stderr)
-            except (BrokenPipeError, OSError):
+            except OSError:
                 emit_progress = False
             initial_delay = _progress_interval_from_env(
                 PROGRESS_INITIAL_DELAY_ENV,
@@ -1361,7 +1378,7 @@ def _capture_tracked_process(
                             started=started,
                             stderr=progress_stderr,
                         )
-                    except (BrokenPipeError, OSError):
+                    except OSError:
                         emit_progress = False
                     next_progress_at = time.monotonic() + interval
         else:
@@ -1569,6 +1586,10 @@ def _append_attempt_delimiter(stderr_log: Path, *, label: str) -> None:
         handle.write(marker.encode("utf-8"))
 
 
+def _accumulator_message_text(accumulator: harness_events.StreamAccumulator) -> str:
+    return "\n".join(event.message for event in accumulator.events if event.message)
+
+
 def _should_retry_profiles(
     ctx: RunContext,
     capture: TrackedCaptureResult,
@@ -1581,8 +1602,12 @@ def _should_retry_profiles(
         return False
     if capture.exit_code == 0:
         return False
+    # Codex --json reports usage limits as stdout events, not stderr, so the
+    # classifier must see both channels (stderr-only missed real quota walls).
     stderr_tail = profiles.read_bounded_stderr_tail(stderr_log)
-    if not profiles.classify_codex_usage_limit(stderr_tail):
+    event_text = _accumulator_message_text(capture.accumulator)
+    signal_text = "\n".join(part for part in (stderr_tail, event_text) if part)
+    if not profiles.classify_codex_usage_limit(signal_text):
         return False
     if profiles.accumulator_had_tool_events(capture.accumulator):
         return False
@@ -1740,6 +1765,294 @@ def execute_tracked(
     return _tracked_result(ctx, capture, finalization, json_mode=json_mode, stdout=stdout)
 
 
+def _kill_process_group(process: subprocess.Popen[bytes], sig: signal.Signals) -> None:
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(process.pid, sig)
+
+
+def _terminate_call_process(process: subprocess.Popen[bytes]) -> None:
+    """Send SIGTERM, wait for graceful exit, then SIGKILL if needed."""
+    _kill_process_group(process, signal.SIGTERM)
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        _kill_process_group(process, signal.SIGKILL)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=5)
+
+
+def _bounded_call_communicate(
+    process: subprocess.Popen[bytes],
+    stdin_bytes: bytes | None,
+    timeout: int | None,
+    max_stdout: int,
+    max_stderr: int,
+) -> tuple[bytes, bytes]:
+    """Read child stdout/stderr under fixed byte caps; kill on overflow or timeout.
+
+    The deadline starts immediately. Stdin is fed on a writer thread so a child
+    that stops reading cannot block the parent past ``timeout``.
+    """
+    stdout_buf = io.BytesIO()
+    stderr_buf = io.BytesIO()
+    overflow = threading.Event()
+    overflow_message: list[str] = [""]
+    overflow_stream: list[str | None] = [None]
+    start = time.monotonic()
+
+    def _deadline_exceeded() -> bool:
+        return timeout is not None and (time.monotonic() - start) >= timeout
+
+    def _drain_to_buffer(
+        pipe: BinaryIO,
+        buf: io.BytesIO,
+        limit: int,
+        message: str,
+        stream: str,
+    ) -> None:
+        try:
+            while not overflow.is_set():
+                chunk = pipe.read(65536)
+                if not chunk:
+                    break
+                available = limit - buf.tell()
+                if available <= 0:
+                    overflow_message[0] = message
+                    overflow_stream[0] = stream
+                    overflow.set()
+                    break
+                if len(chunk) > available:
+                    buf.write(chunk[:available])
+                    overflow_message[0] = message
+                    overflow_stream[0] = stream
+                    overflow.set()
+                    break
+                buf.write(chunk)
+        finally:
+            with contextlib.suppress(OSError):
+                pipe.close()
+
+    def _write_stdin() -> None:
+        assert process.stdin is not None and stdin_bytes is not None
+        try:
+            view = memoryview(stdin_bytes)
+            offset = 0
+            chunk_size = 65536
+            while offset < len(view):
+                if overflow.is_set() or _deadline_exceeded():
+                    break
+                end = min(offset + chunk_size, len(view))
+                try:
+                    written = process.stdin.write(view[offset:end])
+                except OSError:
+                    return
+                if not written:
+                    break
+                offset += written
+            with contextlib.suppress(OSError):
+                process.stdin.flush()
+        finally:
+            with contextlib.suppress(OSError):
+                process.stdin.close()
+
+    stdout_thread = threading.Thread(
+        target=_drain_to_buffer,
+        args=(
+            process.stdout,
+            stdout_buf,
+            max_stdout,
+            f"Child call stdout exceeded the maximum allowed size of {max_stdout} bytes.",
+            "stdout",
+        ),
+        daemon=True,
+    )
+    stderr_thread = threading.Thread(
+        target=_drain_to_buffer,
+        args=(
+            process.stderr,
+            stderr_buf,
+            max_stderr,
+            f"Child call stderr exceeded the maximum allowed size of {max_stderr} bytes.",
+            "stderr",
+        ),
+        daemon=True,
+    )
+    stdout_thread.start()
+    stderr_thread.start()
+
+    stdin_thread: threading.Thread | None = None
+    if stdin_bytes is not None and process.stdin is not None:
+        stdin_thread = threading.Thread(target=_write_stdin, daemon=True)
+        stdin_thread.start()
+
+    while True:
+        poll_interval = 0.05
+        if timeout is not None:
+            remaining = timeout - (time.monotonic() - start)
+            if remaining <= 0:
+                break
+            poll_interval = min(poll_interval, remaining)
+        try:
+            process.wait(timeout=poll_interval)
+        except subprocess.TimeoutExpired:
+            if overflow.is_set():
+                break
+            continue
+        else:
+            break
+
+    def _join_io_threads() -> None:
+        if stdin_thread is not None:
+            stdin_thread.join(timeout=DRAIN_JOIN_TIMEOUT_SEC)
+        stdout_thread.join(timeout=DRAIN_JOIN_TIMEOUT_SEC)
+        stderr_thread.join(timeout=DRAIN_JOIN_TIMEOUT_SEC)
+
+    timed_out = _deadline_exceeded() and process.poll() is None
+    if overflow.is_set() or timed_out:
+        # Terminate BEFORE closing stdin. On a real full pipe the writer thread
+        # is blocked in write() holding the buffered-writer lock, so a parent
+        # close() would deadlock on that same lock. Killing the process group
+        # closes the child's read end first, so the blocked write() raises and
+        # releases the lock; only then can we close and join safely.
+        if process.poll() is None:
+            _terminate_call_process(process)
+        if process.stdin is not None:
+            with contextlib.suppress(OSError):
+                process.stdin.close()
+        _join_io_threads()
+        if overflow.is_set():
+            stream = overflow_stream[0] or "stdout"
+            raise RunnerLaunchError(
+                f"call_{stream}_overflow",
+                overflow_message[0],
+                1,
+            )
+        raise RunnerLaunchError(
+            "call_timeout",
+            f"Child call exceeded timeout of {timeout} seconds.",
+            1,
+        )
+
+    _join_io_threads()
+    return stdout_buf.getvalue(), stderr_buf.getvalue()
+
+
+def _call_stderr_tail(data: bytes, sensitive_texts: tuple[str, ...]) -> str:
+    tail = data.decode("utf-8", errors="replace")
+    for value in sensitive_texts:
+        if value:
+            tail = tail.replace(value, "[REDACTED]")
+    return redaction.redact_string(tail)[-profiles.STDERR_TAIL_LIMIT :]
+
+
+def _claude_model_resolved(event: JsonObject) -> str | None:
+    model_usage = event.get("modelUsage")
+    if not isinstance(model_usage, dict):
+        return None
+    candidates: list[tuple[int, str]] = []
+    for model, values in model_usage.items():
+        if not isinstance(model, str) or not isinstance(values, dict):
+            continue
+        output_tokens = values.get("outputTokens")
+        if isinstance(output_tokens, int) and not isinstance(output_tokens, bool):
+            candidates.append((output_tokens, model))
+    return max(candidates)[1] if candidates else None
+
+
+def _claude_usage(event: JsonObject) -> JsonObject:
+    usage = event.get("usage")
+    if not isinstance(usage, dict):
+        return {"basis": "unavailable"}
+    input_tokens = usage.get("input_tokens")
+    output_tokens = usage.get("output_tokens")
+    if not all(
+        isinstance(value, int) and not isinstance(value, bool)
+        for value in (input_tokens, output_tokens)
+    ):
+        return {"basis": "unavailable"}
+    return {"inputTokens": input_tokens, "outputTokens": output_tokens, "basis": "exact"}
+
+
+def _parse_claude_call_json(
+    stdout_text: str, *, pure: bool
+) -> tuple[str, int, tuple[str, ...], str | None, JsonObject, str | None, str | None]:
+    try:
+        events = json.loads(stdout_text)
+    except json.JSONDecodeError:
+        return "", 1, (), None, {"basis": "unavailable"}, "call_output_invalid", None
+    if not isinstance(events, list):
+        return "", 1, (), None, {"basis": "unavailable"}, "call_output_invalid", None
+    result = next(
+        (
+            event
+            for event in reversed(events)
+            if isinstance(event, dict) and event.get("type") == "result"
+        ),
+        None,
+    )
+    if not isinstance(result, dict) or not isinstance(result.get("result"), str):
+        return "", 1, (), None, {"basis": "unavailable"}, "call_output_invalid", None
+    denials = result.get("permission_denials")
+    if pure:
+        if not isinstance(denials, list):
+            return (
+                result["result"],
+                1,
+                (),
+                _claude_model_resolved(result),
+                _claude_usage(result),
+                "pure_boundary_unverified",
+                "Pure boundary unverified: permission_denials missing or malformed.",
+            )
+        if denials:
+            return (
+                result["result"],
+                1,
+                (),
+                _claude_model_resolved(result),
+                _claude_usage(result),
+                "pure_boundary_violation",
+                f"Pure boundary violation: {len(denials)} permission denial(s).",
+            )
+    exit_code = 1 if result.get("is_error") is True else 0
+    return (
+        result["result"],
+        exit_code,
+        (),
+        _claude_model_resolved(result),
+        _claude_usage(result),
+        "child_failed" if exit_code else None,
+        None,
+    )
+
+
+def _resolve_codex_auth_file(env: dict[str, str]) -> str:
+    """Return the resolved real path to the codex auth.json credential.
+
+    The auth file is resolved from the effective CODEX_HOME (or ~/.codex) so
+    symlinked credentials outside the real home are copied into the
+    ephemeral home correctly.
+    """
+    codex_home = env.get("CODEX_HOME")
+    if not codex_home:
+        home = env.get("HOME") or str(Path.home())
+        codex_home = os.path.join(os.path.expanduser(home), ".codex")
+    auth_file = os.path.join(os.path.expanduser(codex_home), "auth.json")
+    real_auth_file = os.path.realpath(auth_file)
+    if not os.path.isfile(real_auth_file):
+        raise RunnerLaunchError(
+            "codex_auth_unavailable",
+            f"Codex pure call requires a readable auth.json; not found at {auth_file}.",
+        )
+    return real_auth_file
+
+
+def _copy_auth(src: str, dst: str) -> None:
+    """Copy *src* to *dst* as a private file. Never hardlink (avoids inode aliasing)."""
+    shutil.copy2(src, dst)
+    os.chmod(dst, 0o600)
+
+
 def execute_call(
     argv: list[str],
     cwd: str,
@@ -1751,6 +2064,10 @@ def execute_call(
     agent_config_text: str | None = None,
     agent_config_placeholder: str | None = None,
     env_overrides: dict[str, str] | None = None,
+    pure: bool = False,
+    timeout: int | None = None,
+    structured_output: bool = False,
+    sensitive_texts: tuple[str, ...] = (),
 ) -> CallResult:
     """Run a one-shot stateless model call and return parsed assistant text."""
     if stdin_text is not None and prompt_file_text is not None:
@@ -1762,38 +2079,113 @@ def execute_call(
         agent_config_text=agent_config_text,
         agent_config_placeholder=agent_config_placeholder,
     )
-    env = profiles.child_environment(overrides=env_overrides)
+    env = profiles.child_environment(overrides=env_overrides, pure=pure)
     started = time.monotonic()
+    seatbelt_profile_path: str | None = None
+    ephemeral_codex_home: str | None = None
     try:
+        if harness == "codex" and pure:
+            if not seatbelt.codex_pure_available():
+                raise RunnerLaunchError(
+                    "unsupported_pure_call",
+                    "Codex pure call requires macOS with sandbox-exec available.",
+                )
+            real_auth_file = _resolve_codex_auth_file(env)
+            ephemeral_codex_home = tempfile.mkdtemp(prefix="delegate-codex-pure-")
+            os.chmod(ephemeral_codex_home, 0o700)
+            ephemeral_auth_file = os.path.join(ephemeral_codex_home, "auth.json")
+            _copy_auth(real_auth_file, ephemeral_auth_file)
+            env["CODEX_HOME"] = ephemeral_codex_home
+
+            extra_read_roots: list[str] = []
+            resolved_auth_file = os.path.realpath(ephemeral_auth_file)
+            resolved_ephemeral_home = os.path.realpath(ephemeral_codex_home)
+            if not resolved_auth_file.startswith(resolved_ephemeral_home + os.sep):
+                extra_read_roots.append(resolved_auth_file)
+            if "--output-schema" in launch_argv:
+                schema_index = launch_argv.index("--output-schema") + 1
+                if schema_index < len(launch_argv):
+                    extra_read_roots.append(launch_argv[schema_index])
+            profile = seatbelt.build_codex_pure_profile(
+                home=env.get("HOME", str(Path.home())),
+                temp_cwd=cwd,
+                codex_home=ephemeral_codex_home,
+                extra_read_roots=extra_read_roots,
+                env=env,
+            )
+            profile_fd, seatbelt_profile_path = tempfile.mkstemp(
+                prefix="delegate-codex-pure-", suffix=".sb"
+            )
+            with os.fdopen(profile_fd, "w", encoding="utf-8") as profile_file:
+                profile_file.write(profile)
+            launch_argv = ["sandbox-exec", "-f", seatbelt_profile_path, *launch_argv]
         try:
-            run_kwargs: dict[str, object] = {
+            popen_kwargs: dict[str, object] = {
                 "cwd": cwd,
                 "env": env,
+                "stdin": subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
                 "stdout": subprocess.PIPE,
                 "stderr": subprocess.PIPE,
-                "check": False,
+                "start_new_session": True,
             }
-            if stdin_text is None:
-                run_kwargs["stdin"] = subprocess.DEVNULL
-            else:
-                run_kwargs["input"] = stdin_text.encode("utf-8")
-            completed = subprocess.run(  # nosec B603 - Delegate intentionally launches validated harness argv with shell=False.
+            process = subprocess.Popen(  # nosec B603 - Delegate intentionally launches validated harness argv with shell=False.
                 launch_argv,
-                **run_kwargs,
+                **popen_kwargs,
+            )
+            stdout_data, stderr_data = _bounded_call_communicate(
+                process,
+                stdin_text.encode("utf-8") if stdin_text is not None else None,
+                timeout,
+                CALL_STDOUT_MAX_BYTES,
+                CALL_STDERR_MAX_BYTES,
             )
         except OSError as exc:
             raise _runner_launch_error(launch_argv, cwd, exc) from exc
     finally:
+        if seatbelt_profile_path is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(seatbelt_profile_path)
+        if ephemeral_codex_home is not None:
+            with contextlib.suppress(OSError):
+                shutil.rmtree(ephemeral_codex_home, ignore_errors=True)
         _cleanup_prompt_file_dir(prompt_temp_dir)
 
-    stdout_bytes = len(completed.stdout or b"")
-    stderr_bytes = len(completed.stderr or b"")
-    stdout_text = (completed.stdout or b"").decode("utf-8", errors="replace")
-    stderr_tail = _redacted_tail_from_bytes(completed.stderr or b"")
+    stdout_bytes = len(stdout_data or b"")
+    stderr_bytes = len(stderr_data or b"")
+    stdout_text = (stdout_data or b"").decode("utf-8", errors="replace")
+    stderr_tail = _call_stderr_tail(stderr_data or b"", sensitive_texts)
+    if harness == "claude" and (pure or structured_output):
+        raw_text, parsed_exit, warnings, model_resolved, usage, error, message = (
+            _parse_claude_call_json(stdout_text, pure=pure)
+        )
+        text = _bounded_call_fallback_text(raw_text)
+        return CallResult(
+            text=text,
+            exit_code=parsed_exit if process.returncode == 0 else process.returncode,
+            duration_ms=int((time.monotonic() - started) * MILLISECONDS_PER_SECOND),
+            stdout_bytes=stdout_bytes,
+            stderr_bytes=stderr_bytes,
+            text_chars=len(raw_text),
+            text_truncated=len(raw_text) > harness_events.ASSISTANT_TEXT_LIMIT,
+            stderr_tail=stderr_tail,
+            warnings=warnings,
+            error=error,
+            message=message,
+            model_resolved=model_resolved,
+            usage=usage,
+        )
     accumulator = harness_events.StreamAccumulator(harness=harness)
     for line in stdout_text.splitlines():
         accumulator.ingest_line(line)
-    text, meta = accumulator.bounded_assistant_text()
+    if harness == "codex" and structured_output and accumulator.completion_text:
+        raw_text = accumulator.completion_text
+        text = _bounded_call_fallback_text(raw_text)
+        meta: JsonObject = {
+            "assistantTextChars": len(raw_text),
+            "assistantTextTruncated": len(raw_text) > harness_events.ASSISTANT_TEXT_LIMIT,
+        }
+    else:
+        text, meta = accumulator.bounded_assistant_text()
     warnings: tuple[str, ...] = ()
     if text:
         text_chars = int(meta.get("assistantTextChars", len(text)))
@@ -1813,7 +2205,7 @@ def execute_call(
         text_truncated = len(raw) > harness_events.ASSISTANT_TEXT_LIMIT
     return CallResult(
         text=text,
-        exit_code=completed.returncode,
+        exit_code=process.returncode,
         duration_ms=int((time.monotonic() - started) * MILLISECONDS_PER_SECOND),
         stdout_bytes=stdout_bytes,
         stderr_bytes=stderr_bytes,

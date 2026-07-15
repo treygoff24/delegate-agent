@@ -4,6 +4,7 @@ import ast
 import textwrap
 from dataclasses import dataclass
 from pathlib import Path
+from types import CodeType
 from typing import Any
 
 from delegate_agent.constants import (
@@ -86,7 +87,7 @@ def parse_meta(source: str, *, filename: str = "<workflow>") -> dict[str, Any]:
     return {}
 
 
-def compile_workflow(source: str, *, filename: str) -> Any:
+def compile_workflow(source: str, *, filename: str) -> CodeType:
     tree = wrapped_tree(source, filename=filename)
     ast.fix_missing_locations(tree)
     return compile(tree, filename, "exec")
@@ -134,7 +135,7 @@ def _budget_loop_warnings(tree: ast.AST) -> list[str]:
     return warnings
 
 
-def _literal_keyword(call: ast.Call, name: str) -> Any:
+def _literal_keyword(call: ast.Call, name: str) -> object:
     for keyword in call.keywords:
         if keyword.arg == name:
             try:

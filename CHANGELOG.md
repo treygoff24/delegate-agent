@@ -5,6 +5,27 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- `wait`: a run matched by both `--latest HARNESS` and `--group NAME`
+  was emitted twice in the resolved-target list; it now appears once, with
+  first-selection precedence and ordering preserved.
+- `git_root_for` degrades any `OSError` from the git probe (not just
+  `FileNotFoundError`) to the non-git fallback, so e.g. a `PermissionError`
+  spawning git no longer crashes workspace resolution.
+
+### Changed
+
+- Internal cleanup pass across `src/` and `tests/`: removed dead code (unused
+  protocol types, private helpers, stale fixtures), collapsed redundant
+  exception tuples into their `OSError` base, replaced a hand-rolled
+  path-containment helper with `Path.is_relative_to`, and stripped stale
+  review-artifact comments. Behavior-preserving; the workflow supervisor's
+  broad exception boundary around child-model output is now explicitly
+  commented and regression-tested.
+
 ## [0.13.1] - 2026-07-09
 
 ### Added

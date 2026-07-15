@@ -1,4 +1,4 @@
-"""Wave 1a: --model plumbing, alias maps, and shared resolver."""
+"""Model plumbing, alias maps, and shared resolver tests."""
 
 from __future__ import annotations
 

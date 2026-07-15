@@ -125,6 +125,13 @@ def _grok_harness_bypass_enabled(config: JsonObject, mode: str) -> bool:
     return _harness_bypass_enabled(config, mode, "grok")
 
 
+def _reject_pure(engine: str, mode: str, pure: bool, *, supported: bool = False) -> None:
+    if not pure:
+        return
+    if mode != MODE_CALL or not supported:
+        raise DelegateError("unsupported_pure_call", f"{engine} does not support pure call mode.")
+
+
 def build_cursor_argv(
     prefix: list[str],
     mode: str,
@@ -134,7 +141,9 @@ def build_cursor_argv(
     *,
     stream_capture: bool = True,
     call_read_only: bool = False,
+    pure: bool = False,
 ) -> list[str]:
+    _reject_pure("cursor", mode, pure)
     argv = [*prefix, "--workspace", workspace, "-p", "--trust"]
     if mode == MODE_WORK:
         argv.extend(["--approve-mcps", "--force"])
@@ -165,7 +174,9 @@ def build_droid_argv(
     reasoning_capability: reasoning.ReasoningCapability | None = None,
     prompt_transport: str = PROMPT_TRANSPORT_ARGV,
     call_read_only: bool = False,
+    pure: bool = False,
 ) -> list[str]:
+    _reject_pure("droid", mode, pure)
     argv = [binary, "exec", "--cwd", workspace]
     if mode == MODE_WORK:
         argv.append("--skip-permissions-unsafe")
@@ -202,7 +213,9 @@ def build_kimi_argv(
     prompt: str,
     *,
     stream_capture: bool = True,
+    pure: bool = False,
 ) -> list[str]:
+    _reject_pure("kimi", mode, pure)
     argv = [str(kimi["binary"])]
     if mode == MODE_SAFE:
         prompt = prefix_kimi_safe_prompt(prompt)
@@ -226,16 +239,35 @@ def build_claude_argv(
     reasoning_effort: str | None = None,
     allow_bypass_permissions: bool = False,
     call_read_only: bool = False,
+    pure: bool = False,
+    output_schema: str | None = None,
 ) -> list[str]:
+    _reject_pure("claude", mode, pure, supported=True)
+    if pure or output_schema is not None:
+        output_format = "json"
+    elif stream_capture:
+        output_format = "stream-json"
+    else:
+        output_format = "text"
     argv = [
         str(claude["binary"]),
         "-p",
         "--output-format",
-        "stream-json" if stream_capture else "text",
+        output_format,
         "--input-format",
         "text",
     ]
-    if mode == MODE_SAFE:
+    if pure:
+        argv.extend(
+            [
+                "--safe-mode",
+                "--tools",
+                "",
+                "--strict-mcp-config",
+                "--no-session-persistence",
+            ]
+        )
+    elif mode == MODE_SAFE:
         argv.extend(
             [
                 "--permission-mode",
@@ -271,10 +303,12 @@ def build_claude_argv(
             argv.extend(["--permission-mode", str(claude.get("workPermissionMode", "auto"))])
     else:
         validate_mode(mode)
-    if claude.get("noSessionPersistence", True) is True:
+    if not pure and claude.get("noSessionPersistence", True) is True:
         argv.append("--no-session-persistence")
-    if claude.get("bare", False) is True:
+    if not pure and claude.get("bare", False) is True:
         argv.append("--bare")
+    if output_schema is not None:
+        argv.extend(["--json-schema", output_schema])
     if model:
         argv.extend(["--model", model])
     if reasoning_effort is not None:
@@ -294,7 +328,9 @@ def build_grok_argv(
     allow_bypass_permissions: bool = False,
     prompt_transport: str = PROMPT_TRANSPORT_FILE,
     call_read_only: bool = False,
+    pure: bool = False,
 ) -> list[str]:
+    _reject_pure("grok", mode, pure)
     argv = [str(grok["binary"]), "--cwd", workspace]
     if stream_capture:
         argv.extend(["--output-format", "streaming-json"])
@@ -358,7 +394,9 @@ def build_devin_argv(
     *,
     prompt_transport: str = PROMPT_TRANSPORT_FILE,
     call_read_only: bool = False,
+    pure: bool = False,
 ) -> list[str]:
+    _reject_pure("devin", mode, pure)
     argv = [str(devin["binary"])]
     if model:
         argv.extend(["--model", model])
@@ -394,8 +432,10 @@ def build_opencode_argv(
     variant: str | None,
     *,
     call_read_only: bool = False,
+    pure: bool = False,
 ) -> list[str]:
-    read_only = mode == MODE_SAFE or (mode == MODE_CALL and call_read_only)
+    _reject_pure("opencode", mode, pure)
+    read_only = mode == MODE_SAFE or (mode == MODE_CALL and (call_read_only or pure))
     argv = [str(opencode["binary"])]
     if read_only:
         argv.append("--pure")
@@ -428,8 +468,39 @@ def build_codex_argv(
     prompt_transport: str = PROMPT_TRANSPORT_ARGV,
     output_schema: str | None = None,
     call_read_only: bool = False,
+    pure: bool = False,
 ) -> list[str]:
+    _reject_pure("codex", mode, pure)
     binary = str(codex["binary"])
+    if pure:
+        argv = [binary]
+        if model:
+            argv.extend(["--model", model])
+        if reasoning_capability is not None:
+            argv.extend(["-c", f'model_reasoning_effort="{reasoning_capability.effort}"'])
+        if fast is not None:
+            service_tier = "fast" if fast else "default"
+            argv.extend(["-c", f'service_tier="{service_tier}"'])
+            if fast:
+                argv.extend(["-c", "features.fast_mode=true"])
+        argv.extend(
+            [
+                "exec",
+                "--ignore-user-config",
+                "--ignore-rules",
+                "--skip-git-repo-check",
+                "--sandbox",
+                "read-only",
+            ]
+        )
+        if output_schema is not None:
+            argv.extend(["--output-schema", output_schema])
+        if stream_capture:
+            argv.extend(["--color", "never", "--json"])
+            if codex.get("ephemeral", True) is True:
+                argv.append("--ephemeral")
+        argv.append("-")
+        return argv
     argv = [binary]
     # Safe mode is read-only by contract: never emit the dangerous bypass flags,
     # even if a policy block somehow carries them. Config validation rejects such

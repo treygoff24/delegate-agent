@@ -1,4 +1,4 @@
-"""Wave 1b: per-engine model_override consumption, droid/cursor rules, effort coupling."""
+"""Per-engine model override, engine rules, and effort coupling tests."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from typing import ClassVar
 
 from tests.delegate_commands_test_base import CommandTestBase, make_git_repo
 
-# Frozen from Wave 1a / pre-1b shapes on embedded_default_config().
+# Expected key sets from embedded_default_config().
 _MODELS_KEYS: dict[str, set[str]] = {
     "<root>": {
         "ok",
@@ -743,7 +743,7 @@ class EffortCouplingRegressionTests(CommandTestBase):
 
 
 class ContractSupersetTests(unittest.TestCase):
-    """Plan §1.3a: models/capabilities payloads stay key-set supersets."""
+    """Models and capabilities payloads stay key-set supersets."""
 
     MODELS_KEYS: ClassVar[dict[str, set[str]]] = _MODELS_KEYS
     MODELS_SUMMARY_KEYS: ClassVar[dict[str, set[str]]] = _MODELS_SUMMARY_KEYS

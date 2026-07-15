@@ -100,6 +100,35 @@ you need registry inspection.
 OpenCode `call --read-only` uses the same protected environment settings and
 `--pure` plugin restriction as OpenCode safe mode.
 
+`call --pure` is a separate, stronger completion boundary. It is currently
+supported on **Claude only**. Delegate sends the prompt verbatim on stdin, starts
+the child in an empty temporary cwd, and builds the child environment from only
+`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR`, `LANG`, `LC_ALL`, `LC_CTYPE`,
+and `TERM`, then applies trusted Delegate profile overrides. Claude additionally
+uses `--safe-mode --tools "" --strict-mcp-config --no-session-persistence`, and the
+result must carry an empty `permission_denials` list — a missing, null, or
+non-empty value fails the call closed (`pure_boundary_unverified` /
+`pure_boundary_violation`) rather than reporting success.
+
+Codex and OpenCode are **not** pure-eligible; `<engine> call --pure` is rejected
+before launch (`unsupported_pure_call`). They were disabled after review:
+
+- **Codex** would need external OS confinement (a macOS Seatbelt profile) because
+  it stays a tool-using agent. The prototype handed the child an ephemeral
+  `CODEX_HOME` holding the resolved `auth.json`, but a single inherited Seatbelt
+  profile cannot distinguish a read by the Codex parent from a read by a
+  model-driven subprocess, so the credential was reachable inside the boundary it
+  was meant to protect. A credential transport the parent can use but model tools
+  cannot read is required before Codex pure is re-enabled. `sandbox-exec` is also
+  deprecated on macOS and would never cover other platforms.
+- **OpenCode**'s native `--pure` only disables external plugins; it offers no
+  session non-persistence, no schema output, and no denial tripwire, so it does
+  not meet the hostile-input contract.
+
+Fail-closed eligibility is intentional: an engine without a verified boundary
+rejects `--pure` rather than presenting a weaker one under the same name. The
+supported pure matrix may contain only Claude for some time.
+
 ## Reasoning-effort boundary
 
 `--reasoning-effort LEVEL` and JSON `reasoningEffort` request model thinking depth only. They do not change:

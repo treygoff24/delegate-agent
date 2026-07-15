@@ -476,9 +476,6 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertEqual(state["terminalStatus"], "cancelled")
 
     def test_cancelled_run_synthesizes_completion_report_readable_via_run_output(self):
-        # DEFECT 1: a cancelled run (harness terminal cancellation event) must
-        # synthesize a completion report readable via run-output --completion-report,
-        # not dead-end with missing_completion_report.
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         script = Path(temp.name) / "grok"
@@ -528,7 +525,6 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertIn("run-output", report)
             self.assertIn("partial output", report)
 
-            # Readable via run-output --completion-report.
             out = io.StringIO()
             command = self.run_output.RunOutputCommand(
                 alias,
@@ -544,14 +540,10 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertIn("Status: cancelled", section["content"])
 
     def test_finalize_first_marker_race_envelope_and_state_both_cancelled(self):
-        # DEFECT 2 (scenario ii): finalize-first ordering. State has
-        # cancelRequested stamped, child exits 0 -> envelope + state both
-        # cancelled/exitCode 1, with a synthesized cancelled report.
         with tempfile.TemporaryDirectory() as workspace:
             root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
             run_id, alias = self.registry.register_run(root, harness="codex")
             run_path = self.registry.run_directory(root, run_id)
-            # Stamp the cancelRequested marker (as cancel does before signaling).
             state = {
                 "schema": self.registry.STATE_SCHEMA,
                 "runId": run_id,

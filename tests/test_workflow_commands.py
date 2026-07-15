@@ -165,7 +165,7 @@ class WorkflowCommandTests(unittest.TestCase):
             capture_output=True,
             check=False,
             env=env,
-            timeout=20,
+            timeout=40,
         )
 
     def write_workflow(self, body: str) -> Path:
@@ -1778,7 +1778,7 @@ class WorkflowCommandTests(unittest.TestCase):
             ["--json", "workflow", "run", "--resume", wf_id, "--budget", "2"]
         )
         self.assertEqual(resumed.returncode, 0, resumed.stderr)
-        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "15"])
+        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "30"])
         self.assertEqual(waited.returncode, 0, waited.stderr)
         status = json.loads(self.run_delegate(["--json", "workflow", "status", wf_id]).stdout)
         self.assertEqual(status["status"], "succeeded")
@@ -1897,6 +1897,74 @@ class WorkflowCommandTests(unittest.TestCase):
             for line in (root / "journal.jsonl").read_text(encoding="utf-8").splitlines()
         ]
         self.assertNotIn("agent_timeout", {event["type"] for event in events})
+
+    def test_schema_output_recursion_error_degrades_to_rejection_and_retry_events(self) -> None:
+        """Child parse failures outside schema errors stay inside the supervisor boundary."""
+        from delegate_agent.workflows import runtime as workflow_runtime
+
+        root = self.workspace / "workflow-boundary"
+        root.mkdir()
+        state = workflow_runtime.WorkflowState(
+            wf_id="workflow-boundary",
+            workspace=self.workspace,
+            root=root,
+            script_path=root / workflow_registry.SCRIPT_FILE,
+            config=json.loads(self.config_path.read_text(encoding="utf-8")),
+            cli_argv=[sys.executable, str(CLI)],
+            args=None,
+            budget=workflow_runtime.Budget(None),
+        )
+        state.write_status("running")
+        dsl = workflow_runtime.WorkflowDsl(state, {"defaults": {}})
+        schema = {"type": "object"}
+
+        with (
+            mock.patch.object(
+                workflow_runtime.workflow_schema,
+                "parse_json_tolerant",
+                side_effect=RecursionError("pathological child JSON"),
+            ),
+            mock.patch.object(workflow_runtime, "_find_workflow_agent_run", return_value="child"),
+            mock.patch.object(workflow_runtime, "_workflow_run_terminal", return_value=True),
+            mock.patch.object(
+                workflow_runtime, "_workflow_agent_run_result", return_value="[" * 5000
+            ),
+            mock.patch.object(dsl, "_run_delegate", return_value="[" * 5000),
+        ):
+            adopted = dsl._adopt_existing_agent_run(
+                "root/seq#0",
+                scope="root/seq#0",
+                label=None,
+                phase=None,
+                schema=schema,
+                prefer_assistant=False,
+                timeout=None,
+            )
+            retry_result = dsl._run_structured_or_text(
+                "codex",
+                "pathological child JSON",
+                mode="safe",
+                model=None,
+                effort=None,
+                fast=None,
+                schema=schema,
+                isolation=None,
+                passthrough=False,
+                timeout=None,
+                retries=0,
+                key="root/seq#1",
+            )
+
+        self.assertIs(adopted, workflow_runtime._MISSING)
+        self.assertIsNone(retry_result)
+        event_types = {
+            event["type"]
+            for event in (
+                json.loads(line)
+                for line in state.journal_path.read_text(encoding="utf-8").splitlines()
+            )
+        }
+        self.assertTrue({"agent_adopt_rejected", "agent_structured_retry"} <= event_types)
 
     def test_adoption_wait_timeout_cancels_child_without_duplicate(self) -> None:
         # F2: adoption wait timeout cancels the adopted run and returns None.

@@ -863,7 +863,6 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
     def test_merged_into_source_returns_null_when_git_unavailable(self):
         _repo, path = self._make_repo()
         with tempfile.TemporaryDirectory() as fake_home:
-            # Create a plain (non-git) directory as execution_cwd
             plain_dir = Path(fake_home) / "plain-worktree2"
             plain_dir.mkdir()
             (plain_dir / "somefile.txt").write_text("content\n", encoding="utf-8")

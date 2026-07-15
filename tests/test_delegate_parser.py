@@ -291,6 +291,50 @@ class ParserTests(unittest.TestCase):
             self.delegate.parse_cli(["codex", "safe", "--output-schema"])
         self.assertEqual(ctx.exception.error, "missing_output_schema")
 
+    def test_pure_and_timeout_parse_for_supported_call_engines(self):
+        parsed = self.delegate.parse_cli(
+            ["claude", "call", "--pure", "--timeout", "12", "answer this"]
+        )
+        self.assertTrue(parsed.launch.pure)
+        self.assertEqual(parsed.launch.timeout, 12)
+
+    def test_pure_rejects_non_call_conflict_and_unsupported_engine(self):
+        cases = (
+            (["claude", "safe", "--pure", "x"], "unsupported_pure_call"),
+            (
+                ["claude", "call", "--pure", "--read-only", "x"],
+                "pure_conflicts_read_only",
+            ),
+            (
+                ["--group", "g", "claude", "call", "--pure", "x"],
+                "pure_conflicts_group",
+            ),
+            (["cursor", "call", "--pure", "x"], "unsupported_pure_call"),
+            (["opencode", "call", "--pure", "x"], "unsupported_pure_call"),
+            (["codex", "call", "--pure", "x"], "unsupported_pure_call"),
+        )
+        for argv, error in cases:
+            with self.subTest(argv=argv), self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.delegate.parse_cli(argv)
+            self.assertEqual(ctx.exception.error, error)
+        self.assertTrue(ctx.exception.next_actions)
+        self.assertIn("claude", ctx.exception.next_actions[0])
+        self.assertNotIn("opencode", ctx.exception.next_actions[0])
+        self.assertNotIn("codex", ctx.exception.next_actions[0])
+
+    def test_timeout_is_positive_integer_and_call_only(self):
+        invalid = (
+            (["claude", "call", "--timeout", "0", "x"], "invalid_timeout"),
+            (["claude", "call", "--timeout", "-1", "x"], "invalid_timeout"),
+            (["claude", "call", "--timeout", "1.5", "x"], "invalid_timeout"),
+            (["claude", "call", "--timeout"], "missing_timeout"),
+            (["claude", "safe", "--timeout", "1", "x"], "invalid_option_combination"),
+        )
+        for argv, error in invalid:
+            with self.subTest(argv=argv), self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.delegate.parse_cli(argv)
+            self.assertEqual(ctx.exception.error, error)
+
     def test_prompt_file_after_prompt_text_is_rejected(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:
             self.delegate.parse_cli(["cursor", "safe", "hello", "--prompt-file", "task.md"])
@@ -1049,8 +1093,6 @@ class ParserTests(unittest.TestCase):
             self.assertEqual(loaded["cursor"]["defaultModel"], "cli-model")
             self.assertEqual(source, "cli-overrides")
 
-    # -- Wave 1 isolation parser tests ------------------------------------------------
-
     def test_isolation_worktree_cursor_work_parses(self):
         parsed = self.delegate.parse_cli(["--isolation", "worktree", "cursor", "work", "fix this"])
         self.assertEqual(parsed.global_options.isolation, "worktree")
@@ -1110,6 +1152,8 @@ class ParserTests(unittest.TestCase):
     def test_run_input_keys_contains_isolation(self):
         self.assertIn("isolation", self.delegate.RUN_INPUT_KEYS)
         self.assertIn("progress", self.delegate.RUN_INPUT_KEYS)
+        self.assertIn("pure", self.delegate.RUN_INPUT_KEYS)
+        self.assertIn("timeout", self.delegate.RUN_INPUT_KEYS)
 
     def test_run_input_json_unknown_key_still_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1475,6 +1519,54 @@ class ParserTests(unittest.TestCase):
             self.assertEqual(request.model, "claude-opus-4-8")
             self.assertIn("claude-opus-4-8", request.argv)
 
+    def test_call_run_input_json_pure_and_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "task.json"
+            task.write_text(
+                json.dumps(
+                    {
+                        "engine": "claude",
+                        "mode": "call",
+                        "prompt": "hello",
+                        "pure": True,
+                        "timeout": 12,
+                    }
+                )
+            )
+            parsed = self.delegate.ParsedCommand(
+                "run",
+                global_options=self.delegate.GlobalOptions(json_mode=True),
+                run_json=self.delegate.RunJsonOptions(str(task)),
+            )
+            request = self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+            self.assertTrue(request.pure)
+            self.assertEqual(request.timeout, 12)
+
+    def test_call_run_input_json_pure_rejects_group(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "task.json"
+            task.write_text(
+                json.dumps(
+                    {
+                        "engine": "claude",
+                        "mode": "call",
+                        "prompt": "hello",
+                        "pure": True,
+                    }
+                )
+            )
+            parsed = self.delegate.ParsedCommand(
+                "run",
+                global_options=self.delegate.GlobalOptions(
+                    json_mode=True,
+                    group="g",
+                ),
+                run_json=self.delegate.RunJsonOptions(str(task)),
+            )
+            with self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+            self.assertEqual(ctx.exception.error, "pure_conflicts_group")
+
     def test_run_input_json_workspace_config_resolves_isolation(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
@@ -1539,8 +1631,6 @@ class ParserTests(unittest.TestCase):
             self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
         self.assertEqual(ctx.exception.error, "ambiguous_cwd")
 
-    # -- Missing coverage: launch-tail --isolation on codex, droid, dry-run --
-
     def test_isolation_after_subcommand_codex_work_is_accepted(self):
         parsed = self.delegate.parse_cli(["codex", "work", "--isolation", "worktree", "fix"])
         self.assertEqual(parsed.global_options.isolation, "worktree")
@@ -1562,14 +1652,10 @@ class ParserTests(unittest.TestCase):
         )
         self.assertEqual(parsed.global_options.isolation, "worktree")
 
-    # -- Missing coverage: isolation.work unknown value --
-
     def test_isolation_work_unknown_value_raises(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:
             self.delegate.parse_cli(["--isolation", "bananas", "codex", "work", "fix"])
         self.assertEqual(ctx.exception.error, "invalid_isolation")
-
-    # -- Missing coverage: run-input-json isolation = null --
 
     def test_run_input_json_isolation_null_raises(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1590,14 +1676,11 @@ class ParserTests(unittest.TestCase):
                 self.delegate.pre_read_run_json_for_config(str(task), None)
             self.assertEqual(ctx.exception.error, "invalid_isolation")
 
-    # -- Missing coverage: run --input-json cwd with workspace-local config resolves isolation --
-
     def test_run_input_json_workspace_config_resolves_isolation_before_request(self):
-        """Canonical test: JSON cwd pointing at a repo with .delegate/config.json
+        """JSON cwd pointing at a repo with .delegate/config.json
         containing isolation.work = worktree resolves isolation to worktree even when
         CLI cwd has different config."""
         with tempfile.TemporaryDirectory() as global_tmp:
-            # Create a "global" config with isolation.work = none (the default)
             global_config = Path(global_tmp) / "global_config.json"
             global_config.write_text(
                 json.dumps(
@@ -1609,7 +1692,6 @@ class ParserTests(unittest.TestCase):
                 )
             )
             with tempfile.TemporaryDirectory() as workspace_tmp:
-                # Create a workspace with local config that has isolation.work = worktree
                 workspace = Path(workspace_tmp)
                 local_delegate = workspace / ".delegate"
                 local_delegate.mkdir()
@@ -1622,7 +1704,6 @@ class ParserTests(unittest.TestCase):
                         }
                     )
                 )
-                # Create a task.json pointing at the workspace with local config
                 task = workspace / "task.json"
                 task.write_text(
                     json.dumps(
@@ -1643,7 +1724,6 @@ class ParserTests(unittest.TestCase):
                     "Config loaded from JSON-resolved workspace should have isolation.work = worktree",
                 )
 
-                # Now resolve isolation: no CLI flag, no JSON isolation, should use config default
                 result = self.delegate.delegate_config.resolve_isolation(
                     cli_value=None,
                     input_json_value=None,
@@ -1653,7 +1733,6 @@ class ParserTests(unittest.TestCase):
                 )
                 self.assertEqual(result, "worktree")
 
-                # CLI --isolation auto should bypass the config
                 result = self.delegate.delegate_config.resolve_isolation(
                     cli_value="auto",
                     input_json_value=None,
@@ -1663,7 +1742,6 @@ class ParserTests(unittest.TestCase):
                 )
                 self.assertEqual(result, "auto")
 
-                # JSON isolation overrides config
                 result = self.delegate.delegate_config.resolve_isolation(
                     cli_value=None,
                     input_json_value="none",
@@ -1673,7 +1751,6 @@ class ParserTests(unittest.TestCase):
                 )
                 self.assertEqual(result, "none")
 
-                # Build a full request from the JSON and verify it uses the resolved config
                 parsed = self.delegate.ParsedCommand(
                     "run",
                     global_options=self.delegate.GlobalOptions(json_mode=False),
@@ -1682,8 +1759,6 @@ class ParserTests(unittest.TestCase):
                 request = self.delegate.request_from_input_json(parsed, cfg)
                 self.assertEqual(request.engine, "cursor")
                 self.assertEqual(request.mode, "work")
-
-    # -- Finding #5: end-to-end main() integration test for run --input-json config discovery --
 
     def test_main_run_input_json_uses_workspace_config(self):
         """End-to-end main(): JSON cwd config discovery loads workspace-local config

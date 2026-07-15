@@ -323,7 +323,6 @@ class ExecutionWorktreePreflightTests(ExecutionTestBase):
         user_prompt = "Implement the fix."
         skill_prefix = self.delegate.delegate_runner.SKILL_REVIEW_PREFIX
         full_prompt = skill_prefix + user_prompt
-        # Then inject worktree context
         result = prepend_persistent_worktree_context(full_prompt)
 
         skill_idx = result.index("Delegate sub-agent skill review")
@@ -333,8 +332,6 @@ class ExecutionWorktreePreflightTests(ExecutionTestBase):
         self.assertGreater(worktree_idx, skill_idx)
         self.assertGreater(user_idx, worktree_idx)
         self.assertIn("delegate worktree remove <alias> --force", PERSISTENT_WORKTREE_CONTEXT_NOTE)
-
-    # -- Finding 5: Clean-source coverage --------------------------------------
 
     def test_persistent_worktree_dirty_staged_changes_fails(self):
         """Staged changes cause clean-source failure."""
@@ -407,7 +404,6 @@ class ExecutionWorktreePreflightTests(ExecutionTestBase):
 
     def test_persistent_worktree_dirty_submodule_fails(self):
         """Submodule dirtiness causes clean-source failure."""
-        # Create a separate repo to use as the submodule source.
         sub_repo = tempfile.TemporaryDirectory()
         self.addCleanup(sub_repo.cleanup)
         subprocess.run(

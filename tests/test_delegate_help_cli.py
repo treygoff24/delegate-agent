@@ -1,4 +1,4 @@
-"""End-to-end CLI behavior tests for per-subcommand ``--help`` (Task 3b).
+"""End-to-end CLI behavior tests for per-subcommand ``--help``.
 
 These tests drive the CLI through ``main()`` (capturing stdout/stderr and the
 exit code) and through ``parse_cli`` (for routing/boundary assertions). They are

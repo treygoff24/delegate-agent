@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import shlex
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import TextIO
 
@@ -28,6 +29,7 @@ from delegate_agent.argv_builders import (
 from delegate_agent.command_help import SAFE_WORKSPACE_SYNC_NOTE
 from delegate_agent.config import config_path
 from delegate_agent.constants import (
+    ENGINE_CAPABILITIES,
     KNOWN_ENGINES,
     MODE_CALL,
     MODE_SAFE,
@@ -36,6 +38,7 @@ from delegate_agent.constants import (
     PROMPT_ENFORCED_SAFE_ENGINES,
     PROMPT_INSTRUCTION_MODE_SLASH,
     PROMPT_INSTRUCTION_MODE_WRAPPED,
+    pure_call_supported,
 )
 from delegate_agent.errors import EXIT_OK, DelegateError
 from delegate_agent.json_types import JsonObject
@@ -93,7 +96,7 @@ def _commands_catalog() -> list[JsonObject]:
             "name": spec.name,
             "command": spec.name,
             "summary": spec.summary,
-            "usage": list(spec.usage),
+            "usage": list(_call_help_spec(spec).usage),
             "arguments": [
                 {
                     "name": arg.name,
@@ -108,9 +111,9 @@ def _commands_catalog() -> list[JsonObject]:
                     "arg": option.arg,
                     "description": option.description,
                 }
-                for option in spec.options
+                for option in _call_help_spec(spec).options
             ],
-            "launchOptions": [option.flag for option in spec.options],
+            "launchOptions": [option.flag for option in _call_help_spec(spec).options],
         }
         for spec in command_help.COMMAND_SPECS.values()
     ]
@@ -119,11 +122,96 @@ def _commands_catalog() -> list[JsonObject]:
 def _launch_options() -> list[str]:
     flags: list[str] = []
     for command in ("cursor", "droid", "codex", "claude", "grok", "devin", "opencode", "kimi"):
-        spec = command_help.COMMAND_SPECS[command]
+        spec = _call_help_spec(command_help.COMMAND_SPECS[command])
         for option in spec.options:
             if option.flag not in flags:
                 flags.append(option.flag)
     return flags
+
+
+def _call_help_spec(spec: command_help.CommandSpec) -> command_help.CommandSpec:
+    if spec.name not in KNOWN_ENGINES and spec.name != "dry-run":
+        return spec
+
+    def _augment_call_usage(line: str) -> str:
+        if " call [--read-only]" not in line:
+            return line
+        advertise_pure = (
+            "claude call" in line if spec.name == "dry-run" else pure_call_supported(spec.name)
+        )
+        if advertise_pure:
+            return line.replace(
+                " call [--read-only]",
+                " call [--read-only] [--pure] [--timeout SECONDS]",
+            )
+        return line.replace(
+            " call [--read-only]",
+            " call [--read-only] [--timeout SECONDS]",
+        )
+
+    usage = tuple(_augment_call_usage(line) for line in spec.usage)
+    if spec.name == "claude":
+        usage = tuple(
+            line.replace(
+                "[--prompt-file PATH]",
+                "[--output-schema FILE] [--prompt-file PATH]",
+            )
+            if " call " in line
+            else line
+            for line in usage
+        )
+    options = list(spec.options)
+    if spec.name == "claude" and not any(option.flag == "--output-schema" for option in options):
+        options.append(
+            command_help.OptionSpec(
+                "--output-schema",
+                "FILE",
+                "Call mode only: JSON Schema passed inline to Claude Code for the final response.",
+            )
+        )
+    advertise_pure_option = (
+        any(pure_call_supported(engine) for engine in KNOWN_ENGINES)
+        if spec.name == "dry-run"
+        else pure_call_supported(spec.name)
+    )
+    if advertise_pure_option:
+        pure_desc = (
+            "Call mode only (Claude only): use the engine's pure completion boundary."
+            if spec.name == "dry-run"
+            else "Call mode only: use the engine's pure completion boundary."
+        )
+        options.append(command_help.OptionSpec("--pure", None, pure_desc))
+    options.append(
+        command_help.OptionSpec(
+            "--timeout", "SECONDS", "Call mode only: positive process timeout in seconds."
+        )
+    )
+    return replace(spec, usage=usage, options=tuple(options))
+
+
+def _call_overview_text() -> str:
+    lines: list[str] = []
+    for line in command_help.render_overview_text().splitlines(keepends=True):
+        if " call [--read-only]" in line:
+            if "claude call" in line:
+                line = line.replace(
+                    " call [--read-only]",
+                    " call [--read-only] [--pure] [--timeout SECONDS]",
+                )
+            else:
+                line = line.replace(
+                    " call [--read-only]",
+                    " call [--read-only] [--timeout SECONDS]",
+                )
+        lines.append(line)
+    text = "".join(lines)
+    return text.replace(
+        "claude call [--read-only] [--pure] [--timeout SECONDS] "
+        "[--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH]",
+        "claude call [--read-only] [--pure] [--timeout SECONDS] "
+        "[--model <alias-or-model>] [--reasoning-effort LEVEL] [--output-schema FILE] "
+        "[--prompt-file PATH]",
+    )
 
 
 def _profiles_config_payload(config: JsonObject) -> JsonObject:
@@ -536,8 +624,12 @@ def _policy_field_support_matrix() -> JsonObject:
 def _engine_capabilities() -> JsonObject:
     return {
         engine: {
-            "outputSchema": engine == "codex",
+            # Legacy alias for structuredOutput; derive it so the two keys can
+            # never contradict (was hard-coded codex-only, wrong for Claude).
+            "outputSchema": ENGINE_CAPABILITIES[engine]["structuredOutput"],
             "fast": engine == "codex",
+            **ENGINE_CAPABILITIES[engine],
+            "pureCall": pure_call_supported(engine),
         }
         for engine in KNOWN_ENGINES
     }
@@ -1275,7 +1367,7 @@ def emit_command_help(topic: str | None, json_mode: bool, stdout: TextIO) -> int
         if json_mode:
             delegate_rendering.print_json(command_help.help_index_payload(), stdout)
         else:
-            print(command_help.render_overview_text(), file=stdout, end="")
+            print(_call_overview_text(), file=stdout, end="")
         return EXIT_OK
     spec = command_help.COMMAND_SPECS.get(topic)
     if spec is None:
@@ -1283,6 +1375,7 @@ def emit_command_help(topic: str | None, json_mode: bool, stdout: TextIO) -> int
             "unknown_help_topic",
             f"Unknown help topic: {topic}. Run delegate help for the command list.",
         )
+    spec = _call_help_spec(spec)
     if json_mode:
         delegate_rendering.print_json(command_help.command_help_payload(spec), stdout)
     else:

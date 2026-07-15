@@ -176,5 +176,5 @@ def capture_git_metadata(
             branch_name = head_ref[11:]
 
         return git_root, git_common_dir, head_oid, head_ref, branch_name
-    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError):
         return None, None, None, None, None

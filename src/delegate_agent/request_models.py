@@ -53,6 +53,8 @@ class LaunchOptions:
     forbid_commit_implied_isolation: bool = False
     include_dirty: bool = False
     read_only: bool = False
+    pure: bool = False
+    timeout: int | None = None
     dry_run: bool = False
     model: str | None = None
     agent: str | None = None
@@ -142,7 +144,10 @@ class Request:
     argv: list[str]
     model: str | None
     model_alias: str | None = None
+    model_requested: str | None = None
     output_schema: str | None = None
+    pure: bool = False
+    timeout: int | None = None
     dry_run: bool = False
     workspace_kind: str = "git"
     isolation_context: IsolationContext | None = None
@@ -206,5 +211,6 @@ class EngineBuildInput:
     fast: bool | None = None
     output_schema: str | None = None
     call_read_only: bool = False
+    pure: bool = False
     model_override: str | None = None
     agent: str | None = None

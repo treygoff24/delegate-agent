@@ -14,7 +14,7 @@ from delegate_agent import (
     argv_utils,
     capability_commands,
     command_errors,
-    command_help,
+    command_help,  # noqa: F401  # re-exported for tests / back-compat
     config_commands,
     inspection_commands,
     profile_commands,
@@ -66,6 +66,7 @@ from delegate_agent.constants import (
     PROMPT_INSTRUCTION_MODE_SLASH,
 )
 from delegate_agent.describe_payload import (  # noqa: F401  # re-exported for tests / back-compat
+    _call_overview_text,
     _claude_runtime_policy,
     describe_payload,
     emit_agent_help,
@@ -157,7 +158,7 @@ MISSING_BINARY_PROBE_DIRS = (
 )
 
 
-HELP = command_help.render_overview_text()
+HELP = _call_overview_text()
 
 
 def config_path() -> Path:
@@ -649,6 +650,15 @@ def execute_request(
                 except delegate_runner.RunnerLaunchError as exc:
                     raise DelegateError(exc.error, exc.message) from exc
             try:
+                sensitive_texts = [request.prompt]
+                if "--json-schema" in request.argv:
+                    schema_index = request.argv.index("--json-schema") + 1
+                    if schema_index < len(request.argv):
+                        sensitive_texts.append(request.argv[schema_index])
+                if request.engine == "codex" and "--output-schema" in request.argv:
+                    schema_index = request.argv.index("--output-schema") + 1
+                    if schema_index < len(request.argv):
+                        sensitive_texts.append(request.argv[schema_index])
                 result = delegate_runner.execute_call(
                     request.argv,
                     request.workspace,
@@ -659,9 +669,13 @@ def execute_request(
                     agent_config_text=request.agent_config_text,
                     agent_config_placeholder=DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
                     env_overrides=request.env_overrides,
+                    pure=request.pure,
+                    timeout=request.timeout,
+                    structured_output=request.output_schema is not None,
+                    sensitive_texts=tuple(sensitive_texts),
                 )
             except delegate_runner.RunnerLaunchError as exc:
-                raise DelegateError(exc.error, exc.message) from exc
+                raise DelegateError(exc.error, exc.message, exc.exit_code) from exc
             status = delegate_runner.status_from_exit(result.exit_code)
             if json_mode:
                 payload: JsonObject = {
@@ -671,6 +685,17 @@ def execute_request(
                     "engine": request.engine,
                     "mode": request.mode,
                     "model": request.model,
+                    "pure": request.pure,
+                    "structuredOutput": request.output_schema is not None,
+                    "modelRequested": request.model_requested,
+                    "modelResolved": (
+                        result.model_resolved
+                        if request.engine == "claude"
+                        else request.model
+                        if request.engine == "codex"
+                        else None
+                    ),
+                    "usage": result.usage,
                     "text": result.text,
                     "textChars": result.text_chars,
                     "textTruncated": result.text_truncated,
@@ -693,14 +718,22 @@ def execute_request(
                 reasoning.add_reasoning_payload_fields(payload, request)
                 run_metadata.add_speed_payload_fields(payload, request)
                 if result.exit_code != 0:
-                    payload["error"] = "child_failed"
-                    payload["message"] = "Child command failed."
+                    payload["error"] = result.error or "child_failed"
+                    if result.message:
+                        payload["message"] = result.message
+                    elif result.error == "call_output_invalid":
+                        payload["message"] = "Child output was invalid."
+                    else:
+                        payload["message"] = "Child command failed."
                     payload["stderrTail"] = result.stderr_tail
                 return result.exit_code, payload
             for warning in result.warnings:
                 print(f"warning: {warning}", file=stderr)
-            if result.exit_code != 0 and result.stderr_tail:
-                print(result.stderr_tail, file=stderr)
+            if result.exit_code != 0:
+                if result.message:
+                    print(result.message, file=stderr)
+                elif result.stderr_tail:
+                    print(result.stderr_tail, file=stderr)
             if result.text:
                 print(result.text, file=stdout)
             return result.exit_code, None

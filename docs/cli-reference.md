@@ -393,6 +393,7 @@ by default; grouped calls are the narrow exception described below.
 delegate codex call "Write a Python script that finds the 500th prime and run it."
 delegate --json grok call --read-only --prompt-file rubric.md
 delegate --json codex call --read-only --output-schema verdict.json --prompt-file rubric.md
+delegate --json claude call --pure --timeout 60 --output-schema verdict.json < rubric.md
 ```
 
 Call mode uses an empty temporary cwd instead of resolving the current repo, and
@@ -400,8 +401,9 @@ it deletes that cwd after the child exits. It does not create snapshots, inject
 safe/work skill or completion-report framing, emit progress heartbeats, or honor
 persistent worktree/commit policy options. JSON
 output returns fields such as `ok`, `status`, `exitCode`, `engine`, `mode`,
-`model`, `text`, `textChars`, `textTruncated`, `stdoutBytes`, `stderrBytes`,
-reasoning metadata, and `warnings`. Failed calls include a redacted `stderrTail`.
+`model`, `pure`, `structuredOutput`, `modelRequested`, `modelResolved`, `usage`,
+`text`, `textChars`, `textTruncated`, `stdoutBytes`, `stderrBytes`, reasoning
+metadata, and `warnings`. Failed calls include a redacted `stderrTail`.
 `textTruncated` is `true` when the returned
 `text` was bounded (large outputs keep the head and tail); `textChars` is the
 full untruncated character count.
@@ -420,7 +422,21 @@ changed files…" on a repo-flavored prompt. Pair it with `--output-schema` (Cod
 for structured verdicts. Use `--read-only` for any LLM-as-judge, grader, or
 oracle use where the text is the product and the model must not act.
 
-`--read-only` applies only to `call`; passing it with `safe`/`work` is rejected.
+**`--pure` is the hostile-content completion boundary.** It is supported by
+Claude only; other engines fail before launch with `unsupported_pure_call`. Pure
+mode sends the prompt verbatim, drops ambient
+environment variables outside the documented allowlist, and cannot be combined
+with `--read-only`. Claude uses `--safe-mode`, disables every tool, ignores MCP
+and ambient customization, disables session persistence, and receives the prompt
+only on stdin. Use `--output-schema FILE` with Claude (schema contents inline)
+or with ordinary Codex call mode (schema path).
+
+`--timeout SECONDS` is a positive integer available on every call-mode engine.
+On expiry Delegate terminates the whole child process group and returns
+`call_timeout` with exit code 1.
+
+`--read-only`, `--pure`, and `--timeout` apply only to `call`; passing them with
+`safe`/`work` is rejected.
 Because the child call is stateless, `--isolation`, `--pass-through`,
 `--progress`, `--forbid-commit`, and markdown completion reports are rejected.
 An ordinary call also rejects `--cwd`.
@@ -577,7 +593,7 @@ Supported input keys:
 - `progress`: optional boolean. `true` enables parent progress heartbeats on stderr; `false` disables them even when `progress.enabled` is true in config. When omitted, config `progress.enabled` applies (default `false`). `mode: "call"` rejects progress.
 - `forbidCommit`: optional boolean. `true` requires `mode: "work"` with persistent worktree isolation and fails the run if the child creates commits. `mode: "call"` rejects commit policy.
 - `includeDirty`: optional boolean. `true` requires `mode: "work"` with persistent worktree isolation and syncs tracked edits plus untracked non-ignored files into the new worktree before launch.
-- `outputSchema`: optional path to a JSON Schema for Codex's final message. Codex-only; same semantics as `--output-schema`. Other engines fail with `unsupported_output_schema`.
+- `outputSchema`: optional path to a JSON Schema for the final message. Supported for Codex and Claude call mode (same semantics as `--output-schema`). Other engines fail with `unsupported_output_schema`.
 - `prompt`: required task prompt.
 
 `profile` is not accepted in run input JSON. Configure the Codex CLI config

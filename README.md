@@ -188,7 +188,16 @@ run, use stateless `call` mode:
 
 ```bash
 delegate --json codex call "Summarize this context in three bullets."
+delegate --json claude call --pure --timeout 60 --output-schema result.schema.json < prompt.txt
 ```
+
+`call --pure` is a hostile-input completion boundary available on Claude only.
+It uses an empty temporary cwd, an allowlisted child environment, no Delegate
+prompt framing, and no session persistence or tools according to the engine
+capability contract. Claude receives the prompt only on stdin and is
+schema-capable via `--output-schema`; `delegate --json describe` reports
+`pureCall`, `structuredOutput`, `noSessionPersistence`, `usageEvents`, and
+`promptStdin` per engine. `--timeout SECONDS` applies to every call-mode engine.
 
 For multi-step fan-out or gated review flows, use Delegate Workflows. A workflow
 is a Python script that launches normal Delegate child runs, journals progress,

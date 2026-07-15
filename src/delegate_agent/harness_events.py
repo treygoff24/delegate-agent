@@ -215,6 +215,7 @@ class StreamAccumulator:
     _pending_tool_uses: dict[str, tuple[str, str | None]] = field(default_factory=dict, repr=False)
     _grok_text_buffer: str = field(default="", repr=False)
     _grok_current_line: str = field(default="", repr=False)
+    _last_error_message: str | None = field(default=None, repr=False)
     _opencode_step_text_chunks: list[str] = field(default_factory=list, repr=False)
     terminal_event: JsonObject | None = None
     terminal_status: str | None = None
@@ -292,6 +293,13 @@ class StreamAccumulator:
         if event_type == "error" and self.harness == "grok":
             self._ingest_grok_error(payload)
             return
+        if event_type == "error":
+            # Codex --json emits {"type":"error","message":...} on stdout for
+            # harness-level failures (usage limits, auth). Keep the message: the
+            # profile-failover classifier and the synthesized completion report
+            # both read it from the accumulator.
+            self._ingest_error_event(payload)
+            return
         if event_type == "tool_result":
             return
         if event_type == "system":
@@ -322,7 +330,11 @@ class StreamAccumulator:
             self._ingest_result_event(payload)
             return
         if event_type in ("turn.failed", "turn.error"):
-            self._record_terminal_event(event=event_type, status="failed")
+            self._record_terminal_event(
+                event=event_type,
+                status="failed",
+                reason=self._terminal_error_reason(payload),
+            )
             return
         if event_type in ("turn.cancelled", "turn.canceled"):
             self._record_terminal_event(event=event_type, status="cancelled")
@@ -336,6 +348,21 @@ class StreamAccumulator:
         if event_type == "turn.started":
             self._codex_completion_candidate = None
             return
+
+    def _ingest_error_event(self, payload: JsonObject) -> None:
+        message = payload.get("message")
+        if isinstance(message, str) and message.strip():
+            self._last_error_message = message.strip()
+            self.events.append(NormalizedEvent(kind="error", message=self._last_error_message))
+            self.current = _bounded_current_line(self._last_error_message)
+
+    def _terminal_error_reason(self, payload: JsonObject) -> str | None:
+        error = payload.get("error")
+        if isinstance(error, dict):
+            message = error.get("message")
+            if isinstance(message, str) and message.strip():
+                return message.strip()
+        return self._last_error_message
 
     def _ingest_system(self, payload: JsonObject) -> None:
         cwd = payload.get("cwd")

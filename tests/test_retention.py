@@ -438,7 +438,6 @@ class RetentionTests(unittest.TestCase):
             tempfile.TemporaryDirectory() as fake_home,
             mock.patch.dict("os.environ", {"HOME": fake_home}),
         ):
-            # Create a persistent-worktree run with logs.
             run_id, _alias = self.write_completed_run()
             old = (datetime.now(UTC) - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
             run_path = self.registry.run_directory(self.registry_root, run_id)
@@ -451,14 +450,12 @@ class RetentionTests(unittest.TestCase):
             worktree_root.mkdir(parents=True, exist_ok=True)
             (worktree_root / "mutated-file.txt").write_text("worktree content\n", encoding="utf-8")
 
-            # Set worktreeStatus in state to simulate a persistent worktree run.
             state = json.loads((run_path / "state.json").read_text(encoding="utf-8"))
             state["finishedAt"] = old
             state["lastActivityAt"] = old
             state["worktreeStatus"] = "present"
             self.registry.write_json_atomic(run_path / "state.json", state)
 
-            # Run retention pass with zero-day retention to force archival.
             zero_day_config = {"tracking": {"retention": {"enabled": True, "rawLogDays": 0}}}
             result = self.retention.run_retention_pass(self.registry_root, zero_day_config)
 

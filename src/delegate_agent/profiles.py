@@ -17,8 +17,15 @@ from delegate_agent.harness_events import StreamAccumulator
 from delegate_agent.json_types import JsonObject
 
 STDERR_TAIL_LIMIT = 8_000
+PURE_ENV_ALLOWLIST = frozenset(
+    {"PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TERM"}
+)
 
 _RATE_LIMIT_PATTERN = re.compile(r"rate limit", re.IGNORECASE)
+
+# Matches $$, ${VAR}, and $VAR. Only ${VAR} and $VAR are expanded against a
+# restricted environment; $$ collapses to a literal $.
+_ENV_VAR_PATTERN = re.compile(r"\$\$|\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
 
 _USAGE_LIMIT_PATTERNS = (
     re.compile(r"usage limit", re.IGNORECASE),
@@ -63,8 +70,40 @@ def profile_definitions(config: JsonObject) -> dict[str, JsonObject]:
     }
 
 
-def _expanded_env_value(value: str) -> str:
-    return os.path.expanduser(os.path.expandvars(value.strip()))
+def _expand_env_vars(value: str, expand_env: Mapping[str, str | None]) -> str:
+    """Expand $VAR and ${VAR} placeholders using only the provided mapping.
+
+    Unknown variables expand to the empty string. ``$$`` is collapsed to a
+    single ``$`` and a bare ``$`` not followed by an identifier is left as-is.
+    """
+
+    def _repl(match: re.Match[str]) -> str:
+        if match.group(0) == "$$":
+            return "$"
+        var = match.group(1) or match.group(2)
+        if var is None:
+            return match.group(0)
+        v = expand_env.get(var)
+        return v if isinstance(v, str) else ""
+
+    return _ENV_VAR_PATTERN.sub(_repl, value)
+
+
+def _expand_path_prefix(value: str, expand_env: Mapping[str, str | None]) -> str:
+    """Expand a leading ``~`` or ``~/`` against the supplied HOME, falling back to pwd."""
+    if value.startswith("~") and (len(value) == 1 or value[1:2] == "/"):
+        home = expand_env.get("HOME")
+        if isinstance(home, str):
+            return home + value[1:]
+    return os.path.expanduser(value)
+
+
+def _expanded_env_value(value: str, *, expand_env: Mapping[str, str | None] | None = None) -> str:
+    value = value.strip()
+    if expand_env is None:
+        return os.path.expanduser(os.path.expandvars(value))
+    expanded = _expand_env_vars(value, expand_env)
+    return _expand_path_prefix(expanded, expand_env)
 
 
 def _unknown_profile_error(name: str, definitions: Mapping[str, JsonObject]) -> DelegateError:
@@ -79,7 +118,9 @@ def _unknown_profile_error(name: str, definitions: Mapping[str, JsonObject]) -> 
     )
 
 
-def profile_env(config: JsonObject, name: str) -> dict[str, str]:
+def profile_env(
+    config: JsonObject, name: str, *, expand_env: Mapping[str, str | None] | None = None
+) -> dict[str, str]:
     definitions = profile_definitions(config)
     profile = definitions.get(name)
     if profile is None:
@@ -88,7 +129,7 @@ def profile_env(config: JsonObject, name: str) -> dict[str, str]:
     if not isinstance(env, dict):
         return {}
     return {
-        key: _expanded_env_value(value)
+        key: _expanded_env_value(value, expand_env=expand_env)
         for key, value in env.items()
         if isinstance(key, str) and isinstance(value, str)
     }
@@ -124,6 +165,8 @@ def resolve_active_profile(
     config: JsonObject,
     env: Mapping[str, str | None],
     cli_override: str | None = None,
+    *,
+    expand_env: Mapping[str, str | None] | None = None,
 ) -> ProfileResolution:
     definitions = profile_definitions(config)
     warnings: list[str] = []
@@ -167,11 +210,15 @@ def resolve_active_profile(
             if selected is not None:
                 source = "default"
 
-    active_env = profile_env(config, selected) if selected is not None else {}
+    active_env = (
+        profile_env(config, selected, expand_env=expand_env) if selected is not None else {}
+    )
     fallback_profile = codex_fallback_profile(config)
     fallback_home = None
     if fallback_profile is not None:
-        fallback_home = profile_env(config, fallback_profile).get("CODEX_HOME")
+        fallback_home = profile_env(config, fallback_profile, expand_env=expand_env).get(
+            "CODEX_HOME"
+        )
     return ProfileResolution(
         name=selected,
         source=source,
@@ -183,13 +230,24 @@ def resolve_active_profile(
 
 
 def child_environment(
-    base: dict[str, str] | None = None, overrides: dict[str, str] | None = None
+    base: dict[str, str] | None = None,
+    overrides: dict[str, str] | None = None,
+    *,
+    pure: bool = False,
 ) -> dict[str, str]:
-    env = dict(os.environ)
+    env = (
+        {key: value for key, value in os.environ.items() if key in PURE_ENV_ALLOWLIST}
+        if pure
+        else dict(os.environ)
+    )
     if base:
         env.update(base)
     if overrides:
-        env.update(overrides)
+        if pure:
+            for key, value in overrides.items():
+                env[key] = _expanded_env_value(value, expand_env=env)
+        else:
+            env.update(overrides)
     return env
 
 

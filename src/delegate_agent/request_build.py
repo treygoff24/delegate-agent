@@ -50,7 +50,9 @@ from delegate_agent.constants import (
     PROMPT_ENFORCED_SAFE_ENGINES,
     PROMPT_INSTRUCTION_MODE_SLASH,
     PROMPT_INSTRUCTION_MODE_WRAPPED,
+    PURE_CALL_ENGINES,
     SAFE_REVIEW_PREFIX_INJECTED_HERE_ENGINES,
+    pure_call_supported,
     validate_mode,
 )
 from delegate_agent.errors import DelegateError
@@ -96,6 +98,8 @@ RUN_INPUT_KEYS = {
     "agent",
     "promptInstructionMode",
     "workflowAgentKey",
+    "pure",
+    "timeout",
 }
 
 OUTPUT_SCHEMA_COMPLETION_REPORT_WARNING = (
@@ -125,6 +129,8 @@ OPENCODE_SAFE_PERMISSION = {
     "webfetch": "deny",
 }
 OPENCODE_SAFE_PERMISSION_JSON = json.dumps(OPENCODE_SAFE_PERMISSION, separators=(",", ":"))
+OPENCODE_PURE_PERMISSION = {key: "deny" for key in OPENCODE_SAFE_PERMISSION}
+OPENCODE_PURE_PERMISSION_JSON = json.dumps(OPENCODE_PURE_PERMISSION, separators=(",", ":"))
 
 # Read-only call is the stateless "judge/completion" contract: text in, text out,
 # no tree. These harnesses default to a coding-agent framing ("inspect the
@@ -245,7 +251,7 @@ def git_root_for(path: Path) -> str | None:
             ["rev-parse", "--show-toplevel"],
             timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
         )
-    except (FileNotFoundError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError):
         return None
     if result.returncode != 0:
         return None
@@ -269,21 +275,15 @@ def resolve_prompt(
         )
     if has_direct:
         return validate_prompt(direct)
-    if has_prompt_file:
-        prompt_file_path = prompt_file
-        if prompt_file_path is None:
-            raise DelegateError("missing_prompt_file", "--prompt-file requires a path.")
-        _reject_windows_path(prompt_file_path, "--prompt-file")
-        path = Path(prompt_file_path).expanduser()
+    if prompt_file is not None:
+        _reject_windows_path(prompt_file, "--prompt-file")
+        path = Path(prompt_file).expanduser()
         try:
             return validate_prompt(path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             raise DelegateError("prompt_file_not_found", f"Prompt file not found: {path}") from None
-    if has_stdin:
-        stdin_prompt = stdin_text
-        if stdin_prompt is None:
-            raise DelegateError("missing_prompt", "Missing stdin prompt.")
-        return validate_prompt(stdin_prompt)
+    if stdin_text is not None:
+        return validate_prompt(stdin_text)
     raise DelegateError(
         "missing_prompt", "Missing prompt; pass prompt text, --prompt-file, or stdin."
     )
@@ -320,10 +320,10 @@ def resolve_output_schema(engine: str, output_schema: object) -> str | None:
             "Grok --json-schema forces final json output, which breaks Delegate tracked "
             "streaming snapshots; --output-schema is not supported for grok in v1.",
         )
-    if engine != "codex":
+    if engine not in {"codex", "claude"}:
         raise DelegateError(
             "unsupported_output_schema",
-            "--output-schema/outputSchema is only supported by the codex engine; "
+            "--output-schema/outputSchema is only supported by codex and claude; "
             f"{engine} has no native schema enforcement.",
         )
     if not isinstance(output_schema, str) or not output_schema:
@@ -345,6 +345,13 @@ def resolve_output_schema(engine: str, output_schema: object) -> str | None:
             "invalid_output_schema", f"Output schema is not readable: {path}"
         ) from exc
     return str(path)
+
+
+def _validate_output_schema_mode(engine: str, mode: str, output_schema: object) -> None:
+    if engine == "claude" and output_schema is not None and mode != MODE_CALL:
+        raise DelegateError(
+            "unsupported_output_schema", "Claude --output-schema is only supported in call mode."
+        )
 
 
 def _completion_report_prompt_mode(
@@ -672,13 +679,6 @@ def _resolve_opencode_selection_detail(
     return model, None, None
 
 
-def _resolve_opencode_selection(
-    section: JsonObject, build: EngineBuildInput
-) -> tuple[str | None, str | None]:
-    model, variant, _source = _resolve_opencode_selection_detail(section, build)
-    return model, variant
-
-
 def _resolve_opencode_agent(section: JsonObject, build: EngineBuildInput) -> str | None:
     if isinstance(build.agent, str) and build.agent.strip():
         _reject_opencode_flag_like_value(build.agent, field="agent", error="invalid_agent")
@@ -780,6 +780,8 @@ def _validate_call_cli_options(global_options: object, launch: object) -> None:
     progress_intent = getattr(launch, "progress_intent", None)
     forbid_commit = getattr(launch, "forbid_commit", False)
     include_dirty = getattr(launch, "include_dirty", False)
+    pure = getattr(launch, "pure", False)
+    read_only = getattr(launch, "read_only", False)
     group = getattr(global_options, "group", None)
     # Grouped call runs may take --cwd so the run registers in the invocation
     # workspace registry; ungrouped call still rejects --cwd.
@@ -810,6 +812,35 @@ def _validate_call_cli_options(global_options: object, launch: object) -> None:
         raise DelegateError(
             "invalid_option_combination",
             "--include-dirty requires work mode with persistent worktree isolation.",
+        )
+    _validate_pure_call(
+        getattr(launch, "engine", ""),
+        pure=pure,
+        read_only=read_only,
+        group=group,
+    )
+
+
+def _validate_pure_call(
+    engine: str, *, pure: bool, read_only: bool, group: str | None = None
+) -> None:
+    if not pure:
+        return
+    if group is not None:
+        raise DelegateError(
+            "pure_conflicts_group",
+            "--pure cannot be combined with --group; pure call is a stateless one-hop completion.",
+        )
+    if read_only:
+        raise DelegateError(
+            "pure_conflicts_read_only", "--pure cannot be combined with --read-only."
+        )
+    if not pure_call_supported(engine):
+        supported = ", ".join(PURE_CALL_ENGINES)
+        raise DelegateError(
+            "unsupported_pure_call",
+            f"{engine} does not support pure call mode.",
+            next_actions=[f"Use --pure with one of: {supported}."],
         )
 
 
@@ -898,6 +929,7 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
     if launch.mode == MODE_CALL:
         _validate_call_cli_options(global_options, launch)
         read_only = getattr(launch, "read_only", False)
+        pure = getattr(launch, "pure", False)
         if launch.engine == "droid":
             _reject_droid_model_conflict(launch.model_alias, launch.model)
             if launch.model_alias is not None:
@@ -933,6 +965,8 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
                 output_schema=output_schema,
                 cleanup_workspace=cleanup_workspace,
                 call_read_only=read_only,
+                pure=pure,
+                timeout=launch.timeout,
                 group=global_options.group,
                 agent=launch.agent,
                 model_override=cli_model_override,
@@ -946,6 +980,8 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
             "invalid_option_combination",
             "--read-only only applies to call mode.",
         )
+    if getattr(launch, "pure", False):
+        raise DelegateError("unsupported_pure_call", "--pure only applies to call mode.")
     effective_progress = resolve_effective_progress(launch.progress_intent, config)
     if effective_progress and global_options.pass_through:
         raise DelegateError(
@@ -953,6 +989,7 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
             "--progress is incompatible with --pass-through.",
         )
     progress_initial_delay_sec, progress_interval_sec = resolve_progress_timing(config)
+    _validate_output_schema_mode(launch.engine, launch.mode, launch.output_schema)
     output_schema = resolve_output_schema(launch.engine, launch.output_schema)
     workspace = resolve_workspace(global_options.cwd)
     prompt = resolve_prompt(launch.prompt_parts, launch.prompt_file, stdin)
@@ -1151,6 +1188,14 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
     raw_include_dirty = raw.get("includeDirty", False)
     if not isinstance(raw_include_dirty, bool):
         raise DelegateError("invalid_include_dirty", "includeDirty must be true or false.")
+    raw_pure = raw.get("pure", False)
+    if not isinstance(raw_pure, bool):
+        raise DelegateError("invalid_pure", "pure must be true or false.")
+    raw_timeout = raw.get("timeout")
+    if raw_timeout is not None and (
+        isinstance(raw_timeout, bool) or not isinstance(raw_timeout, int) or raw_timeout <= 0
+    ):
+        raise DelegateError("invalid_timeout", "timeout must be a positive integer.")
     json_model_alias: str | None = model_alias if isinstance(model_alias, str) else None
     json_model_override: str | None = None
     if engine == "droid":
@@ -1187,6 +1232,7 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
     _validate_agent_option(str(engine), json_agent)
     if engine == "opencode" and json_agent is not None:
         _reject_opencode_flag_like_value(json_agent, field="agent", error="invalid_agent")
+    _validate_output_schema_mode(str(engine), str(mode), raw.get("outputSchema"))
     output_schema = resolve_output_schema(str(engine), raw.get("outputSchema"))
     raw_instruction_mode = raw.get("promptInstructionMode")
     raw_workflow_agent_key = raw.get("workflowAgentKey")
@@ -1229,6 +1275,8 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
                 output_schema=output_schema,
                 cleanup_workspace=cleanup_workspace,
                 call_read_only=raw_read_only,
+                pure=raw_pure,
+                timeout=raw_timeout,
                 group=global_options.group,
                 workflow_agent_key=raw_workflow_agent_key,
                 prompt_instruction_mode=resolve_input_json_prompt_instruction_mode(
@@ -1374,6 +1422,8 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         prompt_instruction_mode=instruction_mode,
         agent=json_agent,
         model_override=json_model_override,
+        pure=raw_pure,
+        timeout=raw_timeout,
     )
 
 
@@ -1401,6 +1451,8 @@ def build_request(
     warnings: tuple[str, ...] = (),
     cleanup_workspace: bool = False,
     call_read_only: bool = False,
+    pure: bool = False,
+    timeout: int | None = None,
     group: str | None = None,
     workflow_agent_key: str | None = None,
     prompt_instruction_mode: str = PROMPT_INSTRUCTION_MODE_WRAPPED,
@@ -1421,7 +1473,16 @@ def build_request(
     )
     if fast is not None and engine != "codex":
         raise DelegateError("unsupported_fast", "fast is only supported by codex.")
+    _validate_output_schema_mode(engine, mode, output_schema)
     output_schema = resolve_output_schema(engine, output_schema)
+    if pure:
+        if mode != MODE_CALL:
+            raise DelegateError("unsupported_pure_call", "--pure only applies to call mode.")
+        _validate_pure_call(engine, pure=True, read_only=call_read_only, group=group)
+    if timeout is not None and (mode != MODE_CALL or timeout <= 0):
+        raise DelegateError(
+            "invalid_timeout", "timeout must be positive and only used in call mode."
+        )
 
     return _build_request_for_workspace(
         engine,
@@ -1446,6 +1507,8 @@ def build_request(
         warnings=warnings,
         cleanup_workspace=cleanup_workspace,
         call_read_only=call_read_only,
+        pure=pure,
+        timeout=timeout,
         group=group,
         workflow_agent_key=workflow_agent_key,
         prompt_instruction_mode=prompt_instruction_mode,
@@ -1492,6 +1555,7 @@ def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         build.prompt,
         stream_capture=build.stream_capture,
         call_read_only=build.call_read_only,
+        pure=build.pure,
     )
     return EngineRequestParts(
         model=model,
@@ -1558,6 +1622,7 @@ def _droid_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         reasoning_capability=capability,
         prompt_transport=PROMPT_TRANSPORT_FILE,
         call_read_only=build.call_read_only,
+        pure=build.pure,
     )
     display_argv = [
         DROID_PROMPT_FILE_DISPLAY if item == DROID_PROMPT_FILE_ARG_PLACEHOLDER else item
@@ -1633,6 +1698,7 @@ def _codex_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         prompt_transport=PROMPT_TRANSPORT_STDIN,
         output_schema=build.output_schema,
         call_read_only=build.call_read_only,
+        pure=build.pure,
     )
     return EngineRequestParts(
         model=model,
@@ -1665,6 +1731,14 @@ def _claude_request_parts(build: EngineBuildInput) -> EngineRequestParts:
             if build.effort_source != "config":
                 raise DelegateError(exc.error, exc.message) from exc
             warnings = (f"ignoring claude.defaultReasoningEffort: {exc.message}",)
+    schema_contents = None
+    if build.output_schema is not None:
+        try:
+            schema_contents = Path(build.output_schema).read_text(encoding="utf-8")
+        except OSError as exc:
+            raise DelegateError(
+                "invalid_output_schema", f"Output schema is not readable: {build.output_schema}"
+            ) from exc
     argv = build_claude_argv(
         claude,
         build.mode,
@@ -1674,6 +1748,8 @@ def _claude_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         reasoning_effort=effort,
         allow_bypass_permissions=_claude_harness_bypass_enabled(build.config, build.mode),
         call_read_only=build.call_read_only,
+        pure=build.pure,
+        output_schema=schema_contents,
     )
     return EngineRequestParts(
         model=model,
@@ -1714,6 +1790,7 @@ def _grok_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         reasoning_effort=effort,
         allow_bypass_permissions=_grok_harness_bypass_enabled(build.config, build.mode),
         call_read_only=build.call_read_only,
+        pure=build.pure,
     )
     display_argv = [
         PROMPT_FILE_DISPLAY if item == PROMPT_FILE_ARG_PLACEHOLDER else item for item in argv
@@ -1750,6 +1827,7 @@ def _devin_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         build.mode,
         model,
         call_read_only=build.call_read_only,
+        pure=build.pure,
     )
     display_argv = [
         DEVIN_AGENT_CONFIG_DISPLAY
@@ -1771,22 +1849,27 @@ def _devin_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     )
 
 
-def _opencode_env_overrides(*, read_only: bool, agent: str | None = None) -> dict[str, str]:
+def _opencode_env_overrides(
+    *, read_only: bool, pure: bool = False, agent: str | None = None
+) -> dict[str, str]:
     env = {"OPENCODE_DISABLE_AUTOUPDATE": "1"}
     if read_only:
         if agent is None:
             raise ValueError("read-only OpenCode requests require an agent")
-        agent_config: JsonObject = {"permission": OPENCODE_SAFE_PERMISSION}
+        permission = OPENCODE_PURE_PERMISSION if pure else OPENCODE_SAFE_PERMISSION
+        agent_config: JsonObject = {"permission": permission}
         if agent == OPENCODE_SAFE_AGENT:
             agent_config["mode"] = "primary"
         lockdown: JsonObject = {
-            "permission": OPENCODE_SAFE_PERMISSION,
+            "permission": permission,
             "agent": {agent: agent_config},
             "autoupdate": False,
             "share": "disabled",
         }
         env["OPENCODE_CONFIG_CONTENT"] = json.dumps(lockdown, separators=(",", ":"))
-        env["OPENCODE_PERMISSION"] = OPENCODE_SAFE_PERMISSION_JSON
+        env["OPENCODE_PERMISSION"] = (
+            OPENCODE_PURE_PERMISSION_JSON if pure else OPENCODE_SAFE_PERMISSION_JSON
+        )
     return env
 
 
@@ -1795,7 +1878,9 @@ def _opencode_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     opencode = build.config["opencode"]
     model, variant, variant_source = _resolve_opencode_selection_detail(opencode, build)
     agent = _resolve_opencode_agent(opencode, build)
-    read_only = build.mode == MODE_SAFE or (build.mode == MODE_CALL and build.call_read_only)
+    read_only = build.mode == MODE_SAFE or (
+        build.mode == MODE_CALL and (build.call_read_only or build.pure)
+    )
     if read_only and agent is None:
         agent = OPENCODE_SAFE_AGENT
     argv = build_opencode_argv(
@@ -1806,6 +1891,7 @@ def _opencode_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         agent,
         variant,
         call_read_only=build.call_read_only,
+        pure=build.pure,
     )
     return EngineRequestParts(
         model=model,
@@ -1814,7 +1900,7 @@ def _opencode_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         prompt_transport=PROMPT_TRANSPORT_STDIN,
         stdin_text=build.prompt,
         display_argv=list(argv),
-        env_overrides=_opencode_env_overrides(read_only=read_only, agent=agent),
+        env_overrides=_opencode_env_overrides(read_only=read_only, pure=build.pure, agent=agent),
         **opencode_reasoning_request_kwargs(variant, variant_source),
     )
 
@@ -1841,6 +1927,7 @@ def _kimi_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         model,
         build.prompt,
         stream_capture=build.stream_capture,
+        pure=build.pure,
     )
     return EngineRequestParts(
         model=model,
@@ -1903,6 +1990,8 @@ def _build_request_for_workspace(
     warnings: tuple[str, ...],
     cleanup_workspace: bool,
     call_read_only: bool = False,
+    pure: bool = False,
+    timeout: int | None = None,
     group: str | None = None,
     workflow_agent_key: str | None = None,
     prompt_instruction_mode: str = PROMPT_INSTRUCTION_MODE_WRAPPED,
@@ -1934,6 +2023,7 @@ def _build_request_for_workspace(
             fast=fast,
             output_schema=output_schema,
             call_read_only=call_read_only,
+            pure=pure,
             model_override=model_override,
             agent=agent,
         ),
@@ -1947,7 +2037,10 @@ def _build_request_for_workspace(
             parts.argv,
             parts.model,
             model_alias=parts.model_alias,
+            model_requested=model_override or model_alias,
             output_schema=output_schema,
+            pure=pure,
+            timeout=timeout,
             dry_run=dry_run,
             workspace_kind=resolved.kind,
             isolation_context=isolation_context,
@@ -1992,8 +2085,9 @@ def _dedupe_warnings(warnings: tuple[str, ...]) -> tuple[str, ...]:
 def _apply_profile_resolution(
     request: Request, config: JsonObject, *, auth_profile_override: str | None = None
 ) -> Request:
+    expand_env = profiles.child_environment(pure=True) if request.pure else os.environ
     resolution = profiles.resolve_active_profile(
-        config, os.environ, cli_override=auth_profile_override
+        config, os.environ, cli_override=auth_profile_override, expand_env=expand_env
     )
     env_overrides = dict(request.env_overrides or {})
     env_overrides.update(resolution.env)

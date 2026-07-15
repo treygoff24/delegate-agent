@@ -5,7 +5,7 @@ import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, TypeAlias, cast
+from typing import Protocol, TypeAlias, TypeGuard
 
 from delegate_agent import run_registry
 from delegate_agent.json_types import JsonObject, JsonValue
@@ -177,7 +177,7 @@ class ReasoningPayloadCarrier(Protocol):
     reasoning_transport: str | None
 
 
-def is_valid_effort_string(value: object) -> bool:
+def is_valid_effort_string(value: object) -> TypeGuard[str]:
     # Effort values land in child argv and inside a quoted Codex TOML override
     # (model_reasoning_effort="…"), so quoting hazards are banned alongside
     # whitespace.
@@ -197,7 +197,7 @@ def normalize_effort(value: object) -> str:
             "reasoning effort must be a non-empty string without whitespace, "
             "double quotes, or backslashes.",
         )
-    return cast(str, value)
+    return value
 
 
 def format_explicit_reasoning_effort_error(

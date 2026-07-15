@@ -219,8 +219,8 @@ class WorktreesDataHomeTests(unittest.TestCase):
 class BuildIsolationContextTests(unittest.TestCase):
     """build_isolation_context: creates IsolationContext from resolved isolation value.
 
-    Finding B: isolation_mode preserves the raw resolved value (auto/none/worktree),
-    while effective_isolation is the mapped behavior (none/worktree, never auto).
+    isolation_mode preserves the raw resolved value (auto/none/worktree), while
+    effective_isolation is the mapped behavior (none/worktree, never auto).
     """
 
     def test_cursor_safe_auto_maps_to_worktree_temporary(self):
@@ -314,7 +314,7 @@ class BuildIsolationContextTests(unittest.TestCase):
                 self.assertFalse(ctx.preserved_workspace)
 
     def test_planned_paths_with_git_metadata(self):
-        """Finding C: When git metadata is provided and effective is worktree,
+        """When git metadata is provided and effective is worktree,
         planned paths/branches are computed even in dry-run."""
         iso = load_isolation()
         with tempfile.TemporaryDirectory() as tmp:

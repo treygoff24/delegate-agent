@@ -653,8 +653,6 @@ class ValidationTests(unittest.TestCase):
             )
         )
 
-    # -- Wave 1 isolation / worktrees config validation --------------------------------
-
     def test_isolation_config_non_object_raises(self):
         config_mod = load_config_module()
         with self.assertRaises(config_mod.ConfigError) as ctx:
@@ -751,8 +749,6 @@ class ValidationTests(unittest.TestCase):
         cfg = config_mod.deep_merge(config_mod.DEFAULT_CONFIG, {})
         self.assertEqual(cfg["isolation"]["safe"], "auto")
         self.assertEqual(cfg["isolation"]["work"], "none")
-
-    # -- Missing coverage: explicit null rejection + string types --
 
     def test_isolation_work_unknown_value_raises(self):
         config_mod = load_config_module()
@@ -854,15 +850,12 @@ class ValidationTests(unittest.TestCase):
     def test_worktrees_data_home_explicit_null_accepted(self):
         """dataHome: null is the valid explicit default sentinel."""
         config_mod = load_config_module()
-        # Should not raise
         config_mod.validate_config(
             config_mod.deep_merge(
                 config_mod.DEFAULT_CONFIG,
                 {"worktrees": {"dataHome": None}},
             )
         )
-
-    # -- Finding #4: resolve_isolation loaded-config validation (defense in depth) -----
 
     def test_resolve_isolation_loaded_config_isolation_not_dict_raises(self):
         """resolve_isolation raises when loaded_config isolation is a string, not dict."""
@@ -961,8 +954,6 @@ class ValidationTests(unittest.TestCase):
             "none",
         )
 
-    # -- Finding #3: request_from_input_json explicit null isolation -------------------
-
     def test_kimi_config_section_valid(self):
         config_mod = load_config_module()
         config = copy.deepcopy(config_mod.DEFAULT_CONFIG)
@@ -1035,8 +1026,6 @@ class ValidationTests(unittest.TestCase):
                 delegate.request_from_input_json(parsed, droid_test_config(delegate))
             self.assertEqual(ctx.exception.error, "invalid_isolation")
             self.assertIn("null", ctx.exception.message.lower())
-
-    # --- Finding 4: JSON-path parity for forbid-commit -----------------------
 
     def test_input_json_forbid_commit_implies_worktree_isolation(self):
         """run --input-json with forbidCommit: true and no isolation gets the

@@ -31,7 +31,9 @@ from delegate_agent.constants import (
     ENGINES_PROSE,
     KNOWN_ENGINES,
     MODELESS_ENGINES,
+    PURE_CALL_ENGINES,
     VALID_MODES,
+    pure_call_supported,
     validate_mode,
 )
 from delegate_agent.errors import DelegateError
@@ -491,6 +493,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             completion_report=completion_report,
             isolation=isolation,
             auth_profile=auth_profile,
+            group=group,
         )
     if subcommand == "dry-run":
         return parse_dry_run(
@@ -710,6 +713,8 @@ def parse_modeless_engine(
         json_mode,
         isolation,
         read_only,
+        pure,
+        timeout,
         include_dirty,
         model,
         agent,
@@ -718,6 +723,9 @@ def parse_modeless_engine(
         raise DelegateError("unsupported_agent", "--agent is only supported by opencode.")
     if fast is not None and engine != "codex":
         raise DelegateError("unsupported_fast", "--fast and --no-fast are only supported by codex.")
+    _validate_pure_options(engine, mode, pure=pure, read_only=read_only, group=group)
+    if timeout is not None and mode != "call":
+        raise DelegateError("invalid_option_combination", "--timeout only applies to call mode.")
     forbid_commit_implied_isolation = False
     if forbid_commit and mode == "work" and isolation is None:
         isolation = "worktree"
@@ -752,6 +760,8 @@ def parse_modeless_engine(
             forbid_commit_implied_isolation=forbid_commit_implied_isolation,
             include_dirty=include_dirty,
             read_only=read_only,
+            pure=pure,
+            timeout=timeout,
             dry_run=dry_run,
             model=model,
             agent=agent,
@@ -824,6 +834,8 @@ def parse_droid(
         json_mode,
         isolation,
         read_only,
+        pure,
+        timeout,
         include_dirty,
         model,
         agent,
@@ -832,6 +844,9 @@ def parse_droid(
         raise DelegateError("unsupported_agent", "--agent is only supported by opencode.")
     if fast is not None:
         raise DelegateError("unsupported_fast", "--fast and --no-fast are only supported by codex.")
+    _validate_pure_options("droid", mode, pure=pure, read_only=read_only, group=group)
+    if timeout is not None and mode != "call":
+        raise DelegateError("invalid_option_combination", "--timeout only applies to call mode.")
     forbid_commit_implied_isolation = False
     if forbid_commit and mode == "work" and isolation is None:
         isolation = "worktree"
@@ -868,6 +883,8 @@ def parse_droid(
             forbid_commit_implied_isolation=forbid_commit_implied_isolation,
             include_dirty=include_dirty,
             read_only=read_only,
+            pure=pure,
+            timeout=timeout,
             dry_run=dry_run,
             model=model,
             agent=agent,
@@ -949,6 +966,8 @@ def parse_prompt_tail(
     str | None,
     bool,
     bool,
+    int | None,
+    bool,
     str | None,
     str | None,
 ]:
@@ -960,6 +979,8 @@ def parse_prompt_tail(
     forbid_commit = False
     include_dirty = False
     read_only = False
+    pure = False
+    timeout: int | None = None
     model: str | None = None
     agent: str | None = None
     prompt_parts: list[str] = []
@@ -1144,6 +1165,25 @@ def parse_prompt_tail(
             read_only = True
             i += 1
             continue
+        if token == "--pure":
+            if pure:
+                raise DelegateError(
+                    "invalid_option_combination", "Only one --pure flag is allowed."
+                )
+            pure = True
+            i += 1
+            continue
+        if token == "--timeout":
+            if timeout is not None:
+                raise DelegateError("invalid_option_combination", "Only one --timeout is allowed.")
+            timeout, i = parse_required_positive_int_option(
+                rest,
+                i,
+                option_label="--timeout",
+                missing_error="missing_timeout",
+                invalid_error="invalid_timeout",
+            )
+            continue
         prompt_parts = rest[i:]
         break
     if "--prompt-file" in prompt_parts:
@@ -1171,10 +1211,37 @@ def parse_prompt_tail(
         json_mode,
         isolation,
         read_only,
+        pure,
+        timeout,
         include_dirty,
         model,
         agent,
     )
+
+
+def _validate_pure_options(
+    engine: str, mode: str, *, pure: bool, read_only: bool, group: str | None = None
+) -> None:
+    if not pure:
+        return
+    if mode != "call":
+        raise DelegateError("unsupported_pure_call", "--pure only applies to call mode.")
+    if group is not None:
+        raise DelegateError(
+            "pure_conflicts_group",
+            "--pure cannot be combined with --group; pure call is a stateless one-hop completion.",
+        )
+    if read_only:
+        raise DelegateError(
+            "pure_conflicts_read_only", "--pure cannot be combined with --read-only."
+        )
+    if not pure_call_supported(engine):
+        supported = ", ".join(PURE_CALL_ENGINES)
+        raise DelegateError(
+            "unsupported_pure_call",
+            f"{engine} does not support pure call mode.",
+            next_actions=[f"Use --pure with one of: {supported}."],
+        )
 
 
 def parse_snapshot(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
