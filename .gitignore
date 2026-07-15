@@ -48,3 +48,5 @@ docs/plans/
 # desloppify scan artifacts (local tool output)
 .desloppify/
 scorecard.png
+
+docs/dogfood/
