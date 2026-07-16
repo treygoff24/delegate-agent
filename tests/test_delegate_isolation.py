@@ -491,6 +491,17 @@ class SourceRootGuardTests(unittest.TestCase):
 
             self.assertTrue(iso.target_contains_source_root(case_variant, source))
 
+    def test_refuses_cleanup_when_existing_paths_cannot_be_compared(self):
+        iso = load_isolation()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "source"
+            target = Path(temp_dir) / "target"
+            source.mkdir()
+            target.mkdir()
+
+            with mock.patch.object(iso.os.path, "samefile", side_effect=OSError("transient")):
+                self.assertTrue(iso.target_contains_source_root(target, source))
+
 
 class PromptInstructionImportTests(unittest.TestCase):
     """Isolation imports prompt constants from the neutral prompt_instructions module."""

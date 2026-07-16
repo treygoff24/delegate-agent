@@ -220,7 +220,9 @@ def target_contains_source_root(target: str | Path, source_root: str | Path) -> 
                 if os.path.samefile(current, resolved_source):
                     return True
             except OSError:
-                break
+                # Both paths existed when this check started, so identity is
+                # uncertain rather than merely lexical. Refuse cleanup.
+                return True
             if current.parent == current:
                 break
             current = current.parent
