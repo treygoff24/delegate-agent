@@ -696,7 +696,10 @@ class CodexProfileExecutionTests(unittest.TestCase):
         with mock.patch.object(self.profiles, "codex_homes_same_account", return_value=False):
             overrides = self.profiles.codex_fallback_child_env_overrides(
                 resolution,
-                {"DELEGATE_SOURCE_ROOT": "/actual/source", "DELEGATE_EXECUTION_ROOT": "/actual/run"},
+                {
+                    "DELEGATE_SOURCE_ROOT": "/actual/source",
+                    "DELEGATE_EXECUTION_ROOT": "/actual/run",
+                },
             )
 
         self.assertEqual(overrides["CODEX_HOME"], "/work")

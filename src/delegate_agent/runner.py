@@ -1374,6 +1374,7 @@ def _capture_tracked_process(
                 daemon=True,
             )
             stdin_thread.start()
+
         def wait_for_child(timeout: float | None = None) -> int:
             try:
                 return process.wait(timeout=timeout)
@@ -1419,7 +1420,7 @@ def _capture_tracked_process(
                         _terminate_call_process(process)
                         raise RunnerLaunchError(
                             "call_timeout", "Child command exceeded the call timeout."
-                        )
+                        ) from None
                     try:
                         _emit_progress_heartbeat(
                             ctx,
@@ -1944,7 +1945,9 @@ def execute_tracked(
                     retry_capture,
                     stdout_bytes=cumulative_stdout_bytes + retry_capture.stdout_bytes,
                     stderr_bytes=cumulative_stderr_bytes + retry_capture.stderr_bytes,
-                    stdin_failures=tuple(dict.fromkeys([*stdin_failures, *retry_capture.stdin_failures])),
+                    stdin_failures=tuple(
+                        dict.fromkeys([*stdin_failures, *retry_capture.stdin_failures])
+                    ),
                 )
                 retry_quality = _tracked_capture_quality(
                     files,

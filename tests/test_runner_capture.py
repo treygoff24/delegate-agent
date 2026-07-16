@@ -2426,17 +2426,30 @@ class RunnerCaptureTests(unittest.TestCase):
 
     def test_empty_call_retry_aggregates_exact_usage(self):
         primary = self.runner.CallResult(
-            text="", exit_code=0, duration_ms=1, stdout_bytes=0, stderr_bytes=0,
-            text_chars=0, text_truncated=False, result_quality="empty",
+            text="",
+            exit_code=0,
+            duration_ms=1,
+            stdout_bytes=0,
+            stderr_bytes=0,
+            text_chars=0,
+            text_truncated=False,
+            result_quality="empty",
             usage={"inputTokens": 3, "outputTokens": 2, "basis": "exact"},
         )
         retry = self.runner.CallResult(
-            text="ok", exit_code=0, duration_ms=1, stdout_bytes=0, stderr_bytes=0,
-            text_chars=2, text_truncated=False,
+            text="ok",
+            exit_code=0,
+            duration_ms=1,
+            stdout_bytes=0,
+            stderr_bytes=0,
+            text_chars=2,
+            text_truncated=False,
             usage={"inputTokens": 5, "outputTokens": 7, "basis": "exact"},
         )
         with mock.patch.object(self.runner, "_execute_call_once", side_effect=(primary, retry)):
-            result = self.runner.execute_call(["agent", "task"], "/tmp", harness="claude", read_only=True)
+            result = self.runner.execute_call(
+                ["agent", "task"], "/tmp", harness="claude", read_only=True
+            )
 
         self.assertEqual(result.usage, {"inputTokens": 8, "outputTokens": 9, "basis": "exact"})
 
@@ -2542,7 +2555,7 @@ class RunnerCaptureTests(unittest.TestCase):
                 'if [ "${ATTEMPT}" = primary ]; then printf "usage limit\\n" >&2; exit 1; fi\n'
                 'if [[ "$*" == *"Delegate retry instruction"* ]]; then\n'
                 '  printf "retry\\n" >&2\n'
-                "  printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"ok\"}}'\n"
+                '  printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}\'\n'
                 "else\n"
                 '  printf "fallback\\n" >&2\n'
                 "fi\n",
@@ -2552,19 +2565,37 @@ class RunnerCaptureTests(unittest.TestCase):
             root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
             run_id, alias = self.registry.register_run(root, harness="codex")
             ctx = self.runner.RunContext(
-                registry_root=root, run_id=run_id, alias=alias, harness="codex", engine="codex",
-                mode="call", model=None, source_cwd=workspace, execution_cwd=workspace,
-                workspace_kind="directory", isolated_workspace=False,
-                started_at="2026-07-16T12:00:00Z", group="workflow", call_read_only=True,
-                env_overrides={"ATTEMPT": "primary"}, fallback_env_overrides={"ATTEMPT": "fallback"},
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="call",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-07-16T12:00:00Z",
+                group="workflow",
+                call_read_only=True,
+                env_overrides={"ATTEMPT": "primary"},
+                fallback_env_overrides={"ATTEMPT": "fallback"},
             )
             code, payload = self.runner.execute_tracked(
-                [str(script), "task"], workspace, ctx, json_mode=True, stdout=io.StringIO(),
-                stderr=io.StringIO(), manifest_argv=[str(script), "<prompt>"],
+                [str(script), "task"],
+                workspace,
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+                manifest_argv=[str(script), "<prompt>"],
             )
 
             self.assertEqual(code, 0)
-            self.assertEqual(payload["stderrBytes"], len(b"usage limit\n") + len(b"fallback\n") + len(b"retry\n"))
+            self.assertEqual(
+                payload["stderrBytes"], len(b"usage limit\n") + len(b"fallback\n") + len(b"retry\n")
+            )
 
     def test_grouped_read_only_call_empty_success_retries_once(self):
         with tempfile.TemporaryDirectory() as workspace:
@@ -2663,9 +2694,10 @@ class RunnerCaptureTests(unittest.TestCase):
             {"pure": True},
             {"prompt_instruction_mode": "slash-passthrough"},
         ):
-            with self.subTest(kwargs=kwargs), mock.patch.object(
-                self.runner, "_execute_call_once", return_value=empty
-            ) as attempt:
+            with (
+                self.subTest(kwargs=kwargs),
+                mock.patch.object(self.runner, "_execute_call_once", return_value=empty) as attempt,
+            ):
                 result = self.runner.execute_call(
                     ["agent", "/review"], "/tmp", harness="codex", read_only=True, **kwargs
                 )
@@ -2685,14 +2717,29 @@ class RunnerCaptureTests(unittest.TestCase):
             root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
             run_id, alias = self.registry.register_run(root, harness="codex")
             ctx = self.runner.RunContext(
-                registry_root=root, run_id=run_id, alias=alias, harness="codex", engine="codex",
-                mode="call", model=None, source_cwd=workspace, execution_cwd=workspace,
-                workspace_kind="directory", isolated_workspace=False,
-                started_at="2026-07-16T12:00:00Z", group="workflow", call_read_only=True,
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="call",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-07-16T12:00:00Z",
+                group="workflow",
+                call_read_only=True,
             )
             code, payload = self.runner.execute_tracked(
-                [str(script), "task"], workspace, ctx, json_mode=True, stdout=io.StringIO(),
-                stderr=io.StringIO(), manifest_argv=[str(script), "<prompt>"],
+                [str(script), "task"],
+                workspace,
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+                manifest_argv=[str(script), "<prompt>"],
             )
 
             self.assertEqual(code, 1)
@@ -2739,4 +2786,6 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertEqual(counter.read_text(encoding="utf-8"), "x")
             self.assertEqual(payload["resultQuality"], "empty")
             self.assertNotIn("emptyRetry", payload)
-            self.assertIn(self.runner.EMPTY_RETRY_SKIPPED_WRITE_CAPABLE_WARNING, payload["warnings"])
+            self.assertIn(
+                self.runner.EMPTY_RETRY_SKIPPED_WRITE_CAPABLE_WARNING, payload["warnings"]
+            )
