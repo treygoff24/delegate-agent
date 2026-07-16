@@ -295,7 +295,8 @@ def parse_utc_timestamp(value: str | None) -> datetime | None:
     try:
         if value.endswith("Z"):
             return datetime.fromisoformat(value.replace("Z", "+00:00"))
-        return datetime.fromisoformat(value)
+        parsed = datetime.fromisoformat(value)
+        return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed
     except ValueError:
         return None
 
