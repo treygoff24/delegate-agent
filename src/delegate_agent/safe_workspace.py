@@ -320,7 +320,7 @@ def _git_check_ignore(git_root: str, paths: list[str]) -> tuple[set[str], bool]:
     result = _run_git_bytes(
         git_root,
         ["check-ignore", "-z", "--stdin"],
-        input_bytes=b"\x00".join(p.encode("utf-8") for p in paths) + b"\x00",
+        input_bytes=b"\x00".join(os.fsencode(path) for path in paths) + b"\x00",
         timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
     )
     if result.returncode == 1:
@@ -328,7 +328,7 @@ def _git_check_ignore(git_root: str, paths: list[str]) -> tuple[set[str], bool]:
     if result.returncode != 0:
         return set(), True
     ignored: set[str] = set()
-    for token in result.stdout.decode(errors="replace").split("\x00"):
+    for token in os.fsdecode(result.stdout).split("\x00"):
         if token:
             ignored.add(token)
     return ignored, False

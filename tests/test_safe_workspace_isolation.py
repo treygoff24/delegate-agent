@@ -96,6 +96,16 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
         status = b"1 .M SC.. 160000 160000 160000 old new sub\0"
         self.assertEqual(self._submodule_paths_from_status(status), ("sub",))
 
+    def test_git_check_ignore_preserves_surrogateescaped_paths(self):
+        path = os.fsdecode(b"bad-\xff-name")
+        completed = subprocess.CompletedProcess(["git"], 0, os.fsencode(path) + b"\0", b"")
+        with mock.patch.object(safe_workspace, "_run_git_bytes", return_value=completed) as run_git:
+            ignored, failed_closed = safe_workspace._git_check_ignore("/repo", [path])
+
+        self.assertEqual(ignored, {path})
+        self.assertFalse(failed_closed)
+        self.assertEqual(run_git.call_args.kwargs["input_bytes"], os.fsencode(path) + b"\0")
+
     def test_submodule_nested_content_dirt_is_blocked(self):
         status = b"1 .M S.M. 160000 160000 160000 old old sub\0"
         self.assertEqual(self._submodule_paths_from_status(status), ("sub",))
