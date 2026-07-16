@@ -1686,13 +1686,18 @@ def _run_single_tracked_attempt(
 ) -> TrackedCaptureResult:
     if attempt_label is not None:
         _append_attempt_delimiter(files.stderr_log, label=attempt_label)
-    process = _launch_tracked_process(
-        argv,
-        cwd,
-        stdin_text=stdin_text,
-        env_overrides=env_overrides,
-        scratch_dir=scratch_dir,
-    )
+    try:
+        process = _launch_tracked_process(
+            argv,
+            cwd,
+            stdin_text=stdin_text,
+            env_overrides=env_overrides,
+            scratch_dir=scratch_dir,
+        )
+    except OSError as exc:
+        error = _runner_launch_error(argv, cwd, exc)
+        _record_tracked_launch_failure(files, ctx, error)
+        raise error from exc
     return _capture_tracked_process(
         process,
         files,
@@ -1819,26 +1824,21 @@ def execute_tracked(
     retry_prompt_temp_dir: str | None = None
     attempt_env = ctx.env_overrides or None
     try:
-        try:
-            capture = _run_single_tracked_attempt(
-                launch_argv,
-                cwd,
-                files,
-                ctx,
-                started=started,
-                deadline=deadline,
-                stdin_text=stdin_text,
-                env_overrides=ctx.env_overrides or None,
-                scratch_dir=files.scratch_dir,
-                progress=progress,
-                progress_stderr=stderr if progress else None,
-                progress_initial_delay_sec=progress_initial_delay_sec,
-                progress_interval_sec=progress_interval_sec,
-            )
-        except OSError as exc:
-            error = _runner_launch_error(launch_argv, cwd, exc)
-            _record_tracked_launch_failure(files, ctx, error)
-            raise error from exc
+        capture = _run_single_tracked_attempt(
+            launch_argv,
+            cwd,
+            files,
+            ctx,
+            started=started,
+            deadline=deadline,
+            stdin_text=stdin_text,
+            env_overrides=ctx.env_overrides or None,
+            scratch_dir=files.scratch_dir,
+            progress=progress,
+            progress_stderr=stderr if progress else None,
+            progress_initial_delay_sec=progress_initial_delay_sec,
+            progress_interval_sec=progress_interval_sec,
+        )
 
         if _should_retry_profiles(
             ctx,
