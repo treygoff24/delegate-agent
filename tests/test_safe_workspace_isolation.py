@@ -87,6 +87,27 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
                 )
         self.assertEqual(ctx.exception.error, "source_root_guard")
 
+    def _submodule_paths_from_status(self, status: bytes) -> tuple[str, ...]:
+        completed = subprocess.CompletedProcess(["git"], 0, status, b"")
+        with mock.patch.object(safe_workspace, "_run_git_bytes", return_value=completed):
+            return safe_workspace.dirty_submodule_paths("/repo")
+
+    def test_submodule_new_commit_is_blocked_when_gitlink_diff_cannot_sync(self):
+        status = b"1 .M SC.. 160000 160000 160000 old new sub\0"
+        self.assertEqual(self._submodule_paths_from_status(status), ("sub",))
+
+    def test_submodule_nested_content_dirt_is_blocked(self):
+        status = b"1 .M S.M. 160000 160000 160000 old old sub\0"
+        self.assertEqual(self._submodule_paths_from_status(status), ("sub",))
+
+    def test_staged_gitlink_update_is_blocked_when_gitlink_diff_cannot_sync(self):
+        status = b"1 M. S... 160000 160000 160000 old new sub\0"
+        self.assertEqual(self._submodule_paths_from_status(status), ("sub",))
+
+    def test_renamed_gitlink_porcelain_record_consumes_origin_path(self):
+        status = b"2 R. S... 160000 160000 160000 old new R100 renamed\0sub\0"
+        self.assertEqual(self._submodule_paths_from_status(status), ("renamed",))
+
     def test_cursor_safe_cli_config_omits_mutating_shell(self):
         allow = self.delegate.CURSOR_SAFE_CLI_CONFIG["permissions"]["allow"]
         self.assertIn("Read(**)", allow)

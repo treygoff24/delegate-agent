@@ -628,10 +628,10 @@ def dirty_sync_counts(git_root: str) -> tuple[int, int]:
 
 
 def dirty_submodule_paths(git_root: str) -> tuple[str, ...]:
-    """Return dirty gitlinks that the dirty-snapshot sync cannot reproduce."""
+    """Return gitlink changes the dirty-snapshot sync cannot reproduce."""
     status = _run_git_bytes(
         git_root,
-        ["status", "--porcelain=v1", "-z", "--ignore-submodules=none"],
+        ["status", "--porcelain=v2", "-z", "--ignore-submodules=none"],
         timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
     )
     if status.returncode != 0:
@@ -639,28 +639,34 @@ def dirty_submodule_paths(git_root: str) -> tuple[str, ...]:
             "dirty_source_check_failed",
             f"Failed to inspect submodule status: {status.stderr.decode(errors='replace').strip()}",
         )
-    index = _run_git_bytes(
-        git_root,
-        ["ls-files", "--stage", "-z"],
-        timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
-    )
-    if index.returncode != 0:
-        raise DelegateError(
-            "dirty_source_check_failed",
-            f"Failed to inspect submodule index: {index.stderr.decode(errors='replace').strip()}",
+    records = status.stdout.split(b"\0")
+    paths: list[str] = []
+    index = 0
+    while index < len(records):
+        record = records[index]
+        index += 1
+        if record.startswith(b"1 "):
+            fields = record.split(b" ", 8)
+            if len(fields) != 9:
+                continue
+            xy, submodule_state, modes, path = fields[1], fields[2], fields[3:6], fields[8]
+        elif record.startswith(b"2 "):
+            fields = record.split(b" ", 9)
+            if len(fields) != 10:
+                continue
+            # Porcelain -z rename/copy records carry a second pathname.
+            # Consume it even though the destination is the sync-relevant path.
+            index += 1
+            xy, submodule_state, modes, path = fields[1], fields[2], fields[3:6], fields[9]
+        else:
+            continue
+        nested_dirt = len(submodule_state) >= 4 and any(
+            marker in b"MU" for marker in submodule_state[2:4]
         )
-    gitlinks = {
-        record.partition(b"\t")[2].decode("utf-8", errors="surrogateescape")
-        for record in index.stdout.split(b"\0")
-        if record.startswith(b"160000 ")
-    }
-    return tuple(
-        path
-        for record in status.stdout.split(b"\0")
-        if len(record) > 3
-        for path in (record[3:].decode("utf-8", errors="surrogateescape"),)
-        if path in gitlinks
-    )
+        gitlink_change = xy != b".." or submodule_state[1:2] == b"C"
+        if b"160000" in modes and (nested_dirt or gitlink_change):
+            paths.append(path.decode("utf-8", errors="surrogateescape"))
+    return tuple(paths)
 
 
 def sync_git_dirty_snapshot(
