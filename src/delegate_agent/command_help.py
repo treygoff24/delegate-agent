@@ -66,8 +66,8 @@ CALL_MODE_NOTE = (
     "Ungrouped calls are untracked. With --group NAME, the call is tracked in the invocation "
     "workspace; --cwd PATH is accepted only with --group to choose that registry/config "
     "workspace and never changes the child's throwaway execution cwd. --timeout SEC "
-    "bounds any call; on expiry Delegate terminates the child process group and "
-    "returns call_timeout."
+    "bounds calls and tracked safe/work runs alike; on expiry Delegate terminates "
+    "the child process group and returns call_timeout."
 )
 WORKTREE_DIRTY_SYNC_NOTE = (
     "Persistent worktree work runs automatically include tracked edits and untracked, "
@@ -196,8 +196,9 @@ _PURE_OPTION = OptionSpec(
 _CALL_TIMEOUT_OPTION = OptionSpec(
     "--timeout",
     "SECONDS",
-    "call mode only: maximum child runtime in seconds; on expiry the child process group "
-    "is terminated and the call fails with call_timeout.",
+    "Maximum child runtime in seconds; on expiry the child process group is terminated and "
+    "the run fails with call_timeout (historical error-code name, kept for API stability). "
+    "Applies to call mode and tracked safe/work runs; not supported with pass-through launches.",
 )
 _PROMPT_ARG = ArgSpec(
     "prompt",
@@ -225,7 +226,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         usage=(
             "delegate [--json] [--isolation auto|none|worktree] "
             "cursor {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] "
-            "[--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
+            "[--timeout SECONDS] [--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
             "delegate [--json] cursor call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] "
             "[--prompt-file PATH] [prompt...]",
         ),
@@ -262,7 +263,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         usage=(
             "delegate [--json] [--isolation auto|none|worktree] "
             "kimi {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] "
-            "[--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
+            "[--timeout SECONDS] [--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
             "delegate [--json] kimi call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] "
             "[--prompt-file PATH] [prompt...]",
         ),
@@ -292,7 +293,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "Kimi rejects combining --yolo with --prompt.",
             "Model selection uses --model (alias from kimi.models or a raw model ID), "
             "the run-input JSON model, or kimi.defaultModel in config.",
-            "Reasoning effort is unsupported for Kimi in v1.",
+            "The Kimi CLI exposes no effort flag; k3 supports effort internally "
+            "via ~/.kimi-code/config.toml, so Delegate rejects --reasoning-effort for Kimi.",
             "Trailing prompt text begins after the mode; a later --help is prompt text, "
             "not a help request.",
         ),
@@ -304,7 +306,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         usage=(
             "delegate [--json] [--isolation auto|none|worktree] "
             "codex {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] "
-            "[--fast|--no-fast] [--output-schema FILE] [--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
+            "[--fast|--no-fast] [--output-schema FILE] [--timeout SECONDS] [--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
             "delegate [--json] codex call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] "
             "[--fast|--no-fast] [--output-schema FILE] [--prompt-file PATH] [prompt...]",
         ),
@@ -352,7 +354,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         usage=(
             "delegate [--json] [--isolation auto|none|worktree] "
             "claude {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] "
-            "[--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
+            "[--timeout SECONDS] [--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
             "delegate [--json] claude call [--read-only] [--pure] [--timeout SECONDS] [--model <alias-or-model>] "
             "[--reasoning-effort LEVEL] [--output-schema FILE] [--prompt-file PATH] [prompt...]",
         ),
@@ -398,7 +400,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         usage=(
             "delegate [--json] [--isolation auto|none|worktree] "
             "grok {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] "
-            "[--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
+            "[--timeout SECONDS] [--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
             "delegate [--json] grok call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] "
             "[--prompt-file PATH] [prompt...]",
         ),
@@ -447,7 +449,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         usage=(
             "delegate [--json] [--isolation auto|none|worktree] "
             "devin work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] "
-            "[--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
+            "[--timeout SECONDS] [--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
             "delegate [--json] devin call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] "
             "[--prompt-file PATH] [prompt...]",
         ),
@@ -484,7 +486,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         usage=(
             "delegate [--json] [--isolation auto|none|worktree] "
             "opencode {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--progress] "
-            "[--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
+            "[--timeout SECONDS] [--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
             "delegate [--json] opencode call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] "
             "[--agent NAME] [--prompt-file PATH] [prompt...]",
         ),
@@ -526,7 +528,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         usage=(
             "delegate [--json] [--isolation auto|none|worktree] "
             "droid [MODEL_ALIAS] {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] "
-            "[--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
+            "[--timeout SECONDS] [--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
             "delegate [--json] droid [MODEL_ALIAS] call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] "
             "[--prompt-file PATH] [prompt...]",
         ),
@@ -576,23 +578,23 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         usage=(
             "delegate [--json] [--isolation auto|none|worktree] "
             "dry-run {cursor,kimi,claude,grok,opencode} {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] "
-            "[--progress] [--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
+            "[--progress] [--timeout SECONDS] [--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
             "delegate [--json] [--isolation auto|none|worktree] "
             "dry-run devin work [--model <alias-or-model>] [--reasoning-effort LEVEL] "
-            "[--progress] [--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
+            "[--progress] [--timeout SECONDS] [--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
             "delegate [--json] dry-run {cursor,kimi,claude,grok,devin,opencode} call "
-            "[--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] "
+            "[--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] "
             "[--prompt-file PATH] [prompt...]",
             "delegate [--json] [--isolation auto|none|worktree] "
             "dry-run codex {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--output-schema FILE] "
-            "[--fast|--no-fast] [--progress] [--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
+            "[--fast|--no-fast] [--progress] [--timeout SECONDS] [--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
             "delegate [--json] dry-run codex call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] "
             "[--reasoning-effort LEVEL] [--output-schema FILE] "
             "[--fast|--no-fast] [--prompt-file PATH] [prompt...]",
             "delegate [--json] [--isolation auto|none|worktree] "
             "dry-run droid [MODEL_ALIAS] {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] "
-            "[--progress] [--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
-            "delegate [--json] dry-run droid [MODEL_ALIAS] call [--read-only] "
+            "[--progress] [--timeout SECONDS] [--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
+            "delegate [--json] dry-run droid [MODEL_ALIAS] call [--read-only] [--timeout SECONDS] "
             "[--model <alias-or-model>] [--reasoning-effort LEVEL] "
             "[--prompt-file PATH] [prompt...]",
         ),
@@ -1529,37 +1531,37 @@ def render_overview_text() -> str:
     lines: list[str] = [f"delegate {VERSION}", "", "Usage:"]
 
     usage_lines = [
-        f"delegate [--cwd PATH] [--json] {iso} cursor {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} cursor {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         "delegate [--json] cursor call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} droid [MODEL_ALIAS] {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} droid [MODEL_ALIAS] {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         "delegate [--json] droid [MODEL_ALIAS] call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} codex {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--output-schema FILE] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} codex {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--output-schema FILE] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         "delegate [--json] codex call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--output-schema FILE] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} claude {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} claude {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         "delegate [--json] claude call [--read-only] [--pure] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--output-schema FILE] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} grok {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} grok {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         "delegate [--json] grok call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} devin work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} devin work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         "delegate [--json] devin call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} opencode {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} opencode {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         "delegate [--json] opencode call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} kimi {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} kimi {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         "delegate [--json] kimi call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} dry-run cursor {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} dry-run cursor {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         "delegate [--json] dry-run cursor call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} dry-run droid [MODEL_ALIAS] {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} dry-run droid [MODEL_ALIAS] {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         "delegate [--json] dry-run droid [MODEL_ALIAS] call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} dry-run codex {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--output-schema FILE] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} dry-run codex {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--output-schema FILE] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         "delegate [--json] dry-run codex call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--output-schema FILE] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} dry-run claude {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} dry-run claude {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         "delegate [--json] dry-run claude call [--read-only] [--pure] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--output-schema FILE] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} dry-run grok {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} dry-run grok {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         "delegate [--json] dry-run grok call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} dry-run devin work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} dry-run devin work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         "delegate [--json] dry-run devin call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} dry-run opencode {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} dry-run opencode {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         "delegate [--json] dry-run opencode call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} dry-run kimi {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} dry-run kimi {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         "delegate [--json] dry-run kimi call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} run --input-json FILE",
         "delegate [--cwd PATH] [--json] snapshot [--latest HARNESS] [--no-redact] <handle>",

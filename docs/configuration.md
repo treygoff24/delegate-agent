@@ -123,7 +123,7 @@ layers. This is read-only observability; inspecting it does not modify
   },
   "kimi": {
     "binary": "kimi",
-    "defaultModel": "kimi-code/kimi-for-coding",
+    "defaultModel": "kimi-code/k3",
     "defaultReasoningEffort": null
   },
   "workflows": {
@@ -353,7 +353,7 @@ Controls local run recording.
 {
   "kimi": {
     "binary": "kimi",
-    "defaultModel": "kimi-code/kimi-for-coding",
+    "defaultModel": "kimi-code/k3",
     "defaultReasoningEffort": null,
     "models": {}
   }
@@ -361,7 +361,7 @@ Controls local run recording.
 ```
 
 - `binary`: path to the `kimi` executable.
-- `defaultModel`: default Kimi model alias (e.g. `kimi-code/kimi-for-coding`). Set to `null` to let Kimi use its own configured default.
+- `defaultModel`: default Kimi model alias (e.g. `kimi-code/k3`). Set to `null` to let Kimi use its own configured default.
 - `models`: optional map of local aliases to Kimi model IDs for `--model` / JSON `model`. Alias keys must not collide with mode names, equal the engine's own name, or start with `-`.
 - `defaultReasoningEffort`: not supported in v1; must be `null`.
 - Kimi's thinking/effort level is configured in `~/.kimi-code/config.toml`, not through Delegate.

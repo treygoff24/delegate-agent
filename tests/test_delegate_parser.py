@@ -322,18 +322,35 @@ class ParserTests(unittest.TestCase):
         self.assertNotIn("opencode", ctx.exception.next_actions[0])
         self.assertNotIn("codex", ctx.exception.next_actions[0])
 
-    def test_timeout_is_positive_integer_and_call_only(self):
+    def test_timeout_is_positive_integer_and_rejected_with_pass_through(self):
         invalid = (
             (["claude", "call", "--timeout", "0", "x"], "invalid_timeout"),
             (["claude", "call", "--timeout", "-1", "x"], "invalid_timeout"),
             (["claude", "call", "--timeout", "1.5", "x"], "invalid_timeout"),
             (["claude", "call", "--timeout"], "missing_timeout"),
-            (["claude", "safe", "--timeout", "1", "x"], "invalid_option_combination"),
+            (
+                ["--pass-through", "claude", "safe", "--timeout", "1", "x"],
+                "invalid_option_combination",
+            ),
+            (
+                ["--pass-through", "droid", "work", "--timeout", "1", "x"],
+                "invalid_option_combination",
+            ),
         )
         for argv, error in invalid:
             with self.subTest(argv=argv), self.assertRaises(self.delegate.DelegateError) as ctx:
                 self.delegate.parse_cli(argv)
             self.assertEqual(ctx.exception.error, error)
+
+    def test_timeout_parses_for_safe_and_work(self):
+        for argv in (
+            ["claude", "safe", "--timeout", "12", "x"],
+            ["cursor", "work", "--timeout", "12", "x"],
+            ["droid", "work", "--timeout", "12", "x"],
+        ):
+            with self.subTest(argv=argv):
+                parsed = self.delegate.parse_cli(argv)
+                self.assertEqual(parsed.launch.timeout, 12)
 
     def test_prompt_file_after_prompt_text_is_rejected(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:

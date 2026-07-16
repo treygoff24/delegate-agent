@@ -5,6 +5,38 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `--timeout` is now accepted and enforced on tracked `safe` and `work` runs
+  across engines. It remains rejected with `--pass-through`, and deadline
+  failures keep the historical `call_timeout` error code.
+- Kimi tool-call activity is normalized into `tool.started`/`tool.completed`
+  events with id correlation; `status` stays unset because Kimi tool results
+  carry no result-status signal.
+
+### Changed
+
+- Persistent-worktree runs that fail after the worktree is realized
+  (child-launch errors, timeouts) now keep `worktreeStatus: present`,
+  `executionCwd`, `branch`, and `worktreeCleanupCommands` in the failed-run
+  record, so the preserved worktree stays inspectable and removable via
+  `delegate worktree show|remove` instead of being orphaned.
+- The Kimi default model is now `kimi-code/k3`, and the bundled Kimi catalog
+  lists exactly the three real model IDs (`kimi-code/k3`,
+  `kimi-code/kimi-for-coding`, `kimi-code/kimi-for-coding-highspeed`); the
+  stale `kimi-k2.7` entry was removed.
+- Docs clarifications: Kimi reasoning-effort wording now states that the Kimi
+  CLI exposes no effort flag (k3 supports effort internally via
+  `~/.kimi-code/config.toml`) and that Delegate rejects `--reasoning-effort`
+  for Kimi; the CLI reference notes that `usage: unavailable` in Kimi run JSON
+  is expected because the Kimi CLI emits no usage/token lines in stream-json
+  output.
+- Kimi work-mode docs restate current behavior: Delegate emits no `--yolo` —
+  Kimi prompt mode auto-approves tool actions, so workspace isolation is the
+  effective write boundary.
+
 ## [0.15.0] - 2026-07-16
 
 ### Added

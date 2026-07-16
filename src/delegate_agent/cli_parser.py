@@ -727,8 +727,12 @@ def parse_modeless_engine(
     if fast is not None and engine != "codex":
         raise DelegateError("unsupported_fast", "--fast and --no-fast are only supported by codex.")
     _validate_pure_options(engine, mode, pure=pure, read_only=read_only, group=group)
-    if timeout is not None and mode != "call":
-        raise DelegateError("invalid_option_combination", "--timeout only applies to call mode.")
+    if timeout is not None and pass_through:
+        raise DelegateError(
+            "invalid_option_combination",
+            "--timeout is not supported with --pass-through; "
+            "pass-through runs have no tracked deadline.",
+        )
     forbid_commit_implied_isolation = False
     if forbid_commit and mode == "work" and isolation is None:
         isolation = "worktree"
@@ -848,8 +852,12 @@ def parse_droid(
     if fast is not None:
         raise DelegateError("unsupported_fast", "--fast and --no-fast are only supported by codex.")
     _validate_pure_options("droid", mode, pure=pure, read_only=read_only, group=group)
-    if timeout is not None and mode != "call":
-        raise DelegateError("invalid_option_combination", "--timeout only applies to call mode.")
+    if timeout is not None and pass_through:
+        raise DelegateError(
+            "invalid_option_combination",
+            "--timeout is not supported with --pass-through; "
+            "pass-through runs have no tracked deadline.",
+        )
     forbid_commit_implied_isolation = False
     if forbid_commit and mode == "work" and isolation is None:
         isolation = "worktree"

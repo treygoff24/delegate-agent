@@ -627,6 +627,11 @@ class PlainModelsUnchangedTests(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["engine"], "kimi")
         self.assertEqual(payload["schema"], "delegate.engine-models.v1")
+        self.assertEqual(payload["default"], "kimi-code/k3")
+        self.assertEqual(
+            [item["id"] for item in payload["models"]],
+            ["kimi-code/k3", "kimi-code/kimi-for-coding", "kimi-code/kimi-for-coding-highspeed"],
+        )
 
 
 class CommandHelpModelsTests(unittest.TestCase):

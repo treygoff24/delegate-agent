@@ -250,9 +250,13 @@ class StreamAccumulator:
         if self.harness == "devin":
             self._ingest_text_fallback(stripped)
             return
+        # RecursionError is caught alongside JSONDecodeError because
+        # excessively nested (but valid) JSON aborts json.loads with it, and
+        # this runs on the runner's stdout drain thread where no exception may
+        # escape.
         try:
             payload: JsonValue = json.loads(stripped)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, RecursionError):
             if self.harness == "opencode":
                 return
             self._ingest_text_fallback(stripped)
@@ -348,6 +352,10 @@ class StreamAccumulator:
         if event_type == "turn.started":
             self._codex_completion_candidate = None
             return
+        # Anything else with a "type" is intentionally dropped here. That
+        # includes kimi 0.26.0 meta lines such as
+        # {"role":"meta","type":"session.resume_hint",...}, which carry no
+        # assistant text, tool activity, or terminal signal worth normalizing.
 
     def _ingest_error_event(self, payload: JsonObject) -> None:
         message = payload.get("message")
@@ -379,11 +387,74 @@ class StreamAccumulator:
 
     def _ingest_role_content_message(self, payload: JsonObject) -> None:
         role = payload.get("role")
+        if self.harness == "kimi":
+            # Kimi's stream-json speaks in untyped role envelopes: tool
+            # invocations ride on assistant messages as OpenAI-style
+            # tool_calls, and results arrive as role=="tool" lines correlated
+            # back by tool_call_id.
+            if role == "assistant":
+                # Capture prose before tool calls: a combined
+                # content+tool_calls envelope must leave `current` on the
+                # active tool, not on the stale assistant text.
+                text = _extract_text(payload.get("content"))
+                if text:
+                    self._record_recoverable_assistant_text(text)
+                self._ingest_kimi_tool_calls(payload)
+                return
+            if role == "tool":
+                self._ingest_kimi_tool_result(payload)
+            return
         if role != "assistant":
             return
         text = _extract_text(payload.get("content"))
         if text:
             self._record_recoverable_assistant_text(text)
+
+    def _ingest_kimi_tool_calls(self, payload: JsonObject) -> None:
+        tool_calls = payload.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            return
+        for call in tool_calls:
+            if not isinstance(call, dict):
+                continue
+            function = call.get("function")
+            if not isinstance(function, dict):
+                continue
+            tool = _string_field(function, "name") or "tool"
+            target = _kimi_tool_target(function.get("arguments"))
+            tool_id = _string_field(call, "id")
+            if tool_id:
+                self._pending_tool_uses[tool_id] = (tool, target)
+            self.events.append(
+                NormalizedEvent(
+                    kind="tool.started",
+                    tool=tool,
+                    target=target,
+                    path=target,
+                )
+            )
+            self.current = _tool_current(tool, target)
+
+    def _ingest_kimi_tool_result(self, payload: JsonObject) -> None:
+        tool_id = _string_field(payload, "tool_call_id")
+        tool, target = (
+            self._pending_tool_uses.pop(tool_id, (None, None)) if tool_id else (None, None)
+        )
+        tool = tool or "tool"
+        # kimi 0.26.0 tool results carry no is_error/status field, so status
+        # stays None (unknown) rather than an invented success. The result
+        # content is never read into the event, matching the no-leakage
+        # convention of the Claude tool_result path.
+        self.events.append(
+            NormalizedEvent(
+                kind="tool.completed",
+                tool=tool,
+                target=target,
+                path=target,
+                status=None,
+            )
+        )
+        self.current = _tool_current(tool, target)
 
     def _ingest_assistant_event(self, payload: JsonObject) -> None:
         message = payload.get("message")
@@ -881,6 +952,21 @@ def _tool_use_target(block: JsonObject) -> str | None:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return None
+
+
+def _kimi_tool_target(arguments: JsonValue) -> str | None:
+    # Kimi delivers function arguments as a JSON-encoded string; malformed or
+    # missing arguments simply yield no target. The parsed object reuses the
+    # same target-key convention as the Claude tool_use path. RecursionError is
+    # caught alongside JSONDecodeError because excessively nested (but valid)
+    # JSON aborts json.loads with it, and this runs on the runner's stdout
+    # drain thread where no exception may escape.
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except (json.JSONDecodeError, RecursionError):
+            return None
+    return _tool_use_target({"input": arguments})
 
 
 def _tool_target(payload: JsonObject) -> str | None:

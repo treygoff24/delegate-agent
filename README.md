@@ -196,7 +196,7 @@ prompt framing, and no session persistence or tools according to the engine
 capability contract. Claude receives the prompt only on stdin and is
 schema-capable via `--output-schema`; `delegate --json describe` reports
 `pureCall`, `structuredOutput`, `noSessionPersistence`, `usageEvents`, and
-`promptStdin` per engine. `--timeout SECONDS` applies to every call-mode engine.
+`promptStdin` per engine. `--timeout SECONDS` applies to every engine in any mode (calls and tracked safe/work runs, but not `--pass-through`).
 
 For multi-step fan-out or gated review flows, use Delegate Workflows. A workflow
 is a Python script that launches normal Delegate child runs, journals progress,

@@ -478,6 +478,16 @@ class HarnessEventsTests(unittest.TestCase):
         self.assertEqual(acc.events[0].kind, "text")
         self.assertIn("not json", acc.events[0].message or "")
 
+    def test_deeply_nested_json_line_falls_back_to_text_event(self):
+        acc = self.events.StreamAccumulator()
+        # Python 3.14's json scanner tolerates ~100k nesting levels before
+        # aborting json.loads with RecursionError; older versions trip far
+        # shallower, so 300k raises on every supported interpreter.
+        acc.ingest_line("[" * 300_000 + "]" * 300_000)
+        self.assertEqual(acc.structured_events_seen, 0)
+        self.assertEqual(len(acc.events), 1)
+        self.assertEqual(acc.events[0].kind, "text")
+
     def test_devin_json_shaped_line_is_preserved_as_plain_text(self):
         acc = self.events.StreamAccumulator(harness="devin")
         acc.ingest_line("Retrying the request with backoff config:")
@@ -742,6 +752,300 @@ class HarnessEventsTests(unittest.TestCase):
         )
         completed = [event for event in acc.events if event.kind == "tool.completed"]
         self.assertEqual({event.target for event in completed}, {"a.py", "b.py"})
+
+    def test_kimi_tool_call_emits_started_and_completed_correlated_by_id(self):
+        acc = self.events.StreamAccumulator(harness="kimi")
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "type": "function",
+                            "id": "call_01abc",
+                            "function": {
+                                "name": "Read",
+                                "arguments": json.dumps({"file_path": "README.md"}),
+                            },
+                        }
+                    ],
+                }
+            )
+        )
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_01abc",
+                    "content": "file contents",
+                }
+            )
+        )
+        started = [event for event in acc.events if event.kind == "tool.started"]
+        completed = [event for event in acc.events if event.kind == "tool.completed"]
+        self.assertEqual(len(started), 1)
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(started[0].tool, "Read")
+        self.assertEqual(started[0].target, "README.md")
+        self.assertEqual(completed[0].tool, "Read")
+        self.assertEqual(completed[0].target, "README.md")
+        # kimi 0.26.0 results carry no success/error signal; status stays unknown.
+        self.assertIsNone(completed[0].status)
+        self.assertNotIn("status", completed[0].to_dict())
+        self.assertEqual(acc.current, "Read README.md")
+
+    def test_kimi_parallel_tool_calls_correlate_by_id(self):
+        acc = self.events.StreamAccumulator(harness="kimi")
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "type": "function",
+                            "id": "call_a",
+                            "function": {
+                                "name": "Read",
+                                "arguments": json.dumps({"file_path": "a.py"}),
+                            },
+                        },
+                        {
+                            "type": "function",
+                            "id": "call_b",
+                            "function": {
+                                "name": "Bash",
+                                "arguments": json.dumps({"command": "echo hi"}),
+                            },
+                        },
+                    ],
+                }
+            )
+        )
+        # Results may arrive in any order; correlation is by tool_call_id.
+        acc.ingest_line(json.dumps({"role": "tool", "tool_call_id": "call_b", "content": "hi"}))
+        acc.ingest_line(json.dumps({"role": "tool", "tool_call_id": "call_a", "content": "..."}))
+        started = [event for event in acc.events if event.kind == "tool.started"]
+        completed = [event for event in acc.events if event.kind == "tool.completed"]
+        self.assertEqual(len(started), 2)
+        self.assertEqual(len(completed), 2)
+        self.assertEqual((completed[0].tool, completed[0].target), ("Bash", "echo hi"))
+        self.assertEqual((completed[1].tool, completed[1].target), ("Read", "a.py"))
+
+    def test_kimi_tool_result_with_unmatched_id_is_graceful(self):
+        acc = self.events.StreamAccumulator(harness="kimi")
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_unknown",
+                    "content": "orphaned output",
+                }
+            )
+        )
+        completed = [event for event in acc.events if event.kind == "tool.completed"]
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(completed[0].tool, "tool")
+        self.assertIsNone(completed[0].target)
+        self.assertIsNone(completed[0].status)
+
+    def test_kimi_malformed_tool_calls_do_not_crash(self):
+        acc = self.events.StreamAccumulator(harness="kimi")
+        acc.ingest_line(json.dumps({"role": "assistant", "tool_calls": "not-a-list"}))
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        "not-a-dict",
+                        {"type": "function", "id": "call_no_function"},
+                        {
+                            "type": "function",
+                            "id": "call_bad_args",
+                            "function": {"name": "Read", "arguments": "{not json"},
+                        },
+                        {
+                            "type": "function",
+                            "id": "call_no_name",
+                            "function": {"arguments": json.dumps({"path": "x.py"})},
+                        },
+                    ],
+                }
+            )
+        )
+        started = [event for event in acc.events if event.kind == "tool.started"]
+        self.assertEqual(len(started), 2)
+        self.assertEqual((started[0].tool, started[0].target), ("Read", None))
+        self.assertEqual((started[1].tool, started[1].target), ("tool", "x.py"))
+        # Malformed-arguments entries still correlate their results by id.
+        acc.ingest_line(
+            json.dumps({"role": "tool", "tool_call_id": "call_bad_args", "content": "..."})
+        )
+        completed = [event for event in acc.events if event.kind == "tool.completed"]
+        self.assertEqual(len(completed), 1)
+        self.assertEqual((completed[0].tool, completed[0].target), ("Read", None))
+
+    def test_kimi_deeply_nested_tool_arguments_do_not_crash(self):
+        # json.loads raises RecursionError (not JSONDecodeError) on excessively
+        # nested input; argument parsing must never let an exception escape
+        # onto the runner's stdout drain thread.
+        acc = self.events.StreamAccumulator(harness="kimi")
+        nested_arguments = "[" * 5000 + "]" * 5000
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "type": "function",
+                            "id": "call_nested",
+                            "function": {"name": "Read", "arguments": nested_arguments},
+                        }
+                    ],
+                }
+            )
+        )
+        started = [event for event in acc.events if event.kind == "tool.started"]
+        self.assertEqual(len(started), 1)
+        self.assertEqual((started[0].tool, started[0].target), ("Read", None))
+        # The unparseable-arguments entry still correlates its result by id.
+        acc.ingest_line(
+            json.dumps({"role": "tool", "tool_call_id": "call_nested", "content": "..."})
+        )
+        completed = [event for event in acc.events if event.kind == "tool.completed"]
+        self.assertEqual(len(completed), 1)
+        self.assertEqual((completed[0].tool, completed[0].target), ("Read", None))
+
+    def test_kimi_combined_content_and_tool_calls_ends_current_on_tool(self):
+        # A single assistant envelope carrying both prose and tool_calls must
+        # leave `current` on the active tool, not on the stale assistant text.
+        acc = self.events.StreamAccumulator(harness="kimi")
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "role": "assistant",
+                    "content": "I'll read the file first.",
+                    "tool_calls": [
+                        {
+                            "type": "function",
+                            "id": "call_read1",
+                            "function": {
+                                "name": "Read",
+                                "arguments": json.dumps({"file_path": "src/main.py"}),
+                            },
+                        }
+                    ],
+                }
+            )
+        )
+        self.assertEqual(acc.current, "Read src/main.py")
+        self.assertIn("I'll read the file first.", acc.assistant_text)
+        started = [event for event in acc.events if event.kind == "tool.started"]
+        self.assertEqual(len(started), 1)
+        self.assertEqual((started[0].tool, started[0].target), ("Read", "src/main.py"))
+
+    def test_kimi_meta_session_resume_hint_is_dropped(self):
+        acc = self.events.StreamAccumulator(harness="kimi")
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "role": "meta",
+                    "type": "session.resume_hint",
+                    "session_id": "sess_123",
+                    "command": "kimi --resume sess_123",
+                    "content": "Resume this session with: kimi --resume sess_123",
+                }
+            )
+        )
+        self.assertEqual(acc.events, [])
+        self.assertEqual(acc.assistant_text, "")
+        self.assertIsNone(acc.recoverable_assistant_text)
+
+    def test_kimi_tool_result_content_does_not_leak(self):
+        acc = self.events.StreamAccumulator(harness="kimi")
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "type": "function",
+                            "id": "call_secret",
+                            "function": {
+                                "name": "Bash",
+                                "arguments": json.dumps({"command": "cat secret.txt"}),
+                            },
+                        }
+                    ],
+                }
+            )
+        )
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_secret",
+                    "content": "SECRET COMMAND OUTPUT",
+                }
+            )
+        )
+        self.assertNotIn("SECRET COMMAND OUTPUT", acc.assistant_text)
+        self.assertFalse(
+            any("SECRET COMMAND OUTPUT" in (event.message or "") for event in acc.events)
+        )
+        self.assertFalse(
+            any("SECRET COMMAND OUTPUT" in (event.target or "") for event in acc.events)
+        )
+        self.assertNotIn("SECRET COMMAND OUTPUT", acc.current or "")
+
+    def test_kimi_0260_stream_vocabulary_regression(self):
+        # Regression coverage of the exact line vocabulary live-captured from
+        # kimi 0.26.0 `--output-format stream-json`: assistant content,
+        # assistant tool_calls, role=tool results, and meta session.resume_hint.
+        # A static fixture cannot detect future upstream drift; it pins the
+        # shapes observed on 2026-07-16.
+        lines = [
+            {"role": "assistant", "content": "I'll read the file first."},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "type": "function",
+                        "id": "call_read1",
+                        "function": {
+                            "name": "Read",
+                            "arguments": json.dumps({"file_path": "src/main.py"}),
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_read1",
+                "content": "def main(): ...",
+            },
+            {
+                "role": "meta",
+                "type": "session.resume_hint",
+                "session_id": "sess_abc",
+                "command": "kimi --resume sess_abc",
+                "content": "Resume this session with: kimi --resume sess_abc",
+            },
+            {"role": "assistant", "content": "Status: completed\n- read the file"},
+        ]
+        acc = self.events.StreamAccumulator(harness="kimi")
+        for line in lines:
+            acc.ingest_line(json.dumps(line))
+        started = [event for event in acc.events if event.kind == "tool.started"]
+        completed = [event for event in acc.events if event.kind == "tool.completed"]
+        self.assertEqual(len(started), 1)
+        self.assertEqual(len(completed), 1)
+        self.assertEqual((started[0].tool, started[0].target), ("Read", "src/main.py"))
+        self.assertEqual((completed[0].tool, completed[0].target), ("Read", "src/main.py"))
+        self.assertIsNone(completed[0].status)
+        self.assertIn("I'll read the file first.", acc.assistant_text)
+        self.assertIn("Status: completed", acc.assistant_text)
+        self.assertNotIn("sess_abc", acc.assistant_text)
+        self.assertFalse(any(event.kind == "text" for event in acc.events))
 
     def test_substantive_assistant_text_preferred_over_later_housekeeping(self):
         acc = self.events.StreamAccumulator()

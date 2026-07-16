@@ -5,6 +5,7 @@ import fcntl
 import hashlib
 import io
 import json
+import math
 import os
 import signal
 import subprocess
@@ -612,6 +613,13 @@ class WorkflowDsl:
         resolved_fast = fast if fast is not None else self.defaults.get("fast")
         if resolved_fast is not None and not isinstance(resolved_fast, bool):
             raise ValueError("fast must be true, false, or None")
+        if timeout is not None and (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout)
+            or not timeout > 0
+        ):
+            raise ValueError("timeout must be a positive number of seconds")
         resolved_isolation = isolation or self.defaults.get("isolation")
         resolved_phase = phase or self.current_phase
         opts = {

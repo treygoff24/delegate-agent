@@ -82,7 +82,7 @@ and advisory catalogs with `delegate models`, `delegate models <engine>`, and
 `delegate models <engine> --live` (live probes for cursor/droid/devin/opencode; other
 engines report live unsupported).
 
-`--reasoning-effort LEVEL` is optional and parsed only before prompt text begins. Engines with capability metadata reject unsupported model/effort pairs before launch with `unsupported_reasoning_effort`. It affects only model reasoning depth, cost, or latency; it does not change `safe`/`work`/`call` permissions, sandboxing, approvals, network policy, or edit capability. Cursor effort is model-selection based and requires `cursor.reasoningEffortModels`; an explicit `--model` wins over effort→model routing. Droid emits `--reasoning-effort LEVEL`; Codex emits a `model_reasoning_effort` config override for the resolved model, or for the Codex harness default model when no `codex.defaultModel` is configured and the request was explicit; Claude emits Claude Code `--effort LEVEL`; Grok emits Grok `--effort LEVEL` (`low`, `medium`, `high`, `xhigh`, `max`); OpenCode emits `--variant LEVEL` without validating it against the selected model. Kimi does not support reasoning effort in v1.
+`--reasoning-effort LEVEL` is optional and parsed only before prompt text begins. Engines with capability metadata reject unsupported model/effort pairs before launch with `unsupported_reasoning_effort`. It affects only model reasoning depth, cost, or latency; it does not change `safe`/`work`/`call` permissions, sandboxing, approvals, network policy, or edit capability. Cursor effort is model-selection based and requires `cursor.reasoningEffortModels`; an explicit `--model` wins over effort→model routing. Droid emits `--reasoning-effort LEVEL`; Codex emits a `model_reasoning_effort` config override for the resolved model, or for the Codex harness default model when no `codex.defaultModel` is configured and the request was explicit; Claude emits Claude Code `--effort LEVEL`; Grok emits Grok `--effort LEVEL` (`low`, `medium`, `high`, `xhigh`, `max`); OpenCode emits `--variant LEVEL` without validating it against the selected model. The Kimi CLI exposes no effort flag; k3 supports effort internally via `~/.kimi-code/config.toml`, so Delegate rejects `--reasoning-effort` for Kimi.
 
 `--fast` and `--no-fast` are Codex-only, mutually exclusive per-run service-tier overrides. `--fast` emits `service_tier="fast"` plus `features.fast_mode=true` (Codex silently drops a Fast tier when that feature flag is off in the ambient config, so Delegate enables it explicitly); `--no-fast` emits `service_tier="default"` so a globally enabled Fast setting can be turned off for one child. Omitting both emits no override and inherits Codex configuration. Fast is orthogonal to model selection, reasoning effort, and Delegate safety policy. Two upstream caveats: Codex strips the service tier when authenticated with an API key (Fast is a ChatGPT-plan feature), and neither Codex nor the API fails on a tier the model does not offer — Delegate's flag validation is the only fail-closed layer, so an unsupported combination degrades silently to standard routing rather than erroring.
 
@@ -150,8 +150,8 @@ auth/env selection happens.
 Usage:
 
 ```bash
-delegate [--json] [--isolation auto|none|worktree] codex {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--progress] [--forbid-commit] [--prompt-file PATH] [--output-schema FILE] [prompt...]
-delegate [--json] codex call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--prompt-file PATH] [--output-schema FILE] [prompt...]
+delegate [--json] [--isolation auto|none|worktree] codex {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [--output-schema FILE] [prompt...]
+delegate [--json] codex call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--fast|--no-fast] [--prompt-file PATH] [--output-schema FILE] [prompt...]
 ```
 
 - Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff. Codex safe always uses `--sandbox read-only`. Under `--isolation auto`, Codex safe is the only safe harness that may opt out with `--isolation none`, because Codex still keeps its read-only sandbox active.
@@ -178,8 +178,8 @@ delegate --isolation worktree codex work "Implement the feature in a persistent 
 Usage:
 
 ```bash
-delegate [--json] [--isolation auto|none|worktree] claude {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate [--json] claude call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+delegate [--json] [--isolation auto|none|worktree] claude {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate [--json] claude call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 ```
 
 - Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff. Under `--isolation auto`, Claude safe uses `--permission-mode plan`, `--strict-mcp-config`, Read/Grep/Glob, and selected read-only Bash tools such as `git diff`/`git status`.
@@ -204,8 +204,8 @@ delegate --isolation worktree claude work "Implement the feature in a persistent
 Usage:
 
 ```bash
-delegate [--json] [--isolation auto|none|worktree] grok {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate [--json] grok call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+delegate [--json] [--isolation auto|none|worktree] grok {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate [--json] grok call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 ```
 
 - Safe mode reviews your **current working tree** in an isolated throwaway copy plus Grok read-only controls (`--sandbox read-only`, `--permission-mode dontAsk` by default). Delegate does not use Grok `plan` mode for safe review.
@@ -229,8 +229,8 @@ delegate --isolation worktree grok work "Implement the feature in a persistent w
 Wraps OpenCode's non-interactive `run` command.
 
 ```bash
-delegate [--json] [--isolation auto|none|worktree] opencode {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate [--json] opencode call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--prompt-file PATH] [prompt...]
+delegate [--json] [--isolation auto|none|worktree] opencode {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate [--json] opencode call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--prompt-file PATH] [prompt...]
 ```
 
 - Safe mode reviews the current working tree in an isolated throwaway copy. It
@@ -272,7 +272,8 @@ delegate [--json] opencode call [--read-only] [--model <alias-or-model>] [--reas
   `workflows.engineCaps` like other engines.
 - OpenCode currently buffers stdout until completion, so progress can remain
   silent even though `--print-logs` stderr is visible. Sessions accumulate in
-  the user's global OpenCode state. Call mode has no Delegate timeout.
+  the user's global OpenCode state. Call mode has no Delegate timeout unless
+  `--timeout` is set.
 
 Examples:
 
@@ -288,15 +289,16 @@ delegate --isolation worktree opencode work "Implement the feature in a persiste
 Usage:
 
 ```bash
-delegate [--json] [--isolation auto|none|worktree] kimi {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate [--json] kimi call [--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+delegate [--json] [--isolation auto|none|worktree] kimi {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate [--json] kimi call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 ```
 
 - Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff. Under `--isolation auto`, Kimi safe uses a read-only safety prompt. Delegate intentionally avoids Kimi `--plan` in safe mode. Kimi prompt mode auto-approves tool actions, so the isolation is the effective write boundary; the safety prompt is advisory.
 - Work mode uses Kimi prompt mode and runs in the real workspace unless you opt into worktree isolation. Delegate does not emit `--yolo` because Kimi rejects combining `--yolo` with `--prompt`.
 - Model selection uses `--model` (alias from `kimi.models` or a raw model ID), the run-input JSON `model`, or `kimi.defaultModel`.
-- `--reasoning-effort` is unsupported for Kimi in v1.
+- `--reasoning-effort` is rejected for Kimi: the Kimi CLI exposes no effort flag, and k3 supports effort internally via `~/.kimi-code/config.toml`.
 - Kimi prompt text is passed via argv.
+- Run JSON reports `usage: unavailable` for Kimi — expected: the Kimi CLI (verified 0.26.0) emits no usage/token lines in stream-json output, so there is nothing to parse.
 
 Examples:
 
@@ -430,11 +432,13 @@ and ambient customization, disables session persistence, and receives the prompt
 only on stdin. Use `--output-schema FILE` with Claude (schema contents inline)
 or with ordinary Codex call mode (schema path).
 
-`--timeout SECONDS` is a positive integer available on every call-mode engine.
-On expiry Delegate terminates the whole child process group and returns
-`call_timeout` with exit code 1.
+`--timeout SECONDS` is a positive integer accepted in every mode. It bounds
+calls and tracked `safe`/`work` runs alike: on expiry Delegate terminates the
+whole child process group and returns `call_timeout` (a historical error-code
+name kept for API stability) with exit code 1. `--timeout` is not supported
+with `--pass-through`, which streams the child without a tracked deadline.
 
-`--read-only`, `--pure`, and `--timeout` apply only to `call`; passing them with
+`--read-only` and `--pure` apply only to `call`; passing them with
 `safe`/`work` is rejected. Empty-result retry applies to safe runs and read-only
 calls when the prompt can be safely extended; write-capable, pure, and verbatim
 calls are not retried.
@@ -579,6 +583,7 @@ Supported input keys:
   "progress": true,
   "forbidCommit": true,
   "includeDirty": true,
+  "timeout": 30,
   "outputSchema": "/path/to/schema.json",
   "prompt": "Implement the scoped task and report changed files."
 }
@@ -595,6 +600,7 @@ Supported input keys:
 - `progress`: optional boolean. `true` enables parent progress heartbeats on stderr; `false` disables them even when `progress.enabled` is true in config. When omitted, config `progress.enabled` applies (default `false`). `mode: "call"` rejects progress.
 - `forbidCommit`: optional boolean. `true` requires `mode: "work"` with persistent worktree isolation and fails the run if the child creates commits. `mode: "call"` rejects commit policy.
 - `includeDirty`: optional boolean. `true` requires `mode: "work"` with persistent worktree isolation and syncs tracked edits plus untracked non-ignored files into the new worktree before launch.
+- `timeout`: optional positive integer seconds, with the same semantics as `--timeout`. Non-integer, boolean, or non-positive values fail with `invalid_timeout`; combining it with pass-through is rejected.
 - `outputSchema`: optional path to a JSON Schema for the final message. Supported for Codex and Claude call mode (same semantics as `--output-schema`). Other engines fail with `unsupported_output_schema`.
 - `prompt`: required task prompt.
 

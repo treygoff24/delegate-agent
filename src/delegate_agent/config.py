@@ -83,7 +83,7 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
     },
     "kimi": {
         "binary": "kimi",
-        "defaultModel": "kimi-code/kimi-for-coding",
+        "defaultModel": "kimi-code/k3",
         "defaultReasoningEffort": None,
         "models": {},
     },

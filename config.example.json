@@ -95,7 +95,7 @@
   },
   "kimi": {
     "binary": "kimi",
-    "defaultModel": "kimi-code/kimi-for-coding",
+    "defaultModel": "kimi-code/k3",
     "defaultReasoningEffort": null
   },
   "isolation": {

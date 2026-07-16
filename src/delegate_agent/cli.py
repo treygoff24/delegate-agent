@@ -879,6 +879,7 @@ def execute_request(
                 progress=isolated_request.progress,
                 progress_initial_delay_sec=isolated_request.progress_initial_delay_sec,
                 progress_interval_sec=isolated_request.progress_interval_sec,
+                timeout=isolated_request.timeout,
             )
         except delegate_runner.RunnerLaunchError as exc:
             raise DelegateError(exc.error, exc.message) from exc

@@ -755,6 +755,21 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("mutually exclusive", json.loads(result.stdout)["message"])
 
+    def test_run_rejects_invalid_agent_timeout(self) -> None:
+        for bad_timeout in ("True", "'30'", "0", "-5", "float('inf')"):
+            with self.subTest(timeout=bad_timeout):
+                script = self.write_workflow(
+                    f"""
+                    meta = {{"name": "bad-timeout"}}
+                    return agent("x", timeout={bad_timeout})
+                    """
+                )
+                result = self.run_delegate(["--json", "workflow", "run", str(script), "--dry-run"])
+                self.assertNotEqual(result.returncode, 0)
+                payload = json.loads(result.stdout)
+                self.assertEqual(payload["error"], "workflow_execution_failed")
+                self.assertIn("timeout must be a positive number of seconds", payload["message"])
+
     def test_run_surfaces_check_warnings_at_launch(self) -> None:
         script = self.write_workflow(
             """

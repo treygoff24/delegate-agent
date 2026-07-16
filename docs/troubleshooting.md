@@ -99,7 +99,7 @@ Common causes:
 - Droid or Codex model support is not in config, the workspace cache, or bundled fallback data.
 - The effort string is misspelled. Delegate treats labels literally and does not translate between provider naming schemes.
 
-These failures apply to explicit per-run effort (`--reasoning-effort` or JSON run input). For Cursor, Droid, and Codex, a config `defaultReasoningEffort` that cannot be satisfied does not fail the run; the run proceeds without reasoning effort and records a warning in the dry-run payload, manifest, and snapshot. Claude config defaults are validated against its static native labels at config load. Kimi does not support reasoning effort, so `kimi.defaultReasoningEffort` must stay `null`.
+These failures apply to explicit per-run effort (`--reasoning-effort` or JSON run input). For Cursor, Droid, and Codex, a config `defaultReasoningEffort` that cannot be satisfied does not fail the run; the run proceeds without reasoning effort and records a warning in the dry-run payload, manifest, and snapshot. Claude config defaults are validated against its static native labels at config load. For Kimi, `--reasoning-effort` is rejected outright: the Kimi CLI exposes no effort flag (k3 supports effort internally via `~/.kimi-code/config.toml`), so `kimi.defaultReasoningEffort` must stay `null`.
 
 For private or newly released models, declare support in `reasoning.capabilities` in config. Inspect first with plain `capabilities`. To refresh workspace-local discovered data, run:
 

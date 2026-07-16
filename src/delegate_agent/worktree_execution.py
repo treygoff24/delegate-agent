@@ -360,16 +360,23 @@ def _record_persistent_worktree_failure(
     *,
     error: str,
     message: str,
+    worktree_realized: bool = False,
 ) -> None:
+    extra: JsonObject = {
+        "error": error,
+        "message": message,
+    }
+    if worktree_realized:
+        # The worktree and branch already exist on disk, so the failure record
+        # keeps the realized worktreeStatus for `delegate worktree show|remove`.
+        extra["worktreeStatus"] = "present"
+    else:
+        extra["plannedBranch"] = registration.branch
+        extra["plannedExecutionCwd"] = registration.worktree_path
     failed_state = delegate_runner.build_state(
         registration.pre_ctx,
         status="failed",
-        extra={
-            "error": error,
-            "message": message,
-            "plannedBranch": registration.branch,
-            "plannedExecutionCwd": registration.worktree_path,
-        },
+        extra=extra,
     )
     delegate_runner.write_state(registration.run_path, failed_state)
 
@@ -381,10 +388,17 @@ def _record_persistent_worktree_failure(
     failed_snapshot["error"] = error
     failed_snapshot["message"] = message
     failed_snapshot["status"] = "failed"
-    failed_snapshot["plannedBranch"] = registration.branch
-    failed_snapshot["plannedExecutionCwd"] = registration.worktree_path
-    for key in ("executionCwd", "worktreeStatus", "worktreeCleanupCommands", "branch"):
-        failed_snapshot.pop(key, None)
+    if not worktree_realized:
+        # Pre-creation failure: nothing was realized on disk, so strip the
+        # realized worktree fields build_snapshot derived from the registration
+        # context and record only the planned branch/path. When the worktree
+        # was realized, executionCwd, branch, worktreeStatus, and
+        # worktreeCleanupCommands stay so the operator can inspect and clean up
+        # the preserved worktree.
+        failed_snapshot["plannedBranch"] = registration.branch
+        failed_snapshot["plannedExecutionCwd"] = registration.worktree_path
+        for key in ("executionCwd", "worktreeStatus", "worktreeCleanupCommands", "branch"):
+            failed_snapshot.pop(key, None)
     delegate_runner.write_snapshot(registration.run_path, failed_snapshot)
 
 
@@ -580,6 +594,7 @@ def _launch_child_in_persistent_worktree(
             progress=request.progress,
             progress_initial_delay_sec=request.progress_initial_delay_sec,
             progress_interval_sec=request.progress_interval_sec,
+            timeout=request.timeout,
         )
     except Exception as exc:
         error_msg = str(exc)
@@ -587,11 +602,15 @@ def _launch_child_in_persistent_worktree(
         # _record_persistent_worktree_failure writes both the failed state and
         # the failed snapshot in one consolidated pass; do not write_state here
         # first (that would be a redundant double write of the same failed
-        # status). Behavior is identical, with a single state write.
+        # status). Behavior is identical, with a single state write. The
+        # worktree and branch were already created on disk, so the failure
+        # record preserves the realized worktree metadata for operator
+        # inspection/cleanup instead of pre-creation planned keys.
         _record_persistent_worktree_failure(
             registration,
             error=str(error_code),
             message=error_msg,
+            worktree_realized=True,
         )
         raise PersistentWorktreeError(error_code, error_msg) from exc
 

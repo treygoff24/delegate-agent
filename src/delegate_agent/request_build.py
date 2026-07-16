@@ -1090,6 +1090,7 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         auth_profile_override=global_options.auth_profile,
         output_schema=output_schema,
         warnings=(*output_schema_warnings, *isolation_warnings),
+        timeout=launch.timeout,
         group=global_options.group,
         prompt_instruction_mode=instruction_mode,
         agent=launch.agent,
@@ -1196,6 +1197,12 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         isinstance(raw_timeout, bool) or not isinstance(raw_timeout, int) or raw_timeout <= 0
     ):
         raise DelegateError("invalid_timeout", "timeout must be a positive integer.")
+    if raw_timeout is not None and global_options.pass_through:
+        raise DelegateError(
+            "invalid_option_combination",
+            "timeout is not supported with --pass-through; "
+            "pass-through runs have no tracked deadline.",
+        )
     json_model_alias: str | None = model_alias if isinstance(model_alias, str) else None
     json_model_override: str | None = None
     if engine == "droid":
@@ -1479,10 +1486,8 @@ def build_request(
         if mode != MODE_CALL:
             raise DelegateError("unsupported_pure_call", "--pure only applies to call mode.")
         _validate_pure_call(engine, pure=True, read_only=call_read_only, group=group)
-    if timeout is not None and (mode != MODE_CALL or timeout <= 0):
-        raise DelegateError(
-            "invalid_timeout", "timeout must be positive and only used in call mode."
-        )
+    if timeout is not None and timeout <= 0:
+        raise DelegateError("invalid_timeout", "timeout must be a positive integer.")
 
     return _build_request_for_workspace(
         engine,
