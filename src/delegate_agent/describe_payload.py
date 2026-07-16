@@ -825,7 +825,7 @@ def describe_payload(
             },
         },
         "completionEnvelope": {
-            "emptyRetry": "Additive field for tracked empty-result retries: attempted, resolved, and write_capable_call reason when skipped.",
+            "emptyRetry": "Additive field for attempted empty-result retries: attempted and resolved.",
         },
         "childEnvironment": {
             "DELEGATE_SOURCE_ROOT": "Resolved source workspace root.",

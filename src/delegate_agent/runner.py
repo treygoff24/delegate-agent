@@ -1965,7 +1965,6 @@ def execute_tracked(
                     empty_retry_extra["warnings"] = [EMPTY_RETRY_WARNING]
             elif ctx.mode == "call":
                 empty_retry_extra = {
-                    "emptyRetry": {"attempted": False, "reason": "write_capable_call"},
                     "warnings": [EMPTY_RETRY_SKIPPED_WRITE_CAPABLE_WARNING],
                 }
     finally:

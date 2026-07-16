@@ -434,7 +434,9 @@ On expiry Delegate terminates the whole child process group and returns
 `call_timeout` with exit code 1.
 
 `--read-only`, `--pure`, and `--timeout` apply only to `call`; passing them with
-`safe`/`work` is rejected.
+`safe`/`work` is rejected. Empty-result retry applies to safe runs and read-only
+calls when the prompt can be safely extended; write-capable, pure, and verbatim
+calls are not retried.
 Because the child call is stateless, `--isolation`, `--pass-through`,
 `--progress`, `--forbid-commit`, and markdown completion reports are rejected.
 An ordinary call also rejects `--cwd`.

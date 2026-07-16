@@ -2738,7 +2738,5 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(counter.read_text(encoding="utf-8"), "x")
             self.assertEqual(payload["resultQuality"], "empty")
-            self.assertEqual(
-                payload["emptyRetry"],
-                {"attempted": False, "reason": "write_capable_call"},
-            )
+            self.assertNotIn("emptyRetry", payload)
+            self.assertIn(self.runner.EMPTY_RETRY_SKIPPED_WRITE_CAPABLE_WARNING, payload["warnings"])
