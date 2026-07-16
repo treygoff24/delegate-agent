@@ -2244,6 +2244,69 @@ class RunnerCaptureTests(unittest.TestCase):
             stderr_log = (root / "runs" / run_id / "stderr.log").read_text(encoding="utf-8")
             self.assertEqual(stderr_log.count("empty-attempt:"), 2)
 
+    def test_empty_retry_uses_retry_duration_as_total(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-07-16T12:00:00Z",
+            )
+            accumulator = self.runner.harness_events.StreamAccumulator(harness="codex")
+            primary = self.runner.TrackedCaptureResult(
+                accumulator=accumulator,
+                exit_code=0,
+                duration_ms=40,
+                stdout_bytes=2,
+                stderr_bytes=3,
+                stdin_failures=(),
+                pid=os.getpid(),
+                pgid=None,
+            )
+            retry = self.runner.TrackedCaptureResult(
+                accumulator=accumulator,
+                exit_code=0,
+                duration_ms=70,
+                stdout_bytes=5,
+                stderr_bytes=7,
+                stdin_failures=(),
+                pid=os.getpid(),
+                pgid=None,
+            )
+            with (
+                mock.patch.object(
+                    self.runner, "_run_single_tracked_attempt", side_effect=[primary, retry]
+                ),
+                mock.patch.object(
+                    self.runner,
+                    "_tracked_capture_quality",
+                    side_effect=[self.runner.RESULT_QUALITY_EMPTY, self.runner.RESULT_QUALITY_OK],
+                ),
+            ):
+                _code, payload = self.runner.execute_tracked(
+                    ["codex", "task"],
+                    workspace,
+                    ctx,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                    manifest_argv=["codex", "<prompt>"],
+                )
+
+            self.assertEqual(payload["durationMs"], 70)
+            self.assertEqual(payload["stdoutBytes"], 7)
+            self.assertEqual(payload["stderrBytes"], 10)
+
     def test_work_empty_success_does_not_retry(self):
         with tempfile.TemporaryDirectory() as workspace:
             counter = Path(workspace) / "attempts"

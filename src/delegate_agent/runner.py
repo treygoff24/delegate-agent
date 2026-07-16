@@ -1889,7 +1889,6 @@ def execute_tracked(
                 )
                 capture = replace(
                     retry_capture,
-                    duration_ms=primary_capture.duration_ms + retry_capture.duration_ms,
                     stdout_bytes=primary_capture.stdout_bytes + retry_capture.stdout_bytes,
                     stderr_bytes=primary_capture.stderr_bytes + retry_capture.stderr_bytes,
                 )
