@@ -91,3 +91,25 @@ Task and expectation: real-child smoke proving auto include-dirty end to end.
 Outcome and verification: child saw both the tracked edit and untracked file and wrote SMOKE.txt containing them; pre-launch stderr disclosure and envelope warning both correct. ~1 min.
 
 Routing assessment: luna low is the right zero-thought smoke child. Confidence: high.
+
+## 2026-07-16 - gpt-5.6 (sol xhigh) via codex - Wave 6 holistic closing judge + re-verdict
+
+Command and run: `delegate --group wave6-final codex work --model sol --reasoning-effort xhigh --prompt-file <holistic brief>` (codex-522) and the re-verdict run (codex-524); work mode constrained to a single findings file.
+
+Task and expectation: whole-branch (29-commit) holistic review after two clean per-commit rounds, subagent fan-out allowed; then re-verify all 18 findings post-fix and issue a final verdict.
+
+Outcome and verification: DON'T-SHIP with 18 findings (4 high) — every high verified real by the coordinator, including an inverted containment walk in the source-root guard that two prior review rounds and the coordinator had approved, guarded by a vacuously-passing test. Used three subsystem subagent readers. Re-verdict run empirically probed fixes (executable-disappearance, grouped timeout, embedded-NUL) rather than reading commit messages, downgraded 5 items to Partial with evidence, surfaced 2 new LOWs, and closed SHIP-WITH-FIXES.
+
+Performance observations: the holistic pass found an entire class (feature-composition and contract-coherence bugs) invisible to per-commit review — strongest single review round of the wave. ~25 and ~20 min.
+
+Routing assessment: Sol-authors → Sol-xhigh-closing-judge revalidated emphatically; make the holistic whole-branch pass a standard pre-merge stage for multi-round branches. Confidence: high.
+
+## 2026-07-16 - gpt-5.6 (terra high) via codex - Wave 6 fix rounds 4-5
+
+Command and run: `delegate --group wave6-fix{4,5} codex work --model terra --reasoning-effort high --prompt-file <brief>`; handles codex-523, codex-525.
+
+Task and expectation: 18-finding holistic remediation (round 4), then 6 re-verdict residuals (round 5).
+
+Outcome and verification: round 4 landed all 18 with pinning tests, no arguments, full gate green (1370) — largest clean batch of the wave. Round 5 landed all 6 but blocked honestly on a full-suite stall in its shell (known stdin-test environment issue); coordinator gate green independently. Re-verdict graded round 4 at 13/18 fully fixed, 5 partial — partials were narrowness, not wrongness.
+
+Routing assessment: Terra remains the fix lane; budget a follow-up residual round after any 15+ finding batch. Confidence: high.
