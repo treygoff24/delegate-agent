@@ -8,6 +8,7 @@ lives in worktree_mgmt.py.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import subprocess  # nosec B404 - isolation helpers intentionally run fixed git argv with shell=False.
 from dataclasses import dataclass
@@ -212,6 +213,17 @@ def target_contains_source_root(target: str | Path, source_root: str | Path) -> 
     """Return whether deleting target could delete the source workspace root."""
     resolved_target = Path(target).resolve(strict=False)
     resolved_source = Path(source_root).resolve(strict=False)
+    if resolved_target.exists() and resolved_source.exists():
+        current = resolved_target
+        while True:
+            try:
+                if os.path.samefile(current, resolved_source):
+                    return True
+            except OSError:
+                break
+            if current.parent == current:
+                break
+            current = current.parent
     return resolved_source == resolved_target or resolved_source.is_relative_to(resolved_target)
 
 

@@ -480,6 +480,17 @@ class SourceRootGuardTests(unittest.TestCase):
             self.assertTrue(iso.target_contains_source_root(root, source))
             self.assertFalse(iso.target_contains_source_root(source / "child", source))
 
+    def test_detects_case_variant_source_root_on_casefolding_filesystems(self):
+        iso = load_isolation()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "source"
+            source.mkdir()
+            case_variant = source.with_name("SOURCE")
+            if not case_variant.exists():
+                self.skipTest("filesystem is case-sensitive")
+
+            self.assertTrue(iso.target_contains_source_root(case_variant, source))
+
 
 class PromptInstructionImportTests(unittest.TestCase):
     """Isolation imports prompt constants from the neutral prompt_instructions module."""
