@@ -143,7 +143,7 @@ class ModelOverrideDryRunTests(CommandTestBase):
             ("codex", ["codex", "safe", "--model", "pinned-codex", "review"], "pinned-codex"),
             ("claude", ["claude", "safe", "--model", "pinned-claude", "review"], "pinned-claude"),
             ("grok", ["grok", "safe", "--model", "pinned-grok", "review"], "pinned-grok"),
-            ("devin", ["devin", "safe", "--model", "pinned-devin", "review"], "pinned-devin"),
+            ("devin", ["devin", "work", "--model", "pinned-devin", "review"], "pinned-devin"),
             ("kimi", ["kimi", "safe", "--model", "pinned-kimi", "review"], "pinned-kimi"),
             (
                 "droid",
@@ -180,8 +180,9 @@ class ModelOverrideDryRunTests(CommandTestBase):
         )
         for engine, flag_value, expected in alias_cases:
             with self.subTest(engine=engine, kind="alias"):
+                mode = "work" if engine == "devin" else "safe"
                 parsed = self.delegate.parse_cli(
-                    ["--cwd", repo.name, "dry-run", engine, "safe", "--model", flag_value, "x"]
+                    ["--cwd", repo.name, "dry-run", engine, mode, "--model", flag_value, "x"]
                 )
                 request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
                 self.assertEqual(request.model, expected)
@@ -190,8 +191,9 @@ class ModelOverrideDryRunTests(CommandTestBase):
         for engine in ("codex", "claude", "grok", "devin", "kimi", "cursor"):
             with self.subTest(engine=engine, kind="passthrough"):
                 raw = f"raw-{engine}-id"
+                mode = "work" if engine == "devin" else "safe"
                 parsed = self.delegate.parse_cli(
-                    ["--cwd", repo.name, "dry-run", engine, "safe", "--model", raw, "x"]
+                    ["--cwd", repo.name, "dry-run", engine, mode, "--model", raw, "x"]
                 )
                 request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
                 self.assertEqual(request.model, raw)

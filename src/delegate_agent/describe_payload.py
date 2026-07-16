@@ -793,7 +793,8 @@ def describe_payload(
                 "Reported as promptInstructionMode in run metadata."
             ),
             "safeModeAllowed": {
-                engine: engine not in PROMPT_ENFORCED_SAFE_ENGINES for engine in KNOWN_ENGINES
+                engine: engine != "devin" and engine not in PROMPT_ENFORCED_SAFE_ENGINES
+                for engine in KNOWN_ENGINES
             },
             "callReadOnlyAllowed": False,
         },
