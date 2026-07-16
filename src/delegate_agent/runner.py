@@ -1854,6 +1854,7 @@ def execute_tracked(
         )
         cumulative_stdout_bytes = capture.stdout_bytes
         cumulative_stderr_bytes = capture.stderr_bytes
+        stdin_failures = list(capture.stdin_failures)
 
         if _should_retry_profiles(
             ctx,
@@ -1883,6 +1884,7 @@ def execute_tracked(
             )
             cumulative_stdout_bytes += fallback_capture.stdout_bytes
             cumulative_stderr_bytes += fallback_capture.stderr_bytes
+            stdin_failures.extend(fallback_capture.stdin_failures)
             capture = fallback_capture
             attempt_env = ctx.fallback_env_overrides
             fallback_extra = {
@@ -1942,6 +1944,7 @@ def execute_tracked(
                     retry_capture,
                     stdout_bytes=cumulative_stdout_bytes + retry_capture.stdout_bytes,
                     stderr_bytes=cumulative_stderr_bytes + retry_capture.stderr_bytes,
+                    stdin_failures=tuple(dict.fromkeys([*stdin_failures, *retry_capture.stdin_failures])),
                 )
                 retry_quality = _tracked_capture_quality(
                     files,
