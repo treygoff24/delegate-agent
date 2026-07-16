@@ -1712,17 +1712,21 @@ def _run_single_tracked_attempt(
         error = _runner_launch_error(argv, cwd, exc)
         _record_tracked_launch_failure(files, ctx, error)
         raise error from exc
-    return _capture_tracked_process(
-        process,
-        files,
-        ctx,
-        started=started,
-        stdin_text=stdin_text,
-        deadline=deadline,
-        progress_stderr=progress_stderr,
-        progress_initial_delay_sec=progress_initial_delay_sec,
-        progress_interval_sec=progress_interval_sec,
-    )
+    try:
+        return _capture_tracked_process(
+            process,
+            files,
+            ctx,
+            started=started,
+            stdin_text=stdin_text,
+            deadline=deadline,
+            progress_stderr=progress_stderr,
+            progress_initial_delay_sec=progress_initial_delay_sec,
+            progress_interval_sec=progress_interval_sec,
+        )
+    except RunnerLaunchError as error:
+        _record_tracked_launch_failure(files, ctx, error)
+        raise
 
 
 def _append_empty_retry_instruction(prompt: str) -> str:

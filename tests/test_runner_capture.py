@@ -2678,6 +2678,9 @@ class RunnerCaptureTests(unittest.TestCase):
                 )
 
             self.assertEqual(caught.exception.error, "call_timeout")
+            state = json.loads((root / "runs" / run_id / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["status"], "failed")
+            self.assertEqual(state["error"], "call_timeout")
 
     def test_empty_call_does_not_mutate_verbatim_prompts(self):
         empty = self.runner.CallResult(
