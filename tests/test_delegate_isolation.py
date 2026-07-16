@@ -478,7 +478,10 @@ class SourceRootGuardTests(unittest.TestCase):
             )
             self.assertTrue(iso.target_contains_source_root(link, source))
             self.assertTrue(iso.target_contains_source_root(root, source))
-            self.assertFalse(iso.target_contains_source_root(source / "child", source))
+            existing_child = source / "existing-child"
+            existing_child.mkdir()
+            self.assertFalse(iso.target_contains_source_root(existing_child, source))
+            self.assertFalse(iso.target_contains_source_root(source / "missing-child", source))
 
     def test_detects_case_variant_source_root_on_casefolding_filesystems(self):
         iso = load_isolation()

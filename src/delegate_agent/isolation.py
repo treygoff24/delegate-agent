@@ -214,10 +214,10 @@ def target_contains_source_root(target: str | Path, source_root: str | Path) -> 
     resolved_target = Path(target).resolve(strict=False)
     resolved_source = Path(source_root).resolve(strict=False)
     if resolved_target.exists() and resolved_source.exists():
-        current = resolved_target
+        current = resolved_source
         while True:
             try:
-                if os.path.samefile(current, resolved_source):
+                if os.path.samefile(current, resolved_target):
                     return True
             except OSError:
                 # Both paths existed when this check started, so identity is
