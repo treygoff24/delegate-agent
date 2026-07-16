@@ -627,6 +627,42 @@ def dirty_sync_counts(git_root: str) -> tuple[int, int]:
     return len(changed) - len(untracked), len(untracked)
 
 
+def dirty_submodule_paths(git_root: str) -> tuple[str, ...]:
+    """Return dirty gitlinks that the dirty-snapshot sync cannot reproduce."""
+    status = _run_git_bytes(
+        git_root,
+        ["status", "--porcelain=v1", "-z", "--ignore-submodules=none"],
+        timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
+    )
+    if status.returncode != 0:
+        raise DelegateError(
+            "dirty_source_check_failed",
+            f"Failed to inspect submodule status: {status.stderr.decode(errors='replace').strip()}",
+        )
+    index = _run_git_bytes(
+        git_root,
+        ["ls-files", "--stage", "-z"],
+        timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
+    )
+    if index.returncode != 0:
+        raise DelegateError(
+            "dirty_source_check_failed",
+            f"Failed to inspect submodule index: {index.stderr.decode(errors='replace').strip()}",
+        )
+    gitlinks = {
+        record.partition(b"\t")[2].decode("utf-8", errors="surrogateescape")
+        for record in index.stdout.split(b"\0")
+        if record.startswith(b"160000 ")
+    }
+    return tuple(
+        path
+        for record in status.stdout.split(b"\0")
+        if len(record) > 3
+        for path in (record[3:].decode("utf-8", errors="surrogateescape"),)
+        if path in gitlinks
+    )
+
+
 def sync_git_dirty_snapshot(
     git_root: str, worktree_path: str
 ) -> tuple[int, int, int, tuple[str, ...]]:

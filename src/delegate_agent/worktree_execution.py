@@ -148,11 +148,19 @@ def _validate_persistent_worktree_request(
 
     try:
         tracked_dirty_files, untracked_files = safe_workspace.dirty_sync_counts(source_git_root)
+        dirty_submodules = safe_workspace.dirty_submodule_paths(source_git_root)
     except Exception as exc:
         raise PersistentWorktreeError(
             getattr(exc, "error", "dirty_source_check_failed"),
             getattr(exc, "message", str(exc)),
         ) from exc
+    if dirty_submodules:
+        paths = ", ".join(dirty_submodules[:5])
+        raise PersistentWorktreeError(
+            "dirty_source_workspace",
+            "Submodule dirt cannot be synced into persistent worktree isolation "
+            f"({paths}). Commit or stash the submodule changes, or use --isolation none.",
+        )
 
     execution.binary_validator(request.argv, request.engine)
 

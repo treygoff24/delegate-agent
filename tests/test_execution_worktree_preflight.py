@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 from unittest import mock
 
-from tests.execution_test_base import ExecutionTestBase, make_git_repo
+from tests.execution_test_base import GIT_TEST_IDENTITY, ExecutionTestBase, make_git_repo
 
 
 class ExecutionWorktreePreflightTests(ExecutionTestBase):
@@ -83,6 +83,53 @@ class ExecutionWorktreePreflightTests(ExecutionTestBase):
             self.assertEqual(payload["error"], "missing_binary")
             self.assertFalse((Path(fake_home) / ".delegate" / "worktrees").exists())
             self.assertFalse((Path(repo.name) / ".delegate" / "runs").exists())
+
+    def test_persistent_worktree_dirty_submodule_fails_before_binary(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            child = Path(fake_home) / "child"
+            subprocess.run(["git", "init", child], check=True, capture_output=True)
+            subprocess.run(
+                ["git", "-C", child, *GIT_TEST_IDENTITY, "commit", "--allow-empty", "-m", "init"],
+                check=True,
+                capture_output=True,
+            )
+            repo, _git_cd = self._make_git_repo_with_commit()
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    repo.name,
+                    "-c",
+                    "protocol.file.allow=always",
+                    "submodule",
+                    "add",
+                    str(child),
+                    "sub",
+                ],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "-C", repo.name, *GIT_TEST_IDENTITY, "commit", "-am", "add submodule"],
+                check=True,
+                capture_output=True,
+            )
+            (Path(repo.name) / "sub" / "local.txt").write_text("dirty\n", encoding="utf-8")
+            config_path = self._write_missing_cursor_worktree_config(fake_home)
+            stdout_buf = io.StringIO()
+
+            with mock.patch.dict(os.environ, {"DELEGATE_CONFIG": str(config_path)}):
+                code = self.delegate.main(
+                    ["--cwd", repo.name, "--json", "cursor", "work", "hello"],
+                    stdout=stdout_buf,
+                )
+
+            payload = json.loads(stdout_buf.getvalue())
+            self.assertEqual(code, self.delegate.EXIT_USAGE)
+            self.assertEqual(payload["error"], "dirty_source_workspace")
+            self.assertIn("Submodule dirt cannot be synced", payload["message"])
+            self.assertIn("--isolation none", payload["message"])
+            self.assertFalse((Path(fake_home) / ".delegate" / "worktrees").exists())
 
     def test_persistent_worktree_missing_head_preflight_beats_missing_binary(self):
         with (
