@@ -241,10 +241,8 @@ def require_clean_source(source_git_root: str) -> None:
         raise IsolationExecutionError(
             "dirty_source_workspace",
             (
-                "--isolation worktree for work mode requires a clean source workspace. "
-                "Commit/stash/delete local changes, run in-place with --isolation none, "
-                "or relaunch with --include-dirty to copy tracked edits and untracked "
-                "non-ignored files into the new worktree."
+                "This operation requires a clean source workspace and cannot auto-sync "
+                "local changes. Commit, stash, or delete the changes before retrying."
             ),
         )
 

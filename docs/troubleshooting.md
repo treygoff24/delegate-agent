@@ -270,7 +270,9 @@ python3 bin/delegate.py codex safe "Review my uncommitted changes. Do not edit."
 
 ## Persistent worktree run refused
 
-Work-mode persistent worktrees require a Git repository with a valid `HEAD` and a clean source checkout.
+Work-mode persistent worktrees require a Git repository with a valid `HEAD`.
+Dirty tracked and untracked non-ignored files are synced automatically; sync
+failures abort and tear down the new worktree before child launch.
 
 ```bash
 git status --short

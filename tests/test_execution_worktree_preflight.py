@@ -6,11 +6,7 @@ import tempfile
 from pathlib import Path
 from unittest import mock
 
-from tests.execution_test_base import (
-    GIT_TEST_IDENTITY,
-    ExecutionTestBase,
-    make_git_repo,
-)
+from tests.execution_test_base import ExecutionTestBase, make_git_repo
 
 
 class ExecutionWorktreePreflightTests(ExecutionTestBase):
@@ -63,7 +59,7 @@ class ExecutionWorktreePreflightTests(ExecutionTestBase):
             self.assertEqual(branches.stdout.strip(), "")
             self.assertFalse((Path(repo.name) / ".delegate" / "runs").exists())
 
-    def test_persistent_worktree_dirty_source_preflight_beats_missing_binary(self):
+    def test_persistent_worktree_dirty_source_auto_include_still_checks_binary(self):
         with (
             tempfile.TemporaryDirectory() as fake_home,
             mock.patch.dict(
@@ -83,9 +79,8 @@ class ExecutionWorktreePreflightTests(ExecutionTestBase):
                 )
 
             payload = json.loads(stdout_buf.getvalue())
-            self.assertEqual(code, self.delegate.EXIT_USAGE)
-            self.assertEqual(payload["error"], "dirty_source_workspace")
-            self.assertNotEqual(payload["error"], "missing_binary")
+            self.assertEqual(code, self.delegate.EXIT_MISSING_BINARY)
+            self.assertEqual(payload["error"], "missing_binary")
             self.assertFalse((Path(fake_home) / ".delegate" / "worktrees").exists())
             self.assertFalse((Path(repo.name) / ".delegate" / "runs").exists())
 
@@ -186,39 +181,6 @@ class ExecutionWorktreePreflightTests(ExecutionTestBase):
                 stderr=io.StringIO(),
             )
         self.assertEqual(ctx.exception.error, "missing_git_head")
-
-    # -- Dirty source fails clearly -------------------------------------------
-
-    def test_persistent_worktree_dirty_source_fails(self):
-        """Dirty source workspace fails clean-source check before creating artifacts."""
-        repo, _git_cd = self._make_git_repo_with_commit()
-        (Path(repo.name) / "dirty.txt").write_text("untracked\n")
-        workspace = self.delegate.resolve_workspace(repo.name)
-        request = self._make_persistent_worktree_request(
-            "cursor",
-            "work",
-            repo.name,
-            self.delegate.DEFAULT_CONFIG,
-        )
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.execute_request(
-                request,
-                json_mode=False,
-                config=self.delegate.DEFAULT_CONFIG,
-                pass_through=False,
-                completion_report_mode="markdown",
-                source_workspace=workspace,
-                stdout=io.StringIO(),
-                stderr=io.StringIO(),
-            )
-        self.assertEqual(ctx.exception.error, "dirty_source_workspace")
-        # Registry base dir may exist (step 5 happens before step 6),
-        # but no run-specific directories should exist.
-        delegate_dir = Path(repo.name) / ".delegate"
-        runs_dir = delegate_dir / "runs"
-        if runs_dir.exists():
-            run_dirs = list(runs_dir.glob("del_*"))
-            self.assertEqual(len(run_dirs), 0, "No run dirs should exist on dirty-source failure")
 
     # -- Pass-through rejected for persistent worktree ------------------------
 
@@ -332,151 +294,6 @@ class ExecutionWorktreePreflightTests(ExecutionTestBase):
         self.assertGreater(worktree_idx, skill_idx)
         self.assertGreater(user_idx, worktree_idx)
         self.assertIn("delegate worktree remove <alias> --force", PERSISTENT_WORKTREE_CONTEXT_NOTE)
-
-    def test_persistent_worktree_dirty_staged_changes_fails(self):
-        """Staged changes cause clean-source failure."""
-        repo, _git_cd = self._make_git_repo_with_commit()
-        staged = Path(repo.name) / "staged.txt"
-        staged.write_text("staged\n")
-        subprocess.run(
-            ["git", "-C", repo.name, "add", "staged.txt"],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        workspace = self.delegate.resolve_workspace(repo.name)
-        request = self._make_persistent_worktree_request(
-            "cursor",
-            "work",
-            repo.name,
-            self.delegate.DEFAULT_CONFIG,
-        )
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.execute_request(
-                request,
-                json_mode=False,
-                config=self.delegate.DEFAULT_CONFIG,
-                pass_through=False,
-                completion_report_mode="markdown",
-                source_workspace=workspace,
-                stdout=io.StringIO(),
-                stderr=io.StringIO(),
-            )
-        self.assertEqual(ctx.exception.error, "dirty_source_workspace")
-
-    def test_persistent_worktree_dirty_unstaged_tracked_changes_fails(self):
-        """Unstaged changes to tracked files cause clean-source failure."""
-        repo, _git_cd = self._make_git_repo_with_commit()
-        tracked = Path(repo.name) / "tracked.txt"
-        tracked.write_text("initial\n")
-        subprocess.run(
-            ["git", "-C", repo.name, "add", "tracked.txt"],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        subprocess.run(
-            ["git", "-C", repo.name, *GIT_TEST_IDENTITY, "commit", "-m", "add tracked"],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        tracked.write_text("modified-but-not-staged\n")
-        workspace = self.delegate.resolve_workspace(repo.name)
-        request = self._make_persistent_worktree_request(
-            "cursor",
-            "work",
-            repo.name,
-            self.delegate.DEFAULT_CONFIG,
-        )
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.execute_request(
-                request,
-                json_mode=False,
-                config=self.delegate.DEFAULT_CONFIG,
-                pass_through=False,
-                completion_report_mode="markdown",
-                source_workspace=workspace,
-                stdout=io.StringIO(),
-                stderr=io.StringIO(),
-            )
-        self.assertEqual(ctx.exception.error, "dirty_source_workspace")
-
-    def test_persistent_worktree_dirty_submodule_fails(self):
-        """Submodule dirtiness causes clean-source failure."""
-        sub_repo = tempfile.TemporaryDirectory()
-        self.addCleanup(sub_repo.cleanup)
-        subprocess.run(
-            ["git", "-C", sub_repo.name, "init"],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        subprocess.run(
-            [
-                "git",
-                "-C",
-                sub_repo.name,
-                *GIT_TEST_IDENTITY,
-                "commit",
-                "--allow-empty",
-                "-m",
-                "sub init",
-            ],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-
-        repo, _git_cd = self._make_git_repo_with_commit()
-        # Add the submodule pointing to the separate repo.
-        # protocol.file.allow=always needed on modern git for local file:// clones.
-        subprocess.run(
-            [
-                "git",
-                "-C",
-                repo.name,
-                "-c",
-                "protocol.file.allow=always",
-                *GIT_TEST_IDENTITY,
-                "submodule",
-                "add",
-                sub_repo.name,
-                "mysub",
-            ],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        # Commit the submodule addition so the main repo is clean.
-        subprocess.run(
-            ["git", "-C", repo.name, *GIT_TEST_IDENTITY, "commit", "-m", "add submodule"],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        # Modify a file inside the submodule to make it dirty.
-        sub_file = Path(repo.name) / "mysub" / "dirty-in-sub.txt"
-        sub_file.write_text("sub dirty\n")
-        workspace = self.delegate.resolve_workspace(repo.name)
-        request = self._make_persistent_worktree_request(
-            "cursor",
-            "work",
-            repo.name,
-            self.delegate.DEFAULT_CONFIG,
-        )
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.execute_request(
-                request,
-                json_mode=False,
-                config=self.delegate.DEFAULT_CONFIG,
-                pass_through=False,
-                completion_report_mode="markdown",
-                source_workspace=workspace,
-                stdout=io.StringIO(),
-                stderr=io.StringIO(),
-            )
-        self.assertEqual(ctx.exception.error, "dirty_source_workspace")
 
 
 if __name__ == "__main__":

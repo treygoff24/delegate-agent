@@ -25,7 +25,6 @@ from delegate_agent.isolation import (
     plan_branch_name,
     plan_worktree_path,
     prepend_persistent_worktree_context,
-    require_clean_source,
     require_valid_head,
     short_run_id,
     worktrees_data_home,
@@ -75,6 +74,8 @@ class PersistentWorktreePreflight:
     source_head_ref: str | None
     source_branch: str | None
     registry_root: Path
+    tracked_dirty_files: int
+    untracked_files: int
 
 
 @dataclass
@@ -144,11 +145,13 @@ def _validate_persistent_worktree_request(
             "--pass-through is not supported with persistent worktree runs (work mode + effective worktree isolation).",
         )
 
-    if not request.include_dirty:
-        try:
-            require_clean_source(source_git_root)
-        except IsolationExecutionError as exc:
-            raise PersistentWorktreeError(exc.error, exc.message) from exc
+    try:
+        tracked_dirty_files, untracked_files = safe_workspace.dirty_sync_counts(source_git_root)
+    except Exception as exc:
+        raise PersistentWorktreeError(
+            getattr(exc, "error", "dirty_source_check_failed"),
+            getattr(exc, "message", str(exc)),
+        ) from exc
 
     execution.binary_validator(request.argv, request.engine)
 
@@ -170,6 +173,8 @@ def _validate_persistent_worktree_request(
         source_head_ref=current_head_ref,
         source_branch=current_branch,
         registry_root=registry_root,
+        tracked_dirty_files=tracked_dirty_files,
+        untracked_files=untracked_files,
     )
 
 
@@ -230,7 +235,7 @@ def _build_persistent_worktree_run_context(
         ),
         auth_profile=request.auth_profile,
         fallback_auth_profile=request.fallback_auth_profile,
-        include_dirty=request.include_dirty,
+        include_dirty=bool(creation_context.get("includeDirty")),
         synced_files=int(creation_context.get("syncedFiles") or 0),
         group=request.group,
         prompt_instruction_mode=request.prompt_instruction_mode,
@@ -365,22 +370,38 @@ def _create_persistent_worktree_or_record_failure(
             registration.worktree_path,
             preflight.base_oid,
         )
-        if execution.request.include_dirty:
-            synced_files, warnings = safe_workspace.sync_git_dirty_snapshot(
-                preflight.source_git_root,
-                registration.worktree_path,
+        auto_include_dirty = not execution.request.include_dirty and (
+            preflight.tracked_dirty_files > 0 or preflight.untracked_files > 0
+        )
+        if execution.request.include_dirty or auto_include_dirty:
+            synced_files, tracked_files, untracked_files, warnings = (
+                safe_workspace.sync_git_dirty_snapshot(
+                    preflight.source_git_root,
+                    registration.worktree_path,
+                )
             )
+            registration.creation_context["includeDirty"] = True
             registration.creation_context["syncedFiles"] = synced_files
-            registration.creation_context["includeDirtyWarnings"] = list(warnings)
-            if warnings:
+            sync_warnings = list(warnings)
+            if auto_include_dirty:
+                sync_warnings.insert(
+                    0,
+                    "dirty_source_auto_included: "
+                    f"synced {tracked_files} tracked-modified and {untracked_files} "
+                    "untracked file(s).",
+                )
+            registration.creation_context["includeDirtyWarnings"] = sync_warnings
+            if sync_warnings:
                 registration.pre_ctx = replace(
                     registration.pre_ctx,
-                    warnings=(*registration.pre_ctx.warnings, *warnings),
+                    warnings=(*registration.pre_ctx.warnings, *sync_warnings),
+                    include_dirty=True,
                     synced_files=synced_files,
                 )
             else:
                 registration.pre_ctx = replace(
                     registration.pre_ctx,
+                    include_dirty=True,
                     synced_files=synced_files,
                 )
             delegate_runner.write_manifest(

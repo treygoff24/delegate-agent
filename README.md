@@ -319,10 +319,10 @@ child where that summary is available. `--forbid-commit` fails the run if
 commits remain ahead of the creation base when the child exits, and it now
 implies `--isolation worktree`.
 
-To carry uncommitted local work into the worktree instead of stashing it, add
-`--include-dirty`: it syncs tracked edits and untracked, non-ignored files into
-the worktree through the same snapshot primitives as safe mode, and tears the
-worktree down before launching the child if that sync fails.
+Work-mode worktree runs automatically sync tracked edits and untracked,
+non-ignored files from a dirty source checkout before launch, report the counts
+in a `dirty_source_auto_included` warning, and tear down the worktree if syncing
+fails. `--include-dirty` remains an explicit, harmless no-op on a clean source.
 
 Safe isolation and `--include-dirty` recreate an untracked symlink only when it is relative, resolves inside the source workspace, and its target is not gitignored; any symlink that fails those checks — an absolute target, an escape out of the tree, or a target that is itself a gitignored secret — is replaced with an inert placeholder file, failing closed on any ambiguity. Delegate reports a warning listing the symlink paths it blocked. In Git repositories with no commits yet, Cursor/Codex/Claude/Droid/Grok/Devin/OpenCode/Kimi safe isolation falls back to a directory copy because Git cannot create a detached worktree from an unborn `HEAD`.
 
@@ -366,6 +366,6 @@ AI_PROFILE delegate ...` uses the base config, or set
 
 - Delegate is an alpha CLI wrapper. Child runtimes can change their own flags or behavior.
 - Safe mode is a policy and isolation pattern, not a guarantee that a runtime cannot perform side effects outside its execution workspace.
-- Persistent worktrees require a Git repository with a valid `HEAD`; work-mode worktree runs require a clean source checkout.
+- Persistent worktrees require a Git repository with a valid `HEAD`.
 - `--pass-through` is incompatible with `--json` and with persistent worktree runs.
 - Delegate stores local run metadata under `.delegate/`; do not commit that directory.

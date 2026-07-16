@@ -599,7 +599,19 @@ def external_symlink_warnings(source_workspace: str, *, limit: int = 5) -> tuple
     return (f"{SAFE_EXTERNAL_SYMLINK_WARNING_PREFIX}: {preview}.",)
 
 
-def sync_git_dirty_snapshot(git_root: str, worktree_path: str) -> tuple[int, tuple[str, ...]]:
+def dirty_sync_counts(git_root: str) -> tuple[int, int]:
+    changed = changed_files_vs_head(git_root)
+    untracked = _git_lines(
+        git_root,
+        ["ls-files", "--others", "--exclude-standard"],
+        error="Failed to list untracked files",
+    )
+    return len(changed) - len(untracked), len(untracked)
+
+
+def sync_git_dirty_snapshot(
+    git_root: str, worktree_path: str
+) -> tuple[int, int, int, tuple[str, ...]]:
     apply_git_tracked_diff(worktree_path, read_git_tracked_diff(git_root))
     changed = changed_files_vs_head(git_root)
     untracked = _git_lines(
@@ -627,8 +639,11 @@ def sync_git_dirty_snapshot(git_root: str, worktree_path: str) -> tuple[int, tup
             source_root=Path(git_root),
             leak_blocked=leak_blocked,
         )
+    tracked_count = len(changed) - len(untracked)
     return (
         len(changed),
+        tracked_count,
+        len(untracked),
         merge_warnings(
             external_symlink_warnings(git_root),
             block_external_symlinks(worktree_path, git_root),
@@ -639,7 +654,7 @@ def sync_git_dirty_snapshot(git_root: str, worktree_path: str) -> tuple[int, tup
 
 
 def sync_git_workspace_snapshot(git_root: str, worktree_path: str) -> tuple[str, ...]:
-    _count, warnings = sync_git_dirty_snapshot(git_root, worktree_path)
+    _count, _tracked, _untracked, warnings = sync_git_dirty_snapshot(git_root, worktree_path)
     return warnings
 
 

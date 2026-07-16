@@ -58,7 +58,7 @@ class Wave4LaunchFeatureTests(ExecutionTestBase):
             config["worktrees"]["dataHome"] = data_home
         return config
 
-    def test_include_dirty_worktree_syncs_tracked_untracked_ignored_and_external_symlink(self):
+    def test_dirty_worktree_auto_syncs_tracked_untracked_ignored_and_external_symlink(self):
         from delegate_agent import safe_workspace
 
         with tempfile.TemporaryDirectory() as fake_home:
@@ -96,7 +96,6 @@ class Wave4LaunchFeatureTests(ExecutionTestBase):
                         "worktree",
                         "cursor",
                         "work",
-                        "--include-dirty",
                         "hello",
                     ],
                     stdout=stdout,
@@ -106,6 +105,14 @@ class Wave4LaunchFeatureTests(ExecutionTestBase):
             payload = json.loads(stdout.getvalue())
             self.assertTrue(payload["includeDirty"])
             self.assertEqual(payload["syncedFiles"], 3)
+            self.assertTrue(
+                any(
+                    warning.startswith(
+                        "dirty_source_auto_included: synced 1 tracked-modified and 2 untracked"
+                    )
+                    for warning in payload["warnings"]
+                )
+            )
 
             execution_cwd = Path(payload["executionCwd"])
             self.assertEqual((execution_cwd / "tracked.txt").read_text(encoding="utf-8"), "dirty\n")
@@ -119,6 +126,44 @@ class Wave4LaunchFeatureTests(ExecutionTestBase):
             self.assertEqual(
                 blocked_link.read_text(encoding="utf-8"),
                 safe_workspace.SAFE_BLOCKED_SYMLINK_PLACEHOLDER,
+            )
+
+    def test_include_dirty_is_a_noop_for_clean_worktree_source(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            repo, _git_cd = self._make_git_repo_with_commit()
+            agent = self.write_executable("agent", "exit 0\n")
+            config_path = self.write_config(
+                self.config_with_cursor(agent, data_home=str(Path(fake_home) / "worktrees"))
+            )
+            stdout = io.StringIO()
+            with mock.patch.dict(
+                os.environ,
+                {"HOME": fake_home, "DELEGATE_CONFIG": str(config_path)},
+                clear=False,
+            ):
+                code = self.delegate.main(
+                    [
+                        "--cwd",
+                        repo.name,
+                        "--json",
+                        "--isolation",
+                        "worktree",
+                        "cursor",
+                        "work",
+                        "--include-dirty",
+                        "hello",
+                    ],
+                    stdout=stdout,
+                )
+            self.assertEqual(code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertTrue(payload["includeDirty"])
+            self.assertEqual(payload["syncedFiles"], 0)
+            self.assertFalse(
+                any(
+                    "dirty_source_auto_included" in warning
+                    for warning in payload.get("warnings", [])
+                )
             )
 
     def test_scratch_env_is_applied_after_profile_env_for_isolated_run(self):

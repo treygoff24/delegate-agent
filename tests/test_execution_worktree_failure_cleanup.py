@@ -582,7 +582,7 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
 
     # -- Finding: sync failure mid-include-dirty tears down worktree, no child --
 
-    def test_include_dirty_sync_failure_tears_down_worktree_and_never_launches_child(self):
+    def test_auto_dirty_sync_failure_tears_down_worktree_and_never_launches_child(self):
         """When sync_git_dirty_snapshot fails after the persistent worktree is
         created, the fail-clean branch records a failed snapshot, tears down the
         partial worktree, and the child is never launched."""
@@ -650,7 +650,6 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
                 dry_run=request.dry_run,
                 workspace_kind=request.workspace_kind,
                 isolation_context=request.isolation_context,
-                include_dirty=True,
             )
 
             executed_tracked = {"called": False}

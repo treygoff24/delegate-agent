@@ -10,7 +10,7 @@ Use persistent worktree isolation when:
 - You want to review, cherry-pick, or merge the child work later.
 - You want Delegate to keep run metadata tied to a branch and worktree path.
 
-Use the real workspace instead when the task depends on uncommitted local files that you do not want to commit or mirror into a worktree. If you do want a persistent worktree that starts from your current dirty checkout, use `--include-dirty`.
+Use the real workspace instead when the task depends on uncommitted local files that you do not want mirrored into a worktree. Work-mode worktree runs automatically mirror a dirty checkout.
 
 For grouped feature waves, commit between waves when they share the real
 workspace. If each feature needs its own review or commit, use one persistent
@@ -29,8 +29,10 @@ delegate --isolation worktree droid implementer work "Implement the scoped chang
 delegate --isolation worktree kimi work "Implement the scoped change and report changed files."
 ```
 
-Add `--include-dirty` when the new persistent worktree should start with the
-source checkout's uncommitted tracked edits and untracked non-ignored files:
+Dirty source checkouts automatically seed the new persistent worktree with
+uncommitted tracked edits and untracked non-ignored files. Delegate emits a
+`dirty_source_auto_included` warning with both counts. `--include-dirty` remains
+available as an explicit request and is a no-op when the source is clean:
 
 ```bash
 delegate --isolation worktree cursor work --include-dirty "Implement using my local edits."
@@ -47,13 +49,8 @@ A few boundaries are worth stating explicitly:
   was committed before being added to `.gitignore`) is part of the repository
   and is synced like any other tracked file. `--include-dirty` excludes only
   untracked gitignored paths, not tracked ones.
-- **`--include-dirty` skips the submodule-cleanliness portion of the clean
-  check.** Without the flag, the preflight requires a clean source checkout
-  including submodule state (`git status --ignore-submodules=none`). With the
-  flag, the entire clean-source check is skipped, so dirty submodules do not
-  block the launch and submodule working-tree state is not mirrored into the
-  new worktree (only the source checkout's tracked diff and untracked
-  non-ignored files are).
+- **Dirty submodule working-tree state is not mirrored.** Only the source
+  checkout's tracked diff and untracked non-ignored files are copied.
 - **Keep secrets out of hardlinks.** A hardlink at a non-ignored path to
   gitignored content is indistinguishable from a regular file to Delegate's
   path-based sync: it is a non-ignored path, so `--include-dirty` syncs it by
@@ -91,7 +88,7 @@ Persistent worktree work-mode runs require:
 
 - A Git workspace.
 - A valid `HEAD` commit.
-- A clean source checkout: no staged, unstaged, or untracked files, unless the launch uses `--include-dirty`.
+- A source checkout whose tracked edits and untracked non-ignored files can be synced.
 - No `--pass-through`.
 
 Dry-run previews the plan without creating anything:

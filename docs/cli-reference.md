@@ -103,12 +103,13 @@ warning plus suggested review commands, but does not fail solely because commits
 exist. Validation rejects `--forbid-commit` outside `work` mode, and explicit
 `--isolation none --forbid-commit` remains invalid.
 
-`--include-dirty` is an opt-in launch flag for `work` mode with persistent
-worktree isolation. It copies uncommitted tracked changes and untracked
-non-ignored files from the source checkout into the new persistent worktree
-before the child starts. Gitignored files remain excluded, and external symlinks
-are blocked with the same protections used by safe-mode workspace sync. Without
-the flag, persistent worktree launches still require a clean source checkout.
+Work-mode persistent worktrees automatically copy uncommitted tracked changes
+and untracked non-ignored files from a dirty source checkout before the child
+starts. Gitignored files remain excluded, and external symlinks are blocked with
+the same protections used by safe-mode workspace sync. Automatic sync emits a
+`dirty_source_auto_included` warning with tracked-modified and untracked counts.
+`--include-dirty` remains an explicit launch flag and is a no-op when the source
+is already clean.
 JSON and text completion output report `includeDirty: true` / `syncedFiles`.
 `run --input-json` accepts the equivalent boolean field `includeDirty`.
 
@@ -118,11 +119,8 @@ A few boundaries are worth stating explicitly:
   repo history but also matched by a `.gitignore` rule is part of the repository
   and is synced like any other tracked file; `--include-dirty` excludes only
   untracked gitignored paths, not tracked ones.
-- **`--include-dirty` skips the submodule-cleanliness portion of the clean
-  check.** Without the flag, the preflight requires a clean source checkout
-  including submodule state; with the flag, the entire clean-source check is
-  skipped, so dirty submodules do not block the launch and submodule
-  working-tree state is not mirrored.
+- **Dirty submodule working-tree state is not mirrored.** Only the source
+  checkout's tracked diff and untracked non-ignored files are copied.
 - **Keep secrets out of hardlinks.** A hardlink at a non-ignored path to
   gitignored content is indistinguishable from a regular file and will sync by
   content; `--include-dirty` trusts every non-ignored path. Path-based exclusion
