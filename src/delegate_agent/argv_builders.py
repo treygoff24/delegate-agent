@@ -408,7 +408,7 @@ def build_devin_argv(
     argv = [str(devin["binary"])]
     if model:
         argv.extend(["--model", model])
-    read_only = mode == MODE_SAFE or (mode == MODE_CALL and call_read_only)
+    read_only = mode == MODE_CALL and call_read_only
     if read_only:
         argv.extend(
             [
@@ -418,10 +418,8 @@ def build_devin_argv(
                 "auto",
             ]
         )
-    elif mode in (MODE_WORK, MODE_CALL):
-        argv.extend(["--permission-mode", "dangerous"])
     else:
-        validate_mode(mode)
+        argv.extend(["--permission-mode", "dangerous"])
     if prompt_transport != PROMPT_TRANSPORT_FILE:
         raise DelegateError(
             "invalid_prompt_transport",

@@ -229,17 +229,6 @@ def apply_git_tracked_diff(worktree_path: str, diff: bytes) -> None:
         )
 
 
-def _git_lines(git_root: str, args: list[str], *, error: str) -> list[str]:
-    result = _run_git(
-        git_root,
-        args,
-        timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
-    )
-    if result.returncode != 0:
-        raise DelegateError("safe_workspace_sync_failed", f"{error}: {result.stderr.strip()}")
-    return [line for line in result.stdout.splitlines() if line]
-
-
 def _git_paths(git_root: str, args: list[str], *, error: str) -> list[str]:
     result = _run_git_bytes(
         git_root,
@@ -280,11 +269,6 @@ def dirty_sync_snapshot(git_root: str) -> DirtySyncSnapshot:
             )
         ),
     )
-
-
-def dirty_sync_counts(git_root: str) -> tuple[int, int]:
-    snapshot = dirty_sync_snapshot(git_root)
-    return len(snapshot.diff_names), len(snapshot.untracked_names)
 
 
 def symlink_target_resolves_outside(path: Path, source_root: Path) -> bool:

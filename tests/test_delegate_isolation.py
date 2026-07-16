@@ -415,20 +415,6 @@ class BuildIsolationContextTests(unittest.TestCase):
 
 
 class GitTimeoutTests(unittest.TestCase):
-    def test_require_clean_source_raises_git_timeout(self):
-        iso = load_isolation()
-        with (
-            mock.patch.object(
-                iso.subprocess,
-                "run",
-                side_effect=subprocess.TimeoutExpired(["git", "status"], 30),
-            ),
-            self.assertRaises(iso.IsolationExecutionError) as ctx,
-        ):
-            iso.require_clean_source("/repo")
-        self.assertEqual(ctx.exception.error, "git_timeout")
-        self.assertIn("git status timed out", ctx.exception.message)
-
     def test_create_persistent_worktree_branch_probe_timeout_is_structured(self):
         iso = load_isolation()
         with (

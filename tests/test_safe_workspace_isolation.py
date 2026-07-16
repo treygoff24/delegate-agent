@@ -285,20 +285,6 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
             ("tracked.txt", "notes.txt"),
         )
 
-    def test_dirty_sync_counts_track_git_rm_cached_as_both_changes(self):
-        repo = self.make_dirty_repo()
-        subprocess.run(
-            ["git", "-C", repo.name, "rm", "--cached", "tracked.txt"],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        snapshot = safe_workspace.dirty_sync_snapshot(repo.name)
-
-        self.assertIn("tracked.txt", snapshot.diff_names)
-        self.assertIn("tracked.txt", snapshot.untracked_names)
-        self.assertEqual(safe_workspace.dirty_sync_counts(repo.name), (1, 2))
-
     def test_dirty_sync_preserves_unicode_and_tab_filenames(self):
         repo = self.make_dirty_repo()
         root = Path(repo.name)

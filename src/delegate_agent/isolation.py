@@ -248,29 +248,6 @@ def require_valid_head(source_git_root: str) -> str:
     return result.stdout.strip()
 
 
-def require_clean_source(source_git_root: str) -> None:
-    """Require no staged, unstaged, untracked, or submodule dirtiness."""
-    result = _run_git(
-        source_git_root,
-        ["status", "--porcelain=v1", "--untracked-files=normal", "--ignore-submodules=none"],
-        timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
-    )
-    _raise_if_git_timed_out(result, "git status")
-    if result.returncode != 0:
-        raise IsolationExecutionError(
-            "dirty_source_check_failed",
-            f"git status failed with code {result.returncode}: {result.stderr.strip()}",
-        )
-    if result.stdout.strip():
-        raise IsolationExecutionError(
-            "dirty_source_workspace",
-            (
-                "This operation requires a clean source workspace and cannot auto-sync "
-                "local changes. Commit, stash, or delete the changes before retrying."
-            ),
-        )
-
-
 def create_persistent_worktree(
     source_git_root: str,
     branch: str,
