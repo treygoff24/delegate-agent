@@ -255,8 +255,7 @@ preserves auditability after the six primary feature commits.
 - Invalid-byte filenames, case-folding behavior, process races, and live
   provider authentication fallback received unit/static coverage but were not
   all exercised on every supported platform or against every provider CLI.
-- Release packaging, secret scans, wheel installation, tag creation, and live
-  publication remain release-checklist gates rather than Wave 6 feature tests.
+- Tag creation and live publication remain separate release actions.
 
 ### Final verification and verdict
 
@@ -270,7 +269,9 @@ evidence-only documentation update. The final local gates passed:
   `ruff format --check .`, and the three-dot diff whitespace check: passed.
 - Gitleaks full-history scan: 346 commits scanned, no leaks. TruffleHog's Git
   scan and clean `git archive` filesystem scan: zero verified or unverified
-  secrets. Shippable private-path and private-alias scans were empty.
+  secrets. A follow-up hygiene sweep removed the private performance journal
+  and private-alias-named review artifacts; the remaining shippable tree scan
+  was empty.
 - A clean `git archive` build produced the 0.15.0 sdist and wheel; Twine passed
   both, the forbidden-artifact scan was empty, and a clean wheel install
   reported `delegate 0.15.0` with 51 commands in `describe`.

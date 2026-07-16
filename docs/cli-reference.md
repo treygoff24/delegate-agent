@@ -165,7 +165,7 @@ Examples:
 
 ```bash
 delegate codex safe "Review this repo for regressions; report file/line/severity."
-delegate codex safe --model gpt-5.5 "Review this repo for regressions; report file/line/severity."
+delegate codex safe --model reviewer "Review this repo for regressions; report file/line/severity."
 delegate codex safe --model my-alias --reasoning-effort medium --fast "Explore likely causes."
 delegate codex work "Implement the scoped task; report changed files and tests."
 delegate codex call "Summarize this context in three bullets."
@@ -194,7 +194,7 @@ Examples:
 
 ```bash
 delegate claude safe "Review this repo for regressions; report file/line/severity."
-delegate claude work --model claude-opus-4-6 "Implement the scoped task; report changed files and tests."
+delegate claude work --model implementer "Implement the scoped task; report changed files and tests."
 delegate claude call "Summarize this context in three bullets."
 delegate --isolation worktree claude work "Implement the feature in a persistent worktree."
 ```
@@ -250,9 +250,9 @@ delegate [--json] opencode call [--read-only] [--model <alias-or-model>] [--reas
   {
     "opencode": {
       "models": {
-        "sonnet": "anthropic/claude-sonnet-4-5",
-        "sonnet-high": {
-          "model": "anthropic/claude-sonnet-4-5",
+        "reviewer": "provider/model",
+        "reviewer-high": {
+          "model": "provider/model",
           "variant": "high"
         }
       }
@@ -279,7 +279,7 @@ Examples:
 ```bash
 delegate opencode safe "Review this repo for regressions; report file/line/severity."
 delegate opencode work --agent build "Implement the scoped task; report changed files and tests."
-delegate opencode call --read-only --model anthropic/claude-sonnet-4-5 --prompt-file rubric.md
+delegate opencode call --read-only --model reviewer --prompt-file rubric.md
 delegate --isolation worktree opencode work "Implement the feature in a persistent worktree."
 ```
 

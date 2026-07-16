@@ -504,7 +504,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         examples=(
             'delegate opencode safe "Review this workspace. Do not edit files."',
             'delegate opencode work --agent build "Implement the scoped fix and verify."',
-            "delegate opencode call --read-only --model anthropic/claude-sonnet-4-5 --prompt-file judge.md",
+            "delegate opencode call --read-only --model reviewer --prompt-file judge.md",
         ),
         notes=(
             "Uses opencode run --format json --print-logs; stdout is buffered until completion, while --print-logs stderr remains Delegate-visible.",
