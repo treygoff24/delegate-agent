@@ -146,6 +146,7 @@ class RunContext:
     include_dirty: bool = False
     synced_files: int = 0
     group: str | None = None
+    call_read_only: bool = False
     prompt_instruction_mode: str = PROMPT_INSTRUCTION_MODE_WRAPPED
 
 
@@ -1666,6 +1667,10 @@ def _append_empty_retry_instruction(prompt: str) -> str:
     return f"{prompt.rstrip()}\n\n{EMPTY_RETRY_INSTRUCTION}"
 
 
+def _empty_retry_allowed(mode: str, *, call_read_only: bool = False) -> bool:
+    return mode == "safe" or (mode == "call" and call_read_only)
+
+
 def _tracked_capture_quality(
     files: TrackedRunFiles,
     ctx: RunContext,
@@ -1828,11 +1833,11 @@ def execute_tracked(
                     primary_stderr_tail=primary_stderr_tail,
                 )
             }
+        retry_supported = (
+            stdin_text is not None or prompt_file_text is not None or manifest_argv is not None
+        )
         if (
-            ctx.mode == "safe"
-            and (
-                stdin_text is not None or prompt_file_text is not None or manifest_argv is not None
-            )
+            retry_supported
             and _tracked_capture_quality(
                 files,
                 ctx,
@@ -1841,44 +1846,50 @@ def execute_tracked(
             )
             == RESULT_QUALITY_EMPTY
         ):
-            retry_argv, retry_stdin, retry_prompt_temp_dir = _materialize_empty_retry(
-                run_argv,
-                stdin_text=stdin_text,
-                prompt_file_text=prompt_file_text,
-                prompt_file_placeholder=prompt_file_placeholder,
-                agent_config_text=agent_config_text,
-                agent_config_placeholder=agent_config_placeholder,
-                agent_config_dir=files.run_path,
-            )
-            capture = _run_single_tracked_attempt(
-                retry_argv,
-                cwd,
-                files,
-                ctx,
-                started=started,
-                stdin_text=retry_stdin,
-                env_overrides=attempt_env,
-                scratch_dir=files.scratch_dir,
-                progress=progress,
-                progress_stderr=stderr if progress else None,
-                progress_initial_delay_sec=progress_initial_delay_sec,
-                progress_interval_sec=progress_interval_sec,
-                attempt_label="empty-success-retry",
-            )
-            retry_quality = _tracked_capture_quality(
-                files,
-                ctx,
-                capture,
-                completion_report_mode=completion_report_mode,
-            )
-            empty_retry_extra = {
-                "emptyRetry": {
-                    "attempted": True,
-                    "resolved": retry_quality != RESULT_QUALITY_EMPTY,
+            if _empty_retry_allowed(ctx.mode, call_read_only=ctx.call_read_only):
+                retry_argv, retry_stdin, retry_prompt_temp_dir = _materialize_empty_retry(
+                    run_argv,
+                    stdin_text=stdin_text,
+                    prompt_file_text=prompt_file_text,
+                    prompt_file_placeholder=prompt_file_placeholder,
+                    agent_config_text=agent_config_text,
+                    agent_config_placeholder=agent_config_placeholder,
+                    agent_config_dir=files.run_path,
+                )
+                capture = _run_single_tracked_attempt(
+                    retry_argv,
+                    cwd,
+                    files,
+                    ctx,
+                    started=started,
+                    stdin_text=retry_stdin,
+                    env_overrides=attempt_env,
+                    scratch_dir=files.scratch_dir,
+                    progress=progress,
+                    progress_stderr=stderr if progress else None,
+                    progress_initial_delay_sec=progress_initial_delay_sec,
+                    progress_interval_sec=progress_interval_sec,
+                    attempt_label="empty-success-retry",
+                )
+                retry_quality = _tracked_capture_quality(
+                    files,
+                    ctx,
+                    capture,
+                    completion_report_mode=completion_report_mode,
+                )
+                empty_retry_extra = {
+                    "emptyRetry": {
+                        "attempted": True,
+                        "resolved": retry_quality != RESULT_QUALITY_EMPTY,
+                    }
                 }
-            }
-            if retry_quality == RESULT_QUALITY_EMPTY:
-                empty_retry_extra["warnings"] = [EMPTY_RETRY_WARNING]
+                if retry_quality == RESULT_QUALITY_EMPTY:
+                    empty_retry_extra["warnings"] = [EMPTY_RETRY_WARNING]
+            elif ctx.mode == "call":
+                empty_retry_extra = {
+                    "emptyRetry": {"attempted": False, "reason": "write_capable_call"},
+                    "warnings": [EMPTY_RETRY_SKIPPED_WRITE_CAPABLE_WARNING],
+                }
     finally:
         _cleanup_prompt_file_dir(prompt_temp_dir)
         _cleanup_prompt_file_dir(retry_prompt_temp_dir)
@@ -2394,7 +2405,7 @@ def execute_call(
     )
     if result.result_quality != RESULT_QUALITY_EMPTY:
         return result
-    if not (read_only or pure):
+    if not _empty_retry_allowed("call", call_read_only=read_only or pure):
         warnings = list(result.warnings)
         _append_unique(warnings, EMPTY_RETRY_SKIPPED_WRITE_CAPABLE_WARNING)
         return replace(result, warnings=tuple(warnings))

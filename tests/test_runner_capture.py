@@ -2318,3 +2318,92 @@ class RunnerCaptureTests(unittest.TestCase):
                 self.runner.EMPTY_RETRY_SKIPPED_WRITE_CAPABLE_WARNING,
                 result.warnings,
             )
+
+    def test_grouped_read_only_call_empty_success_retries_once(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            script = Path(workspace) / "agent"
+            script.write_text(
+                "#!/usr/bin/env bash\n"
+                "if [[ \"$*\" == *'Delegate retry instruction'* ]]; then\n"
+                '  printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"Status: completed. The requested review finished successfully and this plain-text final report contains the findings, verification result, changed-file summary, and remaining-risk statement needed by the parent operator. No further action is required."}}\'\n'
+                "  printf '%s\\n' '{\"type\":\"turn.completed\"}'\n"
+                "fi\n",
+                encoding="utf-8",
+            )
+            script.chmod(0o755)
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="call",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-07-16T12:00:00Z",
+                group="workflow",
+                call_read_only=True,
+            )
+
+            code, payload = self.runner.execute_tracked(
+                [str(script), "original prompt"],
+                workspace,
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+                manifest_argv=[str(script), "<prompt>"],
+            )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(payload["emptyRetry"], {"attempted": True, "resolved": True})
+
+    def test_grouped_write_capable_call_empty_success_does_not_retry(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            counter = Path(workspace) / "attempts"
+            script = Path(workspace) / "agent"
+            script.write_text(
+                f"#!/usr/bin/env bash\nprintf x >> {counter!s}\n",
+                encoding="utf-8",
+            )
+            script.chmod(0o755)
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="cursor")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="cursor",
+                engine="cursor",
+                mode="call",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-07-16T12:00:00Z",
+                group="workflow",
+            )
+
+            code, payload = self.runner.execute_tracked(
+                [str(script), "side-effectful prompt"],
+                workspace,
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+                manifest_argv=[str(script), "<prompt>"],
+            )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(counter.read_text(encoding="utf-8"), "x")
+            self.assertEqual(payload["resultQuality"], "empty")
+            self.assertEqual(
+                payload["emptyRetry"],
+                {"attempted": False, "reason": "write_capable_call"},
+            )

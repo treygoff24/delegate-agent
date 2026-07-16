@@ -572,6 +572,7 @@ def make_run_context(
         fallback_auth_profile=request.fallback_auth_profile,
         include_dirty=request.include_dirty,
         group=request.group,
+        call_read_only=request.read_only or request.pure,
         prompt_instruction_mode=request.prompt_instruction_mode,
     )
 
