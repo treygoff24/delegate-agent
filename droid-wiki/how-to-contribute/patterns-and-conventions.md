@@ -12,7 +12,7 @@ The code uses dataclasses for request and execution context objects, such as `Re
 
 ## Fail closed on safety and config
 
-Config validation in `src/delegate_agent/config.py` rejects invalid policy, isolation, and reasoning settings before launch. Explicit unsupported reasoning-effort requests fail closed in `src/delegate_agent/reasoning.py`. Persistent worktree preflight in `src/delegate_agent/worktree_execution.py` refuses dirty source checkouts and pass-through mode.
+Config validation in `src/delegate_agent/config.py` rejects invalid policy, isolation, and reasoning settings before launch. Explicit unsupported reasoning-effort requests fail closed in `src/delegate_agent/reasoning.py`. Persistent worktree preflight in `src/delegate_agent/worktree_execution.py` refuses dirty submodules and pass-through mode while auto-syncing ordinary tracked and untracked changes.
 
 ## Public argv must not leak prompt text
 

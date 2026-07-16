@@ -289,9 +289,9 @@ delegate --json --isolation worktree dry-run cursor work "Implement only."
 ```
 
 Detached `HEAD` is valid; an unborn repository with no commit is not. Dry-run
-shows the planned branch/path but does not run the full launch preflight. If the
-source checkout is dirty, commit, stash, or choose a different isolation mode
-before launching.
+shows the planned branch/path but does not run the full launch preflight. Ordinary
+tracked and untracked source changes auto-sync; commit or stash dirty submodules,
+or choose a different isolation mode, before launching.
 
 ## Persistent worktree run failed with `commit_policy_violated`
 

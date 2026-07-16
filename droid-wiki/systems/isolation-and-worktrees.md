@@ -28,7 +28,7 @@ Isolation decides where a child runtime executes: the source checkout, a tempora
 
 ## How it works
 
-`auto` maps to temporary worktree isolation for local safe-mode harnesses and to `none` for work mode. Temporary safe isolation uses a detached Git worktree or directory copy and blocks external symlinks. Persistent worktree execution requires a Git workspace, valid `HEAD`, clean source checkout, no pass-through mode, and a valid child binary.
+`auto` maps to temporary worktree isolation for local safe-mode harnesses and to `none` for work mode. Temporary safe isolation uses a detached Git worktree or directory copy and blocks external symlinks. Persistent worktree execution requires a Git workspace, valid `HEAD`, no dirty submodules, no pass-through mode, and a valid child binary; ordinary tracked and untracked changes auto-sync.
 
 ## Integration points
 

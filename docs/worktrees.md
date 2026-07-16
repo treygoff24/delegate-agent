@@ -49,8 +49,9 @@ A few boundaries are worth stating explicitly:
   was committed before being added to `.gitignore`) is part of the repository
   and is synced like any other tracked file. `--include-dirty` excludes only
   untracked gitignored paths, not tracked ones.
-- **Dirty submodule working-tree state is not mirrored.** Only the source
-  checkout's tracked diff and untracked non-ignored files are copied.
+- **Dirty submodules fail preflight.** Delegate auto-syncs ordinary tracked and
+  untracked non-ignored source changes, but cannot safely reproduce dirty
+  submodule state, so it refuses the launch until that submodule is clean.
 - **Keep secrets out of hardlinks.** A hardlink at a non-ignored path to
   gitignored content is indistinguishable from a regular file to Delegate's
   path-based sync: it is a non-ignored path, so `--include-dirty` syncs it by
