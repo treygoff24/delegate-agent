@@ -295,7 +295,8 @@ def parse_utc_timestamp(value: str | None) -> datetime | None:
     try:
         if value.endswith("Z"):
             return datetime.fromisoformat(value.replace("Z", "+00:00"))
-        return datetime.fromisoformat(value)
+        parsed = datetime.fromisoformat(value)
+        return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed
     except ValueError:
         return None
 
@@ -407,12 +408,73 @@ class RunTarget:
     requested_handle: str | None = None
     resolved_handle: str | None = None
     resolution_kind: str = "literal"
+    resolution_details: JsonObject | None = None
+    resolution_warning: str | None = None
 
 
 @dataclass(frozen=True)
 class RunTargetLookupError:
     error: str
     message: str
+
+
+def _bare_handle_resolution_details(
+    registry_root: Path,
+    index: JsonObject,
+    run_id: str,
+    alias: str | None,
+) -> tuple[JsonObject, str | None]:
+    state = load_run_state_or_none(registry_root, run_id)
+    manifest = load_run_manifest_or_none(registry_root, run_id)
+    entry = index.get("runs", {}).get(run_id)
+    workspace = next(
+        (
+            value
+            for value in (
+                manifest.get("cwd") if isinstance(manifest, dict) else None,
+                state.get("cwd") if isinstance(state, dict) else None,
+                entry.get("cwd") if isinstance(entry, dict) else None,
+            )
+            if isinstance(value, str) and value
+        ),
+        None,
+    )
+    timestamp = activity_timestamp(state, manifest, run_id)
+    parsed = parse_utc_timestamp(timestamp)
+    age_seconds = (
+        max(int((datetime.now(UTC) - parsed).total_seconds()), 0) if parsed is not None else None
+    )
+    details: JsonObject = {
+        "resolvedRunId": run_id,
+        "resolvedAlias": alias,
+        "resolvedWorkspace": workspace,
+        "resolvedAge": _format_age(timestamp),
+    }
+    if age_seconds is not None:
+        details["resolvedAgeSeconds"] = age_seconds
+    warning = None
+    if age_seconds is not None and age_seconds > 24 * 60 * 60:
+        resolved = alias or run_id
+        warning = (
+            f"bare_handle_stale: resolved {resolved} in {workspace or 'an unknown workspace'} "
+            f"({_format_age(timestamp)}). Use --cwd for the intended workspace or the explicit "
+            f"handle {resolved}."
+        )
+    return details, warning
+
+
+def add_run_target_resolution(payload: JsonObject, target: RunTarget) -> None:
+    if target.resolution_kind == "literal":
+        return
+    payload["requestedHandle"] = target.requested_handle
+    payload["resolvedHandle"] = target.resolved_handle or target.alias or target.run_id
+    payload["resolutionKind"] = target.resolution_kind
+    if target.resolution_details:
+        payload.update(target.resolution_details)
+    if target.resolution_warning:
+        warnings = payload.setdefault("warnings", [])
+        if isinstance(warnings, list) and target.resolution_warning not in warnings:
+            warnings.append(target.resolution_warning)
 
 
 def run_directory(registry_root: Path, run_id: str) -> Path:
@@ -517,12 +579,23 @@ def resolve_run_target(
             "Runs are recorded per-workspace under <workspace>/.delegate; "
             "if this run was launched elsewhere, pass --cwd <that workspace>.",
         )
+    details = None
+    warning = None
+    if handle in HARNESS_NAMES:
+        details, warning = _bare_handle_resolution_details(
+            registry_root,
+            index,
+            resolved.run_id,
+            resolved.alias,
+        )
     return RunTarget(
         resolved.run_id,
         resolved.alias,
         resolved.requested_handle,
         resolved.resolved_handle,
         resolved.resolution_kind,
+        details,
+        warning,
     )
 
 

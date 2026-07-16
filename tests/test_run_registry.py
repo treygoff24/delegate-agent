@@ -742,3 +742,9 @@ class RunRegistryTests(unittest.TestCase):
             root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
             with self.assertRaises(ValueError):
                 self.registry.set_worktree_status(root, "del_nonexistent", "invalid_status")
+
+    def test_naive_timestamp_is_normalized_to_utc_for_age_calculation(self):
+        parsed = self.registry.parse_utc_timestamp("2026-07-16T12:00:00")
+
+        self.assertIsNotNone(parsed)
+        self.assertEqual(self.registry._format_age("2026-07-16T12:00:00", now=parsed), "0s ago")

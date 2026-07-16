@@ -24,6 +24,7 @@ import subprocess  # nosec B404 - Delegate launches configured git/harness comma
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from delegate_agent.argv_utils import public_argv
@@ -36,7 +37,7 @@ from delegate_agent.git_utils import (
 )
 from delegate_agent.git_utils import run_git as _run_git
 from delegate_agent.git_utils import run_git_bytes as _run_git_bytes
-from delegate_agent.isolation import IsolationContext
+from delegate_agent.isolation import IsolationContext, target_contains_source_root
 from delegate_agent.json_types import JsonObject
 from delegate_agent.prompt_transport import PROMPT_TRANSPORT_ARGV
 from delegate_agent.request_models import Request
@@ -90,6 +91,16 @@ SAFE_ISOLATION_REPORT_INSTRUCTION = (
     "\n\nSafe-isolation note: cite files relative to the workspace in your report; "
     "do not include the temporary workspace path."
 )
+
+
+@dataclass(frozen=True)
+class DirtySyncSnapshot:
+    diff_names: tuple[str, ...]
+    untracked_names: tuple[str, ...]
+
+    @property
+    def example_paths(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys((*self.diff_names, *self.untracked_names)))
 
 
 def _ensure_codex_skip_git_repo_check(argv: list[str]) -> list[str]:
@@ -218,35 +229,46 @@ def apply_git_tracked_diff(worktree_path: str, diff: bytes) -> None:
         )
 
 
-def _git_lines(git_root: str, args: list[str], *, error: str) -> list[str]:
-    result = _run_git(
+def _git_paths(git_root: str, args: list[str], *, error: str) -> list[str]:
+    result = _run_git_bytes(
         git_root,
-        args,
+        [*args, "-z"],
         timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
     )
     if result.returncode != 0:
-        raise DelegateError("safe_workspace_sync_failed", f"{error}: {result.stderr.strip()}")
-    return [line for line in result.stdout.splitlines() if line]
+        raise DelegateError(
+            "safe_workspace_sync_failed",
+            f"{error}: {result.stderr.decode(errors='replace').strip()}",
+        )
+    return [
+        path.decode("utf-8", errors="surrogateescape")
+        for path in result.stdout.split(b"\0")
+        if path
+    ]
 
 
 def changed_files_vs_head(git_root: str) -> tuple[str, ...]:
     """Return tracked HEAD diff paths plus untracked non-ignored paths."""
-    paths: list[str] = []
-    seen: set[str] = set()
-    for line in _git_lines(
-        git_root,
-        ["diff", "HEAD", "--name-only"],
-        error="Failed to list tracked changes",
-    ) + _git_lines(
-        git_root,
-        ["ls-files", "--others", "--exclude-standard"],
-        error="Failed to list untracked files",
-    ):
-        if line in seen:
-            continue
-        seen.add(line)
-        paths.append(line)
-    return tuple(paths)
+    return dirty_sync_snapshot(git_root).example_paths
+
+
+def dirty_sync_snapshot(git_root: str) -> DirtySyncSnapshot:
+    return DirtySyncSnapshot(
+        diff_names=tuple(
+            _git_paths(
+                git_root,
+                ["diff", "HEAD", "--name-only"],
+                error="Failed to list tracked changes",
+            )
+        ),
+        untracked_names=tuple(
+            _git_paths(
+                git_root,
+                ["ls-files", "--others", "--exclude-standard"],
+                error="Failed to list untracked files",
+            )
+        ),
+    )
 
 
 def symlink_target_resolves_outside(path: Path, source_root: Path) -> bool:
@@ -282,7 +304,7 @@ def _git_check_ignore(git_root: str, paths: list[str]) -> tuple[set[str], bool]:
     result = _run_git_bytes(
         git_root,
         ["check-ignore", "-z", "--stdin"],
-        input_bytes=b"\x00".join(p.encode("utf-8") for p in paths) + b"\x00",
+        input_bytes=b"\x00".join(os.fsencode(path) for path in paths) + b"\x00",
         timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
     )
     if result.returncode == 1:
@@ -290,7 +312,7 @@ def _git_check_ignore(git_root: str, paths: list[str]) -> tuple[set[str], bool]:
     if result.returncode != 0:
         return set(), True
     ignored: set[str] = set()
-    for token in result.stdout.decode(errors="replace").split("\x00"):
+    for token in os.fsdecode(result.stdout).split("\x00"):
         if token:
             ignored.add(token)
     return ignored, False
@@ -599,14 +621,57 @@ def external_symlink_warnings(source_workspace: str, *, limit: int = 5) -> tuple
     return (f"{SAFE_EXTERNAL_SYMLINK_WARNING_PREFIX}: {preview}.",)
 
 
-def sync_git_dirty_snapshot(git_root: str, worktree_path: str) -> tuple[int, tuple[str, ...]]:
-    apply_git_tracked_diff(worktree_path, read_git_tracked_diff(git_root))
-    changed = changed_files_vs_head(git_root)
-    untracked = _git_lines(
+def dirty_submodule_paths(git_root: str) -> tuple[str, ...]:
+    """Return gitlink changes the dirty-snapshot sync cannot reproduce."""
+    status = _run_git_bytes(
         git_root,
-        ["ls-files", "--others", "--exclude-standard"],
-        error="Failed to list untracked files",
+        ["status", "--porcelain=v2", "-z", "--ignore-submodules=none"],
+        timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
     )
+    if status.returncode != 0:
+        raise DelegateError(
+            "dirty_source_check_failed",
+            f"Failed to inspect submodule status: {status.stderr.decode(errors='replace').strip()}",
+        )
+    records = status.stdout.split(b"\0")
+    paths: list[str] = []
+    index = 0
+    while index < len(records):
+        record = records[index]
+        index += 1
+        if record.startswith(b"1 "):
+            fields = record.split(b" ", 8)
+            if len(fields) != 9:
+                continue
+            xy, submodule_state, modes, path = fields[1], fields[2], fields[3:6], fields[8]
+        elif record.startswith(b"2 "):
+            fields = record.split(b" ", 9)
+            if len(fields) != 10:
+                continue
+            # Porcelain -z rename/copy records carry a second pathname.
+            # Consume it even though the destination is the sync-relevant path.
+            index += 1
+            xy, submodule_state, modes, path = fields[1], fields[2], fields[3:6], fields[9]
+        else:
+            continue
+        nested_dirt = len(submodule_state) >= 4 and any(
+            marker in b"MU" for marker in submodule_state[2:4]
+        )
+        gitlink_change = xy != b".." or submodule_state[1:2] == b"C"
+        if b"160000" in modes and (nested_dirt or gitlink_change):
+            paths.append(path.decode("utf-8", errors="surrogateescape"))
+    return tuple(paths)
+
+
+def sync_git_dirty_snapshot(
+    git_root: str,
+    worktree_path: str,
+    *,
+    snapshot: DirtySyncSnapshot | None = None,
+) -> tuple[int, int, int, tuple[str, ...]]:
+    snapshot = snapshot or dirty_sync_snapshot(git_root)
+    apply_git_tracked_diff(worktree_path, read_git_tracked_diff(git_root))
+    untracked = snapshot.untracked_names
     root = Path(git_root)
     try:
         root_resolved = root.resolve(strict=True)
@@ -627,8 +692,11 @@ def sync_git_dirty_snapshot(git_root: str, worktree_path: str) -> tuple[int, tup
             source_root=Path(git_root),
             leak_blocked=leak_blocked,
         )
+    tracked_count = len(snapshot.diff_names)
     return (
-        len(changed),
+        len(snapshot.example_paths),
+        tracked_count,
+        len(untracked),
         merge_warnings(
             external_symlink_warnings(git_root),
             block_external_symlinks(worktree_path, git_root),
@@ -639,7 +707,7 @@ def sync_git_dirty_snapshot(git_root: str, worktree_path: str) -> tuple[int, tup
 
 
 def sync_git_workspace_snapshot(git_root: str, worktree_path: str) -> tuple[str, ...]:
-    _count, warnings = sync_git_dirty_snapshot(git_root, worktree_path)
+    _count, _tracked, _untracked, warnings = sync_git_dirty_snapshot(git_root, worktree_path)
     return warnings
 
 
@@ -721,6 +789,11 @@ def create_directory_safe_workspace(
 
 
 def remove_git_safe_workspace(git_root: str, worktree_path: str) -> None:
+    if target_contains_source_root(worktree_path, git_root):
+        raise DelegateError(
+            "source_root_guard",
+            "Refusing to remove an isolated workspace that is or contains the source root.",
+        )
     with suppress(OSError, subprocess.SubprocessError):
         _run_git(
             git_root,
@@ -734,7 +807,17 @@ def cleanup_safe_isolated_workspace(
     git_root: str | None,
     isolated_workspace: str,
     temp_base: str,
+    source_root: str | None = None,
 ) -> None:
+    protected_root = source_root or git_root
+    if protected_root is not None and (
+        target_contains_source_root(isolated_workspace, protected_root)
+        or target_contains_source_root(temp_base, protected_root)
+    ):
+        raise DelegateError(
+            "source_root_guard",
+            "Refusing to tear down an isolated workspace that is or contains the source root.",
+        )
     if git_root is not None:
         remove_git_safe_workspace(git_root, isolated_workspace)
     shutil.rmtree(temp_base, ignore_errors=True)
@@ -848,46 +931,21 @@ def safe_isolated_request(request: Request) -> Iterator[Request]:
                 request.workspace,
                 isolated_workspace,
             )
-        yield Request(
-            engine=request.engine,
-            mode=request.mode,
+        yield replace(
+            request,
             workspace=isolated_workspace,
             prompt=isolated_prompt or "",
             argv=isolated_argv,
-            model=request.model,
-            model_alias=request.model_alias,
-            output_schema=request.output_schema,
-            dry_run=request.dry_run,
             workspace_kind=workspace_kind,
             isolation_context=isolation,
-            reasoning_effort=request.reasoning_effort,
-            reasoning_effort_source=request.reasoning_effort_source,
-            reasoning_capability_source=request.reasoning_capability_source,
-            reasoning_transport=request.reasoning_transport,
-            fast=request.fast,
-            progress=request.progress,
-            progress_initial_delay_sec=request.progress_initial_delay_sec,
-            progress_interval_sec=request.progress_interval_sec,
-            forbid_commit=request.forbid_commit,
-            include_dirty=request.include_dirty,
-            warnings=request.warnings,
             stdin_text=isolated_stdin_text,
             prompt_file_text=isolated_prompt_file_text,
-            agent_config_text=request.agent_config_text,
-            prompt_transport=request.prompt_transport,
             display_argv=isolated_display_argv,
-            env_overrides=request.env_overrides,
-            auth_profile=request.auth_profile,
-            fallback_auth_profile=request.fallback_auth_profile,
-            cleanup_workspace=request.cleanup_workspace,
-            group=request.group,
-            workflow_agent_key=request.workflow_agent_key,
-            prompt_instruction_mode=request.prompt_instruction_mode,
-            profile_resolution=request.profile_resolution,
         )
     finally:
         cleanup_safe_isolated_workspace(
             git_root=cleanup_git_root,
             isolated_workspace=isolated_workspace,
             temp_base=temp_base,
+            source_root=request.workspace,
         )

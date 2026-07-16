@@ -564,21 +564,17 @@ def emit(command: RunOutputCommand, *, workspace_path: str, stdout: TextIO) -> i
     if isinstance(target, run_registry.RunTargetLookupError):
         raise RunOutputError(target.error, target.message)
     run_id, alias = target.run_id, target.alias
-    resolution = (
-        {
-            "requestedHandle": target.requested_handle,
-            "resolvedHandle": target.resolved_handle or alias or run_id,
-            "resolutionKind": target.resolution_kind,
-        }
-        if target.resolution_kind != "literal"
-        else None
-    )
+    resolution: JsonObject = {}
+    run_registry.add_run_target_resolution(resolution, target)
+    resolution_warnings = resolution.pop("warnings", [])
     sections: JsonObject = {}
     text_sections: dict[str, str] = {}
     # Seed warnings from persisted state so re-emitted quality warnings dedupe
     # against warnings the runner already recorded at write time (cross-channel
     # duplicate suppression).
     warnings: list[str] = []
+    if isinstance(resolution_warnings, list):
+        warnings.extend(warning for warning in resolution_warnings if isinstance(warning, str))
     state = run_registry.load_run_state(registry_root, run_id)
     if isinstance(state, dict):
         state_warnings = state.get("warnings")
@@ -638,7 +634,7 @@ def emit(command: RunOutputCommand, *, workspace_path: str, stdout: TextIO) -> i
         run_id=run_id,
         sections=sections,
         text_sections=text_sections,
-        resolution=resolution,
+        resolution=resolution or None,
         warnings=warnings,
         stdout=stdout,
     )

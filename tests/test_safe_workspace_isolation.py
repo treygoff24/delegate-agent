@@ -74,6 +74,50 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
         self.assertNotIn("--mode=plan", payload["argv"])
         self.assertNotIn("--approve-mcps", payload["argv"])
 
+    def test_cleanup_refuses_target_containing_source_root(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "source"
+            source.mkdir()
+            with self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.delegate.cleanup_safe_isolated_workspace(
+                    git_root=None,
+                    isolated_workspace=str(source),
+                    temp_base=temp_dir,
+                    source_root=str(source),
+                )
+        self.assertEqual(ctx.exception.error, "source_root_guard")
+
+    def _submodule_paths_from_status(self, status: bytes) -> tuple[str, ...]:
+        completed = subprocess.CompletedProcess(["git"], 0, status, b"")
+        with mock.patch.object(safe_workspace, "_run_git_bytes", return_value=completed):
+            return safe_workspace.dirty_submodule_paths("/repo")
+
+    def test_submodule_new_commit_is_blocked_when_gitlink_diff_cannot_sync(self):
+        status = b"1 .M SC.. 160000 160000 160000 old new sub\0"
+        self.assertEqual(self._submodule_paths_from_status(status), ("sub",))
+
+    def test_git_check_ignore_preserves_surrogateescaped_paths(self):
+        path = os.fsdecode(b"bad-\xff-name")
+        completed = subprocess.CompletedProcess(["git"], 0, os.fsencode(path) + b"\0", b"")
+        with mock.patch.object(safe_workspace, "_run_git_bytes", return_value=completed) as run_git:
+            ignored, failed_closed = safe_workspace._git_check_ignore("/repo", [path])
+
+        self.assertEqual(ignored, {path})
+        self.assertFalse(failed_closed)
+        self.assertEqual(run_git.call_args.kwargs["input_bytes"], os.fsencode(path) + b"\0")
+
+    def test_submodule_nested_content_dirt_is_blocked(self):
+        status = b"1 .M S.M. 160000 160000 160000 old old sub\0"
+        self.assertEqual(self._submodule_paths_from_status(status), ("sub",))
+
+    def test_staged_gitlink_update_is_blocked_when_gitlink_diff_cannot_sync(self):
+        status = b"1 M. S... 160000 160000 160000 old new sub\0"
+        self.assertEqual(self._submodule_paths_from_status(status), ("sub",))
+
+    def test_renamed_gitlink_porcelain_record_consumes_origin_path(self):
+        status = b"2 R. S... 160000 160000 160000 old new R100 renamed\0sub\0"
+        self.assertEqual(self._submodule_paths_from_status(status), ("renamed",))
+
     def test_cursor_safe_cli_config_omits_mutating_shell(self):
         allow = self.delegate.CURSOR_SAFE_CLI_CONFIG["permissions"]["allow"]
         self.assertIn("Read(**)", allow)
@@ -240,6 +284,26 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
             safe_workspace.changed_files_vs_head(repo.name),
             ("tracked.txt", "notes.txt"),
         )
+
+    def test_dirty_sync_preserves_unicode_and_tab_filenames(self):
+        repo = self.make_dirty_repo()
+        root = Path(repo.name)
+        names = ("caf\u00e9.txt", "tab\tname.txt")
+        for name in names:
+            (root / name).write_text(name, encoding="utf-8")
+
+        worktree_path, temp_base = self.delegate.create_git_safe_workspace(repo.name)
+        try:
+            isolated = Path(worktree_path)
+            self.assertTrue(set(names).issubset(safe_workspace.changed_files_vs_head(repo.name)))
+            for name in names:
+                self.assertEqual((isolated / name).read_text(encoding="utf-8"), name)
+        finally:
+            self.delegate.cleanup_safe_isolated_workspace(
+                git_root=repo.name,
+                isolated_workspace=worktree_path,
+                temp_base=temp_base,
+            )
 
     def test_git_safe_workspace_excludes_nested_gitignored_subdir_secret(self):
         """A secret in a subdirectory that a nested .gitignore excludes is not
@@ -725,6 +789,37 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
         with self.delegate.safe_isolated_request(request) as unchanged:
             self.assertIs(unchanged, request)
             self.assertEqual(unchanged.prompt, prompt)
+
+    def test_safe_isolated_request_preserves_call_metadata(self):
+        repo = make_git_repo(with_commit=True)
+        self.addCleanup(repo.cleanup)
+        iso_ctx = self.delegate.build_isolation_context(
+            source_workspace=repo.name,
+            resolved_isolation="auto",
+            engine="codex",
+            mode="safe",
+            source_git_root=repo.name,
+        )
+        request = self.delegate.build_request(
+            "codex",
+            "safe",
+            None,
+            self.delegate.ResolvedWorkspace(repo.name, "git"),
+            "review",
+            self.delegate.DEFAULT_CONFIG,
+            dry_run=False,
+            isolation_context=iso_ctx,
+        )
+        request.call_read_only = True
+        request.pure = True
+        request.timeout = 42
+        request.model_requested = "requested-model"
+
+        with self.delegate.safe_isolated_request(request) as isolated:
+            self.assertTrue(isolated.call_read_only)
+            self.assertTrue(isolated.pure)
+            self.assertEqual(isolated.timeout, 42)
+            self.assertEqual(isolated.model_requested, "requested-model")
 
     def test_create_git_safe_workspace_reports_worktree_timeout(self):
         timeout = subprocess.CompletedProcess(

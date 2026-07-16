@@ -422,6 +422,7 @@ class RunOutputHelpTests(HelpCliTestBase):
         self.assertIn("--raw", out)
         self.assertIn("--tail", out)
         self.assertIn("incompatible", out.lower())
+        self.assertIn("implies --stdout", out)
 
     def test_run_output_json_help_documents_max_chars(self):
         code, out, _err = self.run_main(["--json", "run-output", "--help"])
@@ -560,7 +561,7 @@ class KimiHelpTests(HelpCliTestBase):
 
     def test_safe_workspace_sync_note_is_shared_across_help_surfaces(self):
         note = self.delegate.command_help.SAFE_WORKSPACE_SYNC_NOTE
-        for command in ("cursor", "kimi", "codex", "claude", "devin", "opencode", "droid"):
+        for command in ("cursor", "kimi", "codex", "claude", "opencode", "droid"):
             with self.subTest(command=command):
                 code, out, _err = self.run_main([command, "--help"])
                 self.assertEqual(code, self.delegate.EXIT_OK)
@@ -574,9 +575,15 @@ class KimiHelpTests(HelpCliTestBase):
         code, out, _err = self.run_main(["--json", "describe"])
         self.assertEqual(code, self.delegate.EXIT_OK)
         payload = json.loads(out)
-        for command in ("cursor", "kimi", "codex", "claude", "devin", "opencode", "droid"):
+        for command in ("cursor", "kimi", "codex", "claude", "opencode", "droid"):
             with self.subTest(describe=command):
                 self.assertIn(note, payload["modeMapping"][command]["safeNotes"])
+
+        code, out, _err = self.run_main(["devin", "--help"])
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertIn("Execution mode: work", out)
+        self.assertNotIn("safe (read-only review)", out)
+        self.assertNotIn(note, out)
 
         code, out, _err = self.run_main(["agent-help"])
         self.assertEqual(code, self.delegate.EXIT_OK)
@@ -585,6 +592,44 @@ class KimiHelpTests(HelpCliTestBase):
             "Positional MODEL_ALIAS is alias-only (strict); --model is alias-or-id",
             out,
         )
+
+    def test_worktree_dirty_auto_include_is_documented_in_help_and_describe(self):
+        note = self.delegate.command_help.WORKTREE_DIRTY_SYNC_NOTE
+        code, out, _err = self.run_main(["cursor", "--help"])
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertIn(note, out)
+        self.assertIn("Dirty source files are auto-included", out)
+
+        code, out, _err = self.run_main(["--json", "describe"])
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        payload = json.loads(out)
+        self.assertIn("auto-include", payload["worktrees"]["dirtySource"]["behavior"])
+        self.assertIn("emptyRetry", payload["completionEnvelope"])
+        self.assertIn("DELEGATE_SOURCE_ROOT", payload["childEnvironment"])
+        self.assertIn("DELEGATE_EXECUTION_ROOT", payload["childEnvironment"])
+
+    def test_devin_help_advertises_only_work_and_call_modes(self):
+        code, out, _err = self.run_main(["devin", "--help"])
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertIn("work (may edit the workspace) or call", out)
+        self.assertNotIn("safe (read-only review)", out)
+        self.assertNotIn("Devin safe mode", out)
+
+        code, out, _err = self.run_main(["agent-help"])
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        devin_section = out.split("Devin:", 1)[1].split("Droid modes:", 1)[0]
+        self.assertNotIn("safe", devin_section.lower())
+
+        code, out, _err = self.run_main(["cursor", "--help"])
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertIn("safe (read-only review)", out)
+
+    def test_models_summary_derives_devin_modes_from_registry(self):
+        code, out, _err = self.run_main(["--json", "models", "--summary"])
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        devin = next(item for item in json.loads(out)["aliases"] if item["provider"] == "devin")
+        self.assertEqual(devin["command"], "delegate devin {work,call}")
+        self.assertFalse(devin["safeSupported"])
 
 
 if __name__ == "__main__":

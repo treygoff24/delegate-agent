@@ -69,6 +69,12 @@ CALL_MODE_NOTE = (
     "bounds any call; on expiry Delegate terminates the child process group and "
     "returns call_timeout."
 )
+WORKTREE_DIRTY_SYNC_NOTE = (
+    "Persistent worktree work runs automatically include tracked edits and untracked, "
+    "non-ignored files from a dirty source before the child starts; Delegate discloses "
+    "the counts and example paths on stderr. Dirty submodules cannot be synced; commit "
+    "or stash them, or use --isolation none."
+)
 
 
 # Global options (must appear before the subcommand).
@@ -170,7 +176,9 @@ _FORBID_COMMIT_OPTION = OptionSpec(
 _INCLUDE_DIRTY_OPTION = OptionSpec(
     "--include-dirty",
     None,
-    "work + persistent worktree only: sync tracked edits and untracked non-ignored files into the new worktree.",
+    "work + persistent worktree only: explicitly include tracked edits and untracked "
+    "non-ignored files in the new worktree. Dirty source files are auto-included even "
+    "without this flag.",
 )
 _READ_ONLY_OPTION = OptionSpec(
     "--read-only",
@@ -200,6 +208,11 @@ _MODE_ARG = ArgSpec(
     "mode",
     True,
     "Execution mode: safe (read-only review), work (may edit the workspace), or call (stateless one-shot model call).",
+)
+_DEVIN_MODE_ARG = ArgSpec(
+    "mode",
+    True,
+    "Execution mode: work (may edit the workspace) or call (stateless one-shot model call).",
 )
 
 
@@ -235,6 +248,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         notes=(
             SAFE_WORKSPACE_SYNC_NOTE,
+            WORKTREE_DIRTY_SYNC_NOTE,
             CALL_MODE_NOTE,
             "Reasoning effort uses cursor.reasoningEffortModels; no standalone Cursor effort flag is emitted.",
             "Trailing prompt text begins after the mode; a later --help is prompt text, "
@@ -271,6 +285,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         notes=(
             SAFE_WORKSPACE_SYNC_NOTE,
+            WORKTREE_DIRTY_SYNC_NOTE,
             CALL_MODE_NOTE,
             "Kimi safe mode also uses a read-only safety prompt.",
             "work mode uses Kimi prompt mode; Delegate does not emit --yolo because "
@@ -315,6 +330,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         notes=(
             SAFE_WORKSPACE_SYNC_NOTE,
+            WORKTREE_DIRTY_SYNC_NOTE,
             CALL_MODE_NOTE,
             "Model selection uses --model (alias from codex.models or a raw model ID), "
             "the run-input JSON model, or codex.defaultModel in config.",
@@ -364,6 +380,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "Uses Claude Code -p with prompt delivery on stdin; dry-run argv and run manifests "
             "do not contain the prompt.",
             SAFE_WORKSPACE_SYNC_NOTE,
+            WORKTREE_DIRTY_SYNC_NOTE,
             CALL_MODE_NOTE,
             "Claude safe mode runs with --permission-mode plan, "
             "--strict-mcp-config, Read/Grep/Glob, and selected read-only Bash tools.",
@@ -407,6 +424,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         notes=(
             "Prompt uses Delegate temp file via Grok --prompt-file; dry-run argv shows <prompt file>.",
             SAFE_WORKSPACE_SYNC_NOTE,
+            WORKTREE_DIRTY_SYNC_NOTE,
             CALL_MODE_NOTE,
             "Tracked runs use --output-format streaming-json for snapshots/run-output; "
             "pass-through uses plain.",
@@ -425,15 +443,15 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
     ),
     "devin": CommandSpec(
         name="devin",
-        summary="Run Cognition Devin CLI in safe, work, or stateless call mode.",
+        summary="Run Cognition Devin CLI in work or stateless call mode.",
         usage=(
             "delegate [--json] [--isolation auto|none|worktree] "
-            "devin {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] "
+            "devin work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] "
             "[--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
             "delegate [--json] devin call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] "
             "[--prompt-file PATH] [prompt...]",
         ),
-        arguments=(_MODE_ARG, _PROMPT_ARG),
+        arguments=(_DEVIN_MODE_ARG, _PROMPT_ARG),
         options=(
             _MODEL_OPTION,
             _REASONING_EFFORT_OPTION,
@@ -446,15 +464,14 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             _PROMPT_FILE_OPTION,
         ),
         examples=(
-            'delegate devin safe "Review this workspace. Do not edit files."',
             'delegate devin work "Implement the scoped fix, run the named check, report changes."',
             "delegate devin call --read-only --prompt-file judge.md",
         ),
         notes=(
             "Prompt uses Delegate temp file via Devin --prompt-file plus -p; dry-run argv shows <prompt file>.",
-            SAFE_WORKSPACE_SYNC_NOTE,
+            WORKTREE_DIRTY_SYNC_NOTE,
             CALL_MODE_NOTE,
-            "Safe and call --read-only pass a Delegate-generated --agent-config deny-list for edit/write/exec and mcp__* plus --permission-mode auto.",
+            "Call --read-only passes a Delegate-generated --agent-config deny-list for edit/write/exec and mcp__* plus --permission-mode auto.",
             "Work and default call mode use --permission-mode dangerous because Devin print mode rejects unapproved edit/exec tools.",
             "Model selection uses --model (alias from devin.models or a raw model ID), the run-input JSON model, or devin.defaultModel in config; unknown models are left to Devin CLI validation.",
             "Reasoning effort is unsupported for Devin in v1.",
@@ -487,11 +504,12 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         examples=(
             'delegate opencode safe "Review this workspace. Do not edit files."',
             'delegate opencode work --agent build "Implement the scoped fix and verify."',
-            "delegate opencode call --read-only --model anthropic/claude-sonnet-4-5 --prompt-file judge.md",
+            "delegate opencode call --read-only --model reviewer --prompt-file judge.md",
         ),
         notes=(
             "Uses opencode run --format json --print-logs; stdout is buffered until completion, while --print-logs stderr remains Delegate-visible.",
             SAFE_WORKSPACE_SYNC_NOTE,
+            WORKTREE_DIRTY_SYNC_NOTE,
             CALL_MODE_NOTE,
             "call mode has no default Delegate timeout; pass --timeout SEC to bound a silent upstream hang.",
             "Work mode emits --auto; safe and call do not.",
@@ -541,6 +559,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         notes=(
             SAFE_WORKSPACE_SYNC_NOTE,
+            WORKTREE_DIRTY_SYNC_NOTE,
             CALL_MODE_NOTE,
             "Droid safe mode stays read-only; work mode uses --skip-permissions-unsafe "
             "and is intentionally no-prompt -- use only in workspaces you trust.",
@@ -556,7 +575,10 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         summary="Resolve a cursor/codex/droid/kimi/claude/grok/devin/opencode invocation and print the planned argv without running it.",
         usage=(
             "delegate [--json] [--isolation auto|none|worktree] "
-            "dry-run {cursor,kimi,claude,grok,devin,opencode} {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] "
+            "dry-run {cursor,kimi,claude,grok,opencode} {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] "
+            "[--progress] [--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
+            "delegate [--json] [--isolation auto|none|worktree] "
+            "dry-run devin work [--model <alias-or-model>] [--reasoning-effort LEVEL] "
             "[--progress] [--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
             "delegate [--json] dry-run {cursor,kimi,claude,grok,devin,opencode} call "
             "[--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] "
@@ -602,7 +624,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             'delegate dry-run cursor work "Refactor the parser"',
             "delegate --json dry-run droid reviewer safe --prompt-file task.md",
             'delegate dry-run grok safe "Review this repo."',
-            'delegate dry-run devin safe "Review this repo."',
+            'delegate dry-run devin work "Plan an implementation run."',
             'delegate dry-run opencode safe "Review this repo."',
             'delegate dry-run claude safe "Review this repo."',
             'delegate dry-run kimi safe "Review this repo."',
@@ -662,7 +684,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         notes=(
             "Provide either a handle or --latest HARNESS, not both.",
-            "Bare harness handles resolve to the latest run; generated commands use numbered aliases.",
+            "Bare harness handles report the resolved run, workspace, and age; resolutions older "
+            "than 24h warn to use --cwd or an explicit handle.",
         ),
         see_also=("runs", "run-output"),
         unsupported_global_options=("--auth-profile",),
@@ -726,7 +749,11 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             OptionSpec("--completion-report", None, "Print the run's completion report."),
             OptionSpec("--stdout", None, "Print captured stdout (defaults to --tail 80)."),
             OptionSpec("--stderr", None, "Print captured stderr (defaults to --tail 80)."),
-            OptionSpec("--tail", "N", "Print only the last N lines of the selected stream."),
+            OptionSpec(
+                "--tail",
+                "N",
+                "Print the last N lines; implies --stdout when no output selector is given.",
+            ),
             OptionSpec(
                 "--max-chars",
                 "N",
@@ -750,11 +777,13 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         notes=(
             "With no selector, prints the best available parent-facing output.",
-            "Bare harness handles resolve to the latest run; generated commands use numbered aliases.",
+            "Bare harness handles report the resolved run, workspace, and age; resolutions older "
+            "than 24h warn to use --cwd or an explicit handle.",
             "Prefer this over piping launch output through tail.",
             "Non-raw stdout/stderr are bounded by line tail and character cap; use --raw only "
             "when you intentionally need the full stream.",
-            "--tail and --max-chars require --stdout or --stderr; completion reports reject them.",
+            "A bare --tail implies --stdout, never --stderr; --max-chars still requires a stream "
+            "selector, and completion reports reject both bounds.",
         ),
         see_also=("snapshot", "runs"),
         unsupported_global_options=("--auth-profile",),
@@ -793,6 +822,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         notes=(
             "Exit codes: 0 all succeeded; 1 any failed/cancelled; 124 timeout.",
             "Dead recorded child pids are treated as terminal failures, not as hangs.",
+            "Bare harness handles report the resolved run, workspace, and age; resolutions older "
+            "than 24h warn to use --cwd or an explicit handle.",
         ),
         see_also=("runs", "snapshot", "run-output", "cancel"),
         unsupported_global_options=("--auth-profile", "--isolation"),
@@ -1508,7 +1539,7 @@ def render_overview_text() -> str:
         "delegate [--json] claude call [--read-only] [--pure] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--output-schema FILE] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} grok {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         "delegate [--json] grok call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} devin {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} devin work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         "delegate [--json] devin call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} opencode {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         "delegate [--json] opencode call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--prompt-file PATH] [prompt...]",
@@ -1524,7 +1555,7 @@ def render_overview_text() -> str:
         "delegate [--json] dry-run claude call [--read-only] [--pure] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--output-schema FILE] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} dry-run grok {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         "delegate [--json] dry-run grok call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} dry-run devin {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} dry-run devin work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         "delegate [--json] dry-run devin call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} dry-run opencode {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         "delegate [--json] dry-run opencode call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--prompt-file PATH] [prompt...]",

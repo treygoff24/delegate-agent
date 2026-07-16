@@ -79,6 +79,38 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertNotIn("snapshotCommand", payload)
         self.assertFalse(call_workspace.exists())
 
+    def test_call_with_repo_local_tmpdir_cleans_its_workspace(self):
+        fake_bin = self.make_fake_bin()
+        env_path = str(fake_bin) + os.pathsep + os.environ.get("PATH", "")
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["droid"]["models"] = {"reviewer": "model-id"}
+        with tempfile.TemporaryDirectory() as root:
+            source = Path(root) / "source"
+            temp_root = source / "tmp"
+            temp_root.mkdir(parents=True)
+            with (
+                mock.patch.dict(os.environ, {"TMPDIR": str(temp_root)}, clear=False),
+                mock.patch.object(tempfile, "tempdir", None),
+            ):
+                parsed = self.delegate.parse_cli(["droid", "reviewer", "call", "hello"])
+                request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+            call_workspace = Path(request.workspace)
+            self.assertTrue(call_workspace.is_relative_to(source))
+            with mock.patch.dict(os.environ, {"PATH": env_path, "FAKE_ECHO_ARGS": "1"}):
+                code, _payload = self.delegate.execute_request(
+                    request,
+                    json_mode=True,
+                    config=config,
+                    pass_through=False,
+                    completion_report_mode="none",
+                    source_workspace=self.delegate.ResolvedWorkspace(str(source), "directory"),
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+
+            self.assertEqual(code, 0)
+            self.assertFalse(call_workspace.exists())
+
     def test_call_missing_binary_cleans_temp_workspace(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
         config["droid"]["models"] = {"reviewer": "model-id"}
@@ -137,6 +169,45 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
             )
         self.assertEqual(code, 0)
         self.assertIs(payload["requestedFast"], False)
+        self.assertNotIn("emptyRetry", payload)
+        self.assertNotIn("resultQuality", payload)
+
+    def test_call_json_reports_empty_retry_only_when_attempted(self):
+        parsed = self.delegate.parse_cli(["codex", "call", "hello"])
+        request = self.delegate.request_from_parsed(
+            parsed, self.delegate.DEFAULT_CONFIG, io.StringIO("")
+        )
+        fake_result = self.delegate.delegate_runner.CallResult(
+            text="",
+            exit_code=0,
+            duration_ms=10,
+            stdout_bytes=0,
+            stderr_bytes=0,
+            text_chars=0,
+            text_truncated=False,
+            result_quality="empty",
+            empty_retry_attempted=True,
+            empty_retry_resolved=False,
+        )
+        with (
+            mock.patch.object(self.delegate, "ensure_binary"),
+            mock.patch.object(
+                self.delegate.delegate_runner, "execute_call", return_value=fake_result
+            ),
+        ):
+            code, payload = self.delegate.execute_request(
+                request,
+                json_mode=True,
+                config=self.delegate.DEFAULT_CONFIG,
+                pass_through=False,
+                completion_report_mode="none",
+                source_workspace=self.delegate.ResolvedWorkspace("<call-temp-cwd>", "directory"),
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["resultQuality"], "empty")
+        self.assertEqual(payload["emptyRetry"], {"attempted": True, "resolved": False})
 
     def _call_temp_dirs(self):
         return set(Path(tempfile.gettempdir()).glob("delegate-call-*"))

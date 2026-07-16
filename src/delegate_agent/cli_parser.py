@@ -28,6 +28,7 @@ from delegate_agent import (
 )
 from delegate_agent import config as delegate_config
 from delegate_agent.constants import (
+    ENGINE_SUPPORTED_MODES,
     ENGINES_PROSE,
     KNOWN_ENGINES,
     MODELESS_ENGINES,
@@ -690,7 +691,9 @@ def parse_modeless_engine(
     if rest and command_help.is_help_token(rest[0]):
         return help_command(json_mode, topic)
     if not rest:
-        raise DelegateError("missing_mode", f"{engine} requires mode: safe, work, or call.")
+        modes = ENGINE_SUPPORTED_MODES[engine]
+        mode_list = f"{', '.join(modes[:-1])}, or {modes[-1]}"
+        raise DelegateError("missing_mode", f"{engine} requires mode: {mode_list}.")
     mode = rest[0]
     if mode.startswith("-"):
         raise DelegateError(
@@ -1464,6 +1467,8 @@ def parse_run_output(rest: list[str], json_mode: bool, cwd: str | None) -> Parse
             "ambiguous_run_output_target",
             "Use either --latest <harness> or an exact handle, not both.",
         )
+    if tail is not None and not (completion_report or stdout_flag or stderr_flag or raw):
+        stdout_flag = True
     default_output = not (completion_report or stdout_flag or stderr_flag or raw)
     if default_output:
         completion_report = True

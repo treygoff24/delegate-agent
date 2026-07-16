@@ -5,6 +5,7 @@ Tests pure functions only; no filesystem mutations.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
@@ -414,20 +415,6 @@ class BuildIsolationContextTests(unittest.TestCase):
 
 
 class GitTimeoutTests(unittest.TestCase):
-    def test_require_clean_source_raises_git_timeout(self):
-        iso = load_isolation()
-        with (
-            mock.patch.object(
-                iso.subprocess,
-                "run",
-                side_effect=subprocess.TimeoutExpired(["git", "status"], 30),
-            ),
-            self.assertRaises(iso.IsolationExecutionError) as ctx,
-        ):
-            iso.require_clean_source("/repo")
-        self.assertEqual(ctx.exception.error, "git_timeout")
-        self.assertIn("git status timed out", ctx.exception.message)
-
     def test_create_persistent_worktree_branch_probe_timeout_is_structured(self):
         iso = load_isolation()
         with (
@@ -459,6 +446,61 @@ class ReexportTests(unittest.TestCase):
         self.assertIn("auto", iso.VALID_ISOLATION_VALUES)
         self.assertIn("none", iso.VALID_ISOLATION_VALUES)
         self.assertIn("worktree", iso.VALID_ISOLATION_VALUES)
+
+
+class SourceRootGuardTests(unittest.TestCase):
+    def test_detects_absolute_relative_and_symlinked_targets(self):
+        iso = load_isolation()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source"
+            source.mkdir()
+            link = root / "source-link"
+            link.symlink_to(source, target_is_directory=True)
+
+            self.assertTrue(iso.target_contains_source_root(source, source))
+            self.assertTrue(
+                iso.target_contains_source_root(os.path.relpath(root, Path.cwd()), source)
+            )
+            self.assertTrue(iso.target_contains_source_root(link, source))
+            self.assertTrue(iso.target_contains_source_root(root, source))
+            existing_child = source / "existing-child"
+            existing_child.mkdir()
+            self.assertFalse(iso.target_contains_source_root(existing_child, source))
+            self.assertFalse(iso.target_contains_source_root(source / "missing-child", source))
+
+    def test_detects_case_variant_source_root_on_casefolding_filesystems(self):
+        iso = load_isolation()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "source"
+            source.mkdir()
+            case_variant = source.with_name("SOURCE")
+            if not case_variant.exists():
+                self.skipTest("filesystem is case-sensitive")
+
+            self.assertTrue(iso.target_contains_source_root(case_variant, source))
+
+    def test_refuses_cleanup_when_existing_paths_cannot_be_compared(self):
+        iso = load_isolation()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "source"
+            target = Path(temp_dir) / "target"
+            source.mkdir()
+            target.mkdir()
+
+            with mock.patch.object(iso.os.path, "samefile", side_effect=OSError("transient")):
+                self.assertTrue(iso.target_contains_source_root(target, source))
+
+    def test_refuses_cleanup_when_root_resolution_fails(self):
+        iso = load_isolation()
+        with mock.patch.object(iso.Path, "resolve", side_effect=RuntimeError("symlink loop")):
+            self.assertTrue(iso.target_contains_source_root("/target", "/source"))
+
+    def test_refuses_cleanup_for_embedded_nul_paths(self):
+        iso = load_isolation()
+        for target, source in (("/target\0bad", "/source"), ("/target", "/source\0bad")):
+            with self.subTest(target=target, source=source):
+                self.assertTrue(iso.target_contains_source_root(target, source))
 
 
 class PromptInstructionImportTests(unittest.TestCase):

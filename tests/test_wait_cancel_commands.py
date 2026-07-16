@@ -154,6 +154,22 @@ class WaitCancelCommandTests(unittest.TestCase):
         self.assertEqual(payload["runs"][0]["alias"], latest_alias)
         self.assertEqual(payload["runs"][0]["resolutionKind"], "latest")
 
+    def test_wait_bare_harness_reports_resolution_workspace_and_stale_warning(self):
+        run_id, alias = self.write_run(status="succeeded")
+        run_path = run_registry.run_directory(self.registry_root, run_id)
+        state = run_registry.load_run_state(self.registry_root, run_id)
+        state["lastActivityAt"] = "2026-05-20T12:00:00Z"
+        run_registry.write_json_atomic(run_path / run_registry.STATE_FILE, state)
+
+        code, out, err = self.run_cli(["--json", "wait", "codex", "--interval", "1"])
+        self.assertEqual(code, 0, err)
+        resolved = json.loads(out)["runs"][0]
+        self.assertEqual(resolved["resolvedRunId"], run_id)
+        self.assertEqual(resolved["resolvedAlias"], alias)
+        self.assertEqual(resolved["resolvedWorkspace"], str(self.workspace))
+        self.assertGreater(resolved["resolvedAgeSeconds"], 24 * 60 * 60)
+        self.assertTrue(any("bare_handle_stale" in warning for warning in resolved["warnings"]))
+
     def test_wait_group_selector_waits_all_matching_runs(self):
         _first_id, first_alias = self.write_run(status="succeeded", group="wave4")
         _other_id, _other_alias = self.write_run(status="failed", group="other")

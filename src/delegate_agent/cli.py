@@ -85,6 +85,7 @@ from delegate_agent.git_utils import capture_git_metadata  # noqa: F401  # re-ex
 from delegate_agent.isolation import (  # noqa: F401  # re-exported for tests
     IsolationContext,
     build_isolation_context,
+    target_contains_source_root,
 )
 from delegate_agent.json_types import JsonObject
 from delegate_agent.prompt_transport import (  # noqa: F401  # CURSOR_PROMPT_REDACTION re-exported for tests
@@ -563,15 +564,33 @@ def make_run_context(
         progress_initial_delay_sec=request.progress_initial_delay_sec,
         progress_interval_sec=request.progress_interval_sec,
         env_overrides=dict(request.env_overrides or {}),
-        fallback_env_overrides=dict(
-            profiles.codex_fallback_env_overrides(request.profile_resolution) or {}
+        fallback_env_overrides=profiles.codex_fallback_child_env_overrides(
+            request.profile_resolution,
+            request.env_overrides,
         ),
         auth_profile=request.auth_profile,
         fallback_auth_profile=request.fallback_auth_profile,
         include_dirty=request.include_dirty,
         group=request.group,
+        call_read_only=request.call_read_only or request.pure,
+        pure=request.pure,
         prompt_instruction_mode=request.prompt_instruction_mode,
     )
+
+
+def _set_child_root_env(request: Request, source_workspace: ResolvedWorkspace) -> None:
+    execution_root = str(Path(request.workspace).resolve(strict=False))
+    source_root = (
+        execution_root
+        if request.mode == MODE_CALL
+        else str(Path(source_workspace.path).resolve(strict=False))
+    )
+    env = {**(request.env_overrides or {}), "DELEGATE_SOURCE_ROOT": source_root}
+    if execution_root != source_root:
+        env["DELEGATE_EXECUTION_ROOT"] = execution_root
+    else:
+        env.pop("DELEGATE_EXECUTION_ROOT", None)
+    request.env_overrides = env
 
 
 def execute_request(
@@ -586,6 +605,7 @@ def execute_request(
     stdout: TextIO,
     stderr: TextIO,
 ) -> tuple[int, JsonObject | None]:
+    _set_child_root_env(request, source_workspace)
     if request.mode == MODE_CALL:
         try:
             if request.engine == "codex":
@@ -646,6 +666,7 @@ def execute_request(
                         agent_config_placeholder=DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
                         manifest_argv=public_argv(request),
                         progress=False,
+                        timeout=request.timeout,
                     )
                 except delegate_runner.RunnerLaunchError as exc:
                     raise DelegateError(exc.error, exc.message) from exc
@@ -669,7 +690,9 @@ def execute_request(
                     agent_config_text=request.agent_config_text,
                     agent_config_placeholder=DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
                     env_overrides=request.env_overrides,
+                    read_only=request.call_read_only,
                     pure=request.pure,
+                    prompt_instruction_mode=request.prompt_instruction_mode,
                     timeout=request.timeout,
                     structured_output=request.output_schema is not None,
                     sensitive_texts=tuple(sensitive_texts),
@@ -715,6 +738,14 @@ def execute_request(
                             seen.add(warning)
                             merged.append(warning)
                     payload["warnings"] = merged
+                if result.empty_retry_attempted:
+                    payload["resultQuality"] = result.result_quality
+                    payload["emptyRetry"] = {
+                        "attempted": True,
+                        "resolved": result.empty_retry_resolved,
+                    }
+                    if result.stderr_tail:
+                        payload["stderrTail"] = result.stderr_tail
                 reasoning.add_reasoning_payload_fields(payload, request)
                 run_metadata.add_speed_payload_fields(payload, request)
                 if result.exit_code != 0:
@@ -739,6 +770,11 @@ def execute_request(
             return result.exit_code, None
         finally:
             if request.cleanup_workspace:
+                if target_contains_source_root(request.workspace, source_workspace.path):
+                    raise DelegateError(
+                        "source_root_guard",
+                        "Refusing to remove a call workspace that is or contains the source root.",
+                    )
                 shutil.rmtree(request.workspace, ignore_errors=True)
     if request.engine == "codex":
         profiles.preflight_codex_request(request, config.get("codex", {}))
@@ -769,6 +805,7 @@ def execute_request(
             raise DelegateError(exc.error, exc.message) from exc
 
     with safe_isolated_request(request) as isolated_request:
+        _set_child_root_env(isolated_request, source_workspace)
         ensure_binary(
             isolated_request.argv,
             engine=isolated_request.engine,

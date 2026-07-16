@@ -486,6 +486,7 @@ class CodexProfileExecutionTests(unittest.TestCase):
                 f'echo "${{CODEX_HOME:-}}" >> "{attempts}"\n'
                 f'if [ "${{CODEX_HOME}}" = "{work}" ]; then\n'
                 '  printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}\'\n'
+                "  printf '%s\\n' '{\"type\":\"turn.completed\"}'\n"
                 "  exit 0\n"
                 "fi\n"
                 'echo "You exceeded your current quota usage limit" >&2\n'
@@ -546,6 +547,7 @@ class CodexProfileExecutionTests(unittest.TestCase):
                 f'echo "${{CODEX_HOME:-}}" >> "{attempts}"\n'
                 f'if [ "${{CODEX_HOME}}" = "{work}" ]; then\n'
                 '  printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}\'\n'
+                "  printf '%s\\n' '{\"type\":\"turn.completed\"}'\n"
                 "  exit 0\n"
                 "fi\n"
                 "printf '%s\\n' '{\"type\":\"turn.started\"}'\n"
@@ -622,6 +624,10 @@ class CodexProfileExecutionTests(unittest.TestCase):
                     config,
                     dry_run=False,
                 )
+            self.delegate._set_child_root_env(
+                request,
+                self.delegate.ResolvedWorkspace(repo.name, "git"),
+            )
             registry_root = self.registry.ensure_registry(Path(repo.name), workspace_kind="git")
             run_id, alias = self.registry.register_run(registry_root, harness="codex")
             ctx = self.delegate.make_run_context(
@@ -632,6 +638,7 @@ class CodexProfileExecutionTests(unittest.TestCase):
                 source_workspace=self.delegate.ResolvedWorkspace(repo.name, "git"),
             )
             self.assertEqual(ctx.fallback_env_overrides, {})
+            self.assertIn("DELEGATE_SOURCE_ROOT", ctx.env_overrides)
             exit_code, payload = self.runner.execute_tracked(
                 request.argv,
                 repo.name,
@@ -662,6 +669,42 @@ class CodexProfileExecutionTests(unittest.TestCase):
             assert overrides is not None
             self.assertEqual(overrides["CODEX_HOME"], work)
             self.assertEqual(overrides["CODEX_PROXY_URL"], "http://work-proxy")
+
+    def test_child_environment_drops_ambient_delegate_roots(self):
+        with mock.patch.dict(
+            os.environ,
+            {"DELEGATE_SOURCE_ROOT": "/outer/source", "DELEGATE_EXECUTION_ROOT": "/outer/run"},
+            clear=False,
+        ):
+            env = self.profiles.child_environment()
+
+        self.assertNotIn("DELEGATE_SOURCE_ROOT", env)
+        self.assertNotIn("DELEGATE_EXECUTION_ROOT", env)
+
+    def test_fallback_environment_keeps_authoritative_delegate_roots(self):
+        resolution = self.profiles.ProfileResolution(
+            name="personal",
+            source="default",
+            env={
+                "CODEX_HOME": "/personal",
+                "DELEGATE_SOURCE_ROOT": "/profile/source",
+                "DELEGATE_EXECUTION_ROOT": "/profile/run",
+            },
+            codex_home="/personal",
+            codex_fallback_home="/work",
+        )
+        with mock.patch.object(self.profiles, "codex_homes_same_account", return_value=False):
+            overrides = self.profiles.codex_fallback_child_env_overrides(
+                resolution,
+                {
+                    "DELEGATE_SOURCE_ROOT": "/actual/source",
+                    "DELEGATE_EXECUTION_ROOT": "/actual/run",
+                },
+            )
+
+        self.assertEqual(overrides["CODEX_HOME"], "/work")
+        self.assertEqual(overrides["DELEGATE_SOURCE_ROOT"], "/actual/source")
+        self.assertEqual(overrides["DELEGATE_EXECUTION_ROOT"], "/actual/run")
 
     def test_fallback_same_account_normalization_handles_home_vars_and_symlinks(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1047,7 +1090,11 @@ class ProfilePhase2CliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(payload["authProfile"], "work")
             self.assertTrue(payload["isolatedWorkspace"])
-            self.assertEqual(env_out.read_text(encoding="utf-8").splitlines(), ["work-pointer"])
+            self.assertEqual(
+                env_out.read_text(encoding="utf-8").splitlines(),
+                ["work-pointer", "work-pointer"],
+            )
+            self.assertEqual(payload["emptyRetry"], {"attempted": True, "resolved": False})
 
     def test_auth_profile_override_reaches_persistent_worktree_cursor_child(self):
         repo = make_git_repo()

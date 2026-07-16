@@ -386,6 +386,7 @@ Controls local run recording.
 - `models`: optional map of local aliases to Devin model IDs for `--model` / JSON `model`. Alias keys must not collide with mode names, equal the engine's own name, or start with `-`.
 - `defaultReasoningEffort`: not supported in v1; must be `null`.
 - Discover live Devin model IDs with `delegate models devin --live`.
+- Devin safe mode is rejected during preflight because filesystem surveys may require generic `exec`, which Delegate cannot permit without weakening the read-only boundary. Use another safe Harness for filesystem review.
 
 ### `opencode`
 
@@ -491,7 +492,7 @@ Supported boolean policy keys: `networkAccess`, `webSearch`, `bypassApprovalsAnd
 ```
 
 Allowed values are `auto`, `none`, and `worktree`. For Cursor, Claude, Grok,
-Devin, OpenCode, Droid, and Kimi safe mode, an effective value of `none` is normalized to `auto`
+OpenCode, Droid, and Kimi safe mode, an effective value of `none` is normalized to `auto`
 because those safe contracts depend on Delegate's temporary workspace/config
 boundary. Explicit per-run CLI/JSON `none` requests also emit a warning; a
 config default is normalized without a separate per-run warning. Codex safe can
@@ -499,7 +500,7 @@ use `none` because the Codex read-only sandbox remains active.
 
 Embedded defaults:
 
-- `safe`: `auto`. Cursor, Claude, Grok, Devin, OpenCode, Droid, Codex, and Kimi safe use temporary workspace isolation by default.
+- `safe`: `auto`. Cursor, Claude, Grok, OpenCode, Droid, Codex, and Kimi safe use temporary workspace isolation by default. Devin safe is unsupported.
 - `work`: `none`. Work mode runs in the real workspace unless you opt into worktree isolation.
 
 ### `worktrees`

@@ -397,10 +397,20 @@ def build_devin_argv(
     pure: bool = False,
 ) -> list[str]:
     _reject_pure("devin", mode, pure)
+    if mode == MODE_SAFE:
+        raise DelegateError(
+            "unsupported_mode",
+            "Devin safe mode is unsupported: Devin may perform read-only filesystem "
+            "surveys through the generic exec tool, which Delegate cannot allow without "
+            "weakening the read-only boundary. Use another harness in safe mode for "
+            "filesystem review.",
+        )
+    if mode not in (MODE_WORK, MODE_CALL):
+        validate_mode(mode)
     argv = [str(devin["binary"])]
     if model:
         argv.extend(["--model", model])
-    read_only = mode == MODE_SAFE or (mode == MODE_CALL and call_read_only)
+    read_only = mode == MODE_CALL and call_read_only
     if read_only:
         argv.extend(
             [
@@ -410,10 +420,8 @@ def build_devin_argv(
                 "auto",
             ]
         )
-    elif mode in (MODE_WORK, MODE_CALL):
-        argv.extend(["--permission-mode", "dangerous"])
     else:
-        validate_mode(mode)
+        argv.extend(["--permission-mode", "dangerous"])
     if prompt_transport != PROMPT_TRANSPORT_FILE:
         raise DelegateError(
             "invalid_prompt_transport",

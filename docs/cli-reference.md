@@ -103,12 +103,13 @@ warning plus suggested review commands, but does not fail solely because commits
 exist. Validation rejects `--forbid-commit` outside `work` mode, and explicit
 `--isolation none --forbid-commit` remains invalid.
 
-`--include-dirty` is an opt-in launch flag for `work` mode with persistent
-worktree isolation. It copies uncommitted tracked changes and untracked
-non-ignored files from the source checkout into the new persistent worktree
-before the child starts. Gitignored files remain excluded, and external symlinks
-are blocked with the same protections used by safe-mode workspace sync. Without
-the flag, persistent worktree launches still require a clean source checkout.
+Work-mode persistent worktrees automatically copy uncommitted tracked changes
+and untracked non-ignored files from a dirty source checkout before the child
+starts. Gitignored files remain excluded, and external symlinks are blocked with
+the same protections used by safe-mode workspace sync. Automatic sync emits a
+`dirty_source_auto_included` warning with tracked-modified and untracked counts.
+`--include-dirty` remains an explicit launch flag and is a no-op when the source
+is already clean.
 JSON and text completion output report `includeDirty: true` / `syncedFiles`.
 `run --input-json` accepts the equivalent boolean field `includeDirty`.
 
@@ -118,11 +119,9 @@ A few boundaries are worth stating explicitly:
   repo history but also matched by a `.gitignore` rule is part of the repository
   and is synced like any other tracked file; `--include-dirty` excludes only
   untracked gitignored paths, not tracked ones.
-- **`--include-dirty` skips the submodule-cleanliness portion of the clean
-  check.** Without the flag, the preflight requires a clean source checkout
-  including submodule state; with the flag, the entire clean-source check is
-  skipped, so dirty submodules do not block the launch and submodule
-  working-tree state is not mirrored.
+- **Dirty submodules fail preflight.** Delegate auto-syncs ordinary tracked and
+  untracked non-ignored source changes, but cannot safely reproduce dirty
+  submodule state, so it refuses the launch until that submodule is clean.
 - **Keep secrets out of hardlinks.** A hardlink at a non-ignored path to
   gitignored content is indistinguishable from a regular file and will sync by
   content; `--include-dirty` trusts every non-ignored path. Path-based exclusion
@@ -166,7 +165,7 @@ Examples:
 
 ```bash
 delegate codex safe "Review this repo for regressions; report file/line/severity."
-delegate codex safe --model gpt-5.5 "Review this repo for regressions; report file/line/severity."
+delegate codex safe --model reviewer "Review this repo for regressions; report file/line/severity."
 delegate codex safe --model my-alias --reasoning-effort medium --fast "Explore likely causes."
 delegate codex work "Implement the scoped task; report changed files and tests."
 delegate codex call "Summarize this context in three bullets."
@@ -195,7 +194,7 @@ Examples:
 
 ```bash
 delegate claude safe "Review this repo for regressions; report file/line/severity."
-delegate claude work --model claude-opus-4-6 "Implement the scoped task; report changed files and tests."
+delegate claude work --model implementer "Implement the scoped task; report changed files and tests."
 delegate claude call "Summarize this context in three bullets."
 delegate --isolation worktree claude work "Implement the feature in a persistent worktree."
 ```
@@ -251,9 +250,9 @@ delegate [--json] opencode call [--read-only] [--model <alias-or-model>] [--reas
   {
     "opencode": {
       "models": {
-        "sonnet": "anthropic/claude-sonnet-4-5",
-        "sonnet-high": {
-          "model": "anthropic/claude-sonnet-4-5",
+        "reviewer": "provider/model",
+        "reviewer-high": {
+          "model": "provider/model",
           "variant": "high"
         }
       }
@@ -280,7 +279,7 @@ Examples:
 ```bash
 delegate opencode safe "Review this repo for regressions; report file/line/severity."
 delegate opencode work --agent build "Implement the scoped task; report changed files and tests."
-delegate opencode call --read-only --model anthropic/claude-sonnet-4-5 --prompt-file rubric.md
+delegate opencode call --read-only --model reviewer --prompt-file rubric.md
 delegate --isolation worktree opencode work "Implement the feature in a persistent worktree."
 ```
 
@@ -436,7 +435,9 @@ On expiry Delegate terminates the whole child process group and returns
 `call_timeout` with exit code 1.
 
 `--read-only`, `--pure`, and `--timeout` apply only to `call`; passing them with
-`safe`/`work` is rejected.
+`safe`/`work` is rejected. Empty-result retry applies to safe runs and read-only
+calls when the prompt can be safely extended; write-capable, pure, and verbatim
+calls are not retried.
 Because the child call is stateless, `--isolation`, `--pass-through`,
 `--progress`, `--forbid-commit`, and markdown completion reports are rejected.
 An ordinary call also rejects `--cwd`.
@@ -451,7 +452,7 @@ delegate --cwd /path/to/project --group wf_0123abcdef45 codex call "Summarize th
 ```
 
 The child still executes in an empty temporary cwd; `--cwd` does not give it the
-project tree. Dry-run accepts the same combination for faithful planning but
+project tree or leak it through Delegate root metadata. Dry-run accepts the same combination for faithful planning but
 creates no run entry. Use `safe` or `work` when the child should see the project
 tree.
 
@@ -499,7 +500,7 @@ Typical dry-run JSON fields:
 
 When a profile is active, dry-run and completion payloads add `authProfile` (the resolved profile name) and, when a Codex fallback profile is configured, `fallbackProfile`. Dry-run also adds `profileEnv` (the injected env map, with values redacted). These keys are omitted when no profile is active.
 
-For Cursor, Claude, Grok, Devin, OpenCode, Droid, and Kimi safe mode, an explicit `--isolation none`
+For Cursor, Claude, Grok, OpenCode, Droid, and Kimi safe mode, an explicit `--isolation none`
 is normalized to `auto` with a warning because those safe contracts depend on
 the temporary workspace/config boundary. Codex safe can use `none` because Codex
 still runs with its read-only sandbox.
@@ -585,9 +586,10 @@ Supported input keys:
 
 - `engine`: `cursor`, `droid`, `codex`, `claude`, `grok`, `devin`, `opencode`, or `kimi`.
 - `mode`: `safe`, `work`, or `call`.
+- The `devin` engine rejects `safe` with `unsupported_mode` during preflight. Devin filesystem surveys may require generic `exec`, which Delegate cannot allow without weakening the read-only boundary; use another safe Harness for filesystem review.
 - `model`: optional alias-or-id for every engine. Resolved against `<engine>.models` when it matches an alias; otherwise passed through as a raw model ID. For Droid, a positional alias remains alias-only/strict; JSON/`--model` is alias-or-id. Cursor honors an explicit model even when it differs from `cursor.defaultModel`.
 - `cwd`: optional workspace path. Git directories resolve to the repo root. Omit it for `mode: "call"`, which always uses an empty temporary cwd.
-- `isolation`: optional `auto`, `none`, or `worktree`. `null` is invalid. `mode: "call"` rejects isolation. For Cursor, Claude, Grok, Devin, OpenCode, Droid, and Kimi safe mode, `none` is normalized to `auto` with a warning.
+- `isolation`: optional `auto`, `none`, or `worktree`. `null` is invalid. `mode: "call"` rejects isolation. For Cursor, Claude, Grok, OpenCode, Droid, and Kimi safe mode, `none` is normalized to `auto` with a warning.
 - `reasoningEffort`: optional non-empty effort string. It overrides provider `defaultReasoningEffort` for that JSON run.
 - `fast`: optional Codex-only boolean or `null`. `true` requests Fast, `false` explicitly requests Standard, and `null`/omission inherits Codex configuration.
 - `progress`: optional boolean. `true` enables parent progress heartbeats on stderr; `false` disables them even when `progress.enabled` is true in config. When omitted, config `progress.enabled` applies (default `false`). `mode: "call"` rejects progress.
@@ -763,7 +765,7 @@ Codex usage-limit fallback fires, the completion payload also includes
 `codexAuthFallback` metadata (reason, the primary and fallback profile names,
 both exit codes, and a redacted primary stderr tail).
 
-Snapshot JSON uses schema `delegate.snapshot.v1` and includes fields such as `alias`, `runId`, `harness`, `status`, `rawStatus`, `effectiveStatus`, `staleReason`, `nextActions`, `cwd`, `executionCwd`, `assistantText`, `recentEvents`, `warnings`, `exitCode`, reasoning metadata, terminal metadata, and isolation/worktree metadata when applicable. Inspection commands do not rewrite a stale run's recorded state; they expose the raw recorded status plus the effective status computed from the current PID check. Run-output and worktree show output include `requestedHandle`, `resolvedHandle`, and `resolutionKind` (`literal`, `latest`, or `latest_model`) when a handle resolves indirectly.
+Snapshot JSON uses schema `delegate.snapshot.v1` and includes fields such as `alias`, `runId`, `harness`, `status`, `rawStatus`, `effectiveStatus`, `staleReason`, `nextActions`, `cwd`, `executionCwd`, `assistantText`, `recentEvents`, `warnings`, `exitCode`, reasoning metadata, terminal metadata, and isolation/worktree metadata when applicable. Inspection commands do not rewrite a stale run's recorded state; they expose the raw recorded status plus the effective status computed from the current PID check. Run-output and worktree show output include `requestedHandle`, `resolvedHandle`, and `resolutionKind` (`literal`, `latest`, or `latest_model`) when a handle resolves indirectly. For bare harness handles, snapshot, run-output, and wait also report `resolvedRunId`, `resolvedAlias`, `resolvedWorkspace`, `resolvedAge`, and `resolvedAgeSeconds`. Resolutions older than 24 hours add a `bare_handle_stale` warning suggesting `--cwd` or an explicit handle.
 
 Tracked run envelopes include `completionReportWritten`, `completionReportSource`
 (`child`, `delegate_synthesized`, `stdout_recovery`, or `null`), and
@@ -772,6 +774,15 @@ Tracked run envelopes include `completionReportWritten`, `completionReportSource
 exit-code-derived status.
 
 Run-output JSON uses schema `delegate.run-output.v1` and returns selected completion report, stdout, and/or stderr content. By default, secret-like strings are redacted unless `--no-redact` is supplied. Tracked runs finish in one of the terminal statuses `succeeded`, `failed`, or `cancelled`; explicit harness cancellation/error terminal events override an exit-zero child status.
+
+Safe runs and read-only call runs that exit successfully with `resultQuality=empty`
+retry once with the original prompt plus a plain-text final-answer instruction.
+Pure and slash pass-through prompts, and write-capable calls, do not retry. Retried
+envelopes add `emptyRetry: {attempted, resolved}`; runs that do not retry omit the
+field. If the second attempt is also empty, the run remains successful and honest
+with `resultQuality=empty`, and emits an
+`empty_success_retry` warning. Tracked safe runs retain both attempts in their
+stdout/stderr logs.
 
 `delegate wait` blocks until every selected run reaches terminal state. Defaults:
 `--interval 3`, minimum interval `1`, and `--timeout 3600`. Exit codes are `0`
@@ -819,9 +830,10 @@ selectors are preserved. `--stdout` or `--stderr` without `--tail` or `--raw`
 defaults to a bounded `--tail 80` and a character cap (default 60000); use
 `--max-chars N` to override the cap. `--raw` returns the full stream with no
 line or character bounds, includes `rawOutputBytes` in JSON metadata, and cannot
-be combined with `--tail` or `--max-chars`. `--tail` and `--max-chars` require
-`--stdout` or `--stderr`; Delegate rejects them when only `--completion-report`
-is selected.
+be combined with `--tail` or `--max-chars`. A bare `--tail N` implies
+`--stdout` when no output selector is supplied; it never includes stderr.
+`--max-chars` still requires `--stdout` or `--stderr`, and Delegate rejects
+either bound when only `--completion-report` is selected.
 
 When `completion-report.md` is absent, `run-output --completion-report` makes a
 bounded best-effort attempt to recover an explicit final response from the

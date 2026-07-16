@@ -31,12 +31,15 @@ from delegate_agent.constants import (
     ENGINE_CAPABILITIES,
     KNOWN_ENGINES,
     MODE_CALL,
+    MODE_ORDER,
     MODE_SAFE,
     MODE_WORK,
     MODEL_SUMMARY_ENGINES,
     PROMPT_ENFORCED_SAFE_ENGINES,
     PROMPT_INSTRUCTION_MODE_SLASH,
     PROMPT_INSTRUCTION_MODE_WRAPPED,
+    engine_mode_display,
+    engine_modes,
     pure_call_supported,
 )
 from delegate_agent.errors import EXIT_OK, DelegateError
@@ -430,10 +433,10 @@ def models_summary_payload(
         entry: JsonObject = {
             "alias": engine,
             "provider": engine,
-            "command": f"delegate {engine} {{safe,work,call}}",
+            "command": f"delegate {engine} {engine_mode_display(engine)}",
             "available": True,
-            "safeSupported": True,
-            "workSupported": True,
+            "safeSupported": "safe" in engine_modes(engine),
+            "workSupported": "work" in engine_modes(engine),
             "defaultModel": default_model
             if isinstance(default_model, str) and default_model
             else None,
@@ -458,10 +461,10 @@ def models_summary_payload(
                 entry = {
                     "alias": alias,
                     "provider": "droid",
-                    "command": f"delegate droid {shlex.quote(alias)} {{safe,work,call}}",
+                    "command": f"delegate droid {shlex.quote(alias)} {engine_mode_display('droid')}",
                     "available": isinstance(model_id, str) and bool(model_id),
-                    "safeSupported": True,
-                    "workSupported": True,
+                    "safeSupported": "safe" in engine_modes("droid"),
+                    "workSupported": "work" in engine_modes("droid"),
                     "model": model_id if isinstance(model_id, str) else None,
                 }
                 entry.update(
@@ -484,9 +487,9 @@ def models_summary_payload(
             entry = {
                 "alias": alias,
                 "provider": engine,
-                "command": f"delegate {engine} {{safe,work,call}} --model {shlex.quote(alias)}",
-                "safeSupported": True,
-                "workSupported": True,
+                "command": f"delegate {engine} {engine_mode_display(engine)} --model {shlex.quote(alias)}",
+                "safeSupported": "safe" in engine_modes(engine),
+                "workSupported": "work" in engine_modes(engine),
             }
             entry.update(_summary_model_fields(engine, model_id))
             entry.update(
@@ -723,7 +726,6 @@ def describe_payload(
         workspace="<workspace>",
         policy=grok_work_policy,
     )
-    devin_safe_argv = _devin_describe_argv(devin, mode=MODE_SAFE)
     devin_work_argv = _devin_describe_argv(devin, mode=MODE_WORK)
     opencode_safe_argv = _opencode_describe_argv(
         opencode,
@@ -794,7 +796,8 @@ def describe_payload(
                 "Reported as promptInstructionMode in run metadata."
             ),
             "safeModeAllowed": {
-                engine: engine not in PROMPT_ENFORCED_SAFE_ENGINES for engine in KNOWN_ENGINES
+                engine: engine != "devin" and engine not in PROMPT_ENFORCED_SAFE_ENGINES
+                for engine in KNOWN_ENGINES
             },
             "callReadOnlyAllowed": False,
         },
@@ -818,6 +821,18 @@ def describe_payload(
         "worktrees": {
             "dataHome": config["worktrees"]["dataHome"],
             "autoPrune": config["worktrees"]["autoPrune"],
+            "dirtySource": {
+                "behavior": "Persistent worktree work runs auto-include tracked edits and untracked non-ignored files before child launch.",
+                "preLaunchDisclosure": "stderr reports tracked-modified and untracked counts plus up to five example paths.",
+                "submodules": "Dirty submodules cannot be synced; commit or stash them, or use --isolation none.",
+            },
+        },
+        "completionEnvelope": {
+            "emptyRetry": "Additive field for attempted empty-result retries: attempted and resolved.",
+        },
+        "childEnvironment": {
+            "DELEGATE_SOURCE_ROOT": "Resolved source workspace root.",
+            "DELEGATE_EXECUTION_ROOT": "Child execution root when isolated; omitted for direct work mode.",
         },
         "workflows": {
             "registry": ".delegate/workflows/<wfId>/",
@@ -1019,12 +1034,11 @@ def describe_payload(
                 ],
             },
             "devin": {
-                "safe": devin_safe_argv,
+                "safe": [],
+                "safeSupported": False,
                 "safeNotes": [
-                    SAFE_WORKSPACE_SYNC_NOTE,
-                    "Uses Devin --prompt-file in print mode; Delegate materializes the effective prompt in a temp file.",
-                    "Safe mode passes a Delegate-generated --agent-config that denies edit/write/exec and mcp__* while using --permission-mode auto.",
-                    "Devin safe mode allows slash passthrough because read-only enforcement is argv-level.",
+                    "Devin safe mode is unsupported because filesystem surveys may require the generic exec tool, which Delegate cannot allow without weakening the read-only boundary.",
+                    "Use another harness in safe mode for filesystem review.",
                 ],
                 "work": devin_work_argv,
                 "workNotes": [
@@ -1272,7 +1286,7 @@ def emit_describe(
     print(f"config: {payload['configPath']} ({payload['configSource']})", file=stdout)
     print(f"runtime: {payload['runtime']['modulePath']}", file=stdout)
     print(f"engines: {', '.join(KNOWN_ENGINES)}", file=stdout)
-    print("modes: safe, work", file=stdout)
+    print(f"modes: {', '.join(MODE_ORDER)}", file=stdout)
     print("prompt sources: direct, --prompt-file, stdin", file=stdout)
     print("global options must appear before the subcommand", file=stdout)
     return EXIT_OK
@@ -1316,7 +1330,6 @@ Good defaults:
   delegate claude work "Implement the scoped fix, run the named check, and report changed files."
   delegate grok safe "Review this workspace. Do not edit files."
   delegate grok work "Implement the scoped fix, run the named check, and report changed files."
-  delegate devin safe "Review this workspace. Do not edit files."
   delegate devin work "Implement the scoped fix, run the named check, and report changed files."
   delegate kimi safe "Review this repo for regressions; report file/line/severity."
   delegate kimi work "Implement the scoped task; report changed files and tests."
@@ -1355,8 +1368,7 @@ Grok:
 
 Devin:
   - Uses Devin CLI print mode with --prompt-file and -p; Delegate materializes the effective prompt in a temp file.
-  - {SAFE_WORKSPACE_SYNC_NOTE}
-  - Safe and call --read-only pass a Delegate-generated --agent-config deny-list for edit/write/exec and mcp__* plus --permission-mode auto.
+  - Call --read-only passes a Delegate-generated --agent-config deny-list for edit/write/exec and mcp__* plus --permission-mode auto.
   - Work and default call mode use --permission-mode dangerous because Devin print mode rejects unapproved edit/exec tools.
   - Model selection uses --model (alias from devin.models or a raw model ID), optional JSON input model, or devin.defaultModel; Delegate lets Devin validate unknown model names.
   - Reasoning effort is unsupported for Devin in v1.

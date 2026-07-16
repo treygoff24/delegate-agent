@@ -10,6 +10,24 @@ from tests.execution_test_base import ExecutionTestBase
 
 
 class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
+    def test_partial_cleanup_refuses_source_root_target(self):
+        with tempfile.TemporaryDirectory() as source_root:
+            run_path = Path(source_root) / "run"
+            run_path.mkdir()
+            snapshot_path = run_path / self.delegate.run_registry.SNAPSHOT_FILE
+            self.delegate.run_registry.write_json_atomic(snapshot_path, {"ok": False})
+            with mock.patch.object(self.delegate.worktree_execution, "_run_git") as run_git:
+                self.delegate.worktree_execution._cleanup_partial_worktree(
+                    source_root,
+                    source_root,
+                    "delegate/cursor-guarded",
+                    run_path,
+                    stderr=io.StringIO(),
+                )
+            run_git.assert_not_called()
+            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            self.assertEqual(snapshot["cleanupRefused"], "source_root_guard")
+
     def test_prelaunch_failure_inspectable_via_snapshot(self):
         """Pre-launch worktree creation failure is inspectable via delegate snapshot main()."""
         with (
@@ -582,7 +600,7 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
 
     # -- Finding: sync failure mid-include-dirty tears down worktree, no child --
 
-    def test_include_dirty_sync_failure_tears_down_worktree_and_never_launches_child(self):
+    def test_auto_dirty_sync_failure_tears_down_worktree_and_never_launches_child(self):
         """When sync_git_dirty_snapshot fails after the persistent worktree is
         created, the fail-clean branch records a failed snapshot, tears down the
         partial worktree, and the child is never launched."""
@@ -650,7 +668,6 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
                 dry_run=request.dry_run,
                 workspace_kind=request.workspace_kind,
                 isolation_context=request.isolation_context,
-                include_dirty=True,
             )
 
             executed_tracked = {"called": False}

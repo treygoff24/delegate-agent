@@ -171,6 +171,7 @@ class Request:
     fallback_auth_profile: str | None = None
     cleanup_workspace: bool = False
     include_dirty: bool = False
+    call_read_only: bool = False
     group: str | None = None
     workflow_agent_key: str | None = None
     prompt_instruction_mode: str = PROMPT_INSTRUCTION_MODE_WRAPPED

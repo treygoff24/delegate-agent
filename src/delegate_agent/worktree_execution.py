@@ -25,9 +25,9 @@ from delegate_agent.isolation import (
     plan_branch_name,
     plan_worktree_path,
     prepend_persistent_worktree_context,
-    require_clean_source,
     require_valid_head,
     short_run_id,
+    target_contains_source_root,
     worktrees_data_home,
 )
 from delegate_agent.json_types import JsonObject
@@ -75,6 +75,10 @@ class PersistentWorktreePreflight:
     source_head_ref: str | None
     source_branch: str | None
     registry_root: Path
+    tracked_dirty_files: int
+    untracked_files: int
+    dirty_example_paths: tuple[str, ...]
+    dirty_snapshot: safe_workspace.DirtySyncSnapshot
 
 
 @dataclass
@@ -144,11 +148,27 @@ def _validate_persistent_worktree_request(
             "--pass-through is not supported with persistent worktree runs (work mode + effective worktree isolation).",
         )
 
-    if not request.include_dirty:
-        try:
-            require_clean_source(source_git_root)
-        except IsolationExecutionError as exc:
-            raise PersistentWorktreeError(exc.error, exc.message) from exc
+    try:
+        dirty_snapshot = safe_workspace.dirty_sync_snapshot(source_git_root)
+        tracked_dirty_files = len(dirty_snapshot.diff_names)
+        untracked_files = len(dirty_snapshot.untracked_names)
+        dirty_submodules = safe_workspace.dirty_submodule_paths(source_git_root)
+        dirty_example_paths = dirty_snapshot.example_paths
+    except Exception as exc:
+        raise PersistentWorktreeError(
+            getattr(exc, "error", "dirty_source_check_failed"),
+            getattr(exc, "message", str(exc)),
+        ) from exc
+    if dirty_submodules:
+        paths = ", ".join(repr(path) for path in dirty_submodules[:5])
+        omitted = max(len(dirty_submodules) - 5, 0)
+        suffix = f"; {omitted} more omitted" if omitted else ""
+        raise PersistentWorktreeError(
+            "dirty_source_workspace",
+            "Submodule dirt cannot be synced into persistent worktree isolation "
+            f"({paths}{suffix}); Git's diff/apply snapshot does not reproduce gitlink pointer updates. "
+            "Commit or stash the submodule changes, or use --isolation none.",
+        )
 
     execution.binary_validator(request.argv, request.engine)
 
@@ -170,6 +190,10 @@ def _validate_persistent_worktree_request(
         source_head_ref=current_head_ref,
         source_branch=current_branch,
         registry_root=registry_root,
+        tracked_dirty_files=tracked_dirty_files,
+        untracked_files=untracked_files,
+        dirty_example_paths=dirty_example_paths,
+        dirty_snapshot=dirty_snapshot,
     )
 
 
@@ -224,15 +248,26 @@ def _build_persistent_worktree_run_context(
         forbid_commit=request.forbid_commit,
         progress_initial_delay_sec=request.progress_initial_delay_sec,
         progress_interval_sec=request.progress_interval_sec,
-        env_overrides=dict(request.env_overrides or {}),
-        fallback_env_overrides=dict(
-            profiles.codex_fallback_env_overrides(request.profile_resolution) or {}
+        env_overrides={
+            **(request.env_overrides or {}),
+            "DELEGATE_SOURCE_ROOT": str(Path(execution.source_workspace.path).resolve()),
+            "DELEGATE_EXECUTION_ROOT": str(Path(worktree_path).resolve()),
+        },
+        fallback_env_overrides=profiles.codex_fallback_child_env_overrides(
+            request.profile_resolution,
+            {
+                **(request.env_overrides or {}),
+                "DELEGATE_SOURCE_ROOT": str(Path(execution.source_workspace.path).resolve()),
+                "DELEGATE_EXECUTION_ROOT": str(Path(worktree_path).resolve()),
+            },
         ),
         auth_profile=request.auth_profile,
         fallback_auth_profile=request.fallback_auth_profile,
-        include_dirty=request.include_dirty,
+        include_dirty=bool(creation_context.get("includeDirty")),
         synced_files=int(creation_context.get("syncedFiles") or 0),
         group=request.group,
+        call_read_only=request.call_read_only or request.pure,
+        pure=request.pure,
         prompt_instruction_mode=request.prompt_instruction_mode,
     )
 
@@ -365,22 +400,48 @@ def _create_persistent_worktree_or_record_failure(
             registration.worktree_path,
             preflight.base_oid,
         )
-        if execution.request.include_dirty:
-            synced_files, warnings = safe_workspace.sync_git_dirty_snapshot(
-                preflight.source_git_root,
-                registration.worktree_path,
+        auto_include_dirty = not execution.request.include_dirty and (
+            preflight.tracked_dirty_files > 0 or preflight.untracked_files > 0
+        )
+        if auto_include_dirty:
+            examples = ", ".join(repr(path) for path in preflight.dirty_example_paths[:5])
+            print(
+                "Auto-including dirty source into persistent worktree: "
+                f"{preflight.tracked_dirty_files} tracked-modified and "
+                f"{preflight.untracked_files} untracked file(s). "
+                f"Examples: {examples}.",
+                file=execution.stderr,
             )
+        if execution.request.include_dirty or auto_include_dirty:
+            synced_files, tracked_files, untracked_files, warnings = (
+                safe_workspace.sync_git_dirty_snapshot(
+                    preflight.source_git_root,
+                    registration.worktree_path,
+                    snapshot=preflight.dirty_snapshot,
+                )
+            )
+            registration.creation_context["includeDirty"] = True
             registration.creation_context["syncedFiles"] = synced_files
-            registration.creation_context["includeDirtyWarnings"] = list(warnings)
-            if warnings:
+            sync_warnings = list(warnings)
+            if auto_include_dirty:
+                sync_warnings.insert(
+                    0,
+                    "dirty_source_auto_included: "
+                    f"synced {tracked_files} tracked-modified and {untracked_files} "
+                    "untracked file(s).",
+                )
+            registration.creation_context["includeDirtyWarnings"] = sync_warnings
+            if sync_warnings:
                 registration.pre_ctx = replace(
                     registration.pre_ctx,
-                    warnings=(*registration.pre_ctx.warnings, *warnings),
+                    warnings=(*registration.pre_ctx.warnings, *sync_warnings),
+                    include_dirty=True,
                     synced_files=synced_files,
                 )
             else:
                 registration.pre_ctx = replace(
                     registration.pre_ctx,
+                    include_dirty=True,
                     synced_files=synced_files,
                 )
             delegate_runner.write_manifest(
@@ -554,7 +615,10 @@ def _cleanup_partial_worktree(
 ) -> None:
     path = Path(worktree_path)
     cleanup_failed = False
-    if path.exists() or path.is_symlink():
+    guarded = target_contains_source_root(worktree_path, source_git_root)
+    if guarded:
+        cleanup_failed = True
+    elif path.exists() or path.is_symlink():
         try:
             result = _run_git(
                 source_git_root,
@@ -565,7 +629,7 @@ def _cleanup_partial_worktree(
                 cleanup_failed = True
         except (OSError, subprocess.SubprocessError):
             cleanup_failed = True
-    if remove_branch:
+    if remove_branch and not guarded:
         try:
             result = _run_git(
                 source_git_root,
@@ -580,14 +644,25 @@ def _cleanup_partial_worktree(
         except (OSError, subprocess.SubprocessError):
             cleanup_failed = True
     if cleanup_failed:
-        commands = [
-            shlex.join(
-                ["git", "-C", source_git_root, "worktree", "remove", "--force", worktree_path]
-            )
-        ]
-        if remove_branch:
-            commands.append(shlex.join(["git", "-C", source_git_root, "branch", "-D", branch]))
-        manual = " && ".join(commands)
+        if guarded:
+            manual = "source_root_guard refused unsafe cleanup; inspect run metadata"
+        else:
+            commands = [
+                shlex.join(
+                    [
+                        "git",
+                        "-C",
+                        source_git_root,
+                        "worktree",
+                        "remove",
+                        "--force",
+                        worktree_path,
+                    ]
+                )
+            ]
+            if remove_branch:
+                commands.append(shlex.join(["git", "-C", source_git_root, "branch", "-D", branch]))
+            manual = " && ".join(commands)
         snapshot_path = run_path / run_registry.SNAPSHOT_FILE
         metadata_warning: str | None = None
         if snapshot_path.exists():
@@ -596,6 +671,8 @@ def _cleanup_partial_worktree(
                 if existing is not None:
                     existing["cleanupFailed"] = True
                     existing["manualCleanup"] = manual
+                    if guarded:
+                        existing["cleanupRefused"] = "source_root_guard"
                     run_registry.write_json_atomic(snapshot_path, existing)
             except (OSError, ValueError) as exc:
                 metadata_warning = (

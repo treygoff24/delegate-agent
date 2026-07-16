@@ -12,6 +12,23 @@ from tests.worktree_mgmt_test_base import WorktreeMgmtTestBase, git
 
 
 class WorktreeRemoveTests(WorktreeMgmtTestBase):
+    def test_worktree_remove_refuses_source_root_target(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            self._seed_persistent_run(
+                path,
+                alias="cursor-guarded",
+                branch=git("branch", "--show-current", cwd=path).stdout.strip(),
+                execution_cwd=path,
+            )
+            code, out, _err = self._run_cli(
+                ["--cwd", path, "--json", "worktree", "remove", "cursor-guarded"],
+                home=fake_home,
+            )
+        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        self.assertEqual(json.loads(out)["code"], "source_root_guard")
+        self.assertTrue(Path(path).exists())
+
     def test_worktree_remove_dirty_fails_with_envelope(self):
         _repo, path = self._make_repo()
         with tempfile.TemporaryDirectory() as fake_home:

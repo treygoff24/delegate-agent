@@ -31,7 +31,7 @@ from delegate_agent import (
     seatbelt,
     worktree_summary,
 )
-from delegate_agent.constants import PROMPT_INSTRUCTION_MODE_WRAPPED
+from delegate_agent.constants import PROMPT_INSTRUCTION_MODE_SLASH, PROMPT_INSTRUCTION_MODE_WRAPPED
 from delegate_agent.json_types import JsonObject
 
 STDOUT_LOG = run_registry.STDOUT_LOG
@@ -57,6 +57,17 @@ RESULT_QUALITY_HOUSEKEEPING = harness_events.RESULT_QUALITY_HOUSEKEEPING
 RESULT_QUALITY_EMPTY = harness_events.RESULT_QUALITY_EMPTY
 RESULT_QUALITY_SUSPECT_SHORT = harness_events.RESULT_QUALITY_SUSPECT_SHORT
 RESULT_QUALITY_NO_ASSISTANT_TEXT = harness_events.RESULT_QUALITY_NO_ASSISTANT_TEXT
+EMPTY_RETRY_INSTRUCTION = (
+    "Delegate retry instruction: The previous attempt exited successfully but emitted no final "
+    "answer. Emit the final answer or report now as plain text."
+)
+EMPTY_RETRY_WARNING = "empty_success_retry: the retry also emitted no final answer."
+EMPTY_RETRY_SKIPPED_WRITE_CAPABLE_WARNING = (
+    "empty_success_retry: skipped because this call is write-capable."
+)
+EMPTY_RETRY_SKIPPED_VERBATIM_WARNING = (
+    "empty_success_retry: skipped to preserve the verbatim prompt boundary."
+)
 COMPLETION_REPORT_SOURCE_CHILD = "child"
 COMPLETION_REPORT_SOURCE_SYNTHESIZED = "delegate_synthesized"
 COMPLETION_REPORT_SOURCE_STDOUT_RECOVERY = "stdout_recovery"
@@ -138,6 +149,8 @@ class RunContext:
     include_dirty: bool = False
     synced_files: int = 0
     group: str | None = None
+    call_read_only: bool = False
+    pure: bool = False
     prompt_instruction_mode: str = PROMPT_INSTRUCTION_MODE_WRAPPED
 
 
@@ -533,6 +546,19 @@ def write_completion_report(run_path: Path, text: str) -> bool:
 def _append_unique(values: list[str], value: str) -> None:
     if value not in values:
         values.append(value)
+
+
+def _aggregate_call_usage(*usages: JsonObject) -> JsonObject:
+    if not all(usage.get("basis") == "exact" for usage in usages):
+        return {"basis": "unavailable"}
+    keys = ("inputTokens", "outputTokens")
+    if not all(
+        isinstance(usage.get(key), int) and not isinstance(usage.get(key), bool)
+        for usage in usages
+        for key in keys
+    ):
+        return {"basis": "unavailable"}
+    return {key: sum(int(usage[key]) for usage in usages) for key in keys} | {"basis": "exact"}
 
 
 # Delegate to the shared helper in harness_events so the runner (write-time) and
@@ -1013,6 +1039,9 @@ class CallResult:
     message: str | None = None
     model_resolved: str | None = None
     usage: JsonObject = field(default_factory=lambda: {"basis": "unavailable"})
+    result_quality: str = RESULT_QUALITY_OK
+    empty_retry_attempted: bool = False
+    empty_retry_resolved: bool = False
 
 
 @dataclass(frozen=True)
@@ -1231,6 +1260,8 @@ def _record_tracked_launch_failure(
     files: TrackedRunFiles,
     ctx: RunContext,
     error: RunnerLaunchError,
+    *,
+    prior_capture: TrackedCaptureResult | None = None,
 ) -> None:
     # A launch failure never ran the child, so there is no result to classify.
     # resultQuality is set to None explicitly so build_state omits the key,
@@ -1240,10 +1271,24 @@ def _record_tracked_launch_failure(
         "message": error.message,
         "resultQuality": None,
     }
-    write_state(files.run_path, build_state(ctx, status="failed", extra=extra))
-    snapshot = build_snapshot(
-        ctx, accumulator=harness_events.StreamAccumulator(harness=ctx.harness)
+    accumulator = (
+        prior_capture.accumulator
+        if prior_capture is not None
+        else harness_events.StreamAccumulator(harness=ctx.harness)
     )
+    write_state(
+        files.run_path,
+        build_state(
+            ctx,
+            status="failed",
+            exit_code=1,
+            stdout_bytes=prior_capture.stdout_bytes if prior_capture is not None else 0,
+            stderr_bytes=prior_capture.stderr_bytes if prior_capture is not None else 0,
+            current=accumulator.current,
+            extra=extra,
+        ),
+    )
+    snapshot = build_snapshot(ctx, accumulator=accumulator, exit_code=1)
     snapshot["ok"] = False
     snapshot["status"] = "failed"
     # The child never ran, so there is no result quality to report. Remove the
@@ -1260,6 +1305,7 @@ def _capture_tracked_process(
     *,
     started: float,
     stdin_text: str | None,
+    deadline: float | None = None,
     progress_stderr: TextIO | None = None,
     progress_initial_delay_sec: float = PROGRESS_INITIAL_DELAY_SEC,
     progress_interval_sec: float = PROGRESS_HEARTBEAT_INTERVAL_SEC,
@@ -1344,9 +1390,22 @@ def _capture_tracked_process(
                 daemon=True,
             )
             stdin_thread.start()
-        # Child agent runtimes are intentionally unbounded: callers cancel them
-        # via the OS/run-management surface, while quick metadata probes
-        # elsewhere use explicit timeouts.
+
+        def wait_for_child(timeout: float | None = None) -> int:
+            try:
+                return process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired as exc:
+                _terminate_call_process(process)
+                _cleanup_tracked_process_streams(
+                    process,
+                    stdin_thread=stdin_thread,
+                    stdout_thread=stdout_thread,
+                    stderr_thread=stderr_thread,
+                )
+                raise RunnerLaunchError(
+                    "call_timeout", "Child command exceeded the call timeout."
+                ) from exc
+
         if progress_stderr is not None:
             emit_progress = True
             try:
@@ -1367,10 +1426,35 @@ def _capture_tracked_process(
                     exit_code = process.wait()
                     break
                 timeout = max(next_progress_at - time.monotonic(), 0.01)
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        _terminate_call_process(process)
+                        _cleanup_tracked_process_streams(
+                            process,
+                            stdin_thread=stdin_thread,
+                            stdout_thread=stdout_thread,
+                            stderr_thread=stderr_thread,
+                        )
+                        raise RunnerLaunchError(
+                            "call_timeout", "Child command exceeded the call timeout."
+                        )
+                    timeout = min(timeout, remaining)
                 try:
                     exit_code = process.wait(timeout=timeout)
                     break
                 except subprocess.TimeoutExpired:
+                    if deadline is not None and time.monotonic() >= deadline:
+                        _terminate_call_process(process)
+                        _cleanup_tracked_process_streams(
+                            process,
+                            stdin_thread=stdin_thread,
+                            stdout_thread=stdout_thread,
+                            stderr_thread=stderr_thread,
+                        )
+                        raise RunnerLaunchError(
+                            "call_timeout", "Child command exceeded the call timeout."
+                        ) from None
                     try:
                         _emit_progress_heartbeat(
                             ctx,
@@ -1382,12 +1466,15 @@ def _capture_tracked_process(
                         emit_progress = False
                     next_progress_at = time.monotonic() + interval
         else:
-            exit_code = process.wait()
-        _join_stdin_thread(stdin_thread, process.stdin)
-        _join_drain_thread(stdout_thread, process.stdout)
-        _join_drain_thread(stderr_thread, process.stderr)
-        process.stdout.close()
-        process.stderr.close()
+            exit_code = wait_for_child(
+                None if deadline is None else max(deadline - time.monotonic(), 0)
+            )
+        _cleanup_tracked_process_streams(
+            process,
+            stdin_thread=stdin_thread,
+            stdout_thread=stdout_thread,
+            stderr_thread=stderr_thread,
+        )
         if line_buffer.strip():
             accumulator.ingest_line(line_buffer)
     return TrackedCaptureResult(
@@ -1400,6 +1487,22 @@ def _capture_tracked_process(
         pid=process.pid,
         pgid=pgid,
     )
+
+
+def _cleanup_tracked_process_streams(
+    process: subprocess.Popen[bytes],
+    *,
+    stdin_thread: threading.Thread | None,
+    stdout_thread: threading.Thread,
+    stderr_thread: threading.Thread,
+) -> None:
+    _join_stdin_thread(stdin_thread, process.stdin)
+    _join_drain_thread(stdout_thread, process.stdout)
+    _join_drain_thread(stderr_thread, process.stderr)
+    for pipe in (process.stdin, process.stdout, process.stderr):
+        if pipe is not None:
+            with contextlib.suppress(OSError):
+                pipe.close()
 
 
 def _ctx_with_stdin_warnings(
@@ -1580,10 +1683,25 @@ def _tracked_result(
     return finalization.exit_code, None
 
 
+def _attempt_delimiter(label: str) -> bytes:
+    prefix = (
+        "delegate codex auth attempt"
+        if label == "fallback"
+        else "delegate empty-retry attempt"
+        if label == "empty-success-retry"
+        else "delegate attempt"
+    )
+    return f"\n--- {prefix}: {label} ---\n".encode()
+
+
 def _append_attempt_delimiter(stderr_log: Path, *, label: str) -> None:
-    marker = f"\n--- delegate codex auth attempt: {label} ---\n"
     with stderr_log.open("ab") as handle:
-        handle.write(marker.encode("utf-8"))
+        handle.write(_attempt_delimiter(label))
+
+
+def _prepend_attempt_delimiter(stderr_log: Path, *, label: str) -> None:
+    existing = stderr_log.read_bytes() if stderr_log.exists() else b""
+    stderr_log.write_bytes(_attempt_delimiter(label) + existing)
 
 
 def _accumulator_message_text(accumulator: harness_events.StreamAccumulator) -> str:
@@ -1621,6 +1739,7 @@ def _run_single_tracked_attempt(
     ctx: RunContext,
     *,
     started: float,
+    deadline: float | None,
     stdin_text: str | None,
     env_overrides: dict[str, str] | None,
     scratch_dir: Path | None,
@@ -1629,26 +1748,134 @@ def _run_single_tracked_attempt(
     progress_initial_delay_sec: float,
     progress_interval_sec: float,
     attempt_label: str | None = None,
+    prior_capture: TrackedCaptureResult | None = None,
 ) -> TrackedCaptureResult:
     if attempt_label is not None:
         _append_attempt_delimiter(files.stderr_log, label=attempt_label)
-    process = _launch_tracked_process(
-        argv,
-        cwd,
-        stdin_text=stdin_text,
-        env_overrides=env_overrides,
-        scratch_dir=scratch_dir,
+    try:
+        process = _launch_tracked_process(
+            argv,
+            cwd,
+            stdin_text=stdin_text,
+            env_overrides=env_overrides,
+            scratch_dir=scratch_dir,
+        )
+    except OSError as exc:
+        error = _runner_launch_error(argv, cwd, exc)
+        _record_tracked_launch_failure(files, ctx, error, prior_capture=prior_capture)
+        raise error from exc
+    try:
+        return _capture_tracked_process(
+            process,
+            files,
+            ctx,
+            started=started,
+            stdin_text=stdin_text,
+            deadline=deadline,
+            progress_stderr=progress_stderr,
+            progress_initial_delay_sec=progress_initial_delay_sec,
+            progress_interval_sec=progress_interval_sec,
+        )
+    except RunnerLaunchError as error:
+        _record_tracked_launch_failure(files, ctx, error, prior_capture=prior_capture)
+        raise
+
+
+def _merge_tracked_attempt_captures(
+    prior_capture: TrackedCaptureResult,
+    current_capture: TrackedCaptureResult,
+) -> TrackedCaptureResult:
+    accumulator = harness_events.StreamAccumulator(harness=current_capture.accumulator.harness)
+    accumulator.assistant_chunks = [
+        *prior_capture.accumulator.assistant_chunks,
+        *current_capture.accumulator.assistant_chunks,
+    ]
+    accumulator.events = [*prior_capture.accumulator.events, *current_capture.accumulator.events]
+    accumulator.completion_text = (
+        current_capture.accumulator.completion_text or prior_capture.accumulator.completion_text
     )
-    return _capture_tracked_process(
-        process,
-        files,
+    accumulator.current = current_capture.accumulator.current or prior_capture.accumulator.current
+    accumulator.terminal_event = current_capture.accumulator.terminal_event
+    accumulator.terminal_status = current_capture.accumulator.terminal_status
+    accumulator.structured_events_seen = (
+        prior_capture.accumulator.structured_events_seen
+        + current_capture.accumulator.structured_events_seen
+    )
+    return replace(
+        current_capture,
+        accumulator=accumulator,
+        stdout_bytes=prior_capture.stdout_bytes + current_capture.stdout_bytes,
+        stderr_bytes=prior_capture.stderr_bytes + current_capture.stderr_bytes,
+        stdin_failures=tuple(
+            dict.fromkeys([*prior_capture.stdin_failures, *current_capture.stdin_failures])
+        ),
+    )
+
+
+def _append_empty_retry_instruction(prompt: str) -> str:
+    return f"{prompt.rstrip()}\n\n{EMPTY_RETRY_INSTRUCTION}"
+
+
+def _empty_retry_allowed(mode: str, *, call_read_only: bool = False) -> bool:
+    return mode == "safe" or (mode == "call" and call_read_only)
+
+
+def _tracked_capture_quality(
+    files: TrackedRunFiles,
+    ctx: RunContext,
+    capture: TrackedCaptureResult,
+    *,
+    completion_report_mode: str,
+) -> str:
+    if capture.exit_code != 0 or capture.accumulator.terminal_status in {
+        run_registry.STATUS_FAILED,
+        run_registry.STATUS_CANCELLED,
+    }:
+        return RESULT_QUALITY_OK
+    report_text, report_source = _completion_report_text_and_source(
         ctx,
-        started=started,
-        stdin_text=stdin_text,
-        progress_stderr=progress_stderr,
-        progress_initial_delay_sec=progress_initial_delay_sec,
-        progress_interval_sec=progress_interval_sec,
+        capture.accumulator,
+        completion_report_mode=completion_report_mode,
+        status=run_registry.STATUS_SUCCEEDED,
+        failure_reason=None,
+        stderr_tail=profiles.read_bounded_stderr_tail(files.stderr_log),
     )
+    return _classify_result_quality(
+        ctx=ctx,
+        exit_code=capture.exit_code,
+        report_text=report_text,
+        report_written=bool(report_text.strip()),
+        report_source=report_source,
+        accumulator=capture.accumulator,
+    )
+
+
+def _materialize_empty_retry(
+    argv: list[str],
+    *,
+    stdin_text: str | None,
+    prompt_file_text: str | None,
+    prompt_file_placeholder: str | None,
+    agent_config_text: str | None,
+    agent_config_placeholder: str | None,
+    agent_config_dir: Path | None = None,
+) -> tuple[list[str], str | None, str | None]:
+    if stdin_text is not None:
+        return list(argv), _append_empty_retry_instruction(stdin_text), None
+    if prompt_file_text is not None:
+        retry_argv, retry_dir = _materialize_prompt_file_argv(
+            argv,
+            prompt_file_text=_append_empty_retry_instruction(prompt_file_text),
+            prompt_file_placeholder=prompt_file_placeholder,
+            agent_config_text=agent_config_text,
+            agent_config_placeholder=agent_config_placeholder,
+            agent_config_dir=agent_config_dir,
+        )
+        return retry_argv, None, retry_dir
+    retry_argv = list(argv)
+    if retry_argv:
+        retry_argv[-1] = _append_empty_retry_instruction(retry_argv[-1])
+    return retry_argv, None, None
 
 
 def execute_tracked(
@@ -1669,11 +1896,13 @@ def execute_tracked(
     progress: bool = False,
     progress_initial_delay_sec: float = PROGRESS_INITIAL_DELAY_SEC,
     progress_interval_sec: float = PROGRESS_HEARTBEAT_INTERVAL_SEC,
+    timeout: int | None = None,
 ) -> tuple[int, JsonObject | None]:
     if stdin_text is not None and prompt_file_text is not None:
         raise ValueError("stdin_text and prompt_file_text are mutually exclusive")
     files = _prepare_tracked_run(argv, ctx, manifest_argv=manifest_argv)
     started = time.monotonic()
+    deadline = None if timeout is None else started + timeout
     run_argv = _codex_argv_with_scratch(argv, files.scratch_dir) if ctx.engine == "codex" else argv
     run_manifest_argv = (
         _codex_argv_with_scratch(manifest_argv, files.scratch_dir)
@@ -1692,30 +1921,25 @@ def execute_tracked(
     )
     workspace_baseline = profiles.capture_workspace_baseline(cwd) if ctx.mode == "work" else None
     fallback_extra: JsonObject | None = None
+    empty_retry_extra: JsonObject | None = None
+    retry_prompt_temp_dir: str | None = None
+    attempt_env = ctx.env_overrides or None
     try:
-        try:
-            capture = _run_single_tracked_attempt(
-                launch_argv,
-                cwd,
-                files,
-                ctx,
-                started=started,
-                stdin_text=stdin_text,
-                env_overrides=ctx.env_overrides or None,
-                scratch_dir=files.scratch_dir,
-                progress=progress,
-                progress_stderr=stderr if progress else None,
-                progress_initial_delay_sec=progress_initial_delay_sec,
-                progress_interval_sec=progress_interval_sec,
-                attempt_label="primary"
-                if (ctx.engine == "codex" and ctx.fallback_env_overrides)
-                else None,
-            )
-        except OSError as exc:
-            error = _runner_launch_error(launch_argv, cwd, exc)
-            _record_tracked_launch_failure(files, ctx, error)
-            raise error from exc
-
+        capture = _run_single_tracked_attempt(
+            launch_argv,
+            cwd,
+            files,
+            ctx,
+            started=started,
+            deadline=deadline,
+            stdin_text=stdin_text,
+            env_overrides=ctx.env_overrides or None,
+            scratch_dir=files.scratch_dir,
+            progress=progress,
+            progress_stderr=stderr if progress else None,
+            progress_initial_delay_sec=progress_initial_delay_sec,
+            progress_interval_sec=progress_interval_sec,
+        )
         if _should_retry_profiles(
             ctx,
             capture,
@@ -1725,12 +1949,14 @@ def execute_tracked(
         ):
             primary_exit_code = capture.exit_code
             primary_stderr_tail = profiles.read_bounded_stderr_tail(files.stderr_log)
+            _prepend_attempt_delimiter(files.stderr_log, label="primary")
             fallback_capture = _run_single_tracked_attempt(
                 launch_argv,
                 cwd,
                 files,
                 ctx,
                 started=started,
+                deadline=deadline,
                 stdin_text=stdin_text,
                 env_overrides=ctx.fallback_env_overrides,
                 scratch_dir=files.scratch_dir,
@@ -1739,8 +1965,10 @@ def execute_tracked(
                 progress_initial_delay_sec=progress_initial_delay_sec,
                 progress_interval_sec=progress_interval_sec,
                 attempt_label="fallback",
+                prior_capture=capture,
             )
-            capture = fallback_capture
+            capture = _merge_tracked_attempt_captures(capture, fallback_capture)
+            attempt_env = ctx.fallback_env_overrides
             fallback_extra = {
                 "codexAuthFallback": profiles.codex_auth_fallback_metadata(
                     reason="usage_limit",
@@ -1751,8 +1979,78 @@ def execute_tracked(
                     primary_stderr_tail=primary_stderr_tail,
                 )
             }
+        retry_supported = (
+            stdin_text is not None or prompt_file_text is not None or manifest_argv is not None
+        )
+        if (
+            retry_supported
+            and _tracked_capture_quality(
+                files,
+                ctx,
+                capture,
+                completion_report_mode=completion_report_mode,
+            )
+            == RESULT_QUALITY_EMPTY
+        ):
+            if ctx.pure or ctx.prompt_instruction_mode == PROMPT_INSTRUCTION_MODE_SLASH:
+                empty_retry_extra = {"warnings": [EMPTY_RETRY_SKIPPED_VERBATIM_WARNING]}
+            elif _empty_retry_allowed(ctx.mode, call_read_only=ctx.call_read_only):
+                retry_argv, retry_stdin, retry_prompt_temp_dir = _materialize_empty_retry(
+                    run_argv,
+                    stdin_text=stdin_text,
+                    prompt_file_text=prompt_file_text,
+                    prompt_file_placeholder=prompt_file_placeholder,
+                    agent_config_text=agent_config_text,
+                    agent_config_placeholder=agent_config_placeholder,
+                    agent_config_dir=files.run_path,
+                )
+                if fallback_extra is None:
+                    _prepend_attempt_delimiter(files.stderr_log, label="primary")
+                retry_capture = _run_single_tracked_attempt(
+                    retry_argv,
+                    cwd,
+                    files,
+                    ctx,
+                    started=started,
+                    deadline=deadline,
+                    stdin_text=retry_stdin,
+                    env_overrides=attempt_env,
+                    scratch_dir=files.scratch_dir,
+                    progress=progress,
+                    progress_stderr=stderr if progress else None,
+                    progress_initial_delay_sec=progress_initial_delay_sec,
+                    progress_interval_sec=progress_interval_sec,
+                    attempt_label="empty-success-retry",
+                    prior_capture=capture,
+                )
+                capture = _merge_tracked_attempt_captures(capture, retry_capture)
+                retry_quality = _tracked_capture_quality(
+                    files,
+                    ctx,
+                    capture,
+                    completion_report_mode=completion_report_mode,
+                )
+                resolved = (
+                    capture.exit_code == 0
+                    and capture.accumulator.terminal_status
+                    not in {run_registry.STATUS_FAILED, run_registry.STATUS_CANCELLED}
+                    and retry_quality == RESULT_QUALITY_OK
+                )
+                empty_retry_extra = {
+                    "emptyRetry": {
+                        "attempted": True,
+                        "resolved": resolved,
+                    }
+                }
+                if not resolved:
+                    empty_retry_extra["warnings"] = [EMPTY_RETRY_WARNING]
+            elif ctx.mode == "call":
+                empty_retry_extra = {
+                    "warnings": [EMPTY_RETRY_SKIPPED_WRITE_CAPABLE_WARNING],
+                }
     finally:
         _cleanup_prompt_file_dir(prompt_temp_dir)
+        _cleanup_prompt_file_dir(retry_prompt_temp_dir)
 
     ctx = _ctx_with_stdin_warnings(ctx, capture.stdin_failures, stderr)
     finalization = _finalize_tracked_run(
@@ -1760,7 +2058,7 @@ def execute_tracked(
         ctx,
         capture,
         completion_report_mode=completion_report_mode,
-        extra=fallback_extra,
+        extra={**(fallback_extra or {}), **(empty_retry_extra or {})} or None,
     )
     return _tracked_result(ctx, capture, finalization, json_mode=json_mode, stdout=stdout)
 
@@ -1784,7 +2082,7 @@ def _terminate_call_process(process: subprocess.Popen[bytes]) -> None:
 def _bounded_call_communicate(
     process: subprocess.Popen[bytes],
     stdin_bytes: bytes | None,
-    timeout: int | None,
+    timeout: float | None,
     max_stdout: int,
     max_stderr: int,
 ) -> tuple[bytes, bytes]:
@@ -2053,7 +2351,7 @@ def _copy_auth(src: str, dst: str) -> None:
     os.chmod(dst, 0o600)
 
 
-def execute_call(
+def _execute_call_once(
     argv: list[str],
     cwd: str,
     *,
@@ -2065,7 +2363,7 @@ def execute_call(
     agent_config_placeholder: str | None = None,
     env_overrides: dict[str, str] | None = None,
     pure: bool = False,
-    timeout: int | None = None,
+    timeout: float | None = None,
     structured_output: bool = False,
     sensitive_texts: tuple[str, ...] = (),
 ) -> CallResult:
@@ -2159,9 +2457,10 @@ def execute_call(
             _parse_claude_call_json(stdout_text, pure=pure)
         )
         text = _bounded_call_fallback_text(raw_text)
+        result_exit_code = parsed_exit if process.returncode == 0 else process.returncode
         return CallResult(
             text=text,
-            exit_code=parsed_exit if process.returncode == 0 else process.returncode,
+            exit_code=result_exit_code,
             duration_ms=int((time.monotonic() - started) * MILLISECONDS_PER_SECOND),
             stdout_bytes=stdout_bytes,
             stderr_bytes=stderr_bytes,
@@ -2173,6 +2472,11 @@ def execute_call(
             message=message,
             model_resolved=model_resolved,
             usage=usage,
+            result_quality=(
+                RESULT_QUALITY_EMPTY
+                if result_exit_code == 0 and not raw_text.strip()
+                else RESULT_QUALITY_OK
+            ),
         )
     accumulator = harness_events.StreamAccumulator(harness=harness)
     for line in stdout_text.splitlines():
@@ -2213,6 +2517,108 @@ def execute_call(
         text_truncated=text_truncated,
         stderr_tail=stderr_tail,
         warnings=warnings,
+        result_quality=(
+            RESULT_QUALITY_NO_ASSISTANT_TEXT
+            if process.returncode == 0
+            and accumulator.structured_events_seen > 0
+            and not text.strip()
+            else RESULT_QUALITY_EMPTY
+            if process.returncode == 0 and not text.strip()
+            else RESULT_QUALITY_OK
+        ),
+    )
+
+
+def execute_call(
+    argv: list[str],
+    cwd: str,
+    *,
+    harness: str,
+    stdin_text: str | None = None,
+    prompt_file_text: str | None = None,
+    prompt_file_placeholder: str | None = None,
+    agent_config_text: str | None = None,
+    agent_config_placeholder: str | None = None,
+    env_overrides: dict[str, str] | None = None,
+    read_only: bool = False,
+    pure: bool = False,
+    prompt_instruction_mode: str = PROMPT_INSTRUCTION_MODE_WRAPPED,
+    timeout: int | None = None,
+    structured_output: bool = False,
+    sensitive_texts: tuple[str, ...] = (),
+) -> CallResult:
+    deadline = None if timeout is None else time.monotonic() + timeout
+    result = _execute_call_once(
+        argv,
+        cwd,
+        harness=harness,
+        stdin_text=stdin_text,
+        prompt_file_text=prompt_file_text,
+        prompt_file_placeholder=prompt_file_placeholder,
+        agent_config_text=agent_config_text,
+        agent_config_placeholder=agent_config_placeholder,
+        env_overrides=env_overrides,
+        pure=pure,
+        timeout=None if deadline is None else max(deadline - time.monotonic(), 0),
+        structured_output=structured_output,
+        sensitive_texts=sensitive_texts,
+    )
+    if result.result_quality != RESULT_QUALITY_EMPTY:
+        return result
+    if pure or prompt_instruction_mode == PROMPT_INSTRUCTION_MODE_SLASH:
+        warnings = list(result.warnings)
+        _append_unique(warnings, EMPTY_RETRY_SKIPPED_VERBATIM_WARNING)
+        return replace(result, warnings=tuple(warnings))
+    if not _empty_retry_allowed("call", call_read_only=read_only):
+        warnings = list(result.warnings)
+        _append_unique(warnings, EMPTY_RETRY_SKIPPED_WRITE_CAPABLE_WARNING)
+        return replace(result, warnings=tuple(warnings))
+
+    retry_argv = list(argv)
+    retry_stdin = stdin_text
+    retry_prompt_file = prompt_file_text
+    if retry_stdin is not None:
+        retry_stdin = _append_empty_retry_instruction(retry_stdin)
+    elif retry_prompt_file is not None:
+        retry_prompt_file = _append_empty_retry_instruction(retry_prompt_file)
+    elif retry_argv:
+        retry_argv[-1] = _append_empty_retry_instruction(retry_argv[-1])
+
+    retry = _execute_call_once(
+        retry_argv,
+        cwd,
+        harness=harness,
+        stdin_text=retry_stdin,
+        prompt_file_text=retry_prompt_file,
+        prompt_file_placeholder=prompt_file_placeholder,
+        agent_config_text=agent_config_text,
+        agent_config_placeholder=agent_config_placeholder,
+        env_overrides=env_overrides,
+        pure=pure,
+        timeout=None if deadline is None else max(deadline - time.monotonic(), 0),
+        structured_output=structured_output,
+        sensitive_texts=sensitive_texts,
+    )
+    warnings = list(result.warnings)
+    for warning in retry.warnings:
+        _append_unique(warnings, warning)
+    resolved = retry.exit_code == 0 and retry.result_quality == RESULT_QUALITY_OK
+    if not resolved:
+        _append_unique(warnings, EMPTY_RETRY_WARNING)
+    stderr_parts = [part for part in (result.stderr_tail, retry.stderr_tail) if part]
+    return replace(
+        retry,
+        duration_ms=result.duration_ms + retry.duration_ms,
+        stdout_bytes=result.stdout_bytes + retry.stdout_bytes,
+        stderr_bytes=result.stderr_bytes + retry.stderr_bytes,
+        stderr_tail=("\n--- empty-success retry ---\n".join(stderr_parts))[
+            -profiles.STDERR_TAIL_LIMIT :
+        ],
+        warnings=tuple(warnings),
+        text_truncated=result.text_truncated or retry.text_truncated,
+        usage=_aggregate_call_usage(result.usage, retry.usage),
+        empty_retry_attempted=True,
+        empty_retry_resolved=resolved,
     )
 
 

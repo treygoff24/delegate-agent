@@ -8,6 +8,7 @@ lives in worktree_mgmt.py.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import subprocess  # nosec B404 - isolation helpers intentionally run fixed git argv with shell=False.
 from dataclasses import dataclass
@@ -208,6 +209,29 @@ class IsolationExecutionError(Exception):
         self.message = message
 
 
+def target_contains_source_root(target: str | Path, source_root: str | Path) -> bool:
+    """Return whether deleting target could delete the source workspace root."""
+    try:
+        resolved_target = Path(target).resolve(strict=False)
+        resolved_source = Path(source_root).resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        return True
+    if resolved_target.exists() and resolved_source.exists():
+        current = resolved_source
+        while True:
+            try:
+                if os.path.samefile(current, resolved_target):
+                    return True
+            except OSError:
+                # Both paths existed when this check started, so identity is
+                # uncertain rather than merely lexical. Refuse cleanup.
+                return True
+            if current.parent == current:
+                break
+            current = current.parent
+    return resolved_source == resolved_target or resolved_source.is_relative_to(resolved_target)
+
+
 def require_valid_head(source_git_root: str) -> str:
     """Return HEAD's OID or raise missing_git_head for an unborn repository."""
     result = _run_git(
@@ -222,31 +246,6 @@ def require_valid_head(source_git_root: str) -> str:
             "--isolation worktree requires a Git workspace with at least one commit.",
         )
     return result.stdout.strip()
-
-
-def require_clean_source(source_git_root: str) -> None:
-    """Require no staged, unstaged, untracked, or submodule dirtiness."""
-    result = _run_git(
-        source_git_root,
-        ["status", "--porcelain=v1", "--untracked-files=normal", "--ignore-submodules=none"],
-        timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
-    )
-    _raise_if_git_timed_out(result, "git status")
-    if result.returncode != 0:
-        raise IsolationExecutionError(
-            "dirty_source_check_failed",
-            f"git status failed with code {result.returncode}: {result.stderr.strip()}",
-        )
-    if result.stdout.strip():
-        raise IsolationExecutionError(
-            "dirty_source_workspace",
-            (
-                "--isolation worktree for work mode requires a clean source workspace. "
-                "Commit/stash/delete local changes, run in-place with --isolation none, "
-                "or relaunch with --include-dirty to copy tracked edits and untracked "
-                "non-ignored files into the new worktree."
-            ),
-        )
 
 
 def create_persistent_worktree(

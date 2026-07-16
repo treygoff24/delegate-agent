@@ -58,7 +58,60 @@ class Wave4LaunchFeatureTests(ExecutionTestBase):
             config["worktrees"]["dataHome"] = data_home
         return config
 
-    def test_include_dirty_worktree_syncs_tracked_untracked_ignored_and_external_symlink(self):
+    def test_child_env_exports_source_and_isolated_execution_roots(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            repo, _git_cd = self._make_git_repo_with_commit()
+            source_root = str(Path(repo.name).resolve())
+            env_log = Path(fake_home) / "child-env.log"
+            agent = self.write_executable(
+                "agent",
+                "printf 'source=%s\\nexecution=%s\\n' \"$DELEGATE_SOURCE_ROOT\" "
+                '"${DELEGATE_EXECUTION_ROOT:-}" >> "$DELEGATE_ENV_LOG"\n',
+            )
+            config_path = self.write_config(
+                self.config_with_cursor(agent, data_home=str(Path(fake_home) / "worktrees"))
+            )
+
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "HOME": fake_home,
+                    "DELEGATE_CONFIG": str(config_path),
+                    "DELEGATE_ENV_LOG": str(env_log),
+                },
+                clear=False,
+            ):
+                for mode in ("work", "safe", "worktree"):
+                    with self.subTest(mode=mode):
+                        stdout = io.StringIO()
+                        args = ["--cwd", repo.name, "--json"]
+                        if mode == "worktree":
+                            args.extend(["--isolation", "worktree", "cursor", "work", "hello"])
+                        else:
+                            args.extend(["cursor", mode, "hello"])
+                        code = self.delegate.main(args, stdout=stdout)
+                        json.loads(stdout.getvalue())
+                        self.assertEqual(code, 0)
+                        text = env_log.read_text(encoding="utf-8")
+                        self.assertIn(f"source={source_root}", text)
+                        if mode == "work":
+                            self.assertIn("execution=\n", text)
+                        else:
+                            execution_root = text.split("execution=", 1)[1].splitlines()[0]
+                            self.assertTrue(execution_root)
+                            self.assertNotEqual(execution_root, source_root)
+                        env_log.write_text("", encoding="utf-8")
+
+                stdout = io.StringIO()
+                code = self.delegate.main(["--json", "cursor", "call", "hello"], stdout=stdout)
+                self.assertEqual(code, 0)
+                text = env_log.read_text(encoding="utf-8")
+                source_root = text.split("source=", 1)[1].splitlines()[0]
+                self.assertTrue(source_root)
+                self.assertNotEqual(source_root, str(Path.cwd().resolve()))
+                self.assertIn("execution=\n", text)
+
+    def test_dirty_worktree_auto_syncs_tracked_untracked_ignored_and_external_symlink(self):
         from delegate_agent import safe_workspace
 
         with tempfile.TemporaryDirectory() as fake_home:
@@ -82,6 +135,113 @@ class Wave4LaunchFeatureTests(ExecutionTestBase):
             )
             stdout = io.StringIO()
             stderr = io.StringIO()
+            original_sync = safe_workspace.sync_git_dirty_snapshot
+
+            def sync_after_disclosure(*args, **kwargs):
+                self.assertIn(
+                    "Auto-including dirty source into persistent worktree", stderr.getvalue()
+                )
+                return original_sync(*args, **kwargs)
+
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {"HOME": fake_home, "DELEGATE_CONFIG": str(config_path)},
+                    clear=False,
+                ),
+                mock.patch.object(
+                    safe_workspace,
+                    "sync_git_dirty_snapshot",
+                    side_effect=sync_after_disclosure,
+                ),
+            ):
+                code = self.delegate.main(
+                    [
+                        "--cwd",
+                        repo.name,
+                        "--json",
+                        "--isolation",
+                        "worktree",
+                        "cursor",
+                        "work",
+                        "hello",
+                    ],
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+            self.assertEqual(code, 0, stderr.getvalue())
+            payload = json.loads(stdout.getvalue())
+            self.assertTrue(payload["includeDirty"])
+            self.assertEqual(payload["syncedFiles"], 3)
+            self.assertIn(
+                "Auto-including dirty source into persistent worktree: 1 tracked-modified and 2 untracked file(s).",
+                stderr.getvalue(),
+            )
+            self.assertIn("tracked.txt", stderr.getvalue())
+            self.assertIn("untracked.txt", stderr.getvalue())
+            self.assertTrue(
+                any(
+                    warning.startswith(
+                        "dirty_source_auto_included: synced 1 tracked-modified and 2 untracked"
+                    )
+                    for warning in payload["warnings"]
+                )
+            )
+
+            execution_cwd = Path(payload["executionCwd"])
+            self.assertEqual((execution_cwd / "tracked.txt").read_text(encoding="utf-8"), "dirty\n")
+            self.assertEqual(
+                (execution_cwd / "untracked.txt").read_text(encoding="utf-8"),
+                "new\n",
+            )
+            self.assertFalse((execution_cwd / "ignored.txt").exists())
+            blocked_link = execution_cwd / "external-link"
+            self.assertFalse(blocked_link.is_symlink())
+            self.assertEqual(
+                blocked_link.read_text(encoding="utf-8"),
+                safe_workspace.SAFE_BLOCKED_SYMLINK_PLACEHOLDER,
+            )
+
+    def test_dirty_source_disclosure_escapes_untrusted_filenames(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            repo, _git_cd = self._make_git_repo_with_commit()
+            repo_path = Path(repo.name)
+            filename = "line\nbreak.txt"
+            (repo_path / filename).write_text("new\n", encoding="utf-8")
+            agent = self.write_executable("agent", "exit 0\n")
+            config_path = self.write_config(
+                self.config_with_cursor(agent, data_home=str(Path(fake_home) / "worktrees"))
+            )
+            stderr = io.StringIO()
+            with mock.patch.dict(
+                os.environ,
+                {"HOME": fake_home, "DELEGATE_CONFIG": str(config_path)},
+                clear=False,
+            ):
+                code = self.delegate.main(
+                    [
+                        "--cwd",
+                        repo.name,
+                        "--isolation",
+                        "worktree",
+                        "cursor",
+                        "work",
+                        "hello",
+                    ],
+                    stdout=io.StringIO(),
+                    stderr=stderr,
+                )
+            self.assertEqual(code, 0, stderr.getvalue())
+            self.assertIn(repr(filename), stderr.getvalue())
+
+    def test_include_dirty_is_a_noop_for_clean_worktree_source(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            repo, _git_cd = self._make_git_repo_with_commit()
+            agent = self.write_executable("agent", "exit 0\n")
+            config_path = self.write_config(
+                self.config_with_cursor(agent, data_home=str(Path(fake_home) / "worktrees"))
+            )
+            stdout = io.StringIO()
             with mock.patch.dict(
                 os.environ,
                 {"HOME": fake_home, "DELEGATE_CONFIG": str(config_path)},
@@ -100,25 +260,16 @@ class Wave4LaunchFeatureTests(ExecutionTestBase):
                         "hello",
                     ],
                     stdout=stdout,
-                    stderr=stderr,
                 )
-            self.assertEqual(code, 0, stderr.getvalue())
+            self.assertEqual(code, 0)
             payload = json.loads(stdout.getvalue())
             self.assertTrue(payload["includeDirty"])
-            self.assertEqual(payload["syncedFiles"], 3)
-
-            execution_cwd = Path(payload["executionCwd"])
-            self.assertEqual((execution_cwd / "tracked.txt").read_text(encoding="utf-8"), "dirty\n")
-            self.assertEqual(
-                (execution_cwd / "untracked.txt").read_text(encoding="utf-8"),
-                "new\n",
-            )
-            self.assertFalse((execution_cwd / "ignored.txt").exists())
-            blocked_link = execution_cwd / "external-link"
-            self.assertFalse(blocked_link.is_symlink())
-            self.assertEqual(
-                blocked_link.read_text(encoding="utf-8"),
-                safe_workspace.SAFE_BLOCKED_SYMLINK_PLACEHOLDER,
+            self.assertEqual(payload["syncedFiles"], 0)
+            self.assertFalse(
+                any(
+                    "dirty_source_auto_included" in warning
+                    for warning in payload.get("warnings", [])
+                )
             )
 
     def test_scratch_env_is_applied_after_profile_env_for_isolated_run(self):

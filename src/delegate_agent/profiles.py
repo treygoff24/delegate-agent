@@ -240,6 +240,9 @@ def child_environment(
         if pure
         else dict(os.environ)
     )
+    if not pure:
+        env.pop("DELEGATE_SOURCE_ROOT", None)
+        env.pop("DELEGATE_EXECUTION_ROOT", None)
     if base:
         env.update(base)
     if overrides:
@@ -329,6 +332,23 @@ def codex_fallback_env_overrides(resolution: ProfileResolution) -> dict[str, str
     if codex_homes_same_account(resolution.codex_home, resolution.codex_fallback_home):
         return None
     return {**resolution.env, "CODEX_HOME": resolution.codex_fallback_home}
+
+
+def codex_fallback_child_env_overrides(
+    resolution: ProfileResolution,
+    primary_overrides: dict[str, str] | None,
+) -> dict[str, str]:
+    fallback = codex_fallback_env_overrides(resolution)
+    if fallback is None:
+        return {}
+    return {
+        **(primary_overrides or {}),
+        **{
+            key: value
+            for key, value in fallback.items()
+            if key not in {"DELEGATE_SOURCE_ROOT", "DELEGATE_EXECUTION_ROOT"}
+        },
+    }
 
 
 def classify_codex_usage_limit(stderr_text: str) -> bool:

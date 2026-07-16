@@ -1099,11 +1099,9 @@ class EngineArgvTests(CommandTestBase):
         devin_safe = payload["modeMapping"]["devin"]["safe"]
         devin_work = payload["modeMapping"]["devin"]["work"]
         self.assertEqual(payload["promptTransports"]["devin"], "file")
-        self.assertIn("--agent-config", devin_safe)
-        self.assertIn(self.delegate.DEVIN_AGENT_CONFIG_DISPLAY, devin_safe)
-        self.assertIn("--permission-mode auto", " ".join(devin_safe))
-        self.assertIn("--prompt-file", devin_safe)
-        self.assertIn(self.delegate.PROMPT_FILE_DISPLAY, devin_safe)
+        self.assertEqual(devin_safe, [])
+        self.assertFalse(payload["modeMapping"]["devin"]["safeSupported"])
+        self.assertIn("unsupported", payload["modeMapping"]["devin"]["safeNotes"][0])
         self.assertFalse(payload["isolation"]["safeNoneAllowed"]["devin"])
         self.assertIn("--permission-mode dangerous", " ".join(devin_work))
         self.assertNotIn("--agent-config", devin_work)
@@ -1218,38 +1216,57 @@ class EngineArgvTests(CommandTestBase):
         self.assertEqual(ctx.exception.error, "unsupported_output_schema")
         self.assertIn("grok", ctx.exception.message.lower())
 
-    def test_devin_safe_argv_uses_prompt_file_and_agent_config(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
-        request = self.build_git_request(
-            "devin",
-            "safe",
-            None,
-            "/repo",
-            "review task",
-            config,
-            dry_run=True,
-        )
-        self.assertEqual(request.model, "swe-1.7")
-        self.assertEqual(request.prompt_transport, "file")
-        self.assertEqual(request.prompt_file_text, "review task")
-        self.assertEqual(
-            json.loads(request.agent_config_text or "{}"),
-            {
-                "permissions": {
-                    "allow": ["read", "grep", "glob", "Read(/**)"],
-                    "deny": ["edit", "write", "exec", "Write(/**)", "mcp__*"],
-                }
-            },
-        )
-        self.assertIn("--agent-config", request.argv)
-        self.assertIn(self.delegate.DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER, request.argv)
-        self.assertIn("--permission-mode", request.argv)
-        self.assertIn("auto", request.argv)
-        self.assertIn("--prompt-file", request.argv)
-        self.assertIn(self.delegate.PROMPT_FILE_ARG_PLACEHOLDER, request.argv)
-        self.assertEqual(request.argv[-1], "-p")
-        self.assertIn(self.delegate.DEVIN_AGENT_CONFIG_DISPLAY, request.display_argv or [])
-        self.assertIn(self.delegate.PROMPT_FILE_DISPLAY, request.display_argv or [])
+    def test_devin_safe_fails_preflight_as_unsupported(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.build_git_request(
+                "devin",
+                "safe",
+                None,
+                "/repo",
+                "review task",
+                self.delegate.DEFAULT_CONFIG,
+                dry_run=True,
+            )
+        self.assertEqual(ctx.exception.error, "unsupported_mode")
+        self.assertIn("filesystem surveys", ctx.exception.message)
+        self.assertIn("another harness", ctx.exception.message)
+
+    def test_devin_unknown_mode_fails_closed(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.build_devin_argv(self.delegate.DEFAULT_CONFIG["devin"], "bogus", None)
+        self.assertEqual(ctx.exception.error, "invalid_mode")
+
+    def test_devin_safe_cli_fails_before_binary_launch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out, err = self.run_main(["--cwd", tmp, "--json", "devin", "safe", "review task"])
+            self.assertFalse((Path(tmp) / ".delegate").exists())
+        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        self.assertEqual(err, "")
+        payload = json.loads(out)
+        self.assertEqual(payload["error"], "unsupported_mode")
+        self.assertIn("filesystem surveys", payload["message"])
+
+    def test_devin_safe_input_json_fails_preflight(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "task.json"
+            task.write_text(
+                json.dumps(
+                    {
+                        "engine": "devin",
+                        "mode": "safe",
+                        "cwd": tmp,
+                        "prompt": "review task",
+                    }
+                )
+            )
+            parsed = self.delegate.ParsedCommand(
+                "run",
+                global_options=self.delegate.GlobalOptions(json_mode=True),
+                run_json=self.delegate.RunJsonOptions(str(task)),
+            )
+            with self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+        self.assertEqual(ctx.exception.error, "unsupported_mode")
 
     def test_devin_work_uses_dangerous_permission_without_agent_config(self):
         request = self.build_git_request(
