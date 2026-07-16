@@ -661,6 +661,7 @@ def execute_request(
                         agent_config_placeholder=DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
                         manifest_argv=public_argv(request),
                         progress=False,
+                        timeout=request.timeout,
                     )
                 except delegate_runner.RunnerLaunchError as exc:
                     raise DelegateError(exc.error, exc.message) from exc

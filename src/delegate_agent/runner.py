@@ -1272,6 +1272,7 @@ def _capture_tracked_process(
     *,
     started: float,
     stdin_text: str | None,
+    deadline: float | None = None,
     progress_stderr: TextIO | None = None,
     progress_initial_delay_sec: float = PROGRESS_INITIAL_DELAY_SEC,
     progress_interval_sec: float = PROGRESS_HEARTBEAT_INTERVAL_SEC,
@@ -1356,9 +1357,15 @@ def _capture_tracked_process(
                 daemon=True,
             )
             stdin_thread.start()
-        # Child agent runtimes are intentionally unbounded: callers cancel them
-        # via the OS/run-management surface, while quick metadata probes
-        # elsewhere use explicit timeouts.
+        def wait_for_child(timeout: float | None = None) -> int:
+            try:
+                return process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired as exc:
+                _terminate_call_process(process)
+                raise RunnerLaunchError(
+                    "call_timeout", "Child command exceeded the call timeout."
+                ) from exc
+
         if progress_stderr is not None:
             emit_progress = True
             try:
@@ -1379,10 +1386,23 @@ def _capture_tracked_process(
                     exit_code = process.wait()
                     break
                 timeout = max(next_progress_at - time.monotonic(), 0.01)
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        _terminate_call_process(process)
+                        raise RunnerLaunchError(
+                            "call_timeout", "Child command exceeded the call timeout."
+                        )
+                    timeout = min(timeout, remaining)
                 try:
                     exit_code = process.wait(timeout=timeout)
                     break
                 except subprocess.TimeoutExpired:
+                    if deadline is not None and time.monotonic() >= deadline:
+                        _terminate_call_process(process)
+                        raise RunnerLaunchError(
+                            "call_timeout", "Child command exceeded the call timeout."
+                        )
                     try:
                         _emit_progress_heartbeat(
                             ctx,
@@ -1394,7 +1414,9 @@ def _capture_tracked_process(
                         emit_progress = False
                     next_progress_at = time.monotonic() + interval
         else:
-            exit_code = process.wait()
+            exit_code = wait_for_child(
+                None if deadline is None else max(deadline - time.monotonic(), 0)
+            )
         _join_stdin_thread(stdin_thread, process.stdin)
         _join_drain_thread(stdout_thread, process.stdout)
         _join_drain_thread(stderr_thread, process.stderr)
@@ -1648,6 +1670,7 @@ def _run_single_tracked_attempt(
     ctx: RunContext,
     *,
     started: float,
+    deadline: float | None,
     stdin_text: str | None,
     env_overrides: dict[str, str] | None,
     scratch_dir: Path | None,
@@ -1672,6 +1695,7 @@ def _run_single_tracked_attempt(
         ctx,
         started=started,
         stdin_text=stdin_text,
+        deadline=deadline,
         progress_stderr=progress_stderr,
         progress_initial_delay_sec=progress_initial_delay_sec,
         progress_interval_sec=progress_interval_sec,
@@ -1762,11 +1786,13 @@ def execute_tracked(
     progress: bool = False,
     progress_initial_delay_sec: float = PROGRESS_INITIAL_DELAY_SEC,
     progress_interval_sec: float = PROGRESS_HEARTBEAT_INTERVAL_SEC,
+    timeout: int | None = None,
 ) -> tuple[int, JsonObject | None]:
     if stdin_text is not None and prompt_file_text is not None:
         raise ValueError("stdin_text and prompt_file_text are mutually exclusive")
     files = _prepare_tracked_run(argv, ctx, manifest_argv=manifest_argv)
     started = time.monotonic()
+    deadline = None if timeout is None else started + timeout
     run_argv = _codex_argv_with_scratch(argv, files.scratch_dir) if ctx.engine == "codex" else argv
     run_manifest_argv = (
         _codex_argv_with_scratch(manifest_argv, files.scratch_dir)
@@ -1796,6 +1822,7 @@ def execute_tracked(
                 files,
                 ctx,
                 started=started,
+                deadline=deadline,
                 stdin_text=stdin_text,
                 env_overrides=ctx.env_overrides or None,
                 scratch_dir=files.scratch_dir,
@@ -1825,6 +1852,7 @@ def execute_tracked(
                 files,
                 ctx,
                 started=started,
+                deadline=deadline,
                 stdin_text=stdin_text,
                 env_overrides=ctx.fallback_env_overrides,
                 scratch_dir=files.scratch_dir,
@@ -1878,6 +1906,7 @@ def execute_tracked(
                     files,
                     ctx,
                     started=started,
+                    deadline=deadline,
                     stdin_text=retry_stdin,
                     env_overrides=attempt_env,
                     scratch_dir=files.scratch_dir,
@@ -1945,7 +1974,7 @@ def _terminate_call_process(process: subprocess.Popen[bytes]) -> None:
 def _bounded_call_communicate(
     process: subprocess.Popen[bytes],
     stdin_bytes: bytes | None,
-    timeout: int | None,
+    timeout: float | None,
     max_stdout: int,
     max_stderr: int,
 ) -> tuple[bytes, bytes]:
@@ -2226,7 +2255,7 @@ def _execute_call_once(
     agent_config_placeholder: str | None = None,
     env_overrides: dict[str, str] | None = None,
     pure: bool = False,
-    timeout: int | None = None,
+    timeout: float | None = None,
     structured_output: bool = False,
     sensitive_texts: tuple[str, ...] = (),
 ) -> CallResult:
@@ -2409,6 +2438,7 @@ def execute_call(
     structured_output: bool = False,
     sensitive_texts: tuple[str, ...] = (),
 ) -> CallResult:
+    deadline = None if timeout is None else time.monotonic() + timeout
     result = _execute_call_once(
         argv,
         cwd,
@@ -2420,7 +2450,7 @@ def execute_call(
         agent_config_placeholder=agent_config_placeholder,
         env_overrides=env_overrides,
         pure=pure,
-        timeout=timeout,
+        timeout=None if deadline is None else max(deadline - time.monotonic(), 0),
         structured_output=structured_output,
         sensitive_texts=sensitive_texts,
     )
@@ -2452,7 +2482,7 @@ def execute_call(
         agent_config_placeholder=agent_config_placeholder,
         env_overrides=env_overrides,
         pure=pure,
-        timeout=timeout,
+        timeout=None if deadline is None else max(deadline - time.monotonic(), 0),
         structured_output=structured_output,
         sensitive_texts=sensitive_texts,
     )

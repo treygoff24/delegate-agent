@@ -2562,6 +2562,44 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(payload["emptyRetry"], {"attempted": True, "resolved": True})
 
+    def test_grouped_call_timeout_terminates_the_child(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            script = Path(workspace) / "agent"
+            script.write_text("#!/usr/bin/env bash\nsleep 60\n", encoding="utf-8")
+            script.chmod(0o755)
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="call",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-07-16T12:00:00Z",
+                group="workflow",
+                call_read_only=True,
+            )
+
+            with self.assertRaises(self.runner.RunnerLaunchError) as caught:
+                self.runner.execute_tracked(
+                    [str(script), "task"],
+                    workspace,
+                    ctx,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                    manifest_argv=[str(script), "<prompt>"],
+                    timeout=1,
+                )
+
+            self.assertEqual(caught.exception.error, "call_timeout")
+
     def test_grouped_write_capable_call_empty_success_does_not_retry(self):
         with tempfile.TemporaryDirectory() as workspace:
             counter = Path(workspace) / "attempts"
