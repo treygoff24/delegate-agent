@@ -2192,6 +2192,13 @@ class RunnerCaptureTests(unittest.TestCase):
             )
             self.assertIn("empty-success-retry", stderr_log)
             self.assertIn("--- delegate empty-retry attempt:", stderr_log)
+            stdout_log = (root / "runs" / run_id / "stdout.log").read_bytes()
+            self.assertEqual(payload["stdoutBytes"], len(stdout_log))
+            primary_stderr, marker, retry_stderr = stderr_log.encode("utf-8").partition(
+                b"\n--- delegate empty-retry attempt: empty-success-retry ---\n"
+            )
+            self.assertTrue(marker)
+            self.assertEqual(payload["stderrBytes"], len(primary_stderr) + len(retry_stderr))
 
     def test_safe_empty_retry_preserves_both_attempts_and_stays_empty(self):
         with tempfile.TemporaryDirectory() as workspace:

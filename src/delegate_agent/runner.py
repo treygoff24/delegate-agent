@@ -1863,7 +1863,8 @@ def execute_tracked(
                     agent_config_placeholder=agent_config_placeholder,
                     agent_config_dir=files.run_path,
                 )
-                capture = _run_single_tracked_attempt(
+                primary_capture = capture
+                retry_capture = _run_single_tracked_attempt(
                     retry_argv,
                     cwd,
                     files,
@@ -1877,6 +1878,12 @@ def execute_tracked(
                     progress_initial_delay_sec=progress_initial_delay_sec,
                     progress_interval_sec=progress_interval_sec,
                     attempt_label="empty-success-retry",
+                )
+                capture = replace(
+                    retry_capture,
+                    duration_ms=primary_capture.duration_ms + retry_capture.duration_ms,
+                    stdout_bytes=primary_capture.stdout_bytes + retry_capture.stdout_bytes,
+                    stderr_bytes=primary_capture.stderr_bytes + retry_capture.stderr_bytes,
                 )
                 retry_quality = _tracked_capture_quality(
                     files,
