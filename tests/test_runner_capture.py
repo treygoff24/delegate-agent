@@ -1,4 +1,5 @@
 import contextlib
+import gc
 import importlib.util
 import io
 import json
@@ -8,6 +9,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import warnings
 from pathlib import Path
 from unittest import mock
 
@@ -2773,19 +2775,29 @@ class RunnerCaptureTests(unittest.TestCase):
                 call_read_only=True,
             )
 
-            with self.assertRaises(self.runner.RunnerLaunchError) as caught:
-                self.runner.execute_tracked(
-                    [str(script), "task"],
-                    workspace,
-                    ctx,
-                    json_mode=True,
-                    stdout=io.StringIO(),
-                    stderr=io.StringIO(),
-                    manifest_argv=[str(script), "<prompt>"],
-                    timeout=1,
-                )
+            with warnings.catch_warnings(record=True) as caught_warnings:
+                warnings.simplefilter("always", ResourceWarning)
+                with self.assertRaises(self.runner.RunnerLaunchError) as caught:
+                    self.runner.execute_tracked(
+                        [str(script), "task"],
+                        workspace,
+                        ctx,
+                        json_mode=True,
+                        stdout=io.StringIO(),
+                        stderr=io.StringIO(),
+                        manifest_argv=[str(script), "<prompt>"],
+                        timeout=1,
+                    )
+                gc.collect()
 
             self.assertEqual(caught.exception.error, "call_timeout")
+            self.assertFalse(
+                [
+                    warning
+                    for warning in caught_warnings
+                    if issubclass(warning.category, ResourceWarning)
+                ]
+            )
             state = json.loads((root / "runs" / run_id / "state.json").read_text(encoding="utf-8"))
             self.assertEqual(state["status"], "failed")
             self.assertEqual(state["error"], "call_timeout")

@@ -1396,6 +1396,12 @@ def _capture_tracked_process(
                 return process.wait(timeout=timeout)
             except subprocess.TimeoutExpired as exc:
                 _terminate_call_process(process)
+                _cleanup_tracked_process_streams(
+                    process,
+                    stdin_thread=stdin_thread,
+                    stdout_thread=stdout_thread,
+                    stderr_thread=stderr_thread,
+                )
                 raise RunnerLaunchError(
                     "call_timeout", "Child command exceeded the call timeout."
                 ) from exc
@@ -1424,6 +1430,12 @@ def _capture_tracked_process(
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         _terminate_call_process(process)
+                        _cleanup_tracked_process_streams(
+                            process,
+                            stdin_thread=stdin_thread,
+                            stdout_thread=stdout_thread,
+                            stderr_thread=stderr_thread,
+                        )
                         raise RunnerLaunchError(
                             "call_timeout", "Child command exceeded the call timeout."
                         )
@@ -1434,6 +1446,12 @@ def _capture_tracked_process(
                 except subprocess.TimeoutExpired:
                     if deadline is not None and time.monotonic() >= deadline:
                         _terminate_call_process(process)
+                        _cleanup_tracked_process_streams(
+                            process,
+                            stdin_thread=stdin_thread,
+                            stdout_thread=stdout_thread,
+                            stderr_thread=stderr_thread,
+                        )
                         raise RunnerLaunchError(
                             "call_timeout", "Child command exceeded the call timeout."
                         ) from None
@@ -1451,11 +1469,12 @@ def _capture_tracked_process(
             exit_code = wait_for_child(
                 None if deadline is None else max(deadline - time.monotonic(), 0)
             )
-        _join_stdin_thread(stdin_thread, process.stdin)
-        _join_drain_thread(stdout_thread, process.stdout)
-        _join_drain_thread(stderr_thread, process.stderr)
-        process.stdout.close()
-        process.stderr.close()
+        _cleanup_tracked_process_streams(
+            process,
+            stdin_thread=stdin_thread,
+            stdout_thread=stdout_thread,
+            stderr_thread=stderr_thread,
+        )
         if line_buffer.strip():
             accumulator.ingest_line(line_buffer)
     return TrackedCaptureResult(
@@ -1468,6 +1487,22 @@ def _capture_tracked_process(
         pid=process.pid,
         pgid=pgid,
     )
+
+
+def _cleanup_tracked_process_streams(
+    process: subprocess.Popen[bytes],
+    *,
+    stdin_thread: threading.Thread | None,
+    stdout_thread: threading.Thread,
+    stderr_thread: threading.Thread,
+) -> None:
+    _join_stdin_thread(stdin_thread, process.stdin)
+    _join_drain_thread(stdout_thread, process.stdout)
+    _join_drain_thread(stderr_thread, process.stderr)
+    for pipe in (process.stdin, process.stdout, process.stderr):
+        if pipe is not None:
+            with contextlib.suppress(OSError):
+                pipe.close()
 
 
 def _ctx_with_stdin_warnings(
