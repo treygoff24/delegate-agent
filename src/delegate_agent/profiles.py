@@ -331,6 +331,16 @@ def codex_fallback_env_overrides(resolution: ProfileResolution) -> dict[str, str
     return {**resolution.env, "CODEX_HOME": resolution.codex_fallback_home}
 
 
+def codex_fallback_child_env_overrides(
+    resolution: ProfileResolution,
+    primary_overrides: dict[str, str] | None,
+) -> dict[str, str]:
+    fallback = codex_fallback_env_overrides(resolution)
+    if fallback is None:
+        return {}
+    return {**(primary_overrides or {}), **fallback}
+
+
 def classify_codex_usage_limit(stderr_text: str) -> bool:
     if not stderr_text.strip():
         return False

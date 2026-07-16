@@ -486,6 +486,7 @@ class CodexProfileExecutionTests(unittest.TestCase):
                 f'echo "${{CODEX_HOME:-}}" >> "{attempts}"\n'
                 f'if [ "${{CODEX_HOME}}" = "{work}" ]; then\n'
                 '  printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}\'\n'
+                "  printf '%s\\n' '{\"type\":\"turn.completed\"}'\n"
                 "  exit 0\n"
                 "fi\n"
                 'echo "You exceeded your current quota usage limit" >&2\n'
@@ -546,6 +547,7 @@ class CodexProfileExecutionTests(unittest.TestCase):
                 f'echo "${{CODEX_HOME:-}}" >> "{attempts}"\n'
                 f'if [ "${{CODEX_HOME}}" = "{work}" ]; then\n'
                 '  printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}\'\n'
+                "  printf '%s\\n' '{\"type\":\"turn.completed\"}'\n"
                 "  exit 0\n"
                 "fi\n"
                 "printf '%s\\n' '{\"type\":\"turn.started\"}'\n"
@@ -622,6 +624,10 @@ class CodexProfileExecutionTests(unittest.TestCase):
                     config,
                     dry_run=False,
                 )
+            self.delegate._set_child_root_env(
+                request,
+                self.delegate.ResolvedWorkspace(repo.name, "git"),
+            )
             registry_root = self.registry.ensure_registry(Path(repo.name), workspace_kind="git")
             run_id, alias = self.registry.register_run(registry_root, harness="codex")
             ctx = self.delegate.make_run_context(
@@ -632,6 +638,7 @@ class CodexProfileExecutionTests(unittest.TestCase):
                 source_workspace=self.delegate.ResolvedWorkspace(repo.name, "git"),
             )
             self.assertEqual(ctx.fallback_env_overrides, {})
+            self.assertIn("DELEGATE_SOURCE_ROOT", ctx.env_overrides)
             exit_code, payload = self.runner.execute_tracked(
                 request.argv,
                 repo.name,
@@ -1047,7 +1054,11 @@ class ProfilePhase2CliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(payload["authProfile"], "work")
             self.assertTrue(payload["isolatedWorkspace"])
-            self.assertEqual(env_out.read_text(encoding="utf-8").splitlines(), ["work-pointer"])
+            self.assertEqual(
+                env_out.read_text(encoding="utf-8").splitlines(),
+                ["work-pointer", "work-pointer"],
+            )
+            self.assertEqual(payload["emptyRetry"], {"attempted": True, "resolved": False})
 
     def test_auth_profile_override_reaches_persistent_worktree_cursor_child(self):
         repo = make_git_repo()

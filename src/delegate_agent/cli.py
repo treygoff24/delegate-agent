@@ -564,10 +564,10 @@ def make_run_context(
         progress_initial_delay_sec=request.progress_initial_delay_sec,
         progress_interval_sec=request.progress_interval_sec,
         env_overrides=dict(request.env_overrides or {}),
-        fallback_env_overrides={
-            **(request.env_overrides or {}),
-            **(profiles.codex_fallback_env_overrides(request.profile_resolution) or {}),
-        },
+        fallback_env_overrides=profiles.codex_fallback_child_env_overrides(
+            request.profile_resolution,
+            request.env_overrides,
+        ),
         auth_profile=request.auth_profile,
         fallback_auth_profile=request.fallback_auth_profile,
         include_dirty=request.include_dirty,
