@@ -2393,6 +2393,37 @@ class RunnerCaptureTests(unittest.TestCase):
                 result.warnings,
             )
 
+    def test_empty_call_retry_preserves_primary_truncation_flag(self):
+        primary = self.runner.CallResult(
+            text="",
+            exit_code=0,
+            duration_ms=10,
+            stdout_bytes=1,
+            stderr_bytes=2,
+            text_chars=30_001,
+            text_truncated=True,
+            result_quality=self.runner.RESULT_QUALITY_EMPTY,
+        )
+        retry = self.runner.CallResult(
+            text="final answer",
+            exit_code=0,
+            duration_ms=20,
+            stdout_bytes=3,
+            stderr_bytes=4,
+            text_chars=12,
+            text_truncated=False,
+            result_quality=self.runner.RESULT_QUALITY_OK,
+        )
+        with mock.patch.object(self.runner, "_execute_call_once", side_effect=[primary, retry]):
+            result = self.runner.execute_call(
+                ["agent", "task"],
+                "/tmp",
+                harness="cursor",
+                read_only=True,
+            )
+
+        self.assertTrue(result.text_truncated)
+
     def test_attempt_delimiters_keep_auth_fallback_marker_distinct_from_empty_retry(self):
         with tempfile.TemporaryDirectory() as workspace:
             stderr_log = Path(workspace) / "stderr.log"

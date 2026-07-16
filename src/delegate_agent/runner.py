@@ -2472,6 +2472,7 @@ def execute_call(
             -profiles.STDERR_TAIL_LIMIT :
         ],
         warnings=tuple(warnings),
+        text_truncated=result.text_truncated or retry.text_truncated,
         empty_retry_attempted=True,
         empty_retry_resolved=resolved,
     )
