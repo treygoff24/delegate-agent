@@ -13,6 +13,7 @@ class ExecutionWorktreePreflightTests(ExecutionTestBase):
     def test_worktree_docs_match_dirty_submodule_preflight(self):
         root = Path(__file__).resolve().parents[1]
         documents = (
+            root / "docs/cli-reference.md",
             root / "docs/worktrees.md",
             root / "docs/troubleshooting.md",
             root / "droid-wiki/systems/isolation-and-worktrees.md",

@@ -119,8 +119,9 @@ A few boundaries are worth stating explicitly:
   repo history but also matched by a `.gitignore` rule is part of the repository
   and is synced like any other tracked file; `--include-dirty` excludes only
   untracked gitignored paths, not tracked ones.
-- **Dirty submodule working-tree state is not mirrored.** Only the source
-  checkout's tracked diff and untracked non-ignored files are copied.
+- **Dirty submodules fail preflight.** Delegate auto-syncs ordinary tracked and
+  untracked non-ignored source changes, but cannot safely reproduce dirty
+  submodule state, so it refuses the launch until that submodule is clean.
 - **Keep secrets out of hardlinks.** A hardlink at a non-ignored path to
   gitignored content is indistinguishable from a regular file and will sync by
   content; `--include-dirty` trusts every non-ignored path. Path-based exclusion
@@ -774,11 +775,12 @@ exit-code-derived status.
 
 Run-output JSON uses schema `delegate.run-output.v1` and returns selected completion report, stdout, and/or stderr content. By default, secret-like strings are redacted unless `--no-redact` is supplied. Tracked runs finish in one of the terminal statuses `succeeded`, `failed`, or `cancelled`; explicit harness cancellation/error terminal events override an exit-zero child status.
 
-Safe and call runs that exit successfully with `resultQuality=empty` retry once
-with the original prompt plus a plain-text final-answer instruction. Work runs
-never retry. Retried envelopes add `emptyRetry: {attempted, resolved}`; runs that
-do not retry omit the field. If the second attempt is also empty, the run remains
-successful and honest with `resultQuality=empty`, and emits an
+Safe runs and read-only call runs that exit successfully with `resultQuality=empty`
+retry once with the original prompt plus a plain-text final-answer instruction.
+Pure and slash pass-through prompts, and write-capable calls, do not retry. Retried
+envelopes add `emptyRetry: {attempted, resolved}`; runs that do not retry omit the
+field. If the second attempt is also empty, the run remains successful and honest
+with `resultQuality=empty`, and emits an
 `empty_success_retry` warning. Tracked safe runs retain both attempts in their
 stdout/stderr logs.
 
