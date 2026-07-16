@@ -825,9 +825,10 @@ selectors are preserved. `--stdout` or `--stderr` without `--tail` or `--raw`
 defaults to a bounded `--tail 80` and a character cap (default 60000); use
 `--max-chars N` to override the cap. `--raw` returns the full stream with no
 line or character bounds, includes `rawOutputBytes` in JSON metadata, and cannot
-be combined with `--tail` or `--max-chars`. `--tail` and `--max-chars` require
-`--stdout` or `--stderr`; Delegate rejects them when only `--completion-report`
-is selected.
+be combined with `--tail` or `--max-chars`. A bare `--tail N` implies
+`--stdout` when no output selector is supplied; it never includes stderr.
+`--max-chars` still requires `--stdout` or `--stderr`, and Delegate rejects
+either bound when only `--completion-report` is selected.
 
 When `completion-report.md` is absent, `run-output --completion-report` makes a
 bounded best-effort attempt to recover an explicit final response from the

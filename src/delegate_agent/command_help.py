@@ -726,7 +726,11 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             OptionSpec("--completion-report", None, "Print the run's completion report."),
             OptionSpec("--stdout", None, "Print captured stdout (defaults to --tail 80)."),
             OptionSpec("--stderr", None, "Print captured stderr (defaults to --tail 80)."),
-            OptionSpec("--tail", "N", "Print only the last N lines of the selected stream."),
+            OptionSpec(
+                "--tail",
+                "N",
+                "Print the last N lines; implies --stdout when no output selector is given.",
+            ),
             OptionSpec(
                 "--max-chars",
                 "N",
@@ -754,7 +758,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "Prefer this over piping launch output through tail.",
             "Non-raw stdout/stderr are bounded by line tail and character cap; use --raw only "
             "when you intentionally need the full stream.",
-            "--tail and --max-chars require --stdout or --stderr; completion reports reject them.",
+            "A bare --tail implies --stdout, never --stderr; --max-chars still requires a stream "
+            "selector, and completion reports reject both bounds.",
         ),
         see_also=("snapshot", "runs"),
         unsupported_global_options=("--auth-profile",),

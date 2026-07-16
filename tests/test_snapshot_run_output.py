@@ -1117,6 +1117,21 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
         self.assertFalse(stdout_section["truncated"])
         self.assertEqual(stdout_section["content"], "line1\n")
 
+    def test_run_output_tail_without_selector_implies_stdout_only(self):
+        run_id, alias = self.write_run()
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        (run_path / "stdout.log").write_text("first\nsecond\n", encoding="utf-8")
+        (run_path / "stderr.log").write_text("do not include\n", encoding="utf-8")
+        stdout = io.StringIO()
+        code = self.delegate.main(
+            ["--json", "--cwd", str(self.workspace), "run-output", alias, "--tail", "1"],
+            stdout=stdout,
+        )
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(set(payload["sections"]), {"stdout"})
+        self.assertEqual(payload["sections"]["stdout"]["content"], "second\n")
+
     def test_run_output_json_raw_stdout_not_truncated(self):
         run_id, alias = self.write_run()
         run_path = self.registry.run_directory(self.registry_root, run_id)

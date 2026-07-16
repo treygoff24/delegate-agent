@@ -422,6 +422,7 @@ class RunOutputHelpTests(HelpCliTestBase):
         self.assertIn("--raw", out)
         self.assertIn("--tail", out)
         self.assertIn("incompatible", out.lower())
+        self.assertIn("implies --stdout", out)
 
     def test_run_output_json_help_documents_max_chars(self):
         code, out, _err = self.run_main(["--json", "run-output", "--help"])

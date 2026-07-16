@@ -1464,6 +1464,8 @@ def parse_run_output(rest: list[str], json_mode: bool, cwd: str | None) -> Parse
             "ambiguous_run_output_target",
             "Use either --latest <harness> or an exact handle, not both.",
         )
+    if tail is not None and not (completion_report or stdout_flag or stderr_flag or raw):
+        stdout_flag = True
     default_output = not (completion_report or stdout_flag or stderr_flag or raw)
     if default_output:
         completion_report = True
