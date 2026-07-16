@@ -113,10 +113,7 @@ def _resolve_targets(
 def _merged_view(registry_root: Path, run_id: str, target: run_registry.RunTarget) -> JsonObject:
     snapshot = run_registry.load_run_snapshot_or_none(registry_root, run_id)
     view = snapshot_view.merge_snapshot_view(registry_root, run_id, snapshot, redact=True)
-    if target.resolution_kind != "literal":
-        view["requestedHandle"] = target.requested_handle
-        view["resolvedHandle"] = target.resolved_handle or target.alias or run_id
-        view["resolutionKind"] = target.resolution_kind
+    run_registry.add_run_target_resolution(view, target)
     return dict(view)
 
 
@@ -155,6 +152,13 @@ def _status_label(payload: JsonObject) -> str:
 
 
 def _print_wait_table(runs: list[JsonObject], stdout: TextIO) -> None:
+    for run in runs:
+        delegate_rendering.render_resolution_text(run, stdout)
+        warnings = run.get("warnings")
+        if isinstance(warnings, list):
+            for warning in warnings:
+                if isinstance(warning, str) and warning.startswith("bare_handle_stale:"):
+                    print(f"warning: {warning}", file=stdout)
     print("alias        status     quality          failure", file=stdout)
     for run in runs:
         alias = str(run.get("alias") or run.get("runId") or "?")[:12]

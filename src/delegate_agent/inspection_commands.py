@@ -46,7 +46,7 @@ def emit_snapshot(command: SnapshotCommand, *, workspace_path: str, stdout: Text
     )
     if isinstance(target, run_registry.RunTargetLookupError):
         raise InspectionError(target.error, target.message)
-    run_id, alias = target.run_id, target.alias
+    run_id = target.run_id
     snapshot = run_registry.load_run_snapshot(registry_root, run_id)
     view = snapshot_view.merge_snapshot_view(
         registry_root,
@@ -54,10 +54,7 @@ def emit_snapshot(command: SnapshotCommand, *, workspace_path: str, stdout: Text
         snapshot,
         redact=not command.no_redact,
     )
-    if target.resolution_kind != "literal":
-        view["requestedHandle"] = target.requested_handle
-        view["resolvedHandle"] = target.resolved_handle or alias or run_id
-        view["resolutionKind"] = target.resolution_kind
+    run_registry.add_run_target_resolution(view, target)
     if command.json_mode:
         delegate_rendering.print_json(snapshot_view.snapshot_json_payload(view), stdout)
     else:

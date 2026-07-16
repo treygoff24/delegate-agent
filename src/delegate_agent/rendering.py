@@ -71,11 +71,20 @@ def _render_snapshot_status_detail(view: SnapshotView, stdout: TextIO) -> None:
         print(f"status detail: raw={raw_status} effective={effective_status}", file=stdout)
     if isinstance(stale_reason, str) and stale_reason:
         print(f"stale reason: {stale_reason}", file=stdout)
+    render_resolution_text(view, stdout)
+
+
+def render_resolution_text(view: JsonObject, stdout: TextIO) -> None:
     requested = view.get("requestedHandle")
     resolved = view.get("resolvedHandle")
     kind = view.get("resolutionKind")
     if isinstance(requested, str) and isinstance(resolved, str) and isinstance(kind, str):
         print(f"resolved handle: {requested} -> {resolved} ({kind})", file=stdout)
+    run_id = view.get("resolvedRunId")
+    workspace = view.get("resolvedWorkspace")
+    age = view.get("resolvedAge")
+    if isinstance(run_id, str) and isinstance(workspace, str) and isinstance(age, str):
+        print(f"resolved run: {run_id} · workspace: {workspace} · age: {age}", file=stdout)
 
 
 def _render_snapshot_isolation(view: SnapshotView, stdout: TextIO) -> None:
@@ -309,11 +318,7 @@ def render_run_output_text(
     warnings: list[str] | None = None,
 ) -> None:
     if resolution:
-        requested = resolution.get("requestedHandle")
-        resolved = resolution.get("resolvedHandle")
-        kind = resolution.get("resolutionKind")
-        if isinstance(requested, str) and isinstance(resolved, str) and isinstance(kind, str):
-            print(f"resolved handle: {requested} -> {resolved} ({kind})", file=stdout)
+        render_resolution_text(resolution, stdout)
     if warnings:
         print("warnings:", file=stdout)
         for warning in warnings:

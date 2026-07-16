@@ -662,7 +662,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         notes=(
             "Provide either a handle or --latest HARNESS, not both.",
-            "Bare harness handles resolve to the latest run; generated commands use numbered aliases.",
+            "Bare harness handles report the resolved run, workspace, and age; resolutions older "
+            "than 24h warn to use --cwd or an explicit handle.",
         ),
         see_also=("runs", "run-output"),
         unsupported_global_options=("--auth-profile",),
@@ -754,7 +755,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         notes=(
             "With no selector, prints the best available parent-facing output.",
-            "Bare harness handles resolve to the latest run; generated commands use numbered aliases.",
+            "Bare harness handles report the resolved run, workspace, and age; resolutions older "
+            "than 24h warn to use --cwd or an explicit handle.",
             "Prefer this over piping launch output through tail.",
             "Non-raw stdout/stderr are bounded by line tail and character cap; use --raw only "
             "when you intentionally need the full stream.",
@@ -798,6 +800,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         notes=(
             "Exit codes: 0 all succeeded; 1 any failed/cancelled; 124 timeout.",
             "Dead recorded child pids are treated as terminal failures, not as hangs.",
+            "Bare harness handles report the resolved run, workspace, and age; resolutions older "
+            "than 24h warn to use --cwd or an explicit handle.",
         ),
         see_also=("runs", "snapshot", "run-output", "cancel"),
         unsupported_global_options=("--auth-profile", "--isolation"),

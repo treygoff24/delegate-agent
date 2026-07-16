@@ -209,7 +209,51 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
         self.assertEqual(payload["requestedHandle"], "codex")
         self.assertEqual(payload["resolvedHandle"], latest_alias)
         self.assertEqual(payload["resolutionKind"], "latest")
+        self.assertEqual(payload["resolvedRunId"], latest_run_id)
+        self.assertEqual(payload["resolvedAlias"], latest_alias)
+        self.assertEqual(payload["resolvedWorkspace"], str(self.workspace))
+        self.assertGreater(payload["resolvedAgeSeconds"], 24 * 60 * 60)
+        self.assertTrue(any("bare_handle_stale" in warning for warning in payload["warnings"]))
         self.assertEqual(payload["sections"]["completionReport"]["content"], "# latest done\n")
+
+    def test_snapshot_bare_harness_reports_resolution_workspace_and_age(self):
+        run_id, alias = self.write_run(
+            harness="codex",
+            status="succeeded",
+            started_at="2026-05-20T12:00:00Z",
+        )
+        stdout = io.StringIO()
+        code = self.delegate.main(
+            ["--json", "--cwd", str(self.workspace), "snapshot", "codex"],
+            stdout=stdout,
+        )
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["resolvedRunId"], run_id)
+        self.assertEqual(payload["resolvedAlias"], alias)
+        self.assertEqual(payload["resolvedWorkspace"], str(self.workspace))
+        self.assertGreater(payload["resolvedAgeSeconds"], 24 * 60 * 60)
+        self.assertTrue(any("--cwd" in warning for warning in payload["warnings"]))
+
+    def test_run_output_bare_harness_text_surfaces_resolution_and_stale_warning(self):
+        run_id, _alias = self.write_run(
+            harness="codex",
+            status="succeeded",
+            started_at="2026-05-20T12:00:00Z",
+        )
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        (run_path / "completion-report.md").write_text("done\n", encoding="utf-8")
+        stdout = io.StringIO()
+        code = self.delegate.main(
+            ["--cwd", str(self.workspace), "run-output", "codex", "--completion-report"],
+            stdout=stdout,
+        )
+        text = stdout.getvalue()
+        self.assertEqual(code, 0)
+        self.assertIn(f"resolved run: {run_id}", text)
+        self.assertIn(f"workspace: {self.workspace}", text)
+        self.assertIn("age:", text)
+        self.assertIn("bare_handle_stale", text)
 
     def test_run_output_defaults_to_completion_report(self):
         run_id, alias = self.write_run()
