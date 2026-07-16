@@ -229,15 +229,33 @@ def _git_lines(git_root: str, args: list[str], *, error: str) -> list[str]:
     return [line for line in result.stdout.splitlines() if line]
 
 
+def _git_paths(git_root: str, args: list[str], *, error: str) -> list[str]:
+    result = _run_git_bytes(
+        git_root,
+        [*args, "-z"],
+        timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
+    )
+    if result.returncode != 0:
+        raise DelegateError(
+            "safe_workspace_sync_failed",
+            f"{error}: {result.stderr.decode(errors='replace').strip()}",
+        )
+    return [
+        path.decode("utf-8", errors="surrogateescape")
+        for path in result.stdout.split(b"\0")
+        if path
+    ]
+
+
 def changed_files_vs_head(git_root: str) -> tuple[str, ...]:
     """Return tracked HEAD diff paths plus untracked non-ignored paths."""
     paths: list[str] = []
     seen: set[str] = set()
-    for line in _git_lines(
+    for line in _git_paths(
         git_root,
         ["diff", "HEAD", "--name-only"],
         error="Failed to list tracked changes",
-    ) + _git_lines(
+    ) + _git_paths(
         git_root,
         ["ls-files", "--others", "--exclude-standard"],
         error="Failed to list untracked files",
@@ -601,7 +619,7 @@ def external_symlink_warnings(source_workspace: str, *, limit: int = 5) -> tuple
 
 def dirty_sync_counts(git_root: str) -> tuple[int, int]:
     changed = changed_files_vs_head(git_root)
-    untracked = _git_lines(
+    untracked = _git_paths(
         git_root,
         ["ls-files", "--others", "--exclude-standard"],
         error="Failed to list untracked files",
@@ -614,7 +632,7 @@ def sync_git_dirty_snapshot(
 ) -> tuple[int, int, int, tuple[str, ...]]:
     apply_git_tracked_diff(worktree_path, read_git_tracked_diff(git_root))
     changed = changed_files_vs_head(git_root)
-    untracked = _git_lines(
+    untracked = _git_paths(
         git_root,
         ["ls-files", "--others", "--exclude-standard"],
         error="Failed to list untracked files",

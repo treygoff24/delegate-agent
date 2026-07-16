@@ -254,6 +254,26 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
             ("tracked.txt", "notes.txt"),
         )
 
+    def test_dirty_sync_preserves_unicode_and_tab_filenames(self):
+        repo = self.make_dirty_repo()
+        root = Path(repo.name)
+        names = ("caf\u00e9.txt", "tab\tname.txt")
+        for name in names:
+            (root / name).write_text(name, encoding="utf-8")
+
+        worktree_path, temp_base = self.delegate.create_git_safe_workspace(repo.name)
+        try:
+            isolated = Path(worktree_path)
+            self.assertTrue(set(names).issubset(safe_workspace.changed_files_vs_head(repo.name)))
+            for name in names:
+                self.assertEqual((isolated / name).read_text(encoding="utf-8"), name)
+        finally:
+            self.delegate.cleanup_safe_isolated_workspace(
+                git_root=repo.name,
+                isolated_workspace=worktree_path,
+                temp_base=temp_base,
+            )
+
     def test_git_safe_workspace_excludes_nested_gitignored_subdir_secret(self):
         """A secret in a subdirectory that a nested .gitignore excludes is not
         synced into the isolated workspace (the ignore rule is honored even when
