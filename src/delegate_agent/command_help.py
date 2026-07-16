@@ -209,6 +209,11 @@ _MODE_ARG = ArgSpec(
     True,
     "Execution mode: safe (read-only review), work (may edit the workspace), or call (stateless one-shot model call).",
 )
+_DEVIN_MODE_ARG = ArgSpec(
+    "mode",
+    True,
+    "Execution mode: work (may edit the workspace) or call (stateless one-shot model call).",
+)
 
 
 # Command registry.
@@ -446,7 +451,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "delegate [--json] devin call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] "
             "[--prompt-file PATH] [prompt...]",
         ),
-        arguments=(_MODE_ARG, _PROMPT_ARG),
+        arguments=(_DEVIN_MODE_ARG, _PROMPT_ARG),
         options=(
             _MODEL_OPTION,
             _REASONING_EFFORT_OPTION,
@@ -466,7 +471,6 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "Prompt uses Delegate temp file via Devin --prompt-file plus -p; dry-run argv shows <prompt file>.",
             WORKTREE_DIRTY_SYNC_NOTE,
             CALL_MODE_NOTE,
-            "Devin safe mode is rejected during preflight because filesystem surveys may require the generic exec tool, which Delegate cannot allow without weakening the read-only boundary. Use another harness in safe mode for filesystem review.",
             "Call --read-only passes a Delegate-generated --agent-config deny-list for edit/write/exec and mcp__* plus --permission-mode auto.",
             "Work and default call mode use --permission-mode dangerous because Devin print mode rejects unapproved edit/exec tools.",
             "Model selection uses --model (alias from devin.models or a raw model ID), the run-input JSON model, or devin.defaultModel in config; unknown models are left to Devin CLI validation.",

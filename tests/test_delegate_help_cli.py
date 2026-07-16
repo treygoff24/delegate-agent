@@ -581,7 +581,8 @@ class KimiHelpTests(HelpCliTestBase):
 
         code, out, _err = self.run_main(["devin", "--help"])
         self.assertEqual(code, self.delegate.EXIT_OK)
-        self.assertIn("Devin safe mode is rejected during preflight", out)
+        self.assertIn("Execution mode: work", out)
+        self.assertNotIn("safe (read-only review)", out)
         self.assertNotIn(note, out)
 
         code, out, _err = self.run_main(["agent-help"])
@@ -606,6 +607,22 @@ class KimiHelpTests(HelpCliTestBase):
         self.assertIn("emptyRetry", payload["completionEnvelope"])
         self.assertIn("DELEGATE_SOURCE_ROOT", payload["childEnvironment"])
         self.assertIn("DELEGATE_EXECUTION_ROOT", payload["childEnvironment"])
+
+    def test_devin_help_advertises_only_work_and_call_modes(self):
+        code, out, _err = self.run_main(["devin", "--help"])
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertIn("work (may edit the workspace) or call", out)
+        self.assertNotIn("safe (read-only review)", out)
+        self.assertNotIn("Devin safe mode", out)
+
+        code, out, _err = self.run_main(["agent-help"])
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        devin_section = out.split("Devin:", 1)[1].split("Droid modes:", 1)[0]
+        self.assertNotIn("safe", devin_section.lower())
+
+        code, out, _err = self.run_main(["cursor", "--help"])
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertIn("safe (read-only review)", out)
 
 
 if __name__ == "__main__":

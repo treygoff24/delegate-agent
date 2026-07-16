@@ -1365,8 +1365,7 @@ Grok:
 
 Devin:
   - Uses Devin CLI print mode with --prompt-file and -p; Delegate materializes the effective prompt in a temp file.
-  - {SAFE_WORKSPACE_SYNC_NOTE}
-  - Safe and call --read-only pass a Delegate-generated --agent-config deny-list for edit/write/exec and mcp__* plus --permission-mode auto.
+  - Call --read-only passes a Delegate-generated --agent-config deny-list for edit/write/exec and mcp__* plus --permission-mode auto.
   - Work and default call mode use --permission-mode dangerous because Devin print mode rejects unapproved edit/exec tools.
   - Model selection uses --model (alias from devin.models or a raw model ID), optional JSON input model, or devin.defaultModel; Delegate lets Devin validate unknown model names.
   - Reasoning effort is unsupported for Devin in v1.
