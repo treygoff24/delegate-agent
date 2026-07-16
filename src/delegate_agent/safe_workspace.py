@@ -24,7 +24,7 @@ import subprocess  # nosec B404 - Delegate launches configured git/harness comma
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from delegate_agent.argv_utils import public_argv
@@ -91,6 +91,16 @@ SAFE_ISOLATION_REPORT_INSTRUCTION = (
     "\n\nSafe-isolation note: cite files relative to the workspace in your report; "
     "do not include the temporary workspace path."
 )
+
+
+@dataclass(frozen=True)
+class DirtySyncSnapshot:
+    diff_names: tuple[str, ...]
+    untracked_names: tuple[str, ...]
+
+    @property
+    def example_paths(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys((*self.diff_names, *self.untracked_names)))
 
 
 def _ensure_codex_skip_git_repo_check(argv: list[str]) -> list[str]:
@@ -250,22 +260,31 @@ def _git_paths(git_root: str, args: list[str], *, error: str) -> list[str]:
 
 def changed_files_vs_head(git_root: str) -> tuple[str, ...]:
     """Return tracked HEAD diff paths plus untracked non-ignored paths."""
-    paths: list[str] = []
-    seen: set[str] = set()
-    for line in _git_paths(
-        git_root,
-        ["diff", "HEAD", "--name-only"],
-        error="Failed to list tracked changes",
-    ) + _git_paths(
-        git_root,
-        ["ls-files", "--others", "--exclude-standard"],
-        error="Failed to list untracked files",
-    ):
-        if line in seen:
-            continue
-        seen.add(line)
-        paths.append(line)
-    return tuple(paths)
+    return dirty_sync_snapshot(git_root).example_paths
+
+
+def dirty_sync_snapshot(git_root: str) -> DirtySyncSnapshot:
+    return DirtySyncSnapshot(
+        diff_names=tuple(
+            _git_paths(
+                git_root,
+                ["diff", "HEAD", "--name-only"],
+                error="Failed to list tracked changes",
+            )
+        ),
+        untracked_names=tuple(
+            _git_paths(
+                git_root,
+                ["ls-files", "--others", "--exclude-standard"],
+                error="Failed to list untracked files",
+            )
+        ),
+    )
+
+
+def dirty_sync_counts(git_root: str) -> tuple[int, int]:
+    snapshot = dirty_sync_snapshot(git_root)
+    return len(snapshot.diff_names), len(snapshot.untracked_names)
 
 
 def symlink_target_resolves_outside(path: Path, source_root: Path) -> bool:
@@ -618,16 +637,6 @@ def external_symlink_warnings(source_workspace: str, *, limit: int = 5) -> tuple
     return (f"{SAFE_EXTERNAL_SYMLINK_WARNING_PREFIX}: {preview}.",)
 
 
-def dirty_sync_counts(git_root: str) -> tuple[int, int]:
-    changed = changed_files_vs_head(git_root)
-    untracked = _git_paths(
-        git_root,
-        ["ls-files", "--others", "--exclude-standard"],
-        error="Failed to list untracked files",
-    )
-    return len(changed) - len(untracked), len(untracked)
-
-
 def dirty_submodule_paths(git_root: str) -> tuple[str, ...]:
     """Return gitlink changes the dirty-snapshot sync cannot reproduce."""
     status = _run_git_bytes(
@@ -671,15 +680,14 @@ def dirty_submodule_paths(git_root: str) -> tuple[str, ...]:
 
 
 def sync_git_dirty_snapshot(
-    git_root: str, worktree_path: str
+    git_root: str,
+    worktree_path: str,
+    *,
+    snapshot: DirtySyncSnapshot | None = None,
 ) -> tuple[int, int, int, tuple[str, ...]]:
+    snapshot = snapshot or dirty_sync_snapshot(git_root)
     apply_git_tracked_diff(worktree_path, read_git_tracked_diff(git_root))
-    changed = changed_files_vs_head(git_root)
-    untracked = _git_paths(
-        git_root,
-        ["ls-files", "--others", "--exclude-standard"],
-        error="Failed to list untracked files",
-    )
+    untracked = snapshot.untracked_names
     root = Path(git_root)
     try:
         root_resolved = root.resolve(strict=True)
@@ -700,9 +708,9 @@ def sync_git_dirty_snapshot(
             source_root=Path(git_root),
             leak_blocked=leak_blocked,
         )
-    tracked_count = len(changed) - len(untracked)
+    tracked_count = len(snapshot.diff_names)
     return (
-        len(changed),
+        len(snapshot.example_paths),
         tracked_count,
         len(untracked),
         merge_warnings(

@@ -202,6 +202,38 @@ class Wave4LaunchFeatureTests(ExecutionTestBase):
                 safe_workspace.SAFE_BLOCKED_SYMLINK_PLACEHOLDER,
             )
 
+    def test_dirty_source_disclosure_escapes_untrusted_filenames(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            repo, _git_cd = self._make_git_repo_with_commit()
+            repo_path = Path(repo.name)
+            filename = "line\nbreak.txt"
+            (repo_path / filename).write_text("new\n", encoding="utf-8")
+            agent = self.write_executable("agent", "exit 0\n")
+            config_path = self.write_config(
+                self.config_with_cursor(agent, data_home=str(Path(fake_home) / "worktrees"))
+            )
+            stderr = io.StringIO()
+            with mock.patch.dict(
+                os.environ,
+                {"HOME": fake_home, "DELEGATE_CONFIG": str(config_path)},
+                clear=False,
+            ):
+                code = self.delegate.main(
+                    [
+                        "--cwd",
+                        repo.name,
+                        "--isolation",
+                        "worktree",
+                        "cursor",
+                        "work",
+                        "hello",
+                    ],
+                    stdout=io.StringIO(),
+                    stderr=stderr,
+                )
+            self.assertEqual(code, 0, stderr.getvalue())
+            self.assertIn(repr(filename), stderr.getvalue())
+
     def test_include_dirty_is_a_noop_for_clean_worktree_source(self):
         with tempfile.TemporaryDirectory() as fake_home:
             repo, _git_cd = self._make_git_repo_with_commit()

@@ -78,6 +78,7 @@ class PersistentWorktreePreflight:
     tracked_dirty_files: int
     untracked_files: int
     dirty_example_paths: tuple[str, ...]
+    dirty_snapshot: safe_workspace.DirtySyncSnapshot
 
 
 @dataclass
@@ -148,13 +149,11 @@ def _validate_persistent_worktree_request(
         )
 
     try:
-        tracked_dirty_files, untracked_files = safe_workspace.dirty_sync_counts(source_git_root)
+        dirty_snapshot = safe_workspace.dirty_sync_snapshot(source_git_root)
+        tracked_dirty_files = len(dirty_snapshot.diff_names)
+        untracked_files = len(dirty_snapshot.untracked_names)
         dirty_submodules = safe_workspace.dirty_submodule_paths(source_git_root)
-        dirty_example_paths = (
-            safe_workspace.changed_files_vs_head(source_git_root)
-            if tracked_dirty_files or untracked_files
-            else ()
-        )
+        dirty_example_paths = dirty_snapshot.example_paths
     except Exception as exc:
         raise PersistentWorktreeError(
             getattr(exc, "error", "dirty_source_check_failed"),
@@ -192,6 +191,7 @@ def _validate_persistent_worktree_request(
         tracked_dirty_files=tracked_dirty_files,
         untracked_files=untracked_files,
         dirty_example_paths=dirty_example_paths,
+        dirty_snapshot=dirty_snapshot,
     )
 
 
@@ -401,7 +401,7 @@ def _create_persistent_worktree_or_record_failure(
             preflight.tracked_dirty_files > 0 or preflight.untracked_files > 0
         )
         if auto_include_dirty:
-            examples = ", ".join(preflight.dirty_example_paths[:5])
+            examples = ", ".join(repr(path) for path in preflight.dirty_example_paths[:5])
             print(
                 "Auto-including dirty source into persistent worktree: "
                 f"{preflight.tracked_dirty_files} tracked-modified and "
@@ -414,6 +414,7 @@ def _create_persistent_worktree_or_record_failure(
                 safe_workspace.sync_git_dirty_snapshot(
                     preflight.source_git_root,
                     registration.worktree_path,
+                    snapshot=preflight.dirty_snapshot,
                 )
             )
             registration.creation_context["includeDirty"] = True
