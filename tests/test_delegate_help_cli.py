@@ -592,6 +592,21 @@ class KimiHelpTests(HelpCliTestBase):
             out,
         )
 
+    def test_worktree_dirty_auto_include_is_documented_in_help_and_describe(self):
+        note = self.delegate.command_help.WORKTREE_DIRTY_SYNC_NOTE
+        code, out, _err = self.run_main(["cursor", "--help"])
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertIn(note, out)
+        self.assertIn("Dirty source files are auto-included", out)
+
+        code, out, _err = self.run_main(["--json", "describe"])
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        payload = json.loads(out)
+        self.assertIn("auto-include", payload["worktrees"]["dirtySource"]["behavior"])
+        self.assertIn("emptyRetry", payload["completionEnvelope"])
+        self.assertIn("DELEGATE_SOURCE_ROOT", payload["childEnvironment"])
+        self.assertIn("DELEGATE_EXECUTION_ROOT", payload["childEnvironment"])
+
 
 if __name__ == "__main__":
     unittest.main()

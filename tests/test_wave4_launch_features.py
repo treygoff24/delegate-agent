@@ -135,10 +135,25 @@ class Wave4LaunchFeatureTests(ExecutionTestBase):
             )
             stdout = io.StringIO()
             stderr = io.StringIO()
-            with mock.patch.dict(
-                os.environ,
-                {"HOME": fake_home, "DELEGATE_CONFIG": str(config_path)},
-                clear=False,
+            original_sync = safe_workspace.sync_git_dirty_snapshot
+
+            def sync_after_disclosure(*args, **kwargs):
+                self.assertIn(
+                    "Auto-including dirty source into persistent worktree", stderr.getvalue()
+                )
+                return original_sync(*args, **kwargs)
+
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {"HOME": fake_home, "DELEGATE_CONFIG": str(config_path)},
+                    clear=False,
+                ),
+                mock.patch.object(
+                    safe_workspace,
+                    "sync_git_dirty_snapshot",
+                    side_effect=sync_after_disclosure,
+                ),
             ):
                 code = self.delegate.main(
                     [
@@ -158,6 +173,12 @@ class Wave4LaunchFeatureTests(ExecutionTestBase):
             payload = json.loads(stdout.getvalue())
             self.assertTrue(payload["includeDirty"])
             self.assertEqual(payload["syncedFiles"], 3)
+            self.assertIn(
+                "Auto-including dirty source into persistent worktree: 1 tracked-modified and 2 untracked file(s).",
+                stderr.getvalue(),
+            )
+            self.assertIn("tracked.txt", stderr.getvalue())
+            self.assertIn("untracked.txt", stderr.getvalue())
             self.assertTrue(
                 any(
                     warning.startswith(

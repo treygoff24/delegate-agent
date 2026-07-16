@@ -69,6 +69,12 @@ CALL_MODE_NOTE = (
     "bounds any call; on expiry Delegate terminates the child process group and "
     "returns call_timeout."
 )
+WORKTREE_DIRTY_SYNC_NOTE = (
+    "Persistent worktree work runs automatically include tracked edits and untracked, "
+    "non-ignored files from a dirty source before the child starts; Delegate discloses "
+    "the counts and example paths on stderr. Dirty submodules cannot be synced; commit "
+    "or stash them, or use --isolation none."
+)
 
 
 # Global options (must appear before the subcommand).
@@ -170,7 +176,9 @@ _FORBID_COMMIT_OPTION = OptionSpec(
 _INCLUDE_DIRTY_OPTION = OptionSpec(
     "--include-dirty",
     None,
-    "work + persistent worktree only: sync tracked edits and untracked non-ignored files into the new worktree.",
+    "work + persistent worktree only: explicitly include tracked edits and untracked "
+    "non-ignored files in the new worktree. Dirty source files are auto-included even "
+    "without this flag.",
 )
 _READ_ONLY_OPTION = OptionSpec(
     "--read-only",
@@ -235,6 +243,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         notes=(
             SAFE_WORKSPACE_SYNC_NOTE,
+            WORKTREE_DIRTY_SYNC_NOTE,
             CALL_MODE_NOTE,
             "Reasoning effort uses cursor.reasoningEffortModels; no standalone Cursor effort flag is emitted.",
             "Trailing prompt text begins after the mode; a later --help is prompt text, "
@@ -271,6 +280,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         notes=(
             SAFE_WORKSPACE_SYNC_NOTE,
+            WORKTREE_DIRTY_SYNC_NOTE,
             CALL_MODE_NOTE,
             "Kimi safe mode also uses a read-only safety prompt.",
             "work mode uses Kimi prompt mode; Delegate does not emit --yolo because "
@@ -315,6 +325,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         notes=(
             SAFE_WORKSPACE_SYNC_NOTE,
+            WORKTREE_DIRTY_SYNC_NOTE,
             CALL_MODE_NOTE,
             "Model selection uses --model (alias from codex.models or a raw model ID), "
             "the run-input JSON model, or codex.defaultModel in config.",
@@ -364,6 +375,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "Uses Claude Code -p with prompt delivery on stdin; dry-run argv and run manifests "
             "do not contain the prompt.",
             SAFE_WORKSPACE_SYNC_NOTE,
+            WORKTREE_DIRTY_SYNC_NOTE,
             CALL_MODE_NOTE,
             "Claude safe mode runs with --permission-mode plan, "
             "--strict-mcp-config, Read/Grep/Glob, and selected read-only Bash tools.",
@@ -407,6 +419,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         notes=(
             "Prompt uses Delegate temp file via Grok --prompt-file; dry-run argv shows <prompt file>.",
             SAFE_WORKSPACE_SYNC_NOTE,
+            WORKTREE_DIRTY_SYNC_NOTE,
             CALL_MODE_NOTE,
             "Tracked runs use --output-format streaming-json for snapshots/run-output; "
             "pass-through uses plain.",
@@ -451,6 +464,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         notes=(
             "Prompt uses Delegate temp file via Devin --prompt-file plus -p; dry-run argv shows <prompt file>.",
+            WORKTREE_DIRTY_SYNC_NOTE,
             CALL_MODE_NOTE,
             "Devin safe mode is rejected during preflight because filesystem surveys may require the generic exec tool, which Delegate cannot allow without weakening the read-only boundary. Use another harness in safe mode for filesystem review.",
             "Call --read-only passes a Delegate-generated --agent-config deny-list for edit/write/exec and mcp__* plus --permission-mode auto.",
@@ -491,6 +505,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         notes=(
             "Uses opencode run --format json --print-logs; stdout is buffered until completion, while --print-logs stderr remains Delegate-visible.",
             SAFE_WORKSPACE_SYNC_NOTE,
+            WORKTREE_DIRTY_SYNC_NOTE,
             CALL_MODE_NOTE,
             "call mode has no default Delegate timeout; pass --timeout SEC to bound a silent upstream hang.",
             "Work mode emits --auto; safe and call do not.",
@@ -540,6 +555,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         notes=(
             SAFE_WORKSPACE_SYNC_NOTE,
+            WORKTREE_DIRTY_SYNC_NOTE,
             CALL_MODE_NOTE,
             "Droid safe mode stays read-only; work mode uses --skip-permissions-unsafe "
             "and is intentionally no-prompt -- use only in workspaces you trust.",

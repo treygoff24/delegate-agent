@@ -818,6 +818,18 @@ def describe_payload(
         "worktrees": {
             "dataHome": config["worktrees"]["dataHome"],
             "autoPrune": config["worktrees"]["autoPrune"],
+            "dirtySource": {
+                "behavior": "Persistent worktree work runs auto-include tracked edits and untracked non-ignored files before child launch.",
+                "preLaunchDisclosure": "stderr reports tracked-modified and untracked counts plus up to five example paths.",
+                "submodules": "Dirty submodules cannot be synced; commit or stash them, or use --isolation none.",
+            },
+        },
+        "completionEnvelope": {
+            "emptyRetry": "Additive field for tracked empty-result retries: attempted, resolved, and write_capable_call reason when skipped.",
+        },
+        "childEnvironment": {
+            "DELEGATE_SOURCE_ROOT": "Resolved source workspace root.",
+            "DELEGATE_EXECUTION_ROOT": "Child execution root when isolated; omitted for direct work mode.",
         },
         "workflows": {
             "registry": ".delegate/workflows/<wfId>/",

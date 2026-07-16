@@ -77,6 +77,7 @@ class PersistentWorktreePreflight:
     registry_root: Path
     tracked_dirty_files: int
     untracked_files: int
+    dirty_example_paths: tuple[str, ...]
 
 
 @dataclass
@@ -149,6 +150,11 @@ def _validate_persistent_worktree_request(
     try:
         tracked_dirty_files, untracked_files = safe_workspace.dirty_sync_counts(source_git_root)
         dirty_submodules = safe_workspace.dirty_submodule_paths(source_git_root)
+        dirty_example_paths = (
+            safe_workspace.changed_files_vs_head(source_git_root)
+            if tracked_dirty_files or untracked_files
+            else ()
+        )
     except Exception as exc:
         raise PersistentWorktreeError(
             getattr(exc, "error", "dirty_source_check_failed"),
@@ -184,6 +190,7 @@ def _validate_persistent_worktree_request(
         registry_root=registry_root,
         tracked_dirty_files=tracked_dirty_files,
         untracked_files=untracked_files,
+        dirty_example_paths=dirty_example_paths,
     )
 
 
@@ -392,6 +399,15 @@ def _create_persistent_worktree_or_record_failure(
         auto_include_dirty = not execution.request.include_dirty and (
             preflight.tracked_dirty_files > 0 or preflight.untracked_files > 0
         )
+        if auto_include_dirty:
+            examples = ", ".join(preflight.dirty_example_paths[:5])
+            print(
+                "Auto-including dirty source into persistent worktree: "
+                f"{preflight.tracked_dirty_files} tracked-modified and "
+                f"{preflight.untracked_files} untracked file(s). "
+                f"Examples: {examples}.",
+                file=execution.stderr,
+            )
         if execution.request.include_dirty or auto_include_dirty:
             synced_files, tracked_files, untracked_files, warnings = (
                 safe_workspace.sync_git_dirty_snapshot(
