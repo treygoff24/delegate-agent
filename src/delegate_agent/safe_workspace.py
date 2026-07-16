@@ -24,6 +24,7 @@ import subprocess  # nosec B404 - Delegate launches configured git/harness comma
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
+from dataclasses import replace
 from pathlib import Path
 
 from delegate_agent.argv_utils import public_argv
@@ -938,42 +939,16 @@ def safe_isolated_request(request: Request) -> Iterator[Request]:
                 request.workspace,
                 isolated_workspace,
             )
-        yield Request(
-            engine=request.engine,
-            mode=request.mode,
+        yield replace(
+            request,
             workspace=isolated_workspace,
             prompt=isolated_prompt or "",
             argv=isolated_argv,
-            model=request.model,
-            model_alias=request.model_alias,
-            output_schema=request.output_schema,
-            dry_run=request.dry_run,
             workspace_kind=workspace_kind,
             isolation_context=isolation,
-            reasoning_effort=request.reasoning_effort,
-            reasoning_effort_source=request.reasoning_effort_source,
-            reasoning_capability_source=request.reasoning_capability_source,
-            reasoning_transport=request.reasoning_transport,
-            fast=request.fast,
-            progress=request.progress,
-            progress_initial_delay_sec=request.progress_initial_delay_sec,
-            progress_interval_sec=request.progress_interval_sec,
-            forbid_commit=request.forbid_commit,
-            include_dirty=request.include_dirty,
-            warnings=request.warnings,
             stdin_text=isolated_stdin_text,
             prompt_file_text=isolated_prompt_file_text,
-            agent_config_text=request.agent_config_text,
-            prompt_transport=request.prompt_transport,
             display_argv=isolated_display_argv,
-            env_overrides=request.env_overrides,
-            auth_profile=request.auth_profile,
-            fallback_auth_profile=request.fallback_auth_profile,
-            cleanup_workspace=request.cleanup_workspace,
-            group=request.group,
-            workflow_agent_key=request.workflow_agent_key,
-            prompt_instruction_mode=request.prompt_instruction_mode,
-            profile_resolution=request.profile_resolution,
         )
     finally:
         cleanup_safe_isolated_workspace(

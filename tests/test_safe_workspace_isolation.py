@@ -780,6 +780,37 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
             self.assertIs(unchanged, request)
             self.assertEqual(unchanged.prompt, prompt)
 
+    def test_safe_isolated_request_preserves_call_metadata(self):
+        repo = make_git_repo(with_commit=True)
+        self.addCleanup(repo.cleanup)
+        iso_ctx = self.delegate.build_isolation_context(
+            source_workspace=repo.name,
+            resolved_isolation="auto",
+            engine="codex",
+            mode="safe",
+            source_git_root=repo.name,
+        )
+        request = self.delegate.build_request(
+            "codex",
+            "safe",
+            None,
+            self.delegate.ResolvedWorkspace(repo.name, "git"),
+            "review",
+            self.delegate.DEFAULT_CONFIG,
+            dry_run=False,
+            isolation_context=iso_ctx,
+        )
+        request.call_read_only = True
+        request.pure = True
+        request.timeout = 42
+        request.model_requested = "requested-model"
+
+        with self.delegate.safe_isolated_request(request) as isolated:
+            self.assertTrue(isolated.call_read_only)
+            self.assertTrue(isolated.pure)
+            self.assertEqual(isolated.timeout, 42)
+            self.assertEqual(isolated.model_requested, "requested-model")
+
     def test_create_git_safe_workspace_reports_worktree_timeout(self):
         timeout = subprocess.CompletedProcess(
             ["git"],
