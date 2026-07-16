@@ -5,6 +5,46 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] - 2026-07-16
+
+### Added
+
+- Work-mode worktree isolation now automatically carries tracked edits and
+  untracked, non-ignored files into the new worktree, with tracked/untracked
+  counts in human and JSON warnings and fail-clean teardown on sync errors.
+- Child environments expose authoritative source/execution root metadata, and
+  Delegate-managed snapshot and worktree cleanup refuses targets that are or
+  contain the source workspace.
+- Empty successful safe and read-only call results retry once when the prompt
+  can be safely extended; tracked runs retain both attempts and envelopes report
+  `emptyRetry` only when a retry was attempted.
+- Bare Harness resolution in Snapshot, run-output, and wait now reports the
+  resolved Run, Alias, workspace, and age, with a stale-resolution warning after
+  24 hours.
+
+### Changed
+
+- `run-output --tail N` now selects stdout when no output stream or Completion
+  Report was requested; stderr remains opt-in.
+- Devin safe mode now fails during preflight with `unsupported_mode` rather than
+  launching without an enforceable read-only boundary.
+- Call children use their throwaway cwd as `DELEGATE_SOURCE_ROOT`; the
+  Registry/config workspace is not disclosed to a stateless call.
+
+### Fixed
+
+- Empty-result retries now preserve cumulative duration, byte counts, usage,
+  truncation, stdin diagnostics, timeout budgets, and tracked launch-failure
+  state across primary, authentication-fallback, and retry attempts.
+- Source-root cleanup guards now handle relative, symlinked, case-variant,
+  unresolved, and malformed paths conservatively without blocking safe cleanup
+  of source descendants.
+- Dirty worktree sync preserves arbitrary filename bytes, rejects unsyncable
+  dirty submodules with escaped diagnostics, and documents the same behavior
+  consistently across the CLI reference and worktree guidance.
+- Devin help and discovery surfaces now derive supported modes consistently and
+  reject unknown modes before constructing executable arguments.
+
 ## [0.14.0] - 2026-07-15
 
 ### Added
@@ -350,6 +390,7 @@ Usage-audit fix wave: 82 sessions and 1,241 delegate invocations from one week o
 
 - Releases before 0.1.3 predate this changelog.
 
+[0.15.0]: https://github.com/treygoff24/delegate-agent/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/treygoff24/delegate-agent/compare/v0.13.1...v0.14.0
 [0.13.1]: https://github.com/treygoff24/delegate-agent/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/treygoff24/delegate-agent/compare/v0.12.0...v0.13.0
