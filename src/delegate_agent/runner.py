@@ -1593,7 +1593,14 @@ def _tracked_result(
 
 
 def _append_attempt_delimiter(stderr_log: Path, *, label: str) -> None:
-    marker = f"\n--- delegate attempt: {label} ---\n"
+    prefix = (
+        "delegate codex auth attempt"
+        if label == "fallback"
+        else "delegate empty-retry attempt"
+        if label == "empty-success-retry"
+        else "delegate attempt"
+    )
+    marker = f"\n--- {prefix}: {label} ---\n"
     with stderr_log.open("ab") as handle:
         handle.write(marker.encode("utf-8"))
 

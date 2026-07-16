@@ -2191,6 +2191,7 @@ class RunnerCaptureTests(unittest.TestCase):
                 sum(line.startswith("attempt:") for line in stderr_log.splitlines()), 2
             )
             self.assertIn("empty-success-retry", stderr_log)
+            self.assertIn("--- delegate empty-retry attempt:", stderr_log)
 
     def test_safe_empty_retry_preserves_both_attempts_and_stays_empty(self):
         with tempfile.TemporaryDirectory() as workspace:
@@ -2318,6 +2319,16 @@ class RunnerCaptureTests(unittest.TestCase):
                 self.runner.EMPTY_RETRY_SKIPPED_WRITE_CAPABLE_WARNING,
                 result.warnings,
             )
+
+    def test_attempt_delimiters_keep_auth_fallback_marker_distinct_from_empty_retry(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            stderr_log = Path(workspace) / "stderr.log"
+            self.runner._append_attempt_delimiter(stderr_log, label="fallback")
+            self.runner._append_attempt_delimiter(stderr_log, label="empty-success-retry")
+
+            markers = stderr_log.read_text(encoding="utf-8")
+            self.assertIn("--- delegate codex auth attempt: fallback ---", markers)
+            self.assertIn("--- delegate empty-retry attempt: empty-success-retry ---", markers)
 
     def test_grouped_read_only_call_empty_success_retries_once(self):
         with tempfile.TemporaryDirectory() as workspace:
