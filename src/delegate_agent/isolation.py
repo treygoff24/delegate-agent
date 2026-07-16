@@ -214,7 +214,7 @@ def target_contains_source_root(target: str | Path, source_root: str | Path) -> 
     try:
         resolved_target = Path(target).resolve(strict=False)
         resolved_source = Path(source_root).resolve(strict=False)
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, ValueError):
         return True
     if resolved_target.exists() and resolved_source.exists():
         current = resolved_source
