@@ -425,10 +425,10 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
     ),
     "devin": CommandSpec(
         name="devin",
-        summary="Run Cognition Devin CLI in safe, work, or stateless call mode.",
+        summary="Run Cognition Devin CLI in work or stateless call mode.",
         usage=(
             "delegate [--json] [--isolation auto|none|worktree] "
-            "devin {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] "
+            "devin work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] "
             "[--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
             "delegate [--json] devin call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] "
             "[--prompt-file PATH] [prompt...]",
@@ -446,15 +446,14 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             _PROMPT_FILE_OPTION,
         ),
         examples=(
-            'delegate devin safe "Review this workspace. Do not edit files."',
             'delegate devin work "Implement the scoped fix, run the named check, report changes."',
             "delegate devin call --read-only --prompt-file judge.md",
         ),
         notes=(
             "Prompt uses Delegate temp file via Devin --prompt-file plus -p; dry-run argv shows <prompt file>.",
-            SAFE_WORKSPACE_SYNC_NOTE,
             CALL_MODE_NOTE,
-            "Safe and call --read-only pass a Delegate-generated --agent-config deny-list for edit/write/exec and mcp__* plus --permission-mode auto.",
+            "Devin safe mode is rejected during preflight because filesystem surveys may require the generic exec tool, which Delegate cannot allow without weakening the read-only boundary. Use another harness in safe mode for filesystem review.",
+            "Call --read-only passes a Delegate-generated --agent-config deny-list for edit/write/exec and mcp__* plus --permission-mode auto.",
             "Work and default call mode use --permission-mode dangerous because Devin print mode rejects unapproved edit/exec tools.",
             "Model selection uses --model (alias from devin.models or a raw model ID), the run-input JSON model, or devin.defaultModel in config; unknown models are left to Devin CLI validation.",
             "Reasoning effort is unsupported for Devin in v1.",
@@ -556,7 +555,10 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         summary="Resolve a cursor/codex/droid/kimi/claude/grok/devin/opencode invocation and print the planned argv without running it.",
         usage=(
             "delegate [--json] [--isolation auto|none|worktree] "
-            "dry-run {cursor,kimi,claude,grok,devin,opencode} {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] "
+            "dry-run {cursor,kimi,claude,grok,opencode} {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] "
+            "[--progress] [--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
+            "delegate [--json] [--isolation auto|none|worktree] "
+            "dry-run devin work [--model <alias-or-model>] [--reasoning-effort LEVEL] "
             "[--progress] [--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
             "delegate [--json] dry-run {cursor,kimi,claude,grok,devin,opencode} call "
             "[--read-only] [--model <alias-or-model>] [--reasoning-effort LEVEL] "
@@ -602,7 +604,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             'delegate dry-run cursor work "Refactor the parser"',
             "delegate --json dry-run droid reviewer safe --prompt-file task.md",
             'delegate dry-run grok safe "Review this repo."',
-            'delegate dry-run devin safe "Review this repo."',
+            'delegate dry-run devin work "Plan an implementation run."',
             'delegate dry-run opencode safe "Review this repo."',
             'delegate dry-run claude safe "Review this repo."',
             'delegate dry-run kimi safe "Review this repo."',
@@ -1517,7 +1519,7 @@ def render_overview_text() -> str:
         "delegate [--json] claude call [--read-only] [--pure] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--output-schema FILE] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} grok {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         "delegate [--json] grok call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} devin {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} devin work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         "delegate [--json] devin call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} opencode {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         "delegate [--json] opencode call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--prompt-file PATH] [prompt...]",
@@ -1533,7 +1535,7 @@ def render_overview_text() -> str:
         "delegate [--json] dry-run claude call [--read-only] [--pure] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--output-schema FILE] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} dry-run grok {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         "delegate [--json] dry-run grok call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
-        f"delegate [--cwd PATH] [--json] {iso} dry-run devin {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} dry-run devin work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         "delegate [--json] dry-run devin call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} dry-run opencode {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--progress] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         "delegate [--json] dry-run opencode call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--prompt-file PATH] [prompt...]",

@@ -240,9 +240,17 @@ delegate --json droid reviewer call --prompt-file prompt.md
 Call mode returns captured assistant text in JSON `text` when available. Use
 `safe` or `work` for project-aware review/implementation and tracked output.
 
+## Devin safe reports `unsupported_mode`
+
+Devin may implement a read-only filesystem survey through the generic `exec`
+tool. Delegate cannot permit that tool in safe mode without weakening the
+read-only boundary, so `delegate devin safe` is rejected before launch. Use
+another safe Harness for filesystem review; Devin work and call modes remain
+available.
+
 ## Safe-mode isolation fails
 
-Cursor, Droid, Codex, Claude, Grok, Devin, OpenCode, and Kimi safe create an
+Cursor, Droid, Codex, Claude, Grok, OpenCode, and Kimi safe create an
 isolated throwaway workspace by default. Safe mode reviews your **current working tree**,
 uncommitted tracked edits and untracked, non-ignored files are mirrored into
 that copy (only gitignored paths are excluded), so you do **not** need to
@@ -250,7 +258,7 @@ commit or stash before a safe review. In Git repositories, Delegate first tries
 a detached worktree and syncs the dirty tree into it; for non-Git directories
 and some Git fallback cases, it uses a directory copy. Codex safe is the only
 safe harness that may opt out with `--isolation none`, because Codex still
-keeps its read-only sandbox active. Cursor, Droid, Claude, Grok, Devin,
+keeps its read-only sandbox active. Cursor, Droid, Claude, Grok,
 OpenCode, and Kimi safe
 normalize `--isolation none` back to `auto` with a warning because their safe
 contracts depend on Delegate's temporary workspace boundary.

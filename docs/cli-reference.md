@@ -497,7 +497,7 @@ Typical dry-run JSON fields:
 
 When a profile is active, dry-run and completion payloads add `authProfile` (the resolved profile name) and, when a Codex fallback profile is configured, `fallbackProfile`. Dry-run also adds `profileEnv` (the injected env map, with values redacted). These keys are omitted when no profile is active.
 
-For Cursor, Claude, Grok, Devin, OpenCode, Droid, and Kimi safe mode, an explicit `--isolation none`
+For Cursor, Claude, Grok, OpenCode, Droid, and Kimi safe mode, an explicit `--isolation none`
 is normalized to `auto` with a warning because those safe contracts depend on
 the temporary workspace/config boundary. Codex safe can use `none` because Codex
 still runs with its read-only sandbox.
@@ -583,9 +583,10 @@ Supported input keys:
 
 - `engine`: `cursor`, `droid`, `codex`, `claude`, `grok`, `devin`, `opencode`, or `kimi`.
 - `mode`: `safe`, `work`, or `call`.
+- The `devin` engine rejects `safe` with `unsupported_mode` during preflight. Devin filesystem surveys may require generic `exec`, which Delegate cannot allow without weakening the read-only boundary; use another safe Harness for filesystem review.
 - `model`: optional alias-or-id for every engine. Resolved against `<engine>.models` when it matches an alias; otherwise passed through as a raw model ID. For Droid, a positional alias remains alias-only/strict; JSON/`--model` is alias-or-id. Cursor honors an explicit model even when it differs from `cursor.defaultModel`.
 - `cwd`: optional workspace path. Git directories resolve to the repo root. Omit it for `mode: "call"`, which always uses an empty temporary cwd.
-- `isolation`: optional `auto`, `none`, or `worktree`. `null` is invalid. `mode: "call"` rejects isolation. For Cursor, Claude, Grok, Devin, OpenCode, Droid, and Kimi safe mode, `none` is normalized to `auto` with a warning.
+- `isolation`: optional `auto`, `none`, or `worktree`. `null` is invalid. `mode: "call"` rejects isolation. For Cursor, Claude, Grok, OpenCode, Droid, and Kimi safe mode, `none` is normalized to `auto` with a warning.
 - `reasoningEffort`: optional non-empty effort string. It overrides provider `defaultReasoningEffort` for that JSON run.
 - `fast`: optional Codex-only boolean or `null`. `true` requests Fast, `false` explicitly requests Standard, and `null`/omission inherits Codex configuration.
 - `progress`: optional boolean. `true` enables parent progress heartbeats on stderr; `false` disables them even when `progress.enabled` is true in config. When omitted, config `progress.enabled` applies (default `false`). `mode: "call"` rejects progress.

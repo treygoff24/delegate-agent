@@ -397,6 +397,14 @@ def build_devin_argv(
     pure: bool = False,
 ) -> list[str]:
     _reject_pure("devin", mode, pure)
+    if mode == MODE_SAFE:
+        raise DelegateError(
+            "unsupported_mode",
+            "Devin safe mode is unsupported: Devin may perform read-only filesystem "
+            "surveys through the generic exec tool, which Delegate cannot allow without "
+            "weakening the read-only boundary. Use another harness in safe mode for "
+            "filesystem review.",
+        )
     argv = [str(devin["binary"])]
     if model:
         argv.extend(["--model", model])

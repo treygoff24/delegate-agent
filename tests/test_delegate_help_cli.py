@@ -561,7 +561,7 @@ class KimiHelpTests(HelpCliTestBase):
 
     def test_safe_workspace_sync_note_is_shared_across_help_surfaces(self):
         note = self.delegate.command_help.SAFE_WORKSPACE_SYNC_NOTE
-        for command in ("cursor", "kimi", "codex", "claude", "devin", "opencode", "droid"):
+        for command in ("cursor", "kimi", "codex", "claude", "opencode", "droid"):
             with self.subTest(command=command):
                 code, out, _err = self.run_main([command, "--help"])
                 self.assertEqual(code, self.delegate.EXIT_OK)
@@ -575,9 +575,14 @@ class KimiHelpTests(HelpCliTestBase):
         code, out, _err = self.run_main(["--json", "describe"])
         self.assertEqual(code, self.delegate.EXIT_OK)
         payload = json.loads(out)
-        for command in ("cursor", "kimi", "codex", "claude", "devin", "opencode", "droid"):
+        for command in ("cursor", "kimi", "codex", "claude", "opencode", "droid"):
             with self.subTest(describe=command):
                 self.assertIn(note, payload["modeMapping"][command]["safeNotes"])
+
+        code, out, _err = self.run_main(["devin", "--help"])
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertIn("Devin safe mode is rejected during preflight", out)
+        self.assertNotIn(note, out)
 
         code, out, _err = self.run_main(["agent-help"])
         self.assertEqual(code, self.delegate.EXIT_OK)

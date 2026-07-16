@@ -130,7 +130,6 @@ Run a read-only review in an isolated throwaway workspace:
 delegate codex safe "Review this repository for correctness risks. Do not edit files."
 delegate claude safe "Review this repository for correctness risks. Do not edit files."
 delegate grok safe "Review this repository for correctness risks. Do not edit files."
-delegate devin safe "Review this repository for correctness risks. Do not edit files."
 delegate opencode safe "Review this repository for correctness risks. Do not edit files."
 delegate cursor safe "Review the current diff for regressions. Do not edit files."
 delegate kimi safe "Review this repository for regressions. Do not edit files."
@@ -158,7 +157,7 @@ raw model ID passed through verbatim). Droid still accepts a positional alias;
 `--model` works on every engine, including Droid:
 
 ```bash
-delegate devin safe --model claude-fable-5 "Review this repository. Do not edit files."
+delegate devin work --model claude-fable-5 "Implement the scoped change and report it."
 delegate droid work --model custom:my-model "Implement the scoped change."
 delegate --json dry-run codex safe --model fast "Review this repository. Do not edit files."
 ```
@@ -294,9 +293,9 @@ Delegate separates three ideas:
 
 Defaults are intentionally conservative for review paths:
 
-- `delegate cursor safe`, `delegate codex safe`, `delegate claude safe`, `delegate grok safe`, `delegate devin safe`, `delegate opencode safe`, `delegate droid ALIAS safe`, and `delegate kimi safe` run in an isolated throwaway workspace. Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff.
+- `delegate cursor safe`, `delegate codex safe`, `delegate claude safe`, `delegate grok safe`, `delegate opencode safe`, `delegate droid ALIAS safe`, and `delegate kimi safe` run in an isolated throwaway workspace. Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff.
 - Grok safe mode uses Delegate isolated copy plus Grok read-only sandbox/permission controls (`--sandbox read-only`, `--permission-mode dontAsk` by default). It does not use Grok `plan` mode. Prompts are delivered via Grok `--prompt-file` from a Delegate temp file.
-- Devin safe mode uses Delegate isolated copy plus a Delegate-generated `--agent-config` deny-list for edit/write/exec and `mcp__*`, with Devin `--permission-mode auto`. Work mode uses Devin `--permission-mode dangerous` because Devin print mode rejects unapproved edit/exec tools.
+- Devin safe mode is unsupported: Devin may implement filesystem surveys through the generic `exec` tool, which Delegate cannot permit without weakening the read-only boundary. Use another safe Harness for filesystem review. Devin work mode uses `--permission-mode dangerous` because Devin print mode rejects unapproved edit/exec tools.
 - OpenCode safe mode uses Delegate's isolated copy plus an `OPENCODE_CONFIG_CONTENT` permission lockdown that allows only read, glob, and grep operations. OpenCode merges this override last, so repository configuration cannot restore write-capable tools. `opencode call --read-only` uses the same lockdown; plain `call` does not.
 - Claude safe mode invokes `claude -p` with prompt text on stdin, `--permission-mode plan`, `--strict-mcp-config`, Read/Grep/Glob plus selected read-only Bash tools, and `--no-session-persistence` by default. Delegate does not currently prove that Claude Code hooks, plugins, user settings, or other non-MCP customization surfaces are disabled.
 - `work` mode can edit. By default it runs in the real workspace for backward compatibility.
@@ -324,7 +323,7 @@ non-ignored files from a dirty source checkout before launch, report the counts
 in a `dirty_source_auto_included` warning, and tear down the worktree if syncing
 fails. `--include-dirty` remains an explicit, harmless no-op on a clean source.
 
-Safe isolation and `--include-dirty` recreate an untracked symlink only when it is relative, resolves inside the source workspace, and its target is not gitignored; any symlink that fails those checks — an absolute target, an escape out of the tree, or a target that is itself a gitignored secret — is replaced with an inert placeholder file, failing closed on any ambiguity. Delegate reports a warning listing the symlink paths it blocked. In Git repositories with no commits yet, Cursor/Codex/Claude/Droid/Grok/Devin/OpenCode/Kimi safe isolation falls back to a directory copy because Git cannot create a detached worktree from an unborn `HEAD`.
+Safe isolation and `--include-dirty` recreate an untracked symlink only when it is relative, resolves inside the source workspace, and its target is not gitignored; any symlink that fails those checks — an absolute target, an escape out of the tree, or a target that is itself a gitignored secret — is replaced with an inert placeholder file, failing closed on any ambiguity. Delegate reports a warning listing the symlink paths it blocked. In Git repositories with no commits yet, Cursor/Codex/Claude/Droid/Grok/OpenCode/Kimi safe isolation falls back to a directory copy because Git cannot create a detached worktree from an unborn `HEAD`.
 
 Snapshots and `run-output` redact common credential shapes by default, including authorization headers, bearer/basic tokens, JWT-like strings, and common `token=` / `api_key=` / `password=` values. Use `--no-redact` only when exact output is necessary and safe to display.
 

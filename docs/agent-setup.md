@@ -96,7 +96,7 @@ When running on Windows through WSL, treat Delegate as a Linux CLI:
    delegate --json dry-run claude safe --reasoning-effort high "Review only. Do not edit files."
    delegate --json dry-run grok safe "Review only. Do not edit files."
    delegate --json dry-run grok safe --reasoning-effort high "Review only. Do not edit files."
-   delegate --json dry-run devin safe "Review only. Do not edit files."
+   delegate --json dry-run devin work "Describe the planned work invocation."
    delegate --json dry-run opencode safe "Review only. Do not edit files."
    delegate --json dry-run opencode safe --reasoning-effort high "Review only. Do not edit files."
    delegate --json dry-run cursor safe "Review only. Do not edit files."
@@ -104,7 +104,7 @@ When running on Windows through WSL, treat Delegate as a Linux CLI:
    delegate --json dry-run kimi safe "Review only. Do not edit files."
    ```
 
-   The Codex, Claude, Grok, Devin, OpenCode, Cursor, and Kimi dry-runs succeed with the unedited example config when no reasoning effort is requested. Explicit Codex reasoning-effort dry-runs can target the harness default model when no default model is configured. Claude and Grok reasoning effort map to native `--effort` flags; OpenCode reasoning effort maps to `--variant` without model validation. The Droid dry-run validates the alias, so it returns `unconfigured_model` until you replace the `reviewer` placeholder in `config.json` with a real model ID.
+   The Codex, Claude, Grok, Devin work, OpenCode, Cursor, and Kimi dry-runs succeed with the unedited example config when no reasoning effort is requested. Devin safe mode is intentionally rejected because filesystem surveys may require generic `exec`, which cannot be allowed without weakening the read-only boundary. Explicit Codex reasoning-effort dry-runs can target the harness default model when no default model is configured. Claude and Grok reasoning effort map to native `--effort` flags; OpenCode reasoning effort maps to `--variant` without model validation. The Droid dry-run validates the alias, so it returns `unconfigured_model` until you replace the `reviewer` placeholder in `config.json` with a real model ID.
 
 ### OpenCode
 

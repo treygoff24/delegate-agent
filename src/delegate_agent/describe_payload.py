@@ -723,7 +723,6 @@ def describe_payload(
         workspace="<workspace>",
         policy=grok_work_policy,
     )
-    devin_safe_argv = _devin_describe_argv(devin, mode=MODE_SAFE)
     devin_work_argv = _devin_describe_argv(devin, mode=MODE_WORK)
     opencode_safe_argv = _opencode_describe_argv(
         opencode,
@@ -1019,12 +1018,11 @@ def describe_payload(
                 ],
             },
             "devin": {
-                "safe": devin_safe_argv,
+                "safe": [],
+                "safeSupported": False,
                 "safeNotes": [
-                    SAFE_WORKSPACE_SYNC_NOTE,
-                    "Uses Devin --prompt-file in print mode; Delegate materializes the effective prompt in a temp file.",
-                    "Safe mode passes a Delegate-generated --agent-config that denies edit/write/exec and mcp__* while using --permission-mode auto.",
-                    "Devin safe mode allows slash passthrough because read-only enforcement is argv-level.",
+                    "Devin safe mode is unsupported because filesystem surveys may require the generic exec tool, which Delegate cannot allow without weakening the read-only boundary.",
+                    "Use another harness in safe mode for filesystem review.",
                 ],
                 "work": devin_work_argv,
                 "workNotes": [
@@ -1316,7 +1314,6 @@ Good defaults:
   delegate claude work "Implement the scoped fix, run the named check, and report changed files."
   delegate grok safe "Review this workspace. Do not edit files."
   delegate grok work "Implement the scoped fix, run the named check, and report changed files."
-  delegate devin safe "Review this workspace. Do not edit files."
   delegate devin work "Implement the scoped fix, run the named check, and report changed files."
   delegate kimi safe "Review this repo for regressions; report file/line/severity."
   delegate kimi work "Implement the scoped task; report changed files and tests."
