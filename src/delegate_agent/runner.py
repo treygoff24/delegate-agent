@@ -1592,7 +1592,7 @@ def _tracked_result(
     return finalization.exit_code, None
 
 
-def _append_attempt_delimiter(stderr_log: Path, *, label: str) -> None:
+def _attempt_delimiter(label: str) -> bytes:
     prefix = (
         "delegate codex auth attempt"
         if label == "fallback"
@@ -1600,9 +1600,17 @@ def _append_attempt_delimiter(stderr_log: Path, *, label: str) -> None:
         if label == "empty-success-retry"
         else "delegate attempt"
     )
-    marker = f"\n--- {prefix}: {label} ---\n"
+    return f"\n--- {prefix}: {label} ---\n".encode()
+
+
+def _append_attempt_delimiter(stderr_log: Path, *, label: str) -> None:
     with stderr_log.open("ab") as handle:
-        handle.write(marker.encode("utf-8"))
+        handle.write(_attempt_delimiter(label))
+
+
+def _prepend_attempt_delimiter(stderr_log: Path, *, label: str) -> None:
+    existing = stderr_log.read_bytes() if stderr_log.exists() else b""
+    stderr_log.write_bytes(_attempt_delimiter(label) + existing)
 
 
 def _accumulator_message_text(accumulator: harness_events.StreamAccumulator) -> str:
@@ -1795,9 +1803,6 @@ def execute_tracked(
                 progress_stderr=stderr if progress else None,
                 progress_initial_delay_sec=progress_initial_delay_sec,
                 progress_interval_sec=progress_interval_sec,
-                attempt_label="primary"
-                if (ctx.engine == "codex" and ctx.fallback_env_overrides)
-                else None,
             )
         except OSError as exc:
             error = _runner_launch_error(launch_argv, cwd, exc)
@@ -1813,6 +1818,7 @@ def execute_tracked(
         ):
             primary_exit_code = capture.exit_code
             primary_stderr_tail = profiles.read_bounded_stderr_tail(files.stderr_log)
+            _prepend_attempt_delimiter(files.stderr_log, label="primary")
             fallback_capture = _run_single_tracked_attempt(
                 launch_argv,
                 cwd,
@@ -1864,6 +1870,8 @@ def execute_tracked(
                     agent_config_dir=files.run_path,
                 )
                 primary_capture = capture
+                if fallback_extra is None:
+                    _prepend_attempt_delimiter(files.stderr_log, label="primary")
                 retry_capture = _run_single_tracked_attempt(
                     retry_argv,
                     cwd,

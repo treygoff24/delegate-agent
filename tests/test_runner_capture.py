@@ -2198,7 +2198,10 @@ class RunnerCaptureTests(unittest.TestCase):
                 b"\n--- delegate empty-retry attempt: empty-success-retry ---\n"
             )
             self.assertTrue(marker)
-            self.assertEqual(payload["stderrBytes"], len(primary_stderr) + len(retry_stderr))
+            _primary_marker, primary_child = primary_stderr.split(
+                b"\n--- delegate attempt: primary ---\n", 1
+            )
+            self.assertEqual(payload["stderrBytes"], len(primary_child) + len(retry_stderr))
 
     def test_safe_empty_retry_preserves_both_attempts_and_stays_empty(self):
         with tempfile.TemporaryDirectory() as workspace:
@@ -2336,6 +2339,90 @@ class RunnerCaptureTests(unittest.TestCase):
             markers = stderr_log.read_text(encoding="utf-8")
             self.assertIn("--- delegate codex auth attempt: fallback ---", markers)
             self.assertIn("--- delegate empty-retry attempt: empty-success-retry ---", markers)
+
+    def test_fallback_configured_single_attempt_keeps_stderr_unprefixed(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            script = Path(workspace) / "codex"
+            script.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf 'single attempt\\n' >&2\n"
+                'printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}\'\n'
+                "printf '%s\\n' '{\"type\":\"turn.completed\"}'\n",
+                encoding="utf-8",
+            )
+            script.chmod(0o755)
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-07-16T12:00:00Z",
+                fallback_env_overrides={"CODEX_HOME": "/fallback"},
+            )
+            self.runner.execute_tracked(
+                [str(script), "task"],
+                workspace,
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+            stderr_log = (root / "runs" / run_id / "stderr.log").read_text(encoding="utf-8")
+            self.assertEqual(stderr_log, "single attempt\n")
+
+    def test_fallback_retry_writes_both_attempt_delimiters(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            script = Path(workspace) / "codex"
+            script.write_text(
+                "#!/usr/bin/env bash\n"
+                'if [ "${ATTEMPT}" = primary ]; then\n'
+                "  printf 'You exceeded your current quota usage limit\\n' >&2\n"
+                "  exit 1\n"
+                "fi\n"
+                "printf 'fallback attempt\\n' >&2\n"
+                'printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}\'\n'
+                "printf '%s\\n' '{\"type\":\"turn.completed\"}'\n",
+                encoding="utf-8",
+            )
+            script.chmod(0o755)
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-07-16T12:00:00Z",
+                env_overrides={"ATTEMPT": "primary"},
+                fallback_env_overrides={"ATTEMPT": "fallback"},
+            )
+            self.runner.execute_tracked(
+                [str(script), "task"],
+                workspace,
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+            stderr_log = (root / "runs" / run_id / "stderr.log").read_text(encoding="utf-8")
+            self.assertIn("--- delegate attempt: primary ---", stderr_log)
+            self.assertIn("--- delegate codex auth attempt: fallback ---", stderr_log)
 
     def test_grouped_read_only_call_empty_success_retries_once(self):
         with tempfile.TemporaryDirectory() as workspace:
