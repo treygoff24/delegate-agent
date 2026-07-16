@@ -106,10 +106,10 @@ class Wave4LaunchFeatureTests(ExecutionTestBase):
                 code = self.delegate.main(["--json", "cursor", "call", "hello"], stdout=stdout)
                 self.assertEqual(code, 0)
                 text = env_log.read_text(encoding="utf-8")
-                self.assertIn(f"source={Path.cwd().resolve()}", text)
-                execution_root = text.split("execution=", 1)[1].splitlines()[0]
-                self.assertTrue(execution_root)
-                self.assertNotEqual(execution_root, str(Path.cwd().resolve()))
+                source_root = text.split("source=", 1)[1].splitlines()[0]
+                self.assertTrue(source_root)
+                self.assertNotEqual(source_root, str(Path.cwd().resolve()))
+                self.assertIn("execution=\n", text)
 
     def test_dirty_worktree_auto_syncs_tracked_untracked_ignored_and_external_symlink(self):
         from delegate_agent import safe_workspace

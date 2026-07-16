@@ -449,7 +449,7 @@ delegate --cwd /path/to/project --group wf_0123abcdef45 codex call "Summarize th
 ```
 
 The child still executes in an empty temporary cwd; `--cwd` does not give it the
-project tree. Dry-run accepts the same combination for faithful planning but
+project tree or leak it through Delegate root metadata. Dry-run accepts the same combination for faithful planning but
 creates no run entry. Use `safe` or `work` when the child should see the project
 tree.
 

@@ -578,8 +578,12 @@ def make_run_context(
 
 
 def _set_child_root_env(request: Request, source_workspace: ResolvedWorkspace) -> None:
-    source_root = str(Path(source_workspace.path).resolve(strict=False))
     execution_root = str(Path(request.workspace).resolve(strict=False))
+    source_root = (
+        execution_root
+        if request.mode == MODE_CALL
+        else str(Path(source_workspace.path).resolve(strict=False))
+    )
     env = {**(request.env_overrides or {}), "DELEGATE_SOURCE_ROOT": source_root}
     if execution_root != source_root:
         env["DELEGATE_EXECUTION_ROOT"] = execution_root
