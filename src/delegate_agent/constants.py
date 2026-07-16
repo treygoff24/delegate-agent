@@ -21,6 +21,10 @@ VALID_MODES = {MODE_SAFE, MODE_WORK, MODE_CALL}
 KNOWN_ENGINES = ("cursor", "droid", "codex", "kimi", "claude", "grok", "devin", "opencode")
 # "<engine>, ..., or <engine>" — for error messages and help text.
 ENGINES_PROSE = f"{', '.join(KNOWN_ENGINES[:-1])}, or {KNOWN_ENGINES[-1]}"
+ENGINE_SUPPORTED_MODES = {
+    engine: (MODE_WORK, MODE_CALL) if engine == "devin" else (MODE_SAFE, MODE_WORK, MODE_CALL)
+    for engine in KNOWN_ENGINES
+}
 
 
 def pure_call_supported(engine: str) -> bool:

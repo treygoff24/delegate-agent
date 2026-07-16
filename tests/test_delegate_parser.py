@@ -711,6 +711,16 @@ class ParserTests(unittest.TestCase):
         )
         self.assertEqual(parsed.launch.prompt_file, "task.md")
 
+    def test_missing_mode_lists_each_engine_supported_modes(self):
+        for engine, expected in (
+            ("devin", "devin requires mode: work, or call."),
+            ("codex", "codex requires mode: safe, work, or call."),
+        ):
+            with self.subTest(engine=engine), self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.delegate.parse_cli([engine])
+            self.assertEqual(ctx.exception.error, "missing_mode")
+            self.assertEqual(ctx.exception.message, expected)
+
     def test_dry_run_devin_parses(self):
         parsed = self.delegate.parse_cli(["dry-run", "devin", "work", "fix"])
         self.assertEqual(parsed.subcommand, "devin")
