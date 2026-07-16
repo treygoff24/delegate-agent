@@ -1260,6 +1260,8 @@ def _record_tracked_launch_failure(
     files: TrackedRunFiles,
     ctx: RunContext,
     error: RunnerLaunchError,
+    *,
+    prior_capture: TrackedCaptureResult | None = None,
 ) -> None:
     # A launch failure never ran the child, so there is no result to classify.
     # resultQuality is set to None explicitly so build_state omits the key,
@@ -1269,10 +1271,24 @@ def _record_tracked_launch_failure(
         "message": error.message,
         "resultQuality": None,
     }
-    write_state(files.run_path, build_state(ctx, status="failed", extra=extra))
-    snapshot = build_snapshot(
-        ctx, accumulator=harness_events.StreamAccumulator(harness=ctx.harness)
+    accumulator = (
+        prior_capture.accumulator
+        if prior_capture is not None
+        else harness_events.StreamAccumulator(harness=ctx.harness)
     )
+    write_state(
+        files.run_path,
+        build_state(
+            ctx,
+            status="failed",
+            exit_code=1,
+            stdout_bytes=prior_capture.stdout_bytes if prior_capture is not None else 0,
+            stderr_bytes=prior_capture.stderr_bytes if prior_capture is not None else 0,
+            current=accumulator.current,
+            extra=extra,
+        ),
+    )
+    snapshot = build_snapshot(ctx, accumulator=accumulator, exit_code=1)
     snapshot["ok"] = False
     snapshot["status"] = "failed"
     # The child never ran, so there is no result quality to report. Remove the
@@ -1697,6 +1713,7 @@ def _run_single_tracked_attempt(
     progress_initial_delay_sec: float,
     progress_interval_sec: float,
     attempt_label: str | None = None,
+    prior_capture: TrackedCaptureResult | None = None,
 ) -> TrackedCaptureResult:
     if attempt_label is not None:
         _append_attempt_delimiter(files.stderr_log, label=attempt_label)
@@ -1710,7 +1727,7 @@ def _run_single_tracked_attempt(
         )
     except OSError as exc:
         error = _runner_launch_error(argv, cwd, exc)
-        _record_tracked_launch_failure(files, ctx, error)
+        _record_tracked_launch_failure(files, ctx, error, prior_capture=prior_capture)
         raise error from exc
     try:
         return _capture_tracked_process(
@@ -1725,8 +1742,39 @@ def _run_single_tracked_attempt(
             progress_interval_sec=progress_interval_sec,
         )
     except RunnerLaunchError as error:
-        _record_tracked_launch_failure(files, ctx, error)
+        _record_tracked_launch_failure(files, ctx, error, prior_capture=prior_capture)
         raise
+
+
+def _merge_tracked_attempt_captures(
+    prior_capture: TrackedCaptureResult,
+    current_capture: TrackedCaptureResult,
+) -> TrackedCaptureResult:
+    accumulator = harness_events.StreamAccumulator(harness=current_capture.accumulator.harness)
+    accumulator.assistant_chunks = [
+        *prior_capture.accumulator.assistant_chunks,
+        *current_capture.accumulator.assistant_chunks,
+    ]
+    accumulator.events = [*prior_capture.accumulator.events, *current_capture.accumulator.events]
+    accumulator.completion_text = (
+        current_capture.accumulator.completion_text or prior_capture.accumulator.completion_text
+    )
+    accumulator.current = current_capture.accumulator.current or prior_capture.accumulator.current
+    accumulator.terminal_event = current_capture.accumulator.terminal_event
+    accumulator.terminal_status = current_capture.accumulator.terminal_status
+    accumulator.structured_events_seen = (
+        prior_capture.accumulator.structured_events_seen
+        + current_capture.accumulator.structured_events_seen
+    )
+    return replace(
+        current_capture,
+        accumulator=accumulator,
+        stdout_bytes=prior_capture.stdout_bytes + current_capture.stdout_bytes,
+        stderr_bytes=prior_capture.stderr_bytes + current_capture.stderr_bytes,
+        stdin_failures=tuple(
+            dict.fromkeys([*prior_capture.stdin_failures, *current_capture.stdin_failures])
+        ),
+    )
 
 
 def _append_empty_retry_instruction(prompt: str) -> str:
@@ -1857,10 +1905,6 @@ def execute_tracked(
             progress_initial_delay_sec=progress_initial_delay_sec,
             progress_interval_sec=progress_interval_sec,
         )
-        cumulative_stdout_bytes = capture.stdout_bytes
-        cumulative_stderr_bytes = capture.stderr_bytes
-        stdin_failures = list(capture.stdin_failures)
-
         if _should_retry_profiles(
             ctx,
             capture,
@@ -1886,11 +1930,9 @@ def execute_tracked(
                 progress_initial_delay_sec=progress_initial_delay_sec,
                 progress_interval_sec=progress_interval_sec,
                 attempt_label="fallback",
+                prior_capture=capture,
             )
-            cumulative_stdout_bytes += fallback_capture.stdout_bytes
-            cumulative_stderr_bytes += fallback_capture.stderr_bytes
-            stdin_failures.extend(fallback_capture.stdin_failures)
-            capture = fallback_capture
+            capture = _merge_tracked_attempt_captures(capture, fallback_capture)
             attempt_env = ctx.fallback_env_overrides
             fallback_extra = {
                 "codexAuthFallback": profiles.codex_auth_fallback_metadata(
@@ -1944,15 +1986,9 @@ def execute_tracked(
                     progress_initial_delay_sec=progress_initial_delay_sec,
                     progress_interval_sec=progress_interval_sec,
                     attempt_label="empty-success-retry",
+                    prior_capture=capture,
                 )
-                capture = replace(
-                    retry_capture,
-                    stdout_bytes=cumulative_stdout_bytes + retry_capture.stdout_bytes,
-                    stderr_bytes=cumulative_stderr_bytes + retry_capture.stderr_bytes,
-                    stdin_failures=tuple(
-                        dict.fromkeys([*stdin_failures, *retry_capture.stdin_failures])
-                    ),
-                )
+                capture = _merge_tracked_attempt_captures(capture, retry_capture)
                 retry_quality = _tracked_capture_quality(
                     files,
                     ctx,

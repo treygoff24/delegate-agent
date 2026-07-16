@@ -2144,6 +2144,51 @@ class RunnerCaptureTests(unittest.TestCase):
                 f"snapshot must omit resultQuality for launch failure, got {snapshot}",
             )
 
+    def test_second_attempt_launch_failure_preserves_primary_capture(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            script = Path(workspace) / "codex"
+            script.write_text(
+                '#!/usr/bin/env bash\nprintf "usage limit\\n" >&2\nchmod 000 "$0"\nexit 1\n',
+                encoding="utf-8",
+            )
+            script.chmod(0o755)
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-07-16T12:00:00Z",
+                fallback_env_overrides={"ATTEMPT": "fallback"},
+            )
+
+            with self.assertRaises(self.runner.RunnerLaunchError) as caught:
+                self.runner.execute_tracked(
+                    [str(script), "task"],
+                    workspace,
+                    ctx,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+
+            self.assertEqual(caught.exception.error, "child_launch_failed")
+            run_path = root / "runs" / run_id
+            state = json.loads((run_path / "state.json").read_text(encoding="utf-8"))
+            snapshot = json.loads((run_path / "snapshot.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["stderrBytes"], len(b"usage limit\n"))
+            self.assertEqual(state["exitCode"], 1)
+            self.assertIn("finishedAt", state)
+            self.assertEqual(snapshot["exitCode"], 1)
+
     def test_safe_empty_success_retries_once_and_resolves(self):
         with tempfile.TemporaryDirectory() as workspace:
             script = Path(workspace) / "codex"
@@ -2546,6 +2591,69 @@ class RunnerCaptureTests(unittest.TestCase):
             stderr_log = (root / "runs" / run_id / "stderr.log").read_text(encoding="utf-8")
             self.assertIn("--- delegate attempt: primary ---", stderr_log)
             self.assertIn("--- delegate codex auth attempt: fallback ---", stderr_log)
+
+    def test_successful_auth_fallback_aggregates_primary_capture(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            script = Path(workspace) / "codex"
+            primary_stdout = b'{"type":"error","message":"usage limit"}\n'
+            fallback_lines = (
+                '{"type":"item.completed","item":{"type":"agent_message",'
+                '"text":"Status: completed with a substantive fallback result."}}',
+                '{"type":"turn.completed"}',
+            )
+            fallback_stdout = "\n".join(fallback_lines).encode("utf-8") + b"\n"
+            script.write_text(
+                "#!/usr/bin/env bash\n"
+                'if [ "${ATTEMPT}" = primary ]; then\n'
+                "  printf '%s\\n' '" + primary_stdout.decode("utf-8").strip() + "'\n"
+                "  printf 'primary stderr\\n' >&2\n"
+                "  exit 1\n"
+                "fi\n"
+                + "".join(f"printf '%s\\n' '{line}'\n" for line in fallback_lines)
+                + "printf 'fallback stderr\\n' >&2\n",
+                encoding="utf-8",
+            )
+            script.chmod(0o755)
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-07-16T12:00:00Z",
+                env_overrides={"ATTEMPT": "primary"},
+                fallback_env_overrides={"ATTEMPT": "fallback"},
+            )
+
+            code, payload = self.runner.execute_tracked(
+                [str(script), "task"],
+                workspace,
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+
+            self.assertEqual(code, 0)
+            assert payload is not None
+            self.assertEqual(payload["stdoutBytes"], len(primary_stdout) + len(fallback_stdout))
+            self.assertEqual(
+                payload["stderrBytes"], len(b"primary stderr\n") + len(b"fallback stderr\n")
+            )
+            snapshot = json.loads(
+                (root / "runs" / run_id / "snapshot.json").read_text(encoding="utf-8")
+            )
+            self.assertTrue(
+                any(event.get("message") == "usage limit" for event in snapshot["recentEvents"])
+            )
 
     def test_auth_fallback_empty_retry_keeps_all_byte_counts(self):
         with tempfile.TemporaryDirectory() as workspace:
