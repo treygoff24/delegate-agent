@@ -211,8 +211,11 @@ class IsolationExecutionError(Exception):
 
 def target_contains_source_root(target: str | Path, source_root: str | Path) -> bool:
     """Return whether deleting target could delete the source workspace root."""
-    resolved_target = Path(target).resolve(strict=False)
-    resolved_source = Path(source_root).resolve(strict=False)
+    try:
+        resolved_target = Path(target).resolve(strict=False)
+        resolved_source = Path(source_root).resolve(strict=False)
+    except (OSError, RuntimeError):
+        return True
     if resolved_target.exists() and resolved_source.exists():
         current = resolved_source
         while True:

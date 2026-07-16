@@ -505,6 +505,11 @@ class SourceRootGuardTests(unittest.TestCase):
             with mock.patch.object(iso.os.path, "samefile", side_effect=OSError("transient")):
                 self.assertTrue(iso.target_contains_source_root(target, source))
 
+    def test_refuses_cleanup_when_root_resolution_fails(self):
+        iso = load_isolation()
+        with mock.patch.object(iso.Path, "resolve", side_effect=RuntimeError("symlink loop")):
+            self.assertTrue(iso.target_contains_source_root("/target", "/source"))
+
 
 class PromptInstructionImportTests(unittest.TestCase):
     """Isolation imports prompt constants from the neutral prompt_instructions module."""
