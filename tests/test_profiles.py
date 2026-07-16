@@ -670,6 +670,17 @@ class CodexProfileExecutionTests(unittest.TestCase):
             self.assertEqual(overrides["CODEX_HOME"], work)
             self.assertEqual(overrides["CODEX_PROXY_URL"], "http://work-proxy")
 
+    def test_child_environment_drops_ambient_delegate_roots(self):
+        with mock.patch.dict(
+            os.environ,
+            {"DELEGATE_SOURCE_ROOT": "/outer/source", "DELEGATE_EXECUTION_ROOT": "/outer/run"},
+            clear=False,
+        ):
+            env = self.profiles.child_environment()
+
+        self.assertNotIn("DELEGATE_SOURCE_ROOT", env)
+        self.assertNotIn("DELEGATE_EXECUTION_ROOT", env)
+
     def test_fallback_same_account_normalization_handles_home_vars_and_symlinks(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

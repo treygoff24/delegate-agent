@@ -240,6 +240,9 @@ def child_environment(
         if pure
         else dict(os.environ)
     )
+    if not pure:
+        env.pop("DELEGATE_SOURCE_ROOT", None)
+        env.pop("DELEGATE_EXECUTION_ROOT", None)
     if base:
         env.update(base)
     if overrides:
