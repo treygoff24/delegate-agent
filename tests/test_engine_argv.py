@@ -1231,6 +1231,11 @@ class EngineArgvTests(CommandTestBase):
         self.assertIn("filesystem surveys", ctx.exception.message)
         self.assertIn("another harness", ctx.exception.message)
 
+    def test_devin_unknown_mode_fails_closed(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.build_devin_argv(self.delegate.DEFAULT_CONFIG["devin"], "bogus", None)
+        self.assertEqual(ctx.exception.error, "invalid_mode")
+
     def test_devin_safe_cli_fails_before_binary_launch(self):
         with tempfile.TemporaryDirectory() as tmp:
             code, out, err = self.run_main(["--cwd", tmp, "--json", "devin", "safe", "review task"])

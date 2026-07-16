@@ -405,6 +405,8 @@ def build_devin_argv(
             "weakening the read-only boundary. Use another harness in safe mode for "
             "filesystem review.",
         )
+    if mode not in (MODE_WORK, MODE_CALL):
+        validate_mode(mode)
     argv = [str(devin["binary"])]
     if model:
         argv.extend(["--model", model])
