@@ -260,9 +260,26 @@ preserves auditability after the six primary feature commits.
 
 ### Final verification and verdict
 
-The post-round-5 coordinator gate was reported green. This release-readiness
-pass also re-resolved every primary SHA against the live branch and reran the
-targeted Wave 6 documentation/version checks recorded in the handoff.
+The coordinator verified a fresh `origin/main` and merge base at
+`bfea26d5fe2f1795893245eaa66f412b569add96`, with a clean worktree before this
+evidence-only documentation update. The final local gates passed:
+
+- `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests`: 1,374
+  passed, 7 skipped in 210.850 seconds.
+- `python3 -m compileall -q src tests bin`, `ruff check .`,
+  `ruff format --check .`, and the three-dot diff whitespace check: passed.
+- Gitleaks full-history scan: 346 commits scanned, no leaks. TruffleHog's Git
+  scan and clean `git archive` filesystem scan: zero verified or unverified
+  secrets. Shippable private-path and private-alias scans were empty.
+- A clean `git archive` build produced the 0.15.0 sdist and wheel; Twine passed
+  both, the forbidden-artifact scan was empty, and a clean wheel install
+  reported `delegate 0.15.0` with 51 commands in `describe`.
+- Safe dry-runs passed for codex, claude, grok, opencode, and kimi. These were
+  argv/config preflight checks only; no live provider child was executed.
+
+This evidence supersedes the earlier residual note that packaging and secret
+scans were still pending. Tag creation and live publication remain separate
+release actions.
 
 **Final verdict: SHIP.** The authored contract, implementation, public docs, and
 release metadata now agree. No known Wave 6 correctness or compatibility blocker
