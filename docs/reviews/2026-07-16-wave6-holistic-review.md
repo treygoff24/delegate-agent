@@ -1,4 +1,8 @@
-DON'T-SHIP
+# Wave 6 holistic review record
+
+> **Historical opening verdict: DON'T-SHIP.** The findings and round-4
+> re-verdict below are preserved as review history. They are superseded by the
+> post-round-5 final re-verdict at the end of this document.
 
 ## Findings
 
@@ -167,7 +171,7 @@ DON'T-SHIP
 - Invalid-byte Linux filenames, case-folding filesystem behavior, WSL namespace behavior, and symlink-loop registry artifacts were reviewed statically/read-only rather than exercised on their native platforms.
 - Packaging/build/install promotion and the live `~/.delegate` runtime were not probed because this was a branch review, not a release or install task.
 
-## Re-verdict (2026-07-16)
+## Round-4 re-verdict (2026-07-16, superseded)
 
 ### Original findings
 
@@ -201,4 +205,66 @@ DON'T-SHIP
 - `ruff check .`, `ruff format --check .`, `python3 -m compileall -q src tests bin`, and `git diff --check 66597ec^..HEAD`: passed.
 - Targeted probes covered the grouped timeout, second-attempt executable disappearance, fallback accounting, embedded-NUL root handling, Devin discovery, and unknown-mode builder path.
 
-**Final verdict: SHIP-WITH-FIXES.** No HIGH-severity blocker remains, but the residual attempt-accounting and documentation defects should be corrected before calling Wave 6 fully closed.
+**Superseded round-4 verdict: SHIP-WITH-FIXES.** At this point no HIGH-severity blocker remained, but the residual attempt-accounting and documentation defects still required correction before Wave 6 could close.
+
+## Post-round-5 final re-verdict (2026-07-16)
+
+Round 5 closed the six residuals from the superseded re-verdict: tracked launch
+failures and successful authentication fallback now retain cumulative attempt
+state; tracked timeout streams close cleanly; retry and dirty-submodule docs
+match behavior and are contract-tested; malformed Devin modes fail closed; and
+the final retry documentation contract is pinned. The approved authored spec now
+records the two safety-driven deviations discovered during review rather than
+pretending the original wording shipped unchanged.
+
+### Per-item release record
+
+| Item | Status | Primary commit | Test additions and final coverage |
+| --- | --- | --- | --- |
+| Auto include-dirty | Shipped | `9b66aee` | `test_execution_worktree_preflight`, `test_execution_worktree_failure_cleanup`, and `test_wave4_launch_features` cover clean, tracked, untracked, non-Git, sync-failure teardown, dirty submodules, warning counts, and live launch behavior. Later hardening covers arbitrary filename bytes and escaped diagnostics. |
+| Source-root guard | Shipped | `5e462b5` | `test_delegate_isolation`, `test_safe_workspace_isolation`, `test_execution_worktree_failure_cleanup`, `test_wave4_launch_features`, and `test_worktree_remove` cover child envs plus absolute, relative, symlinked, case-variant, malformed, and descendant cleanup paths. Profile tests cover ambient and fallback precedence. |
+| Empty-success retry | Shipped | `254d576` | `test_runner_capture`, `test_execution_argv_and_prompt`, and `test_codex_pure_sandbox` cover successful and still-empty retries, output/accounting retention, one deadline, tracked launch failures, authentication fallback, and no replay for work, write-capable call, pure, or slash pass-through requests. |
+| `run-output --tail` | Shipped | `47e6f11` | `test_snapshot_run_output` and `test_delegate_help_cli` pin implicit stdout, explicit selectors, stderr opt-in, invalid combinations, and generated help. |
+| Bare-handle resolution | Shipped | `a1d9def` | `test_snapshot_run_output` and `test_wait_cancel_commands` cover Snapshot, run-output, and wait JSON/text metadata plus the older-than-24-hours warning. |
+| Devin safe preflight | Shipped | `2471154` | `test_engine_argv` and `test_delegate_help_cli` cover `unsupported_mode`, work/call preservation, unknown-mode rejection, and coherent help/discovery output. |
+
+All six primary SHAs above resolve on `feature/wave6-hardening`. Review fixes
+remain as focused follow-up commits rather than amendments; this intentionally
+preserves auditability after the six primary feature commits.
+
+### Approved deviations
+
+- Empty-success replay is limited to safe and read-only call requests whose
+  prompt transport permits mutation. Write-capable calls are not replayed
+  because they may duplicate side effects; pure and slash pass-through prompts
+  are not replayed because Delegate must preserve them verbatim.
+- Call mode has no source checkout. Its throwaway cwd is exported as
+  `DELEGATE_SOURCE_ROOT`, and the Registry/config workspace is not disclosed to
+  the child. `DELEGATE_EXECUTION_ROOT` is emitted only when source and execution
+  roots differ.
+- The branch contains review and fix commits beyond the six primary item
+  commits. This follows the no-amend rule and leaves each correction reviewable.
+
+### Residual risks
+
+- Hook-side enforcement for `DELEGATE_SOURCE_ROOT` and
+  `DELEGATE_EXECUTION_ROOT` remains machine configuration outside this repo.
+- Persistent worktrees and temporary isolation remain containment mechanisms,
+  not host security sandboxes; children retain whatever absolute-path, network,
+  credential, and tool access their runtime permits.
+- Invalid-byte filenames, case-folding behavior, process races, and live
+  provider authentication fallback received unit/static coverage but were not
+  all exercised on every supported platform or against every provider CLI.
+- Release packaging, secret scans, wheel installation, tag creation, and live
+  publication remain release-checklist gates rather than Wave 6 feature tests.
+
+### Final verification and verdict
+
+The post-round-5 coordinator gate was reported green. This release-readiness
+pass also re-resolved every primary SHA against the live branch and reran the
+targeted Wave 6 documentation/version checks recorded in the handoff.
+
+**Final verdict: SHIP.** The authored contract, implementation, public docs, and
+release metadata now agree. No known Wave 6 correctness or compatibility blocker
+remains; the residuals above are bounded release/platform risks, not hidden
+feature defects.
