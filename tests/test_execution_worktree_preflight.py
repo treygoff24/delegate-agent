@@ -37,7 +37,9 @@ class ExecutionWorktreePreflightTests(ExecutionTestBase):
             config_path = self._write_missing_cursor_worktree_config(fake_home)
             stdout_buf = io.StringIO()
 
-            with mock.patch.dict(os.environ, {"DELEGATE_CONFIG": str(config_path)}):
+            with (
+                mock.patch.dict(os.environ, {"DELEGATE_CONFIG": str(config_path)}),
+            ):
                 code = self.delegate.main(
                     ["--cwd", repo.name, "--json", "cursor", "work", "hello"],
                     stdout=stdout_buf,
@@ -128,6 +130,7 @@ class ExecutionWorktreePreflightTests(ExecutionTestBase):
             self.assertEqual(code, self.delegate.EXIT_USAGE)
             self.assertEqual(payload["error"], "dirty_source_workspace")
             self.assertIn("Submodule dirt cannot be synced", payload["message"])
+            self.assertIn("'sub'", payload["message"])
             self.assertIn("--isolation none", payload["message"])
             self.assertFalse((Path(fake_home) / ".delegate" / "worktrees").exists())
 
