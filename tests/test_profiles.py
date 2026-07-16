@@ -681,6 +681,28 @@ class CodexProfileExecutionTests(unittest.TestCase):
         self.assertNotIn("DELEGATE_SOURCE_ROOT", env)
         self.assertNotIn("DELEGATE_EXECUTION_ROOT", env)
 
+    def test_fallback_environment_keeps_authoritative_delegate_roots(self):
+        resolution = self.profiles.ProfileResolution(
+            name="personal",
+            source="default",
+            env={
+                "CODEX_HOME": "/personal",
+                "DELEGATE_SOURCE_ROOT": "/profile/source",
+                "DELEGATE_EXECUTION_ROOT": "/profile/run",
+            },
+            codex_home="/personal",
+            codex_fallback_home="/work",
+        )
+        with mock.patch.object(self.profiles, "codex_homes_same_account", return_value=False):
+            overrides = self.profiles.codex_fallback_child_env_overrides(
+                resolution,
+                {"DELEGATE_SOURCE_ROOT": "/actual/source", "DELEGATE_EXECUTION_ROOT": "/actual/run"},
+            )
+
+        self.assertEqual(overrides["CODEX_HOME"], "/work")
+        self.assertEqual(overrides["DELEGATE_SOURCE_ROOT"], "/actual/source")
+        self.assertEqual(overrides["DELEGATE_EXECUTION_ROOT"], "/actual/run")
+
     def test_fallback_same_account_normalization_handles_home_vars_and_symlinks(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

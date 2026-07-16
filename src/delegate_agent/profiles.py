@@ -341,7 +341,14 @@ def codex_fallback_child_env_overrides(
     fallback = codex_fallback_env_overrides(resolution)
     if fallback is None:
         return {}
-    return {**(primary_overrides or {}), **fallback}
+    return {
+        **(primary_overrides or {}),
+        **{
+            key: value
+            for key, value in fallback.items()
+            if key not in {"DELEGATE_SOURCE_ROOT", "DELEGATE_EXECUTION_ROOT"}
+        },
+    }
 
 
 def classify_codex_usage_limit(stderr_text: str) -> bool:
