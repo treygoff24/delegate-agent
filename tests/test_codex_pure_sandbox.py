@@ -245,7 +245,7 @@ class CodexPureSandboxUnitTests(CommandTestBase):
         self.assertEqual(captured_argv[:3], ["sandbox-exec", "-f", profile_path])
         self.assertEqual(captured_argv[3:], ["codex", "exec", "-"])
         self.assertFalse(Path(profile_path).exists())
-        self.assertEqual(build_profile.call_count, 1)
+        self.assertEqual(build_profile.call_count, 2)
         _, kwargs = build_profile.call_args
         self.assertEqual(kwargs["home"], str(Path.home()))
         self.assertEqual(kwargs["temp_cwd"], cwd)

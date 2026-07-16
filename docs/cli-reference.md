@@ -771,6 +771,14 @@ exit-code-derived status.
 
 Run-output JSON uses schema `delegate.run-output.v1` and returns selected completion report, stdout, and/or stderr content. By default, secret-like strings are redacted unless `--no-redact` is supplied. Tracked runs finish in one of the terminal statuses `succeeded`, `failed`, or `cancelled`; explicit harness cancellation/error terminal events override an exit-zero child status.
 
+Safe and call runs that exit successfully with `resultQuality=empty` retry once
+with the original prompt plus a plain-text final-answer instruction. Work runs
+never retry. Retried envelopes add `emptyRetry: {attempted, resolved}`; runs that
+do not retry omit the field. If the second attempt is also empty, the run remains
+successful and honest with `resultQuality=empty`, and emits an
+`empty_success_retry` warning. Tracked safe runs retain both attempts in their
+stdout/stderr logs.
+
 `delegate wait` blocks until every selected run reaches terminal state. Defaults:
 `--interval 3`, minimum interval `1`, and `--timeout 3600`. Exit codes are `0`
 when all runs succeeded, `1` when any run failed or was cancelled, and `124` on

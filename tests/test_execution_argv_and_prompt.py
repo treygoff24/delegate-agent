@@ -137,6 +137,45 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
             )
         self.assertEqual(code, 0)
         self.assertIs(payload["requestedFast"], False)
+        self.assertNotIn("emptyRetry", payload)
+        self.assertNotIn("resultQuality", payload)
+
+    def test_call_json_reports_empty_retry_only_when_attempted(self):
+        parsed = self.delegate.parse_cli(["codex", "call", "hello"])
+        request = self.delegate.request_from_parsed(
+            parsed, self.delegate.DEFAULT_CONFIG, io.StringIO("")
+        )
+        fake_result = self.delegate.delegate_runner.CallResult(
+            text="",
+            exit_code=0,
+            duration_ms=10,
+            stdout_bytes=0,
+            stderr_bytes=0,
+            text_chars=0,
+            text_truncated=False,
+            result_quality="empty",
+            empty_retry_attempted=True,
+            empty_retry_resolved=False,
+        )
+        with (
+            mock.patch.object(self.delegate, "ensure_binary"),
+            mock.patch.object(
+                self.delegate.delegate_runner, "execute_call", return_value=fake_result
+            ),
+        ):
+            code, payload = self.delegate.execute_request(
+                request,
+                json_mode=True,
+                config=self.delegate.DEFAULT_CONFIG,
+                pass_through=False,
+                completion_report_mode="none",
+                source_workspace=self.delegate.ResolvedWorkspace("<call-temp-cwd>", "directory"),
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["resultQuality"], "empty")
+        self.assertEqual(payload["emptyRetry"], {"attempted": True, "resolved": False})
 
     def _call_temp_dirs(self):
         return set(Path(tempfile.gettempdir()).glob("delegate-call-*"))

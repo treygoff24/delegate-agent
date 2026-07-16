@@ -729,6 +729,14 @@ def execute_request(
                             seen.add(warning)
                             merged.append(warning)
                     payload["warnings"] = merged
+                if result.empty_retry_attempted:
+                    payload["resultQuality"] = result.result_quality
+                    payload["emptyRetry"] = {
+                        "attempted": True,
+                        "resolved": result.empty_retry_resolved,
+                    }
+                    if result.stderr_tail:
+                        payload["stderrTail"] = result.stderr_tail
                 reasoning.add_reasoning_payload_fields(payload, request)
                 run_metadata.add_speed_payload_fields(payload, request)
                 if result.exit_code != 0:

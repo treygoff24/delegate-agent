@@ -2143,3 +2143,153 @@ class RunnerCaptureTests(unittest.TestCase):
                 snapshot,
                 f"snapshot must omit resultQuality for launch failure, got {snapshot}",
             )
+
+    def test_safe_empty_success_retries_once_and_resolves(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            script = Path(workspace) / "codex"
+            script.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf 'attempt:%s\\n' \"$*\" >&2\n"
+                "if [[ \"$*\" == *'Delegate retry instruction'* ]]; then\n"
+                '  printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"Status: completed. The requested review finished successfully and this plain-text final report contains the findings, verification result, changed-file summary, and remaining-risk statement needed by the parent operator. No further action is required."}}\'\n'
+                "  printf '%s\\n' '{\"type\":\"turn.completed\"}'\n"
+                "fi\n",
+                encoding="utf-8",
+            )
+            script.chmod(0o755)
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-07-16T12:00:00Z",
+            )
+            code, payload = self.runner.execute_tracked(
+                [str(script), "original prompt"],
+                workspace,
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+                manifest_argv=[str(script), "<prompt>"],
+            )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(payload["emptyRetry"], {"attempted": True, "resolved": True})
+            self.assertEqual(payload["resultQuality"], "ok")
+            stderr_log = (root / "runs" / run_id / "stderr.log").read_text(encoding="utf-8")
+            self.assertEqual(
+                sum(line.startswith("attempt:") for line in stderr_log.splitlines()), 2
+            )
+            self.assertIn("empty-success-retry", stderr_log)
+
+    def test_safe_empty_retry_preserves_both_attempts_and_stays_empty(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            script = Path(workspace) / "codex"
+            script.write_text(
+                "#!/usr/bin/env bash\nprintf 'empty-attempt:%s\\n' \"$*\" >&2\n",
+                encoding="utf-8",
+            )
+            script.chmod(0o755)
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-07-16T12:00:00Z",
+            )
+            code, payload = self.runner.execute_tracked(
+                [str(script), "original prompt"],
+                workspace,
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+                manifest_argv=[str(script), "<prompt>"],
+            )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(payload["emptyRetry"], {"attempted": True, "resolved": False})
+            self.assertEqual(payload["resultQuality"], "empty")
+            self.assertIn(self.runner.EMPTY_RETRY_WARNING, payload["warnings"])
+            stderr_log = (root / "runs" / run_id / "stderr.log").read_text(encoding="utf-8")
+            self.assertEqual(stderr_log.count("empty-attempt:"), 2)
+
+    def test_work_empty_success_does_not_retry(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            counter = Path(workspace) / "attempts"
+            script = Path(workspace) / "codex"
+            script.write_text(
+                f"#!/usr/bin/env bash\nprintf x >> {counter!s}\n",
+                encoding="utf-8",
+            )
+            script.chmod(0o755)
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="work",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-07-16T12:00:00Z",
+            )
+            code, payload = self.runner.execute_tracked(
+                [str(script), "original prompt"],
+                workspace,
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+                manifest_argv=[str(script), "<prompt>"],
+            )
+            self.assertEqual(code, 0)
+            self.assertEqual(counter.read_text(encoding="utf-8"), "x")
+            self.assertNotIn("emptyRetry", payload)
+
+    def test_call_empty_success_retries_once(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            script = Path(workspace) / "agent"
+            script.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf 'attempt stderr\\n' >&2\n"
+                "if [[ \"$*\" == *'Delegate retry instruction'* ]]; then\n"
+                "  printf 'Final answer.\\n'\n"
+                "fi\n",
+                encoding="utf-8",
+            )
+            script.chmod(0o755)
+            result = self.runner.execute_call(
+                [str(script), "original prompt"],
+                workspace,
+                harness="cursor",
+            )
+            self.assertEqual(result.text, "Final answer.")
+            self.assertTrue(result.empty_retry_attempted)
+            self.assertTrue(result.empty_retry_resolved)
+            self.assertEqual(result.result_quality, "ok")
+            self.assertEqual(result.stderr_tail.count("attempt stderr"), 2)
