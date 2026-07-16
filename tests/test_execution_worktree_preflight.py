@@ -10,6 +10,13 @@ from tests.execution_test_base import GIT_TEST_IDENTITY, ExecutionTestBase, make
 
 
 class ExecutionWorktreePreflightTests(ExecutionTestBase):
+    def test_cli_reference_matches_empty_retry_eligibility(self):
+        text = (Path(__file__).resolve().parents[1] / "docs/cli-reference.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Safe runs and read-only call runs", text)
+        self.assertIn("Pure and slash pass-through prompts, and write-capable calls", text)
+
     def test_worktree_docs_match_dirty_submodule_preflight(self):
         root = Path(__file__).resolve().parents[1]
         documents = (
