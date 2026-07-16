@@ -624,6 +624,13 @@ class KimiHelpTests(HelpCliTestBase):
         self.assertEqual(code, self.delegate.EXIT_OK)
         self.assertIn("safe (read-only review)", out)
 
+    def test_models_summary_derives_devin_modes_from_registry(self):
+        code, out, _err = self.run_main(["--json", "models", "--summary"])
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        devin = next(item for item in json.loads(out)["aliases"] if item["provider"] == "devin")
+        self.assertEqual(devin["command"], "delegate devin {work,call}")
+        self.assertFalse(devin["safeSupported"])
+
 
 if __name__ == "__main__":
     unittest.main()

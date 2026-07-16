@@ -13,6 +13,7 @@ MODE_SAFE = "safe"
 MODE_WORK = "work"
 MODE_CALL = "call"
 VALID_MODES = {MODE_SAFE, MODE_WORK, MODE_CALL}
+MODE_ORDER = (MODE_SAFE, MODE_WORK, MODE_CALL)
 
 # Canonical engine/harness vocabulary. This tuple's order is the registry order
 # reused wherever engines are enumerated (the describe payload, help prose, the
@@ -25,6 +26,14 @@ ENGINE_SUPPORTED_MODES = {
     engine: (MODE_WORK, MODE_CALL) if engine == "devin" else (MODE_SAFE, MODE_WORK, MODE_CALL)
     for engine in KNOWN_ENGINES
 }
+
+
+def engine_modes(engine: str) -> tuple[str, ...]:
+    return ENGINE_SUPPORTED_MODES[engine]
+
+
+def engine_mode_display(engine: str) -> str:
+    return "{" + ",".join(engine_modes(engine)) + "}"
 
 
 def pure_call_supported(engine: str) -> bool:

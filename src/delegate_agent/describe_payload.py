@@ -31,12 +31,15 @@ from delegate_agent.constants import (
     ENGINE_CAPABILITIES,
     KNOWN_ENGINES,
     MODE_CALL,
+    MODE_ORDER,
     MODE_SAFE,
     MODE_WORK,
     MODEL_SUMMARY_ENGINES,
     PROMPT_ENFORCED_SAFE_ENGINES,
     PROMPT_INSTRUCTION_MODE_SLASH,
     PROMPT_INSTRUCTION_MODE_WRAPPED,
+    engine_mode_display,
+    engine_modes,
     pure_call_supported,
 )
 from delegate_agent.errors import EXIT_OK, DelegateError
@@ -430,10 +433,10 @@ def models_summary_payload(
         entry: JsonObject = {
             "alias": engine,
             "provider": engine,
-            "command": f"delegate {engine} {{safe,work,call}}",
+            "command": f"delegate {engine} {engine_mode_display(engine)}",
             "available": True,
-            "safeSupported": True,
-            "workSupported": True,
+            "safeSupported": "safe" in engine_modes(engine),
+            "workSupported": "work" in engine_modes(engine),
             "defaultModel": default_model
             if isinstance(default_model, str) and default_model
             else None,
@@ -458,10 +461,10 @@ def models_summary_payload(
                 entry = {
                     "alias": alias,
                     "provider": "droid",
-                    "command": f"delegate droid {shlex.quote(alias)} {{safe,work,call}}",
+                    "command": f"delegate droid {shlex.quote(alias)} {engine_mode_display('droid')}",
                     "available": isinstance(model_id, str) and bool(model_id),
-                    "safeSupported": True,
-                    "workSupported": True,
+                    "safeSupported": "safe" in engine_modes("droid"),
+                    "workSupported": "work" in engine_modes("droid"),
                     "model": model_id if isinstance(model_id, str) else None,
                 }
                 entry.update(
@@ -484,9 +487,9 @@ def models_summary_payload(
             entry = {
                 "alias": alias,
                 "provider": engine,
-                "command": f"delegate {engine} {{safe,work,call}} --model {shlex.quote(alias)}",
-                "safeSupported": True,
-                "workSupported": True,
+                "command": f"delegate {engine} {engine_mode_display(engine)} --model {shlex.quote(alias)}",
+                "safeSupported": "safe" in engine_modes(engine),
+                "workSupported": "work" in engine_modes(engine),
             }
             entry.update(_summary_model_fields(engine, model_id))
             entry.update(
@@ -1283,7 +1286,7 @@ def emit_describe(
     print(f"config: {payload['configPath']} ({payload['configSource']})", file=stdout)
     print(f"runtime: {payload['runtime']['modulePath']}", file=stdout)
     print(f"engines: {', '.join(KNOWN_ENGINES)}", file=stdout)
-    print("modes: safe, work", file=stdout)
+    print(f"modes: {', '.join(MODE_ORDER)}", file=stdout)
     print("prompt sources: direct, --prompt-file, stdin", file=stdout)
     print("global options must appear before the subcommand", file=stdout)
     return EXIT_OK
