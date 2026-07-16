@@ -548,6 +548,19 @@ def _append_unique(values: list[str], value: str) -> None:
         values.append(value)
 
 
+def _aggregate_call_usage(*usages: JsonObject) -> JsonObject:
+    if not all(usage.get("basis") == "exact" for usage in usages):
+        return {"basis": "unavailable"}
+    keys = ("inputTokens", "outputTokens")
+    if not all(
+        isinstance(usage.get(key), int) and not isinstance(usage.get(key), bool)
+        for usage in usages
+        for key in keys
+    ):
+        return {"basis": "unavailable"}
+    return {key: sum(int(usage[key]) for usage in usages) for key in keys} | {"basis": "exact"}
+
+
 # Delegate to the shared helper in harness_events so the runner (write-time) and
 # run-output (read-time) channels emit identical warning text.
 _quality_warning = harness_events.quality_warning
@@ -2523,6 +2536,7 @@ def execute_call(
         ],
         warnings=tuple(warnings),
         text_truncated=result.text_truncated or retry.text_truncated,
+        usage=_aggregate_call_usage(result.usage, retry.usage),
         empty_retry_attempted=True,
         empty_retry_resolved=resolved,
     )

@@ -2422,7 +2422,23 @@ class RunnerCaptureTests(unittest.TestCase):
                 read_only=True,
             )
 
-        self.assertTrue(result.text_truncated)
+            self.assertTrue(result.text_truncated)
+
+    def test_empty_call_retry_aggregates_exact_usage(self):
+        primary = self.runner.CallResult(
+            text="", exit_code=0, duration_ms=1, stdout_bytes=0, stderr_bytes=0,
+            text_chars=0, text_truncated=False, result_quality="empty",
+            usage={"inputTokens": 3, "outputTokens": 2, "basis": "exact"},
+        )
+        retry = self.runner.CallResult(
+            text="ok", exit_code=0, duration_ms=1, stdout_bytes=0, stderr_bytes=0,
+            text_chars=2, text_truncated=False,
+            usage={"inputTokens": 5, "outputTokens": 7, "basis": "exact"},
+        )
+        with mock.patch.object(self.runner, "_execute_call_once", side_effect=(primary, retry)):
+            result = self.runner.execute_call(["agent", "task"], "/tmp", harness="claude", read_only=True)
+
+        self.assertEqual(result.usage, {"inputTokens": 8, "outputTokens": 9, "basis": "exact"})
 
     def test_attempt_delimiters_keep_auth_fallback_marker_distinct_from_empty_retry(self):
         with tempfile.TemporaryDirectory() as workspace:
