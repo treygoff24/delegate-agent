@@ -572,7 +572,7 @@ def make_run_context(
         fallback_auth_profile=request.fallback_auth_profile,
         include_dirty=request.include_dirty,
         group=request.group,
-        call_read_only=request.read_only or request.pure,
+        call_read_only=request.call_read_only or request.pure,
         prompt_instruction_mode=request.prompt_instruction_mode,
     )
 
@@ -684,7 +684,7 @@ def execute_request(
                     agent_config_text=request.agent_config_text,
                     agent_config_placeholder=DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
                     env_overrides=request.env_overrides,
-                    read_only=request.read_only,
+                    read_only=request.call_read_only,
                     pure=request.pure,
                     timeout=request.timeout,
                     structured_output=request.output_schema is not None,

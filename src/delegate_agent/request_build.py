@@ -2054,6 +2054,7 @@ def _build_request_for_workspace(
             progress_interval_sec=progress_interval_sec,
             forbid_commit=forbid_commit,
             include_dirty=include_dirty,
+            call_read_only=call_read_only,
             warnings=(*warnings, *parts.warnings),
             stdin_text=parts.stdin_text,
             prompt_file_text=parts.prompt_file_text,

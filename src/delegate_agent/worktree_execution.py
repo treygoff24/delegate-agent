@@ -248,7 +248,7 @@ def _build_persistent_worktree_run_context(
         include_dirty=bool(creation_context.get("includeDirty")),
         synced_files=int(creation_context.get("syncedFiles") or 0),
         group=request.group,
-        call_read_only=request.read_only or request.pure,
+        call_read_only=request.call_read_only or request.pure,
         prompt_instruction_mode=request.prompt_instruction_mode,
     )
 
