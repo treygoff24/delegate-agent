@@ -10,6 +10,20 @@ from tests.execution_test_base import GIT_TEST_IDENTITY, ExecutionTestBase, make
 
 
 class ExecutionWorktreePreflightTests(ExecutionTestBase):
+    def test_worktree_docs_match_dirty_submodule_preflight(self):
+        root = Path(__file__).resolve().parents[1]
+        documents = (
+            root / "docs/worktrees.md",
+            root / "docs/troubleshooting.md",
+            root / "droid-wiki/systems/isolation-and-worktrees.md",
+            root / "droid-wiki/how-to-contribute/patterns-and-conventions.md",
+        )
+        for document in documents:
+            with self.subTest(document=document):
+                text = document.read_text(encoding="utf-8").lower()
+                self.assertIn("dirty submodule", text)
+                self.assertIn("auto-sync", text)
+
     def _write_missing_cursor_worktree_config(self, directory: str) -> Path:
         config_path = Path(directory) / "delegate-config.json"
         config_path.write_text(
