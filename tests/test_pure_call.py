@@ -85,7 +85,10 @@ class PureCallTests(CommandTestBase):
             text_chars=2,
             text_truncated=False,
         )
-        with mock.patch.object(self.delegate.delegate_runner, "execute_call", return_value=fake):
+        with (
+            mock.patch.object(self.delegate, "ensure_binary"),
+            mock.patch.object(self.delegate.delegate_runner, "execute_call", return_value=fake),
+        ):
             code, _ = self.delegate.execute_request(
                 request,
                 json_mode=True,
@@ -302,8 +305,9 @@ class PureCallTests(CommandTestBase):
                 model_resolved="resolved-model",
                 usage={"inputTokens": 5, "outputTokens": 2, "basis": "exact"},
             )
-            with mock.patch.object(
-                self.delegate.delegate_runner, "execute_call", return_value=fake
+            with (
+                mock.patch.object(self.delegate, "ensure_binary"),
+                mock.patch.object(self.delegate.delegate_runner, "execute_call", return_value=fake),
             ):
                 code, payload = self.delegate.execute_request(
                     request,
