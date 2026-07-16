@@ -1839,6 +1839,8 @@ def execute_tracked(
             progress_initial_delay_sec=progress_initial_delay_sec,
             progress_interval_sec=progress_interval_sec,
         )
+        cumulative_stdout_bytes = capture.stdout_bytes
+        cumulative_stderr_bytes = capture.stderr_bytes
 
         if _should_retry_profiles(
             ctx,
@@ -1866,6 +1868,8 @@ def execute_tracked(
                 progress_interval_sec=progress_interval_sec,
                 attempt_label="fallback",
             )
+            cumulative_stdout_bytes += fallback_capture.stdout_bytes
+            cumulative_stderr_bytes += fallback_capture.stderr_bytes
             capture = fallback_capture
             attempt_env = ctx.fallback_env_overrides
             fallback_extra = {
@@ -1903,7 +1907,6 @@ def execute_tracked(
                     agent_config_placeholder=agent_config_placeholder,
                     agent_config_dir=files.run_path,
                 )
-                primary_capture = capture
                 if fallback_extra is None:
                     _prepend_attempt_delimiter(files.stderr_log, label="primary")
                 retry_capture = _run_single_tracked_attempt(
@@ -1924,8 +1927,8 @@ def execute_tracked(
                 )
                 capture = replace(
                     retry_capture,
-                    stdout_bytes=primary_capture.stdout_bytes + retry_capture.stdout_bytes,
-                    stderr_bytes=primary_capture.stderr_bytes + retry_capture.stderr_bytes,
+                    stdout_bytes=cumulative_stdout_bytes + retry_capture.stdout_bytes,
+                    stderr_bytes=cumulative_stderr_bytes + retry_capture.stderr_bytes,
                 )
                 retry_quality = _tracked_capture_quality(
                     files,

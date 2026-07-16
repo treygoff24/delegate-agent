@@ -2518,6 +2518,38 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertIn("--- delegate attempt: primary ---", stderr_log)
             self.assertIn("--- delegate codex auth attempt: fallback ---", stderr_log)
 
+    def test_auth_fallback_empty_retry_keeps_all_byte_counts(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            script = Path(workspace) / "codex"
+            script.write_text(
+                "#!/usr/bin/env bash\n"
+                'if [ "${ATTEMPT}" = primary ]; then printf "usage limit\\n" >&2; exit 1; fi\n'
+                'if [[ "$*" == *"Delegate retry instruction"* ]]; then\n'
+                '  printf "retry\\n" >&2\n'
+                "  printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"ok\"}}'\n"
+                "else\n"
+                '  printf "fallback\\n" >&2\n'
+                "fi\n",
+                encoding="utf-8",
+            )
+            script.chmod(0o755)
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            ctx = self.runner.RunContext(
+                registry_root=root, run_id=run_id, alias=alias, harness="codex", engine="codex",
+                mode="call", model=None, source_cwd=workspace, execution_cwd=workspace,
+                workspace_kind="directory", isolated_workspace=False,
+                started_at="2026-07-16T12:00:00Z", group="workflow", call_read_only=True,
+                env_overrides={"ATTEMPT": "primary"}, fallback_env_overrides={"ATTEMPT": "fallback"},
+            )
+            code, payload = self.runner.execute_tracked(
+                [str(script), "task"], workspace, ctx, json_mode=True, stdout=io.StringIO(),
+                stderr=io.StringIO(), manifest_argv=[str(script), "<prompt>"],
+            )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(payload["stderrBytes"], len(b"usage limit\n") + len(b"fallback\n") + len(b"retry\n"))
+
     def test_grouped_read_only_call_empty_success_retries_once(self):
         with tempfile.TemporaryDirectory() as workspace:
             script = Path(workspace) / "agent"
