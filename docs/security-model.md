@@ -171,6 +171,13 @@ This closes a leak where an untracked symlink whose absolute target pointed at t
 
 `--isolation worktree` with `work` mode creates a preserved Git worktree and local branch. The child edits that worktree, not the source checkout. The orchestrator can inspect and integrate the diff later.
 
+Every child receives `DELEGATE_SOURCE_ROOT` with the resolved source workspace
+root. Isolated children also receive `DELEGATE_EXECUTION_ROOT`. Delegate's own
+worktree removal, pruning, and temporary snapshot teardown paths refuse a target
+that is or contains the source root, including through relative or symlinked
+paths. Harness-side hook enforcement is separate machine configuration and is
+not provided by this repository.
+
 Persistent worktree isolation is not a security sandbox. It does not prevent:
 
 - Use of secrets available in environment variables, config files, credential stores, or runtime sessions.

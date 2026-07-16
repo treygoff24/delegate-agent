@@ -5,6 +5,7 @@ Tests pure functions only; no filesystem mutations.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
@@ -459,6 +460,25 @@ class ReexportTests(unittest.TestCase):
         self.assertIn("auto", iso.VALID_ISOLATION_VALUES)
         self.assertIn("none", iso.VALID_ISOLATION_VALUES)
         self.assertIn("worktree", iso.VALID_ISOLATION_VALUES)
+
+
+class SourceRootGuardTests(unittest.TestCase):
+    def test_detects_absolute_relative_and_symlinked_targets(self):
+        iso = load_isolation()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source"
+            source.mkdir()
+            link = root / "source-link"
+            link.symlink_to(source, target_is_directory=True)
+
+            self.assertTrue(iso.target_contains_source_root(source, source))
+            self.assertTrue(
+                iso.target_contains_source_root(os.path.relpath(root, Path.cwd()), source)
+            )
+            self.assertTrue(iso.target_contains_source_root(link, source))
+            self.assertTrue(iso.target_contains_source_root(root, source))
+            self.assertFalse(iso.target_contains_source_root(source / "child", source))
 
 
 class PromptInstructionImportTests(unittest.TestCase):

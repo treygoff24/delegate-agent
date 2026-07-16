@@ -58,6 +58,59 @@ class Wave4LaunchFeatureTests(ExecutionTestBase):
             config["worktrees"]["dataHome"] = data_home
         return config
 
+    def test_child_env_exports_source_and_isolated_execution_roots(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            repo, _git_cd = self._make_git_repo_with_commit()
+            source_root = str(Path(repo.name).resolve())
+            env_log = Path(fake_home) / "child-env.log"
+            agent = self.write_executable(
+                "agent",
+                "printf 'source=%s\\nexecution=%s\\n' \"$DELEGATE_SOURCE_ROOT\" "
+                '"${DELEGATE_EXECUTION_ROOT:-}" >> "$DELEGATE_ENV_LOG"\n',
+            )
+            config_path = self.write_config(
+                self.config_with_cursor(agent, data_home=str(Path(fake_home) / "worktrees"))
+            )
+
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "HOME": fake_home,
+                    "DELEGATE_CONFIG": str(config_path),
+                    "DELEGATE_ENV_LOG": str(env_log),
+                },
+                clear=False,
+            ):
+                for mode in ("work", "safe", "worktree"):
+                    with self.subTest(mode=mode):
+                        stdout = io.StringIO()
+                        args = ["--cwd", repo.name, "--json"]
+                        if mode == "worktree":
+                            args.extend(["--isolation", "worktree", "cursor", "work", "hello"])
+                        else:
+                            args.extend(["cursor", mode, "hello"])
+                        code = self.delegate.main(args, stdout=stdout)
+                        json.loads(stdout.getvalue())
+                        self.assertEqual(code, 0)
+                        text = env_log.read_text(encoding="utf-8")
+                        self.assertIn(f"source={source_root}", text)
+                        if mode == "work":
+                            self.assertIn("execution=\n", text)
+                        else:
+                            execution_root = text.split("execution=", 1)[1].splitlines()[0]
+                            self.assertTrue(execution_root)
+                            self.assertNotEqual(execution_root, source_root)
+                        env_log.write_text("", encoding="utf-8")
+
+                stdout = io.StringIO()
+                code = self.delegate.main(["--json", "cursor", "call", "hello"], stdout=stdout)
+                self.assertEqual(code, 0)
+                text = env_log.read_text(encoding="utf-8")
+                self.assertIn(f"source={Path.cwd().resolve()}", text)
+                execution_root = text.split("execution=", 1)[1].splitlines()[0]
+                self.assertTrue(execution_root)
+                self.assertNotEqual(execution_root, str(Path.cwd().resolve()))
+
     def test_dirty_worktree_auto_syncs_tracked_untracked_ignored_and_external_symlink(self):
         from delegate_agent import safe_workspace
 

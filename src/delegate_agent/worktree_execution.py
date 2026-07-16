@@ -27,6 +27,7 @@ from delegate_agent.isolation import (
     prepend_persistent_worktree_context,
     require_valid_head,
     short_run_id,
+    target_contains_source_root,
     worktrees_data_home,
 )
 from delegate_agent.json_types import JsonObject
@@ -229,10 +230,17 @@ def _build_persistent_worktree_run_context(
         forbid_commit=request.forbid_commit,
         progress_initial_delay_sec=request.progress_initial_delay_sec,
         progress_interval_sec=request.progress_interval_sec,
-        env_overrides=dict(request.env_overrides or {}),
-        fallback_env_overrides=dict(
-            profiles.codex_fallback_env_overrides(request.profile_resolution) or {}
-        ),
+        env_overrides={
+            **(request.env_overrides or {}),
+            "DELEGATE_SOURCE_ROOT": str(Path(execution.source_workspace.path).resolve()),
+            "DELEGATE_EXECUTION_ROOT": str(Path(worktree_path).resolve()),
+        },
+        fallback_env_overrides={
+            **(request.env_overrides or {}),
+            "DELEGATE_SOURCE_ROOT": str(Path(execution.source_workspace.path).resolve()),
+            "DELEGATE_EXECUTION_ROOT": str(Path(worktree_path).resolve()),
+            **(profiles.codex_fallback_env_overrides(request.profile_resolution) or {}),
+        },
         auth_profile=request.auth_profile,
         fallback_auth_profile=request.fallback_auth_profile,
         include_dirty=bool(creation_context.get("includeDirty")),
@@ -575,7 +583,10 @@ def _cleanup_partial_worktree(
 ) -> None:
     path = Path(worktree_path)
     cleanup_failed = False
-    if path.exists() or path.is_symlink():
+    guarded = target_contains_source_root(worktree_path, source_git_root)
+    if guarded:
+        cleanup_failed = True
+    elif path.exists() or path.is_symlink():
         try:
             result = _run_git(
                 source_git_root,
@@ -586,7 +597,7 @@ def _cleanup_partial_worktree(
                 cleanup_failed = True
         except (OSError, subprocess.SubprocessError):
             cleanup_failed = True
-    if remove_branch:
+    if remove_branch and not guarded:
         try:
             result = _run_git(
                 source_git_root,
@@ -601,14 +612,25 @@ def _cleanup_partial_worktree(
         except (OSError, subprocess.SubprocessError):
             cleanup_failed = True
     if cleanup_failed:
-        commands = [
-            shlex.join(
-                ["git", "-C", source_git_root, "worktree", "remove", "--force", worktree_path]
-            )
-        ]
-        if remove_branch:
-            commands.append(shlex.join(["git", "-C", source_git_root, "branch", "-D", branch]))
-        manual = " && ".join(commands)
+        if guarded:
+            manual = "source_root_guard refused unsafe cleanup; inspect run metadata"
+        else:
+            commands = [
+                shlex.join(
+                    [
+                        "git",
+                        "-C",
+                        source_git_root,
+                        "worktree",
+                        "remove",
+                        "--force",
+                        worktree_path,
+                    ]
+                )
+            ]
+            if remove_branch:
+                commands.append(shlex.join(["git", "-C", source_git_root, "branch", "-D", branch]))
+            manual = " && ".join(commands)
         snapshot_path = run_path / run_registry.SNAPSHOT_FILE
         metadata_warning: str | None = None
         if snapshot_path.exists():
@@ -617,6 +639,8 @@ def _cleanup_partial_worktree(
                 if existing is not None:
                     existing["cleanupFailed"] = True
                     existing["manualCleanup"] = manual
+                    if guarded:
+                        existing["cleanupRefused"] = "source_root_guard"
                     run_registry.write_json_atomic(snapshot_path, existing)
             except (OSError, ValueError) as exc:
                 metadata_warning = (

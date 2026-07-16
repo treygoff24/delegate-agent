@@ -10,6 +10,24 @@ from tests.execution_test_base import ExecutionTestBase
 
 
 class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
+    def test_partial_cleanup_refuses_source_root_target(self):
+        with tempfile.TemporaryDirectory() as source_root:
+            run_path = Path(source_root) / "run"
+            run_path.mkdir()
+            snapshot_path = run_path / self.delegate.run_registry.SNAPSHOT_FILE
+            self.delegate.run_registry.write_json_atomic(snapshot_path, {"ok": False})
+            with mock.patch.object(self.delegate.worktree_execution, "_run_git") as run_git:
+                self.delegate.worktree_execution._cleanup_partial_worktree(
+                    source_root,
+                    source_root,
+                    "delegate/cursor-guarded",
+                    run_path,
+                    stderr=io.StringIO(),
+                )
+            run_git.assert_not_called()
+            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            self.assertEqual(snapshot["cleanupRefused"], "source_root_guard")
+
     def test_prelaunch_failure_inspectable_via_snapshot(self):
         """Pre-launch worktree creation failure is inspectable via delegate snapshot main()."""
         with (

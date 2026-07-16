@@ -208,6 +208,13 @@ class IsolationExecutionError(Exception):
         self.message = message
 
 
+def target_contains_source_root(target: str | Path, source_root: str | Path) -> bool:
+    """Return whether deleting target could delete the source workspace root."""
+    resolved_target = Path(target).resolve(strict=False)
+    resolved_source = Path(source_root).resolve(strict=False)
+    return resolved_source == resolved_target or resolved_source.is_relative_to(resolved_target)
+
+
 def require_valid_head(source_git_root: str) -> str:
     """Return HEAD's OID or raise missing_git_head for an unborn repository."""
     result = _run_git(

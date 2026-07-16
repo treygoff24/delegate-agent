@@ -74,6 +74,19 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
         self.assertNotIn("--mode=plan", payload["argv"])
         self.assertNotIn("--approve-mcps", payload["argv"])
 
+    def test_cleanup_refuses_target_containing_source_root(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "source"
+            source.mkdir()
+            with self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.delegate.cleanup_safe_isolated_workspace(
+                    git_root=None,
+                    isolated_workspace=str(source),
+                    temp_base=temp_dir,
+                    source_root=str(source),
+                )
+        self.assertEqual(ctx.exception.error, "source_root_guard")
+
     def test_cursor_safe_cli_config_omits_mutating_shell(self):
         allow = self.delegate.CURSOR_SAFE_CLI_CONFIG["permissions"]["allow"]
         self.assertIn("Read(**)", allow)

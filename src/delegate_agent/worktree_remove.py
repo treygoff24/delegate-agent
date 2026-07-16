@@ -19,6 +19,7 @@ from pathlib import Path
 
 from delegate_agent import run_registry
 from delegate_agent.git_utils import GIT_TIMEOUT_RETURN_CODE
+from delegate_agent.isolation import target_contains_source_root
 from delegate_agent.json_types import JsonObject
 from delegate_agent.worktree_records import (
     SCHEMA_REMOVE,
@@ -350,6 +351,15 @@ def _build_remove_worktree_plan(
     options: RemoveWorktreeOptions,
     merged_check_already_passed: bool,
 ) -> RemoveWorktreePlan:
+    source_git_root, execution_cwd = _require_removal_metadata(record)
+    if target_contains_source_root(execution_cwd, source_git_root):
+        raise wm.WorktreeManagementError(
+            wm._error_payload(
+                "source_root_guard",
+                "Refusing to remove a worktree path that is or contains its source root.",
+                record=record,
+            )
+        )
     dirty, dirty_paths, _dirty_total, dirty_warnings = wm.dirty_info(record, status)
     all_warnings = [*status_warnings, *dirty_warnings]
     if status in (STATUS_PRESENT, STATUS_UNKNOWN):
@@ -362,7 +372,6 @@ def _build_remove_worktree_plan(
             alias=alias,
         )
 
-    source_git_root, execution_cwd = _require_removal_metadata(record)
     branch = record.get("branch")
     if not merged_check_already_passed:
         _raise_if_unmerged_without_override(

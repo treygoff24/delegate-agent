@@ -36,7 +36,7 @@ from delegate_agent.git_utils import (
 )
 from delegate_agent.git_utils import run_git as _run_git
 from delegate_agent.git_utils import run_git_bytes as _run_git_bytes
-from delegate_agent.isolation import IsolationContext
+from delegate_agent.isolation import IsolationContext, target_contains_source_root
 from delegate_agent.json_types import JsonObject
 from delegate_agent.prompt_transport import PROMPT_TRANSPORT_ARGV
 from delegate_agent.request_models import Request
@@ -736,6 +736,11 @@ def create_directory_safe_workspace(
 
 
 def remove_git_safe_workspace(git_root: str, worktree_path: str) -> None:
+    if target_contains_source_root(worktree_path, git_root):
+        raise DelegateError(
+            "source_root_guard",
+            "Refusing to remove an isolated workspace that is or contains the source root.",
+        )
     with suppress(OSError, subprocess.SubprocessError):
         _run_git(
             git_root,
@@ -749,7 +754,17 @@ def cleanup_safe_isolated_workspace(
     git_root: str | None,
     isolated_workspace: str,
     temp_base: str,
+    source_root: str | None = None,
 ) -> None:
+    protected_root = source_root or git_root
+    if protected_root is not None and (
+        target_contains_source_root(isolated_workspace, protected_root)
+        or target_contains_source_root(temp_base, protected_root)
+    ):
+        raise DelegateError(
+            "source_root_guard",
+            "Refusing to tear down an isolated workspace that is or contains the source root.",
+        )
     if git_root is not None:
         remove_git_safe_workspace(git_root, isolated_workspace)
     shutil.rmtree(temp_base, ignore_errors=True)
@@ -905,4 +920,5 @@ def safe_isolated_request(request: Request) -> Iterator[Request]:
             git_root=cleanup_git_root,
             isolated_workspace=isolated_workspace,
             temp_base=temp_base,
+            source_root=request.workspace,
         )
