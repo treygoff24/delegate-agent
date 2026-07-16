@@ -573,6 +573,7 @@ def make_run_context(
         include_dirty=request.include_dirty,
         group=request.group,
         call_read_only=request.call_read_only or request.pure,
+        pure=request.pure,
         prompt_instruction_mode=request.prompt_instruction_mode,
     )
 
@@ -691,6 +692,7 @@ def execute_request(
                     env_overrides=request.env_overrides,
                     read_only=request.call_read_only,
                     pure=request.pure,
+                    prompt_instruction_mode=request.prompt_instruction_mode,
                     timeout=request.timeout,
                     structured_output=request.output_schema is not None,
                     sensitive_texts=tuple(sensitive_texts),

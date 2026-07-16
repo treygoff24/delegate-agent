@@ -2600,6 +2600,31 @@ class RunnerCaptureTests(unittest.TestCase):
 
             self.assertEqual(caught.exception.error, "call_timeout")
 
+    def test_empty_call_does_not_mutate_verbatim_prompts(self):
+        empty = self.runner.CallResult(
+            text="",
+            exit_code=0,
+            duration_ms=1,
+            stdout_bytes=0,
+            stderr_bytes=0,
+            text_chars=0,
+            text_truncated=False,
+            result_quality="empty",
+        )
+        for kwargs in (
+            {"pure": True},
+            {"prompt_instruction_mode": "slash-passthrough"},
+        ):
+            with self.subTest(kwargs=kwargs), mock.patch.object(
+                self.runner, "_execute_call_once", return_value=empty
+            ) as attempt:
+                result = self.runner.execute_call(
+                    ["agent", "/review"], "/tmp", harness="codex", read_only=True, **kwargs
+                )
+
+            self.assertEqual(attempt.call_count, 1)
+            self.assertIn("verbatim prompt boundary", result.warnings[0])
+
     def test_grouped_write_capable_call_empty_success_does_not_retry(self):
         with tempfile.TemporaryDirectory() as workspace:
             counter = Path(workspace) / "attempts"

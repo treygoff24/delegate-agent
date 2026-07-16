@@ -31,7 +31,7 @@ from delegate_agent import (
     seatbelt,
     worktree_summary,
 )
-from delegate_agent.constants import PROMPT_INSTRUCTION_MODE_WRAPPED
+from delegate_agent.constants import PROMPT_INSTRUCTION_MODE_SLASH, PROMPT_INSTRUCTION_MODE_WRAPPED
 from delegate_agent.json_types import JsonObject
 
 STDOUT_LOG = run_registry.STDOUT_LOG
@@ -64,6 +64,9 @@ EMPTY_RETRY_INSTRUCTION = (
 EMPTY_RETRY_WARNING = "empty_success_retry: the retry also emitted no final answer."
 EMPTY_RETRY_SKIPPED_WRITE_CAPABLE_WARNING = (
     "empty_success_retry: skipped because this call is write-capable."
+)
+EMPTY_RETRY_SKIPPED_VERBATIM_WARNING = (
+    "empty_success_retry: skipped to preserve the verbatim prompt boundary."
 )
 COMPLETION_REPORT_SOURCE_CHILD = "child"
 COMPLETION_REPORT_SOURCE_SYNTHESIZED = "delegate_synthesized"
@@ -147,6 +150,7 @@ class RunContext:
     synced_files: int = 0
     group: str | None = None
     call_read_only: bool = False
+    pure: bool = False
     prompt_instruction_mode: str = PROMPT_INSTRUCTION_MODE_WRAPPED
 
 
@@ -1887,7 +1891,9 @@ def execute_tracked(
             )
             == RESULT_QUALITY_EMPTY
         ):
-            if _empty_retry_allowed(ctx.mode, call_read_only=ctx.call_read_only):
+            if ctx.pure or ctx.prompt_instruction_mode == PROMPT_INSTRUCTION_MODE_SLASH:
+                empty_retry_extra = {"warnings": [EMPTY_RETRY_SKIPPED_VERBATIM_WARNING]}
+            elif _empty_retry_allowed(ctx.mode, call_read_only=ctx.call_read_only):
                 retry_argv, retry_stdin, retry_prompt_temp_dir = _materialize_empty_retry(
                     run_argv,
                     stdin_text=stdin_text,
@@ -2434,6 +2440,7 @@ def execute_call(
     env_overrides: dict[str, str] | None = None,
     read_only: bool = False,
     pure: bool = False,
+    prompt_instruction_mode: str = PROMPT_INSTRUCTION_MODE_WRAPPED,
     timeout: int | None = None,
     structured_output: bool = False,
     sensitive_texts: tuple[str, ...] = (),
@@ -2456,7 +2463,11 @@ def execute_call(
     )
     if result.result_quality != RESULT_QUALITY_EMPTY:
         return result
-    if not _empty_retry_allowed("call", call_read_only=read_only or pure):
+    if pure or prompt_instruction_mode == PROMPT_INSTRUCTION_MODE_SLASH:
+        warnings = list(result.warnings)
+        _append_unique(warnings, EMPTY_RETRY_SKIPPED_VERBATIM_WARNING)
+        return replace(result, warnings=tuple(warnings))
+    if not _empty_retry_allowed("call", call_read_only=read_only):
         warnings = list(result.warnings)
         _append_unique(warnings, EMPTY_RETRY_SKIPPED_WRITE_CAPABLE_WARNING)
         return replace(result, warnings=tuple(warnings))
