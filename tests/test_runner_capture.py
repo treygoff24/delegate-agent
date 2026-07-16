@@ -2625,6 +2625,31 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertEqual(attempt.call_count, 1)
             self.assertIn("verbatim prompt boundary", result.warnings[0])
 
+    def test_grouped_empty_retry_failure_is_not_resolved(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            script = Path(workspace) / "agent"
+            script.write_text(
+                "#!/usr/bin/env bash\n"
+                "if [[ \"$*\" == *'Delegate retry instruction'* ]]; then exit 1; fi\n",
+                encoding="utf-8",
+            )
+            script.chmod(0o755)
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            ctx = self.runner.RunContext(
+                registry_root=root, run_id=run_id, alias=alias, harness="codex", engine="codex",
+                mode="call", model=None, source_cwd=workspace, execution_cwd=workspace,
+                workspace_kind="directory", isolated_workspace=False,
+                started_at="2026-07-16T12:00:00Z", group="workflow", call_read_only=True,
+            )
+            code, payload = self.runner.execute_tracked(
+                [str(script), "task"], workspace, ctx, json_mode=True, stdout=io.StringIO(),
+                stderr=io.StringIO(), manifest_argv=[str(script), "<prompt>"],
+            )
+
+            self.assertEqual(code, 1)
+            self.assertEqual(payload["emptyRetry"], {"attempted": True, "resolved": False})
+
     def test_grouped_write_capable_call_empty_success_does_not_retry(self):
         with tempfile.TemporaryDirectory() as workspace:
             counter = Path(workspace) / "attempts"

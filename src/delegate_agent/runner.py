@@ -1933,13 +1933,19 @@ def execute_tracked(
                     capture,
                     completion_report_mode=completion_report_mode,
                 )
+                resolved = (
+                    capture.exit_code == 0
+                    and capture.accumulator.terminal_status
+                    not in {run_registry.STATUS_FAILED, run_registry.STATUS_CANCELLED}
+                    and retry_quality == RESULT_QUALITY_OK
+                )
                 empty_retry_extra = {
                     "emptyRetry": {
                         "attempted": True,
-                        "resolved": retry_quality != RESULT_QUALITY_EMPTY,
+                        "resolved": resolved,
                     }
                 }
-                if retry_quality == RESULT_QUALITY_EMPTY:
+                if not resolved:
                     empty_retry_extra["warnings"] = [EMPTY_RETRY_WARNING]
             elif ctx.mode == "call":
                 empty_retry_extra = {
@@ -2500,7 +2506,7 @@ def execute_call(
     warnings = list(result.warnings)
     for warning in retry.warnings:
         _append_unique(warnings, warning)
-    resolved = retry.result_quality != RESULT_QUALITY_EMPTY
+    resolved = retry.exit_code == 0 and retry.result_quality == RESULT_QUALITY_OK
     if not resolved:
         _append_unique(warnings, EMPTY_RETRY_WARNING)
     stderr_parts = [part for part in (result.stderr_tail, retry.stderr_tail) if part]
