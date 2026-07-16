@@ -2271,7 +2271,7 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertEqual(counter.read_text(encoding="utf-8"), "x")
             self.assertNotIn("emptyRetry", payload)
 
-    def test_call_empty_success_retries_once(self):
+    def test_read_only_call_empty_success_retries_once(self):
         with tempfile.TemporaryDirectory() as workspace:
             script = Path(workspace) / "agent"
             script.write_text(
@@ -2287,9 +2287,34 @@ class RunnerCaptureTests(unittest.TestCase):
                 [str(script), "original prompt"],
                 workspace,
                 harness="cursor",
+                read_only=True,
             )
             self.assertEqual(result.text, "Final answer.")
             self.assertTrue(result.empty_retry_attempted)
             self.assertTrue(result.empty_retry_resolved)
             self.assertEqual(result.result_quality, "ok")
             self.assertEqual(result.stderr_tail.count("attempt stderr"), 2)
+
+    def test_write_capable_call_empty_success_does_not_retry(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            counter = Path(workspace) / "attempts"
+            script = Path(workspace) / "agent"
+            script.write_text(
+                f"#!/usr/bin/env bash\nprintf x >> {counter!s}\n",
+                encoding="utf-8",
+            )
+            script.chmod(0o755)
+
+            result = self.runner.execute_call(
+                [str(script), "side-effectful prompt"],
+                workspace,
+                harness="cursor",
+            )
+
+            self.assertEqual(counter.read_text(encoding="utf-8"), "x")
+            self.assertEqual(result.result_quality, "empty")
+            self.assertFalse(result.empty_retry_attempted)
+            self.assertIn(
+                self.runner.EMPTY_RETRY_SKIPPED_WRITE_CAPABLE_WARNING,
+                result.warnings,
+            )

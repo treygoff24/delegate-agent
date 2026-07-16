@@ -62,6 +62,9 @@ EMPTY_RETRY_INSTRUCTION = (
     "answer. Emit the final answer or report now as plain text."
 )
 EMPTY_RETRY_WARNING = "empty_success_retry: the retry also emitted no final answer."
+EMPTY_RETRY_SKIPPED_WRITE_CAPABLE_WARNING = (
+    "empty_success_retry: skipped because this call is write-capable."
+)
 COMPLETION_REPORT_SOURCE_CHILD = "child"
 COMPLETION_REPORT_SOURCE_SYNTHESIZED = "delegate_synthesized"
 COMPLETION_REPORT_SOURCE_STDOUT_RECOVERY = "stdout_recovery"
@@ -2368,6 +2371,7 @@ def execute_call(
     agent_config_text: str | None = None,
     agent_config_placeholder: str | None = None,
     env_overrides: dict[str, str] | None = None,
+    read_only: bool = False,
     pure: bool = False,
     timeout: int | None = None,
     structured_output: bool = False,
@@ -2390,6 +2394,10 @@ def execute_call(
     )
     if result.result_quality != RESULT_QUALITY_EMPTY:
         return result
+    if not (read_only or pure):
+        warnings = list(result.warnings)
+        _append_unique(warnings, EMPTY_RETRY_SKIPPED_WRITE_CAPABLE_WARNING)
+        return replace(result, warnings=tuple(warnings))
 
     retry_argv = list(argv)
     retry_stdin = stdin_text

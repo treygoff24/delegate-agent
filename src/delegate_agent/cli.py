@@ -683,6 +683,7 @@ def execute_request(
                     agent_config_text=request.agent_config_text,
                     agent_config_placeholder=DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
                     env_overrides=request.env_overrides,
+                    read_only=request.read_only,
                     pure=request.pure,
                     timeout=request.timeout,
                     structured_output=request.output_schema is not None,
