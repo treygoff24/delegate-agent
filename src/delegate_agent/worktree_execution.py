@@ -163,7 +163,7 @@ def _validate_persistent_worktree_request(
         paths = ", ".join(dirty_submodules[:5])
         raise PersistentWorktreeError(
             "dirty_source_workspace",
-            "Submodule changes cannot be synced into persistent worktree isolation "
+            "Submodule dirt cannot be synced into persistent worktree isolation "
             f"({paths}); Git's diff/apply snapshot does not reproduce gitlink pointer updates. "
             "Commit or stash the submodule changes, or use --isolation none.",
         )
