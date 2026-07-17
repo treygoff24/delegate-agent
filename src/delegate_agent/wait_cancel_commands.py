@@ -24,6 +24,10 @@ PID_IDENTITY_SKEW_SECONDS = 60.0
 WAIT_DEFAULT_INTERVAL_SECONDS = 3
 WAIT_MIN_INTERVAL_SECONDS = 1
 CANCEL_GRACE_SECONDS = 5.0
+# A tracked run can launch a primary attempt, an auth fallback, and an empty-
+# result retry. Four selections let cancel follow all three generation changes
+# while still failing closed if the run keeps churning unexpectedly.
+CANCEL_GENERATION_MAX_ATTEMPTS = 4
 
 
 @dataclass(frozen=True)
@@ -407,24 +411,14 @@ def _state_int(state: JsonObject | None, key: str) -> int | None:
     return None
 
 
-def _cancel_target(registry_root: Path, target: run_registry.RunTarget) -> JsonObject:
-    state = run_registry.load_run_state_or_none(registry_root, target.run_id)
-    fields = run_registry.status_fields(state)
-    effective = fields.get("effectiveStatus")
-    if effective in run_registry.TERMINAL_STATUSES or effective == run_registry.STATUS_STALE:
-        raise WaitCancelError(
-            "run_already_terminal",
-            f"Run {target.alias or target.run_id} is already terminal ({effective}).",
-        )
-    pgid = _state_int(state, "pgid")
+def _cancel_signal_generation(
+    state: JsonObject | None,
+    target: run_registry.RunTarget,
+) -> tuple[int | None, int | None, int, bool]:
     pid = _state_int(state, "pid")
-    warnings: list[str] = []
-    process_group = True
-    signal_value = pgid
-    if signal_value is None:
-        signal_value = pid
-        process_group = False
-        warnings.append("pgid missing; fell back to pid signal for legacy run")
+    pgid = _state_int(state, "pgid")
+    process_group = pgid is not None
+    signal_value = pgid if process_group else pid
     if signal_value is None:
         raise WaitCancelError(
             "missing_pid", f"Run {target.alias or target.run_id} has no pid/pgid."
@@ -433,144 +427,207 @@ def _cancel_target(registry_root: Path, target: run_registry.RunTarget) -> JsonO
         raise WaitCancelError(
             "unsafe_signal_target", f"Refusing to signal pid/pgid <= 1: {signal_value}"
         )
+    return pid, pgid, signal_value, process_group
 
-    # PID-reuse start-identity guard: verify the tracked leader pid is not older
-    # than the run. If the original child is gone and the pid was reused, refuse
-    # rather than signal an unrelated process. Soft-degrades (warning) when ps
-    # is unavailable or the manifest lacks a parseable startedAt.
-    identity_pid = pid if pid is not None else signal_value
-    warnings.extend(_check_pid_identity(registry_root, target, identity_pid))
 
-    # Marker protocol: stamp cancelRequested BEFORE sending any signal, under the
-    # registry lock. This lets the runner finalizer (which acquires the same
-    # lock) observe the marker even if the child exits 0 on SIGTERM and the
-    # finalizer runs before cancel's post-grace terminal write. Only stamp when
-    # the run is not already terminal: the top-of-function refusal already
-    # rejected terminal runs, but the runner may have finalized during the
-    # identity-check window, so re-check under the lock. A terminal run keeps
-    # its existing status (cancel's final locked write reconciles to cancelled).
-    cancel_requested_at = run_registry.utc_now_iso()
-    with run_registry.registry_lock(registry_root):
-        pre_signal = run_registry.load_run_state_or_none(registry_root, target.run_id)
-        pre_fields = run_registry.status_fields(pre_signal)
-        pre_effective = pre_fields.get("effectiveStatus")
-        if (
-            pre_effective not in run_registry.TERMINAL_STATUSES
-            and pre_effective != run_registry.STATUS_STALE
-        ):
-            stamped = dict(pre_signal or state or {})
-            stamped["cancelRequested"] = True
-            stamped["cancelRequestedAt"] = cancel_requested_at
-            run_registry.write_json_atomic(
-                run_registry.run_directory(registry_root, target.run_id) / run_registry.STATE_FILE,
-                stamped,
-            )
-
-    _send_signal(signal_value, signal.SIGTERM, process_group=process_group)
-    deadline = time.monotonic() + CANCEL_GRACE_SECONDS
-    while time.monotonic() < deadline:
-        alive = _signal_target_alive(signal_value, process_group=process_group)
-        if alive is False:
-            break
-        time.sleep(0.05)
-    alive = _signal_target_alive(signal_value, process_group=process_group)
-    if alive is not False:
-        try:
-            _send_signal(signal_value, signal.SIGKILL, process_group=process_group)
-        except ProcessLookupError:
-            pass
-        except PermissionError:
-            warnings.append("SIGKILL was not permitted after SIGTERM; run state marked cancelled")
-
+def _persist_cancelled_terminal_locked(
+    registry_root: Path,
+    target: run_registry.RunTarget,
+    state: JsonObject | None,
+    warnings: list[str],
+) -> None:
+    """Persist the canonical cancelled outcome while registry_lock is held."""
     run_path = run_registry.run_directory(registry_root, target.run_id)
     stdout_bytes, stderr_bytes = run_registry.effective_log_byte_sizes(
         registry_root, target.run_id, state
     )
     now = run_registry.utc_now_iso()
-    # Perform the terminal state write under the registry lock, re-reading
-    # state first. If the runner finalizer already wrote a terminal status
-    # (succeeded/failed) during the signal/grace window, cancel wins: reconcile
-    # to cancelled rather than blind-overwriting. This pairs with the runner
-    # finalizer's own cancel-precedence check so both race orders converge on
-    # cancelled.
-    with run_registry.registry_lock(registry_root):
-        latest = run_registry.load_run_state_or_none(registry_root, target.run_id)
-        updated: JsonObject = dict(latest or state or {})
-        runner_terminal = (
-            isinstance(latest, dict)
-            and latest.get("status") in run_registry.TERMINAL_STATUSES
-            and latest.get("status") != run_registry.STATUS_CANCELLED
-        )
-        if runner_terminal:
-            # The runner wrote a terminal status after our initial liveness
-            # check. Preserve its work summary/output metadata (exitCode, byte
-            # counts, completion report, result quality) but override status to
-            # cancelled per the cancel-wins precedence rule.
-            updated["status"] = run_registry.STATUS_CANCELLED
-            updated["failureReason"] = "cancelled_by_user"
-            updated["finishedAt"] = now
-            updated["lastActivityAt"] = now
-            updated["stdoutBytes"] = stdout_bytes
-            updated["stderrBytes"] = stderr_bytes
-        else:
-            updated.update(
-                {
-                    "schema": run_registry.STATE_SCHEMA,
-                    "runId": target.run_id,
-                    "alias": target.alias,
-                    "status": run_registry.STATUS_CANCELLED,
-                    "failureReason": "cancelled_by_user",
-                    "exitCode": 1,
-                    "finishedAt": now,
-                    "lastActivityAt": now,
-                    "stdoutBytes": stdout_bytes,
-                    "stderrBytes": stderr_bytes,
-                }
-            )
-        if warnings:
-            existing = updated.get("warnings") if isinstance(updated.get("warnings"), list) else []
-            updated["warnings"] = [
-                *existing,
-                *(warning for warning in warnings if warning not in existing),
-            ]
-        run_registry.write_json_atomic(run_path / run_registry.STATE_FILE, updated)
-
-        snapshot = dict(run_registry.load_run_snapshot_or_none(registry_root, target.run_id) or {})
-        snapshot.update(
+    updated: JsonObject = dict(state or {})
+    runner_terminal = (
+        isinstance(state, dict)
+        and state.get("status") in run_registry.TERMINAL_STATUSES
+        and state.get("status") != run_registry.STATUS_CANCELLED
+    )
+    if runner_terminal:
+        # Preserve the runner's work summary/output metadata, but cancellation
+        # wins status and exit-code precedence.
+        updated["status"] = run_registry.STATUS_CANCELLED
+        updated["failureReason"] = "cancelled_by_user"
+        updated["finishedAt"] = now
+        updated["lastActivityAt"] = now
+        updated["stdoutBytes"] = stdout_bytes
+        updated["stderrBytes"] = stderr_bytes
+    else:
+        updated.update(
             {
-                "schema": run_registry.SNAPSHOT_SCHEMA,
-                "ok": False,
+                "schema": run_registry.STATE_SCHEMA,
                 "runId": target.run_id,
                 "alias": target.alias,
                 "status": run_registry.STATUS_CANCELLED,
                 "failureReason": "cancelled_by_user",
+                "exitCode": 1,
                 "finishedAt": now,
+                "lastActivityAt": now,
                 "stdoutBytes": stdout_bytes,
                 "stderrBytes": stderr_bytes,
             }
         )
-        if runner_terminal and isinstance(latest, dict):
-            # Preserve the runner's exit code in the snapshot when reconciling.
-            runner_exit = latest.get("exitCode")
-            if isinstance(runner_exit, int):
-                snapshot["exitCode"] = runner_exit
-            else:
-                snapshot["exitCode"] = 1
-        else:
-            snapshot["exitCode"] = 1
-        if warnings:
-            existing = (
-                snapshot.get("warnings") if isinstance(snapshot.get("warnings"), list) else []
-            )
-            snapshot["warnings"] = [
-                *existing,
-                *(warning for warning in warnings if warning not in existing),
-            ]
-        run_registry.write_json_atomic(run_path / run_registry.SNAPSHOT_FILE, snapshot)
-    payload = _terminal_payload(registry_root, target)
+    updated["exitCode"] = 1
+    updated.pop("error", None)
+    updated.pop("message", None)
+    updated.pop("nextActions", None)
     if warnings:
-        payload["warnings"] = warnings
-    return payload
+        existing = updated.get("warnings") if isinstance(updated.get("warnings"), list) else []
+        updated["warnings"] = [
+            *existing,
+            *(warning for warning in warnings if warning not in existing),
+        ]
+    run_registry.write_json_atomic(run_path / run_registry.STATE_FILE, updated)
+
+    snapshot = dict(run_registry.load_run_snapshot_or_none(registry_root, target.run_id) or {})
+    snapshot.update(
+        {
+            "schema": run_registry.SNAPSHOT_SCHEMA,
+            "ok": False,
+            "runId": target.run_id,
+            "alias": target.alias,
+            "status": run_registry.STATUS_CANCELLED,
+            "failureReason": "cancelled_by_user",
+            "finishedAt": now,
+            "stdoutBytes": stdout_bytes,
+            "stderrBytes": stderr_bytes,
+            "exitCode": 1,
+        }
+    )
+    snapshot.pop("error", None)
+    snapshot.pop("message", None)
+    snapshot.pop("nextActions", None)
+    if warnings:
+        existing = snapshot.get("warnings") if isinstance(snapshot.get("warnings"), list) else []
+        snapshot["warnings"] = [
+            *existing,
+            *(warning for warning in warnings if warning not in existing),
+        ]
+    run_registry.write_json_atomic(run_path / run_registry.SNAPSHOT_FILE, snapshot)
+
+
+def _cancel_target(registry_root: Path, target: run_registry.RunTarget) -> JsonObject:
+    # The runner publishes each launched generation under this same lock. Take
+    # the initial selection under it too, so cancel waits for a primary Popen to
+    # publish pid/pgid instead of racing the temporary no-state window.
+    with run_registry.registry_lock(registry_root):
+        state = run_registry.load_run_state_or_none(registry_root, target.run_id)
+        fields = run_registry.status_fields(state)
+        effective = fields.get("effectiveStatus")
+        if effective in run_registry.TERMINAL_STATUSES or effective == run_registry.STATUS_STALE:
+            raise WaitCancelError(
+                "run_already_terminal",
+                f"Run {target.alias or target.run_id} is already terminal ({effective}).",
+            )
+        generation = _cancel_signal_generation(state, target)
+    warnings: list[str] = []
+    cancel_marker_written = False
+    for _attempt in range(CANCEL_GENERATION_MAX_ATTEMPTS):
+        pid, pgid, signal_value, process_group = generation
+
+        # PID-reuse start-identity guard: verify the tracked leader pid is not
+        # older than the run. The locked reread below must still describe this
+        # exact generation before the marker is written or any signal is sent.
+        identity_pid = pid if pid is not None else signal_value
+        generation_warnings = _check_pid_identity(registry_root, target, identity_pid)
+
+        already_terminal = False
+        generation_changed = False
+        with run_registry.registry_lock(registry_root):
+            pre_signal = run_registry.load_run_state_or_none(registry_root, target.run_id)
+            pre_fields = run_registry.status_fields(pre_signal)
+            pre_effective = pre_fields.get("effectiveStatus")
+            if (
+                pre_effective in run_registry.TERMINAL_STATUSES
+                or pre_effective == run_registry.STATUS_STALE
+            ):
+                already_terminal = True
+            elif _cancel_signal_generation(pre_signal, target) != generation:
+                generation_changed = True
+            else:
+                stamped = dict(pre_signal or state or {})
+                stamped["cancelRequested"] = True
+                if not isinstance(stamped.get("cancelRequestedAt"), str):
+                    stamped["cancelRequestedAt"] = run_registry.utc_now_iso()
+                run_registry.write_json_atomic(
+                    run_registry.run_directory(registry_root, target.run_id)
+                    / run_registry.STATE_FILE,
+                    stamped,
+                )
+                cancel_marker_written = True
+
+        if already_terminal:
+            return _terminal_payload(registry_root, target)
+        if generation_changed:
+            state = pre_signal
+            generation = _cancel_signal_generation(state, target)
+            continue
+        state = pre_signal
+        warnings.extend(generation_warnings)
+        if pgid is None:
+            warnings.append("pgid missing; fell back to pid signal for legacy run")
+        try:
+            _send_signal(signal_value, signal.SIGTERM, process_group=process_group)
+        except ProcessLookupError:
+            warnings.append("process exited before SIGTERM; checking for a replacement generation")
+        deadline = time.monotonic() + CANCEL_GRACE_SECONDS
+        while time.monotonic() < deadline:
+            alive = _signal_target_alive(signal_value, process_group=process_group)
+            if alive is False:
+                break
+            time.sleep(0.05)
+        alive = _signal_target_alive(signal_value, process_group=process_group)
+        if alive is not False:
+            try:
+                _send_signal(signal_value, signal.SIGKILL, process_group=process_group)
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                warnings.append(
+                    "SIGKILL was not permitted after SIGTERM; run state marked cancelled"
+                )
+
+        # A signalled attempt may immediately hand off to an auth fallback or
+        # empty-result retry. Re-read under the lock before terminalizing; a new
+        # live generation goes through the same identity/marker/signal protocol.
+        follow_generation = False
+        with run_registry.registry_lock(registry_root):
+            latest = run_registry.load_run_state_or_none(registry_root, target.run_id)
+            latest_fields = run_registry.status_fields(latest)
+            latest_effective = latest_fields.get("effectiveStatus")
+            if (
+                latest_effective not in run_registry.TERMINAL_STATUSES
+                and latest_effective != run_registry.STATUS_STALE
+                and _cancel_signal_generation(latest, target) != generation
+            ):
+                state = latest
+                follow_generation = True
+            else:
+                _persist_cancelled_terminal_locked(registry_root, target, latest or state, warnings)
+        if follow_generation:
+            generation = _cancel_signal_generation(state, target)
+            continue
+
+        payload = _terminal_payload(registry_root, target)
+        if warnings:
+            payload["warnings"] = warnings
+        return payload
+
+    marker_note = (
+        "The cancel marker remains set and no successful terminal outcome was recorded."
+        if cancel_marker_written
+        else "No process was signaled and no cancel marker was written."
+    )
+    raise WaitCancelError(
+        "cancel_target_changed",
+        f"Run {target.alias or target.run_id} kept changing pid/pgid across "
+        f"{CANCEL_GENERATION_MAX_ATTEMPTS} cancellation selections. {marker_note}",
+    )
 
 
 def emit_cancel(command: CancelCommand, *, workspace_path: str, stdout: TextIO) -> int:
@@ -584,7 +641,12 @@ def emit_cancel(command: CancelCommand, *, workspace_path: str, stdout: TextIO) 
         )
         return 0
     for run in runs:
-        print(f"cancelled: {run.get('alias') or run.get('runId')}", file=stdout)
+        label = run.get("alias") or run.get("runId")
+        status = _status_label(run)
+        if status == run_registry.STATUS_CANCELLED:
+            print(f"cancelled: {label}", file=stdout)
+        else:
+            print(f"not cancelled: {label} is already {status}", file=stdout)
         for warning in run.get("warnings") or []:
             print(f"warning: {warning}", file=stdout)
     return 0

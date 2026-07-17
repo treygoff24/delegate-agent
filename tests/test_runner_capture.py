@@ -4,10 +4,12 @@ import importlib.util
 import io
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import warnings
 from pathlib import Path
@@ -541,6 +543,109 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertEqual(section["completionReportSource"], "delegate_synthesized")
             self.assertIn("Status: cancelled", section["content"])
 
+    def test_progress_persist_preserves_cancel_marker(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            run_path = self.registry.run_directory(root, run_id)
+            requested_at = self.registry.utc_now_iso()
+            self.registry.write_json_atomic(
+                run_path / self.registry.STATE_FILE,
+                {
+                    "status": "running",
+                    "cancelRequested": True,
+                    "cancelRequestedAt": requested_at,
+                },
+            )
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at=requested_at,
+            )
+            accumulator = self.runner.harness_events.StreamAccumulator(harness="codex")
+
+            self.runner.persist_progress(
+                run_path,
+                ctx,
+                accumulator,
+                status="running",
+                pid=os.getpid(),
+                stdout_bytes=7,
+            )
+
+            state = json.loads((run_path / self.registry.STATE_FILE).read_text(encoding="utf-8"))
+            snapshot = json.loads(
+                (run_path / self.registry.SNAPSHOT_FILE).read_text(encoding="utf-8")
+            )
+            self.assertEqual(state["status"], "running")
+            self.assertTrue(state["cancelRequested"])
+            self.assertEqual(state["cancelRequestedAt"], requested_at)
+            self.assertEqual(snapshot["status"], "running")
+            self.assertTrue(snapshot["cancelRequested"])
+            self.assertEqual(snapshot["cancelRequestedAt"], requested_at)
+
+    def test_progress_persist_never_downgrades_terminal_state_or_snapshot(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            run_path = self.registry.run_directory(root, run_id)
+            terminal_state = {
+                "status": "cancelled",
+                "exitCode": 1,
+                "failureReason": "cancelled_by_user",
+            }
+            terminal_snapshot = {
+                "status": "cancelled",
+                "exitCode": 1,
+                "failureReason": "cancelled_by_user",
+                "ok": False,
+            }
+            self.registry.write_json_atomic(run_path / self.registry.STATE_FILE, terminal_state)
+            self.registry.write_json_atomic(
+                run_path / self.registry.SNAPSHOT_FILE, terminal_snapshot
+            )
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at=self.registry.utc_now_iso(),
+            )
+
+            self.runner.persist_progress(
+                run_path,
+                ctx,
+                self.runner.harness_events.StreamAccumulator(harness="codex"),
+                status="running",
+                pid=os.getpid(),
+                stdout_bytes=99,
+            )
+
+            self.assertEqual(
+                json.loads((run_path / self.registry.STATE_FILE).read_text(encoding="utf-8")),
+                terminal_state,
+            )
+            self.assertEqual(
+                json.loads((run_path / self.registry.SNAPSHOT_FILE).read_text(encoding="utf-8")),
+                terminal_snapshot,
+            )
+
     def test_finalize_first_marker_race_envelope_and_state_both_cancelled(self):
         with tempfile.TemporaryDirectory() as workspace:
             root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
@@ -614,6 +719,152 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertEqual(persisted["status"], "cancelled")
             self.assertEqual(persisted["failureReason"], "cancelled_by_user")
             self.assertEqual(persisted.get("exitCode"), 1)
+
+    def test_timeout_with_cancel_marker_returns_cancelled_without_timeout_error(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            run_path = self.registry.run_directory(root, run_id)
+            self.registry.write_json_atomic(
+                run_path / self.registry.STATE_FILE,
+                {
+                    "schema": self.registry.STATE_SCHEMA,
+                    "runId": run_id,
+                    "alias": alias,
+                    "status": "running",
+                    "cancelRequested": True,
+                },
+            )
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-07-16T12:00:00Z",
+            )
+            capture = self.runner.TrackedCaptureResult(
+                accumulator=self.runner.harness_events.StreamAccumulator(harness="codex"),
+                exit_code=1,
+                duration_ms=1000,
+                stdout_bytes=0,
+                stderr_bytes=0,
+                stdin_failures=(),
+                pid=os.getpid(),
+                pgid=os.getpgid(0),
+                error="call_timeout",
+                message="Child command exceeded the configured timeout.",
+            )
+
+            with mock.patch.object(
+                self.runner,
+                "_run_single_tracked_attempt",
+                return_value=capture,
+            ):
+                code, payload = self.runner.execute_tracked(
+                    [sys.executable, "-c", "pass"],
+                    workspace,
+                    ctx,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                    timeout=1,
+                )
+
+            self.assertEqual(code, 1)
+            self.assertEqual(payload["status"], "cancelled")
+            self.assertEqual(payload["failureReason"], "cancelled_by_user")
+            self.assertEqual(payload["error"], "cancelled_by_user")
+            self.assertEqual(payload["message"], "Run was cancelled.")
+            for name in ("state.json", "snapshot.json"):
+                persisted = json.loads((run_path / name).read_text(encoding="utf-8"))
+                self.assertEqual(persisted["status"], "cancelled")
+                self.assertEqual(persisted["failureReason"], "cancelled_by_user")
+                self.assertNotIn("error", persisted)
+                self.assertNotIn("message", persisted)
+            report = (run_path / "completion-report.md").read_text(encoding="utf-8")
+            self.assertIn("Status: cancelled", report)
+            self.assertIn("Failure reason: cancelled_by_user", report)
+            self.assertNotIn("Status: failed", report)
+            self.assertNotIn("call_timeout", report)
+
+    def test_timeout_late_cancel_reconciliation_clears_timeout_error(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            run_path = self.registry.run_directory(root, run_id)
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-07-16T12:00:00Z",
+            )
+            capture = self.runner.TrackedCaptureResult(
+                accumulator=self.runner.harness_events.StreamAccumulator(harness="codex"),
+                exit_code=1,
+                duration_ms=1000,
+                stdout_bytes=0,
+                stderr_bytes=0,
+                stdin_failures=(),
+                pid=os.getpid(),
+                pgid=os.getpgid(0),
+                error="call_timeout",
+                message="Child command exceeded the configured timeout.",
+            )
+            running = {"status": "running"}
+            cancel_requested = {"status": "running", "cancelRequested": True}
+
+            with mock.patch.object(
+                self.runner.run_registry,
+                "load_run_state_or_none",
+                side_effect=(running, cancel_requested, cancel_requested),
+            ):
+                finalization = self.runner._finalize_tracked_run(
+                    self.runner.TrackedRunFiles(
+                        run_path=run_path,
+                        stdout_log=run_path / self.registry.STDOUT_LOG,
+                        stderr_log=run_path / self.registry.STDERR_LOG,
+                    ),
+                    ctx,
+                    capture,
+                    completion_report_mode="off",
+                    extra={
+                        "error": capture.error,
+                        "message": capture.message,
+                        "failureReason": capture.error,
+                    },
+                )
+
+            self.assertEqual(finalization.status, "cancelled")
+            self.assertEqual(finalization.exit_code, 1)
+            self.assertEqual(finalization.extra["failureReason"], "cancelled_by_user")
+            self.assertNotIn("error", finalization.extra)
+            self.assertNotIn("message", finalization.extra)
+            for name in ("state.json", "snapshot.json"):
+                persisted = json.loads((run_path / name).read_text(encoding="utf-8"))
+                self.assertEqual(persisted["status"], "cancelled")
+                self.assertEqual(persisted["failureReason"], "cancelled_by_user")
+                self.assertNotIn("error", persisted)
+                self.assertNotIn("message", persisted)
+            report = (run_path / "completion-report.md").read_text(encoding="utf-8")
+            self.assertIn("Status: cancelled", report)
+            self.assertIn("Failure reason: cancelled_by_user", report)
+            self.assertNotIn("Status: failed", report)
+            self.assertNotIn("call_timeout", report)
 
     def test_tracked_run_gives_child_eof_stdin(self):
         temp = tempfile.TemporaryDirectory()
@@ -2191,6 +2442,310 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertIn("finishedAt", state)
             self.assertEqual(snapshot["exitCode"], 1)
 
+    def test_cancel_marker_suppresses_auth_fallback(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-07-16T12:00:00Z",
+                fallback_env_overrides={"ATTEMPT": "fallback"},
+            )
+            accumulator = self.runner.harness_events.StreamAccumulator(harness="codex")
+            accumulator.ingest_line('{"type":"error","message":"usage limit"}')
+            primary = self.runner.TrackedCaptureResult(
+                accumulator=accumulator,
+                exit_code=1,
+                duration_ms=10,
+                stdout_bytes=1,
+                stderr_bytes=0,
+                stdin_failures=(),
+                pid=os.getpid(),
+                pgid=None,
+            )
+
+            def primary_then_cancel(*_args, **_kwargs):
+                state = {
+                    "schema": self.registry.STATE_SCHEMA,
+                    "runId": run_id,
+                    "alias": alias,
+                    "status": "running",
+                    "cancelRequested": True,
+                    "cancelRequestedAt": self.registry.utc_now_iso(),
+                }
+                self.registry.write_json_atomic(
+                    self.registry.run_directory(root, run_id) / self.registry.STATE_FILE,
+                    state,
+                )
+                return primary
+
+            with (
+                mock.patch.object(
+                    self.runner,
+                    "_run_single_tracked_attempt",
+                    side_effect=primary_then_cancel,
+                ) as run_attempt,
+                mock.patch.object(self.runner, "_should_retry_profiles") as should_retry,
+            ):
+                code, payload = self.runner.execute_tracked(
+                    ["codex", "task"],
+                    workspace,
+                    ctx,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+
+            self.assertEqual(run_attempt.call_count, 1)
+            should_retry.assert_not_called()
+            self.assertEqual(code, 1)
+            self.assertEqual(payload["status"], "cancelled")
+            self.assertEqual(payload["exitCode"], 1)
+
+    def test_cancel_marker_suppresses_empty_result_retry(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-07-16T12:00:00Z",
+            )
+            primary = self.runner.TrackedCaptureResult(
+                accumulator=self.runner.harness_events.StreamAccumulator(harness="codex"),
+                exit_code=0,
+                duration_ms=10,
+                stdout_bytes=0,
+                stderr_bytes=0,
+                stdin_failures=(),
+                pid=os.getpid(),
+                pgid=None,
+            )
+
+            def primary_then_cancel(*_args, **_kwargs):
+                state = {
+                    "schema": self.registry.STATE_SCHEMA,
+                    "runId": run_id,
+                    "alias": alias,
+                    "status": "running",
+                    "cancelRequested": True,
+                    "cancelRequestedAt": self.registry.utc_now_iso(),
+                }
+                self.registry.write_json_atomic(
+                    self.registry.run_directory(root, run_id) / self.registry.STATE_FILE,
+                    state,
+                )
+                return primary
+
+            with (
+                mock.patch.object(
+                    self.runner,
+                    "_run_single_tracked_attempt",
+                    side_effect=primary_then_cancel,
+                ) as run_attempt,
+                mock.patch.object(self.runner, "_tracked_capture_quality") as capture_quality,
+            ):
+                code, payload = self.runner.execute_tracked(
+                    ["codex", "task"],
+                    workspace,
+                    ctx,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                    manifest_argv=["codex", "<prompt>"],
+                )
+
+            self.assertEqual(run_attempt.call_count, 1)
+            capture_quality.assert_not_called()
+            self.assertEqual(code, 1)
+            self.assertEqual(payload["status"], "cancelled")
+            self.assertNotIn("emptyRetry", payload)
+
+    def test_retry_launch_gate_rechecks_cancel_marker_under_lock(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            run_path = self.registry.run_directory(root, run_id)
+            self.registry.write_json_atomic(
+                run_path / self.registry.STATE_FILE,
+                {
+                    "schema": self.registry.STATE_SCHEMA,
+                    "runId": run_id,
+                    "alias": alias,
+                    "status": "running",
+                    "cancelRequested": True,
+                    "cancelRequestedAt": self.registry.utc_now_iso(),
+                },
+            )
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-07-16T12:00:00Z",
+            )
+            files = self.runner.TrackedRunFiles(
+                run_path=run_path,
+                stdout_log=run_path / self.registry.STDOUT_LOG,
+                stderr_log=run_path / self.registry.STDERR_LOG,
+            )
+            prior = self.runner.TrackedCaptureResult(
+                accumulator=self.runner.harness_events.StreamAccumulator(harness="codex"),
+                exit_code=1,
+                duration_ms=10,
+                stdout_bytes=0,
+                stderr_bytes=0,
+                stdin_failures=(),
+                pid=os.getpid(),
+                pgid=None,
+            )
+
+            with (
+                mock.patch.object(self.runner, "_launch_tracked_process") as launch,
+                self.assertRaises(self.runner.RunnerLaunchError) as caught,
+            ):
+                self.runner._run_single_tracked_attempt(
+                    ["codex", "task"],
+                    workspace,
+                    files,
+                    ctx,
+                    started=time.monotonic(),
+                    deadline=None,
+                    stdin_text=None,
+                    env_overrides=None,
+                    scratch_dir=None,
+                    progress=False,
+                    progress_stderr=None,
+                    progress_initial_delay_sec=1,
+                    progress_interval_sec=1,
+                    attempt_label="fallback",
+                    prior_capture=prior,
+                )
+
+            self.assertEqual(caught.exception.error, "cancelled_by_user")
+            launch.assert_not_called()
+            self.assertFalse((run_path / self.registry.STDERR_LOG).exists())
+
+    def test_fallback_launch_failure_after_cancel_preserves_cancelled_outcome(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-07-16T12:00:00Z",
+                fallback_env_overrides={"ATTEMPT": "fallback"},
+            )
+            accumulator = self.runner.harness_events.StreamAccumulator(harness="codex")
+            accumulator.ingest_line('{"type":"error","message":"usage limit"}')
+            primary = self.runner.TrackedCaptureResult(
+                accumulator=accumulator,
+                exit_code=1,
+                duration_ms=10,
+                stdout_bytes=1,
+                stderr_bytes=0,
+                stdin_failures=(),
+                pid=os.getpid(),
+                pgid=None,
+            )
+            attempts = 0
+
+            def cancel_during_fallback_launch(_argv, _cwd, files, attempt_ctx, **kwargs):
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    return primary
+                state = {
+                    "schema": self.registry.STATE_SCHEMA,
+                    "runId": run_id,
+                    "alias": alias,
+                    "status": "running",
+                    "cancelRequested": True,
+                    "cancelRequestedAt": self.registry.utc_now_iso(),
+                }
+                self.registry.write_json_atomic(files.run_path / self.registry.STATE_FILE, state)
+                error = self.runner.RunnerLaunchError(
+                    "child_launch_failed",
+                    "fallback launch failed",
+                )
+                self.runner._record_tracked_launch_failure(
+                    files,
+                    attempt_ctx,
+                    error,
+                    prior_capture=kwargs.get("prior_capture"),
+                )
+                raise error
+
+            with (
+                mock.patch.object(
+                    self.runner,
+                    "_run_single_tracked_attempt",
+                    side_effect=cancel_during_fallback_launch,
+                ),
+                mock.patch.object(self.runner, "_should_retry_profiles", return_value=True),
+            ):
+                code, payload = self.runner.execute_tracked(
+                    ["codex", "task"],
+                    workspace,
+                    ctx,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+
+            self.assertEqual(attempts, 2)
+            self.assertEqual(code, 1)
+            self.assertEqual(payload["status"], "cancelled")
+            self.assertEqual(payload["exitCode"], 1)
+            self.assertEqual(payload["failureReason"], "cancelled_by_user")
+            self.assertEqual(payload["error"], "cancelled_by_user")
+            run_path = self.registry.run_directory(root, run_id)
+            for name in (self.registry.STATE_FILE, self.registry.SNAPSHOT_FILE):
+                persisted = json.loads((run_path / name).read_text(encoding="utf-8"))
+                self.assertEqual(persisted["status"], "cancelled")
+                self.assertEqual(persisted["exitCode"], 1)
+                self.assertNotIn("error", persisted)
+                self.assertNotIn("message", persisted)
+            report = (run_path / "completion-report.md").read_text(encoding="utf-8")
+            self.assertIn("Status: cancelled", report)
+            self.assertIn("Failure reason: cancelled_by_user", report)
+            self.assertNotIn("child_launch_failed", report)
+
     def test_safe_empty_success_retries_once_and_resolves(self):
         with tempfile.TemporaryDirectory() as workspace:
             script = Path(workspace) / "codex"
@@ -2801,6 +3356,73 @@ class RunnerCaptureTests(unittest.TestCase):
             state = json.loads((root / "runs" / run_id / "state.json").read_text(encoding="utf-8"))
             self.assertEqual(state["status"], "failed")
             self.assertEqual(state["error"], "call_timeout")
+
+    def test_grouped_call_timeout_kills_descendants_after_leader_exits(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            script = Path(workspace) / "agent.py"
+            child_pid_path = Path(workspace) / "child.pid"
+            child_ready_path = Path(workspace) / "child.ready"
+            child_code = (
+                "import signal, time\n"
+                "from pathlib import Path\n"
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                f"Path({str(child_ready_path)!r}).write_text('ready', encoding='utf-8')\n"
+                "time.sleep(60)\n"
+            )
+            script.write_text(
+                "import os, signal, subprocess, sys, time\n"
+                "from pathlib import Path\n"
+                "signal.signal(signal.SIGTERM, lambda *_: os._exit(0))\n"
+                f"child = subprocess.Popen([sys.executable, '-c', {child_code!r}], "
+                "stderr=subprocess.DEVNULL)\n"
+                f"Path({str(child_pid_path)!r}).write_text(str(child.pid), encoding='utf-8')\n"
+                f"ready = Path({str(child_ready_path)!r})\n"
+                "while not ready.exists():\n"
+                "    time.sleep(0.01)\n"
+                "time.sleep(60)\n",
+                encoding="utf-8",
+            )
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="call",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-07-16T12:00:00Z",
+                group="workflow",
+                call_read_only=True,
+            )
+
+            child_pid = None
+            started = time.monotonic()
+            try:
+                with self.assertRaises(self.runner.RunnerLaunchError) as caught:
+                    self.runner.execute_tracked(
+                        [sys.executable, str(script)],
+                        workspace,
+                        ctx,
+                        json_mode=True,
+                        stdout=io.StringIO(),
+                        stderr=io.StringIO(),
+                        timeout=1,
+                    )
+                child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+                self.assertEqual(caught.exception.error, "call_timeout")
+                self.assertLess(time.monotonic() - started, 6)
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(child_pid, 0)
+            finally:
+                if child_pid is not None:
+                    with contextlib.suppress(ProcessLookupError):
+                        os.kill(child_pid, signal.SIGKILL)
 
     def test_empty_call_does_not_mutate_verbatim_prompts(self):
         empty = self.runner.CallResult(

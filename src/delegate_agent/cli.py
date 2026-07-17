@@ -669,7 +669,7 @@ def execute_request(
                         timeout=request.timeout,
                     )
                 except delegate_runner.RunnerLaunchError as exc:
-                    raise DelegateError(exc.error, exc.message) from exc
+                    raise DelegateError(exc.error, exc.message, exc.exit_code) from exc
             try:
                 sensitive_texts = [request.prompt]
                 if "--json-schema" in request.argv:
@@ -802,7 +802,7 @@ def execute_request(
                 )
             )
         except worktree_execution.PersistentWorktreeError as exc:
-            raise DelegateError(exc.error, exc.message) from exc
+            raise DelegateError(exc.error, exc.message, exc.exit_code) from exc
 
     with safe_isolated_request(request) as isolated_request:
         _set_child_root_env(isolated_request, source_workspace)
@@ -882,7 +882,7 @@ def execute_request(
                 timeout=isolated_request.timeout,
             )
         except delegate_runner.RunnerLaunchError as exc:
-            raise DelegateError(exc.error, exc.message) from exc
+            raise DelegateError(exc.error, exc.message, exc.exit_code) from exc
 
 
 def shell_join(argv: list[str]) -> str:

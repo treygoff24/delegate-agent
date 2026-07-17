@@ -34,8 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is expected because the Kimi CLI emits no usage/token lines in stream-json
   output.
 - Kimi work-mode docs restate current behavior: Delegate emits no `--yolo` —
-  Kimi prompt mode auto-approves tool actions, so workspace isolation is the
-  effective write boundary.
+  Kimi prompt mode auto-approves tool actions, and work mode edits the real
+  workspace by default. Temporary safe isolation or explicit worktree
+  isolation provides a workspace boundary, not a complete host sandbox.
 
 ## [0.15.0] - 2026-07-16
 

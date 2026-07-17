@@ -297,6 +297,7 @@ class UtilityModuleTests(unittest.TestCase):
 
         self.assertEqual(error.error, "worktree_requires_git")
         self.assertEqual(error.message, "no git")
+        self.assertEqual(error.exit_code, 2)
         self.assertEqual(str(error), "no git")
 
     def test_run_output_emit_requires_registry(self):

@@ -250,19 +250,23 @@ class StreamAccumulator:
         if self.harness == "devin":
             self._ingest_text_fallback(stripped)
             return
-        # RecursionError is caught alongside JSONDecodeError because
-        # excessively nested (but valid) JSON aborts json.loads with it, and
-        # this runs on the runner's stdout drain thread where no exception may
-        # escape.
         try:
             payload: JsonValue = json.loads(stripped)
-        except (json.JSONDecodeError, RecursionError):
-            if self.harness == "opencode":
+        except RecursionError:
+            # Kimi tool results can contain arbitrary command output. If an
+            # excessively nested envelope cannot be classified, dropping it is
+            # safer than exposing the raw line as a text event.
+            if self.harness in ("kimi", "opencode"):
+                return
+            self._ingest_text_fallback(stripped)
+            return
+        except json.JSONDecodeError:
+            if self.harness in ("kimi", "opencode"):
                 return
             self._ingest_text_fallback(stripped)
             return
         if not isinstance(payload, dict):
-            if self.harness == "opencode":
+            if self.harness in ("kimi", "opencode"):
                 return
             self._ingest_text_fallback(stripped)
             return

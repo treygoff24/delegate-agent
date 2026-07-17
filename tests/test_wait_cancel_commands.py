@@ -6,6 +6,8 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock as unittest_mock
@@ -15,7 +17,7 @@ SRC = str(ROOT / "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
-from delegate_agent import cli, run_registry, wait_cancel_commands  # noqa: E402
+from delegate_agent import cli, run_registry, runner, wait_cancel_commands  # noqa: E402
 
 
 class WaitCancelCommandTests(unittest.TestCase):
@@ -307,6 +309,151 @@ class WaitCancelCommandTests(unittest.TestCase):
         self.assertEqual(state["status"], "cancelled")
         self.assertEqual(state["failureReason"], "cancelled_by_user")
 
+    def test_external_sigterm_cancel_uses_exit_one_everywhere(self):
+        run_id, alias = run_registry.register_run(self.registry_root, harness="codex")
+        ctx = runner.RunContext(
+            registry_root=self.registry_root,
+            run_id=run_id,
+            alias=alias,
+            harness="codex",
+            engine="codex",
+            mode="safe",
+            model=None,
+            source_cwd=str(self.workspace),
+            execution_cwd=str(self.workspace),
+            workspace_kind="directory",
+            isolated_workspace=False,
+            started_at=run_registry.utc_now_iso(),
+        )
+        launched: dict[str, tuple[int, dict | None]] = {}
+
+        def run_child() -> None:
+            launched["result"] = runner.execute_tracked(
+                [sys.executable, "-c", "import time; time.sleep(5)"],
+                str(self.workspace),
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+
+        thread = threading.Thread(target=run_child, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 6)
+        for _ in range(500):
+            state = run_registry.load_run_state_or_none(self.registry_root, run_id)
+            if isinstance(state, dict) and state.get("status") == "running" and state.get("pid"):
+                break
+            time.sleep(0.01)
+        else:
+            self.fail("tracked child did not reach running state")
+
+        cancel_payload = wait_cancel_commands._cancel_target(
+            self.registry_root,
+            run_registry.RunTarget(run_id=run_id, alias=alias),
+        )
+        thread.join(timeout=5)
+        self.assertFalse(thread.is_alive())
+        live_code, live_payload = launched["result"]
+        self.assertEqual(live_code, 1)
+        self.assertIsNotNone(live_payload)
+        self.assertEqual(live_payload["status"], "cancelled")
+        self.assertEqual(live_payload["exitCode"], 1)
+        self.assertEqual(cancel_payload["exitCode"], 1)
+        state = run_registry.load_run_state(self.registry_root, run_id)
+        snapshot = run_registry.load_run_snapshot(self.registry_root, run_id)
+        self.assertEqual(state["status"], "cancelled")
+        self.assertEqual(state["exitCode"], 1)
+        self.assertEqual(snapshot["status"], "cancelled")
+        self.assertEqual(snapshot["exitCode"], 1)
+
+    def test_cancel_waits_for_primary_pid_publication_then_terminates_child(self):
+        run_id, alias = run_registry.register_run(self.registry_root, harness="codex")
+        ctx = runner.RunContext(
+            registry_root=self.registry_root,
+            run_id=run_id,
+            alias=alias,
+            harness="codex",
+            engine="codex",
+            mode="safe",
+            model=None,
+            source_cwd=str(self.workspace),
+            execution_cwd=str(self.workspace),
+            workspace_kind="directory",
+            isolated_workspace=False,
+            started_at=run_registry.utc_now_iso(),
+        )
+        primary_launched = threading.Event()
+        allow_publication = threading.Event()
+        process_holder: list[subprocess.Popen[bytes]] = []
+        run_outcome: dict[str, object] = {}
+        cancel_outcome: dict[str, object] = {}
+        original_launch = runner._launch_tracked_process
+
+        def launch_then_pause(*args, **kwargs):
+            process = original_launch(*args, **kwargs)
+            process_holder.append(process)
+            primary_launched.set()
+            allow_publication.wait(timeout=5)
+            return process
+
+        def run_child() -> None:
+            try:
+                run_outcome["result"] = runner.execute_tracked(
+                    [sys.executable, "-c", "import time; time.sleep(30)"],
+                    str(self.workspace),
+                    ctx,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+            except BaseException as exc:  # pragma: no cover - asserted below
+                run_outcome["error"] = exc
+
+        def cancel_child() -> None:
+            try:
+                cancel_outcome["result"] = wait_cancel_commands._cancel_target(
+                    self.registry_root,
+                    run_registry.RunTarget(run_id=run_id, alias=alias),
+                )
+            except BaseException as exc:  # pragma: no cover - asserted below
+                cancel_outcome["error"] = exc
+
+        with unittest_mock.patch.object(
+            runner,
+            "_launch_tracked_process",
+            side_effect=launch_then_pause,
+        ):
+            run_thread = threading.Thread(target=run_child, daemon=True)
+            run_thread.start()
+            self.assertTrue(primary_launched.wait(timeout=3))
+            process = process_holder[0]
+            self.add_process_cleanup(process)
+            pgid = os.getpgid(process.pid)
+            self.assertIsNone(run_registry.load_run_state_or_none(self.registry_root, run_id))
+
+            cancel_thread = threading.Thread(target=cancel_child, daemon=True)
+            cancel_thread.start()
+            time.sleep(0.1)
+            self.assertTrue(cancel_thread.is_alive())
+            self.assertEqual(cancel_outcome, {})
+
+            allow_publication.set()
+            cancel_thread.join(timeout=7)
+            run_thread.join(timeout=7)
+
+        self.assertFalse(cancel_thread.is_alive())
+        self.assertFalse(run_thread.is_alive())
+        self.assertNotIn("error", cancel_outcome)
+        self.assertNotIn("error", run_outcome)
+        self.assertEqual(cancel_outcome["result"]["status"], "cancelled")
+        run_code, run_payload = run_outcome["result"]
+        self.assertEqual(run_code, 1)
+        self.assertEqual(run_payload["status"], "cancelled")
+        self.assertIsNotNone(process.poll())
+        with self.assertRaises(ProcessLookupError):
+            os.killpg(pgid, 0)
+
     def test_race_runner_finalizes_first_cancel_wins(self):
         """Runner finalizer writes terminal state during the cancel grace window,
         then cancel reconciles to cancelled (cancel wins)."""
@@ -354,6 +501,277 @@ class WaitCancelCommandTests(unittest.TestCase):
         self.assertEqual(state["status"], "cancelled")
         self.assertEqual(state["failureReason"], "cancelled_by_user")
         proc.kill()
+
+    def test_race_runner_finalizes_before_marker_preserves_result_without_signal(self):
+        """The locked pre-signal re-read must not cancel a run that already finished."""
+        pid = os.getpid()
+        pgid = os.getpgid(0)
+        run_id, alias = self.write_run(status="running", pid=pid, pgid=pgid)
+        run_path = run_registry.run_directory(self.registry_root, run_id)
+        target = run_registry.RunTarget(run_id=run_id, alias=alias)
+        original_load = run_registry.load_run_state_or_none
+        load_count = {"value": 0}
+
+        def finalize_before_marker(root, rid):
+            load_count["value"] += 1
+            if load_count["value"] == 2:
+                terminal_state = dict(original_load(root, rid) or {})
+                terminal_state.update(
+                    {
+                        "status": "succeeded",
+                        "exitCode": 0,
+                        "finishedAt": run_registry.utc_now_iso(),
+                        "completionReportWritten": True,
+                    }
+                )
+                run_registry.write_json_atomic(run_path / run_registry.STATE_FILE, terminal_state)
+                snapshot = json.loads((run_path / run_registry.SNAPSHOT_FILE).read_text())
+                snapshot.update(
+                    {
+                        "ok": True,
+                        "status": "succeeded",
+                        "exitCode": 0,
+                        "completionReportWritten": True,
+                    }
+                )
+                run_registry.write_json_atomic(run_path / run_registry.SNAPSHOT_FILE, snapshot)
+                (run_path / run_registry.COMPLETION_REPORT_FILE).write_text(
+                    "Status: succeeded\n", encoding="utf-8"
+                )
+            return original_load(root, rid)
+
+        with (
+            unittest_mock.patch.object(
+                run_registry, "load_run_state_or_none", side_effect=finalize_before_marker
+            ),
+            unittest_mock.patch.object(
+                wait_cancel_commands, "_check_pid_identity", return_value=[]
+            ),
+            unittest_mock.patch.object(wait_cancel_commands, "_send_signal") as send_signal,
+        ):
+            payload = wait_cancel_commands._cancel_target(self.registry_root, target)
+
+        send_signal.assert_not_called()
+        self.assertEqual(payload["status"], "succeeded")
+        self.assertEqual(payload["exitCode"], 0)
+        state = json.loads((run_path / run_registry.STATE_FILE).read_text())
+        self.assertEqual(state["status"], "succeeded")
+        self.assertEqual(state["exitCode"], 0)
+        self.assertNotIn("cancelRequested", state)
+        self.assertEqual(
+            (run_path / run_registry.COMPLETION_REPORT_FILE).read_text(encoding="utf-8"),
+            "Status: succeeded\n",
+        )
+
+    def test_cancel_revalidates_changed_process_generation_before_signaling(self):
+        first = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            start_new_session=True,
+        )
+        second = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            start_new_session=True,
+        )
+        self.add_process_cleanup(first)
+        self.add_process_cleanup(second)
+        first_pgid = os.getpgid(first.pid)
+        second_pgid = os.getpgid(second.pid)
+        run_id, alias = self.write_run(status="running", pid=first.pid, pgid=first_pgid)
+        run_path = run_registry.run_directory(self.registry_root, run_id)
+        target = run_registry.RunTarget(run_id=run_id, alias=alias)
+        original_load = run_registry.load_run_state_or_none
+        load_count = {"value": 0}
+
+        def switch_attempt_before_marker(root, rid):
+            load_count["value"] += 1
+            if load_count["value"] == 2:
+                current = dict(original_load(root, rid) or {})
+                current.update(pid=second.pid, pgid=second_pgid)
+                run_registry.write_json_atomic(run_path / run_registry.STATE_FILE, current)
+            return original_load(root, rid)
+
+        signaled: list[tuple[int, bool]] = []
+        with (
+            unittest_mock.patch.object(
+                run_registry,
+                "load_run_state_or_none",
+                side_effect=switch_attempt_before_marker,
+            ),
+            unittest_mock.patch.object(
+                wait_cancel_commands, "_check_pid_identity", return_value=[]
+            ),
+            unittest_mock.patch.object(
+                wait_cancel_commands,
+                "_send_signal",
+                side_effect=lambda value, _sig, *, process_group: signaled.append(
+                    (value, process_group)
+                ),
+            ),
+            unittest_mock.patch.object(
+                wait_cancel_commands, "_signal_target_alive", return_value=False
+            ),
+        ):
+            payload = wait_cancel_commands._cancel_target(self.registry_root, target)
+
+        self.assertEqual(signaled, [(second_pgid, True)])
+        self.assertEqual(payload["status"], "cancelled")
+        state = json.loads((run_path / run_registry.STATE_FILE).read_text())
+        self.assertEqual(state["pid"], second.pid)
+        self.assertEqual(state["pgid"], second_pgid)
+        self.assertTrue(state["cancelRequested"])
+
+    def test_cancel_follows_replacement_generation_after_first_signal(self):
+        first = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            start_new_session=True,
+        )
+        second = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            start_new_session=True,
+        )
+        self.add_process_cleanup(first)
+        self.add_process_cleanup(second)
+        first_generation = (first.pid, os.getpgid(first.pid))
+        second_generation = (second.pid, os.getpgid(second.pid))
+        run_id, alias = self.write_run(
+            status="running",
+            pid=first_generation[0],
+            pgid=first_generation[1],
+        )
+        run_path = run_registry.run_directory(self.registry_root, run_id)
+        target = run_registry.RunTarget(run_id=run_id, alias=alias)
+        signaled: list[tuple[int, bool]] = []
+
+        def replace_after_first_signal(value, _sig, *, process_group):
+            signaled.append((value, process_group))
+            if len(signaled) == 1:
+                current = dict(run_registry.load_run_state(self.registry_root, run_id))
+                current.update(pid=second_generation[0], pgid=second_generation[1])
+                run_registry.write_json_atomic(run_path / run_registry.STATE_FILE, current)
+
+        with (
+            unittest_mock.patch.object(
+                wait_cancel_commands, "_check_pid_identity", return_value=[]
+            ),
+            unittest_mock.patch.object(
+                wait_cancel_commands, "_send_signal", side_effect=replace_after_first_signal
+            ),
+            unittest_mock.patch.object(
+                wait_cancel_commands, "_signal_target_alive", return_value=False
+            ),
+        ):
+            payload = wait_cancel_commands._cancel_target(self.registry_root, target)
+
+        self.assertEqual(
+            signaled,
+            [(first_generation[1], True), (second_generation[1], True)],
+        )
+        self.assertEqual(payload["status"], "cancelled")
+        self.assertEqual(payload["exitCode"], 1)
+        state = run_registry.load_run_state(self.registry_root, run_id)
+        self.assertEqual(state["pid"], second_generation[0])
+        self.assertEqual(state["pgid"], second_generation[1])
+
+    def test_cancel_bounds_replacement_churn_after_signals(self):
+        processes = [
+            subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                start_new_session=True,
+            )
+            for _ in range(wait_cancel_commands.CANCEL_GENERATION_MAX_ATTEMPTS + 1)
+        ]
+        for process in processes:
+            self.add_process_cleanup(process)
+        generations = [(process.pid, os.getpgid(process.pid)) for process in processes]
+        run_id, alias = self.write_run(
+            status="running",
+            pid=generations[0][0],
+            pgid=generations[0][1],
+        )
+        run_path = run_registry.run_directory(self.registry_root, run_id)
+        target = run_registry.RunTarget(run_id=run_id, alias=alias)
+        signaled: list[int] = []
+
+        def replace_after_every_signal(value, _sig, *, process_group):
+            self.assertTrue(process_group)
+            signaled.append(value)
+            next_generation = generations[len(signaled)]
+            current = dict(run_registry.load_run_state(self.registry_root, run_id))
+            current.update(pid=next_generation[0], pgid=next_generation[1])
+            run_registry.write_json_atomic(run_path / run_registry.STATE_FILE, current)
+
+        with (
+            unittest_mock.patch.object(
+                wait_cancel_commands, "_check_pid_identity", return_value=[]
+            ),
+            unittest_mock.patch.object(
+                wait_cancel_commands, "_send_signal", side_effect=replace_after_every_signal
+            ),
+            unittest_mock.patch.object(
+                wait_cancel_commands, "_signal_target_alive", return_value=False
+            ),
+            self.assertRaises(wait_cancel_commands.WaitCancelError) as caught,
+        ):
+            wait_cancel_commands._cancel_target(self.registry_root, target)
+
+        self.assertEqual(caught.exception.error, "cancel_target_changed")
+        self.assertEqual(
+            signaled,
+            [generation[1] for generation in generations[:-1]],
+        )
+        state = run_registry.load_run_state(self.registry_root, run_id)
+        self.assertEqual(state["status"], "running")
+        self.assertTrue(state["cancelRequested"])
+
+    def test_cancel_fails_closed_when_process_generation_keeps_changing(self):
+        processes = [
+            subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                start_new_session=True,
+            )
+            for _ in range(wait_cancel_commands.CANCEL_GENERATION_MAX_ATTEMPTS + 1)
+        ]
+        for process in processes:
+            self.add_process_cleanup(process)
+        generations = [(process.pid, os.getpgid(process.pid)) for process in processes]
+        run_id, alias = self.write_run(
+            status="running",
+            pid=generations[0][0],
+            pgid=generations[0][1],
+        )
+        run_path = run_registry.run_directory(self.registry_root, run_id)
+        target = run_registry.RunTarget(run_id=run_id, alias=alias)
+        original_load = run_registry.load_run_state_or_none
+        load_count = {"value": 0}
+
+        def change_every_locked_read(root, rid):
+            load_count["value"] += 1
+            if load_count["value"] >= 2:
+                generation = generations[load_count["value"] - 1]
+                current = dict(original_load(root, rid) or {})
+                current.update(pid=generation[0], pgid=generation[1])
+                run_registry.write_json_atomic(run_path / run_registry.STATE_FILE, current)
+            return original_load(root, rid)
+
+        with (
+            unittest_mock.patch.object(
+                run_registry,
+                "load_run_state_or_none",
+                side_effect=change_every_locked_read,
+            ),
+            unittest_mock.patch.object(
+                wait_cancel_commands, "_check_pid_identity", return_value=[]
+            ),
+            unittest_mock.patch.object(wait_cancel_commands, "_send_signal") as send_signal,
+            self.assertRaises(wait_cancel_commands.WaitCancelError) as caught,
+        ):
+            wait_cancel_commands._cancel_target(self.registry_root, target)
+
+        self.assertEqual(caught.exception.error, "cancel_target_changed")
+        send_signal.assert_not_called()
+        state = json.loads((run_path / run_registry.STATE_FILE).read_text())
+        self.assertEqual(state["status"], "running")
+        self.assertNotIn("cancelRequested", state)
 
     def test_cancel_stamps_cancel_requested_marker_before_signal(self):
         """Cancel stamps cancelRequested:true + cancelRequestedAt on a live run
@@ -679,6 +1097,31 @@ class WaitCancelCommandTests(unittest.TestCase):
                 unittest_mock.call(pgid, wait_cancel_commands.signal.SIGKILL, process_group=True),
             ],
         )
+
+    def test_process_group_vanishing_at_sigterm_is_safely_cancelled(self):
+        pid = os.getpid()
+        pgid = os.getpgid(0)
+        run_id, alias = self.write_run(status="running", pid=pid, pgid=pgid)
+        target = run_registry.RunTarget(run_id=run_id, alias=alias)
+
+        with (
+            unittest_mock.patch.object(
+                wait_cancel_commands, "_check_pid_identity", return_value=[]
+            ),
+            unittest_mock.patch.object(
+                wait_cancel_commands,
+                "_send_signal",
+                side_effect=ProcessLookupError,
+            ),
+            unittest_mock.patch.object(
+                wait_cancel_commands, "_signal_target_alive", return_value=False
+            ),
+        ):
+            payload = wait_cancel_commands._cancel_target(self.registry_root, target)
+
+        self.assertEqual(payload["status"], "cancelled")
+        self.assertEqual(payload["exitCode"], 1)
+        self.assertTrue(any("before SIGTERM" in warning for warning in payload["warnings"]))
 
     def test_cancel_refuses_stale_dead_pid_run(self):
         """A running run with a dead pid is stale and cancel refuses it."""

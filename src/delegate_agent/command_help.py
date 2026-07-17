@@ -193,7 +193,7 @@ _PURE_OPTION = OptionSpec(
     "on stdin, tools and MCP disabled, ambient env dropped to an allowlist. "
     "Conflicts with --read-only and --group.",
 )
-_CALL_TIMEOUT_OPTION = OptionSpec(
+_CHILD_TIMEOUT_OPTION = OptionSpec(
     "--timeout",
     "SECONDS",
     "Maximum child runtime in seconds; on expiry the child process group is terminated and "
@@ -239,7 +239,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             _FORBID_COMMIT_OPTION,
             _INCLUDE_DIRTY_OPTION,
             _READ_ONLY_OPTION,
-            _CALL_TIMEOUT_OPTION,
+            _CHILD_TIMEOUT_OPTION,
             _PROMPT_FILE_OPTION,
         ),
         examples=(
@@ -276,7 +276,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             _FORBID_COMMIT_OPTION,
             _INCLUDE_DIRTY_OPTION,
             _READ_ONLY_OPTION,
-            _CALL_TIMEOUT_OPTION,
+            _CHILD_TIMEOUT_OPTION,
             _PROMPT_FILE_OPTION,
         ),
         examples=(
@@ -322,7 +322,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             _FORBID_COMMIT_OPTION,
             _INCLUDE_DIRTY_OPTION,
             _READ_ONLY_OPTION,
-            _CALL_TIMEOUT_OPTION,
+            _CHILD_TIMEOUT_OPTION,
             _PROMPT_FILE_OPTION,
         ),
         examples=(
@@ -369,7 +369,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             _READ_ONLY_OPTION,
             _PURE_OPTION,
             _OUTPUT_SCHEMA_OPTION,
-            _CALL_TIMEOUT_OPTION,
+            _CHILD_TIMEOUT_OPTION,
             _PROMPT_FILE_OPTION,
         ),
         examples=(
@@ -413,7 +413,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             _FORBID_COMMIT_OPTION,
             _INCLUDE_DIRTY_OPTION,
             _READ_ONLY_OPTION,
-            _CALL_TIMEOUT_OPTION,
+            _CHILD_TIMEOUT_OPTION,
             _PROMPT_FILE_OPTION,
         ),
         examples=(
@@ -462,7 +462,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             _FORBID_COMMIT_OPTION,
             _INCLUDE_DIRTY_OPTION,
             _READ_ONLY_OPTION,
-            _CALL_TIMEOUT_OPTION,
+            _CHILD_TIMEOUT_OPTION,
             _PROMPT_FILE_OPTION,
         ),
         examples=(
@@ -500,7 +500,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             _FORBID_COMMIT_OPTION,
             _INCLUDE_DIRTY_OPTION,
             _READ_ONLY_OPTION,
-            _CALL_TIMEOUT_OPTION,
+            _CHILD_TIMEOUT_OPTION,
             _PROMPT_FILE_OPTION,
         ),
         examples=(
@@ -550,7 +550,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             _FORBID_COMMIT_OPTION,
             _INCLUDE_DIRTY_OPTION,
             _READ_ONLY_OPTION,
-            _CALL_TIMEOUT_OPTION,
+            _CHILD_TIMEOUT_OPTION,
             _PROMPT_FILE_OPTION,
         ),
         examples=(
@@ -619,7 +619,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             _INCLUDE_DIRTY_OPTION,
             _READ_ONLY_OPTION,
             _PURE_OPTION,
-            _CALL_TIMEOUT_OPTION,
+            _CHILD_TIMEOUT_OPTION,
             _PROMPT_FILE_OPTION,
         ),
         examples=(

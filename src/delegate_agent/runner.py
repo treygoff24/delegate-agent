@@ -435,29 +435,47 @@ def persist_progress(
     completion_report_written: bool = False,
     extra: JsonObject | None = None,
 ) -> None:
-    write_state(
-        run_path,
-        build_state(
-            ctx,
-            status=status,
-            exit_code=exit_code,
-            stdout_bytes=stdout_bytes,
-            stderr_bytes=stderr_bytes,
-            current=accumulator.current,
-            pid=pid,
-            extra=extra,
-        ),
-    )
-    write_snapshot(
-        run_path,
-        build_snapshot(
+    with run_registry.registry_lock(ctx.registry_root):
+        current = run_registry.load_run_state_or_none(ctx.registry_root, ctx.run_id)
+        current_status = current.get("status") if isinstance(current, dict) else None
+        if current_status in run_registry.TERMINAL_STATUSES:
+            return
+        persisted_extra = dict(extra or {})
+        if isinstance(current, dict) and current.get("cancelRequested") is True:
+            persisted_extra["cancelRequested"] = True
+            cancel_requested_at = current.get("cancelRequestedAt")
+            if isinstance(cancel_requested_at, str):
+                persisted_extra["cancelRequestedAt"] = cancel_requested_at
+        write_state(
+            run_path,
+            build_state(
+                ctx,
+                status=status,
+                exit_code=exit_code,
+                stdout_bytes=stdout_bytes,
+                stderr_bytes=stderr_bytes,
+                current=accumulator.current,
+                pid=pid,
+                extra=persisted_extra or None,
+            ),
+        )
+        snapshot = build_snapshot(
             ctx,
             accumulator=accumulator,
             exit_code=exit_code,
             completion_report_written=completion_report_written,
-            extra=extra,
-        ),
-    )
+            extra=persisted_extra or None,
+        )
+        snapshot["status"] = status
+        write_snapshot(run_path, snapshot)
+
+
+def _reconcile_cancel_extra(extra: JsonObject) -> None:
+    extra["failureReason"] = "cancelled_by_user"
+    extra["exitCode"] = 1
+    extra.pop("error", None)
+    extra.pop("message", None)
+    extra.pop("nextActions", None)
 
 
 def _persist_final_progress(
@@ -471,7 +489,7 @@ def _persist_final_progress(
     stderr_bytes: int,
     completion_report_written: bool,
     extra: JsonObject,
-) -> str:
+) -> tuple[str, JsonObject]:
     """Persist terminal state with cancel-precedence reconciliation.
 
     Acquires the registry lock, re-reads the current persisted state, and if a
@@ -480,7 +498,8 @@ def _persist_final_progress(
     status and the ``cancelled_by_user`` failure reason instead of downgrading
     to the runner's exit-code-derived status. The runner's work summary/output
     metadata (exit_code, byte counts, completion report, result quality, etc.)
-    is still recorded. Returns the status that was actually persisted.
+    is still recorded. Returns the status and extra metadata that were actually
+    persisted.
 
     The ``cancelRequested`` marker handles the finalize-first race: cancel
     stamps the marker under the lock BEFORE sending SIGTERM, so if the child
@@ -502,18 +521,14 @@ def _persist_final_progress(
             # downgrade. Persist cancelled status and the cancel failure reason,
             # but still record the runner's work summary/output metadata.
             persisted_status = run_registry.STATUS_CANCELLED
-            persisted_extra["failureReason"] = "cancelled_by_user"
-            if exit_code == 0:
-                # A cancelled run never reports success.
-                persisted_extra["exitCode"] = 1
-            else:
-                persisted_extra["exitCode"] = exit_code
+            _reconcile_cancel_extra(persisted_extra)
+        persisted_exit_code = 1 if persisted_status == run_registry.STATUS_CANCELLED else exit_code
         write_state(
             run_path,
             build_state(
                 ctx,
                 status=persisted_status,
-                exit_code=exit_code,
+                exit_code=persisted_exit_code,
                 stdout_bytes=stdout_bytes,
                 stderr_bytes=stderr_bytes,
                 current=accumulator.current,
@@ -521,17 +536,17 @@ def _persist_final_progress(
                 extra=persisted_extra,
             ),
         )
-        write_snapshot(
-            run_path,
-            build_snapshot(
-                ctx,
-                accumulator=accumulator,
-                exit_code=exit_code,
-                completion_report_written=completion_report_written,
-                extra=persisted_extra,
-            ),
+        snapshot = build_snapshot(
+            ctx,
+            accumulator=accumulator,
+            exit_code=persisted_exit_code,
+            completion_report_written=completion_report_written,
+            extra=persisted_extra,
         )
-    return persisted_status
+        snapshot["ok"] = persisted_status == run_registry.STATUS_SUCCEEDED
+        snapshot["status"] = persisted_status
+        write_snapshot(run_path, snapshot)
+    return persisted_status, persisted_extra
 
 
 def write_completion_report(run_path: Path, text: str) -> bool:
@@ -670,6 +685,35 @@ def _completion_report_text_and_source(
         accumulator,
         completion_report_mode=completion_report_mode,
     ).strip()
+    if status == run_registry.STATUS_CANCELLED:
+        # A cancelled run was killed mid-flight: child output is not a valid
+        # completion report, so synthesize one regardless of recoverable text.
+        reason = (
+            failure_reason
+            if failure_reason
+            in {
+                "cancelled_by_user",
+                "harness_cancelled",
+            }
+            else "cancelled_by_user"
+        )
+        next_actions = [
+            run_registry.run_output_command(
+                ctx.alias,
+                cwd=ctx.source_cwd,
+            )
+            + " for partial output",
+        ]
+        lines = [
+            "Synthesized by delegate.",
+            "",
+            f"Status: {status}",
+            f"Failure reason: {reason}",
+        ]
+        if stderr_tail.strip():
+            lines.extend(["", "Redacted stderr tail:", "```text", stderr_tail.rstrip(), "```"])
+        lines.extend(["", "Next actions:", *(f"- {action}" for action in next_actions)])
+        return "\n".join(lines), COMPLETION_REPORT_SOURCE_SYNTHESIZED
     if accumulator.completion_text and child_text:
         return child_text, COMPLETION_REPORT_SOURCE_CHILD
     if status == run_registry.STATUS_FAILED and not accumulator.completion_text:
@@ -694,39 +738,6 @@ def _completion_report_text_and_source(
             lines.append(f"Harness error: {redaction.redact_string(terminal_reason.strip())}")
         if failure_reason == "auth_failed":
             lines.append(_auth_remediation_line(ctx))
-        if stderr_tail.strip():
-            lines.extend(["", "Redacted stderr tail:", "```text", stderr_tail.rstrip(), "```"])
-        lines.extend(["", "Next actions:", *(f"- {action}" for action in next_actions)])
-        return "\n".join(lines), COMPLETION_REPORT_SOURCE_SYNTHESIZED
-    if status == run_registry.STATUS_CANCELLED:
-        # A cancelled run was killed mid-flight: a partial child message left in
-        # stdout is NOT a valid completion report, so synthesize one regardless of
-        # any recoverable assistant text. The failure reason is the cancel reason
-        # already computed by _failure_reason (cancelled_by_user when cancel
-        # requested/won the race, harness_cancelled when a harness terminal event
-        # drove the cancellation). Same envelope fields as the failed path.
-        reason = (
-            failure_reason
-            if failure_reason
-            in {
-                "cancelled_by_user",
-                "harness_cancelled",
-            }
-            else "cancelled_by_user"
-        )
-        next_actions = [
-            run_registry.run_output_command(
-                ctx.alias,
-                cwd=ctx.source_cwd,
-            )
-            + " for partial output",
-        ]
-        lines = [
-            "Synthesized by delegate.",
-            "",
-            f"Status: {status}",
-            f"Failure reason: {reason}",
-        ]
         if stderr_tail.strip():
             lines.extend(["", "Redacted stderr tail:", "```text", stderr_tail.rstrip(), "```"])
         lines.extend(["", "Next actions:", *(f"- {action}" for action in next_actions)])
@@ -895,7 +906,10 @@ def completion_json_payload(
         _merge_extra(payload, extra)
 
     if not ok:
-        if extra is not None and extra.get("commitPolicyCausedFailure") is True:
+        if status == run_registry.STATUS_CANCELLED and extra is not None:
+            payload["error"] = str(extra.get("failureReason") or "cancelled_by_user")
+            payload["message"] = "Run was cancelled."
+        elif extra is not None and extra.get("commitPolicyCausedFailure") is True:
             payload["error"] = str(extra.get("error") or "commit_policy_violated")
             payload["message"] = str(extra.get("message") or "Commit policy failed.")
         else:
@@ -1022,6 +1036,8 @@ class TrackedCaptureResult:
     stdin_failures: tuple[str, ...]
     pid: int
     pgid: int | None
+    error: str | None = None
+    message: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1276,26 +1292,35 @@ def _record_tracked_launch_failure(
         if prior_capture is not None
         else harness_events.StreamAccumulator(harness=ctx.harness)
     )
-    write_state(
-        files.run_path,
-        build_state(
-            ctx,
-            status="failed",
-            exit_code=1,
-            stdout_bytes=prior_capture.stdout_bytes if prior_capture is not None else 0,
-            stderr_bytes=prior_capture.stderr_bytes if prior_capture is not None else 0,
-            current=accumulator.current,
-            extra=extra,
-        ),
-    )
-    snapshot = build_snapshot(ctx, accumulator=accumulator, exit_code=1)
-    snapshot["ok"] = False
-    snapshot["status"] = "failed"
-    # The child never ran, so there is no result quality to report. Remove the
-    # snapshot's default "ok" verdict so launch-failure state and snapshot agree.
-    snapshot.pop("resultQuality", None)
-    snapshot.update({"error": error.error, "message": error.message})
-    write_snapshot(files.run_path, snapshot)
+    with run_registry.registry_lock(ctx.registry_root):
+        current = run_registry.load_run_state_or_none(ctx.registry_root, ctx.run_id)
+        current_status = current.get("status") if isinstance(current, dict) else None
+        cancel_requested = isinstance(current, dict) and current.get("cancelRequested") is True
+        if current_status in run_registry.TERMINAL_STATUSES or cancel_requested:
+            # A concurrent cancel or terminal finalizer owns the outcome. In
+            # particular, a fallback launch failure after cancel must not
+            # replace cancelled with child_launch_failed.
+            return
+        write_state(
+            files.run_path,
+            build_state(
+                ctx,
+                status="failed",
+                exit_code=1,
+                stdout_bytes=prior_capture.stdout_bytes if prior_capture is not None else 0,
+                stderr_bytes=prior_capture.stderr_bytes if prior_capture is not None else 0,
+                current=accumulator.current,
+                extra=extra,
+            ),
+        )
+        snapshot = build_snapshot(ctx, accumulator=accumulator, exit_code=1)
+        snapshot["ok"] = False
+        snapshot["status"] = "failed"
+        # The child never ran, so there is no result quality to report. Remove the
+        # snapshot's default "ok" verdict so launch-failure state and snapshot agree.
+        snapshot.pop("resultQuality", None)
+        snapshot.update({"error": error.error, "message": error.message})
+        write_snapshot(files.run_path, snapshot)
 
 
 def _capture_tracked_process(
@@ -1391,20 +1416,16 @@ def _capture_tracked_process(
             )
             stdin_thread.start()
 
+        timed_out = False
+
         def wait_for_child(timeout: float | None = None) -> int:
+            nonlocal timed_out
             try:
                 return process.wait(timeout=timeout)
-            except subprocess.TimeoutExpired as exc:
+            except subprocess.TimeoutExpired:
                 _terminate_call_process(process)
-                _cleanup_tracked_process_streams(
-                    process,
-                    stdin_thread=stdin_thread,
-                    stdout_thread=stdout_thread,
-                    stderr_thread=stderr_thread,
-                )
-                raise RunnerLaunchError(
-                    "call_timeout", "Child command exceeded the call timeout."
-                ) from exc
+                timed_out = True
+                return 1
 
         if progress_stderr is not None:
             emit_progress = True
@@ -1423,22 +1444,18 @@ def _capture_tracked_process(
             next_progress_at = time.monotonic() + initial_delay
             while True:
                 if not emit_progress:
-                    exit_code = process.wait()
+                    exit_code = wait_for_child(
+                        None if deadline is None else max(deadline - time.monotonic(), 0)
+                    )
                     break
                 timeout = max(next_progress_at - time.monotonic(), 0.01)
                 if deadline is not None:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         _terminate_call_process(process)
-                        _cleanup_tracked_process_streams(
-                            process,
-                            stdin_thread=stdin_thread,
-                            stdout_thread=stdout_thread,
-                            stderr_thread=stderr_thread,
-                        )
-                        raise RunnerLaunchError(
-                            "call_timeout", "Child command exceeded the call timeout."
-                        )
+                        timed_out = True
+                        exit_code = 1
+                        break
                     timeout = min(timeout, remaining)
                 try:
                     exit_code = process.wait(timeout=timeout)
@@ -1446,15 +1463,9 @@ def _capture_tracked_process(
                 except subprocess.TimeoutExpired:
                     if deadline is not None and time.monotonic() >= deadline:
                         _terminate_call_process(process)
-                        _cleanup_tracked_process_streams(
-                            process,
-                            stdin_thread=stdin_thread,
-                            stdout_thread=stdout_thread,
-                            stderr_thread=stderr_thread,
-                        )
-                        raise RunnerLaunchError(
-                            "call_timeout", "Child command exceeded the call timeout."
-                        ) from None
+                        timed_out = True
+                        exit_code = 1
+                        break
                     try:
                         _emit_progress_heartbeat(
                             ctx,
@@ -1486,6 +1497,8 @@ def _capture_tracked_process(
         stdin_failures=tuple(stdin_failures),
         pid=process.pid,
         pgid=pgid,
+        error="call_timeout" if timed_out else None,
+        message="Child command exceeded the configured timeout." if timed_out else None,
     )
 
 
@@ -1557,7 +1570,7 @@ def _finalize_tracked_run(
         run_registry.STATUS_CANCELLED,
     }:
         status = capture.accumulator.terminal_status
-        if exit_code == 0:
+        if status == run_registry.STATUS_CANCELLED or exit_code == 0:
             exit_code = 1
     # Marker protocol (finalize-first race): cancel stamps cancelRequested under
     # the registry lock BEFORE signaling. If the child exits 0 on SIGTERM and
@@ -1569,11 +1582,10 @@ def _finalize_tracked_run(
     # decision, so a marker that disappears between reads cannot corrupt state.
     pre_state = run_registry.load_run_state_or_none(ctx.registry_root, ctx.run_id)
     cancel_requested = isinstance(pre_state, dict) and pre_state.get("cancelRequested") is True
-    if cancel_requested and status != run_registry.STATUS_CANCELLED:
+    if cancel_requested:
         status = run_registry.STATUS_CANCELLED
-        if exit_code == 0:
-            exit_code = 1
-        merged_extra["failureReason"] = "cancelled_by_user"
+        exit_code = 1
+        _reconcile_cancel_extra(merged_extra)
     stderr_tail = profiles.read_bounded_stderr_tail(files.stderr_log)
     failure_reason = _failure_reason(
         status=status,
@@ -1609,7 +1621,7 @@ def _finalize_tracked_run(
         warnings = list(merged_extra.get("warnings") or [])
         _append_unique(warnings, _quality_warning(result_quality, harness=ctx.harness))
         merged_extra["warnings"] = warnings
-    persisted_status = _persist_final_progress(
+    persisted_status, persisted_extra = _persist_final_progress(
         files.run_path,
         ctx,
         capture.accumulator,
@@ -1620,6 +1632,45 @@ def _finalize_tracked_run(
         completion_report_written=report_written,
         extra=merged_extra,
     )
+    if (
+        persisted_status == run_registry.STATUS_CANCELLED
+        and status != run_registry.STATUS_CANCELLED
+    ):
+        # Cancel arrived after the preliminary state read and report decision.
+        # Rebuild the report for the authoritative cancelled outcome, then
+        # persist its reconciled metadata in the same rare path.
+        _reconcile_cancel_extra(persisted_extra)
+        report_text, report_source = _completion_report_text_and_source(
+            ctx,
+            capture.accumulator,
+            completion_report_mode=completion_report_mode,
+            status=run_registry.STATUS_CANCELLED,
+            failure_reason="cancelled_by_user",
+            stderr_tail=stderr_tail,
+        )
+        report_written = write_completion_report(files.run_path, report_text)
+        result_quality = _classify_result_quality(
+            ctx=ctx,
+            exit_code=1,
+            report_text=report_text,
+            report_written=report_written,
+            report_source=report_source,
+            accumulator=capture.accumulator,
+        )
+        persisted_extra["completionReportWritten"] = report_written
+        persisted_extra["completionReportSource"] = report_source if report_written else None
+        persisted_extra["resultQuality"] = result_quality
+        persisted_status, persisted_extra = _persist_final_progress(
+            files.run_path,
+            ctx,
+            capture.accumulator,
+            status=run_registry.STATUS_CANCELLED,
+            exit_code=1,
+            stdout_bytes=capture.stdout_bytes,
+            stderr_bytes=capture.stderr_bytes,
+            completion_report_written=report_written,
+            extra=persisted_extra,
+        )
     # Cancel-precedence reconciliation: when the finalizer preserved a
     # concurrent cancel (persisted_status is cancelled but the runner's own
     # exit-code-derived status was not cancelled), the LIVE result returned to
@@ -1627,24 +1678,18 @@ def _finalize_tracked_run(
     # reports success, so normalize exit_code to 1, status to cancelled, and
     # the failure reason to cancelled_by_user. This keeps the CLI envelope
     # (ok/status/exitCode), the process exit code, and state.json in lockstep.
-    if (
-        persisted_status == run_registry.STATUS_CANCELLED
-        and status != run_registry.STATUS_CANCELLED
-    ):
-        final_extra = dict(merged_extra)
-        final_extra["failureReason"] = "cancelled_by_user"
-        final_extra["exitCode"] = 1
+    if persisted_status == run_registry.STATUS_CANCELLED:
         return TrackedFinalization(
             status=run_registry.STATUS_CANCELLED,
             exit_code=1,
             report_written=report_written,
-            extra=final_extra,
+            extra=persisted_extra,
         )
     return TrackedFinalization(
         status=persisted_status,
         exit_code=exit_code,
         report_written=report_written,
-        extra=merged_extra,
+        extra=persisted_extra,
     )
 
 
@@ -1718,7 +1763,7 @@ def _should_retry_profiles(
 ) -> bool:
     if ctx.engine != "codex" or not ctx.fallback_env_overrides:
         return False
-    if capture.exit_code == 0:
+    if capture.error is not None or capture.exit_code == 0:
         return False
     # Codex --json reports usage limits as stdout events, not stderr, so the
     # classifier must see both channels (stderr-only missed real quota walls).
@@ -1730,6 +1775,13 @@ def _should_retry_profiles(
     if profiles.accumulator_had_tool_events(capture.accumulator):
         return False
     return ctx.mode != "work" or profiles.work_mode_safe_for_codex_fallback(cwd, workspace_baseline)
+
+
+def _cancel_requested_or_cancelled(ctx: RunContext) -> bool:
+    state = run_registry.load_run_state_or_none(ctx.registry_root, ctx.run_id)
+    return isinstance(state, dict) and (
+        state.get("cancelRequested") is True or state.get("status") == run_registry.STATUS_CANCELLED
+    )
 
 
 def _run_single_tracked_attempt(
@@ -1750,20 +1802,50 @@ def _run_single_tracked_attempt(
     attempt_label: str | None = None,
     prior_capture: TrackedCaptureResult | None = None,
 ) -> TrackedCaptureResult:
-    if attempt_label is not None:
-        _append_attempt_delimiter(files.stderr_log, label=attempt_label)
-    try:
-        process = _launch_tracked_process(
-            argv,
-            cwd,
-            stdin_text=stdin_text,
-            env_overrides=env_overrides,
-            scratch_dir=scratch_dir,
-        )
-    except OSError as exc:
+    process: subprocess.Popen[bytes] | None = None
+    launch_exc: OSError | None = None
+    # Admission, launch, and pid/pgid publication are one locked generation
+    # transition for both the primary attempt and retries. Cancel therefore
+    # observes either its marker blocking a retry or a complete live generation;
+    # there is no launched-but-unpublished child it can accidentally miss.
+    with run_registry.registry_lock(ctx.registry_root):
+        current = run_registry.load_run_state_or_none(ctx.registry_root, ctx.run_id)
+        if (
+            prior_capture is not None
+            and isinstance(current, dict)
+            and (
+                current.get("cancelRequested") is True
+                or current.get("status") == run_registry.STATUS_CANCELLED
+            )
+        ):
+            raise RunnerLaunchError("cancelled_by_user", "Run was cancelled.", 1)
+        if attempt_label is not None:
+            _append_attempt_delimiter(files.stderr_log, label=attempt_label)
+        try:
+            process = _launch_tracked_process(
+                argv,
+                cwd,
+                stdin_text=stdin_text,
+                env_overrides=env_overrides,
+                scratch_dir=scratch_dir,
+            )
+        except OSError as exc:
+            launch_exc = exc
+        else:
+            write_state(
+                files.run_path,
+                build_state(
+                    ctx,
+                    status="running",
+                    pid=process.pid,
+                ),
+            )
+    if launch_exc is not None:
+        exc = launch_exc
         error = _runner_launch_error(argv, cwd, exc)
         _record_tracked_launch_failure(files, ctx, error, prior_capture=prior_capture)
         raise error from exc
+    assert process is not None
     try:
         return _capture_tracked_process(
             process,
@@ -1924,6 +2006,7 @@ def execute_tracked(
     empty_retry_extra: JsonObject | None = None
     retry_prompt_temp_dir: str | None = None
     attempt_env = ctx.env_overrides or None
+    capture: TrackedCaptureResult | None = None
     try:
         capture = _run_single_tracked_attempt(
             launch_argv,
@@ -1940,7 +2023,7 @@ def execute_tracked(
             progress_initial_delay_sec=progress_initial_delay_sec,
             progress_interval_sec=progress_interval_sec,
         )
-        if _should_retry_profiles(
+        if not _cancel_requested_or_cancelled(ctx) and _should_retry_profiles(
             ctx,
             capture,
             cwd=cwd,
@@ -1983,7 +2066,8 @@ def execute_tracked(
             stdin_text is not None or prompt_file_text is not None or manifest_argv is not None
         )
         if (
-            retry_supported
+            not _cancel_requested_or_cancelled(ctx)
+            and retry_supported
             and _tracked_capture_quality(
                 files,
                 ctx,
@@ -2048,35 +2132,74 @@ def execute_tracked(
                 empty_retry_extra = {
                     "warnings": [EMPTY_RETRY_SKIPPED_WRITE_CAPABLE_WARNING],
                 }
+    except RunnerLaunchError:
+        if capture is None or not _cancel_requested_or_cancelled(ctx):
+            raise
+        # A retry launch lost the race to cancellation. Its locked launch-
+        # failure persistence preserved the marker/terminal state; finalize the
+        # prior capture through the ordinary cancelled path so live state,
+        # snapshot, report, and exit code converge on cancelled/1.
     finally:
         _cleanup_prompt_file_dir(prompt_temp_dir)
         _cleanup_prompt_file_dir(retry_prompt_temp_dir)
 
+    assert capture is not None
     ctx = _ctx_with_stdin_warnings(ctx, capture.stdin_failures, stderr)
+    final_extra = {**(fallback_extra or {}), **(empty_retry_extra or {})}
+    if capture.error is not None:
+        final_extra.update(
+            error=capture.error,
+            message=capture.message,
+            failureReason=capture.error,
+        )
     finalization = _finalize_tracked_run(
         files,
         ctx,
         capture,
         completion_report_mode=completion_report_mode,
-        extra={**(fallback_extra or {}), **(empty_retry_extra or {})} or None,
+        extra=final_extra or None,
     )
+    if capture.error is not None and finalization.status != run_registry.STATUS_CANCELLED:
+        raise RunnerLaunchError(capture.error, capture.message or capture.error, 1)
     return _tracked_result(ctx, capture, finalization, json_mode=json_mode, stdout=stdout)
 
 
-def _kill_process_group(process: subprocess.Popen[bytes], sig: signal.Signals) -> None:
+def _kill_process_group(pgid: int, sig: signal.Signals) -> None:
     with contextlib.suppress(ProcessLookupError):
-        os.killpg(process.pid, sig)
+        os.killpg(pgid, sig)
+
+
+def _wait_for_process_group_exit(pgid: int, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            pass
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.05, remaining))
 
 
 def _terminate_call_process(process: subprocess.Popen[bytes]) -> None:
     """Send SIGTERM, wait for graceful exit, then SIGKILL if needed."""
-    _kill_process_group(process, signal.SIGTERM)
-    try:
+    pgid = process.pid
+    with contextlib.suppress(ProcessLookupError):
+        pgid = os.getpgid(process.pid)
+    term_deadline = time.monotonic() + 2
+    _kill_process_group(pgid, signal.SIGTERM)
+    with contextlib.suppress(subprocess.TimeoutExpired):
         process.wait(timeout=2)
-    except subprocess.TimeoutExpired:
-        _kill_process_group(process, signal.SIGKILL)
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            process.wait(timeout=5)
+    remaining = max(term_deadline - time.monotonic(), 0)
+    if _wait_for_process_group_exit(pgid, remaining):
+        return
+    _kill_process_group(pgid, signal.SIGKILL)
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        process.wait(timeout=5)
+    _wait_for_process_group_exit(pgid, 5)
 
 
 def _bounded_call_communicate(
@@ -2227,7 +2350,7 @@ def _bounded_call_communicate(
             )
         raise RunnerLaunchError(
             "call_timeout",
-            f"Child call exceeded timeout of {timeout} seconds.",
+            f"Child command exceeded timeout of {timeout} seconds.",
             1,
         )
 

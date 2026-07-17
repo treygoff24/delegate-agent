@@ -43,10 +43,11 @@ from delegate_agent.request_models import Request, ResolvedWorkspace
 class PersistentWorktreeError(Exception):
     """User-facing error raised by the persistent worktree execution boundary."""
 
-    def __init__(self, error: str, message: str) -> None:
+    def __init__(self, error: str, message: str, exit_code: int = 2) -> None:
         super().__init__(message)
         self.error = error
         self.message = message
+        self.exit_code = exit_code
 
 
 BinaryValidator = Callable[[list[str], str], None]
@@ -599,20 +600,32 @@ def _launch_child_in_persistent_worktree(
     except Exception as exc:
         error_msg = str(exc)
         error_code = getattr(exc, "error", "execution_failed")
-        # _record_persistent_worktree_failure writes both the failed state and
-        # the failed snapshot in one consolidated pass; do not write_state here
-        # first (that would be a redundant double write of the same failed
-        # status). Behavior is identical, with a single state write. The
-        # worktree and branch were already created on disk, so the failure
-        # record preserves the realized worktree metadata for operator
-        # inspection/cleanup instead of pre-creation planned keys.
-        _record_persistent_worktree_failure(
-            registration,
-            error=str(error_code),
-            message=error_msg,
-            worktree_realized=True,
-        )
-        raise PersistentWorktreeError(error_code, error_msg) from exc
+        state = run_registry.load_run_state_or_none(preflight.registry_root, registration.run_id)
+        if isinstance(state, dict) and state.get("status") in {
+            run_registry.STATUS_FAILED,
+            run_registry.STATUS_CANCELLED,
+            run_registry.STATUS_SUCCEEDED,
+        }:
+            # execute_tracked already finalized the run. Preserve its captured
+            # output, report, quality, and terminal metadata; only add the
+            # realized worktree state needed for later inspection/removal.
+            run_registry.set_worktree_status(
+                preflight.registry_root,
+                registration.run_id,
+                "present",
+            )
+        else:
+            _record_persistent_worktree_failure(
+                registration,
+                error=str(error_code),
+                message=error_msg,
+                worktree_realized=True,
+            )
+        raise PersistentWorktreeError(
+            error_code,
+            error_msg,
+            getattr(exc, "exit_code", 2),
+        ) from exc
 
     run_registry.set_worktree_status(
         preflight.registry_root,

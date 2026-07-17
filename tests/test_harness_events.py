@@ -478,6 +478,11 @@ class HarnessEventsTests(unittest.TestCase):
         self.assertEqual(acc.events[0].kind, "text")
         self.assertIn("not json", acc.events[0].message or "")
 
+        kimi = self.events.StreamAccumulator(harness="kimi")
+        kimi.ingest_line("plain Kimi progress")
+        kimi.ingest_line(json.dumps(["non-object Kimi output"]))
+        self.assertEqual(kimi.events, [])
+
     def test_deeply_nested_json_line_falls_back_to_text_event(self):
         acc = self.events.StreamAccumulator()
         # Python 3.14's json scanner tolerates ~100k nesting levels before
@@ -996,6 +1001,39 @@ class HarnessEventsTests(unittest.TestCase):
             any("SECRET COMMAND OUTPUT" in (event.target or "") for event in acc.events)
         )
         self.assertNotIn("SECRET COMMAND OUTPUT", acc.current or "")
+
+    def test_kimi_deeply_nested_tool_result_content_does_not_leak(self):
+        acc = self.events.StreamAccumulator(harness="kimi")
+        secret = "SECRET COMMAND OUTPUT"
+        line = (
+            '{"role":"tool","content":"'
+            + secret
+            + '","nested":'
+            + "[" * 300_000
+            + "0"
+            + "]" * 300_000
+            + "}"
+        )
+
+        acc.ingest_line(line)
+
+        self.assertEqual(acc.events, [])
+        self.assertIsNone(acc.current)
+        self.assertNotIn(secret, acc.assistant_text)
+        self.assertIsNone(acc.recoverable_assistant_text)
+        self.assertIsNone(acc.completion_text)
+
+    def test_kimi_truncated_tool_result_content_does_not_leak(self):
+        acc = self.events.StreamAccumulator(harness="kimi")
+        secret = "SECRET COMMAND OUTPUT"
+
+        acc.ingest_line('{"role":"tool","content":"' + secret)
+
+        self.assertEqual(acc.events, [])
+        self.assertIsNone(acc.current)
+        self.assertNotIn(secret, acc.assistant_text)
+        self.assertIsNone(acc.recoverable_assistant_text)
+        self.assertIsNone(acc.completion_text)
 
     def test_kimi_0260_stream_vocabulary_regression(self):
         # Regression coverage of the exact line vocabulary live-captured from
