@@ -673,13 +673,18 @@ class CodexProfileExecutionTests(unittest.TestCase):
     def test_child_environment_drops_ambient_delegate_roots(self):
         with mock.patch.dict(
             os.environ,
-            {"DELEGATE_SOURCE_ROOT": "/outer/source", "DELEGATE_EXECUTION_ROOT": "/outer/run"},
+            {
+                "DELEGATE_SOURCE_ROOT": "/outer/source",
+                "DELEGATE_EXECUTION_ROOT": "/outer/run",
+                "WORKSPACE_ROOT": "/outer/workspace",
+            },
             clear=False,
         ):
             env = self.profiles.child_environment()
 
         self.assertNotIn("DELEGATE_SOURCE_ROOT", env)
         self.assertNotIn("DELEGATE_EXECUTION_ROOT", env)
+        self.assertNotIn("WORKSPACE_ROOT", env)
 
     def test_fallback_environment_keeps_authoritative_delegate_roots(self):
         resolution = self.profiles.ProfileResolution(
@@ -689,6 +694,7 @@ class CodexProfileExecutionTests(unittest.TestCase):
                 "CODEX_HOME": "/personal",
                 "DELEGATE_SOURCE_ROOT": "/profile/source",
                 "DELEGATE_EXECUTION_ROOT": "/profile/run",
+                "WORKSPACE_ROOT": "/profile/workspace",
             },
             codex_home="/personal",
             codex_fallback_home="/work",
@@ -699,12 +705,14 @@ class CodexProfileExecutionTests(unittest.TestCase):
                 {
                     "DELEGATE_SOURCE_ROOT": "/actual/source",
                     "DELEGATE_EXECUTION_ROOT": "/actual/run",
+                    "WORKSPACE_ROOT": "/actual/workspace",
                 },
             )
 
         self.assertEqual(overrides["CODEX_HOME"], "/work")
         self.assertEqual(overrides["DELEGATE_SOURCE_ROOT"], "/actual/source")
         self.assertEqual(overrides["DELEGATE_EXECUTION_ROOT"], "/actual/run")
+        self.assertEqual(overrides["WORKSPACE_ROOT"], "/actual/workspace")
 
     def test_fallback_same_account_normalization_handles_home_vars_and_symlinks(self):
         with tempfile.TemporaryDirectory() as tmp:

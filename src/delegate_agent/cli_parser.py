@@ -574,7 +574,15 @@ def _shell_command(argv: list[str]) -> str:
     return shlex.join(["delegate", *argv])
 
 
-def corrected_global_command(argv: list[str]) -> str:
+def corrected_command_suffix(argv: list[str]) -> str:
+    try:
+        parse_cli(argv)
+    except DelegateError:
+        return ""
+    return f" Corrected command: {_shell_command(argv)}."
+
+
+def corrected_global_argv(argv: list[str]) -> list[str]:
     globals_out: list[str] = []
     rest: list[str] = []
     i = 0
@@ -590,7 +598,11 @@ def corrected_global_command(argv: list[str]) -> str:
             continue
         rest.append(token)
         i += 1
-    return _shell_command([*globals_out, *rest])
+    return [*globals_out, *rest]
+
+
+def corrected_global_command(argv: list[str]) -> str:
+    return _shell_command(corrected_global_argv(argv))
 
 
 def raise_misplaced_global_option(message: str, argv: list[str] | None = None) -> NoReturn:
@@ -598,7 +610,7 @@ def raise_misplaced_global_option(message: str, argv: list[str] | None = None) -
         "Move global options before the subcommand "
         "(for example: delegate --json --cwd PATH <subcommand> ...)."
     )
-    corrected = f" Corrected command: {corrected_global_command(argv)}." if argv else ""
+    corrected = corrected_command_suffix(corrected_global_argv(argv)) if argv else ""
     raise DelegateError("misplaced_global_option", f"{message} {guidance}{corrected}")
 
 
@@ -738,10 +750,12 @@ def parse_modeless_engine(
         isolation = "worktree"
         forbid_commit_implied_isolation = True
     if forbid_commit and mode == "work" and isolation == "none":
+        corrected = corrected_command_suffix(
+            ["--isolation", "worktree", engine, mode, "--forbid-commit", *(prompt_parts or [])]
+        )
         raise DelegateError(
             "invalid_option_combination",
-            "--forbid-commit cannot be combined with --isolation none. "
-            f"Corrected command: {_shell_command(['--isolation', 'worktree', engine, mode, '--forbid-commit', *(prompt_parts or [])])}.",
+            f"--forbid-commit cannot be combined with --isolation none.{corrected}",
         )
     return ParsedCommand(
         engine,
@@ -864,10 +878,12 @@ def parse_droid(
         forbid_commit_implied_isolation = True
     if forbid_commit and mode == "work" and isolation == "none":
         droid_tokens = ["droid", *([model_alias] if model_alias else []), mode]
+        corrected = corrected_command_suffix(
+            ["--isolation", "worktree", *droid_tokens, "--forbid-commit", *(prompt_parts or [])]
+        )
         raise DelegateError(
             "invalid_option_combination",
-            "--forbid-commit cannot be combined with --isolation none. "
-            f"Corrected command: {_shell_command(['--isolation', 'worktree', *droid_tokens, '--forbid-commit', *(prompt_parts or [])])}.",
+            f"--forbid-commit cannot be combined with --isolation none.{corrected}",
         )
     return ParsedCommand(
         "droid",
@@ -1195,8 +1211,29 @@ def parse_prompt_tail(
                 invalid_error="invalid_timeout",
             )
             continue
+        if token in MISPLACED_GLOBAL_OPTIONS:
+            raise_misplaced_global_option("Global options must appear before the subcommand.")
+        if token.startswith("-"):
+            command = " ".join(command_prefix or ["launch"])
+            raise DelegateError("unknown_option", unknown_option_message(command, token))
         prompt_parts = rest[i:]
         break
+    known_options = set(MISPLACED_GLOBAL_OPTIONS) | {"--help", "-h"}
+    if command_prefix:
+        spec = command_help.COMMAND_SPECS.get(command_prefix[0])
+        if spec is not None:
+            known_options.update(option.flag for option in spec.options)
+    unknown_option = next(
+        (token for token in prompt_parts if token.startswith("-") and token not in known_options),
+        None,
+    )
+    if unknown_option is not None:
+        command = " ".join(command_prefix or ["launch"])
+        raise DelegateError(
+            "unknown_option",
+            unknown_option_message(command, unknown_option)
+            + " If this token is part of your prompt text, quote the whole prompt or use --prompt-file.",
+        )
     if "--prompt-file" in prompt_parts:
         raise DelegateError(
             "ambiguous_prompt_source",
@@ -1803,7 +1840,7 @@ def corrected_prompt_file_suffix(command_prefix: list[str] | None, rest: list[st
     before = [token for token in rest[:prompt_index] if token != "--json"]
     after = rest[prompt_index + 2 :]
     corrected = [*command_prefix, "--prompt-file", prompt_file, *before, *after]
-    return f" Corrected command: {_shell_command(corrected)}."
+    return corrected_command_suffix(corrected)
 
 
 def corrected_drop_option_suffix(
@@ -1817,7 +1854,7 @@ def corrected_drop_option_suffix(
         return ""
     drop = 2 if takes_value else 1
     corrected = [*command_prefix, *rest[:index], *rest[index + drop :]]
-    return f" Corrected command: {_shell_command(corrected)}."
+    return corrected_command_suffix(corrected)
 
 
 def parse_non_negative_int(value: str, *, option: str) -> int:

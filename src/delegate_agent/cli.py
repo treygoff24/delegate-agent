@@ -299,6 +299,7 @@ def dry_run_payload(request: Request) -> JsonObject:
         "ok": True,
         "dryRun": True,
         "cwd": request.workspace,
+        "workspaceRoot": request.workspace,
         "workspaceKind": request.workspace_kind,
         "engine": request.engine,
         "mode": request.mode,
@@ -585,12 +586,45 @@ def _set_child_root_env(request: Request, source_workspace: ResolvedWorkspace) -
         if request.mode == MODE_CALL
         else str(Path(source_workspace.path).resolve(strict=False))
     )
-    env = {**(request.env_overrides or {}), "DELEGATE_SOURCE_ROOT": source_root}
+    env = {
+        **(request.env_overrides or {}),
+        "DELEGATE_SOURCE_ROOT": source_root,
+        "WORKSPACE_ROOT": execution_root,
+    }
     if execution_root != source_root:
         env["DELEGATE_EXECUTION_ROOT"] = execution_root
     else:
         env.pop("DELEGATE_EXECUTION_ROOT", None)
     request.env_overrides = env
+
+
+def _artifact_files(root: Path) -> list[str]:
+    return sorted(str(item) for item in root.rglob("*") if item.is_file() or item.is_symlink())
+
+
+def _preserve_call_artifacts(
+    workspace: Path,
+    source_workspace: ResolvedWorkspace,
+    artifact_id: str | None,
+) -> tuple[str, list[str], str | None] | None:
+    if not any(workspace.iterdir()):
+        return None
+    try:
+        registry_root = run_registry.ensure_registry(
+            Path(source_workspace.path), workspace_kind=source_workspace.kind
+        )
+        artifacts_root = registry_root / "artifacts"
+        run_registry.ensure_private_dir(artifacts_root)
+        destination = artifacts_root / (artifact_id or run_registry.generate_run_id())
+        shutil.move(str(workspace), destination)
+        return str(destination), _artifact_files(destination), None
+    except (OSError, run_registry.RegistryJsonError) as exc:
+        return (
+            str(workspace),
+            _artifact_files(workspace),
+            f"Could not move call artifacts into Delegate state; retained temp cwd at "
+            f"{workspace}: {exc}",
+        )
 
 
 def execute_request(
@@ -607,6 +641,8 @@ def execute_request(
 ) -> tuple[int, JsonObject | None]:
     _set_child_root_env(request, source_workspace)
     if request.mode == MODE_CALL:
+        call_response: tuple[int, JsonObject | None] | None = None
+        artifact_id: str | None = None
         try:
             if request.engine == "codex":
                 profiles.preflight_codex_request(request, config.get("codex", {}))
@@ -643,6 +679,7 @@ def execute_request(
                         "cwd": source_workspace.path,
                     },
                 )
+                artifact_id = run_id
                 ctx_runner = make_run_context(
                     registry_root,
                     request,
@@ -651,7 +688,7 @@ def execute_request(
                     source_workspace=source_workspace,
                 )
                 try:
-                    return delegate_runner.execute_tracked(
+                    call_response = delegate_runner.execute_tracked(
                         request.argv,
                         request.workspace,
                         ctx_runner,
@@ -668,6 +705,7 @@ def execute_request(
                         progress=False,
                         timeout=request.timeout,
                     )
+                    return call_response
                 except delegate_runner.RunnerLaunchError as exc:
                     raise DelegateError(exc.error, exc.message, exc.exit_code) from exc
             try:
@@ -707,6 +745,9 @@ def execute_request(
                     "exitCode": result.exit_code,
                     "engine": request.engine,
                     "mode": request.mode,
+                    "workspaceRoot": (request.env_overrides or {}).get(
+                        "WORKSPACE_ROOT", request.workspace
+                    ),
                     "model": request.model,
                     "pure": request.pure,
                     "structuredOutput": request.output_schema is not None,
@@ -757,7 +798,8 @@ def execute_request(
                     else:
                         payload["message"] = "Child command failed."
                     payload["stderrTail"] = result.stderr_tail
-                return result.exit_code, payload
+                call_response = (result.exit_code, payload)
+                return call_response
             for warning in result.warnings:
                 print(f"warning: {warning}", file=stderr)
             if result.exit_code != 0:
@@ -767,7 +809,8 @@ def execute_request(
                     print(result.stderr_tail, file=stderr)
             if result.text:
                 print(result.text, file=stdout)
-            return result.exit_code, None
+            call_response = (result.exit_code, None)
+            return call_response
         finally:
             if request.cleanup_workspace:
                 if target_contains_source_root(request.workspace, source_workspace.path):
@@ -775,7 +818,23 @@ def execute_request(
                         "source_root_guard",
                         "Refusing to remove a call workspace that is or contains the source root.",
                     )
-                shutil.rmtree(request.workspace, ignore_errors=True)
+                preserved = _preserve_call_artifacts(
+                    Path(request.workspace), source_workspace, artifact_id
+                )
+                if preserved is None:
+                    shutil.rmtree(request.workspace, ignore_errors=True)
+                else:
+                    artifacts_path, artifacts, warning = preserved
+                    payload = call_response[1] if call_response is not None else None
+                    if payload is not None:
+                        payload["artifactsPath"] = artifacts_path
+                        payload["preservedArtifacts"] = artifacts
+                        if warning is not None:
+                            payload.setdefault("warnings", []).append(warning)
+                    else:
+                        print(f"preserved call artifacts: {artifacts_path}", file=stderr)
+                        if warning is not None:
+                            print(f"warning: {warning}", file=stderr)
     if request.engine == "codex":
         profiles.preflight_codex_request(request, config.get("codex", {}))
     ctx = request.isolation_context
@@ -1056,13 +1115,7 @@ def main(
             return emit_agent_help(stdout)
 
         if parsed.subcommand != "run":
-            if parsed.launch is not None and parsed.launch.mode == MODE_CALL:
-                if global_options.group is not None:
-                    workspace = resolve_workspace(global_options.cwd)
-                else:
-                    workspace = ResolvedWorkspace(CALL_TEMP_CWD_PLACEHOLDER, "directory")
-            else:
-                workspace = resolve_workspace(global_options.cwd)
+            workspace = resolve_workspace(global_options.cwd)
 
         if parsed.subcommand == "capabilities":
             command = parsed.capabilities

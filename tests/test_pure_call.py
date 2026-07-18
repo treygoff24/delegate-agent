@@ -102,6 +102,58 @@ class PureCallTests(CommandTestBase):
         self.assertEqual(code, 0)
         self.assertFalse(workspace.exists())
 
+    def test_call_preserves_child_created_files_in_result_envelope(self):
+        with tempfile.TemporaryDirectory() as source:
+            parsed = self.delegate.parse_cli(["cursor", "call", "write memo"])
+            request = self.delegate.request_from_parsed(
+                parsed, self.delegate.DEFAULT_CONFIG, io.StringIO("")
+            )
+            workspace = Path(request.workspace)
+            fake = self.delegate.delegate_runner.CallResult(
+                text="done",
+                exit_code=0,
+                duration_ms=1,
+                stdout_bytes=4,
+                stderr_bytes=0,
+                text_chars=4,
+                text_truncated=False,
+            )
+
+            def create_deliverable(*_args, **_kwargs):
+                deliverable = workspace / "research" / "memo.md"
+                deliverable.parent.mkdir()
+                deliverable.write_text("completed memo\n", encoding="utf-8")
+                return fake
+
+            with (
+                mock.patch.object(self.delegate, "ensure_binary"),
+                mock.patch.object(
+                    self.delegate.delegate_runner,
+                    "execute_call",
+                    side_effect=create_deliverable,
+                ),
+            ):
+                code, payload = self.delegate.execute_request(
+                    request,
+                    json_mode=True,
+                    config=self.delegate.DEFAULT_CONFIG,
+                    pass_through=False,
+                    completion_report_mode="none",
+                    source_workspace=self.delegate.ResolvedWorkspace(source, "directory"),
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+
+            self.assertEqual(code, 0)
+            self.assertFalse(workspace.exists())
+            self.assertIsNotNone(payload)
+            assert payload is not None
+            preserved = [Path(item) for item in payload["preservedArtifacts"]]
+            self.assertEqual(len(preserved), 1)
+            self.assertEqual(preserved[0].name, "memo.md")
+            self.assertEqual(preserved[0].read_text(encoding="utf-8"), "completed memo\n")
+            self.assertEqual(preserved[0].parents[2].name, "artifacts")
+
     def test_call_pure_env_is_allowlisted_no_ambient_secrets(self):
         with mock.patch.dict(
             os.environ,

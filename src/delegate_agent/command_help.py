@@ -67,7 +67,9 @@ CALL_MODE_NOTE = (
     "workspace; --cwd PATH is accepted only with --group to choose that registry/config "
     "workspace and never changes the child's throwaway execution cwd. --timeout SEC "
     "bounds calls and tracked safe/work runs alike; on expiry Delegate terminates "
-    "the child process group and returns call_timeout."
+    "the child process group and returns call_timeout. Use delegate --cwd PATH <engine> work "
+    "for file deliverables; call is for text results. If a call creates files anyway, Delegate moves its cwd under "
+    ".delegate/artifacts/<runId>/ and reports preservedArtifacts; cleanup is manual."
 )
 WORKTREE_DIRTY_SYNC_NOTE = (
     "Persistent worktree work runs automatically include tracked edits and untracked, "
@@ -84,7 +86,8 @@ GLOBAL_OPTIONS: tuple[OptionSpec, ...] = (
         "--cwd",
         "PATH",
         "Resolve the workspace from PATH (repo root inside Git); call mode accepts it only "
-        "with --group for registry/config resolution.",
+        "with --group for registry/config resolution. Run metadata reports cwd, executionCwd, "
+        "and workspaceRoot; children receive WORKSPACE_ROOT.",
     ),
     OptionSpec("--json", None, "Emit machine-readable JSON instead of human text."),
     OptionSpec(

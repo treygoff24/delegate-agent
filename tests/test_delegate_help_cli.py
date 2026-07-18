@@ -13,6 +13,7 @@ import importlib
 import io
 import json
 import os
+import shlex
 import sys
 import tempfile
 import unittest
@@ -508,6 +509,29 @@ class ErgonomicsParserTests(HelpCliTestBase):
         self.assertEqual(ctx.exception.error, "ambiguous_prompt_source")
         self.assertIn("Corrected command:", ctx.exception.message)
         self.assertIn("--prompt-file task.md", ctx.exception.message)
+        corrected = ctx.exception.message.split("Corrected command: ", 1)[1].removesuffix(".")
+        corrected_argv = shlex.split(corrected)
+        self.assertEqual(corrected_argv[0], "delegate")
+        self.delegate.parse_cli(corrected_argv[1:])
+
+    def test_unknown_launch_option_wins_before_prompt_source_validation(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(
+                [
+                    "--group",
+                    "research",
+                    "cursor",
+                    "work",
+                    "write memo",
+                    "--alias",
+                    "memo",
+                    "--prompt-file",
+                    "task.md",
+                ]
+            )
+        self.assertEqual(ctx.exception.error, "unknown_option")
+        self.assertIn("--alias", ctx.exception.message)
+        self.assertNotIn("Corrected command:", ctx.exception.message)
 
     def test_forbid_commit_implies_worktree_when_isolation_omitted(self):
         parsed = self.delegate.parse_cli(["cursor", "work", "--forbid-commit", "do it"])
@@ -607,6 +631,7 @@ class KimiHelpTests(HelpCliTestBase):
         self.assertIn("emptyRetry", payload["completionEnvelope"])
         self.assertIn("DELEGATE_SOURCE_ROOT", payload["childEnvironment"])
         self.assertIn("DELEGATE_EXECUTION_ROOT", payload["childEnvironment"])
+        self.assertIn("WORKSPACE_ROOT", payload["childEnvironment"])
 
     def test_devin_help_advertises_only_work_and_call_modes(self):
         code, out, _err = self.run_main(["devin", "--help"])

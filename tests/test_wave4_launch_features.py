@@ -65,8 +65,8 @@ class Wave4LaunchFeatureTests(ExecutionTestBase):
             env_log = Path(fake_home) / "child-env.log"
             agent = self.write_executable(
                 "agent",
-                "printf 'source=%s\\nexecution=%s\\n' \"$DELEGATE_SOURCE_ROOT\" "
-                '"${DELEGATE_EXECUTION_ROOT:-}" >> "$DELEGATE_ENV_LOG"\n',
+                "printf 'source=%s\\nexecution=%s\\nworkspace=%s\\n' \"$DELEGATE_SOURCE_ROOT\" "
+                '"${DELEGATE_EXECUTION_ROOT:-}" "$WORKSPACE_ROOT" >> "$DELEGATE_ENV_LOG"\n',
             )
             config_path = self.write_config(
                 self.config_with_cursor(agent, data_home=str(Path(fake_home) / "worktrees"))
@@ -90,16 +90,20 @@ class Wave4LaunchFeatureTests(ExecutionTestBase):
                         else:
                             args.extend(["cursor", mode, "hello"])
                         code = self.delegate.main(args, stdout=stdout)
-                        json.loads(stdout.getvalue())
+                        payload = json.loads(stdout.getvalue())
                         self.assertEqual(code, 0)
                         text = env_log.read_text(encoding="utf-8")
                         self.assertIn(f"source={source_root}", text)
                         if mode == "work":
                             self.assertIn("execution=\n", text)
+                            workspace_root = source_root
                         else:
                             execution_root = text.split("execution=", 1)[1].splitlines()[0]
                             self.assertTrue(execution_root)
                             self.assertNotEqual(execution_root, source_root)
+                            workspace_root = execution_root
+                        self.assertIn(f"workspace={workspace_root}\n", text)
+                        self.assertEqual(payload["workspaceRoot"], workspace_root)
                         env_log.write_text("", encoding="utf-8")
 
                 stdout = io.StringIO()
@@ -110,6 +114,7 @@ class Wave4LaunchFeatureTests(ExecutionTestBase):
                 self.assertTrue(source_root)
                 self.assertNotEqual(source_root, str(Path.cwd().resolve()))
                 self.assertIn("execution=\n", text)
+                self.assertIn(f"workspace={source_root}\n", text)
 
     def test_dirty_worktree_auto_syncs_tracked_untracked_ignored_and_external_symlink(self):
         from delegate_agent import safe_workspace

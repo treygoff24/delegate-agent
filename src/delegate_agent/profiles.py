@@ -243,6 +243,7 @@ def child_environment(
     if not pure:
         env.pop("DELEGATE_SOURCE_ROOT", None)
         env.pop("DELEGATE_EXECUTION_ROOT", None)
+        env.pop("WORKSPACE_ROOT", None)
     if base:
         env.update(base)
     if overrides:
@@ -346,7 +347,7 @@ def codex_fallback_child_env_overrides(
         **{
             key: value
             for key, value in fallback.items()
-            if key not in {"DELEGATE_SOURCE_ROOT", "DELEGATE_EXECUTION_ROOT"}
+            if key not in {"DELEGATE_SOURCE_ROOT", "DELEGATE_EXECUTION_ROOT", "WORKSPACE_ROOT"}
         },
     }
 

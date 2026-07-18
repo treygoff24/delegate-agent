@@ -50,3 +50,6 @@ docs/plans/
 scorecard.png
 
 docs/dogfood/
+
+# Ephemeral coordinator scratch (briefs, lane results)
+.scratch/

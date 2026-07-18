@@ -253,6 +253,7 @@ def _build_persistent_worktree_run_context(
             **(request.env_overrides or {}),
             "DELEGATE_SOURCE_ROOT": str(Path(execution.source_workspace.path).resolve()),
             "DELEGATE_EXECUTION_ROOT": str(Path(worktree_path).resolve()),
+            "WORKSPACE_ROOT": str(Path(worktree_path).resolve()),
         },
         fallback_env_overrides=profiles.codex_fallback_child_env_overrides(
             request.profile_resolution,
@@ -260,6 +261,7 @@ def _build_persistent_worktree_run_context(
                 **(request.env_overrides or {}),
                 "DELEGATE_SOURCE_ROOT": str(Path(execution.source_workspace.path).resolve()),
                 "DELEGATE_EXECUTION_ROOT": str(Path(worktree_path).resolve()),
+                "WORKSPACE_ROOT": str(Path(worktree_path).resolve()),
             },
         ),
         auth_profile=request.auth_profile,

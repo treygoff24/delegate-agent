@@ -834,6 +834,7 @@ def describe_payload(
         "childEnvironment": {
             "DELEGATE_SOURCE_ROOT": "Resolved source workspace root.",
             "DELEGATE_EXECUTION_ROOT": "Child execution root when isolated; omitted for direct work mode.",
+            "WORKSPACE_ROOT": "Child execution root for anchoring paths after changing directories.",
         },
         "workflows": {
             "registry": ".delegate/workflows/<wfId>/",

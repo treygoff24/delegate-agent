@@ -175,7 +175,9 @@ This closes a leak where an untracked symlink whose absolute target pointed at t
 Workspace-backed children receive `DELEGATE_SOURCE_ROOT` with the resolved source
 workspace root. Isolated children also receive `DELEGATE_EXECUTION_ROOT`. Call
 mode has no source checkout: its throwaway cwd is `DELEGATE_SOURCE_ROOT`, and the
-Registry/config workspace is not exposed to the child. Delegate's own worktree
+Registry/config workspace is not exposed to the child. Every child receives
+`WORKSPACE_ROOT` set to its execution root; run metadata reports the same value
+as `workspaceRoot`. Delegate's own worktree
 removal, pruning, and temporary snapshot teardown paths refuse a target that is
 or contains the source root, including through relative or symlinked paths.
 Harness-side hook enforcement is separate machine configuration and is not

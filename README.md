@@ -190,6 +190,12 @@ delegate --json codex call "Summarize this context in three bullets."
 delegate --json claude call --pure --timeout 60 --output-schema result.schema.json < prompt.txt
 ```
 
+Use `delegate --cwd /path/to/workspace <engine> work ...` when the deliverable
+is a file; `call` is optimized for text results. If a call creates files in its throwaway cwd,
+Delegate preserves that cwd under `.delegate/artifacts/<runId>/` and reports
+`preservedArtifacts` in the JSON result instead of deleting the files. Artifact
+cleanup is manual.
+
 `call --pure` is a hostile-input completion boundary available on Claude only.
 It uses an empty temporary cwd, an allowlisted child environment, no Delegate
 prompt framing, and no session persistence or tools according to the engine
@@ -290,6 +296,11 @@ Delegate separates three ideas:
 | Mode | `safe` is for review/investigation; `work` is edit-capable; `call` is a stateless one-hop model call. |
 | Isolation | The child runtime can run in the source workspace, a temporary copy/worktree, or a persistent Git worktree. |
 | Runtime policy | Extra flags passed to the child runtime, such as Codex `--sandbox read-only`. |
+
+Every child receives `WORKSPACE_ROOT`, the resolved execution workspace shown as
+`workspaceRoot` in run metadata. Use it to anchor workspace-relative commands
+after changing into a toolchain directory. Source-backed runs also expose
+`DELEGATE_SOURCE_ROOT`; isolated runs expose `DELEGATE_EXECUTION_ROOT`.
 
 Defaults are intentionally conservative for review paths:
 

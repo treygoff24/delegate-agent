@@ -446,6 +446,12 @@ Because the child call is stateless, `--isolation`, `--pass-through`,
 `--progress`, `--forbid-commit`, and markdown completion reports are rejected.
 An ordinary call also rejects `--cwd`.
 
+Use `delegate --cwd /path/to/workspace <engine> work ...` for file deliverables;
+`call` is intended for text results. If a child nevertheless creates files in the call cwd,
+Delegate moves the cwd to `.delegate/artifacts/<runId>/` at teardown and lists
+the retained files in `preservedArtifacts`. The artifacts directory has manual,
+bounded-by-operator retention; Delegate does not run artifact GC.
+
 **Grouped calls preserve workflow tracking without exposing the workspace to the
 child.** `--group NAME` registers the call in the invocation workspace so
 workflow kill/adopt and group selectors can find it. In that one combination,
@@ -771,7 +777,7 @@ Codex usage-limit fallback fires, the completion payload also includes
 `codexAuthFallback` metadata (reason, the primary and fallback profile names,
 both exit codes, and a redacted primary stderr tail).
 
-Snapshot JSON uses schema `delegate.snapshot.v1` and includes fields such as `alias`, `runId`, `harness`, `status`, `rawStatus`, `effectiveStatus`, `staleReason`, `nextActions`, `cwd`, `executionCwd`, `assistantText`, `recentEvents`, `warnings`, `exitCode`, reasoning metadata, terminal metadata, and isolation/worktree metadata when applicable. Inspection commands do not rewrite a stale run's recorded state; they expose the raw recorded status plus the effective status computed from the current PID check. Run-output and worktree show output include `requestedHandle`, `resolvedHandle`, and `resolutionKind` (`literal`, `latest`, or `latest_model`) when a handle resolves indirectly. For bare harness handles, snapshot, run-output, and wait also report `resolvedRunId`, `resolvedAlias`, `resolvedWorkspace`, `resolvedAge`, and `resolvedAgeSeconds`. Resolutions older than 24 hours add a `bare_handle_stale` warning suggesting `--cwd` or an explicit handle.
+Snapshot JSON uses schema `delegate.snapshot.v1` and includes fields such as `alias`, `runId`, `harness`, `status`, `rawStatus`, `effectiveStatus`, `staleReason`, `nextActions`, `cwd`, `executionCwd`, `workspaceRoot`, `assistantText`, `recentEvents`, `warnings`, `exitCode`, reasoning metadata, terminal metadata, and isolation/worktree metadata when applicable. `workspaceRoot` is also exported to the child as `WORKSPACE_ROOT`, so commands can anchor workspace-relative paths after changing directories. Inspection commands do not rewrite a stale run's recorded state; they expose the raw recorded status plus the effective status computed from the current PID check. Run-output and worktree show output include `requestedHandle`, `resolvedHandle`, and `resolutionKind` (`literal`, `latest`, or `latest_model`) when a handle resolves indirectly. For bare harness handles, snapshot, run-output, and wait also report `resolvedRunId`, `resolvedAlias`, `resolvedWorkspace`, `resolvedAge`, and `resolvedAgeSeconds`. Resolutions older than 24 hours add a `bare_handle_stale` warning suggesting `--cwd` or an explicit handle.
 
 Tracked run envelopes include `completionReportWritten`, `completionReportSource`
 (`child`, `delegate_synthesized`, `stdout_recovery`, or `null`), and
