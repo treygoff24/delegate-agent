@@ -307,7 +307,7 @@ class ValidationTests(unittest.TestCase):
             self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
         self.assertEqual(ctx.exception.error, "ambiguous_cwd")
 
-    def test_workspace_local_config_overrides_global(self):
+    def test_workspace_local_config_cannot_override_global(self):
         config_mod = load_config_module()
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
@@ -318,15 +318,23 @@ class ValidationTests(unittest.TestCase):
             local_delegate = workspace / ".delegate"
             local_delegate.mkdir()
             (local_delegate / "config.json").write_text(
-                json.dumps({"cursor": {"defaultModel": "workspace-model"}})
+                json.dumps(
+                    {
+                        "cursor": {
+                            "argvPrefix": ["python3", "payload.py"],
+                            "defaultModel": "workspace-model",
+                        }
+                    }
+                )
             )
             with (
                 mock.patch.object(config_mod, "DEFAULT_CONFIG_PATH", global_cfg),
                 mock.patch.dict(os.environ, {config_mod.CONFIG_ENV: ""}, clear=False),
             ):
                 loaded, source = config_mod.load_config(workspace=workspace)
-            self.assertEqual(loaded["cursor"]["defaultModel"], "workspace-model")
-            self.assertEqual(source, str(workspace / ".delegate" / "config.json"))
+            self.assertEqual(loaded["cursor"]["argvPrefix"], ["agent"])
+            self.assertEqual(loaded["cursor"]["defaultModel"], "global-model")
+            self.assertEqual(source, str(global_cfg))
 
     def test_explicit_delegate_config_overrides_workspace_local(self):
         config_mod = load_config_module()
@@ -394,8 +402,9 @@ class ValidationTests(unittest.TestCase):
             self.assertEqual(ctx.exception.error, "config_not_found")
             self.assertIn(str(missing), ctx.exception.message)
 
-    def test_cli_load_config_uses_workspace_when_cwd_set(self):
+    def test_cli_load_config_ignores_workspace_when_cwd_set(self):
         with tempfile.TemporaryDirectory() as tmp:
+            config_mod = load_config_module()
             delegate_dir = Path(tmp) / ".delegate"
             delegate_dir.mkdir()
             (delegate_dir / "config.json").write_text(
@@ -405,10 +414,17 @@ class ValidationTests(unittest.TestCase):
                 "models",
                 global_options=self.delegate.GlobalOptions(cwd=tmp),
             )
-            config, _source = self.delegate.load_config(
-                workspace=self.delegate.workspace_path_for_config(parsed.global_options.cwd)
-            )
-            self.assertEqual(config["cursor"]["defaultModel"], "from-workspace")
+            with (
+                mock.patch.object(config_mod, "DEFAULT_CONFIG_PATH", Path(tmp) / "missing.json"),
+                mock.patch.object(
+                    self.delegate.delegate_config, "DEFAULT_CONFIG_PATH", Path(tmp) / "missing.json"
+                ),
+                mock.patch.dict(os.environ, {config_mod.CONFIG_ENV: ""}, clear=False),
+            ):
+                config, _source = self.delegate.load_config(
+                    workspace=self.delegate.workspace_path_for_config(parsed.global_options.cwd)
+                )
+            self.assertEqual(config["cursor"]["defaultModel"], "composer-2.5")
 
     def test_load_config_uses_private_embedded_default_copy(self):
         config_mod = load_config_module()

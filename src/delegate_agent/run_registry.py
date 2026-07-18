@@ -20,6 +20,7 @@ from delegate_agent.private_io import (  # noqa: F401  # re-exported
     RegistryJsonError,
     ensure_private_dir,
     ensure_private_file,
+    open_private_file,
     read_json_object,
     read_json_object_or_none,
     supports_private_modes,
@@ -178,7 +179,10 @@ def allocate_alias(registry_root: Path, harness: str) -> str:
         alias = f"{harness}-{counter}"
         claim_path = claims / alias
         try:
-            fd = os.open(claim_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, PRIVATE_FILE_MODE)
+            fd = open_private_file(
+                claim_path,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+            )
         except FileExistsError:
             counter += 1
             continue
@@ -205,8 +209,7 @@ def registry_lock(
     """Serialize registry mutations. flock releases on process exit (no stale locks)."""
     ensure_private_dir(registry_root)
     lock_path = registry_lock_path(registry_root)
-    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, PRIVATE_FILE_MODE)
-    ensure_private_file(lock_path)
+    fd = open_private_file(lock_path, os.O_CREAT | os.O_RDWR)
     try:
         deadline = time.monotonic() + timeout_seconds
         while True:

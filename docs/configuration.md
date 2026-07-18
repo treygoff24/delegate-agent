@@ -1,6 +1,6 @@
 # Configuration
 
-Delegate loads JSON config from embedded defaults plus optional user and workspace files.
+Delegate loads JSON config from embedded defaults plus optional user and explicitly selected files.
 
 ## Config locations and precedence
 
@@ -8,11 +8,16 @@ From lowest to highest precedence:
 
 1. Embedded defaults in the package.
 2. User config: `~/.delegate/config.json`.
-3. Workspace config: `.delegate/config.json` under the resolved workspace root.
-4. `DELEGATE_CONFIG=/path/to/config.json`, when set.
-5. Internal CLI overrides used by some commands.
+3. `DELEGATE_CONFIG=/path/to/config.json`, when set.
+4. Internal CLI overrides used by some commands.
 
 If `DELEGATE_CONFIG` is set, the file must exist. Delegate fails closed instead of silently falling back to another config.
+
+Repository-local `.delegate/config.json` is never merged automatically. A cloned
+repository must not be able to select provider binaries, environment variables,
+profiles, or execution policy. To trust a file deliberately, select it with
+`DELEGATE_CONFIG=/path/to/config.json`; `describe` still reports an existing
+workspace file as an unapplied layer.
 
 Create an editable user config from an installed Delegate:
 

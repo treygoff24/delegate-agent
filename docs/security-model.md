@@ -190,7 +190,7 @@ Persistent worktree isolation is not a security sandbox. It does not prevent:
 
 ## Config and secret hygiene
 
-- Keep real config in `~/.delegate/config.json`, a private `DELEGATE_CONFIG` path, or ignored workspace-local `.delegate/config.json`.
+- Keep real config in `~/.delegate/config.json` or a private `DELEGATE_CONFIG` path. Repository-local `.delegate/config.json` is not loaded implicitly.
 - Do not commit provider API keys, tokens, private model IDs that should not be public, local logs, or `.delegate/runs/` data.
 - Keep `config.example.json` placeholder-only.
 - Run secret and path scans before publishing.

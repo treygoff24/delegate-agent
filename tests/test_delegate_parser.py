@@ -1,12 +1,14 @@
 import importlib.util
 import io
 import json
+import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = str(ROOT / "src")
@@ -1625,7 +1627,7 @@ class ParserTests(unittest.TestCase):
                 global_options=self.delegate.GlobalOptions(json_mode=True),
                 run_json=self.delegate.RunJsonOptions(str(task)),
             )
-            # pre_read_run_json_for_config loads workspace-local config
+            # Workspace config is deliberately ignored during config discovery.
             _ws, cfg, _src = self.delegate.pre_read_run_json_for_config(str(task), None)
             request = self.delegate.request_from_input_json(parsed, cfg)
             self.assertEqual(request.engine, "droid")
@@ -1703,10 +1705,8 @@ class ParserTests(unittest.TestCase):
                 self.delegate.pre_read_run_json_for_config(str(task), None)
             self.assertEqual(ctx.exception.error, "invalid_isolation")
 
-    def test_run_input_json_workspace_config_resolves_isolation_before_request(self):
-        """JSON cwd pointing at a repo with .delegate/config.json
-        containing isolation.work = worktree resolves isolation to worktree even when
-        CLI cwd has different config."""
+    def test_run_input_json_ignores_workspace_config_before_request(self):
+        """JSON cwd cannot select isolation through repository config."""
         with tempfile.TemporaryDirectory() as global_tmp:
             global_config = Path(global_tmp) / "global_config.json"
             global_config.write_text(
@@ -1742,13 +1742,16 @@ class ParserTests(unittest.TestCase):
                         }
                     )
                 )
-                # The pre-read should load config from the workspace (with work = worktree)
-                # and validate successfully.
-                _ws, cfg, _src = self.delegate.pre_read_run_json_for_config(str(task), None)
+                with mock.patch.dict(
+                    os.environ,
+                    {"DELEGATE_CONFIG": str(global_config)},
+                    clear=False,
+                ):
+                    _ws, cfg, _src = self.delegate.pre_read_run_json_for_config(str(task), None)
                 self.assertEqual(
                     cfg["isolation"]["work"],
-                    "worktree",
-                    "Config loaded from JSON-resolved workspace should have isolation.work = worktree",
+                    "none",
+                    "Repository config must not override explicitly trusted config",
                 )
 
                 result = self.delegate.delegate_config.resolve_isolation(
@@ -1758,7 +1761,7 @@ class ParserTests(unittest.TestCase):
                     engine="cursor",
                     mode="work",
                 )
-                self.assertEqual(result, "worktree")
+                self.assertEqual(result, "none")
 
                 result = self.delegate.delegate_config.resolve_isolation(
                     cli_value="auto",
@@ -1787,10 +1790,9 @@ class ParserTests(unittest.TestCase):
                 self.assertEqual(request.engine, "cursor")
                 self.assertEqual(request.mode, "work")
 
-    def test_main_run_input_json_uses_workspace_config(self):
-        """End-to-end main(): JSON cwd config discovery loads workspace-local config
-        and resolve_isolation uses it."""
-        with tempfile.TemporaryDirectory() as tmp:
+    def test_main_run_input_json_ignores_workspace_config(self):
+        """End-to-end main(): repository config cannot select executable or isolation."""
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as home:
             workspace = Path(tmp)
             local_delegate = workspace / ".delegate"
             local_delegate.mkdir()
@@ -1820,16 +1822,13 @@ class ParserTests(unittest.TestCase):
             )
             stdout = io.StringIO()
             stderr = io.StringIO()
-            code = self.delegate.main(
-                ["run", "--input-json", str(task)],
-                stdout=stdout,
-                stderr=stderr,
-            )
-            # Should fail at persistent-worktree semantic validation before
-            # attempting to launch the configured child binary. That confirms
-            # config was loaded from the JSON-resolved workspace and isolation
-            # resolved to "worktree" correctly.
-            self.assertEqual(code, self.delegate.EXIT_USAGE)
+            with mock.patch.dict(os.environ, {"HOME": home, "PATH": ""}, clear=True):
+                code = self.delegate.main(
+                    ["run", "--input-json", str(task)],
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+            self.assertEqual(code, self.delegate.EXIT_MISSING_BINARY)
             err = stderr.getvalue()
-            self.assertIn("worktree_requires_git", err)
-            self.assertNotIn("invalid_isolation", err)
+            self.assertIn("missing_binary", err)
+            self.assertNotIn("worktree_requires_git", err)

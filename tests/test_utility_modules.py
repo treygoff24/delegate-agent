@@ -333,7 +333,7 @@ class WriteJsonAtomicCleanupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "state.json"
 
-            def failing_replace(src: str, dst: str) -> None:
+            def failing_replace(src: str, dst: str, **_kwargs: object) -> None:
                 raise OSError(errno.ENOSPC, "simulated disk full")
 
             with (

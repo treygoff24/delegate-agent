@@ -189,7 +189,8 @@ def config_resolution_payload(config_source: str, workspace: Path | None = None)
                 "name": "workspace",
                 "path": str(workspace_path),
                 "exists": workspace_exists,
-                "applied": workspace_exists,
+                "applied": False,
+                "reason": "untrusted; set DELEGATE_CONFIG explicitly to use this file",
             }
         )
     explicit = os.environ.get(CONFIG_ENV)

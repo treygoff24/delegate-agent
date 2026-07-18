@@ -1160,10 +1160,11 @@ def load_config(
     workspace: Path | None = None,
     cli_overrides: JsonObject | None = None,
 ) -> tuple[JsonObject, str]:
-    """Load config with precedence: cli > DELEGATE_CONFIG > workspace > global > embedded.
+    """Load config with precedence: cli > DELEGATE_CONFIG > global > embedded.
 
     When DELEGATE_CONFIG is set, the path must exist; a missing file raises ConfigError
-    instead of discarding lower-precedence layers.
+    instead of discarding lower-precedence layers. Workspace config is never merged
+    implicitly because repositories are not trusted to select executables or policy.
     """
     merged = embedded_default_config()
     primary_source = "embedded-default"
@@ -1172,12 +1173,6 @@ def load_config(
     if global_path.exists():
         merged = merge_config_layer(merged, read_config_file(global_path))
         primary_source = str(global_path)
-
-    if workspace is not None:
-        local_path = workspace_config_path(workspace)
-        if local_path.exists():
-            merged = merge_config_layer(merged, read_config_file(local_path))
-            primary_source = str(local_path)
 
     explicit = os.environ.get(CONFIG_ENV)
     if explicit:

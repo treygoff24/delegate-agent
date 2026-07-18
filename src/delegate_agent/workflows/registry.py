@@ -130,8 +130,7 @@ def write_result(root: Path, payload: JsonObject) -> None:
 def acquire_workflow_lock(root: Path) -> int:
     run_registry.ensure_private_dir(root)
     path = root / LOCK_FILE
-    fd = os.open(path, os.O_CREAT | os.O_RDWR, run_registry.PRIVATE_FILE_MODE)
-    run_registry.ensure_private_file(path)
+    fd = run_registry.open_private_file(path, os.O_CREAT | os.O_RDWR)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
@@ -150,7 +149,7 @@ def supervisor_alive(root: Path) -> bool:
     if not path.exists():
         return False
     try:
-        fd = os.open(path, os.O_RDWR)
+        fd = run_registry.open_private_file(path, os.O_RDWR)
     except OSError:
         # Unexpected probe failure (EMFILE, permissions drift): fail toward
         # "alive" so a transient error never fabricates a stalled overlay.
@@ -211,7 +210,7 @@ def latest_workflow_dir(
 
 
 def append_jsonl(path: Path, event: dict[str, Any]) -> None:
-    fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, run_registry.PRIVATE_FILE_MODE)
+    fd = run_registry.open_private_file(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY)
     with os.fdopen(fd, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(event, sort_keys=True) + "\n")
         if event.get("type") in DURABLE_EVENT_TYPES:

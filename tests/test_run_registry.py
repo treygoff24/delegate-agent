@@ -117,6 +117,70 @@ class RunRegistryTests(unittest.TestCase):
                 with self.subTest(path=path):
                     self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
 
+    @unittest.skipUnless(os.name == "posix", "POSIX symlink protections only")
+    def test_registry_rejects_delegate_directory_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as outside:
+            workspace = Path(tmp)
+            outside_path = Path(outside)
+            outside_path.chmod(0o755)
+            (workspace / ".delegate").symlink_to(outside_path, target_is_directory=True)
+
+            with self.assertRaises(OSError):
+                self.registry.ensure_registry(workspace, workspace_kind="directory")
+
+            self.assertEqual(list(outside_path.iterdir()), [])
+            self.assertEqual(stat.S_IMODE(outside_path.stat().st_mode), 0o755)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX symlink protections only")
+    def test_registry_rejects_nested_directory_symlink(self):
+        for component in ("aliases", "runs"):
+            with (
+                self.subTest(component=component),
+                tempfile.TemporaryDirectory() as tmp,
+                tempfile.TemporaryDirectory() as outside,
+            ):
+                workspace = Path(tmp)
+                root = workspace / ".delegate"
+                root.mkdir()
+                outside_path = Path(outside)
+                outside_path.chmod(0o755)
+                (root / component).symlink_to(outside_path, target_is_directory=True)
+
+                with self.assertRaises(OSError):
+                    self.registry.ensure_registry(workspace, workspace_kind="directory")
+
+                self.assertEqual(list(outside_path.iterdir()), [])
+                self.assertEqual(stat.S_IMODE(outside_path.stat().st_mode), 0o755)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX symlink protections only")
+    def test_private_file_helpers_reject_symlinks(self):
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as outside:
+            root = Path(tmp) / ".delegate"
+            root.mkdir()
+            external = Path(outside) / "external.txt"
+            external.write_text("keep", encoding="utf-8")
+            external.chmod(0o644)
+            link = root / "claim"
+            link.symlink_to(external)
+
+            with self.assertRaises(OSError):
+                self.registry.write_private_text(link, "overwrite\n")
+
+            self.assertEqual(external.read_text(encoding="utf-8"), "keep")
+            self.assertEqual(stat.S_IMODE(external.stat().st_mode), 0o644)
+
+            external_json = Path(outside) / "external.json"
+            external_json.write_text('{"keep": true}\n', encoding="utf-8")
+            json_link = root / "state.json"
+            json_link.symlink_to(external_json)
+
+            with self.assertRaises(OSError):
+                self.registry.write_json_atomic(json_link, {"keep": False})
+            with self.assertRaises(self.registry.RegistryJsonError):
+                self.registry.read_json_object(json_link)
+
+            self.assertEqual(external_json.read_text(encoding="utf-8"), '{"keep": true}\n')
+
     def test_second_cursor_alias_is_cursor_2(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")

@@ -168,10 +168,9 @@ def write_snapshot(run_path: Path, snapshot: JsonObject) -> None:
 
 def open_events_log(run_path: Path) -> TextIO:
     run_registry.ensure_private_dir(run_path)
-    fd = os.open(
+    fd = run_registry.open_private_file(
         run_path / EVENTS_JSONL,
         os.O_CREAT | os.O_APPEND | os.O_WRONLY,
-        run_registry.PRIVATE_FILE_MODE,
     )
     return os.fdopen(fd, "a", encoding="utf-8")
 

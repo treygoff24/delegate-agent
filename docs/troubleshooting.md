@@ -79,8 +79,9 @@ config layers:
 delegate --json describe
 ```
 
-Inspect `configResolution.layers`; `DELEGATE_CONFIG` and workspace
-`.delegate/config.json` can override the user config.
+Inspect `configResolution.layers`; `DELEGATE_CONFIG` can override the user
+config. Workspace `.delegate/config.json` is reported but remains unapplied
+unless selected explicitly through `DELEGATE_CONFIG`.
 
 ## `unsupported_reasoning_effort`
 
