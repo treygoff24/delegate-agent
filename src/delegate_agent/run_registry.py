@@ -56,7 +56,7 @@ GIT_INFO_EXCLUDE_TIMEOUT_SECONDS = 5.0
 BYTES_PER_KIB = 1 << 10
 BYTES_PER_MIB = BYTES_PER_KIB * BYTES_PER_KIB
 HARNESS_NAMES = frozenset(
-    {"codex", "cursor", "grok", "kimi", "claude", "droid", "devin", "opencode"}
+    {"codex", "cursor", "grok", "kimi", "claude", "droid", "devin", "opencode", "pi"}
 )
 
 

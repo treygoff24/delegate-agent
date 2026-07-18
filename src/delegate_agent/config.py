@@ -27,7 +27,7 @@ ISOLATION_NONE = "none"
 ISOLATION_WORKTREE = "worktree"
 VALID_ISOLATION_VALUES = (ISOLATION_AUTO, ISOLATION_NONE, ISOLATION_WORKTREE)
 SAFE_ISOLATION_REQUIRED_ENGINES = frozenset(
-    {"cursor", "droid", "kimi", "claude", "grok", "devin", "opencode"}
+    {"cursor", "droid", "kimi", "claude", "grok", "devin", "opencode", "pi"}
 )
 
 POLICY_PROFILES = ("safe", "trusted-hooks", "external-sandbox", "custom")
@@ -119,6 +119,12 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
         "defaultModel": None,
         "defaultReasoningEffort": None,
         "defaultAgent": None,
+        "models": {},
+    },
+    "pi": {
+        "binary": "pi",
+        "defaultModel": None,
+        "defaultReasoningEffort": None,
         "models": {},
     },
     "policy": {
@@ -780,6 +786,26 @@ def _validate_opencode_section(opencode: JsonValue) -> None:
     _validate_opencode_models(opencode.get("models"))
 
 
+def _validate_pi_section(pi: JsonValue) -> None:
+    if not isinstance(pi, dict):
+        raise ConfigError("invalid_pi_config", "pi config must be an object.")
+    require_non_empty_str(pi.get("binary"), path="pi.binary", error="invalid_pi_config")
+    optional_str(pi.get("defaultModel"), path="pi.defaultModel", error="invalid_pi_config")
+    _reject_pi_family_flag_like_value(
+        pi.get("defaultModel"), path="pi.defaultModel", error="invalid_pi_config"
+    )
+    default_effort = pi.get("defaultReasoningEffort")
+    if default_effort is not None:
+        try:
+            reasoning.resolve_pi_native_effort(default_effort)
+        except reasoning.ReasoningCapabilityError as exc:
+            raise ConfigError(
+                "invalid_pi_config",
+                f"pi.defaultReasoningEffort: {exc.message}",
+            ) from exc
+    _validate_pi_family_models(pi.get("models"), engine="pi")
+
+
 def _reject_opencode_flag_like_value(
     value: JsonValue,
     *,
@@ -793,6 +819,21 @@ def _reject_opencode_flag_like_value(
         raise ConfigError(
             error,
             f"{path} must be a non-empty string that does not start with '-'.",
+        )
+
+
+def _reject_pi_family_flag_like_value(value: JsonValue, *, path: str, error: str) -> None:
+    if value is None:
+        return
+    if not isinstance(value, str) or not value.strip() or value.startswith("-"):
+        raise ConfigError(
+            error,
+            f"{path} must be a non-empty string that does not start with '-'.",
+        )
+    if ":" in value:
+        raise ConfigError(
+            error,
+            f"{path} must not contain ':'; use the thinking field to set Pi reasoning effort.",
         )
 
 
@@ -882,6 +923,48 @@ def _validate_opencode_models(models: JsonValue) -> None:
             reasoning.normalize_effort(variant)
         except reasoning.ReasoningCapabilityError as exc:
             raise ConfigError(error, f"{path}.{alias}.variant: {exc.message}") from exc
+
+
+def _validate_pi_family_models(models: JsonValue, *, engine: str) -> None:
+    error = f"invalid_{engine}_config"
+    path = f"{engine}.models"
+    if models is None:
+        return
+    if not isinstance(models, dict):
+        raise ConfigError(error, f"{path} must be an object.")
+    for alias, mapping in models.items():
+        _validate_engine_model_alias(alias, engine=engine, error=error)
+        if isinstance(mapping, str):
+            _reject_pi_family_flag_like_value(mapping, path=f"{path}.{alias}", error=error)
+            continue
+        if not isinstance(mapping, dict):
+            raise ConfigError(
+                error,
+                f"{path}.{alias} must be a non-empty string or an object with model and thinking.",
+            )
+        unknown = sorted(set(mapping) - {"model", "thinking"})
+        if unknown:
+            raise ConfigError(
+                error,
+                f"{path}.{alias} has unknown keys: {', '.join(unknown)}.",
+            )
+        model = mapping.get("model")
+        thinking = mapping.get("thinking")
+        if not isinstance(model, str) or not model.strip():
+            raise ConfigError(error, f"{path}.{alias}.model must be a non-empty string.")
+        if not isinstance(thinking, str) or not thinking.strip():
+            raise ConfigError(error, f"{path}.{alias}.thinking must be a non-empty string.")
+        _reject_pi_family_flag_like_value(model, path=f"{path}.{alias}.model", error=error)
+        _reject_pi_family_flag_like_value(
+            thinking,
+            path=f"{path}.{alias}.thinking",
+            error=error,
+        )
+        if thinking not in reasoning.PI_THINKING_LEVELS:
+            raise ConfigError(
+                error,
+                f"{path}.{alias}.thinking must be one of: {', '.join(reasoning.PI_THINKING_LEVELS)}.",
+            )
 
 
 def _validate_reasoning_effort_value(value: JsonValue, *, path: str) -> str:
@@ -1280,6 +1363,7 @@ def validate_config(config: JsonObject) -> None:
     _validate_grok_section(config.get("grok"))
     _validate_devin_section(config.get("devin"))
     _validate_opencode_section(config.get("opencode"))
+    _validate_pi_section(config.get("pi"))
     _validate_reasoning_section(config.get("reasoning"))
     _validate_isolation_section(config.get("isolation"))
     _validate_worktrees_section(config.get("worktrees"))

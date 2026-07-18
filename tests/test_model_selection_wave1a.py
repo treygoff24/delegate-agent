@@ -102,7 +102,17 @@ class EngineModelsConfigTests(unittest.TestCase):
 
     def test_valid_models_map_accepted_for_all_engines(self):
         config = copy.deepcopy(self.config_mod.DEFAULT_CONFIG)
-        for engine in ("cursor", "droid", "codex", "kimi", "claude", "grok", "devin", "opencode"):
+        for engine in (
+            "cursor",
+            "droid",
+            "codex",
+            "kimi",
+            "claude",
+            "grok",
+            "devin",
+            "opencode",
+            "pi",
+        ):
             config[engine]["models"] = {"fast": f"{engine}-model-id"}
         config["droid"]["defaultModel"] = "droid-default"
         self.config_mod.validate_config(config)
@@ -295,6 +305,63 @@ class EngineModelsConfigTests(unittest.TestCase):
                         self.config_mod.validate_config(config)
                     self.assertEqual(ctx.exception.error, "invalid_opencode_config")
 
+    def test_pi_config_accepts_string_and_structured_aliases(self):
+        config = copy.deepcopy(self.config_mod.DEFAULT_CONFIG)
+        config["pi"] = {
+            "binary": "pi",
+            "defaultModel": "openai-codex/gpt-5.6-sol",
+            "defaultReasoningEffort": "high",
+            "models": {
+                "plain": "anthropic/claude-opus-4-8",
+                "quick": {
+                    "model": "openai-codex/gpt-5.6-sol",
+                    "thinking": "minimal",
+                },
+            },
+        }
+        self.config_mod.validate_config(config)
+
+    def test_pi_config_rejects_bad_aliases_and_flag_injection(self):
+        bad_models = (
+            {"quick": ["openai-codex/gpt-5.6-sol"]},
+            {"quick": {"thinking": "minimal"}},
+            {"quick": {"model": "openai-codex/gpt-5.6-sol"}},
+            {"quick": {"model": "--api-key", "thinking": "minimal"}},
+            {"quick": {"model": "openai-codex/gpt-5.6-sol", "thinking": "turbo"}},
+            {
+                "quick": {
+                    "model": "openai-codex/gpt-5.6-sol",
+                    "thinking": "minimal",
+                    "extra": True,
+                }
+            },
+        )
+        for models in bad_models:
+            with self.subTest(models=models):
+                config = copy.deepcopy(self.config_mod.DEFAULT_CONFIG)
+                config["pi"]["models"] = models
+                with self.assertRaises(self.config_mod.ConfigError) as ctx:
+                    self.config_mod.validate_config(config)
+                self.assertEqual(ctx.exception.error, "invalid_pi_config")
+
+        config = copy.deepcopy(self.config_mod.DEFAULT_CONFIG)
+        config["pi"]["defaultModel"] = "--api-key"
+        with self.assertRaises(self.config_mod.ConfigError) as ctx:
+            self.config_mod.validate_config(config)
+        self.assertEqual(ctx.exception.error, "invalid_pi_config")
+
+    def test_pi_config_rejects_model_thinking_suffix(self):
+        config = copy.deepcopy(self.config_mod.DEFAULT_CONFIG)
+        config["pi"]["models"] = {
+            "quick": {"model": "openai-codex/gpt-5.6-sol:off", "thinking": "high"}
+        }
+
+        with self.assertRaises(self.config_mod.ConfigError) as ctx:
+            self.config_mod.validate_config(config)
+
+        self.assertEqual(ctx.exception.error, "invalid_pi_config")
+        self.assertIn("thinking", ctx.exception.message)
+
 
 class ModelOverrideThreadingTests(CommandTestBase):
     def test_model_override_reaches_engine_build_input_for_modeless_and_droid(self):
@@ -346,7 +413,17 @@ class ModelOptionHelpTests(unittest.TestCase):
     def test_model_option_on_all_engine_specs(self):
         from delegate_agent import command_help
 
-        for engine in ("cursor", "droid", "codex", "kimi", "claude", "grok", "devin"):
+        for engine in (
+            "cursor",
+            "droid",
+            "codex",
+            "kimi",
+            "claude",
+            "grok",
+            "devin",
+            "opencode",
+            "pi",
+        ):
             with self.subTest(engine=engine):
                 spec = command_help.COMMAND_SPECS[engine]
                 flags = {opt.flag for opt in spec.options}

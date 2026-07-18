@@ -313,6 +313,7 @@ class ParserTests(unittest.TestCase):
             ),
             (["cursor", "call", "--pure", "x"], "unsupported_pure_call"),
             (["opencode", "call", "--pure", "x"], "unsupported_pure_call"),
+            (["pi", "call", "--pure", "x"], "unsupported_pure_call"),
             (["codex", "call", "--pure", "x"], "unsupported_pure_call"),
         )
         for argv, error in cases:
@@ -322,6 +323,7 @@ class ParserTests(unittest.TestCase):
         self.assertTrue(ctx.exception.next_actions)
         self.assertIn("claude", ctx.exception.next_actions[0])
         self.assertNotIn("opencode", ctx.exception.next_actions[0])
+        self.assertNotIn("pi", ctx.exception.next_actions[0])
         self.assertNotIn("codex", ctx.exception.next_actions[0])
 
     def test_timeout_is_positive_integer_and_rejected_with_pass_through(self):
@@ -523,7 +525,16 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(parsed.launch.mode, "work")
 
     def test_modeless_call_mode_parses(self):
-        for engine in ("cursor", "codex", "kimi", "claude", "grok", "devin", "opencode"):
+        for engine in (
+            "cursor",
+            "codex",
+            "kimi",
+            "claude",
+            "grok",
+            "devin",
+            "opencode",
+            "pi",
+        ):
             with self.subTest(engine=engine):
                 parsed = self.delegate.parse_cli([engine, "call", "summarize"])
                 self.assertEqual(parsed.subcommand, engine)
@@ -778,6 +789,21 @@ class ParserTests(unittest.TestCase):
         parsed = self.delegate.parse_cli(
             ["dry-run", "opencode", "safe", "--prompt-file", "task.md"],
         )
+        self.assertEqual(parsed.launch.prompt_file, "task.md")
+
+    def test_pi_direct_and_prompt_file_commands_parse(self):
+        parsed = self.delegate.parse_cli(
+            ["pi", "safe", "--model", "reviewer", "--reasoning-effort", "high", "review"]
+        )
+        self.assertEqual(parsed.subcommand, "pi")
+        self.assertEqual(parsed.launch.engine, "pi")
+        self.assertEqual(parsed.launch.mode, "safe")
+        self.assertEqual(parsed.launch.model, "reviewer")
+        self.assertEqual(parsed.launch.reasoning_effort, "high")
+        self.assertEqual(parsed.launch.prompt_parts, ["review"])
+
+        parsed = self.delegate.parse_cli(["dry-run", "pi", "work", "--prompt-file", "task.md"])
+        self.assertTrue(parsed.launch.dry_run)
         self.assertEqual(parsed.launch.prompt_file, "task.md")
 
     def test_agent_flag_rejected_for_non_opencode_engines(self):

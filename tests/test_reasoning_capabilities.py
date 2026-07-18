@@ -20,6 +20,7 @@ from delegate_agent.reasoning import (  # noqa: E402
     TRANSPORT_CURSOR_MODEL_SELECTION,
     TRANSPORT_DROID_FLAG,
     TRANSPORT_OPENCODE_VARIANT_FLAG,
+    TRANSPORT_PI_THINKING_FLAG,
     ReasoningCapabilityError,
     _alias_key_for_default_model,
     build_alias_reasoning_summaries,
@@ -28,6 +29,7 @@ from delegate_agent.reasoning import (  # noqa: E402
     normalize_effort,
     resolve_claude_native_effort,
     resolve_grok_native_effort,
+    resolve_pi_native_effort,
     resolve_reasoning_capability,
 )
 
@@ -224,6 +226,21 @@ class ReasoningCapabilityTests(unittest.TestCase):
                 with self.assertRaises(ReasoningCapabilityError) as ctx:
                     resolve_grok_native_effort(bad)
                 self.assertEqual(ctx.exception.error, "invalid_reasoning_effort")
+
+    def test_pi_native_effort_accepts_delegate_levels_only(self):
+        for effort in ("low", "medium", "high", "xhigh", "max"):
+            with self.subTest(effort=effort):
+                self.assertEqual(resolve_pi_native_effort(effort), effort)
+        for unsupported in ("off", "minimal"):
+            with self.subTest(effort=unsupported), self.assertRaises(ReasoningCapabilityError):
+                resolve_pi_native_effort(unsupported)
+
+    def test_capabilities_payload_includes_static_pi_thinking_levels(self):
+        payload = build_reasoning_capabilities_payload({}, cache=None)
+        pi = payload["harnesses"]["pi"]
+        self.assertEqual(pi["transport"], "pi-thinking-flag")
+        self.assertEqual(pi["source"], "static")
+        self.assertEqual(pi["supported"], ["low", "medium", "high", "xhigh", "max"])
 
     def test_capabilities_payload_includes_static_grok_efforts(self):
         payload = build_reasoning_capabilities_payload({}, cache=None)
@@ -476,6 +493,7 @@ class ReasoningCapabilityTests(unittest.TestCase):
                 },
             },
             "grok": {},
+            "pi": {},
         }
 
         self.assertEqual(build_alias_reasoning_summaries(config, cache=None), expected_aliases)
@@ -555,8 +573,10 @@ class ReasoningCapabilityTests(unittest.TestCase):
         self.assertIsNone(REASONING_PROFILES["kimi"].transport)
         self.assertIsNone(REASONING_PROFILES["devin"].transport)
         self.assertIsNone(REASONING_PROFILES["opencode"].transport)
+        self.assertEqual(REASONING_PROFILES["pi"].transport, TRANSPORT_PI_THINKING_FLAG)
         self.assertEqual(REASONING_PROFILES["claude"].strategy, "static-enum")
         self.assertEqual(REASONING_PROFILES["opencode"].strategy, "pass-through")
+        self.assertEqual(REASONING_PROFILES["pi"].strategy, "static-enum")
         self.assertEqual(REASONING_PROFILES["claude"].static_efforts, CLAUDE_NATIVE_EFFORTS)
         self.assertEqual(
             REASONING_PROFILES["kimi"].unsupported_warning,

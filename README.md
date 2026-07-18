@@ -66,6 +66,7 @@ command -v claude  # Claude Code CLI, used by delegate claude ...
 command -v grok    # xAI Grok Build CLI, used by delegate grok ...
 command -v devin   # Cognition Devin CLI, used by delegate devin ...
 command -v opencode # OpenCode CLI, used by delegate opencode ...
+command -v pi      # Pi coding agent, used by delegate pi ...
 command -v kimi    # Kimi Code CLI, used by delegate kimi ...
 ```
 
@@ -98,6 +99,7 @@ delegate --json models
 delegate --json models codex          # per-engine advisory catalog
 delegate --json models cursor --live  # merge live harness probe when supported
 delegate --json models opencode --live # query every model visible to OpenCode
+delegate --json models pi --live       # query every model visible to Pi
 delegate --json capabilities
 ```
 
@@ -122,6 +124,7 @@ Preview the command without launching a child runtime:
 delegate --json dry-run codex safe "Review this repository. Do not edit files."
 delegate --json dry-run claude safe "Review this repository. Do not edit files."
 delegate --json dry-run opencode safe "Review this repository. Do not edit files."
+delegate --json dry-run pi safe "Review this repository. Do not edit files."
 ```
 
 Run a read-only review in an isolated throwaway workspace:
@@ -131,6 +134,7 @@ delegate codex safe "Review this repository for correctness risks. Do not edit f
 delegate claude safe "Review this repository for correctness risks. Do not edit files."
 delegate grok safe "Review this repository for correctness risks. Do not edit files."
 delegate opencode safe "Review this repository for correctness risks. Do not edit files."
+delegate pi safe "Review this repository for correctness risks. Do not edit files."
 delegate cursor safe "Review the current diff for regressions. Do not edit files."
 delegate kimi safe "Review this repository for regressions. Do not edit files."
 ```
@@ -149,6 +153,7 @@ delegate cursor work "Fix the parser bug. Run python3 -m unittest tests.test_del
 delegate claude work "Implement the scoped change and run the named check. Report changed files."
 delegate devin work "Implement the scoped change and run the named check. Report changed files."
 delegate opencode work "Implement the scoped change and run the named check. Report changed files."
+delegate pi work "Implement the scoped change and run the named check. Report changed files."
 delegate kimi work "Implement the scoped change and run the named check. Report changed files."
 ```
 
@@ -217,7 +222,7 @@ python3 bin/delegate.py workflow approve wf_0123abcdef45
 See [Delegate Workflows](docs/delegate-workflows.md) for the DSL, safety
 limits, config, and gate semantics.
 
-Reasoning effort is provider-aware. Unsupported combinations fail before launch. It changes only the requested model thinking depth/cost/latency; it does not change safe/work/call mode, sandboxing, approvals, or edit capability. Codex/Droid validate effort against model capability metadata, Cursor maps effort to configured model selection, Claude maps to Claude Code `--effort`, Grok maps to Grok `--effort` (`low`, `medium`, `high`, `xhigh`, `max`), and OpenCode passes it through as `--variant`. Devin and Kimi do not expose a Delegate reasoning-effort flag. Explicit Codex effort can target the harness default model even when `codex.defaultModel` is unset:
+Reasoning effort is provider-aware. Unsupported combinations fail before launch. It changes only the requested model thinking depth/cost/latency; it does not change safe/work/call mode, sandboxing, approvals, or edit capability. Codex/Droid validate effort against model capability metadata, Cursor maps effort to configured model selection, Claude and Grok map to native `--effort`, OpenCode passes it through as `--variant`, and Pi maps `low|medium|high|xhigh|max` directly to `--thinking`. Devin and Kimi do not expose a Delegate reasoning-effort flag. Explicit Codex effort can target the harness default model even when `codex.defaultModel` is unset:
 
 ```bash
 delegate --json dry-run codex safe --reasoning-effort high "Review this repository. Do not edit files."
@@ -304,10 +309,11 @@ after changing into a toolchain directory. Source-backed runs also expose
 
 Defaults are intentionally conservative for review paths:
 
-- `delegate cursor safe`, `delegate codex safe`, `delegate claude safe`, `delegate grok safe`, `delegate opencode safe`, `delegate droid ALIAS safe`, and `delegate kimi safe` run in an isolated throwaway workspace. Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff.
+- `delegate cursor safe`, `delegate codex safe`, `delegate claude safe`, `delegate grok safe`, `delegate opencode safe`, `delegate pi safe`, `delegate droid ALIAS safe`, and `delegate kimi safe` run in an isolated throwaway workspace. Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff.
 - Grok safe mode uses Delegate isolated copy plus Grok read-only sandbox/permission controls (`--sandbox read-only`, `--permission-mode dontAsk` by default). It does not use Grok `plan` mode. Prompts are delivered via Grok `--prompt-file` from a Delegate temp file.
 - Devin safe mode is unsupported: Devin may implement filesystem surveys through the generic `exec` tool, which Delegate cannot permit without weakening the read-only boundary. Use another safe Harness for filesystem review. Devin work mode uses `--permission-mode dangerous` because Devin print mode rejects unapproved edit/exec tools.
 - OpenCode safe mode uses Delegate's isolated copy plus an `OPENCODE_CONFIG_CONTENT` permission lockdown that allows only read, glob, and grep operations. OpenCode merges this override last, so repository configuration cannot restore write-capable tools. `opencode call --read-only` uses the same lockdown; plain `call` does not.
+- Pi safe mode and `pi call --read-only` use only the built-in `read` tool and disable extension, skill, prompt-template, and project-approval discovery. All Pi modes use `--no-session`; Delegate's run registry is the durable record.
 - Claude safe mode invokes `claude -p` with prompt text on stdin, `--permission-mode plan`, `--strict-mcp-config`, Read/Grep/Glob plus selected read-only Bash tools, and `--no-session-persistence` by default. Delegate does not currently prove that Claude Code hooks, plugins, user settings, or other non-MCP customization surfaces are disabled.
 - `work` mode can edit. By default it runs in the real workspace for backward compatibility.
 

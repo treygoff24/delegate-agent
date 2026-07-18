@@ -1051,7 +1051,10 @@ class EngineArgvTests(CommandTestBase):
             self.assertIn("profile", ctx.exception.message)
 
     def test_describe_preserves_safe_read_only_modes(self):
-        payload = self.delegate.describe_payload(self.delegate.DEFAULT_CONFIG, "embedded-default")
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["pi"]["defaultModel"] = "openai-codex/gpt-5.6-sol"
+        config["pi"]["defaultReasoningEffort"] = "high"
+        payload = self.delegate.describe_payload(config, "embedded-default")
         self.assertIn("promptTransforms", payload)
         self.assertTrue(payload["engineCapabilities"]["codex"]["outputSchema"])
         self.assertTrue(payload["engineCapabilities"]["claude"]["outputSchema"])
@@ -1113,6 +1116,15 @@ class EngineArgvTests(CommandTestBase):
         self.assertNotIn("--auto", opencode_safe)
         self.assertIn("--auto", opencode_work)
         self.assertFalse(payload["isolation"]["safeNoneAllowed"]["opencode"])
+        self.assertEqual(payload["engineDefaults"]["pi"]["binary"], "pi")
+        self.assertEqual(payload["promptTransports"]["pi"], "stdin")
+        pi_safe = payload["modeMapping"]["pi"]["safe"]
+        pi_work = payload["modeMapping"]["pi"]["work"]
+        self.assertIn("--no-session", pi_safe)
+        self.assertEqual(pi_safe[pi_safe.index("--tools") + 1], "read")
+        self.assertEqual(pi_work[pi_work.index("--thinking") + 1], "high")
+        self.assertNotIn("--tools", pi_work)
+        self.assertFalse(payload["isolation"]["safeNoneAllowed"]["pi"])
 
     def test_grok_safe_argv_uses_prompt_file_and_read_only_controls(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
@@ -1421,6 +1433,127 @@ class EngineArgvTests(CommandTestBase):
         self.assertIn("OPENCODE_CONFIG_CONTENT", ro_req.env_overrides)
         self.assertIn("OPENCODE_PERMISSION", ro_req.env_overrides)
         self.assertTrue(ro_req.stdin_text.startswith("You are being called"))
+
+    def test_pi_safe_argv_is_stateless_stdin_and_read_only(self):
+        request = self.build_git_request(
+            "pi",
+            "safe",
+            None,
+            "/repo",
+            "review task",
+            self.delegate.DEFAULT_CONFIG,
+            dry_run=True,
+        )
+        self.assertEqual(request.prompt_transport, self.delegate.PROMPT_TRANSPORT_STDIN)
+        self.assertEqual(request.stdin_text, "review task")
+        self.assertEqual(
+            request.argv,
+            [
+                "pi",
+                "-p",
+                "--no-session",
+                "--mode",
+                "json",
+                "--tools",
+                "read",
+                "--no-extensions",
+                "--no-skills",
+                "--no-prompt-templates",
+                "--no-approve",
+            ],
+        )
+        for write_capability in ("bash", "edit", "write", "--api-key", "--approve"):
+            self.assertNotIn(write_capability, request.argv)
+
+    def test_pi_work_resolves_structured_alias_and_cli_thinking(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["pi"]["models"] = {
+            "builder": {
+                "model": "openai-codex/gpt-5.6-sol",
+                "thinking": "minimal",
+            }
+        }
+        request = self.build_git_request(
+            "pi",
+            "work",
+            None,
+            "/repo",
+            "implement",
+            config,
+            dry_run=True,
+            model_override="builder",
+            reasoning_effort="xhigh",
+        )
+        self.assertEqual(
+            request.argv,
+            [
+                "pi",
+                "-p",
+                "--no-session",
+                "--mode",
+                "json",
+                "--model",
+                "openai-codex/gpt-5.6-sol",
+                "--thinking",
+                "xhigh",
+            ],
+        )
+        self.assertEqual(request.reasoning_effort, "xhigh")
+        self.assertEqual(request.reasoning_transport, "pi-thinking-flag")
+        self.assertEqual(request.reasoning_capability_source, "static")
+
+    def test_pi_alias_can_pin_minimal_thinking(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["pi"]["models"] = {
+            "quick": {"model": "openai-codex/gpt-5.6-sol", "thinking": "minimal"}
+        }
+        request = self.build_git_request(
+            "pi",
+            "work",
+            "quick",
+            "/repo",
+            "answer",
+            config,
+            dry_run=True,
+        )
+        self.assertEqual(request.model, "openai-codex/gpt-5.6-sol")
+        self.assertEqual(request.argv[-2:], ["--thinking", "minimal"])
+        self.assertEqual(request.reasoning_effort_source, "alias")
+        self.assertEqual(request.reasoning_capability_source, "alias")
+
+    def test_pi_raw_model_rejects_thinking_suffix(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.build_git_request(
+                "pi",
+                "work",
+                None,
+                "/repo",
+                "answer",
+                self.delegate.DEFAULT_CONFIG,
+                dry_run=True,
+                model_override="openai-codex/gpt-5.6-sol:off",
+            )
+
+        self.assertEqual(ctx.exception.error, "invalid_model")
+        self.assertIn("thinking", ctx.exception.message)
+
+    def test_pi_call_is_temp_cwd_no_session_and_read_only_when_requested(self):
+        with (
+            tempfile.TemporaryDirectory() as temp_cwd,
+            mock.patch("delegate_agent.request_build.tempfile.mkdtemp", return_value=temp_cwd),
+        ):
+            request = self.delegate.request_from_parsed(
+                self.delegate.parse_cli(["pi", "call", "--read-only", "--timeout", "17", "score"]),
+                self.delegate.DEFAULT_CONFIG,
+                io.StringIO(""),
+            )
+            self.assertEqual(request.workspace, temp_cwd)
+            self.assertTrue(request.cleanup_workspace)
+            self.assertEqual(request.timeout, 17)
+            self.assertIn("--no-session", request.argv)
+            self.assertEqual(request.argv[request.argv.index("--tools") + 1], "read")
+            self.assertNotIn("bash", request.argv)
+            self.assertTrue(request.stdin_text.startswith("You are being called"))
 
     def test_opencode_safe_agents_preserve_selected_name_with_deny_policy(self):
         permissions = {

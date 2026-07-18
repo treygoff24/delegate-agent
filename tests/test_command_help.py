@@ -32,6 +32,7 @@ TOP_LEVEL_COMMANDS = (
     "grok",
     "devin",
     "opencode",
+    "pi",
     "codex",
     "droid",
     "kimi",

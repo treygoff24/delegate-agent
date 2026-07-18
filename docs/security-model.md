@@ -6,7 +6,7 @@ Delegate is a launcher and run recorder for other agent runtimes. It improves co
 
 Delegate controls:
 
-- Which child argv is built for Cursor, Droid, Codex, Claude, Grok, Devin, OpenCode, or Kimi.
+- Which child argv is built for Cursor, Droid, Codex, Claude, Grok, Devin, OpenCode, Pi, or Kimi.
 - Whether the child is launched in `safe`, `work`, or stateless `call` mode.
 - Whether a requested reasoning effort is translated into the supported child-runtime mechanism for the resolved harness/model.
 - Whether the execution workspace is the source checkout, a temporary isolated workspace, or a persistent Git worktree.
@@ -27,7 +27,7 @@ Delegate does not control:
 
 Safe mode is for review and investigation.
 
-- Cursor safe, Droid safe, Codex safe, Claude safe, Grok safe, OpenCode safe, and Kimi safe run in an isolated throwaway workspace by default, with your current working tree mirrored into that copy (see [What safe review can and cannot see](#what-safe-review-can-and-cannot-see) below).
+- Cursor safe, Droid safe, Codex safe, Claude safe, Grok safe, OpenCode safe, Pi safe, and Kimi safe run in an isolated throwaway workspace by default, with your current working tree mirrored into that copy (see [What safe review can and cannot see](#what-safe-review-can-and-cannot-see) below).
 - Cursor safe also writes a read-oriented `.cursor/cli.json` in the isolated workspace only.
 - Codex safe uses `--ask-for-approval never exec --sandbox read-only`.
 - Claude safe uses `claude -p` with stdin prompt transport, `--permission-mode plan`, `--strict-mcp-config`, Read/Grep/Glob, and selected read-only Bash tools. Delegate does not currently prove that Claude Code hooks, plugins, user settings, or other non-MCP customization surfaces are disabled.
@@ -36,7 +36,8 @@ Safe mode is for review and investigation.
 - Grok safe uses Delegate's read-only safety prompt plus Grok `--sandbox read-only` and `--permission-mode dontAsk`. Delegate does not use Grok `plan` mode for safe review. Prompts are delivered via Grok `--prompt-file`.
 - Devin safe is rejected during preflight. Devin may implement filesystem surveys through generic `exec`, which Delegate cannot permit without weakening the read-only boundary; use another safe Harness for filesystem review.
 - OpenCode safe uses `--pure` plus environment-injected runtime enforcement. `OPENCODE_CONFIG_CONTENT` merges after repository config, disables sharing and autoupdate, applies deny-all-but-read/glob/grep permissions globally and to the selected agent, and creates a synthetic `delegate-read-only` agent when none is selected. `OPENCODE_PERMISSION` applies the same tool policy. Delegate re-applies these protected settings after profile resolution. `--pure` also disables repository-local plugins that could otherwise execute code during a safe run.
-- Explicit `--isolation none` is normalized to `auto` with a warning for Cursor, Claude, Grok, OpenCode, Droid, and Kimi safe mode because it would remove the isolation/config boundary those safe contracts rely on. Codex safe may opt out of Delegate workspace isolation because the Codex read-only sandbox remains active.
+- Pi safe enables only the built-in `read` tool and adds `--no-extensions --no-skills --no-prompt-templates --no-approve`. The isolated workspace remains a second filesystem boundary. `pi call --read-only` uses the same argv restrictions.
+- Explicit `--isolation none` is normalized to `auto` with a warning for Cursor, Claude, Grok, OpenCode, Pi, Droid, and Kimi safe mode because it would remove the isolation/config boundary those safe contracts rely on. Codex safe may opt out of Delegate workspace isolation because the Codex read-only sandbox remains active.
 
 Safe mode is not a proof of zero side effects. Treat it as a defensive default plus prompt/runtime policy. A runtime could still read available files, use configured credentials, load its own customizations, or perform actions allowed by its own permissions.
 
@@ -100,6 +101,8 @@ you need registry inspection.
 
 OpenCode `call --read-only` uses the same protected environment settings and
 `--pure` plugin restriction as OpenCode safe mode.
+Pi `call --read-only` uses the same read-only tool allowlist and discovery-disable
+flags as Pi safe mode. All Pi modes use `--no-session`.
 
 `call --pure` is a separate, stronger completion boundary. It is currently
 supported on **Claude only**. Delegate sends the prompt verbatim on stdin, starts
@@ -160,7 +163,7 @@ security control.
 
 ### Temporary safe isolation
 
-Cursor safe, Droid safe, Codex safe, Claude safe, Grok safe, OpenCode safe, and Kimi safe normally run in a temporary Git worktree or directory copy, with uncommitted tracked edits and untracked, non-ignored files synced from the source working tree (gitignored paths excluded). This protects the source checkout from ordinary relative-path edits made inside the execution workspace. Delegate may still write `.delegate/` metadata in the source workspace for tracked runs.
+Cursor safe, Droid safe, Codex safe, Claude safe, Grok safe, OpenCode safe, Pi safe, and Kimi safe normally run in a temporary Git worktree or directory copy, with uncommitted tracked edits and untracked, non-ignored files synced from the source working tree (gitignored paths excluded). This protects the source checkout from ordinary relative-path edits made inside the execution workspace. Delegate may still write `.delegate/` metadata in the source workspace for tracked runs.
 
 Git repositories with commits use a detached temporary Git worktree. Non-Git directories use a temporary directory copy. Git repositories with no commits fall back to a temporary directory copy because Git cannot create a detached worktree from an unborn `HEAD`; Delegate reports that fallback in run metadata.
 

@@ -24,6 +24,7 @@ from delegate_agent.argv_builders import (
     build_devin_argv,
     build_grok_argv,
     build_opencode_argv,
+    build_pi_argv,
 )
 from delegate_agent.command_help import SAFE_WORKSPACE_SYNC_NOTE
 from delegate_agent.config import config_path
@@ -123,7 +124,17 @@ def _commands_catalog() -> list[JsonObject]:
 
 def _launch_options() -> list[str]:
     flags: list[str] = []
-    for command in ("cursor", "droid", "codex", "claude", "grok", "devin", "opencode", "kimi"):
+    for command in (
+        "cursor",
+        "droid",
+        "codex",
+        "claude",
+        "grok",
+        "devin",
+        "opencode",
+        "pi",
+        "kimi",
+    ):
         spec = command_help.COMMAND_SPECS[command]
         for option in spec.options:
             if option.flag not in flags:
@@ -273,6 +284,11 @@ def models_payload(
         "defaultReasoningEffort": config["opencode"].get("defaultReasoningEffort"),
         "defaultAgent": config["opencode"].get("defaultAgent"),
     }
+    pi: JsonObject = {
+        "binary": config["pi"]["binary"],
+        "defaultModel": config["pi"]["defaultModel"],
+        "defaultReasoningEffort": config["pi"].get("defaultReasoningEffort"),
+    }
     for engine, section in (
         ("cursor", cursor),
         ("codex", codex),
@@ -281,6 +297,7 @@ def models_payload(
         ("grok", grok),
         ("devin", devin),
         ("opencode", opencode),
+        ("pi", pi),
     ):
         models = _nonempty_engine_models(config[engine])
         if models is not None:
@@ -303,6 +320,7 @@ def models_payload(
         "grok": grok,
         "devin": devin,
         "opencode": opencode,
+        "pi": pi,
     }
 
 
@@ -346,6 +364,11 @@ def _engine_defaults_payload(config: JsonObject) -> JsonObject:
             "defaultModel": config["opencode"]["defaultModel"],
             "defaultReasoningEffort": config["opencode"].get("defaultReasoningEffort"),
             "defaultAgent": config["opencode"].get("defaultAgent"),
+        },
+        "pi": {
+            "binary": config["pi"]["binary"],
+            "defaultModel": config["pi"]["defaultModel"],
+            "defaultReasoningEffort": config["pi"].get("defaultReasoningEffort"),
         },
     }
 
@@ -395,6 +418,9 @@ def _summary_reasoning_fields(reasoning_payload: JsonObject) -> JsonObject:
     pinned_variant = reasoning_payload.get("pinnedVariant")
     if isinstance(pinned_variant, str) and pinned_variant:
         output["pinnedVariant"] = pinned_variant
+    pinned_thinking = reasoning_payload.get("pinnedThinking")
+    if isinstance(pinned_thinking, str) and pinned_thinking:
+        output["pinnedThinking"] = pinned_thinking
     return output
 
 
@@ -404,7 +430,7 @@ def _summary_model_fields(engine: str, mapping: object) -> JsonObject:
             "available": bool(mapping),
             "model": mapping if mapping else None,
         }
-    if engine == "opencode" and isinstance(mapping, dict):
+    if engine in {"opencode", "pi"} and isinstance(mapping, dict):
         model = mapping.get("model")
         fields: JsonObject = {
             "available": isinstance(model, str) and bool(model),
@@ -413,6 +439,9 @@ def _summary_model_fields(engine: str, mapping: object) -> JsonObject:
         variant = mapping.get("variant")
         if isinstance(variant, str) and variant:
             fields["pinnedVariant"] = variant
+        thinking = mapping.get("thinking")
+        if isinstance(thinking, str) and thinking:
+            fields["pinnedThinking"] = thinking
         return fields
     return {"available": False, "model": None}
 
@@ -540,6 +569,7 @@ def _policy_field_support_matrix() -> JsonObject:
         "kimi": unsupported,
         "devin": unsupported,
         "opencode": unsupported,
+        "pi": unsupported,
     }
 
 
@@ -671,6 +701,21 @@ def _opencode_describe_argv(
     return [PROMPT_FILE_DISPLAY if item == PROMPT_FILE_ARG_PLACEHOLDER else item for item in argv]
 
 
+def _pi_describe_argv(pi: JsonObject, *, mode: str) -> list[str]:
+    model = _resolve_default_model(pi)
+    default_effort = pi.get("defaultReasoningEffort")
+    return build_pi_argv(
+        pi,
+        mode,
+        model,
+        reasoning.resolve_native_effort(
+            "pi",
+            default_effort if isinstance(default_effort, str) else None,
+            model=model,
+        ),
+    )
+
+
 def describe_payload(
     config: JsonObject,
     config_source: str,
@@ -681,6 +726,7 @@ def describe_payload(
     grok = config["grok"]
     devin = config["devin"]
     opencode = config["opencode"]
+    pi = config["pi"]
     codex_safe_policy = delegate_config.effective_policy(config, engine="codex", mode=MODE_SAFE)
     codex_work_policy = delegate_config.effective_policy(config, engine="codex", mode=MODE_WORK)
     claude_safe_policy = _claude_runtime_policy(config, MODE_SAFE)
@@ -738,6 +784,8 @@ def describe_payload(
         mode=MODE_WORK,
         workspace="<workspace>",
     )
+    pi_safe_argv = _pi_describe_argv(pi, mode=MODE_SAFE)
+    pi_work_argv = _pi_describe_argv(pi, mode=MODE_WORK)
     return {
         "ok": True,
         "summary": False,
@@ -777,6 +825,7 @@ def describe_payload(
             "grok": PROMPT_TRANSPORT_FILE,
             "devin": PROMPT_TRANSPORT_FILE,
             "opencode": PROMPT_TRANSPORT_STDIN,
+            "pi": PROMPT_TRANSPORT_STDIN,
         },
         "globalOptions": _global_options(),
         "launchOptions": _launch_options(),
@@ -817,6 +866,7 @@ def describe_payload(
                 "grok": False,
                 "devin": False,
                 "opencode": False,
+                "pi": False,
             },
         },
         "worktrees": {
@@ -872,7 +922,7 @@ def describe_payload(
                         "engine may be a fallback list; child runs are tagged --group <wfId>.",
                         "fast is a Codex-only per-run service-tier preference; non-Codex fallbacks ignore it.",
                         "passthrough=True is explicit and mutually exclusive with schema= and mode='call'.",
-                        "cursor/kimi argv transport rejects prompts around 100KB; route large stages to codex/claude/droid/opencode.",
+                        "cursor/kimi argv transport rejects prompts around 100KB; route large stages to codex/claude/droid/opencode/pi.",
                     ],
                 },
                 "phase": "phase(title) emits a phase event for human-readable progress.",
@@ -1066,6 +1116,21 @@ def describe_payload(
                     "Delegate sets OPENCODE_DISABLE_AUTOUPDATE=1; opencode sessions still accumulate in the user's global state.",
                 ],
             },
+            "pi": {
+                "safe": pi_safe_argv,
+                "safeNotes": [
+                    SAFE_WORKSPACE_SYNC_NOTE,
+                    "Uses pi -p --mode json --no-session with prompt delivered on stdin.",
+                    "Safe mode enables only the built-in read tool and disables extension, skill, prompt-template, and project-approval discovery.",
+                    "Delegate also runs safe mode in an isolated copy; pi receives no write-capable built-in tools.",
+                ],
+                "work": pi_work_argv,
+                "workNotes": [
+                    "All modes use --no-session; Delegate run tracking is the durable record.",
+                    "Reasoning effort maps directly to pi --thinking (low, medium, high, xhigh, max).",
+                    "Model IDs use provider/model form; aliases may pin model plus off/minimal thinking.",
+                ],
+            },
         },
         "commands": _commands_catalog(),
         "recommendedDiscovery": [
@@ -1118,6 +1183,9 @@ def _print_engine_aliases(section: JsonObject, stdout: TextIO) -> None:
             pinned_variant = fields.get("pinnedVariant")
             if isinstance(pinned_variant, str):
                 suffix = f" variant={pinned_variant}"
+            pinned_thinking = fields.get("pinnedThinking")
+            if isinstance(pinned_thinking, str):
+                suffix += f" thinking={pinned_thinking}"
             print(f"  {alias} -> {_text_or_none(fields.get('model'))}{suffix}", file=stdout)
 
 
@@ -1192,6 +1260,15 @@ def _emit_models_text(payload: JsonObject, config_source: str, stdout: TextIO) -
             file=stdout,
         )
         _print_engine_aliases(opencode, stdout)
+    pi = payload.get("pi")
+    if isinstance(pi, dict):
+        print(
+            "pi: "
+            f"binary={_text_or_none(pi.get('binary'))} "
+            f"defaultModel={_text_or_none(pi.get('defaultModel'))}",
+            file=stdout,
+        )
+        _print_engine_aliases(pi, stdout)
     kimi = payload.get("kimi")
     if isinstance(kimi, dict):
         print(

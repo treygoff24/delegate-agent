@@ -19,7 +19,17 @@ MODE_ORDER = (MODE_SAFE, MODE_WORK, MODE_CALL)
 # reused wherever engines are enumerated (the describe payload, help prose, the
 # runs/worktree --harness filters). Membership checks and the prose enumeration
 # both derive from it so the list can never drift out of sync.
-KNOWN_ENGINES = ("cursor", "droid", "codex", "kimi", "claude", "grok", "devin", "opencode")
+KNOWN_ENGINES = (
+    "cursor",
+    "droid",
+    "codex",
+    "kimi",
+    "claude",
+    "grok",
+    "devin",
+    "opencode",
+    "pi",
+)
 # "<engine>, ..., or <engine>" — for error messages and help text.
 ENGINES_PROSE = f"{', '.join(KNOWN_ENGINES[:-1])}, or {KNOWN_ENGINES[-1]}"
 ENGINE_SUPPORTED_MODES = {
@@ -49,10 +59,10 @@ ENGINE_CAPABILITIES = {
         "pureCall": pure_call_supported(engine),
         "pureTripwire": engine == "claude",
         "structuredOutput": engine in {"codex", "claude"},
-        "noSessionPersistence": engine in {"codex", "claude"},
+        "noSessionPersistence": engine in {"codex", "claude", "pi"},
         "usageEvents": engine == "claude",
-        # OpenCode uses stdin for all modes (not pure-only); keep the capability.
-        "promptStdin": engine in {"codex", "claude", "opencode"},
+        # These engines use stdin for all modes (not pure-only); keep the capability.
+        "promptStdin": engine in {"codex", "claude", "opencode", "pi"},
     }
     for engine in KNOWN_ENGINES
 }
@@ -68,12 +78,12 @@ BINARY_CONFIG_ENGINES = tuple(engine for engine in KNOWN_ENGINES if engine != "c
 SAFE_REVIEW_PREFIX_INJECTED_HERE_ENGINES = tuple(
     engine
     for engine in KNOWN_ENGINES
-    if engine in {"codex", "droid", "claude", "grok", "devin", "opencode"}
+    if engine in {"codex", "droid", "claude", "grok", "devin", "opencode", "pi"}
 )
 # Stable public summary order; membership is still derived from the modeless engine set.
 MODEL_SUMMARY_ENGINES = tuple(
     engine
-    for engine in ("cursor", "codex", "claude", "grok", "devin", "kimi", "opencode")
+    for engine in ("cursor", "codex", "claude", "grok", "devin", "kimi", "opencode", "pi")
     if engine in MODELESS_ENGINES
 )
 

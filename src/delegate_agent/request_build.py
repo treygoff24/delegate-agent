@@ -37,6 +37,7 @@ from delegate_agent.argv_builders import (
     build_grok_argv,
     build_kimi_argv,
     build_opencode_argv,
+    build_pi_argv,
     prefix_droid_safe_prompt,
     redacted_prompt_argv,
 )
@@ -688,6 +689,76 @@ def _resolve_opencode_agent(section: JsonObject, build: EngineBuildInput) -> str
         _reject_opencode_flag_like_value(default, field="agent", error="invalid_agent")
         return default
     return None
+
+
+def _resolve_pi_family_alias(section: JsonObject, value: str) -> tuple[str, str | None]:
+    models = section.get("models")
+    if isinstance(models, dict) and value in models:
+        mapped = models[value]
+        if isinstance(mapped, str):
+            return mapped, None
+        if isinstance(mapped, dict):
+            model = mapped.get("model")
+            thinking = mapped.get("thinking")
+            if isinstance(model, str):
+                return model, thinking if isinstance(thinking, str) else None
+    return value, None
+
+
+def _reject_pi_model_thinking_suffix(model: str | None) -> None:
+    if isinstance(model, str) and ":" in model:
+        raise DelegateError(
+            "invalid_model",
+            "model must not contain ':'; use the alias thinking field or --reasoning-effort.",
+        )
+
+
+def _resolve_pi_family_selection_detail(
+    section: JsonObject,
+    build: EngineBuildInput,
+    *,
+    engine: str,
+) -> tuple[str | None, str | None, str | None]:
+    alias_thinking: str | None = None
+    selection = build.model_override or build.model_alias
+    if selection:
+        _reject_opencode_flag_like_value(selection, field="model", error="invalid_model")
+        model, alias_thinking = _resolve_pi_family_alias(section, selection)
+    else:
+        model = _resolve_default_model(section)
+    _reject_opencode_flag_like_value(model, field="model", error="invalid_model")
+    _reject_pi_model_thinking_suffix(model)
+
+    if build.requested_effort is not None and build.effort_source != "config":
+        try:
+            thinking = reasoning.resolve_native_effort(
+                engine,
+                build.requested_effort,
+                alias=build.model_alias,
+                model=model,
+            )
+        except reasoning.ReasoningCapabilityError as exc:
+            raise DelegateError(exc.error, exc.message) from exc
+        return model, thinking, build.effort_source or "cli"
+    if alias_thinking is not None:
+        if alias_thinking not in reasoning.PI_THINKING_LEVELS:
+            raise DelegateError(
+                "invalid_reasoning_effort",
+                f"{engine} alias thinking must be one of: {', '.join(reasoning.PI_THINKING_LEVELS)}.",
+            )
+        return model, alias_thinking, "alias"
+    if build.requested_effort is not None:
+        try:
+            thinking = reasoning.resolve_native_effort(
+                engine,
+                build.requested_effort,
+                alias=build.model_alias,
+                model=model,
+            )
+        except reasoning.ReasoningCapabilityError as exc:
+            raise DelegateError(exc.error, exc.message) from exc
+        return model, thinking, build.effort_source or "config"
+    return model, None, None
 
 
 def _effective_cli_model_alias(launch: LaunchOptions, config: JsonObject) -> str | None:
@@ -1910,6 +1981,33 @@ def _opencode_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     )
 
 
+def _pi_request_parts(build: EngineBuildInput) -> EngineRequestParts:
+    _ = build.cache
+    pi = build.config["pi"]
+    model, thinking, thinking_source = _resolve_pi_family_selection_detail(
+        pi,
+        build,
+        engine="pi",
+    )
+    argv = build_pi_argv(
+        pi,
+        build.mode,
+        model,
+        thinking,
+        call_read_only=build.call_read_only,
+        pure=build.pure,
+    )
+    return EngineRequestParts(
+        model=model,
+        argv=argv,
+        model_alias=build.model_alias,
+        prompt_transport=PROMPT_TRANSPORT_STDIN,
+        stdin_text=build.prompt,
+        display_argv=list(argv),
+        **pi_reasoning_request_kwargs(thinking, thinking_source),
+    )
+
+
 def _kimi_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     _ = build.effort_source, build.cache
     kimi = build.config["kimi"]
@@ -1953,6 +2051,7 @@ ENGINE_REQUEST_PARTS_BUILDERS: dict[str, EngineRequestPartsBuilder] = {
     "grok": _grok_request_parts,
     "devin": _devin_request_parts,
     "opencode": _opencode_request_parts,
+    "pi": _pi_request_parts,
     "kimi": _kimi_request_parts,
 }
 
@@ -2291,6 +2390,15 @@ def opencode_reasoning_request_kwargs(variant: str | None, source: str | None) -
         source,
         transport=reasoning.TRANSPORT_OPENCODE_VARIANT_FLAG,
         capability_source="pass-through",
+    )
+
+
+def pi_reasoning_request_kwargs(thinking: str | None, source: str | None) -> JsonObject:
+    return _native_reasoning_request_kwargs(
+        thinking,
+        source,
+        transport=reasoning.TRANSPORT_PI_THINKING_FLAG,
+        capability_source="static" if source != "alias" else "alias",
     )
 
 

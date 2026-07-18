@@ -1236,6 +1236,64 @@ class RunnerCaptureTests(unittest.TestCase):
                 self.assertIn(expected, report)
                 self.assertIn(expected, snapshot["assistantText"])
 
+    def test_tracked_pi_fixture_populates_json_envelope_assistant_text(self):
+        fixture = ROOT / "tests" / "fixtures" / "pi" / "simple_text.jsonl"
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            for mode in ("safe", "work"):
+                with self.subTest(mode=mode):
+                    run_id, alias = self.registry.register_run(root, harness="pi")
+                    ctx = self.runner.RunContext(
+                        registry_root=root,
+                        run_id=run_id,
+                        alias=alias,
+                        harness="pi",
+                        engine="pi",
+                        mode=mode,
+                        model=None,
+                        source_cwd=workspace,
+                        execution_cwd=workspace,
+                        workspace_kind="directory",
+                        isolated_workspace=False,
+                        started_at="2026-05-20T21:42:33Z",
+                    )
+                    code, payload = self.runner.execute_tracked(
+                        [
+                            sys.executable,
+                            "-c",
+                            "import sys; print(open(sys.argv[1]).read(), end='')",
+                            str(fixture),
+                        ],
+                        workspace,
+                        ctx,
+                        json_mode=True,
+                        stdout=io.StringIO(),
+                        stderr=io.StringIO(),
+                    )
+
+                    self.assertEqual(code, 0)
+                    assert payload is not None
+                    self.assertIn("PI_OK", payload["assistantText"])
+                    self.assertNotEqual(payload["resultQuality"], "no_assistant_text")
+
+    def test_pi_call_fixture_returns_assistant_text(self):
+        fixture = ROOT / "tests" / "fixtures" / "pi" / "simple_text.jsonl"
+        with tempfile.TemporaryDirectory() as workspace:
+            result = self.runner.execute_call(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys; print(open(sys.argv[1]).read(), end='')",
+                    str(fixture),
+                ],
+                workspace,
+                harness="pi",
+            )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("PI_OK", result.text)
+        self.assertNotEqual(result.result_quality, "no_assistant_text")
+
     def test_tracked_codex_progress_message_before_command_does_not_write_report(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)

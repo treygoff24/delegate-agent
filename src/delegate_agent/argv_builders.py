@@ -43,6 +43,7 @@ _SAFE_REVIEW_LABEL_BY_ENGINE = {
     "grok": "Delegate Grok safe mode",
     "devin": "Delegate Devin safe mode",
     "opencode": "Delegate OpenCode safe mode",
+    "pi": "Delegate Pi safe mode",
     "droid": "Delegate Droid safe mode",
     "kimi": "Delegate Kimi safe mode",
 }
@@ -459,6 +460,58 @@ def build_opencode_argv(
     elif mode not in (MODE_SAFE, MODE_CALL):
         validate_mode(mode)
     return argv
+
+
+def _build_pi_family_argv(
+    section: JsonObject,
+    engine: str,
+    mode: str,
+    model: str | None,
+    thinking: str | None,
+    *,
+    call_read_only: bool = False,
+    pure: bool = False,
+) -> list[str]:
+    _reject_pure(engine, mode, pure)
+    if mode not in (MODE_SAFE, MODE_WORK, MODE_CALL):
+        validate_mode(mode)
+    argv = [str(section["binary"]), "-p", "--no-session", "--mode", "json"]
+    if mode == MODE_SAFE or (mode == MODE_CALL and call_read_only):
+        argv.extend(
+            [
+                "--tools",
+                "read",
+                "--no-extensions",
+                "--no-skills",
+                "--no-prompt-templates",
+                "--no-approve",
+            ]
+        )
+    if model:
+        argv.extend(["--model", model])
+    if thinking:
+        argv.extend(["--thinking", thinking])
+    return argv
+
+
+def build_pi_argv(
+    pi: JsonObject,
+    mode: str,
+    model: str | None,
+    thinking: str | None,
+    *,
+    call_read_only: bool = False,
+    pure: bool = False,
+) -> list[str]:
+    return _build_pi_family_argv(
+        pi,
+        "pi",
+        mode,
+        model,
+        thinking,
+        call_read_only=call_read_only,
+        pure=pure,
+    )
 
 
 def build_codex_argv(

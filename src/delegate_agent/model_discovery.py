@@ -203,6 +203,8 @@ def _probe_live_models(
             return _probe_devin_models(config), None
         if engine == "opencode":
             return _probe_opencode_models(config, workspace=workspace), None
+        if engine == "pi":
+            return _probe_pi_family_models(config, engine="pi"), None
     except Exception as exc:
         return [], f"live probe failed: {exc}"
     return [], f"live probe unsupported for {engine}"
@@ -386,6 +388,59 @@ def parse_opencode_models_output(raw: str) -> list[JsonObject]:
         models.append({"id": model_id})
     if not models:
         raise RuntimeError("opencode models output had no parseable model lines")
+    return models
+
+
+def _probe_pi_family_models(config: JsonObject, *, engine: str) -> list[JsonObject]:
+    binary = delegate_config.harness_binary(config, engine)
+    argv = [
+        binary,
+        "--offline",
+        "--no-extensions",
+        "--no-skills",
+        "--no-prompt-templates",
+        "--no-approve",
+        "--list-models",
+    ]
+    with tempfile.TemporaryDirectory(prefix="delegate-model-probe-") as probe_cwd:
+        completed = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=LIVE_PROBE_TIMEOUT_SEC,
+            check=False,
+            stdin=subprocess.DEVNULL,
+            cwd=probe_cwd,
+        )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"{engine} --list-models exited {completed.returncode}: "
+            f"{(completed.stderr or completed.stdout or '').strip()[:200]}"
+        )
+    return parse_pi_models_output(completed.stdout or "")
+
+
+def parse_pi_models_output(raw: str) -> list[JsonObject]:
+    models: list[JsonObject] = []
+    for line in strip_ansi(raw).splitlines():
+        columns = line.split()
+        if len(columns) < 6 or columns[:2] == ["provider", "model"]:
+            continue
+        provider, model = columns[:2]
+        if (
+            not provider
+            or not model
+            or columns[-2] not in {"yes", "no"}
+            or columns[-1]
+            not in {
+                "yes",
+                "no",
+            }
+        ):
+            continue
+        models.append({"id": f"{provider}/{model}"})
+    if not models:
+        raise RuntimeError("pi --list-models output had no parseable model lines")
     return models
 
 

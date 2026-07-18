@@ -156,7 +156,7 @@ EVENT_TAIL = 400
 # be preamble ("I'll start by..."), and only a message sealed by turn.completed
 # is the real answer.
 ASSISTANT_RECOVERY_HARNESSES = frozenset(
-    {"cursor", "droid", "kimi", "claude", "grok", "devin", "opencode"}
+    {"cursor", "droid", "kimi", "claude", "grok", "devin", "opencode", "pi"}
 )
 
 
@@ -217,6 +217,7 @@ class StreamAccumulator:
     _grok_current_line: str = field(default="", repr=False)
     _last_error_message: str | None = field(default=None, repr=False)
     _opencode_step_text_chunks: list[str] = field(default_factory=list, repr=False)
+    _pi_text_buffer: str = field(default="", repr=False)
     terminal_event: JsonObject | None = None
     terminal_status: str | None = None
     structured_events_seen: int = 0
@@ -256,17 +257,17 @@ class StreamAccumulator:
             # Kimi tool results can contain arbitrary command output. If an
             # excessively nested envelope cannot be classified, dropping it is
             # safer than exposing the raw line as a text event.
-            if self.harness in ("kimi", "opencode"):
+            if self.harness in ("kimi", "opencode", "pi"):
                 return
             self._ingest_text_fallback(stripped)
             return
         except json.JSONDecodeError:
-            if self.harness in ("kimi", "opencode"):
+            if self.harness in ("kimi", "opencode", "pi"):
                 return
             self._ingest_text_fallback(stripped)
             return
         if not isinstance(payload, dict):
-            if self.harness in ("kimi", "opencode"):
+            if self.harness in ("kimi", "opencode", "pi"):
                 return
             self._ingest_text_fallback(stripped)
             return
@@ -287,6 +288,9 @@ class StreamAccumulator:
             return
         if self.harness == "opencode":
             self._ingest_opencode_event(payload, event_type)
+            return
+        if self.harness == "pi":
+            self._ingest_pi_event(payload, event_type)
             return
         if event_type == "reasoning":
             return
@@ -768,6 +772,86 @@ class StreamAccumulator:
         if reason:
             self.current = _bounded_current_line(reason)
 
+    def _reset_pi_turn_text(self) -> None:
+        self._pi_text_buffer = ""
+        self.assistant_chunks = []
+        self.completion_text = None
+        self._last_recoverable_assistant_text = None
+        self._last_substantive_assistant_text = None
+        self._invalidate_assistant_text_cache()
+
+    def _publish_pi_text(self, text: str, *, completion: bool = False) -> None:
+        stripped = text.strip()
+        if not stripped:
+            return
+        self._pi_text_buffer = stripped
+        self.assistant_chunks = [stripped]
+        self._last_recoverable_assistant_text = stripped
+        if is_substantive_assistant_text(stripped):
+            self._last_substantive_assistant_text = stripped
+        if completion:
+            self.completion_text = stripped
+        self.current = _current_from_text(stripped)
+        self._invalidate_assistant_text_cache()
+
+    def _ingest_pi_event(self, payload: JsonObject, event_type: str) -> None:
+        if event_type == "turn_start":
+            self._reset_pi_turn_text()
+            return
+        if event_type == "message_update":
+            update = payload.get("assistantMessageEvent")
+            if isinstance(update, dict) and update.get("type") == "text_delta":
+                delta = update.get("delta")
+                if isinstance(delta, str):
+                    self._publish_pi_text(self._pi_text_buffer + delta)
+            return
+        if event_type == "message_end":
+            message = payload.get("message")
+            if isinstance(message, dict) and message.get("role") == "assistant":
+                self._publish_pi_text(_extract_text(message.get("content")))
+            return
+        if event_type == "tool_execution_start":
+            self._ingest_pi_tool(payload, completed=False)
+            return
+        if event_type == "tool_execution_end":
+            self._ingest_pi_tool(payload, completed=True)
+            return
+        if event_type == "turn_end":
+            message = payload.get("message")
+            role = message.get("role") if isinstance(message, dict) else None
+            stop_reason = (
+                message.get("stopReason") if isinstance(message, dict) else payload.get("stopReason")
+            )
+            if role != "assistant" or stop_reason != "stop":
+                return
+            if isinstance(message, dict):
+                text = _extract_text(message.get("content"))
+                if text:
+                    self._publish_pi_text(text, completion=True)
+            self._record_terminal_event(event="pi.turn_end", status="succeeded")
+            return
+        if event_type == "error":
+            self._ingest_error_event(payload)
+            self._record_terminal_event(event="pi.error", status="failed")
+
+    def _ingest_pi_tool(self, payload: JsonObject, *, completed: bool) -> None:
+        tool = _string_field(payload, "toolName") or "tool"
+        args = payload.get("args")
+        target = _tool_use_target({"input": args}) if isinstance(args, dict) else None
+        status = None
+        if completed:
+            status = "error" if payload.get("isError") is True else "success"
+        self.events.append(
+            NormalizedEvent(
+                kind="tool.completed" if completed else "tool.started",
+                tool=tool,
+                target=target,
+                path=target,
+                status=status,
+            )
+        )
+        self.current = _tool_current(tool, target)
+
     def _ingest_tool_call(self, payload: JsonObject) -> None:
         tool = _string_field(payload, "tool", "name", "toolName") or "tool"
         target = _tool_target(payload)
@@ -892,7 +976,7 @@ def _extract_text(content: JsonValue) -> str:
                 parts.append(item)
             elif isinstance(item, dict):
                 text = item.get("text")
-                if isinstance(text, str):
+                if item.get("type") in (None, "text") and isinstance(text, str):
                     parts.append(text)
         return "\n".join(part for part in parts if part).strip()
     return ""

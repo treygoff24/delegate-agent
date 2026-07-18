@@ -67,6 +67,9 @@ CLAUDE_NATIVE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 TRANSPORT_GROK_EFFORT_FLAG = "grok-effort-flag"
 GROK_NATIVE_EFFORTS = CLAUDE_NATIVE_EFFORTS
 TRANSPORT_OPENCODE_VARIANT_FLAG = "variant-flag"
+TRANSPORT_PI_THINKING_FLAG = "pi-thinking-flag"
+PI_NATIVE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+PI_THINKING_LEVELS = ("off", "minimal", *PI_NATIVE_EFFORTS)
 INSPECT_REASONING_DISCOVERY_HINT = (
     "Inspect `delegate --json models --summary` or "
     "`delegate --json capabilities` for reasoning-effort support."
@@ -113,6 +116,11 @@ REASONING_PROFILES: dict[str, ReasoningProfile] = {
         unsupported_warning=DEVIN_UNSUPPORTED_REASONING_WARNING,
     ),
     "opencode": ReasoningProfile(None, "pass-through"),
+    "pi": ReasoningProfile(
+        TRANSPORT_PI_THINKING_FLAG,
+        "static-enum",
+        static_efforts=PI_NATIVE_EFFORTS,
+    ),
 }
 
 TRANSPORT_BY_HARNESS = {
@@ -279,6 +287,15 @@ def resolve_grok_native_effort(
 ) -> str | None:
     """Validate Grok Build CLI native --effort values."""
     return resolve_native_effort("grok", requested_effort, alias=alias, model=model)
+
+
+def resolve_pi_native_effort(
+    requested_effort: str | None,
+    *,
+    alias: str | None = None,
+    model: str | None = None,
+) -> str | None:
+    return resolve_native_effort("pi", requested_effort, alias=alias, model=model)
 
 
 def _as_models_map(source: JsonValue) -> dict[str, JsonObject]:
@@ -622,6 +639,23 @@ def _grok_alias_reasoning_summary(grok: JsonObject) -> JsonObject:
     return payload
 
 
+def _pi_alias_reasoning_summary(pi: JsonObject) -> JsonObject:
+    default_model = pi.get("defaultModel")
+    alias = _alias_key_for_default_model(default_model)
+    payload: JsonObject = {
+        "alias": alias,
+        "supported": list(PI_NATIVE_EFFORTS),
+        "source": "static",
+        "transport": TRANSPORT_PI_THINKING_FLAG,
+    }
+    if isinstance(default_model, str) and default_model:
+        payload["model"] = default_model
+    default_effort = pi.get("defaultReasoningEffort")
+    if isinstance(default_effort, str):
+        payload["configDefault"] = default_effort
+    return payload
+
+
 def _kimi_alias_reasoning_summary(kimi: JsonObject) -> JsonObject:
     default_model = kimi.get("defaultModel")
     alias = _alias_key_for_default_model(default_model)
@@ -700,6 +734,31 @@ def _add_opencode_alias_summaries(aliases: JsonObject, opencode: JsonObject) -> 
             continue
         entry["model"] = model
         entry["pinnedVariant"] = variant
+        entry["source"] = "alias"
+        aliases[alias] = entry
+
+
+def _add_pi_alias_summaries(aliases: JsonObject, pi: JsonObject) -> None:
+    models = pi.get("models")
+    if not isinstance(models, dict):
+        return
+    for alias, mapping in sorted(models.items()):
+        if not isinstance(alias, str) or not alias:
+            continue
+        entry = dict(_pi_alias_reasoning_summary(pi))
+        entry["alias"] = alias
+        if isinstance(mapping, str) and mapping:
+            entry["model"] = mapping
+            aliases[alias] = entry
+            continue
+        if not isinstance(mapping, dict):
+            continue
+        model = mapping.get("model")
+        thinking = mapping.get("thinking")
+        if not (isinstance(model, str) and model and isinstance(thinking, str) and thinking):
+            continue
+        entry["model"] = model
+        entry["pinnedThinking"] = thinking
         entry["source"] = "alias"
         aliases[alias] = entry
 
@@ -822,6 +881,16 @@ def build_alias_reasoning_summaries(
     else:
         summaries["opencode"] = {}
 
+    pi = config.get("pi")
+    if isinstance(pi, dict):
+        default_model = pi.get("defaultModel")
+        alias_key = _alias_key_for_default_model(default_model)
+        pi_aliases: JsonObject = {alias_key: _pi_alias_reasoning_summary(pi)}
+        _add_pi_alias_summaries(pi_aliases, pi)
+        summaries["pi"] = pi_aliases
+    else:
+        summaries["pi"] = {}
+
     kimi = config.get("kimi")
     if isinstance(kimi, dict):
         default_model = kimi.get("defaultModel")
@@ -874,6 +943,12 @@ def build_reasoning_capabilities_payload(
         "transport": REASONING_PROFILES["grok"].transport,
         "source": "static",
         "supported": list(REASONING_PROFILES["grok"].static_efforts),
+        "models": {},
+    }
+    harnesses["pi"] = {
+        "transport": REASONING_PROFILES["pi"].transport,
+        "source": "static",
+        "supported": list(REASONING_PROFILES["pi"].static_efforts),
         "models": {},
     }
     for harness in [h for h, p in REASONING_PROFILES.items() if p.strategy == "pass-through"]:

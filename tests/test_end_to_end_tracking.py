@@ -110,7 +110,7 @@ def make_codex_streaming_script(*, include_completion: bool = True) -> str:
     return (
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
-        f'printf \'{{"type":"message","role":"assistant","content":[{{"type":"output_text","text":"{CODEX_ASSISTANT_MARKER}"}}]}}\\n\'\n'
+        f'printf \'{{"type":"message","role":"assistant","content":[{{"type":"text","text":"{CODEX_ASSISTANT_MARKER}"}}]}}\\n\'\n'
         f'printf \'{{"type":"tool_call","tool":"shell","args":{{"command":"python3 -m unittest"}}}}\\n\'\n'
         f"{completion_line}"
         f'printf "{STDERR_MARKER}\\n" >&2\n'

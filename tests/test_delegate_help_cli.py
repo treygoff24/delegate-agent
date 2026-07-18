@@ -36,6 +36,7 @@ TOP_LEVEL_COMMANDS = (
     "claude",
     "devin",
     "opencode",
+    "pi",
     "codex",
     "droid",
     "dry-run",
@@ -131,6 +132,7 @@ class FocusedCallHelpTests(HelpCliTestBase):
         (["cursor", "call", "--help"], "cursor call"),
         (["codex", "call", "--help"], "codex call"),
         (["opencode", "call", "--help"], "opencode call"),
+        (["pi", "call", "--help"], "pi call"),
         (["droid", "call", "--help"], "droid call"),
         (["droid", "reviewer", "call", "--help"], "droid call"),
         (["dry-run", "cursor", "call", "--help"], "dry-run call"),
@@ -200,6 +202,7 @@ class JsonCommandHelpTests(HelpCliTestBase):
         (["--json", "cursor", "--help"], "cursor"),
         (["--json", "claude", "--help"], "claude"),
         (["--json", "opencode", "--help"], "opencode"),
+        (["--json", "pi", "--help"], "pi"),
         (["--json", "codex", "--help"], "codex"),
         (["--json", "droid", "--help"], "droid"),
         (["--json", "dry-run", "--help"], "dry-run"),
@@ -218,6 +221,7 @@ class JsonCommandHelpTests(HelpCliTestBase):
         (["--json", "cursor", "safe", "--help"], "cursor"),
         (["--json", "claude", "safe", "--help"], "claude"),
         (["--json", "opencode", "safe", "--help"], "opencode"),
+        (["--json", "pi", "safe", "--help"], "pi"),
     )
 
     def test_json_command_help(self):
@@ -585,7 +589,7 @@ class KimiHelpTests(HelpCliTestBase):
 
     def test_safe_workspace_sync_note_is_shared_across_help_surfaces(self):
         note = self.delegate.command_help.SAFE_WORKSPACE_SYNC_NOTE
-        for command in ("cursor", "kimi", "codex", "claude", "opencode", "droid"):
+        for command in ("cursor", "kimi", "codex", "claude", "opencode", "pi", "droid"):
             with self.subTest(command=command):
                 code, out, _err = self.run_main([command, "--help"])
                 self.assertEqual(code, self.delegate.EXIT_OK)
@@ -599,7 +603,7 @@ class KimiHelpTests(HelpCliTestBase):
         code, out, _err = self.run_main(["--json", "describe"])
         self.assertEqual(code, self.delegate.EXIT_OK)
         payload = json.loads(out)
-        for command in ("cursor", "kimi", "codex", "claude", "opencode", "droid"):
+        for command in ("cursor", "kimi", "codex", "claude", "opencode", "pi", "droid"):
             with self.subTest(describe=command):
                 self.assertIn(note, payload["modeMapping"][command]["safeNotes"])
 

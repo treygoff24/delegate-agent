@@ -327,6 +327,136 @@ class HarnessEventsTests(unittest.TestCase):
         self.assertEqual(acc.assistant_recovery_quality(), "explicit_completion")
         self.assertIn("opencode", self.events.ASSISTANT_RECOVERY_HARNESSES)
 
+    def test_pi_json_fixture_populates_assistant_text_and_completion(self):
+        fixture = ROOT / "tests" / "fixtures" / "pi" / "simple_text.jsonl"
+        acc = self.events.StreamAccumulator(harness="pi")
+        for line in fixture.read_text(encoding="utf-8").splitlines():
+            acc.ingest_line(line)
+
+        self.assertEqual(acc.assistant_text, "PI_OK")
+        self.assertEqual(acc.completion_text, "PI_OK")
+        self.assertEqual(acc.terminal_status, "succeeded")
+        self.assertEqual(
+            acc.terminal_event,
+            {"event": "pi.turn_end", "status": "succeeded"},
+        )
+        self.assertIn("pi", self.events.ASSISTANT_RECOVERY_HARNESSES)
+
+    def test_pi_empty_stop_turn_is_terminal_success(self):
+        acc = self.events.StreamAccumulator(harness="pi")
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "turn_end",
+                    "message": {"role": "assistant", "content": [], "stopReason": "stop"},
+                }
+            )
+        )
+
+        self.assertEqual(acc.assistant_text, "")
+        self.assertEqual(acc.terminal_status, "succeeded")
+        self.assertEqual(
+            acc.terminal_event,
+            {"event": "pi.turn_end", "status": "succeeded"},
+        )
+
+    def test_reasoning_typed_content_is_not_assistant_text(self):
+        acc = self.events.StreamAccumulator()
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {"type": "reasoning", "text": "hidden chain"},
+                        {"type": "text", "text": "visible answer"},
+                    ],
+                }
+            )
+        )
+
+        self.assertEqual(acc.assistant_text, "visible answer")
+
+    def test_real_pi_tool_fixture_parses_tool_without_exposing_result(self):
+        fixture = ROOT / "tests" / "fixtures" / "pi" / "tool_read.jsonl"
+        acc = self.events.StreamAccumulator(harness="pi")
+        result_text = None
+        for line in fixture.read_text(encoding="utf-8").splitlines():
+            payload = json.loads(line)
+            if payload.get("type") == "tool_execution_end":
+                result = payload.get("result")
+                if isinstance(result, dict):
+                    content = result.get("content")
+                    if isinstance(content, list) and content:
+                        result_text = content[0].get("text")
+            acc.ingest_line(line)
+
+        self.assertEqual(
+            [(event.kind, event.tool, event.target) for event in acc.events if event.tool],
+            [
+                ("tool.started", "read", "notes.txt"),
+                ("tool.completed", "read", None),
+            ],
+        )
+        self.assertIsInstance(result_text, str)
+        self.assertNotIn(result_text, acc.assistant_text)
+        self.assertNotIn(result_text, json.dumps([event.to_dict() for event in acc.events]))
+        self.assertTrue(acc.assistant_text)
+        self.assertEqual(acc.completion_text, acc.assistant_text)
+        completions = [event for event in acc.events if event.kind == "run.completed"]
+        self.assertEqual(len(completions), 1, "toolUse turn_end must not record a premature completion")
+
+    def test_pi_non_stop_turn_end_is_not_terminal_success(self):
+        for stop_reason in ("error", "aborted", "length", "toolUse"):
+            acc = self.events.StreamAccumulator(harness="pi")
+            acc.ingest_line(
+                json.dumps(
+                    {
+                        "type": "turn_end",
+                        "message": {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": "partial"}],
+                            "stopReason": stop_reason,
+                        },
+                    }
+                )
+            )
+            self.assertIsNone(
+                acc.terminal_status,
+                f"stopReason={stop_reason} must not record a succeeded terminal",
+            )
+
+    def test_pi_tool_result_content_is_not_exposed(self):
+        acc = self.events.StreamAccumulator(harness="pi")
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "tool_execution_start",
+                    "toolName": "read",
+                    "args": {"path": "note.txt"},
+                }
+            )
+        )
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "tool_execution_end",
+                    "toolName": "read",
+                    "args": {"path": "note.txt"},
+                    "result": {"content": [{"type": "text", "text": "SECRET"}]},
+                    "isError": False,
+                }
+            )
+        )
+        self.assertEqual(acc.assistant_text, "")
+        self.assertEqual(
+            [(event.kind, event.tool, event.path, event.status) for event in acc.events],
+            [
+                ("tool.started", "read", "note.txt", None),
+                ("tool.completed", "read", "note.txt", "success"),
+            ],
+        )
+
     def test_opencode_tool_run_fixture_recovers_final_text_not_tool_output(self):
         acc = self.ingest_opencode_fixture("tool_run.ndjson")
         expected = self.opencode_text_parts("tool_run.ndjson")[-1].strip()

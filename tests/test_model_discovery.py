@@ -140,6 +140,12 @@ class ModelsCommandParseTests(unittest.TestCase):
         self.assertEqual(parsed.inspection.engine, "opencode")
         self.assertTrue(parsed.inspection.live)
 
+    def test_pi_engine_and_live_parse(self):
+        parsed = self.parse_cli(["models", "pi", "--live"])
+        assert parsed.inspection is not None
+        self.assertEqual(parsed.inspection.engine, "pi")
+        self.assertTrue(parsed.inspection.live)
+
 
 class LiveProbeParseHelpersTests(unittest.TestCase):
     def test_strip_ansi(self):
@@ -210,6 +216,23 @@ class LiveProbeParseHelpersTests(unittest.TestCase):
         with self.assertRaises(RuntimeError) as ctx:
             parse_opencode_models_output("warning:\nloading\n\n  spaced id\n")
         self.assertIn("no parseable model lines", str(ctx.exception))
+
+    def test_parse_pi_models_output(self):
+        from delegate_agent.model_discovery import parse_pi_models_output
+
+        raw = (
+            "provider      model                    context  max-out  thinking  images\n"
+            "openai-codex  gpt-5.6-sol              272K     128K     yes       yes\n"
+            "warning: loading local catalog\n"
+            "anthropic     claude-opus-4-8          1M       128K     yes       yes\n"
+        )
+        self.assertEqual(
+            parse_pi_models_output(raw),
+            [
+                {"id": "openai-codex/gpt-5.6-sol"},
+                {"id": "anthropic/claude-opus-4-8"},
+            ],
+        )
 
     def test_parse_droid_custom_models(self):
         from delegate_agent.model_discovery import parse_droid_custom_models
@@ -424,6 +447,35 @@ class LiveProbeIntegrationTests(unittest.TestCase):
             self.assertEqual(
                 Path(cwd_log.read_text(encoding="utf-8").strip()).resolve(),
                 workspace_path.resolve(),
+            )
+
+    def test_pi_live_merge_uses_offline_probe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            argv_log = Path(tmp) / "argv.log"
+            fake = _write_executable(
+                Path(tmp) / "fake-pi",
+                "#!/usr/bin/env bash\n"
+                f'printf \'%s\\n\' "$@" > "{argv_log}"\n'
+                "echo 'provider model context max-out thinking images'\n"
+                "echo 'openai-codex gpt-5.6-sol 272K 128K yes yes'\n"
+                "exit 0\n",
+            )
+            config = self.embedded_default_config()
+            config["pi"]["binary"] = str(fake)
+
+            payload = self.engine_models_payload(config, "pi", live=True)
+
+            self.assertIs(payload["live"], True)
+            self.assertEqual(
+                argv_log.read_text(encoding="utf-8").splitlines(),
+                [
+                    "--offline",
+                    "--no-extensions",
+                    "--no-skills",
+                    "--no-prompt-templates",
+                    "--no-approve",
+                    "--list-models",
+                ],
             )
 
     def test_live_degrades_on_missing_binary(self):

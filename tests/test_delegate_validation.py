@@ -914,7 +914,16 @@ class ValidationTests(unittest.TestCase):
 
     def test_resolve_isolation_normalizes_safe_none_for_isolation_required_harnesses(self):
         config_mod = load_config_module()
-        for engine in ("cursor", "droid", "kimi", "claude", "grok", "devin", "opencode"):
+        for engine in (
+            "cursor",
+            "droid",
+            "kimi",
+            "claude",
+            "grok",
+            "devin",
+            "opencode",
+            "pi",
+        ):
             with self.subTest(engine=engine):
                 self.assertEqual(
                     config_mod.resolve_isolation(

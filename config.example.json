@@ -93,6 +93,12 @@
     "defaultAgent": null,
     "models": {}
   },
+  "pi": {
+    "binary": "pi",
+    "defaultModel": null,
+    "defaultReasoningEffort": null,
+    "models": {}
+  },
   "kimi": {
     "binary": "kimi",
     "defaultModel": "kimi-code/k3",
