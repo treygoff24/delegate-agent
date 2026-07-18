@@ -458,6 +458,31 @@ provider, including configured custom or local providers.
 - Every mode uses `--no-session`. Safe mode and `call --read-only` allow only Pi's `read` tool and disable extensions, skills, prompt templates, and project approval discovery.
 - `delegate models pi --live` probes Pi's local model catalog without reading or printing provider credentials.
 
+### `omp`
+
+```json
+{
+  "omp": {
+    "binary": "omp",
+    "defaultModel": null,
+    "defaultReasoningEffort": null,
+    "models": {
+      "reviewer": "openai-codex/gpt-5.6-sol",
+      "quick": { "model": "openai-codex/gpt-5.6-sol", "thinking": "minimal" }
+    }
+  }
+}
+```
+
+- `binary`: path to the Oh My Pi executable.
+- `defaultModel`: optional `provider/model` ID. `null` preserves Oh My Pi's configured default.
+- `defaultReasoningEffort`: optional `low`, `medium`, `high`, `xhigh`, or `max` default.
+- `models`: the same string or `{ "model", "thinking" }` alias shape as `pi.models`; model values containing a colon suffix are rejected.
+- Explicit `--reasoning-effort` overrides alias-pinned thinking, which overrides the configured default.
+- Every mode uses `--no-session`. Safe mode and `call --read-only` allow only `read` and disable extensions, skills, rules, and LSP discovery.
+- Delegate does not consume `modelRoles` and never emits `--smol`, `--slow`, `--plan`, `--prewalk*`, or `--plan-yolo*`.
+- `delegate models omp --live` probes `omp models --json --no-extensions` without reading or printing provider credentials.
+
 ### `reasoning`
 
 ```json
@@ -524,7 +549,7 @@ Supported boolean policy keys: `networkAccess`, `webSearch`, `bypassApprovalsAnd
 ```
 
 Allowed values are `auto`, `none`, and `worktree`. For Cursor, Claude, Grok,
-OpenCode, Pi, Droid, and Kimi safe mode, an effective value of `none` is normalized to `auto`
+OpenCode, Pi, Oh My Pi, Droid, and Kimi safe mode, an effective value of `none` is normalized to `auto`
 because those safe contracts depend on Delegate's temporary workspace/config
 boundary. Explicit per-run CLI/JSON `none` requests also emit a warning; a
 config default is normalized without a separate per-run warning. Codex safe can
@@ -532,7 +557,7 @@ use `none` because the Codex read-only sandbox remains active.
 
 Embedded defaults:
 
-- `safe`: `auto`. Cursor, Claude, Grok, OpenCode, Pi, Droid, Codex, and Kimi safe use temporary workspace isolation by default. Devin safe is unsupported.
+- `safe`: `auto`. Cursor, Claude, Grok, OpenCode, Pi, Oh My Pi, Droid, Codex, and Kimi safe use temporary workspace isolation by default. Devin safe is unsupported.
 - `work`: `none`. Work mode runs in the real workspace unless you opt into worktree isolation.
 
 ### `worktrees`

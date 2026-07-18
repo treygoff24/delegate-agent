@@ -85,4 +85,9 @@ BUNDLED_MODELS: dict[str, tuple[BundledModelEntry, ...]] = {
         {"id": "anthropic/claude-opus-4-8"},
         {"id": "anthropic/claude-sonnet-5"},
     ),
+    "omp": (
+        {"id": "openai-codex/gpt-5.6-sol"},
+        {"id": "anthropic/claude-opus-4-8"},
+        {"id": "anthropic/claude-sonnet-5"},
+    ),
 }

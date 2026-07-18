@@ -99,6 +99,12 @@
     "defaultReasoningEffort": null,
     "models": {}
   },
+  "omp": {
+    "binary": "omp",
+    "defaultModel": null,
+    "defaultReasoningEffort": null,
+    "models": {}
+  },
   "kimi": {
     "binary": "kimi",
     "defaultModel": "kimi-code/k3",

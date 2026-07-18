@@ -46,6 +46,7 @@ from delegate_agent.argv_builders import (  # noqa: F401  # re-exported for test
     build_droid_argv,
     build_grok_argv,
     build_kimi_argv,
+    build_omp_argv,
     build_opencode_argv,
     build_pi_argv,
     prefix_cursor_safe_prompt,
@@ -768,9 +769,9 @@ def execute_request(
                     "stderrBytes": result.stderr_bytes,
                     "durationMs": result.duration_ms,
                 }
-                if request.engine == "pi":
+                if request.engine in {"pi", "omp"}:
                     # Keep the established call-mode `text` field while giving
-                    # Pi the same assistantText contract as tracked modes.
+                    # Pi-family engines the same assistantText contract as tracked modes.
                     payload["assistantText"] = result.text
                 if request.warnings:
                     payload["warnings"] = list(request.warnings)

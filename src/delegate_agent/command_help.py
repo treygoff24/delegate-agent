@@ -564,6 +564,45 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         see_also=("opencode", "codex", "models", "agent-help"),
     ),
+    "omp": CommandSpec(
+        name="omp",
+        summary="Run Oh My Pi in safe, work, or stateless call mode.",
+        usage=(
+            "delegate [--json] [--isolation auto|none|worktree] "
+            "omp {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] "
+            "[--timeout SECONDS] [--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
+            "delegate [--json] omp call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] "
+            "[--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
+        ),
+        arguments=(_MODE_ARG, _PROMPT_ARG),
+        options=(
+            _MODEL_OPTION,
+            _REASONING_EFFORT_OPTION,
+            _PROGRESS_OPTION,
+            _NO_PROGRESS_OPTION,
+            _FORBID_COMMIT_OPTION,
+            _INCLUDE_DIRTY_OPTION,
+            _READ_ONLY_OPTION,
+            _CHILD_TIMEOUT_OPTION,
+            _PROMPT_FILE_OPTION,
+        ),
+        examples=(
+            'delegate omp safe "Review this workspace. Do not edit files."',
+            'delegate omp work --model builder "Implement the scoped fix and verify."',
+            "delegate omp call --read-only --prompt-file judge.md",
+        ),
+        notes=(
+            "Uses omp -p --mode json --no-session with prompt delivered as a positional argument.",
+            SAFE_WORKSPACE_SYNC_NOTE,
+            WORKTREE_DIRTY_SYNC_NOTE,
+            CALL_MODE_NOTE,
+            "Safe and call --read-only allow only omp's read tool and disable extension, skill, rules, and LSP discovery.",
+            "All modes are stateless at omp's session layer; Delegate run tracking remains available.",
+            "Reasoning effort maps directly to omp --thinking: low, medium, high, xhigh, or max.",
+            "Model IDs use provider/model form; aliases may pin model plus off/minimal thinking.",
+        ),
+        see_also=("pi", "opencode", "codex", "models", "agent-help"),
+    ),
     "droid": CommandSpec(
         name="droid",
         summary="Run a Factory Droid BYOK model alias in safe, work, or stateless call mode.",
@@ -616,15 +655,15 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
     ),
     "dry-run": CommandSpec(
         name="dry-run",
-        summary="Resolve a cursor/codex/droid/kimi/claude/grok/devin/opencode/pi invocation and print the planned argv without running it.",
+        summary="Resolve a cursor/codex/droid/kimi/claude/grok/devin/opencode/pi/omp invocation and print the planned argv without running it.",
         usage=(
             "delegate [--json] [--isolation auto|none|worktree] "
-            "dry-run {cursor,kimi,claude,grok,opencode,pi} {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] "
+            "dry-run {cursor,kimi,claude,grok,opencode,pi,omp} {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] "
             "[--progress] [--timeout SECONDS] [--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
             "delegate [--json] [--isolation auto|none|worktree] "
             "dry-run devin work [--model <alias-or-model>] [--reasoning-effort LEVEL] "
             "[--progress] [--timeout SECONDS] [--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
-            "delegate [--json] dry-run {cursor,kimi,claude,grok,devin,opencode,pi} call "
+            "delegate [--json] dry-run {cursor,kimi,claude,grok,devin,opencode,pi,omp} call "
             "[--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] "
             "[--prompt-file PATH] [prompt...]",
             "delegate [--json] [--isolation auto|none|worktree] "
@@ -644,7 +683,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             ArgSpec(
                 "engine",
                 True,
-                "Engine to plan: cursor, codex, kimi, claude, grok, devin, opencode, pi, or droid.",
+                "Engine to plan: cursor, codex, kimi, claude, grok, devin, opencode, pi, omp, or droid.",
             ),
             _PROMPT_ARG,
         ),
@@ -671,6 +710,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             'delegate dry-run devin work "Plan an implementation run."',
             'delegate dry-run opencode safe "Review this repo."',
             'delegate dry-run pi safe "Review this repo."',
+            'delegate dry-run omp safe "Review this repo."',
             'delegate dry-run claude safe "Review this repo."',
             'delegate dry-run kimi safe "Review this repo."',
         ),
@@ -689,6 +729,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "grok",
             "opencode",
             "pi",
+            "omp",
             "describe",
         ),
     ),
@@ -1487,6 +1528,7 @@ for _engine in (
     "devin",
     "opencode",
     "pi",
+    "omp",
     "droid",
 ):
     COMMAND_SPECS[f"{_engine} call"] = _focused_call_spec(COMMAND_SPECS[_engine])
@@ -1610,6 +1652,8 @@ def render_overview_text() -> str:
         "delegate [--json] opencode call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} pi {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         "delegate [--json] pi call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} omp {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        "delegate [--json] omp call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} kimi {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         "delegate [--json] kimi call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} dry-run cursor {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
@@ -1628,6 +1672,8 @@ def render_overview_text() -> str:
         "delegate [--json] dry-run opencode call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--agent NAME] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} dry-run pi {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         "delegate [--json] dry-run pi call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
+        f"delegate [--cwd PATH] [--json] {iso} dry-run omp {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
+        "delegate [--json] dry-run omp call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} dry-run kimi {{safe,work}} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         "delegate [--json] dry-run kimi call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} run --input-json FILE",

@@ -205,6 +205,8 @@ def _probe_live_models(
             return _probe_opencode_models(config, workspace=workspace), None
         if engine == "pi":
             return _probe_pi_family_models(config, engine="pi"), None
+        if engine == "omp":
+            return _probe_pi_family_models(config, engine="omp"), None
     except Exception as exc:
         return [], f"live probe failed: {exc}"
     return [], f"live probe unsupported for {engine}"
@@ -393,15 +395,18 @@ def parse_opencode_models_output(raw: str) -> list[JsonObject]:
 
 def _probe_pi_family_models(config: JsonObject, *, engine: str) -> list[JsonObject]:
     binary = delegate_config.harness_binary(config, engine)
-    argv = [
-        binary,
-        "--offline",
-        "--no-extensions",
-        "--no-skills",
-        "--no-prompt-templates",
-        "--no-approve",
-        "--list-models",
-    ]
+    if engine == "omp":
+        argv = [binary, "models", "--json", "--no-extensions"]
+    else:
+        argv = [
+            binary,
+            "--offline",
+            "--no-extensions",
+            "--no-skills",
+            "--no-prompt-templates",
+            "--no-approve",
+            "--list-models",
+        ]
     with tempfile.TemporaryDirectory(prefix="delegate-model-probe-") as probe_cwd:
         completed = subprocess.run(
             argv,
@@ -417,6 +422,8 @@ def _probe_pi_family_models(config: JsonObject, *, engine: str) -> list[JsonObje
             f"{engine} --list-models exited {completed.returncode}: "
             f"{(completed.stderr or completed.stdout or '').strip()[:200]}"
         )
+    if engine == "omp":
+        return parse_omp_models_output(completed.stdout or "")
     return parse_pi_models_output(completed.stdout or "")
 
 
@@ -441,6 +448,27 @@ def parse_pi_models_output(raw: str) -> list[JsonObject]:
         models.append({"id": f"{provider}/{model}"})
     if not models:
         raise RuntimeError("pi --list-models output had no parseable model lines")
+    return models
+
+
+def parse_omp_models_output(raw: str) -> list[JsonObject]:
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("omp models --json output was not valid JSON") from exc
+    entries = payload.get("models") if isinstance(payload, dict) else None
+    if not isinstance(entries, list):
+        raise RuntimeError("omp models --json output had no models array")
+    models = [
+        {"id": selector}
+        for entry in entries
+        if isinstance(entry, dict)
+        and isinstance((selector := entry.get("selector")), str)
+        and selector
+        and "/" in selector
+    ]
+    if not models:
+        raise RuntimeError("omp models --json output had no parseable model selectors")
     return models
 
 

@@ -20,6 +20,7 @@ command -v grok
 command -v devin
 command -v opencode
 command -v pi
+command -v omp
 command -v kimi
 ```
 
@@ -36,7 +37,7 @@ cron, launchd, or another non-interactive subprocess.
 
 The durable fix is to set an absolute binary path in the active config, for
 example `codex.binary`, `claude.binary`, `grok.binary`, `devin.binary`,
-`opencode.binary`, `pi.binary`, `droid.binary`, `kimi.binary`, or `cursor.argvPrefix`.
+`opencode.binary`, `pi.binary`, `omp.binary`, `droid.binary`, `kimi.binary`, or `cursor.argvPrefix`.
 JSON errors include `configPath`, `configKey`, and, when Delegate sees a likely
 user-local install, `suggestedBinaryPath`.
 
@@ -98,6 +99,7 @@ Common causes:
 - Codex effort was requested with a label not supported by the resolved model or the harness-default fallback capability.
 - Claude effort must be one of Claude Code's native labels: `low`, `medium`, `high`, `xhigh`, or `max`.
 - Pi effort must be `low`, `medium`, `high`, `xhigh`, or `max`; alias-only `thinking` may also use `off` or `minimal`.
+- Oh My Pi effort uses the same levels and alias-only `thinking` values as Pi.
 - Cursor effort was requested but `cursor.reasoningEffortModels.<level>` is missing. Cursor effort uses model selection rather than a standalone effort flag.
 - Droid or Codex model support is not in config, the workspace cache, or bundled fallback data.
 - The effort string is misspelled. Delegate treats labels literally and does not translate between provider naming schemes.
@@ -135,6 +137,19 @@ Pi owns provider authentication under `~/.pi/agent`. Delegate never passes
 pi -p --no-session "Reply with OK"
 delegate --json dry-run pi safe --model provider/model-id "Review only."
 delegate --json models pi --live
+```
+
+## Oh My Pi exits after only a session event
+
+Oh My Pi 17.0.4 was observed to exit successfully without processing piped
+stdin in non-interactive JSON mode. Delegate therefore passes the resolved
+prompt as a positional argument. Confirm the direct positional form works, then
+inspect Delegate's planned argv:
+
+```bash
+omp -p --mode json --no-session "Reply with OK"
+delegate --json dry-run omp safe --model provider/model-id "Review only."
+delegate --json models omp --live
 ```
 
 ## Unexpected config source

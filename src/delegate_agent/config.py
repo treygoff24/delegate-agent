@@ -27,7 +27,7 @@ ISOLATION_NONE = "none"
 ISOLATION_WORKTREE = "worktree"
 VALID_ISOLATION_VALUES = (ISOLATION_AUTO, ISOLATION_NONE, ISOLATION_WORKTREE)
 SAFE_ISOLATION_REQUIRED_ENGINES = frozenset(
-    {"cursor", "droid", "kimi", "claude", "grok", "devin", "opencode", "pi"}
+    {"cursor", "droid", "kimi", "claude", "grok", "devin", "opencode", "pi", "omp"}
 )
 
 POLICY_PROFILES = ("safe", "trusted-hooks", "external-sandbox", "custom")
@@ -123,6 +123,12 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
     },
     "pi": {
         "binary": "pi",
+        "defaultModel": None,
+        "defaultReasoningEffort": None,
+        "models": {},
+    },
+    "omp": {
+        "binary": "omp",
         "defaultModel": None,
         "defaultReasoningEffort": None,
         "models": {},
@@ -786,24 +792,25 @@ def _validate_opencode_section(opencode: JsonValue) -> None:
     _validate_opencode_models(opencode.get("models"))
 
 
-def _validate_pi_section(pi: JsonValue) -> None:
-    if not isinstance(pi, dict):
-        raise ConfigError("invalid_pi_config", "pi config must be an object.")
-    require_non_empty_str(pi.get("binary"), path="pi.binary", error="invalid_pi_config")
-    optional_str(pi.get("defaultModel"), path="pi.defaultModel", error="invalid_pi_config")
+def _validate_pi_family_section(section: JsonValue, *, engine: str) -> None:
+    error = f"invalid_{engine}_config"
+    if not isinstance(section, dict):
+        raise ConfigError(error, f"{engine} config must be an object.")
+    require_non_empty_str(section.get("binary"), path=f"{engine}.binary", error=error)
+    optional_str(section.get("defaultModel"), path=f"{engine}.defaultModel", error=error)
     _reject_pi_family_flag_like_value(
-        pi.get("defaultModel"), path="pi.defaultModel", error="invalid_pi_config"
+        section.get("defaultModel"), path=f"{engine}.defaultModel", error=error
     )
-    default_effort = pi.get("defaultReasoningEffort")
+    default_effort = section.get("defaultReasoningEffort")
     if default_effort is not None:
         try:
-            reasoning.resolve_pi_native_effort(default_effort)
+            reasoning.resolve_pi_native_effort(default_effort, engine=engine)
         except reasoning.ReasoningCapabilityError as exc:
             raise ConfigError(
-                "invalid_pi_config",
-                f"pi.defaultReasoningEffort: {exc.message}",
+                error,
+                f"{engine}.defaultReasoningEffort: {exc.message}",
             ) from exc
-    _validate_pi_family_models(pi.get("models"), engine="pi")
+    _validate_pi_family_models(section.get("models"), engine=engine)
 
 
 def _reject_opencode_flag_like_value(
@@ -1363,7 +1370,8 @@ def validate_config(config: JsonObject) -> None:
     _validate_grok_section(config.get("grok"))
     _validate_devin_section(config.get("devin"))
     _validate_opencode_section(config.get("opencode"))
-    _validate_pi_section(config.get("pi"))
+    _validate_pi_family_section(config.get("pi"), engine="pi")
+    _validate_pi_family_section(config.get("omp"), engine="omp")
     _validate_reasoning_section(config.get("reasoning"))
     _validate_isolation_section(config.get("isolation"))
     _validate_worktrees_section(config.get("worktrees"))

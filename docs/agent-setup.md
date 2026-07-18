@@ -39,6 +39,7 @@ This guide covers both human setup and non-interactive setup for agents or CI jo
    command -v devin || echo "Devin CLI missing"
    command -v opencode || echo "OpenCode CLI missing"
    command -v pi || echo "Pi coding agent missing"
+   command -v omp || echo "Oh My Pi missing"
    command -v kimi || echo "Kimi Code CLI missing"
    ```
 
@@ -101,12 +102,13 @@ When running on Windows through WSL, treat Delegate as a Linux CLI:
    delegate --json dry-run opencode safe "Review only. Do not edit files."
    delegate --json dry-run opencode safe --reasoning-effort high "Review only. Do not edit files."
    delegate --json dry-run pi safe --reasoning-effort high "Review only. Do not edit files."
+   delegate --json dry-run omp safe --reasoning-effort high "Review only. Do not edit files."
    delegate --json dry-run cursor safe "Review only. Do not edit files."
    delegate --json dry-run droid reviewer safe "Review only. Do not edit files."
    delegate --json dry-run kimi safe "Review only. Do not edit files."
    ```
 
-   The Codex, Claude, Grok, Devin work, OpenCode, Pi, Cursor, and Kimi dry-runs succeed with the unedited example config when no reasoning effort is requested. Devin safe mode is intentionally rejected because filesystem surveys may require generic `exec`, which cannot be allowed without weakening the read-only boundary. Explicit Codex reasoning-effort dry-runs can target the harness default model when no default model is configured. Claude and Grok reasoning effort map to native `--effort` flags; OpenCode maps to `--variant`; Pi maps to `--thinking`. The Droid dry-run validates the alias, so it returns `unconfigured_model` until you replace the `reviewer` placeholder in `config.json` with a real model ID.
+   The Codex, Claude, Grok, Devin work, OpenCode, Pi, Oh My Pi, Cursor, and Kimi dry-runs succeed with the unedited example config when no reasoning effort is requested. Devin safe mode is intentionally rejected because filesystem surveys may require generic `exec`, which cannot be allowed without weakening the read-only boundary. Explicit Codex reasoning-effort dry-runs can target the harness default model when no default model is configured. Claude and Grok reasoning effort map to native `--effort` flags; OpenCode maps to `--variant`; Pi and Oh My Pi map to `--thinking`. The Droid dry-run validates the alias, so it returns `unconfigured_model` until you replace the `reviewer` placeholder in `config.json` with a real model ID.
 
 ### OpenCode
 
@@ -132,6 +134,13 @@ Install [Pi](https://github.com/badlogic/pi-mono) and authenticate its selected
 provider. Delegate uses Pi's existing `~/.pi/agent/auth.json`; it never reads,
 prints, or forwards that file and never emits Pi's `--api-key` flag. Configure
 an absolute `pi.binary` when `pi` is not on the non-interactive `PATH`.
+
+### Oh My Pi setup
+
+Install Oh My Pi and authenticate its selected provider. Delegate uses the
+runtime's existing profile without reading or forwarding credentials and never
+emits `--api-key` or Oh My Pi's role flags. Configure an absolute `omp.binary`
+when `omp` is not on the non-interactive `PATH`.
 
 ## Non-interactive agent setup
 
@@ -176,6 +185,7 @@ For an orchestrating agent, script, or CI job:
    command -v devin >/dev/null || exit 3
    command -v opencode >/dev/null || exit 3
    command -v pi >/dev/null || exit 3
+   command -v omp >/dev/null || exit 3
    command -v kimi >/dev/null || exit 3
    ```
 

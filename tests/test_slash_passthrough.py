@@ -213,6 +213,7 @@ class SlashPassthroughDescribeTests(ExecutionTestBase):
                 "devin": False,
                 "opencode": True,
                 "pi": True,
+                "omp": True,
             },
         )
         self.assertFalse(modes["callReadOnlyAllowed"])

@@ -156,7 +156,7 @@ EVENT_TAIL = 400
 # be preamble ("I'll start by..."), and only a message sealed by turn.completed
 # is the real answer.
 ASSISTANT_RECOVERY_HARNESSES = frozenset(
-    {"cursor", "droid", "kimi", "claude", "grok", "devin", "opencode", "pi"}
+    {"cursor", "droid", "kimi", "claude", "grok", "devin", "opencode", "pi", "omp"}
 )
 
 
@@ -289,7 +289,7 @@ class StreamAccumulator:
         if self.harness == "opencode":
             self._ingest_opencode_event(payload, event_type)
             return
-        if self.harness == "pi":
+        if self.harness in {"pi", "omp"}:
             self._ingest_pi_event(payload, event_type)
             return
         if event_type == "reasoning":
@@ -820,7 +820,9 @@ class StreamAccumulator:
             message = payload.get("message")
             role = message.get("role") if isinstance(message, dict) else None
             stop_reason = (
-                message.get("stopReason") if isinstance(message, dict) else payload.get("stopReason")
+                message.get("stopReason")
+                if isinstance(message, dict)
+                else payload.get("stopReason")
             )
             if role != "assistant" or stop_reason != "stop":
                 return
@@ -828,11 +830,11 @@ class StreamAccumulator:
                 text = _extract_text(message.get("content"))
                 if text:
                     self._publish_pi_text(text, completion=True)
-            self._record_terminal_event(event="pi.turn_end", status="succeeded")
+            self._record_terminal_event(event=f"{self.harness}.turn_end", status="succeeded")
             return
         if event_type == "error":
             self._ingest_error_event(payload)
-            self._record_terminal_event(event="pi.error", status="failed")
+            self._record_terminal_event(event=f"{self.harness}.error", status="failed")
 
     def _ingest_pi_tool(self, payload: JsonObject, *, completed: bool) -> None:
         tool = _string_field(payload, "toolName") or "tool"

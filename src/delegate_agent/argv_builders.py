@@ -44,6 +44,7 @@ _SAFE_REVIEW_LABEL_BY_ENGINE = {
     "devin": "Delegate Devin safe mode",
     "opencode": "Delegate OpenCode safe mode",
     "pi": "Delegate Pi safe mode",
+    "omp": "Delegate Omp safe mode",
     "droid": "Delegate Droid safe mode",
     "kimi": "Delegate Kimi safe mode",
 }
@@ -57,6 +58,33 @@ CLAUDE_SAFE_ALLOWED_TOOLS = (
     "Bash(git diff:*),Bash(git status:*),Bash(git show:*),Bash(git log:*),"
     "Bash(rg:*),Bash(grep:*),Bash(ls:*)"
 )
+
+PI_FAMILY_SAFE_LOCKDOWN = {
+    "pi": (
+        "--tools",
+        "read",
+        "--no-extensions",
+        "--no-skills",
+        "--no-prompt-templates",
+        "--no-approve",
+    ),
+    "omp": (
+        # --tools read is NOT self-enforcing in omp 17.0.4 (the write/bash/python
+        # tools still execute under it). --approval-mode always-ask is the load-
+        # bearing flag: in headless -p there is no approver, so every write/exec
+        # tool call auto-denies while the read capability stays auto-allowed. It
+        # also beats a hostile project-local approvalMode: yolo. Verified by live
+        # write/bash/read/config-override probes — do not drop it.
+        "--tools",
+        "read",
+        "--no-extensions",
+        "--no-skills",
+        "--no-rules",
+        "--no-lsp",
+        "--approval-mode",
+        "always-ask",
+    ),
+}
 
 
 def redacted_prompt_argv(argv: list[str], replacement: str = CURSOR_PROMPT_REDACTION) -> list[str]:
@@ -468,6 +496,7 @@ def _build_pi_family_argv(
     mode: str,
     model: str | None,
     thinking: str | None,
+    prompt: str | None = None,
     *,
     call_read_only: bool = False,
     pure: bool = False,
@@ -477,20 +506,26 @@ def _build_pi_family_argv(
         validate_mode(mode)
     argv = [str(section["binary"]), "-p", "--no-session", "--mode", "json"]
     if mode == MODE_SAFE or (mode == MODE_CALL and call_read_only):
-        argv.extend(
-            [
-                "--tools",
-                "read",
-                "--no-extensions",
-                "--no-skills",
-                "--no-prompt-templates",
-                "--no-approve",
-            ]
-        )
+        argv.extend(PI_FAMILY_SAFE_LOCKDOWN[engine])
     if model:
         argv.extend(["--model", model])
     if thinking:
         argv.extend(["--thinking", thinking])
+    if prompt is not None:
+        # The prompt is a bare trailing positional and omp does not honor `--` as
+        # an end-of-options separator, so a prompt whose first char is `-` would be
+        # parsed as a flag (e.g. a lone `--auto-approve` re-enabling writes) and `@`
+        # is omp's file-include sigil. safe/call--read-only never reach here flag-
+        # shaped because the safe prefix / read-only preamble is prepended upstream;
+        # this makes that boundary explicit instead of incidental and also fails
+        # plain call/work closed with a clear error instead of omp's opaque one.
+        if prompt[:1] in ("-", "@"):
+            raise DelegateError(
+                "pi_family_prompt_flag_like",
+                f"{engine} prompt may not start with '-' or '@' (argv transport has no "
+                "end-of-options separator); rephrase, or lead with a space or period.",
+            )
+        argv.append(prompt)
     return argv
 
 
@@ -509,6 +544,28 @@ def build_pi_argv(
         mode,
         model,
         thinking,
+        call_read_only=call_read_only,
+        pure=pure,
+    )
+
+
+def build_omp_argv(
+    omp: JsonObject,
+    mode: str,
+    model: str | None,
+    thinking: str | None,
+    prompt: str,
+    *,
+    call_read_only: bool = False,
+    pure: bool = False,
+) -> list[str]:
+    return _build_pi_family_argv(
+        omp,
+        "omp",
+        mode,
+        model,
+        thinking,
+        prompt,
         call_read_only=call_read_only,
         pure=pure,
     )

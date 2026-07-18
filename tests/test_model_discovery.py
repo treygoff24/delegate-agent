@@ -146,6 +146,12 @@ class ModelsCommandParseTests(unittest.TestCase):
         self.assertEqual(parsed.inspection.engine, "pi")
         self.assertTrue(parsed.inspection.live)
 
+    def test_omp_engine_and_live_parse(self):
+        parsed = self.parse_cli(["models", "omp", "--live"])
+        assert parsed.inspection is not None
+        self.assertEqual(parsed.inspection.engine, "omp")
+        self.assertTrue(parsed.inspection.live)
+
 
 class LiveProbeParseHelpersTests(unittest.TestCase):
     def test_strip_ansi(self):
@@ -228,6 +234,33 @@ class LiveProbeParseHelpersTests(unittest.TestCase):
         )
         self.assertEqual(
             parse_pi_models_output(raw),
+            [
+                {"id": "openai-codex/gpt-5.6-sol"},
+                {"id": "anthropic/claude-opus-4-8"},
+            ],
+        )
+
+    def test_parse_omp_models_output(self):
+        from delegate_agent.model_discovery import parse_omp_models_output
+
+        raw = json.dumps(
+            {
+                "models": [
+                    {
+                        "provider": "openai-codex",
+                        "id": "gpt-5.6-sol",
+                        "selector": "openai-codex/gpt-5.6-sol",
+                    },
+                    {
+                        "provider": "anthropic",
+                        "id": "claude-opus-4-8",
+                        "selector": "anthropic/claude-opus-4-8",
+                    },
+                ]
+            }
+        )
+        self.assertEqual(
+            parse_omp_models_output(raw),
             [
                 {"id": "openai-codex/gpt-5.6-sol"},
                 {"id": "anthropic/claude-opus-4-8"},
@@ -477,6 +510,27 @@ class LiveProbeIntegrationTests(unittest.TestCase):
                     "--list-models",
                 ],
             )
+
+    def test_omp_live_merge_uses_json_models_command_without_role_flags(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            argv_log = Path(tmp) / "argv.log"
+            fake = _write_executable(
+                Path(tmp) / "fake-omp",
+                "#!/usr/bin/env bash\n"
+                f'printf \'%s\\n\' "$@" > "{argv_log}"\n'
+                'printf \'%s\\n\' \'{"models":[{"selector":"openai-codex/gpt-5.6-sol"}]}\'\n'
+                "exit 0\n",
+            )
+            config = self.embedded_default_config()
+            config["omp"]["binary"] = str(fake)
+
+            payload = self.engine_models_payload(config, "omp", live=True)
+
+            self.assertIs(payload["live"], True)
+            argv = argv_log.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(argv, ["models", "--json", "--no-extensions"])
+            for role_flag in ("--smol", "--slow", "--plan", "--prewalk", "--plan-yolo"):
+                self.assertNotIn(role_flag, argv)
 
     def test_live_degrades_on_missing_binary(self):
         config = self.embedded_default_config()

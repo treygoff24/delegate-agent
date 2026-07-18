@@ -121,6 +121,11 @@ REASONING_PROFILES: dict[str, ReasoningProfile] = {
         "static-enum",
         static_efforts=PI_NATIVE_EFFORTS,
     ),
+    "omp": ReasoningProfile(
+        TRANSPORT_PI_THINKING_FLAG,
+        "static-enum",
+        static_efforts=PI_NATIVE_EFFORTS,
+    ),
 }
 
 TRANSPORT_BY_HARNESS = {
@@ -294,8 +299,9 @@ def resolve_pi_native_effort(
     *,
     alias: str | None = None,
     model: str | None = None,
+    engine: str = "pi",
 ) -> str | None:
-    return resolve_native_effort("pi", requested_effort, alias=alias, model=model)
+    return resolve_native_effort(engine, requested_effort, alias=alias, model=model)
 
 
 def _as_models_map(source: JsonValue) -> dict[str, JsonObject]:
@@ -881,15 +887,16 @@ def build_alias_reasoning_summaries(
     else:
         summaries["opencode"] = {}
 
-    pi = config.get("pi")
-    if isinstance(pi, dict):
-        default_model = pi.get("defaultModel")
-        alias_key = _alias_key_for_default_model(default_model)
-        pi_aliases: JsonObject = {alias_key: _pi_alias_reasoning_summary(pi)}
-        _add_pi_alias_summaries(pi_aliases, pi)
-        summaries["pi"] = pi_aliases
-    else:
-        summaries["pi"] = {}
+    for engine in ("pi", "omp"):
+        section = config.get(engine)
+        if isinstance(section, dict):
+            default_model = section.get("defaultModel")
+            alias_key = _alias_key_for_default_model(default_model)
+            aliases: JsonObject = {alias_key: _pi_alias_reasoning_summary(section)}
+            _add_pi_alias_summaries(aliases, section)
+            summaries[engine] = aliases
+        else:
+            summaries[engine] = {}
 
     kimi = config.get("kimi")
     if isinstance(kimi, dict):
@@ -945,12 +952,13 @@ def build_reasoning_capabilities_payload(
         "supported": list(REASONING_PROFILES["grok"].static_efforts),
         "models": {},
     }
-    harnesses["pi"] = {
-        "transport": REASONING_PROFILES["pi"].transport,
-        "source": "static",
-        "supported": list(REASONING_PROFILES["pi"].static_efforts),
-        "models": {},
-    }
+    for harness in ("pi", "omp"):
+        harnesses[harness] = {
+            "transport": REASONING_PROFILES[harness].transport,
+            "source": "static",
+            "supported": list(REASONING_PROFILES[harness].static_efforts),
+            "models": {},
+        }
     for harness in [h for h, p in REASONING_PROFILES.items() if p.strategy == "pass-through"]:
         harnesses[harness] = {
             "transport": TRANSPORT_OPENCODE_VARIANT_FLAG,

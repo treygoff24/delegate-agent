@@ -404,7 +404,9 @@ class HarnessEventsTests(unittest.TestCase):
         self.assertTrue(acc.assistant_text)
         self.assertEqual(acc.completion_text, acc.assistant_text)
         completions = [event for event in acc.events if event.kind == "run.completed"]
-        self.assertEqual(len(completions), 1, "toolUse turn_end must not record a premature completion")
+        self.assertEqual(
+            len(completions), 1, "toolUse turn_end must not record a premature completion"
+        )
 
     def test_pi_non_stop_turn_end_is_not_terminal_success(self):
         for stop_reason in ("error", "aborted", "length", "toolUse"):
@@ -424,6 +426,71 @@ class HarnessEventsTests(unittest.TestCase):
             self.assertIsNone(
                 acc.terminal_status,
                 f"stopReason={stop_reason} must not record a succeeded terminal",
+            )
+
+    def test_real_omp_fixture_records_observed_stdin_transport_divergence(self):
+        fixture = ROOT / "tests" / "fixtures" / "omp" / "simple_text.jsonl"
+        payloads = [json.loads(line) for line in fixture.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([payload["type"] for payload in payloads], ["session"])
+        self.assertEqual(payloads[0]["id"], "sanitized")
+        self.assertEqual(payloads[0]["cwd"], "/tmp/delegate-omp")
+
+        acc = self.events.StreamAccumulator(harness="omp")
+        for payload in payloads:
+            acc.ingest_line(json.dumps(payload))
+        self.assertEqual(acc.assistant_text, "")
+        self.assertIsNone(acc.completion_text)
+        self.assertIsNone(acc.terminal_status)
+
+    def test_omp_stop_turn_populates_assistant_text_and_completes_once(self):
+        acc = self.events.StreamAccumulator(harness="omp")
+        acc.ingest_line(json.dumps({"type": "turn_start"}))
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "message_update",
+                    "assistantMessageEvent": {"type": "text_delta", "delta": "OMP_OK"},
+                }
+            )
+        )
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "turn_end",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "OMP_OK"}],
+                        "stopReason": "stop",
+                    },
+                }
+            )
+        )
+
+        self.assertEqual(acc.assistant_text, "OMP_OK")
+        self.assertEqual(acc.completion_text, "OMP_OK")
+        self.assertEqual(acc.terminal_status, "succeeded")
+        self.assertEqual(acc.terminal_event, {"event": "omp.turn_end", "status": "succeeded"})
+        self.assertEqual(len([event for event in acc.events if event.kind == "run.completed"]), 1)
+        self.assertIn("omp", self.events.ASSISTANT_RECOVERY_HARNESSES)
+
+    def test_omp_non_stop_turn_end_matrix_is_not_terminal_success(self):
+        for stop_reason in ("error", "aborted", "length", "toolUse"):
+            acc = self.events.StreamAccumulator(harness="omp")
+            acc.ingest_line(
+                json.dumps(
+                    {
+                        "type": "turn_end",
+                        "message": {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": "partial"}],
+                            "stopReason": stop_reason,
+                        },
+                    }
+                )
+            )
+            self.assertIsNone(acc.terminal_status, stop_reason)
+            self.assertEqual(
+                len([event for event in acc.events if event.kind == "run.completed"]), 0
             )
 
     def test_pi_tool_result_content_is_not_exposed(self):

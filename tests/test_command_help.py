@@ -33,6 +33,7 @@ TOP_LEVEL_COMMANDS = (
     "devin",
     "opencode",
     "pi",
+    "omp",
     "codex",
     "droid",
     "kimi",

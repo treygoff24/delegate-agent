@@ -88,6 +88,9 @@ class RunRegistryTests(unittest.TestCase):
     def test_pi_is_a_tracked_harness(self):
         self.assertIn("pi", self.registry.HARNESS_NAMES)
 
+    def test_omp_is_a_tracked_harness(self):
+        self.assertIn("omp", self.registry.HARNESS_NAMES)
+
     @unittest.skipUnless(os.name == "posix", "POSIX mode bits only")
     def test_registry_dirs_and_files_are_private_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:

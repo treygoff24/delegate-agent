@@ -371,18 +371,9 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertIsInstance(payload["textChars"], int)
         self.assertFalse(payload["textTruncated"])
 
-    def test_pi_call_json_populates_assistant_text(self):
-        request = self.delegate.build_request(
-            "pi",
-            "call",
-            None,
-            self.delegate.ResolvedWorkspace("<call-temp-cwd>", "directory"),
-            "hello",
-            self.delegate.DEFAULT_CONFIG,
-            False,
-        )
+    def test_pi_family_call_json_populates_assistant_text(self):
         fake_result = self.delegate.delegate_runner.CallResult(
-            text="PI_OK",
+            text="FAMILY_OK",
             exit_code=0,
             duration_ms=10,
             stdout_bytes=5,
@@ -390,28 +381,41 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
             text_chars=5,
             text_truncated=False,
         )
-        with (
-            mock.patch.object(self.delegate, "ensure_binary"),
-            mock.patch.object(
-                self.delegate.delegate_runner,
-                "execute_call",
-                return_value=fake_result,
-            ),
-        ):
-            code, payload = self.delegate.execute_request(
-                request,
-                json_mode=True,
-                config=self.delegate.DEFAULT_CONFIG,
-                pass_through=False,
-                completion_report_mode="none",
-                source_workspace=self.delegate.ResolvedWorkspace("<call-temp-cwd>", "directory"),
-                stdout=io.StringIO(),
-                stderr=io.StringIO(),
-            )
+        for engine in ("pi", "omp"):
+            with self.subTest(engine=engine):
+                request = self.delegate.build_request(
+                    engine,
+                    "call",
+                    None,
+                    self.delegate.ResolvedWorkspace("<call-temp-cwd>", "directory"),
+                    "hello",
+                    self.delegate.DEFAULT_CONFIG,
+                    False,
+                )
+                with (
+                    mock.patch.object(self.delegate, "ensure_binary"),
+                    mock.patch.object(
+                        self.delegate.delegate_runner,
+                        "execute_call",
+                        return_value=fake_result,
+                    ),
+                ):
+                    code, payload = self.delegate.execute_request(
+                        request,
+                        json_mode=True,
+                        config=self.delegate.DEFAULT_CONFIG,
+                        pass_through=False,
+                        completion_report_mode="none",
+                        source_workspace=self.delegate.ResolvedWorkspace(
+                            "<call-temp-cwd>", "directory"
+                        ),
+                        stdout=io.StringIO(),
+                        stderr=io.StringIO(),
+                    )
 
-        self.assertEqual(code, 0)
-        self.assertEqual(payload["text"], "PI_OK")
-        self.assertEqual(payload["assistantText"], "PI_OK")
+                self.assertEqual(code, 0)
+                self.assertEqual(payload["text"], "FAMILY_OK")
+                self.assertEqual(payload["assistantText"], "FAMILY_OK")
 
     def test_call_failure_surfaces_stderr_tail_in_json_and_text(self):
         temp = tempfile.TemporaryDirectory()

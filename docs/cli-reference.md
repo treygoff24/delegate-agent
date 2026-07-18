@@ -48,6 +48,10 @@ delegate pi safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progre
 delegate pi work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
 delegate pi call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 
+delegate omp safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate omp work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate omp call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+
 delegate kimi safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
 delegate kimi work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
 delegate kimi call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
@@ -55,7 +59,8 @@ delegate kimi call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] 
 
 Prompt sources are direct arguments, `--prompt-file`, or Delegate stdin. Raw C0 control characters other than newline, carriage return, and tab are stripped before launch; a prompt that becomes empty fails fast. After
 Delegate resolves the prompt, Codex, Claude, OpenCode, and Pi prompts are passed to the child runtime over
-stdin. Droid and Grok prompts are written to a private temporary prompt file and passed
+stdin. Oh My Pi receives a positional prompt because 17.0.4 did not consume piped stdin in the verified
+non-interactive invocation. Droid and Grok prompts are written to a private temporary prompt file and passed
 with Droid's documented `--file` option or Grok's `--prompt-file`. Cursor Agent currently only exposes
 positional prompt input, and Kimi Code prompt mode currently uses `--prompt`,
 so those launches still use argv transport; Delegate redacts Cursor and Kimi
@@ -83,10 +88,10 @@ matches an alias key; otherwise it is passed through verbatim as a raw model ID
 `MODEL_ALIAS` (alias-only/strict); give either the positional or `--model`, not
 both. With neither, Droid uses `droid.defaultModel` when set. Discover aliases
 and advisory catalogs with `delegate models`, `delegate models <engine>`, and
-`delegate models <engine> --live` (live probes for cursor/droid/devin/opencode/pi; other
+`delegate models <engine> --live` (live probes for cursor/droid/devin/opencode/pi/omp; other
 engines report live unsupported).
 
-`--reasoning-effort LEVEL` is optional and parsed only before prompt text begins. Engines with capability metadata reject unsupported model/effort pairs before launch with `unsupported_reasoning_effort`. It affects only model reasoning depth, cost, or latency; it does not change `safe`/`work`/`call` permissions, sandboxing, approvals, network policy, or edit capability. Cursor effort is model-selection based and requires `cursor.reasoningEffortModels`; an explicit `--model` wins over effort→model routing. Droid emits `--reasoning-effort LEVEL`; Codex emits a `model_reasoning_effort` config override for the resolved model, or for the Codex harness default model when no `codex.defaultModel` is configured and the request was explicit; Claude emits Claude Code `--effort LEVEL`; Grok emits Grok `--effort LEVEL` (`low`, `medium`, `high`, `xhigh`, `max`); OpenCode emits `--variant LEVEL` without validating it against the selected model; Pi emits `--thinking LEVEL` and accepts the same five Delegate levels. The Kimi CLI exposes no effort flag; k3 supports effort internally via `~/.kimi-code/config.toml`, so Delegate rejects `--reasoning-effort` for Kimi.
+`--reasoning-effort LEVEL` is optional and parsed only before prompt text begins. Engines with capability metadata reject unsupported model/effort pairs before launch with `unsupported_reasoning_effort`. It affects only model reasoning depth, cost, or latency; it does not change `safe`/`work`/`call` permissions, sandboxing, approvals, network policy, or edit capability. Cursor effort is model-selection based and requires `cursor.reasoningEffortModels`; an explicit `--model` wins over effort→model routing. Droid emits `--reasoning-effort LEVEL`; Codex emits a `model_reasoning_effort` config override for the resolved model, or for the Codex harness default model when no `codex.defaultModel` is configured and the request was explicit; Claude emits Claude Code `--effort LEVEL`; Grok emits Grok `--effort LEVEL` (`low`, `medium`, `high`, `xhigh`, `max`); OpenCode emits `--variant LEVEL` without validating it against the selected model; Pi and Oh My Pi emit `--thinking LEVEL` and accept the same five Delegate levels. The Kimi CLI exposes no effort flag; k3 supports effort internally via `~/.kimi-code/config.toml`, so Delegate rejects `--reasoning-effort` for Kimi.
 
 `--fast` and `--no-fast` are Codex-only, mutually exclusive per-run service-tier overrides. `--fast` emits `service_tier="fast"` plus `features.fast_mode=true` (Codex silently drops a Fast tier when that feature flag is off in the ambient config, so Delegate enables it explicitly); `--no-fast` emits `service_tier="default"` so a globally enabled Fast setting can be turned off for one child. Omitting both emits no override and inherits Codex configuration. Fast is orthogonal to model selection, reasoning effort, and Delegate safety policy. Two upstream caveats: Codex strips the service tier when authenticated with an API key (Fast is a ChatGPT-plan feature), and neither Codex nor the API fails on a tier the model does not offer — Delegate's flag validation is the only fail-closed layer, so an unsupported combination degrades silently to standard routing rather than erroring.
 
@@ -311,6 +316,30 @@ Examples:
 delegate pi safe --reasoning-effort high "Review this repo for regressions."
 delegate pi work --model reviewer "Implement the scoped task and run its checks."
 delegate pi call --read-only --prompt-file rubric.md
+```
+
+### `delegate omp`
+
+Wraps Oh My Pi's headless print mode.
+
+```bash
+delegate [--json] [--isolation auto|none|worktree] omp {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate [--json] omp call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+```
+
+- Delegate launches `omp -p --no-session --mode json` and passes the resolved prompt as a positional argument.
+- Safe mode and `call --read-only` add `--tools read --no-extensions --no-skills --no-rules --no-lsp`; safe mode also uses Delegate's isolated throwaway workspace.
+- Model aliases accept either a `provider/model` string or `{ "model": "provider/model", "thinking": "LEVEL" }`.
+- `--reasoning-effort` maps directly to `--thinking` for `low`, `medium`, `high`, `xhigh`, and `max`. Structured aliases may select `off` or `minimal`.
+- Delegate never emits Oh My Pi's `--smol`, `--slow`, `--plan`, `--prewalk*`, or `--plan-yolo*` role flags.
+- `delegate models omp --live` uses `omp models --json --no-extensions`.
+
+Examples:
+
+```bash
+delegate omp safe --reasoning-effort high "Review this repo for regressions."
+delegate omp work --model reviewer "Implement the scoped task and run its checks."
+delegate omp call --read-only --prompt-file rubric.md
 ```
 
 ### `delegate kimi`
@@ -539,7 +568,7 @@ Typical dry-run JSON fields:
 
 When a profile is active, dry-run and completion payloads add `authProfile` (the resolved profile name) and, when a Codex fallback profile is configured, `fallbackProfile`. Dry-run also adds `profileEnv` (the injected env map, with values redacted). These keys are omitted when no profile is active.
 
-For Cursor, Claude, Grok, OpenCode, Pi, Droid, and Kimi safe mode, an explicit `--isolation none`
+For Cursor, Claude, Grok, OpenCode, Pi, Oh My Pi, Droid, and Kimi safe mode, an explicit `--isolation none`
 is normalized to `auto` with a warning because those safe contracts depend on
 the temporary workspace/config boundary. Codex safe can use `none` because Codex
 still runs with its read-only sandbox.
@@ -624,12 +653,12 @@ Supported input keys:
 }
 ```
 
-- `engine`: `cursor`, `droid`, `codex`, `claude`, `grok`, `devin`, `opencode`, `pi`, or `kimi`.
+- `engine`: `cursor`, `droid`, `codex`, `claude`, `grok`, `devin`, `opencode`, `pi`, `omp`, or `kimi`.
 - `mode`: `safe`, `work`, or `call`.
 - The `devin` engine rejects `safe` with `unsupported_mode` during preflight. Devin filesystem surveys may require generic `exec`, which Delegate cannot allow without weakening the read-only boundary; use another safe Harness for filesystem review.
 - `model`: optional alias-or-id for every engine. Resolved against `<engine>.models` when it matches an alias; otherwise passed through as a raw model ID. For Droid, a positional alias remains alias-only/strict; JSON/`--model` is alias-or-id. Cursor honors an explicit model even when it differs from `cursor.defaultModel`.
 - `cwd`: optional workspace path. Git directories resolve to the repo root. Omit it for `mode: "call"`, which always uses an empty temporary cwd.
-- `isolation`: optional `auto`, `none`, or `worktree`. `null` is invalid. `mode: "call"` rejects isolation. For Cursor, Claude, Grok, OpenCode, Pi, Droid, and Kimi safe mode, `none` is normalized to `auto` with a warning.
+- `isolation`: optional `auto`, `none`, or `worktree`. `null` is invalid. `mode: "call"` rejects isolation. For Cursor, Claude, Grok, OpenCode, Pi, Oh My Pi, Droid, and Kimi safe mode, `none` is normalized to `auto` with a warning.
 - `reasoningEffort`: optional non-empty effort string. It overrides provider `defaultReasoningEffort` for that JSON run.
 - `fast`: optional Codex-only boolean or `null`. `true` requests Fast, `false` explicitly requests Standard, and `null`/omission inherits Codex configuration.
 - `progress`: optional boolean. `true` enables parent progress heartbeats on stderr; `false` disables them even when `progress.enabled` is true in config. When omitted, config `progress.enabled` applies (default `false`). `mode: "call"` rejects progress.
@@ -659,7 +688,7 @@ delegate --json capabilities refresh
 delegate agent-help
 ```
 
-`describe` reports version, engines, modes, supported isolation values, prompt transforms, effective policy, top-level profile config metadata, and representative argv shapes. It also includes a `commands` catalog derived from the help registry; each full entry includes stable `name`/`command`, usage, arguments, options, and launchOptions fields. Full `describe` is a strict superset of `describe --summary`, so fields present in summary keep the same names in the full payload. `models` reports configured Cursor, Droid, Codex, Claude, Grok, Devin, OpenCode, Pi, and Kimi model settings, including non-empty `<engine>.models` alias maps. `models <engine>` returns an advisory per-engine catalog (bundled + config); `--live` merges a harness probe for cursor, droid, devin, opencode, and pi when available. Discovery output applies best-effort credential scrubbing, so secret-shaped values (including model IDs or paths that resemble credentials) are redacted; copy exact values from your config file rather than from scrubbed output. Agents should start with `--summary` for a compact inventory, then use raw output only when needed.
+`describe` reports version, engines, modes, supported isolation values, prompt transforms, effective policy, top-level profile config metadata, and representative argv shapes. It also includes a `commands` catalog derived from the help registry; each full entry includes stable `name`/`command`, usage, arguments, options, and launchOptions fields. Full `describe` is a strict superset of `describe --summary`, so fields present in summary keep the same names in the full payload. `models` reports configured Cursor, Droid, Codex, Claude, Grok, Devin, OpenCode, Pi, Oh My Pi, and Kimi model settings, including non-empty `<engine>.models` alias maps. `models <engine>` returns an advisory per-engine catalog (bundled + config); `--live` merges a harness probe for cursor, droid, devin, opencode, pi, and omp when available. Discovery output applies best-effort credential scrubbing, so secret-shaped values (including model IDs or paths that resemble credentials) are redacted; copy exact values from your config file rather than from scrubbed output. Agents should start with `--summary` for a compact inventory, then use raw output only when needed.
 
 Both `describe` and `models` include provenance fields useful for detecting installed-runtime drift:
 

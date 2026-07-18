@@ -29,6 +29,7 @@ KNOWN_ENGINES = (
     "devin",
     "opencode",
     "pi",
+    "omp",
 )
 # "<engine>, ..., or <engine>" — for error messages and help text.
 ENGINES_PROSE = f"{', '.join(KNOWN_ENGINES[:-1])}, or {KNOWN_ENGINES[-1]}"
@@ -59,7 +60,7 @@ ENGINE_CAPABILITIES = {
         "pureCall": pure_call_supported(engine),
         "pureTripwire": engine == "claude",
         "structuredOutput": engine in {"codex", "claude"},
-        "noSessionPersistence": engine in {"codex", "claude", "pi"},
+        "noSessionPersistence": engine in {"codex", "claude", "pi", "omp"},
         "usageEvents": engine == "claude",
         # These engines use stdin for all modes (not pure-only); keep the capability.
         "promptStdin": engine in {"codex", "claude", "opencode", "pi"},
@@ -78,12 +79,22 @@ BINARY_CONFIG_ENGINES = tuple(engine for engine in KNOWN_ENGINES if engine != "c
 SAFE_REVIEW_PREFIX_INJECTED_HERE_ENGINES = tuple(
     engine
     for engine in KNOWN_ENGINES
-    if engine in {"codex", "droid", "claude", "grok", "devin", "opencode", "pi"}
+    if engine in {"codex", "droid", "claude", "grok", "devin", "opencode", "pi", "omp"}
 )
 # Stable public summary order; membership is still derived from the modeless engine set.
 MODEL_SUMMARY_ENGINES = tuple(
     engine
-    for engine in ("cursor", "codex", "claude", "grok", "devin", "kimi", "opencode", "pi")
+    for engine in (
+        "cursor",
+        "codex",
+        "claude",
+        "grok",
+        "devin",
+        "kimi",
+        "opencode",
+        "pi",
+        "omp",
+    )
     if engine in MODELESS_ENGINES
 )
 

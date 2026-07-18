@@ -242,6 +242,11 @@ class ReasoningCapabilityTests(unittest.TestCase):
         self.assertEqual(pi["source"], "static")
         self.assertEqual(pi["supported"], ["low", "medium", "high", "xhigh", "max"])
 
+        omp = payload["harnesses"]["omp"]
+        self.assertEqual(omp["transport"], "pi-thinking-flag")
+        self.assertEqual(omp["source"], "static")
+        self.assertEqual(omp["supported"], ["low", "medium", "high", "xhigh", "max"])
+
     def test_capabilities_payload_includes_static_grok_efforts(self):
         payload = build_reasoning_capabilities_payload({}, cache=None)
         grok = payload["harnesses"]["grok"]
@@ -494,6 +499,7 @@ class ReasoningCapabilityTests(unittest.TestCase):
             },
             "grok": {},
             "pi": {},
+            "omp": {},
         }
 
         self.assertEqual(build_alias_reasoning_summaries(config, cache=None), expected_aliases)
@@ -574,9 +580,11 @@ class ReasoningCapabilityTests(unittest.TestCase):
         self.assertIsNone(REASONING_PROFILES["devin"].transport)
         self.assertIsNone(REASONING_PROFILES["opencode"].transport)
         self.assertEqual(REASONING_PROFILES["pi"].transport, TRANSPORT_PI_THINKING_FLAG)
+        self.assertEqual(REASONING_PROFILES["omp"].transport, TRANSPORT_PI_THINKING_FLAG)
         self.assertEqual(REASONING_PROFILES["claude"].strategy, "static-enum")
         self.assertEqual(REASONING_PROFILES["opencode"].strategy, "pass-through")
         self.assertEqual(REASONING_PROFILES["pi"].strategy, "static-enum")
+        self.assertEqual(REASONING_PROFILES["omp"].strategy, "static-enum")
         self.assertEqual(REASONING_PROFILES["claude"].static_efforts, CLAUDE_NATIVE_EFFORTS)
         self.assertEqual(
             REASONING_PROFILES["kimi"].unsupported_warning,

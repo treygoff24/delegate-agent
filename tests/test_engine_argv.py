@@ -1054,6 +1054,8 @@ class EngineArgvTests(CommandTestBase):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
         config["pi"]["defaultModel"] = "openai-codex/gpt-5.6-sol"
         config["pi"]["defaultReasoningEffort"] = "high"
+        config["omp"]["defaultModel"] = "openai-codex/gpt-5.6-sol"
+        config["omp"]["defaultReasoningEffort"] = "high"
         payload = self.delegate.describe_payload(config, "embedded-default")
         self.assertIn("promptTransforms", payload)
         self.assertTrue(payload["engineCapabilities"]["codex"]["outputSchema"])
@@ -1125,6 +1127,17 @@ class EngineArgvTests(CommandTestBase):
         self.assertEqual(pi_work[pi_work.index("--thinking") + 1], "high")
         self.assertNotIn("--tools", pi_work)
         self.assertFalse(payload["isolation"]["safeNoneAllowed"]["pi"])
+        self.assertEqual(payload["engineDefaults"]["omp"]["binary"], "omp")
+        self.assertEqual(payload["promptTransports"]["omp"], "argv")
+        omp_safe = payload["modeMapping"]["omp"]["safe"]
+        omp_work = payload["modeMapping"]["omp"]["work"]
+        self.assertEqual(omp_safe[omp_safe.index("--tools") + 1], "read")
+        self.assertIn("--no-rules", omp_safe)
+        self.assertIn("--no-lsp", omp_safe)
+        self.assertNotIn("--no-prompt-templates", omp_safe)
+        self.assertNotIn("--no-approve", omp_safe)
+        self.assertEqual(omp_work[omp_work.index("--thinking") + 1], "high")
+        self.assertFalse(payload["isolation"]["safeNoneAllowed"]["omp"])
 
     def test_grok_safe_argv_uses_prompt_file_and_read_only_controls(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
@@ -1464,6 +1477,159 @@ class EngineArgvTests(CommandTestBase):
         )
         for write_capability in ("bash", "edit", "write", "--api-key", "--approve"):
             self.assertNotIn(write_capability, request.argv)
+
+    def test_omp_safe_argv_uses_fork_specific_read_only_lockdown(self):
+        request = self.build_git_request(
+            "omp",
+            "safe",
+            None,
+            "/repo",
+            "review task",
+            self.delegate.DEFAULT_CONFIG,
+            dry_run=True,
+        )
+        self.assertEqual(request.prompt_transport, self.delegate.PROMPT_TRANSPORT_ARGV)
+        self.assertIsNone(request.stdin_text)
+        self.assertEqual(request.display_argv[-1], "<prompt redacted: omp argv transport>")
+        self.assertEqual(
+            request.argv,
+            [
+                "omp",
+                "-p",
+                "--no-session",
+                "--mode",
+                "json",
+                "--tools",
+                "read",
+                "--no-extensions",
+                "--no-skills",
+                "--no-rules",
+                "--no-lsp",
+                "--approval-mode",
+                "always-ask",
+                "review task",
+            ],
+        )
+        # --approval-mode always-ask is the load-bearing read-only enforcer: omp
+        # 17.0.4's --tools read allowlist does NOT bind on its own (write/bash/python
+        # still execute under it), so dropping always-ask silently makes omp safe
+        # mode write-capable. Verified by live write/bash/read/config-override probes;
+        # tests/test_omp_read_only_behavior.py is the gated behavioral backstop.
+        self.assertIn("--approval-mode", request.argv)
+        self.assertIn("always-ask", request.argv)
+        for forbidden in (
+            "bash",
+            "edit",
+            "write",
+            "python",
+            "browser",
+            "task",
+            "web_search",
+            "--smol",
+            "--slow",
+            "--plan",
+            "--prewalk",
+            "--plan-yolo",
+            "--auto-approve",
+        ):
+            self.assertNotIn(forbidden, request.argv)
+
+    def test_omp_rejects_flag_like_prompt_on_argv_transport(self):
+        # omp is the only pi-family engine using argv prompt transport (pi uses stdin).
+        # omp does not honor `--` as an end-of-options separator, so a bare prompt
+        # starting with `-` (e.g. a lone `--auto-approve` that would re-enable writes)
+        # or `@` (omp's file-include sigil) must be rejected before it reaches argv.
+        # safe/call--read-only never hit this because the safe prefix / read-only
+        # preamble is prepended upstream; this guards plain work/call.
+        for bad in ("--auto-approve", "@/etc/hostname", "-x"):
+            with self.subTest(prompt=bad):
+                with self.assertRaises(self.delegate.DelegateError) as ctx:
+                    self.delegate.build_omp_argv(
+                        self.delegate.DEFAULT_CONFIG["omp"], "work", None, None, bad
+                    )
+                self.assertEqual(ctx.exception.error, "pi_family_prompt_flag_like")
+        # A normal prompt still builds, and safe-mode omp (prefix prepended upstream)
+        # is never flag-shaped, so the guard does not false-positive on real prompts.
+        ok = self.delegate.build_omp_argv(
+            self.delegate.DEFAULT_CONFIG["omp"], "work", None, None, "do the task"
+        )
+        self.assertEqual(ok[-1], "do the task")
+
+    def test_omp_never_emits_fork_role_flags(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["omp"]["models"] = {
+            "builder": {"model": "openai-codex/gpt-5.6-sol", "thinking": "minimal"}
+        }
+        config["omp"]["modelRoles"] = {
+            "default": "private/default",
+            "smol": "private/smol",
+            "plan": "private/plan",
+        }
+        requests = [
+            self.build_git_request(
+                "omp", mode, None, "/repo", "task", config, dry_run=True, model_override="builder"
+            )
+            for mode in ("safe", "work")
+        ]
+        with (
+            tempfile.TemporaryDirectory() as temp_cwd,
+            mock.patch("delegate_agent.request_build.tempfile.mkdtemp", return_value=temp_cwd),
+        ):
+            requests.append(
+                self.delegate.request_from_parsed(
+                    self.delegate.parse_cli(["omp", "call", "--model", "builder", "task"]),
+                    config,
+                    io.StringIO(""),
+                )
+            )
+        role_prefixes = ("--smol", "--slow", "--plan", "--prewalk", "--plan-yolo")
+        for request in requests:
+            with self.subTest(mode=request.mode):
+                self.assertFalse(
+                    any(token.startswith(role_prefixes) for token in request.argv), request.argv
+                )
+                self.assertNotIn("private/default", request.argv)
+                self.assertNotIn("private/smol", request.argv)
+                self.assertNotIn("private/plan", request.argv)
+        self.assertNotIn("private/", json.dumps(self.delegate.describe_payload(config, "test")))
+
+    def test_omp_work_resolves_structured_alias_and_cli_thinking(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["omp"]["models"] = {
+            "builder": {
+                "model": "openai-codex/gpt-5.6-sol",
+                "thinking": "minimal",
+            }
+        }
+        request = self.build_git_request(
+            "omp",
+            "work",
+            None,
+            "/repo",
+            "implement",
+            config,
+            dry_run=True,
+            model_override="builder",
+            reasoning_effort="xhigh",
+        )
+        self.assertEqual(
+            request.argv,
+            [
+                "omp",
+                "-p",
+                "--no-session",
+                "--mode",
+                "json",
+                "--model",
+                "openai-codex/gpt-5.6-sol",
+                "--thinking",
+                "xhigh",
+                "implement",
+            ],
+        )
+        self.assertEqual(request.reasoning_effort, "xhigh")
+        self.assertEqual(request.reasoning_transport, "pi-thinking-flag")
+        self.assertEqual(request.reasoning_capability_source, "static")
 
     def test_pi_work_resolves_structured_alias_and_cli_thinking(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))

@@ -198,6 +198,12 @@ class CapabilityCommandTests(unittest.TestCase):
         self.assertTrue(capabilities["pi"]["noSessionPersistence"])
         self.assertFalse(capabilities["pi"]["usageEvents"])
         self.assertTrue(capabilities["pi"]["promptStdin"])
+        self.assertFalse(capabilities["omp"]["pureCall"])
+        self.assertFalse(capabilities["omp"]["pureTripwire"])
+        self.assertFalse(capabilities["omp"]["structuredOutput"])
+        self.assertTrue(capabilities["omp"]["noSessionPersistence"])
+        self.assertFalse(capabilities["omp"]["usageEvents"])
+        self.assertFalse(capabilities["omp"]["promptStdin"])
 
         summary = models_summary_payload(config, "test-config")
         by_provider_alias = {(item["provider"], item["alias"]): item for item in summary["aliases"]}

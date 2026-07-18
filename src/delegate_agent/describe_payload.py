@@ -23,6 +23,7 @@ from delegate_agent.argv_builders import (
     build_codex_argv,
     build_devin_argv,
     build_grok_argv,
+    build_omp_argv,
     build_opencode_argv,
     build_pi_argv,
 )
@@ -133,6 +134,7 @@ def _launch_options() -> list[str]:
         "devin",
         "opencode",
         "pi",
+        "omp",
         "kimi",
     ):
         spec = command_help.COMMAND_SPECS[command]
@@ -289,6 +291,11 @@ def models_payload(
         "defaultModel": config["pi"]["defaultModel"],
         "defaultReasoningEffort": config["pi"].get("defaultReasoningEffort"),
     }
+    omp: JsonObject = {
+        "binary": config["omp"]["binary"],
+        "defaultModel": config["omp"]["defaultModel"],
+        "defaultReasoningEffort": config["omp"].get("defaultReasoningEffort"),
+    }
     for engine, section in (
         ("cursor", cursor),
         ("codex", codex),
@@ -298,6 +305,7 @@ def models_payload(
         ("devin", devin),
         ("opencode", opencode),
         ("pi", pi),
+        ("omp", omp),
     ):
         models = _nonempty_engine_models(config[engine])
         if models is not None:
@@ -321,6 +329,7 @@ def models_payload(
         "devin": devin,
         "opencode": opencode,
         "pi": pi,
+        "omp": omp,
     }
 
 
@@ -369,6 +378,11 @@ def _engine_defaults_payload(config: JsonObject) -> JsonObject:
             "binary": config["pi"]["binary"],
             "defaultModel": config["pi"]["defaultModel"],
             "defaultReasoningEffort": config["pi"].get("defaultReasoningEffort"),
+        },
+        "omp": {
+            "binary": config["omp"]["binary"],
+            "defaultModel": config["omp"]["defaultModel"],
+            "defaultReasoningEffort": config["omp"].get("defaultReasoningEffort"),
         },
     }
 
@@ -430,7 +444,7 @@ def _summary_model_fields(engine: str, mapping: object) -> JsonObject:
             "available": bool(mapping),
             "model": mapping if mapping else None,
         }
-    if engine in {"opencode", "pi"} and isinstance(mapping, dict):
+    if engine in {"opencode", "pi", "omp"} and isinstance(mapping, dict):
         model = mapping.get("model")
         fields: JsonObject = {
             "available": isinstance(model, str) and bool(model),
@@ -570,6 +584,7 @@ def _policy_field_support_matrix() -> JsonObject:
         "devin": unsupported,
         "opencode": unsupported,
         "pi": unsupported,
+        "omp": unsupported,
     }
 
 
@@ -701,19 +716,17 @@ def _opencode_describe_argv(
     return [PROMPT_FILE_DISPLAY if item == PROMPT_FILE_ARG_PLACEHOLDER else item for item in argv]
 
 
-def _pi_describe_argv(pi: JsonObject, *, mode: str) -> list[str]:
-    model = _resolve_default_model(pi)
-    default_effort = pi.get("defaultReasoningEffort")
-    return build_pi_argv(
-        pi,
-        mode,
-        model,
-        reasoning.resolve_native_effort(
-            "pi",
-            default_effort if isinstance(default_effort, str) else None,
-            model=model,
-        ),
+def _pi_family_describe_argv(section: JsonObject, engine: str, *, mode: str) -> list[str]:
+    model = _resolve_default_model(section)
+    default_effort = section.get("defaultReasoningEffort")
+    thinking = reasoning.resolve_native_effort(
+        engine,
+        default_effort if isinstance(default_effort, str) else None,
+        model=model,
     )
+    if engine == "omp":
+        return build_omp_argv(section, mode, model, thinking, "<prompt>")
+    return build_pi_argv(section, mode, model, thinking)
 
 
 def describe_payload(
@@ -727,6 +740,7 @@ def describe_payload(
     devin = config["devin"]
     opencode = config["opencode"]
     pi = config["pi"]
+    omp = config["omp"]
     codex_safe_policy = delegate_config.effective_policy(config, engine="codex", mode=MODE_SAFE)
     codex_work_policy = delegate_config.effective_policy(config, engine="codex", mode=MODE_WORK)
     claude_safe_policy = _claude_runtime_policy(config, MODE_SAFE)
@@ -784,8 +798,10 @@ def describe_payload(
         mode=MODE_WORK,
         workspace="<workspace>",
     )
-    pi_safe_argv = _pi_describe_argv(pi, mode=MODE_SAFE)
-    pi_work_argv = _pi_describe_argv(pi, mode=MODE_WORK)
+    pi_safe_argv = _pi_family_describe_argv(pi, "pi", mode=MODE_SAFE)
+    pi_work_argv = _pi_family_describe_argv(pi, "pi", mode=MODE_WORK)
+    omp_safe_argv = _pi_family_describe_argv(omp, "omp", mode=MODE_SAFE)
+    omp_work_argv = _pi_family_describe_argv(omp, "omp", mode=MODE_WORK)
     return {
         "ok": True,
         "summary": False,
@@ -826,6 +842,7 @@ def describe_payload(
             "devin": PROMPT_TRANSPORT_FILE,
             "opencode": PROMPT_TRANSPORT_STDIN,
             "pi": PROMPT_TRANSPORT_STDIN,
+            "omp": PROMPT_TRANSPORT_ARGV,
         },
         "globalOptions": _global_options(),
         "launchOptions": _launch_options(),
@@ -867,6 +884,7 @@ def describe_payload(
                 "devin": False,
                 "opencode": False,
                 "pi": False,
+                "omp": False,
             },
         },
         "worktrees": {
@@ -1131,6 +1149,21 @@ def describe_payload(
                     "Model IDs use provider/model form; aliases may pin model plus off/minimal thinking.",
                 ],
             },
+            "omp": {
+                "safe": omp_safe_argv,
+                "safeNotes": [
+                    SAFE_WORKSPACE_SYNC_NOTE,
+                    "Uses omp -p --mode json --no-session with prompt delivered as a positional argument.",
+                    "Safe mode enables only read and disables extension, skill, rules, and LSP discovery.",
+                    "Delegate also runs safe mode in an isolated copy; omp receives no write-capable built-in tools.",
+                ],
+                "work": omp_work_argv,
+                "workNotes": [
+                    "All modes use --no-session; Delegate run tracking is the durable record.",
+                    "Reasoning effort maps directly to omp --thinking (low, medium, high, xhigh, max).",
+                    "Model IDs use provider/model form; aliases may pin model plus off/minimal thinking.",
+                ],
+            },
         },
         "commands": _commands_catalog(),
         "recommendedDiscovery": [
@@ -1269,6 +1302,15 @@ def _emit_models_text(payload: JsonObject, config_source: str, stdout: TextIO) -
             file=stdout,
         )
         _print_engine_aliases(pi, stdout)
+    omp = payload.get("omp")
+    if isinstance(omp, dict):
+        print(
+            "omp: "
+            f"binary={_text_or_none(omp.get('binary'))} "
+            f"defaultModel={_text_or_none(omp.get('defaultModel'))}",
+            file=stdout,
+        )
+        _print_engine_aliases(omp, stdout)
     kimi = payload.get("kimi")
     if isinstance(kimi, dict):
         print(

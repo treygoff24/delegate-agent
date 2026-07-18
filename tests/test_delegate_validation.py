@@ -923,6 +923,7 @@ class ValidationTests(unittest.TestCase):
             "devin",
             "opencode",
             "pi",
+            "omp",
         ):
             with self.subTest(engine=engine):
                 self.assertEqual(

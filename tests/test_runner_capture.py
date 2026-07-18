@@ -1294,6 +1294,68 @@ class RunnerCaptureTests(unittest.TestCase):
         self.assertIn("PI_OK", result.text)
         self.assertNotEqual(result.result_quality, "no_assistant_text")
 
+    def test_omp_synthetic_argv_stream_populates_assistant_text_in_all_modes(self):
+        stream = "\n".join(
+            (
+                json.dumps({"type": "turn_start"}),
+                json.dumps(
+                    {
+                        "type": "message_end",
+                        "message": {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": "OMP_OK"}],
+                            "stopReason": "stop",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "turn_end",
+                        "message": {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": "OMP_OK"}],
+                            "stopReason": "stop",
+                        },
+                    }
+                ),
+            )
+        )
+        command = [sys.executable, "-c", f"print({stream!r})"]
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            for mode in ("safe", "work"):
+                with self.subTest(mode=mode):
+                    run_id, alias = self.registry.register_run(root, harness="omp")
+                    ctx = self.runner.RunContext(
+                        registry_root=root,
+                        run_id=run_id,
+                        alias=alias,
+                        harness="omp",
+                        engine="omp",
+                        mode=mode,
+                        model=None,
+                        source_cwd=workspace,
+                        execution_cwd=workspace,
+                        workspace_kind="directory",
+                        isolated_workspace=False,
+                        started_at="2026-07-18T21:00:00Z",
+                    )
+                    code, payload = self.runner.execute_tracked(
+                        command,
+                        workspace,
+                        ctx,
+                        json_mode=True,
+                        stdout=io.StringIO(),
+                        stderr=io.StringIO(),
+                    )
+                    self.assertEqual(code, 0)
+                    assert payload is not None
+                    self.assertEqual(payload["assistantText"], "OMP_OK")
+
+            result = self.runner.execute_call(command, workspace, harness="omp")
+            self.assertEqual(result.exit_code, 0)
+            self.assertEqual(result.text, "OMP_OK")
+
     def test_tracked_codex_progress_message_before_command_does_not_write_report(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)

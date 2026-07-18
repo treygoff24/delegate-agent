@@ -36,6 +36,7 @@ from delegate_agent.argv_builders import (
     build_droid_argv,
     build_grok_argv,
     build_kimi_argv,
+    build_omp_argv,
     build_opencode_argv,
     build_pi_argv,
     prefix_droid_safe_prompt,
@@ -67,6 +68,7 @@ from delegate_agent.prompt_transport import (
     DROID_PROMPT_FILE_ARG_PLACEHOLDER,
     DROID_PROMPT_FILE_DISPLAY,
     KIMI_PROMPT_REDACTION,
+    OMP_PROMPT_REDACTION,
     PROMPT_FILE_ARG_PLACEHOLDER,
     PROMPT_FILE_DISPLAY,
     PROMPT_TRANSPORT_ARGV,
@@ -2008,6 +2010,33 @@ def _pi_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     )
 
 
+def _omp_request_parts(build: EngineBuildInput) -> EngineRequestParts:
+    _ = build.cache
+    omp = build.config["omp"]
+    model, thinking, thinking_source = _resolve_pi_family_selection_detail(
+        omp,
+        build,
+        engine="omp",
+    )
+    argv = build_omp_argv(
+        omp,
+        build.mode,
+        model,
+        thinking,
+        build.prompt,
+        call_read_only=build.call_read_only,
+        pure=build.pure,
+    )
+    return EngineRequestParts(
+        model=model,
+        argv=argv,
+        model_alias=build.model_alias,
+        prompt_transport=PROMPT_TRANSPORT_ARGV,
+        display_argv=redacted_prompt_argv(argv, replacement=OMP_PROMPT_REDACTION),
+        **pi_reasoning_request_kwargs(thinking, thinking_source),
+    )
+
+
 def _kimi_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     _ = build.effort_source, build.cache
     kimi = build.config["kimi"]
@@ -2052,6 +2081,7 @@ ENGINE_REQUEST_PARTS_BUILDERS: dict[str, EngineRequestPartsBuilder] = {
     "devin": _devin_request_parts,
     "opencode": _opencode_request_parts,
     "pi": _pi_request_parts,
+    "omp": _omp_request_parts,
     "kimi": _kimi_request_parts,
 }
 
