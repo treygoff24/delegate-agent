@@ -90,7 +90,7 @@ layers. This is read-only observability; inspecting it does not modify
     "definitions": {
       "work": {
         "env": {
-          "CODEX_HOME": "~/.ai-profiles/runtime/codex/work"
+          "CODEX_HOME": "~/replace-with-work-codex-home"
         }
       }
     }
@@ -124,6 +124,18 @@ layers. This is read-only observability; inspecting it does not modify
     "defaultModel": null,
     "defaultReasoningEffort": null,
     "defaultAgent": null,
+    "models": {}
+  },
+  "pi": {
+    "binary": "pi",
+    "defaultModel": null,
+    "defaultReasoningEffort": null,
+    "models": {}
+  },
+  "omp": {
+    "binary": "omp",
+    "defaultModel": null,
+    "defaultReasoningEffort": null,
     "models": {}
   },
   "kimi": {
@@ -256,7 +268,7 @@ Controls local run recording.
     "definitions": {
       "work": {
         "env": {
-          "CODEX_HOME": "~/.ai-profiles/runtime/codex/work",
+          "CODEX_HOME": "~/replace-with-work-codex-home",
           "SOME_TOOL_HOME": "~/.config/some-tool/work"
         }
       }
@@ -467,8 +479,8 @@ provider, including configured custom or local providers.
     "defaultModel": null,
     "defaultReasoningEffort": null,
     "models": {
-      "reviewer": "openai-codex/gpt-5.6-sol",
-      "quick": { "model": "openai-codex/gpt-5.6-sol", "thinking": "minimal" }
+      "reviewer": "replace-with-provider/model-id",
+      "quick": { "model": "replace-with-provider/model-id", "thinking": "minimal" }
     }
   }
 }
@@ -479,7 +491,7 @@ provider, including configured custom or local providers.
 - `defaultReasoningEffort`: optional `low`, `medium`, `high`, `xhigh`, or `max` default.
 - `models`: the same string or `{ "model", "thinking" }` alias shape as `pi.models`; model values containing a colon suffix are rejected.
 - Explicit `--reasoning-effort` overrides alias-pinned thinking, which overrides the configured default.
-- Every mode uses `--no-session`. Safe mode and `call --read-only` allow only `read` and disable extensions, skills, rules, and LSP discovery.
+- Every mode uses `--no-session`. Safe mode and `call --read-only` allow only `read`, disable extensions, skills, rules, and LSP discovery, and add `--approval-mode always-ask` as the load-bearing write/exec denial in headless mode.
 - Delegate does not consume `modelRoles` and never emits `--smol`, `--slow`, `--plan`, `--prewalk*`, or `--plan-yolo*`.
 - `delegate models omp --live` probes `omp models --json --no-extensions` without reading or printing provider credentials.
 

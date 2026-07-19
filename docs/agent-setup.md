@@ -212,7 +212,7 @@ For an orchestrating agent, script, or CI job:
 ## CI expectations
 
 The required test suite does not need real Cursor, Droid, Codex, Claude, Grok,
-Devin, OpenCode, or Kimi binaries. Tests use dry-run paths and fake binaries
+Devin, OpenCode, Pi, Oh My Pi, or Kimi binaries. Tests use dry-run paths and fake binaries
 where needed:
 
 ```bash

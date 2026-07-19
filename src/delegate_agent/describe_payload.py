@@ -1155,7 +1155,7 @@ def describe_payload(
                     SAFE_WORKSPACE_SYNC_NOTE,
                     "Uses omp -p --mode json --no-session with prompt delivered as a positional argument.",
                     "Safe mode enables only read and disables extension, skill, rules, and LSP discovery.",
-                    "Delegate also runs safe mode in an isolated copy; omp receives no write-capable built-in tools.",
+                    "Oh My Pi 17.0.4 still exposes write-capable tools under --tools read; --approval-mode always-ask denies their use in headless mode. Delegate also runs safe mode in an isolated copy.",
                 ],
                 "work": omp_work_argv,
                 "workNotes": [

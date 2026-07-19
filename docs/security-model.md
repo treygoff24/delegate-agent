@@ -67,7 +67,9 @@ Work mode is edit-capable. Use it only for bounded tasks in workspaces you trust
 - Codex work uses the configured Codex policy and sandbox settings.
 - Claude work uses `claude.workPermissionMode`; Delegate policy can explicitly map `policy.harness.claude.work.bypassApprovalsAndSandbox` to Claude `--permission-mode bypassPermissions`.
 - Grok work uses `grok.workPermissionMode` and `grok.workSandbox`; Delegate policy can explicitly map `policy.harness.grok.work.bypassApprovalsAndSandbox` to Grok `--permission-mode bypassPermissions`.
+- Devin work uses `--permission-mode dangerous` because non-interactive edit and exec tools otherwise require approval.
 - OpenCode work adds `--auto` and does not apply the read-only environment lockdown.
+- Pi and Oh My Pi work use their normal tool sets without the safe-mode read-only flags. Both remain stateless at the child layer through `--no-session`.
 - Kimi work uses edit-capable prompt mode. Delegate does not emit `--yolo` because Kimi rejects combining `--yolo` with `--prompt`.
 
 #### Claude bypass scope
@@ -81,8 +83,10 @@ Delegate never auto-commits, pushes, merges, deploys, or publishes work-mode cha
 ### Call mode
 
 Call mode is a stateless one-hop model call. It runs the child in an empty
-temporary cwd, captures assistant text when available, deletes the temporary cwd,
-and does not write a run registry entry, snapshot, or completion report. It also
+temporary cwd, captures assistant text when available, and does not write a run
+registry entry, snapshot, or completion report. An empty temporary cwd is
+deleted; if the child creates files, Delegate preserves them under
+`.delegate/artifacts/<runId>/` and reports the path in the response. Call mode
 does not inject safe/work skill framing.
 
 Call mode is **write-capable by default** — it inherits work-level harness

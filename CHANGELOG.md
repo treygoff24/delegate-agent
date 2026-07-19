@@ -5,7 +5,45 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.17.0] - 2026-07-18
+
+### Added
+
+- Pi is now a first-class `safe`/`work`/`call` engine with stateless JSON
+  execution, stdin prompt transport, model aliases, reasoning-effort mapping,
+  live model discovery, normalized JSON events, and a native read-only policy
+  for safe mode and `call --read-only`.
+- Oh My Pi is now a first-class `omp` engine with matching mode, model alias,
+  reasoning, discovery, and event support. Its verified 17.0.4 prompt path uses
+  a redacted positional argument because piped stdin exits without processing.
+- Child processes now receive an authoritative `WORKSPACE_ROOT`; run metadata
+  exposes the same path as `workspaceRoot`, with source and isolated execution
+  roots available through `DELEGATE_SOURCE_ROOT` and
+  `DELEGATE_EXECUTION_ROOT` where applicable.
+
+### Changed
+
+- Repository-local `.delegate/config.json` is no longer loaded automatically.
+  Delegate reports it as an unapplied layer; operators must explicitly select
+  a trusted file with `DELEGATE_CONFIG`.
+- Stateless calls now preserve child-created files under
+  `.delegate/artifacts/<runId>/` instead of deleting successful deliverables,
+  and report `artifactsPath` plus `preservedArtifacts` in the response.
+- Unknown launch flags now fail as `unknown_option` before they can be absorbed
+  as prompt text, and corrected-command suggestions are emitted only after the
+  real parser validates them.
+
+### Security
+
+- Oh My Pi safe mode and `omp call --read-only` now add
+  `--approval-mode always-ask`, which denies write and exec tools in headless
+  mode even when project config requests `yolo`. A gated real-binary behavioral
+  test verifies writes and shell commands are denied while reads remain
+  available, and positional prompt guards reject flag- and include-shaped
+  injection prefixes.
+- Private `.delegate` run, workflow, and cache state I/O now traverses from the
+  workspace anchor with descriptor-relative, no-follow opens, rejecting
+  symlinked path components to prevent symlink-swap races.
 
 ## [0.16.0] - 2026-07-16
 
@@ -425,6 +463,7 @@ Usage-audit fix wave: 82 sessions and 1,241 delegate invocations from one week o
 
 - Releases before 0.1.3 predate this changelog.
 
+[0.17.0]: https://github.com/treygoff24/delegate-agent/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/treygoff24/delegate-agent/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/treygoff24/delegate-agent/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/treygoff24/delegate-agent/compare/v0.13.1...v0.14.0

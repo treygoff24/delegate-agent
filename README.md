@@ -4,7 +4,7 @@
 
 # Delegate Agent
 
-Delegate Agent is a small CLI for handing a bounded task to another coding-agent runtime. It normalizes common calls to Cursor Agent, Factory Droid, OpenAI Codex, Claude Code, Grok Build, Devin, OpenCode, and Kimi Code so humans or other agents can launch review, investigation, and implementation jobs without remembering each tool's flags.
+Delegate Agent is a small CLI for handing a bounded task to another coding-agent runtime. It normalizes common calls to Cursor Agent, Factory Droid, OpenAI Codex, Claude Code, Grok Build, Devin, OpenCode, Pi, Oh My Pi, and Kimi Code so humans or other agents can launch review, investigation, and implementation jobs without remembering each tool's flags.
 
 Use it when you want a predictable wrapper around prompts like:
 
@@ -14,11 +14,11 @@ Use it when you want a predictable wrapper around prompts like:
 
 Delegate does **not** commit, push, merge, deploy, publish, or run a background service. It builds the child command, adds safety framing, launches the selected runtime, and records local run metadata for later inspection.
 
-Prompt handling is provider-specific: Codex, Claude, and OpenCode prompts are delivered to the child
+Prompt handling is provider-specific: Codex, Claude, OpenCode, and Pi prompts are delivered to the child
 runtime over stdin; Droid, Grok, and Devin prompts are delivered through private
-temporary prompt files; Cursor Agent and Kimi Code currently
-require prompt argv. Delegate redacts Cursor and Kimi prompt argv in dry-run
-output and run manifests, but true process-argv hiding for those harnesses
+temporary prompt files; Cursor Agent, Oh My Pi, and Kimi Code currently
+require prompt argv. Delegate redacts Cursor, Oh My Pi, and Kimi prompt argv in
+dry-run output and run manifests, but true process-argv hiding for those Harnesses
 depends on the child CLIs exposing stdin or prompt-file transport.
 
 ## Install
@@ -70,6 +70,26 @@ command -v pi      # Pi coding agent, used by delegate pi ...
 command -v omp     # Oh My Pi, used by delegate omp ...
 command -v kimi    # Kimi Code CLI, used by delegate kimi ...
 ```
+
+Supported modes:
+
+| Harness | Command | `safe` | `work` | `call` |
+| --- | --- | --- | --- | --- |
+| Cursor Agent | `cursor` | Yes | Yes | Yes |
+| Factory Droid | `droid` | Yes | Yes | Yes |
+| OpenAI Codex | `codex` | Yes | Yes | Yes |
+| Claude Code | `claude` | Yes | Yes | Yes |
+| Grok Build | `grok` | Yes | Yes | Yes |
+| Devin | `devin` | No | Yes | Yes |
+| OpenCode | `opencode` | Yes | Yes | Yes |
+| Pi | `pi` | Yes | Yes | Yes |
+| Oh My Pi | `omp` | Yes | Yes | Yes |
+| Kimi Code | `kimi` | Yes | Yes | Yes |
+
+Devin `safe` is rejected because Delegate cannot enforce a read-only filesystem
+survey through Devin's generic execution tool. See the
+[security model](docs/security-model.md) for the strength and limits of each
+Harness's `safe` and `call --read-only` boundary.
 
 Runtime authentication is owned by each child CLI. Delegate cannot log in for you. Dry-runs and CI tests do not require the real child binaries.
 
@@ -319,7 +339,7 @@ Defaults are intentionally conservative for review paths:
 - Devin safe mode is unsupported: Devin may implement filesystem surveys through the generic `exec` tool, which Delegate cannot permit without weakening the read-only boundary. Use another safe Harness for filesystem review. Devin work mode uses `--permission-mode dangerous` because Devin print mode rejects unapproved edit/exec tools.
 - OpenCode safe mode uses Delegate's isolated copy plus an `OPENCODE_CONFIG_CONTENT` permission lockdown that allows only read, glob, and grep operations. OpenCode merges this override last, so repository configuration cannot restore write-capable tools. `opencode call --read-only` uses the same lockdown; plain `call` does not.
 - Pi safe mode and `pi call --read-only` use only the built-in `read` tool and disable extension, skill, prompt-template, and project-approval discovery. All Pi modes use `--no-session`; Delegate's run registry is the durable record.
-- Oh My Pi safe mode and `omp call --read-only` use only `read` and disable extension, skill, rules, and LSP discovery. All Oh My Pi modes use `--no-session`; Delegate passes prompts as positional arguments because the verified 17.0.4 stdin path exited without processing piped input.
+- Oh My Pi safe mode and `omp call --read-only` use only `read`, disable extension, skill, rules, and LSP discovery, and enforce `--approval-mode always-ask` so headless write and exec requests are denied. All Oh My Pi modes use `--no-session`; Delegate passes prompts as positional arguments because the verified 17.0.4 stdin path exited without processing piped input.
 - Claude safe mode invokes `claude -p` with prompt text on stdin, `--permission-mode plan`, `--strict-mcp-config`, Read/Grep/Glob plus selected read-only Bash tools, and `--no-session-persistence` by default. Delegate does not currently prove that Claude Code hooks, plugins, user settings, or other non-MCP customization surfaces are disabled.
 - `work` mode can edit. By default it runs in the real workspace for backward compatibility.
 
@@ -346,7 +366,7 @@ non-ignored files from a dirty source checkout before launch, report the counts
 in a `dirty_source_auto_included` warning, and tear down the worktree if syncing
 fails. `--include-dirty` remains an explicit, harmless no-op on a clean source.
 
-Safe isolation and `--include-dirty` recreate an untracked symlink only when it is relative, resolves inside the source workspace, and its target is not gitignored; any symlink that fails those checks — an absolute target, an escape out of the tree, or a target that is itself a gitignored secret — is replaced with an inert placeholder file, failing closed on any ambiguity. Delegate reports a warning listing the symlink paths it blocked. In Git repositories with no commits yet, Cursor/Codex/Claude/Droid/Grok/OpenCode/Kimi safe isolation falls back to a directory copy because Git cannot create a detached worktree from an unborn `HEAD`.
+Safe isolation and `--include-dirty` recreate an untracked symlink only when it is relative, resolves inside the source workspace, and its target is not gitignored; any symlink that fails those checks — an absolute target, an escape out of the tree, or a target that is itself a gitignored secret — is replaced with an inert placeholder file, failing closed on any ambiguity. Delegate reports a warning listing the symlink paths it blocked. In Git repositories with no commits yet, Cursor/Codex/Claude/Droid/Grok/OpenCode/Pi/Oh My Pi/Kimi safe isolation falls back to a directory copy because Git cannot create a detached worktree from an unborn `HEAD`.
 
 Snapshots and `run-output` redact common credential shapes by default, including authorization headers, bearer/basic tokens, JWT-like strings, and common `token=` / `api_key=` / `password=` values. Use `--no-redact` only when exact output is necessary and safe to display.
 

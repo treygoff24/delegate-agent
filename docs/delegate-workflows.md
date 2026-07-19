@@ -73,7 +73,8 @@ workflow result in `result.json`. Injected globals are `agent`, `pipeline`,
 - `judges(prompt, schema, engines=[...])` runs one `call --read-only` judge lane per engine and returns the votes.
 
 Workflow `engine` values and `workflows.engineCaps` keys accept `cursor`,
-`droid`, `codex`, `claude`, `grok`, `devin`, `opencode`, and `kimi`.
+`droid`, `codex`, `claude`, `grok`, `devin`, `opencode`, `pi`, `omp`, and
+`kimi`.
 
 ## Gates and resume
 

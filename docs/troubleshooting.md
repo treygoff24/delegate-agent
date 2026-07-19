@@ -279,7 +279,7 @@ available.
 
 ## Safe-mode isolation fails
 
-Cursor, Droid, Codex, Claude, Grok, OpenCode, and Kimi safe create an
+Cursor, Droid, Codex, Claude, Grok, OpenCode, Pi, Oh My Pi, and Kimi safe create an
 isolated throwaway workspace by default. Safe mode reviews your **current working tree**,
 uncommitted tracked edits and untracked, non-ignored files are mirrored into
 that copy (only gitignored paths are excluded), so you do **not** need to
@@ -288,7 +288,7 @@ a detached worktree and syncs the dirty tree into it; for non-Git directories
 and some Git fallback cases, it uses a directory copy. Codex safe is the only
 safe harness that may opt out with `--isolation none`, because Codex still
 keeps its read-only sandbox active. Cursor, Droid, Claude, Grok,
-OpenCode, and Kimi safe
+OpenCode, Pi, Oh My Pi, and Kimi safe
 normalize `--isolation none` back to `auto` with a warning because their safe
 contracts depend on Delegate's temporary workspace boundary.
 
@@ -405,7 +405,7 @@ reviewing the worktree.
 ## CI does not have child runtimes
 
 That is expected. Required tests do not need real Cursor, Droid, Codex, Claude,
-Grok, Devin, OpenCode, or Kimi binaries:
+Grok, Devin, OpenCode, Pi, Oh My Pi, or Kimi binaries:
 
 ```bash
 python3 -m compileall -q src tests bin

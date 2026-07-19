@@ -1136,6 +1136,10 @@ class EngineArgvTests(CommandTestBase):
         self.assertIn("--no-lsp", omp_safe)
         self.assertNotIn("--no-prompt-templates", omp_safe)
         self.assertNotIn("--no-approve", omp_safe)
+        self.assertIn(
+            "--approval-mode always-ask denies",
+            " ".join(payload["modeMapping"]["omp"]["safeNotes"]),
+        )
         self.assertEqual(omp_work[omp_work.index("--thinking") + 1], "high")
         self.assertFalse(payload["isolation"]["safeNoneAllowed"]["omp"])
 

@@ -9,6 +9,7 @@ include bin/delegate-profile-shim
 include docs/agent-setup.md
 include docs/cli-reference.md
 include docs/configuration.md
+include docs/delegate-workflows.md
 include docs/development.md
 include docs/live-runtime.md
 include docs/publishing-checklist.md

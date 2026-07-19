@@ -26,6 +26,10 @@ class PackagingTests(unittest.TestCase):
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
         self.assertIn(f"## [{version}]", changelog)
 
+    def test_delegate_workflows_doc_is_shipped(self):
+        manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")
+        self.assertIn("include docs/delegate-workflows.md", manifest)
+
 
 if __name__ == "__main__":
     unittest.main()

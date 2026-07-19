@@ -63,7 +63,7 @@ stdin. Oh My Pi receives a positional prompt because 17.0.4 did not consume pipe
 non-interactive invocation. Droid and Grok prompts are written to a private temporary prompt file and passed
 with Droid's documented `--file` option or Grok's `--prompt-file`. Cursor Agent currently only exposes
 positional prompt input, and Kimi Code prompt mode currently uses `--prompt`,
-so those launches still use argv transport; Delegate redacts Cursor and Kimi
+so those Harnesses also use argv transport; Delegate redacts Cursor, Oh My Pi, and Kimi
 prompt argv in dry-run output and run manifests.
 
 Temporary safe isolation also re-roots absolute paths under the source workspace
@@ -328,7 +328,7 @@ delegate [--json] omp call [--read-only] [--timeout SECONDS] [--model <alias-or-
 ```
 
 - Delegate launches `omp -p --no-session --mode json` and passes the resolved prompt as a positional argument.
-- Safe mode and `call --read-only` add `--tools read --no-extensions --no-skills --no-rules --no-lsp`; safe mode also uses Delegate's isolated throwaway workspace.
+- Safe mode and `call --read-only` add `--tools read --no-extensions --no-skills --no-rules --no-lsp --approval-mode always-ask`; the approval mode is the load-bearing write/exec denial in headless mode, and safe mode also uses Delegate's isolated throwaway workspace.
 - Model aliases accept either a `provider/model` string or `{ "model": "provider/model", "thinking": "LEVEL" }`.
 - `--reasoning-effort` maps directly to `--thinking` for `low`, `medium`, `high`, `xhigh`, and `max`. Structured aliases may select `off` or `minimal`.
 - Delegate never emits Oh My Pi's `--smol`, `--slow`, `--plan`, `--prewalk*`, or `--plan-yolo*` role flags.
