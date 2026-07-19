@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess  # nosec B404 - persistent worktree cleanup intentionally runs fixed git argv with shell=False.
 from collections.abc import Callable
@@ -30,7 +31,7 @@ from delegate_agent.isolation import (
     target_contains_source_root,
     worktrees_data_home,
 )
-from delegate_agent.json_types import JsonObject
+from delegate_agent.json_types import JsonObject, is_non_negative_int
 from delegate_agent.prompt_transport import (
     DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
     PROMPT_FILE_ARG_PLACEHOLDER,
@@ -108,9 +109,51 @@ def execute_persistent_worktree(
 ) -> tuple[int, JsonObject | None]:
     """Launch a work-mode child in a preserved Delegate-managed git worktree."""
     preflight = _validate_persistent_worktree_request(execution)
+    _warn_if_worktree_pool_large(execution.config, execution.stderr)
     registration = _register_persistent_worktree_run(execution, preflight)
     _create_persistent_worktree_or_record_failure(execution, preflight, registration)
     return _launch_child_in_persistent_worktree(execution, preflight, registration)
+
+
+def _worktree_pool_count(data_home: Path) -> int:
+    # ponytail: count-based guardrail only — a full-tree byte walk was slowest
+    # exactly when the pool was large, the case the warning exists to catch.
+    if not data_home.is_dir():
+        return 0
+    worktree_count = 0
+    try:
+        with os.scandir(data_home) as repositories:
+            for repository in repositories:
+                if not repository.is_dir(follow_symlinks=False):
+                    continue
+                with os.scandir(repository.path) as worktrees:
+                    worktree_count += sum(
+                        entry.is_dir(follow_symlinks=False) for entry in worktrees
+                    )
+    except OSError:
+        pass
+    return worktree_count
+
+
+def _warn_if_worktree_pool_large(config: JsonObject, stderr: TextIO) -> None:
+    worktrees = config.get("worktrees")
+    if not isinstance(worktrees, dict):
+        return
+    threshold = worktrees.get("poolWarnCount")
+    if not is_non_negative_int(threshold):
+        return
+    data_home = worktrees_data_home(config)
+    worktree_count = _worktree_pool_count(data_home)
+    if worktree_count <= threshold:
+        return
+    noun = "worktree" if worktree_count == 1 else "worktrees"
+    print(
+        "WARNING: persistent worktree pool "
+        f"{data_home} holds {worktree_count} {noun}; "
+        f"worktrees.poolWarnCount={threshold}. Reclaim retained work with "
+        "`delegate worktree remove` or `delegate worktree prune`.",
+        file=stderr,
+    )
 
 
 def _validate_persistent_worktree_request(

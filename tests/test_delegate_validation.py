@@ -745,6 +745,20 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(ctx.exception.error, "invalid_worktrees_config")
         self.assertIn("mergedOlderThanDays", ctx.exception.message)
 
+    def test_worktrees_pool_warn_count_rejects_bad_values(self):
+        config_mod = load_config_module()
+        for value in (None, -1, True, "1024"):
+            with self.subTest(value=value):
+                with self.assertRaises(config_mod.ConfigError) as ctx:
+                    config_mod.validate_config(
+                        config_mod.deep_merge(
+                            config_mod.DEFAULT_CONFIG,
+                            {"worktrees": {"poolWarnCount": value}},
+                        )
+                    )
+                self.assertEqual(ctx.exception.error, "invalid_worktrees_config")
+                self.assertIn("poolWarnCount", ctx.exception.message)
+
     def test_isolation_and_worktrees_valid_does_not_raise(self):
         config_mod = load_config_module()
         config_mod.validate_config(

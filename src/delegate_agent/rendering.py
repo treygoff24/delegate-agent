@@ -554,7 +554,13 @@ def render_worktree_prune_text(payload: JsonObject, stdout: TextIO) -> None:
 
 def render_worktree_gc_text(payload: JsonObject, stdout: TextIO) -> None:
     print(f"reconciled: {payload.get('reconciled', 0)}", file=stdout)
-    print(f"pruned source roots: {payload.get('prunedSourceRoots', 0)}", file=stdout)
+    if payload.get("dryRun") is True:
+        print(
+            f"would prune source roots: {payload.get('wouldPruneSourceRoots', 0)}",
+            file=stdout,
+        )
+    else:
+        print(f"pruned source roots: {payload.get('prunedSourceRoots', 0)}", file=stdout)
     warnings = payload.get("warnings")
     if isinstance(warnings, list) and warnings:
         print("warnings:", file=stdout)
@@ -569,7 +575,8 @@ def render_worktree_gc_text(payload: JsonObject, stdout: TextIO) -> None:
         for orphan in orphans:
             if isinstance(orphan, dict):
                 print(
-                    f"  - {orphan.get('alias') or orphan.get('runId')} {orphan.get('reason')}",
+                    f"  - {orphan.get('alias') or orphan.get('runId')} "
+                    f"{orphan.get('reason')} {orphan.get('executionCwd')}",
                     file=stdout,
                 )
 

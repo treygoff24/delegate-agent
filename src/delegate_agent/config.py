@@ -161,6 +161,7 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
     },
     "worktrees": {
         "dataHome": None,
+        "poolWarnCount": 20,
         "autoPrune": {
             "enabled": False,
             "mergedOlderThanDays": 7,
@@ -416,6 +417,12 @@ def _validate_worktrees_section(worktrees: JsonValue) -> None:
                 "invalid_worktrees_config",
                 "worktrees.dataHome must be an absolute path or start with ~/.",
             )
+    if "poolWarnCount" in worktrees:
+        _validate_required_non_negative_int(
+            worktrees["poolWarnCount"],
+            path="worktrees.poolWarnCount",
+            error="invalid_worktrees_config",
+        )
     auto_prune = worktrees.get("autoPrune")
     if auto_prune is not None:
         if not isinstance(auto_prune, dict):

@@ -578,6 +578,7 @@ Embedded defaults:
 {
   "worktrees": {
     "dataHome": null,
+    "poolWarnCount": 20,
     "autoPrune": {
       "enabled": false,
       "mergedOlderThanDays": 7
@@ -587,6 +588,7 @@ Embedded defaults:
 ```
 
 - `dataHome`: persistent-worktree root. `null` means `~/.delegate/worktrees`.
+- `poolWarnCount`: non-negative worktree-count threshold for a launch-time warning when the shared persistent-worktree pool holds more worktrees. The default is 20. The warning does not block or delete anything.
 - `autoPrune.enabled`: if true, `delegate worktree list` opportunistically prunes clean, fully merged worktrees older than `mergedOlderThanDays`.
 - `autoPrune.mergedOlderThanDays`: non-negative integer.
 

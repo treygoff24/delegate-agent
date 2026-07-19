@@ -241,8 +241,10 @@ def _gc_orphan_entry(
     if message:
         entry["message"] = message
     safe_actions = {
+        "source_root_missing": "restore_source_root_or_inspect_path_before_manual_cleanup",
         "worktree_metadata_missing": "inspect_path_before_manual_cleanup",
         "branch_missing": "inspect_branch_metadata_before_manual_cleanup",
+        "detached_backlink": "inspect_path_before_manual_cleanup",
         "worktree_list_failed": "retry_after_git_worktree_list_succeeds",
     }
     if reason in safe_actions:
@@ -261,7 +263,12 @@ def _gc_reconcile_missing_path(
 ) -> bool:
     if Path(execution).exists():
         return False
+    source = record.get("sourceGitRoot")
+    if isinstance(source, str) and not Path(source).exists():
+        return False
     if dry_run:
+        if isinstance(source, str):
+            prune_roots.add(source)
         reconciled.append(_gc_missing_entry(record, execution, dry_run=True))
         return True
 
@@ -294,26 +301,55 @@ def _gc_reconcile_list_failure(
 ) -> bool:
     if listed_paths is not None:
         return False
+    source = record.get("sourceGitRoot")
+    reason = (
+        "source_root_missing"
+        if isinstance(source, str) and not Path(source).exists()
+        else "worktree_list_failed"
+    )
     if dry_run:
-        orphans.append(_gc_orphan_entry(record, execution, "worktree_list_failed", list_warning))
+        orphans.append(_gc_orphan_entry(record, execution, reason, list_warning))
         return True
 
     def mark_unknown(
-        fresh: PersistentWorktreeRecord, _fresh_source: str, fresh_execution: str
+        fresh: PersistentWorktreeRecord, fresh_source: str, fresh_execution: str
     ) -> None:
-        if not Path(fresh_execution).exists():
+        source_missing = not Path(fresh_source).exists()
+        if not source_missing and not Path(fresh_execution).exists():
             return
+        fresh_reason = "source_root_missing" if source_missing else "worktree_list_failed"
         run_registry.set_worktree_status_locked(
             registry_root,
             str(fresh["runId"]),
             STATUS_UNKNOWN,
         )
-        orphans.append(
-            _gc_orphan_entry(fresh, fresh_execution, "worktree_list_failed", list_warning)
-        )
+        orphans.append(_gc_orphan_entry(fresh, fresh_execution, fresh_reason, list_warning))
 
     _with_locked_fresh_gc_candidate(registry_root, record, mark_unknown)
     return True
+
+
+def _resolved_git_common_dir(worktree: str) -> Path | None:
+    result = wm._run_git(worktree, ["rev-parse", "--git-common-dir"])
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    common_dir = Path(result.stdout.strip())
+    if not common_dir.is_absolute():
+        common_dir = Path(worktree) / common_dir
+    try:
+        return common_dir.resolve()
+    except (OSError, RuntimeError):
+        return None
+
+
+def _has_detached_backlink(source: str, execution: str) -> bool:
+    source_common_dir = _resolved_git_common_dir(source)
+    execution_common_dir = _resolved_git_common_dir(execution)
+    return (
+        source_common_dir is not None
+        and execution_common_dir is not None
+        and source_common_dir != execution_common_dir
+    )
 
 
 def _gc_reconcile_missing_metadata(
@@ -329,7 +365,13 @@ def _gc_reconcile_missing_metadata(
     if listed_paths is None or _registered_worktree_path_matches(listed_paths, execution):
         return False
     if dry_run:
-        orphans.append(_gc_orphan_entry(record, execution, "worktree_metadata_missing"))
+        source = record.get("sourceGitRoot")
+        reason = (
+            "detached_backlink"
+            if isinstance(source, str) and _has_detached_backlink(source, execution)
+            else "worktree_metadata_missing"
+        )
+        orphans.append(_gc_orphan_entry(record, execution, reason))
         return True
 
     def mark_unknown_if_still_orphaned(
@@ -345,12 +387,17 @@ def _gc_reconcile_missing_metadata(
             and fresh_paths is not None
             and not _registered_worktree_path_matches(fresh_paths, fresh_execution)
         ):
+            fresh_reason = (
+                "detached_backlink"
+                if _has_detached_backlink(fresh_source, fresh_execution)
+                else "worktree_metadata_missing"
+            )
             run_registry.set_worktree_status_locked(
                 registry_root,
                 str(fresh["runId"]),
                 STATUS_UNKNOWN,
             )
-            orphans.append(_gc_orphan_entry(fresh, fresh_execution, "worktree_metadata_missing"))
+            orphans.append(_gc_orphan_entry(fresh, fresh_execution, fresh_reason))
 
     _with_locked_fresh_gc_candidate(registry_root, record, mark_unknown_if_still_orphaned)
     return True
@@ -478,6 +525,7 @@ def gc_worktrees(registry_root: Path, *, dry_run: bool = False) -> JsonObject:
             "runsGitWorktreePrune": (not dry_run and bool(prune_roots)),
         },
         "prunedSourceRoots": 0 if dry_run else len(prune_roots),
+        "wouldPruneSourceRoots": len(prune_roots) if dry_run else 0,
         "reconciled": len(reconciled),
         "reconciledEntries": reconciled,
         "orphans": orphans,

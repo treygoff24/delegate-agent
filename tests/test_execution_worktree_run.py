@@ -18,6 +18,71 @@ from delegate_agent import worktree_summary  # noqa: E402
 
 
 class ExecutionWorktreeRunTests(ExecutionTestBase):
+    def test_persistent_worktree_launch_checks_pool_guardrail(self):
+        execution = mock.Mock(config={"worktrees": {}}, stderr=io.StringIO())
+        preflight = mock.sentinel.preflight
+        with (
+            mock.patch.object(
+                self.delegate.worktree_execution,
+                "_validate_persistent_worktree_request",
+                return_value=preflight,
+            ),
+            mock.patch.object(
+                self.delegate.worktree_execution,
+                "_warn_if_worktree_pool_large",
+            ) as warn,
+            mock.patch.object(
+                self.delegate.worktree_execution,
+                "_register_persistent_worktree_run",
+                side_effect=RuntimeError("stop after guardrail"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "stop after guardrail"),
+        ):
+            self.delegate.worktree_execution.execute_persistent_worktree(execution)
+
+        warn.assert_called_once_with(execution.config, execution.stderr)
+
+    def test_worktree_pool_guardrail_below_threshold_emits_no_warning(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            pool = Path(fake_home) / "pool"
+            worktree = pool / "fingerprint" / "old-worktree"
+            worktree.mkdir(parents=True)
+            config = dict(self.delegate.DEFAULT_CONFIG)
+            config["worktrees"] = {
+                **config["worktrees"],
+                "dataHome": str(pool),
+                "poolWarnCount": 1,
+            }
+            stderr = io.StringIO()
+
+            self.delegate.worktree_execution._warn_if_worktree_pool_large(config, stderr)
+
+            self.assertEqual(stderr.getvalue(), "")
+
+    def test_worktree_pool_guardrail_exceeded_warns_with_path_and_threshold(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            pool = Path(fake_home) / "pool"
+            for name in ("old-worktree", "new-worktree"):
+                (pool / "fingerprint" / name).mkdir(parents=True)
+            config = dict(self.delegate.DEFAULT_CONFIG)
+            config["worktrees"] = {
+                **config["worktrees"],
+                "dataHome": str(pool),
+                "poolWarnCount": 1,
+            }
+            stderr = io.StringIO()
+
+            self.delegate.worktree_execution._warn_if_worktree_pool_large(config, stderr)
+
+            warning = stderr.getvalue()
+            self.assertIn("WARNING", warning)
+            self.assertIn(str(pool), warning)
+            self.assertIn("2 worktrees", warning)
+            self.assertIn("poolWarnCount=1", warning)
+            self.assertIn("delegate worktree remove", warning)
+            self.assertIn("delegate worktree prune", warning)
+            self.assertNotIn("gc --all", warning)
+
     # -- Persistent worktree: cursor work runs in isolated worktree -----------
 
     def test_cursor_work_persistent_worktree_runs_in_worktree(self):

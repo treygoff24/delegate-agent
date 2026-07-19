@@ -1370,13 +1370,16 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         usage=("delegate [--cwd PATH] [--json] worktree gc [--dry-run]",),
         options=(
             OptionSpec(
-                "--dry-run", None, "Report what would be collected without changing anything."
+                "--dry-run",
+                None,
+                "Report source roots that would be pruned and un-prunable worktree reasons without changing anything.",
             ),
         ),
         examples=(
             "delegate worktree gc",
             "delegate worktree gc --dry-run",
         ),
+        notes=("GC reconciles registry and Git metadata; it never removes worktree paths.",),
         see_also=("worktree list", "worktree prune", "worktree remove"),
         unsupported_global_options=("--isolation", "--auth-profile"),
     ),

@@ -170,6 +170,86 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
             self.assertEqual(state["worktreeStatus"], "missing")
             self.assertNotIn("worktreeRemovedAt", state)
 
+    def test_worktree_gc_dry_run_reports_would_prune_source_roots(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            wt_path = str(Path(fake_home) / "wt" / "missing")
+            self._seed_persistent_run(path, execution_cwd=wt_path)
+
+            code, out, _err = self._run_cli(
+                ["--cwd", path, "--json", "worktree", "gc", "--dry-run"],
+                home=fake_home,
+            )
+
+            self.assertEqual(code, 0)
+            payload = json.loads(out)
+            self.assertEqual(payload["wouldPruneSourceRoots"], 1)
+            self.assertEqual(payload["prunedSourceRoots"], 0)
+            self.assertFalse(payload["effects"]["deletesWorktreePaths"])
+
+    def test_worktree_gc_classifies_missing_source_root(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            execution = Path(fake_home) / "wt" / "orphan"
+            run_id, _alias = self._seed_persistent_run(path, execution_cwd=str(execution))
+            registry_root = self._registry_root(path)
+            manifest = self.delegate.run_registry.load_run_manifest(registry_root, run_id)
+            manifest["sourceGitRoot"] = str(Path(fake_home) / "missing-source")
+            self.delegate.run_registry.write_json_atomic(
+                self.delegate.run_registry.run_directory(registry_root, run_id) / "manifest.json",
+                manifest,
+            )
+
+            result = self.delegate.worktree_mgmt.gc_worktrees(registry_root, dry_run=True)
+
+            self.assertEqual(result["orphans"][0]["reason"], "source_root_missing")
+            result = self.delegate.worktree_mgmt.gc_worktrees(registry_root)
+            self.assertEqual(result["orphans"][0]["reason"], "source_root_missing")
+            state = self.delegate.run_registry.load_run_state(registry_root, run_id)
+            self.assertEqual(state["worktreeStatus"], "unknown")
+
+    def test_worktree_gc_classifies_detached_backlink(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            execution = Path(fake_home) / "standalone"
+            subprocess.run(
+                ["git", "init", str(execution)],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            self._seed_persistent_run(path, execution_cwd=str(execution))
+
+            result = self.delegate.worktree_mgmt.gc_worktrees(
+                self._registry_root(path), dry_run=True
+            )
+
+            self.assertEqual(result["orphans"][0]["reason"], "detached_backlink")
+
+    def test_worktree_gc_classifies_missing_branch(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            execution = Path(fake_home) / "wt" / "missing-branch"
+            execution.mkdir(parents=True)
+            self._seed_persistent_run(path, execution_cwd=str(execution))
+            with (
+                mock.patch.object(
+                    self.delegate.worktree_mgmt,
+                    "_worktree_list_paths_with_warning",
+                    return_value=({str(execution)}, None),
+                ),
+                mock.patch.object(
+                    self.delegate.worktree_mgmt,
+                    "_branch_exists",
+                    return_value=False,
+                ),
+            ):
+                result = self.delegate.worktree_mgmt.gc_worktrees(
+                    self._registry_root(path), dry_run=True
+                )
+
+            self.assertEqual(result["orphans"][0]["reason"], "branch_missing")
+
     def test_worktree_gc_existing_orphan_path_is_not_deleted_and_marked_unknown(self):
         _repo, path = self._make_repo()
         with tempfile.TemporaryDirectory() as fake_home:

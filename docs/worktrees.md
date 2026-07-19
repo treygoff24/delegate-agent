@@ -214,7 +214,7 @@ delegate worktree gc
 
 `gc` reconciles registry metadata with the filesystem and Git worktree list. It does not delete paths by itself.
 
-In dry-run mode, `gc` only reports what it would mark. Without `--dry-run`, it may update Delegate registry status (for example, marking missing paths as `missing` or inconsistent metadata as `unknown`) and may run `git worktree prune` to clean Git administrative metadata for already-missing paths, but it does not delete worktree directories. JSON output includes an `effects` object that makes those mutation boundaries explicit.
+In dry-run mode, `gc` reports `wouldPruneSourceRoots` and classifies un-prunable worktrees with reasons such as `source_root_missing`, `worktree_metadata_missing`, `branch_missing`, and `detached_backlink`. Without `--dry-run`, it may update Delegate registry status (for example, marking missing paths as `missing` or inconsistent metadata as `unknown`) and may run `git worktree prune` to clean Git administrative metadata for already-missing paths, but it does not delete worktree directories. JSON output includes an `effects` object that makes those mutation boundaries explicit.
 
 ## Security boundary
 

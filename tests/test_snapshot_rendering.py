@@ -130,6 +130,31 @@ class SnapshotRenderingTests(SnapshotCommandTestBase):
         self.assertIn("warnings:", output)
         self.assertIn("/repo: fatal: worktree list failed", output)
 
+    def test_render_worktree_gc_dry_run_reports_would_prune_and_reasons(self):
+        stdout = io.StringIO()
+        self.rendering.render_worktree_gc_text(
+            {
+                "dryRun": True,
+                "reconciled": 1,
+                "prunedSourceRoots": 0,
+                "wouldPruneSourceRoots": 1,
+                "orphans": [
+                    {
+                        "alias": "cursor-1",
+                        "executionCwd": "/pool/cursor-1",
+                        "reason": "detached_backlink",
+                    }
+                ],
+                "warnings": [],
+            },
+            stdout,
+        )
+
+        output = stdout.getvalue()
+        self.assertIn("would prune source roots: 1", output)
+        self.assertIn("cursor-1 detached_backlink", output)
+        self.assertIn("/pool/cursor-1", output)
+
 
 if __name__ == "__main__":
     unittest.main()

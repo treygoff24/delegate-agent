@@ -889,6 +889,7 @@ def describe_payload(
         },
         "worktrees": {
             "dataHome": config["worktrees"]["dataHome"],
+            "poolWarnCount": config["worktrees"]["poolWarnCount"],
             "autoPrune": config["worktrees"]["autoPrune"],
             "dirtySource": {
                 "behavior": "Persistent worktree work runs auto-include tracked edits and untracked non-ignored files before child launch.",

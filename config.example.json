@@ -116,6 +116,7 @@
   },
   "worktrees": {
     "dataHome": null,
+    "poolWarnCount": 20,
     "autoPrune": {
       "enabled": false,
       "mergedOlderThanDays": 7
