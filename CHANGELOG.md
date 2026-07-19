@@ -5,6 +5,26 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.0] - 2026-07-19
+
+### Added
+
+- `worktree gc --dry-run` now reports `wouldPruneSourceRoots` and classifies
+  un-prunable worktrees with structured orphan reasons (`source_root_missing`,
+  `worktree_metadata_missing`, `branch_missing`, `detached_backlink`), each
+  with a `safeAction`. GC remains non-destructive and never deletes worktree
+  directories.
+- New `worktrees.poolWarnCount` config knob (default 20): persistent
+  work-mode launches emit a stderr warning when the shared worktree pool
+  holds more worktrees than the threshold. Warn-only; nothing is blocked or
+  deleted.
+
+### Changed
+
+- Text rendering for `worktree gc --dry-run` prints
+  `would prune source roots` instead of a constant zero, and orphan lines now
+  include the worktree path alongside the reason.
+
 ## [0.17.0] - 2026-07-18
 
 ### Added
@@ -463,6 +483,7 @@ Usage-audit fix wave: 82 sessions and 1,241 delegate invocations from one week o
 
 - Releases before 0.1.3 predate this changelog.
 
+[0.18.0]: https://github.com/treygoff24/delegate-agent/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/treygoff24/delegate-agent/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/treygoff24/delegate-agent/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/treygoff24/delegate-agent/compare/v0.14.0...v0.15.0
