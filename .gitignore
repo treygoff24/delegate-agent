@@ -53,3 +53,6 @@ docs/dogfood/
 
 # Ephemeral coordinator scratch (briefs, lane results)
 .scratch/
+
+# uv release-tooling artifact, not a project dependency lock (stdlib-only)
+uv.lock
