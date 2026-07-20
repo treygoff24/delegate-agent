@@ -97,6 +97,7 @@ delegate --json capabilities
 Common causes:
 
 - Codex effort was requested with a label not supported by the resolved model or the harness-default fallback capability.
+- Codex `max` was requested for a model other than `gpt-5.6-sol`, the only bundled Codex model that supports it as of 2026-07, without an exact config or workspace capability-cache declaration.
 - Claude effort must be one of Claude Code's native labels: `low`, `medium`, `high`, `xhigh`, or `max`.
 - Pi effort must be `low`, `medium`, `high`, `xhigh`, or `max`; alias-only `thinking` may also use `off` or `minimal`.
 - Oh My Pi effort uses the same levels and alias-only `thinking` values as Pi.
