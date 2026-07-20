@@ -1,0 +1,14 @@
+{
+  "capturedAt": "2026-07-20",
+  "fixtures": {
+    "cursor_models.txt": {"command": ["cursor-agent", "models"], "version": "2026.07.17-3e2a980"},
+    "droid_help.txt": {"command": ["droid", "exec", "--help"], "version": "0.175.0"},
+    "codex_models.json": {"command": ["codex", "debug", "models"], "version": "codex-cli 0.144.6"},
+    "claude_effort_help.txt": {"command": ["claude", "--effort", "__delegate_probe__", "--help"], "version": "2.1.216"},
+    "grok_models.txt": {"command": ["grok", "models"], "version": "grok 0.2.101"},
+    "opencode_models_verbose.txt": {"command": ["opencode", "--pure", "models", "--verbose"], "version": "1.17.18"},
+    "pi_models.txt": {"command": ["pi", "--offline", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-approve", "--list-models"], "version": "0.80.10"},
+    "omp_models.json": {"command": ["omp", "models", "--json", "--no-extensions"], "version": "omp/17.0.4"},
+    "kimi_providers.json": {"command": ["kimi", "provider", "list", "--json"], "version": "0.26.0"}
+  }
+}

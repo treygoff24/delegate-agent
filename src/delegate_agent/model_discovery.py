@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import os
 import re
 import subprocess
 import tempfile
@@ -11,6 +9,7 @@ from pathlib import Path
 from typing import TextIO
 
 from delegate_agent import config as delegate_config
+from delegate_agent import harness_discovery, profiles
 from delegate_agent.bundled_models import BUNDLED_MODELS
 from delegate_agent.constants import ENGINES_PROSE, KNOWN_ENGINES
 from delegate_agent.errors import DelegateError
@@ -19,7 +18,7 @@ from delegate_agent.json_types import JsonObject, JsonValue
 ENGINE_MODELS_SCHEMA = "delegate.engine-models.v1"
 LIVE_PROBE_TIMEOUT_SEC = 10
 DEVIN_LIVE_SENTINEL = "delegate-live-probe-sentinel"
-LIVE_UNSUPPORTED_ENGINES = frozenset({"codex", "claude", "grok", "kimi"})
+LIVE_UNSUPPORTED_ENGINES = frozenset({"claude"})
 _SOURCE_RANK = {"bundled": 0, "live": 1, "config": 2}
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
@@ -89,7 +88,7 @@ def engine_models_payload(
             )
             if probe_warning:
                 warning = probe_warning
-                live_field = False
+                live_field = bool(live_models)
             else:
                 live_field = True
             for item in live_models:
@@ -195,123 +194,52 @@ def _probe_live_models(
     workspace: Path | None = None,
 ) -> tuple[list[JsonObject], str | None]:
     try:
-        if engine == "cursor":
-            return _probe_cursor_models(config), None
-        if engine == "droid":
-            return _probe_droid_models(factory_settings_path=factory_settings_path), None
         if engine == "devin":
             return _probe_devin_models(config), None
-        if engine == "opencode":
-            return _probe_opencode_models(config, workspace=workspace), None
-        if engine == "pi":
-            return _probe_pi_family_models(config, engine="pi"), None
-        if engine == "omp":
-            return _probe_pi_family_models(config, engine="omp"), None
+        del workspace  # Global discovery is intentionally repository-neutral.
+        record = harness_discovery.probe_harness(
+            config,
+            engine,
+            env=profiles.child_environment(),
+            factory_settings_path=factory_settings_path,
+        )
+        models = _legacy_models(record)
+        status = record.get("probeStatus")
+        raw_warnings = record.get("warnings")
+        warnings = (
+            [item for item in raw_warnings if isinstance(item, str)]
+            if isinstance(raw_warnings, list)
+            else []
+        )
+        warning = "; ".join(warnings) or None
+        if status in {"missing", "error"}:
+            return [], warning or f"{engine} metadata probe {status}"
+        return models, warning
     except Exception as exc:
         return [], f"live probe failed: {exc}"
-    return [], f"live probe unsupported for {engine}"
 
 
-def _probe_cursor_models(config: JsonObject) -> list[JsonObject]:
-    cursor = config.get("cursor")
-    if not isinstance(cursor, dict):
-        raise RuntimeError("cursor config missing")
-    prefix = cursor.get("argvPrefix")
-    if not isinstance(prefix, list) or not prefix or not all(isinstance(p, str) for p in prefix):
-        raise RuntimeError("cursor.argvPrefix must be a non-empty string array")
-    argv = [*prefix, "models"]
-    # Throwaway cwd: a wrapper or the harness itself may write relative files
-    # (caches, logs) during a listing; never let that land in the caller's tree.
-    with tempfile.TemporaryDirectory(prefix="delegate-model-probe-") as probe_cwd:
-        completed = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=LIVE_PROBE_TIMEOUT_SEC,
-            check=False,
-            stdin=subprocess.DEVNULL,
-            cwd=probe_cwd,
-        )
-    if completed.returncode != 0:
-        raise RuntimeError(
-            f"cursor models exited {completed.returncode}: "
-            f"{(completed.stderr or completed.stdout or '').strip()[:200]}"
-        )
-    return parse_cursor_models_output(completed.stdout or "")
+def _legacy_models(fragment: JsonObject) -> list[JsonObject]:
+    raw_models = fragment.get("models")
+    if not isinstance(raw_models, dict):
+        return []
+    models: list[JsonObject] = []
+    for selector, model in raw_models.items():
+        if not isinstance(selector, str):
+            continue
+        entry: JsonObject = {"id": selector}
+        if isinstance(model, dict) and isinstance(model.get("displayName"), str):
+            entry["note"] = model["displayName"]
+        models.append(entry)
+    return models
 
 
 def parse_cursor_models_output(raw: str) -> list[JsonObject]:
-    text = strip_ansi(raw)
-    lines = text.splitlines()
-    collecting = False
-    models: list[JsonObject] = []
-    for line in lines:
-        stripped = line.strip()
-        if not collecting:
-            if stripped.lower().startswith("available models"):
-                collecting = True
-            continue
-        if not stripped:
-            continue
-        if " - " not in stripped:
-            continue
-        model_id, _, label = stripped.partition(" - ")
-        model_id = model_id.strip()
-        label = label.strip()
-        if not model_id:
-            continue
-        entry: JsonObject = {"id": model_id}
-        if label:
-            entry["note"] = label
-        models.append(entry)
-    if not models:
-        raise RuntimeError("cursor models output had no parseable model lines")
-    return models
-
-
-def _probe_droid_models(*, factory_settings_path: Path | None = None) -> list[JsonObject]:
-    path = factory_settings_path
-    if path is None:
-        home = Path(os.path.expanduser("~"))
-        path = home / ".factory" / "settings.json"
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise RuntimeError(f"could not read {path}: {exc}") from exc
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"invalid JSON in {path}: {exc}") from exc
-    if not isinstance(data, dict):
-        raise RuntimeError(f"{path} root must be an object")
-    custom = data.get("customModels")
-    if custom is None:
-        return []
-    if not isinstance(custom, list):
-        raise RuntimeError("customModels must be a list")
-    return parse_droid_custom_models(custom)
+    return _legacy_models(harness_discovery.parse_cursor_catalog(strip_ansi(raw)))
 
 
 def parse_droid_custom_models(custom_models: list[object]) -> list[JsonObject]:
-    models: list[JsonObject] = []
-    for item in custom_models:
-        if not isinstance(item, dict):
-            continue
-        model_id = item.get("id")
-        if isinstance(model_id, str) and model_id:
-            entry: JsonObject = {"id": model_id}
-        else:
-            display = item.get("displayName")
-            if not isinstance(display, str) or not display.strip():
-                continue
-            derived = "custom:" + "-".join(display.split())
-            entry = {"id": derived}
-            entry["note"] = display
-        note = item.get("displayName")
-        if isinstance(note, str) and note and "note" not in entry:
-            entry["note"] = note
-        models.append(entry)
-    return models
+    return _legacy_models({"models": harness_discovery.parse_droid_settings_models(custom_models)})
 
 
 def _probe_devin_models(config: JsonObject) -> list[JsonObject]:
@@ -346,40 +274,13 @@ def parse_devin_available_models(raw: str) -> list[JsonObject]:
     raise RuntimeError("devin output had no Available: line")
 
 
-def _probe_opencode_models(
-    config: JsonObject, *, workspace: Path | None = None
-) -> list[JsonObject]:
-    binary = delegate_config.harness_binary(config, "opencode")
-    if workspace is not None:
-        completed = subprocess.run(
-            [binary, "--pure", "models"],
-            capture_output=True,
-            text=True,
-            timeout=LIVE_PROBE_TIMEOUT_SEC,
-            check=False,
-            stdin=subprocess.DEVNULL,
-            cwd=workspace,
-        )
-    else:
-        with tempfile.TemporaryDirectory(prefix="delegate-model-probe-") as probe_cwd:
-            completed = subprocess.run(
-                [binary, "--pure", "models"],
-                capture_output=True,
-                text=True,
-                timeout=LIVE_PROBE_TIMEOUT_SEC,
-                check=False,
-                stdin=subprocess.DEVNULL,
-                cwd=probe_cwd,
-            )
-    if completed.returncode != 0:
-        raise RuntimeError(
-            f"opencode models exited {completed.returncode}: "
-            f"{(completed.stderr or completed.stdout or '').strip()[:200]}"
-        )
-    return parse_opencode_models_output(completed.stdout or "")
-
-
 def parse_opencode_models_output(raw: str) -> list[JsonObject]:
+    try:
+        fragment = harness_discovery.parse_opencode_catalog(strip_ansi(raw))
+    except ValueError:
+        fragment = None
+    if isinstance(fragment, dict):
+        return [{"id": item["id"]} for item in _legacy_models(fragment)]
     models: list[JsonObject] = []
     for line in strip_ansi(raw).splitlines():
         model_id = line.strip()
@@ -393,83 +294,20 @@ def parse_opencode_models_output(raw: str) -> list[JsonObject]:
     return models
 
 
-def _probe_pi_family_models(config: JsonObject, *, engine: str) -> list[JsonObject]:
-    binary = delegate_config.harness_binary(config, engine)
-    if engine == "omp":
-        argv = [binary, "models", "--json", "--no-extensions"]
-    else:
-        argv = [
-            binary,
-            "--offline",
-            "--no-extensions",
-            "--no-skills",
-            "--no-prompt-templates",
-            "--no-approve",
-            "--list-models",
-        ]
-    with tempfile.TemporaryDirectory(prefix="delegate-model-probe-") as probe_cwd:
-        completed = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=LIVE_PROBE_TIMEOUT_SEC,
-            check=False,
-            stdin=subprocess.DEVNULL,
-            cwd=probe_cwd,
-        )
-    if completed.returncode != 0:
-        raise RuntimeError(
-            f"{engine} --list-models exited {completed.returncode}: "
-            f"{(completed.stderr or completed.stdout or '').strip()[:200]}"
-        )
-    if engine == "omp":
-        return parse_omp_models_output(completed.stdout or "")
-    return parse_pi_models_output(completed.stdout or "")
-
-
 def parse_pi_models_output(raw: str) -> list[JsonObject]:
-    models: list[JsonObject] = []
-    for line in strip_ansi(raw).splitlines():
-        columns = line.split()
-        if len(columns) < 6 or columns[:2] == ["provider", "model"]:
-            continue
-        provider, model = columns[:2]
-        if (
-            not provider
-            or not model
-            or columns[-2] not in {"yes", "no"}
-            or columns[-1]
-            not in {
-                "yes",
-                "no",
-            }
-        ):
-            continue
-        models.append({"id": f"{provider}/{model}"})
-    if not models:
-        raise RuntimeError("pi --list-models output had no parseable model lines")
-    return models
+    try:
+        fragment = harness_discovery.parse_pi_catalog(strip_ansi(raw))
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+    return [{"id": item["id"]} for item in _legacy_models(fragment)]
 
 
 def parse_omp_models_output(raw: str) -> list[JsonObject]:
     try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("omp models --json output was not valid JSON") from exc
-    entries = payload.get("models") if isinstance(payload, dict) else None
-    if not isinstance(entries, list):
-        raise RuntimeError("omp models --json output had no models array")
-    models = [
-        {"id": selector}
-        for entry in entries
-        if isinstance(entry, dict)
-        and isinstance((selector := entry.get("selector")), str)
-        and selector
-        and "/" in selector
-    ]
-    if not models:
-        raise RuntimeError("omp models --json output had no parseable model selectors")
-    return models
+        fragment = harness_discovery.parse_omp_catalog(raw)
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+    return [{"id": item["id"]} for item in _legacy_models(fragment)]
 
 
 def emit_engine_models_text(payload: JsonObject, stdout: TextIO) -> None:

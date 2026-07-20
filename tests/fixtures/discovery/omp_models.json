@@ -1,0 +1,26 @@
+{
+  "models": [
+    {
+      "selector": "cerebras/gemma-4-31b",
+      "name": "Gemma 4 31B IT",
+      "reasoning": true,
+      "thinking": [
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ]
+    },
+    {
+      "selector": "cerebras/gpt-oss-120b",
+      "name": "GPT OSS 120B",
+      "reasoning": true,
+      "thinking": [
+        "low",
+        "medium",
+        "high"
+      ]
+    }
+  ]
+}

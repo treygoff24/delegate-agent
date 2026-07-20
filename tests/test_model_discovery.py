@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import ClassVar
 from unittest import mock
 
+from tests.discovery_fakes import FIXTURES, materialize_minimum_harnesses
 from tests.test_model_selection_wave1b import (
     _MODELS_KEYS,
     _MODELS_SUMMARY_KEYS,
@@ -294,6 +295,7 @@ class LiveProbeIntegrationTests(unittest.TestCase):
             fake = _write_executable(
                 bin_dir / "fake-cursor",
                 "#!/usr/bin/env bash\n"
+                'if [ "$1" = --version ]; then echo 2026.07.17-3e2a980; exit 0; fi\n'
                 "echo 'Available models'\n"
                 "printf '\\033[32mlive-cursor-model\\033[0m - Live Cursor\\n'\n"
                 "exit 0\n",
@@ -371,6 +373,7 @@ class LiveProbeIntegrationTests(unittest.TestCase):
             fake = _write_executable(
                 Path(tmp) / "fake-cursor",
                 "#!/usr/bin/env bash\n"
+                'if [ "$1" = --version ]; then echo 2026.07.17-3e2a980; exit 0; fi\n'
                 "echo side-effect > probe-side-effect.txt\n"
                 'pwd > "$SIDE_EFFECT_LOG"\n'
                 "echo 'Available models'\n"
@@ -391,6 +394,12 @@ class LiveProbeIntegrationTests(unittest.TestCase):
 
     def test_droid_live_merge_from_settings(self):
         with tempfile.TemporaryDirectory() as tmp:
+            fake = _write_executable(
+                Path(tmp) / "droid",
+                "#!/usr/bin/env bash\n"
+                'if [ "$1" = --version ]; then echo 0.175.0; exit 0; fi\n'
+                f'cat "{FIXTURES / "droid_help.txt"}"\n',
+            )
             settings = Path(tmp) / "settings.json"
             settings.write_text(
                 json.dumps(
@@ -403,6 +412,7 @@ class LiveProbeIntegrationTests(unittest.TestCase):
                 encoding="utf-8",
             )
             config = self.embedded_default_config()
+            config["droid"]["binary"] = str(fake)
             payload = self.engine_models_payload(
                 config,
                 "droid",
@@ -449,13 +459,12 @@ class LiveProbeIntegrationTests(unittest.TestCase):
             argv_log = Path(tmp) / "argv.log"
             cwd_log = Path(tmp) / "cwd.log"
             fake = _write_executable(
-                Path(tmp) / "fake-opencode",
+                Path(tmp) / "opencode",
                 "#!/usr/bin/env bash\n"
                 f'printf \'%s\\n\' "$@" > "{argv_log}"\n'
                 f'pwd > "{cwd_log}"\n'
-                "echo 'openai/gpt-5'\n"
-                "echo 'junk with spaces'\n"
-                "echo 'anthropic/claude-sonnet-4-5'\n"
+                'if [ "$1" = --version ]; then echo 1.17.18; exit 0; fi\n'
+                f'cat "{FIXTURES / "opencode_models_verbose.txt"}"\n'
                 "exit 0\n",
             )
             config = self.embedded_default_config()
@@ -469,15 +478,14 @@ class LiveProbeIntegrationTests(unittest.TestCase):
                 )
             self.assertIs(payload["live"], True)
             by_id = {item["id"]: item for item in payload["models"]}
-            self.assertEqual(by_id["openai/gpt-5"]["source"], "live")
-            self.assertEqual(by_id["anthropic/claude-sonnet-4-5"]["source"], "live")
+            self.assertEqual(by_id["openai/gpt-5.5"]["source"], "live")
             self.assertIn("opencode/gpt-5", by_id)
             self.assertEqual(
-                argv_log.read_text(encoding="utf-8").splitlines(), ["--pure", "models"]
+                argv_log.read_text(encoding="utf-8").splitlines(),
+                ["--pure", "models", "--verbose"],
             )
-            self.assertEqual(run.call_args.args[0], [str(fake), "--pure", "models"])
-            self.assertEqual(run.call_args.kwargs["cwd"], workspace_path)
-            self.assertEqual(
+            self.assertTrue(run.called)
+            self.assertNotEqual(
                 Path(cwd_log.read_text(encoding="utf-8").strip()).resolve(),
                 workspace_path.resolve(),
             )
@@ -486,11 +494,11 @@ class LiveProbeIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             argv_log = Path(tmp) / "argv.log"
             fake = _write_executable(
-                Path(tmp) / "fake-pi",
+                Path(tmp) / "pi",
                 "#!/usr/bin/env bash\n"
-                f'printf \'%s\\n\' "$@" > "{argv_log}"\n'
-                "echo 'provider model context max-out thinking images'\n"
-                "echo 'openai-codex gpt-5.6-sol 272K 128K yes yes'\n"
+                f'printf \'%s\\n\' "$*" >> "{argv_log}"\n'
+                'if [ "$1" = --version ]; then echo 0.80.10; exit 0; fi\n'
+                f'cat "{FIXTURES / "pi_models.txt"}"\n'
                 "exit 0\n",
             )
             config = self.embedded_default_config()
@@ -502,12 +510,9 @@ class LiveProbeIntegrationTests(unittest.TestCase):
             self.assertEqual(
                 argv_log.read_text(encoding="utf-8").splitlines(),
                 [
-                    "--offline",
-                    "--no-extensions",
-                    "--no-skills",
-                    "--no-prompt-templates",
-                    "--no-approve",
-                    "--list-models",
+                    "--version",
+                    "--offline --no-extensions --no-skills --no-prompt-templates --no-approve --list-models",
+                    "--help",
                 ],
             )
 
@@ -515,10 +520,11 @@ class LiveProbeIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             argv_log = Path(tmp) / "argv.log"
             fake = _write_executable(
-                Path(tmp) / "fake-omp",
+                Path(tmp) / "omp",
                 "#!/usr/bin/env bash\n"
-                f'printf \'%s\\n\' "$@" > "{argv_log}"\n'
-                'printf \'%s\\n\' \'{"models":[{"selector":"openai-codex/gpt-5.6-sol"}]}\'\n'
+                f'printf \'%s\\n\' "$*" >> "{argv_log}"\n'
+                'if [ "$1" = --version ]; then echo omp/17.0.4; exit 0; fi\n'
+                f'cat "{FIXTURES / "omp_models.json"}"\n'
                 "exit 0\n",
             )
             config = self.embedded_default_config()
@@ -528,7 +534,7 @@ class LiveProbeIntegrationTests(unittest.TestCase):
 
             self.assertIs(payload["live"], True)
             argv = argv_log.read_text(encoding="utf-8").splitlines()
-            self.assertEqual(argv, ["models", "--json", "--no-extensions"])
+            self.assertEqual(argv, ["--version", "models --json --no-extensions"])
             for role_flag in ("--smol", "--slow", "--plan", "--prewalk", "--plan-yolo"):
                 self.assertNotIn(role_flag, argv)
 
@@ -549,7 +555,9 @@ class LiveProbeIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             fake = _write_executable(
                 Path(tmp) / "fake-cursor",
-                "#!/usr/bin/env bash\necho 'totally unrelated'\nexit 0\n",
+                "#!/usr/bin/env bash\n"
+                'if [ "$1" = --version ]; then echo 2026.07.17-3e2a980; exit 0; fi\n'
+                "echo 'totally unrelated'\nexit 0\n",
             )
             config = self.embedded_default_config()
             config["cursor"]["argvPrefix"] = [str(fake)]
@@ -560,8 +568,10 @@ class LiveProbeIntegrationTests(unittest.TestCase):
     def test_opencode_live_degrades_on_failure_to_bundled_and_config(self):
         with tempfile.TemporaryDirectory() as tmp:
             fake = _write_executable(
-                Path(tmp) / "fake-opencode",
-                "#!/usr/bin/env bash\necho nope >&2\nexit 7\n",
+                Path(tmp) / "opencode",
+                "#!/usr/bin/env bash\n"
+                'if [ "$1" = --version ]; then echo 1.17.18; exit 0; fi\n'
+                "echo nope >&2\nexit 7\n",
             )
             config = self.embedded_default_config()
             config["opencode"]["binary"] = str(fake)
@@ -579,12 +589,14 @@ class LiveProbeIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             fake = _write_executable(
                 Path(tmp) / "fake-cursor",
-                "#!/usr/bin/env bash\nsleep 30\n",
+                "#!/usr/bin/env bash\n"
+                'if [ "$1" = --version ]; then echo 2026.07.17-3e2a980; exit 0; fi\n'
+                "sleep 30\n",
             )
             config = self.embedded_default_config()
             config["cursor"]["argvPrefix"] = [str(fake)]
             with mock.patch(
-                "delegate_agent.model_discovery.LIVE_PROBE_TIMEOUT_SEC",
+                "delegate_agent.harness_discovery.METADATA_PROBE_TIMEOUT_SEC",
                 0.05,
             ):
                 payload = self.engine_models_payload(config, "cursor", live=True)
@@ -593,7 +605,7 @@ class LiveProbeIntegrationTests(unittest.TestCase):
 
     def test_live_unsupported_engines(self):
         config = self.embedded_default_config()
-        for engine in ("codex", "claude", "grok", "kimi"):
+        for engine in ("claude",):
             with self.subTest(engine=engine):
                 payload = self.engine_models_payload(config, engine, live=True)
                 live = payload["live"]
@@ -604,10 +616,30 @@ class LiveProbeIntegrationTests(unittest.TestCase):
                 self.assertTrue(sources <= {"bundled", "config"})
                 self.assertNotIn("live", sources)
 
+    def test_codex_grok_and_kimi_live_use_metadata_adapters(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            harnesses = materialize_minimum_harnesses(Path(tmp))
+            config = self.embedded_default_config()
+            expected = {
+                "codex": ("gpt-5.6-sol", "live"),
+                "grok": ("grok-4.5", "live"),
+                # Config precedence remains higher than the live observation.
+                "kimi": ("kimi-code/k3", "config"),
+            }
+            for engine, (selector, source) in expected.items():
+                with self.subTest(engine=engine):
+                    config[engine]["binary"] = str(harnesses[engine])
+                    payload = self.engine_models_payload(config, engine, live=True)
+                    self.assertIs(payload["live"], True)
+                    by_id = {item["id"]: item for item in payload["models"]}
+                    self.assertEqual(by_id[selector]["source"], source)
+                    if engine == "kimi":
+                        self.assertEqual(by_id[selector]["note"], "K3")
+
     def test_opencode_is_not_live_unsupported(self):
         from delegate_agent.model_discovery import LIVE_UNSUPPORTED_ENGINES
 
-        self.assertNotIn("opencode", LIVE_UNSUPPORTED_ENGINES)
+        self.assertEqual(LIVE_UNSUPPORTED_ENGINES, frozenset({"claude"}))
 
 
 class NonDroidModelsSummaryExtensionTests(unittest.TestCase):
