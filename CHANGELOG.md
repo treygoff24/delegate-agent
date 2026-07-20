@@ -26,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   through the read-only workflow actions
   (`check|status|watch|events|result|wait|list`) without a selected profile,
   mirroring the Python CLI's guard; a parity test fails on drift.
+- Tracked Cursor completion JSON now includes the CLI-reported token `usage`
+  object when present.
 
 ### Changed
 

@@ -1125,12 +1125,14 @@ Common JSON fields for tracked run completion:
 
 Persistent worktree completions also include `branch`, `worktree`, a
 `workSummary`, and (when requested) `commitPolicy`. `workSummary` reports dirty
-state, changed file count, diff stat, and commits created by the child. When a
-Codex usage-limit fallback fires, the completion payload also includes
-`codexAuthFallback` metadata (reason, the primary and fallback profile names,
-both exit codes, and a redacted primary stderr tail). The fallback is Codex-only
-and is enabled only by `codex.fallbackProfile`; Delegate remembers temporary
-blocks by hashed credential namespace (`CODEX_HOME/auth.json` plus
+state, changed file count, diff stat, and commits created by the child. Tracked
+Cursor completions include `usage` when the Cursor CLI reports it, using
+`basis: "reported"` and camel-case token fields such as `inputTokens` and
+`outputTokens`. When a Codex usage-limit fallback fires, the completion payload
+also includes `codexAuthFallback` metadata (reason, the primary and fallback
+profile names, both exit codes, and a redacted primary stderr tail). The
+fallback is Codex-only and is enabled only by `codex.fallbackProfile`; Delegate
+remembers temporary blocks by hashed credential namespace (`CODEX_HOME/auth.json` plus
 `codex.profile`) as canonical state. Default work/personal credential homes
 also mirror compatible legacy alias keys so existing launchers share blocks;
 remapped aliases remain isolated.

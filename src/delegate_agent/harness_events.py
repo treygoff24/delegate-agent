@@ -7,7 +7,7 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from typing import Literal
 
-from delegate_agent.json_types import JsonObject, JsonValue
+from delegate_agent.json_types import JsonObject, JsonValue, is_non_negative_int
 
 RecoveryQuality = Literal[
     "explicit_completion",
@@ -280,6 +280,21 @@ def _normalize_terminal_status(value: JsonValue) -> str | None:
     return None
 
 
+def _normalize_reported_usage(value: JsonValue) -> JsonObject | None:
+    if not isinstance(value, dict):
+        return None
+    usage: JsonObject = {"basis": "reported"}
+    for camel_case, snake_case in (
+        ("inputTokens", "input_tokens"),
+        ("outputTokens", "output_tokens"),
+        ("cacheReadTokens", "cache_read_tokens"),
+        ("cacheWriteTokens", "cache_write_tokens"),
+    ):
+        token_count = value.get(camel_case, value.get(snake_case))
+        usage[camel_case] = token_count if is_non_negative_int(token_count) else None
+    return usage
+
+
 @dataclass
 class StreamAccumulator:
     harness: str | None = None
@@ -299,6 +314,7 @@ class StreamAccumulator:
     _pi_text_buffer: str = field(default="", repr=False)
     terminal_event: JsonObject | None = None
     terminal_status: str | None = None
+    usage: JsonObject | None = None
     structured_events_seen: int = 0
 
     def _record_terminal_event(
@@ -641,6 +657,9 @@ class StreamAccumulator:
             self._record_successful_completion_text(final_text)
 
     def _ingest_result_event(self, payload: JsonObject) -> None:
+        usage = _normalize_reported_usage(payload.get("usage"))
+        if usage is not None:
+            self.usage = usage
         result = payload.get("result")
         if isinstance(result, str) and result.strip():
             if payload.get("is_error") is True:

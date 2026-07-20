@@ -928,6 +928,7 @@ def completion_json_payload(
     stderr_bytes: int,
     completion_report_written: bool = False,
     assistant_meta: JsonObject | None = None,
+    usage: JsonObject | None = None,
     extra: JsonObject | None = None,
 ) -> JsonObject:
     payload: JsonObject = {
@@ -981,6 +982,9 @@ def completion_json_payload(
     _add_persona_payload_fields(payload, ctx)
     if assistant_meta is not None:
         payload.update(assistant_meta)
+    if usage is not None:
+        payload["usage"] = usage
+
     cleanup = _worktree_cleanup_commands(ctx)
     if cleanup is not None:
         payload["worktreeCleanupCommands"] = cleanup
@@ -2157,6 +2161,7 @@ def _tracked_result(
             stderr_bytes=capture.stderr_bytes,
             completion_report_written=finalization.report_written,
             assistant_meta=assistant_meta,
+            usage=capture.accumulator.usage,
             extra=finalization.extra,
         )
         return finalization.exit_code, payload
@@ -2477,6 +2482,7 @@ def _merge_tracked_attempt_captures(
     accumulator.current = current_capture.accumulator.current or prior_capture.accumulator.current
     accumulator.terminal_event = current_capture.accumulator.terminal_event
     accumulator.terminal_status = current_capture.accumulator.terminal_status
+    accumulator.usage = current_capture.accumulator.usage or prior_capture.accumulator.usage
     accumulator.structured_events_seen = (
         prior_capture.accumulator.structured_events_seen
         + current_capture.accumulator.structured_events_seen
