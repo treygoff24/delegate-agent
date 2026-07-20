@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests.discovery_fakes import (
     FIXTURES,
@@ -511,6 +515,304 @@ class AdapterOrchestrationTests(unittest.TestCase):
             self.assertEqual(len(all_missing), 10)
             self.assertTrue(
                 all(record["probeStatus"] == "missing" for record in all_missing.values())
+            )
+
+
+class DiscoveryCacheTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from delegate_agent import harness_discovery, profiles
+
+        self.discovery = harness_discovery
+        self.profiles = profiles
+
+    def _snapshot(self, profile: str, harness: str = "codex") -> dict[str, object]:
+        snapshot = self.discovery.empty_snapshot(
+            profile=profile,
+            captured_at="2026-07-20T21:00:00Z",
+        )
+        record = _harness_record()
+        record["selector"] = [f"/{harness}"]
+        snapshot["harnesses"] = {harness: record}
+        return snapshot
+
+    def test_cache_paths_are_home_scoped_and_hash_every_real_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            default = self.discovery.discovery_cache_path(None, home=home)
+            literal_default = self.discovery.discovery_cache_path("default", home=home)
+            traversal = self.discovery.discovery_cache_path(" ../../work ", home=home)
+
+        root = home / ".delegate" / "cache" / "discovery"
+        self.assertEqual(default, root / "default.json")
+        self.assertEqual(
+            literal_default,
+            root / f"profile-{hashlib.sha256(b'default').hexdigest()}.json",
+        )
+        self.assertEqual(traversal.parent, root)
+        self.assertEqual(
+            traversal.name,
+            f"profile-{hashlib.sha256(b'../../work').hexdigest()}.json",
+        )
+
+    def test_private_atomic_round_trip_and_malformed_read_is_absent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            snapshot = self._snapshot("work")
+            path = self.discovery.write_discovery_cache("work", snapshot, home=home)
+            loaded = self.discovery.load_discovery_cache("work", home=home)
+
+            self.assertEqual(loaded, snapshot)
+            if os.name == "posix":
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+                self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
+
+            path.write_text("{not json", encoding="utf-8")
+            self.assertIsNone(self.discovery.load_discovery_cache("work", home=home))
+            self.assertTrue(path.exists())
+
+    def test_implicit_and_literal_default_profiles_use_independent_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            implicit = self._snapshot("default", "codex")
+            literal = self._snapshot("default", "droid")
+            self.discovery.write_discovery_cache(None, implicit, home=home)
+            self.discovery.write_discovery_cache("default", literal, home=home)
+            self.assertEqual(self.discovery.load_discovery_cache(None, home=home), implicit)
+            self.assertEqual(
+                self.discovery.load_discovery_cache("default", home=home),
+                literal,
+            )
+
+    def test_cache_rejects_credential_shaped_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            snapshot = self._snapshot("work")
+            snapshot["harnesses"]["codex"]["models"]["gpt-test"]["apiKey"] = "fixture-secret"
+            with self.assertRaises(ValueError):
+                self.discovery.write_discovery_cache("work", snapshot, home=home)
+            self.assertFalse(self.discovery.discovery_cache_path("work", home=home).exists())
+
+    def test_cache_rejects_extra_fields_at_every_normalized_level(self):
+        mutations = (
+            lambda snapshot: snapshot.update(rawOutput="raw harness output"),
+            lambda snapshot: snapshot["harnesses"]["codex"].update(authPath="/private/account"),
+            lambda snapshot: snapshot["harnesses"]["codex"]["models"]["gpt-test"].update(
+                provider={"name": "private"}
+            ),
+            lambda snapshot: snapshot["harnesses"]["codex"]["models"]["gpt-test"][
+                "reasoning"
+            ].update(environment="work"),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            for mutate in mutations:
+                with self.subTest(mutate=mutate):
+                    snapshot = self._snapshot("work")
+                    mutate(snapshot)
+                    with self.assertRaises(ValueError):
+                        self.discovery.write_discovery_cache("work", snapshot, home=home)
+
+    def test_cache_read_filters_valid_unknown_harness_but_rejects_extra_known_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            snapshot = self._snapshot("work")
+            snapshot["harnesses"]["future"] = copy.deepcopy(snapshot["harnesses"]["codex"])
+            path = self.discovery.discovery_cache_path("work", home=home)
+            from delegate_agent import private_io
+
+            private_io.write_json_atomic(path, snapshot)
+            loaded = self.discovery.load_discovery_cache("work", home=home)
+            self.assertEqual(set(loaded["harnesses"]), {"codex"})
+
+            snapshot["harnesses"]["codex"]["rawStderr"] = "benign but raw"
+            private_io.write_json_atomic(path, snapshot)
+            self.assertIsNone(self.discovery.load_discovery_cache("work", home=home))
+
+    def test_different_profiles_write_independently(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            barrier = threading.Barrier(2)
+
+            def write(profile: str, harness: str) -> None:
+                barrier.wait()
+                self.discovery.write_discovery_cache(
+                    profile,
+                    self._snapshot(profile, harness),
+                    home=home,
+                )
+
+            threads = [
+                threading.Thread(target=write, args=("work", "codex")),
+                threading.Thread(target=write, args=("personal", "droid")),
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+            work = self.discovery.load_discovery_cache("work", home=home)
+            personal = self.discovery.load_discovery_cache("personal", home=home)
+            self.assertEqual(set(work["harnesses"]), {"codex"})
+            self.assertEqual(set(personal["harnesses"]), {"droid"})
+
+    def test_same_profile_writes_are_whole_snapshot_last_writer_wins(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            self.discovery.write_discovery_cache("work", self._snapshot("work", "codex"), home=home)
+            expected = self._snapshot("work", "droid")
+            self.discovery.write_discovery_cache("work", expected, home=home)
+            self.assertEqual(
+                self.discovery.load_discovery_cache("work", home=home),
+                expected,
+            )
+
+    def test_refresh_preserves_failed_last_good_and_uses_profile_environment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            existing = self._snapshot("work")
+            old_codex = copy.deepcopy(existing["harnesses"]["codex"])
+            self.discovery.write_discovery_cache("work", existing, home=home)
+            profile = self.profiles.ProfileResolution(
+                name="work",
+                source="test",
+                env={"PATH": "/profile/bin", "API_KEY": "fixture-secret"},
+            )
+            seen_env: list[dict[str, str]] = []
+
+            def probe(_config, harness, *, env, factory_settings_path=None):
+                del factory_settings_path
+                seen_env.append(dict(env))
+                if harness == "codex":
+                    record = copy.deepcopy(old_codex)
+                    record.update(
+                        installed=False,
+                        selector=[],
+                        version=None,
+                        probeStatus="missing",
+                    )
+                    return record
+                record = copy.deepcopy(old_codex)
+                record["selector"] = ["/droid-new"]
+                record["probeStatus"] = "partial"
+                return record
+
+            with mock.patch.object(self.discovery, "probe_harness", side_effect=probe):
+                result = self.discovery.refresh_discovery(
+                    {},
+                    profile=profile,
+                    engines=("codex", "droid"),
+                    home=home,
+                )
+
+            snapshot = result["snapshot"]
+            self.assertEqual(snapshot["harnesses"]["codex"], old_codex)
+            self.assertEqual(snapshot["harnesses"]["droid"]["selector"], ["/droid-new"])
+            self.assertEqual(result["updatedHarnesses"], ["droid"])
+            self.assertEqual(result["attempts"]["codex"]["probeStatus"], "missing")
+            self.assertEqual(result["staleHarnesses"], ["codex"])
+            self.assertTrue(result["wrote"])
+            self.assertEqual(len(seen_env), 2)
+            self.assertTrue(all(item["PATH"] == "/profile/bin" for item in seen_env))
+            persisted = self.discovery.load_discovery_cache("work", home=home)
+            self.assertNotIn("fixture-secret", json.dumps(persisted))
+            self.assertNotIn("API_KEY", json.dumps(persisted))
+
+    def test_all_failed_refresh_does_not_rewrite_last_good(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            existing = self._snapshot("work")
+            path = self.discovery.write_discovery_cache("work", existing, home=home)
+            before = path.read_bytes()
+            profile = self.profiles.ProfileResolution(name="work", source="test")
+            failed = copy.deepcopy(existing["harnesses"]["codex"])
+            failed.update(installed=True, probeStatus="error")
+
+            with mock.patch.object(self.discovery, "probe_harness", return_value=failed):
+                result = self.discovery.refresh_discovery(
+                    {}, profile=profile, engines=("codex",), home=home
+                )
+
+            self.assertFalse(result["wrote"])
+            self.assertEqual(result["snapshot"], existing)
+            self.assertEqual(result["staleHarnesses"], ["codex"])
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(result["snapshot"]["harnesses"]["codex"]["probeStatus"], "ok")
+
+    def test_selector_drift_uses_profile_path_without_spawning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            binary = write_version_harness(root / "codex-profile", "0.1.0")
+            config = {"codex": {"binary": "codex-profile"}}
+            profile = self.profiles.ProfileResolution(
+                name="work", source="test", env={"PATH": str(root)}
+            )
+            record = _harness_record()
+            record["selector"] = [str(binary)]
+
+            with mock.patch.object(
+                self.discovery,
+                "run_metadata_probe",
+                side_effect=AssertionError("selector drift must not spawn"),
+            ):
+                self.assertFalse(
+                    self.discovery.selector_has_drifted(config, "codex", record, profile=profile)
+                )
+                record["selector"] = ["/different/codex"]
+                self.assertTrue(
+                    self.discovery.selector_has_drifted(config, "codex", record, profile=profile)
+                )
+
+    def test_relative_configured_selector_is_cached_absolute_and_detects_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = write_version_harness(root / "custom-codex", "codex-cli 1.0.0")
+            second = write_version_harness(root / "other-codex", "codex-cli 1.0.1")
+            profile = self.profiles.ProfileResolution(
+                name="work", source="test", env={"PATH": str(root)}
+            )
+            config = {"codex": {"binary": "custom-codex"}}
+            env = self.profiles.child_environment(overrides=profile.env)
+            resolution = self.discovery.resolve_harness_selector(config, "codex", env=env)
+            self.assertEqual(resolution.selector, (str(first),))
+            record = _harness_record()
+            record["selector"] = list(resolution.selector)
+            self.assertFalse(
+                self.discovery.selector_has_drifted(config, "codex", record, profile=profile)
+            )
+
+            config["codex"]["binary"] = second.name
+            self.assertTrue(
+                self.discovery.selector_has_drifted(config, "codex", record, profile=profile)
+            )
+
+    def test_cursor_cached_implicit_fallback_does_not_drift_when_agent_is_grok(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_version_harness(root / "agent", "grok 0.2.101 (deadbeef) [alpha]")
+            cursor = write_version_harness(root / "cursor-agent", "2026.07.17-3e2a980")
+            profile = self.profiles.ProfileResolution(
+                name="work", source="test", env={"PATH": str(root)}
+            )
+            config = self.discovery.delegate_config.embedded_default_config()
+            env = self.profiles.child_environment(overrides=profile.env)
+            resolution = self.discovery.resolve_harness_selector(config, "cursor", env=env)
+            self.assertEqual(resolution.selector, (str(cursor),))
+            record = _harness_record()
+            record["selector"] = list(resolution.selector)
+
+            with mock.patch.object(
+                self.discovery,
+                "run_metadata_probe",
+                side_effect=AssertionError("selector drift must not spawn"),
+            ):
+                self.assertFalse(
+                    self.discovery.selector_has_drifted(config, "cursor", record, profile=profile)
+                )
+
+            explicit = copy.deepcopy(config)
+            explicit["cursor"]["argvPrefix"] = ["custom-cursor"]
+            self.assertTrue(
+                self.discovery.selector_has_drifted(explicit, "cursor", record, profile=profile)
             )
 
 

@@ -7,20 +7,21 @@ are deliberately layered on later.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import BinaryIO
 
 from delegate_agent import config as delegate_config
-from delegate_agent import redaction
+from delegate_agent import private_io, profiles, redaction
 from delegate_agent.constants import KNOWN_ENGINES
 from delegate_agent.json_types import JsonObject
 
@@ -64,6 +65,22 @@ _CURSOR_EFFORT_LABELS = {
     "extra-high": "Extra High",
     "max": "Max",
 }
+_SNAPSHOT_FIELDS = frozenset({"schema", "profile", "capturedAt", "harnesses"})
+_HARNESS_FIELDS = frozenset(
+    {
+        "installed",
+        "selector",
+        "version",
+        "probeStatus",
+        "modelScope",
+        "defaultModel",
+        "models",
+        "harnessReasoning",
+        "warnings",
+    }
+)
+_MODEL_FIELDS = frozenset({"displayName", "reasoning", "routeFamily", "routeEffort"})
+_REASONING_FIELDS = frozenset({"supported", "default", "evidence"})
 
 
 def empty_snapshot(*, profile: str = "default", captured_at: str | None = None) -> JsonObject:
@@ -83,6 +100,7 @@ def validate_snapshot(
     allow_unknown_harnesses: bool = False,
 ) -> tuple[str, ...]:
     """Validate a normalized snapshot and return forward-compat warnings."""
+    _reject_extra_fields(snapshot, _SNAPSHOT_FIELDS, "discovery snapshot")
     schema = snapshot.get("schema")
     if isinstance(schema, bool) or schema != DISCOVERY_SCHEMA:
         raise ValueError(f"discovery snapshot schema must be {DISCOVERY_SCHEMA}")
@@ -126,7 +144,14 @@ def _string_list(value: object, *, allow_empty: bool = True) -> bool:
     )
 
 
+def _reject_extra_fields(value: JsonObject, allowed: frozenset[str], path: str) -> None:
+    extras = [key for key in value if key not in allowed]
+    if extras:
+        raise ValueError(f"{path} contains unsupported field {extras[0]!r}")
+
+
 def _validate_harness_record(harness: str, record: JsonObject) -> None:
+    _reject_extra_fields(record, _HARNESS_FIELDS, f"discovery harness {harness}")
     if not isinstance(record.get("installed"), bool):
         raise ValueError(f"discovery harness {harness}.installed must be boolean")
     selector = record.get("selector")
@@ -168,6 +193,7 @@ def _validate_harness_record(harness: str, record: JsonObject) -> None:
 def _validate_model_record(
     harness: str, selector: str, model: JsonObject
 ) -> tuple[str, str] | None:
+    _reject_extra_fields(model, _MODEL_FIELDS, f"discovery model {harness}/{selector}")
     display_name = model.get("displayName")
     if display_name is not None and not _nonempty_string(display_name):
         raise ValueError(f"discovery model {harness}/{selector}.displayName is invalid")
@@ -206,6 +232,7 @@ def _validate_model_record(
 
 
 def _validate_reasoning(harness: str, selector: str, reasoning: JsonObject) -> None:
+    _reject_extra_fields(reasoning, _REASONING_FIELDS, f"discovery reasoning {harness}/{selector}")
     supported = reasoning.get("supported")
     if supported is not None and (
         not isinstance(supported, list)
@@ -356,11 +383,12 @@ def resolve_harness_selector(
 ) -> SelectorResolution:
     warnings: list[str] = []
     for selector, explicit in selector_candidates(config, harness):
-        if not explicit:
-            binary = shutil.which(selector[0], path=env.get("PATH", ""))
-            if binary is None:
-                continue
-            selector = (binary, *selector[1:])
+        normalized = _normalize_selector(selector, env=env)
+        if normalized is None:
+            if explicit:
+                return SelectorResolution(None, None, "probe_missing", tuple(warnings))
+            continue
+        selector = normalized
         probe = run_metadata_probe([*selector, "--version"], env=env)
         if probe.error is not None:
             if explicit:
@@ -376,6 +404,15 @@ def resolve_harness_selector(
             continue
         return SelectorResolution(selector, version, None, tuple(warnings))
     return SelectorResolution(None, None, "probe_missing", tuple(warnings))
+
+
+def _normalize_selector(
+    selector: tuple[str, ...], *, env: Mapping[str, str]
+) -> tuple[str, ...] | None:
+    binary = shutil.which(selector[0], path=env.get("PATH", ""))
+    if binary is None:
+        return None
+    return (str(Path(binary).absolute()), *selector[1:])
 
 
 def _canonical_version(harness: str, selector: tuple[str, ...], output: str) -> str | None:
@@ -1130,4 +1167,169 @@ def probe_all_harnesses(
             factory_settings_path=factory_settings_path,
         )
         for harness in KNOWN_ENGINES
+    }
+
+
+def _normalized_profile_name(profile_name: str | None) -> str:
+    if profile_name is None:
+        return "default"
+    normalized = profile_name.strip()
+    if not normalized:
+        raise ValueError("discovery profile name must be non-empty")
+    return normalized
+
+
+def discovery_cache_path(profile_name: str | None, *, home: Path | None = None) -> Path:
+    """Return the private user cache path for one resolved auth profile."""
+    root = (home if home is not None else Path.home()) / ".delegate" / "cache" / "discovery"
+    if profile_name is None:
+        return root / "default.json"
+    normalized = _normalized_profile_name(profile_name)
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    return root / f"profile-{digest}.json"
+
+
+def load_discovery_cache(
+    profile_name: str | None,
+    *,
+    home: Path | None = None,
+) -> JsonObject | None:
+    """Load a valid profile snapshot; malformed data is treated as absent."""
+    path = discovery_cache_path(profile_name, home=home)
+    try:
+        snapshot = private_io.read_json_object(path)
+        if snapshot is None:
+            return None
+        validate_snapshot(
+            snapshot,
+            expected_profile=_normalized_profile_name(profile_name),
+            allow_unknown_harnesses=True,
+        )
+    except (private_io.RegistryJsonError, ValueError):
+        return None
+
+    harnesses = snapshot["harnesses"]
+    if not isinstance(harnesses, dict):  # validate_snapshot already enforces this.
+        return None
+    if any(harness not in KNOWN_ENGINES for harness in harnesses):
+        snapshot = dict(snapshot)
+        snapshot["harnesses"] = {
+            harness: record for harness, record in harnesses.items() if harness in KNOWN_ENGINES
+        }
+    return snapshot
+
+
+def write_discovery_cache(
+    profile_name: str | None,
+    snapshot: JsonObject,
+    *,
+    home: Path | None = None,
+) -> Path:
+    """Atomically replace one whole validated profile snapshot.
+
+    Same-profile concurrent refreshes intentionally remain whole-snapshot
+    last-writer-wins. Different profiles never share a writable file.
+    """
+    validate_snapshot(snapshot, expected_profile=_normalized_profile_name(profile_name))
+    path = discovery_cache_path(profile_name, home=home)
+    private_io.write_json_atomic(path, snapshot)
+    return path
+
+
+def _effective_configured_selectors(
+    config: JsonObject,
+    harness: str,
+    *,
+    profile: profiles.ProfileResolution,
+) -> tuple[tuple[str, ...], ...]:
+    candidates = selector_candidates(config, harness)
+    if candidates[0][1]:
+        candidates = candidates[:1]
+    env = profiles.child_environment(overrides=profile.env)
+    return tuple(
+        normalized
+        for selector, _explicit in candidates
+        if (normalized := _normalize_selector(selector, env=env)) is not None
+    )
+
+
+def selector_has_drifted(
+    config: JsonObject,
+    harness: str,
+    cached_record: JsonObject,
+    *,
+    profile: profiles.ProfileResolution,
+) -> bool:
+    """Compare cached and configured selectors without invoking a child CLI."""
+    cached = cached_record.get("selector")
+    if not _string_list(cached, allow_empty=False):
+        return True
+    return tuple(cached) not in _effective_configured_selectors(config, harness, profile=profile)
+
+
+def refresh_discovery(
+    config: JsonObject,
+    *,
+    profile: profiles.ProfileResolution,
+    engines: Collection[str] | None = None,
+    home: Path | None = None,
+    factory_settings_path: Path | None = None,
+) -> JsonObject:
+    """Probe selected harnesses and persist successful last-known-good records."""
+    if isinstance(engines, str):
+        raise ValueError("discovery engines must be a collection of harness names")
+    selected = tuple(dict.fromkeys(KNOWN_ENGINES if engines is None else engines))
+    unknown = [engine for engine in selected if engine not in KNOWN_ENGINES]
+    if unknown:
+        raise ValueError(f"unknown discovery harness: {unknown[0]}")
+
+    profile_name = _normalized_profile_name(profile.name)
+    existing = load_discovery_cache(profile.name, home=home)
+    snapshot = existing if existing is not None else empty_snapshot(profile=profile_name)
+    attempts: JsonObject = {}
+    updated: list[str] = []
+    stale: list[str] = []
+    env = profiles.child_environment(overrides=profile.env)
+
+    for harness in selected:
+        try:
+            record = probe_harness(
+                config,
+                harness,
+                env=env,
+                factory_settings_path=factory_settings_path,
+            )
+            _validate_harness_record(harness, record)
+        except Exception as exc:
+            diagnostic = _scrub_diagnostic(str(exc)) or "discovery probe failed"
+            record = _empty_harness_record(
+                installed=False,
+                selector=None,
+                version=None,
+                probe_status="error",
+                warnings=[diagnostic],
+            )
+        attempts[harness] = record
+        if record.get("installed") is True and record.get("probeStatus") in {"ok", "partial"}:
+            if not updated:
+                snapshot = {
+                    **snapshot,
+                    "capturedAt": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                    "harnesses": dict(snapshot["harnesses"]),
+                }
+            snapshot["harnesses"][harness] = record
+            updated.append(harness)
+        elif harness in snapshot["harnesses"]:
+            stale.append(harness)
+
+    cache_path = discovery_cache_path(profile.name, home=home)
+    if updated:
+        write_discovery_cache(profile.name, snapshot, home=home)
+    return {
+        "snapshot": snapshot,
+        "attempts": attempts,
+        "updatedHarnesses": updated,
+        "staleHarnesses": stale,
+        "cachePath": str(cache_path),
+        "wrote": bool(updated),
     }
