@@ -95,7 +95,7 @@ engines report live unsupported).
 
 Codex `max` support is model-scoped and, as of 2026-07, bundled only for
 `gpt-5.6-sol`. Other Codex models fail closed unless an exact
-`reasoning.capabilities.codex` config declaration explicitly supports `max`;
+config or workspace capability-cache declaration explicitly supports `max`;
 other engines retain their independently documented effort sets.
 
 `--fast` and `--no-fast` are Codex-only, mutually exclusive per-run service-tier overrides. `--fast` emits `service_tier="fast"` plus `features.fast_mode=true` (Codex silently drops a Fast tier when that feature flag is off in the ambient config, so Delegate enables it explicitly); `--no-fast` emits `service_tier="default"` so a globally enabled Fast setting can be turned off for one child. Omitting both emits no override and inherits Codex configuration. Fast is orthogonal to model selection, reasoning effort, and Delegate safety policy. Two upstream caveats: Codex strips the service tier when authenticated with an API key (Fast is a ChatGPT-plan feature), and neither Codex nor the API fails on a tier the model does not offer — Delegate's flag validation is the only fail-closed layer, so an unsupported combination degrades silently to standard routing rather than erroring.

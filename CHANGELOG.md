@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Codex `--reasoning-effort max` support for `gpt-5.6-sol`; other Codex models
-  still fail closed unless config capability overrides explicitly opt them in.
+  still fail closed unless config or workspace capability-cache overrides opt them in.
 
 ## [0.18.0] - 2026-07-19
 

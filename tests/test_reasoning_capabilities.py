@@ -92,6 +92,17 @@ class ReasoningCapabilityTests(unittest.TestCase):
         self.assertIn("gpt-5.6-terra", ctx.exception.message)
         self.assertIn(INSPECT_REASONING_DISCOVERY_HINT, ctx.exception.message)
 
+    def test_codex_declared_model_rejects_max_effort(self):
+        with self.assertRaises(ReasoningCapabilityError) as ctx:
+            resolve_reasoning_capability(
+                harness="codex",
+                model="gpt-5.5",
+                requested_effort="max",
+                config={},
+            )
+        self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
+        self.assertIn("Supported values: low, medium, high, xhigh", ctx.exception.message)
+
     def test_non_codex_model_rejects_max_effort(self):
         with self.assertRaises(ReasoningCapabilityError) as ctx:
             resolve_reasoning_capability(

@@ -362,6 +362,21 @@ class EngineArgvTests(CommandTestBase):
         self.assertIn('model_reasoning_effort="high"', request.argv)
         self.assertEqual(request.reasoning_capability_source, "harness-default")
 
+    def test_codex_max_reasoning_effort_without_model_fails_closed(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.build_git_request(
+                "codex",
+                "safe",
+                None,
+                "/repo",
+                "hello",
+                self.delegate.DEFAULT_CONFIG,
+                True,
+                reasoning_effort="max",
+            )
+        self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
+        self.assertIn("Supported values: low, medium, high, xhigh", ctx.exception.message)
+
     def test_droid_reasoning_effort_argv_uses_flag(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
         config["droid"]["models"] = {"reviewer": "gpt-5.5"}
