@@ -300,6 +300,23 @@ class EngineArgvTests(CommandTestBase):
         self.assertIn('model_reasoning_effort="high"', request.argv[:exec_index])
         self.assertEqual(request.reasoning_transport, "codex-config")
 
+    def test_codex_sol_max_reasoning_effort_is_forwarded(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["codex"]["defaultModel"] = "gpt-5.6-sol"
+        request = self.build_git_request(
+            "codex",
+            "safe",
+            None,
+            "/repo",
+            "hello",
+            config,
+            True,
+            reasoning_effort="max",
+        )
+        exec_index = request.argv.index("exec")
+        self.assertIn('model_reasoning_effort="max"', request.argv[:exec_index])
+        self.assertEqual(request.reasoning_capability_source, "bundled")
+
     def test_codex_fast_service_tier_is_explicit_and_before_exec(self):
         for fast, expected in ((True, 'service_tier="fast"'), (False, 'service_tier="default"')):
             with self.subTest(fast=fast):

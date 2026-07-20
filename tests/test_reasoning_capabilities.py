@@ -68,6 +68,64 @@ class ReasoningCapabilityTests(unittest.TestCase):
         self.assertEqual(capability.transport, "codex-config")
         self.assertEqual(capability.source, "bundled")
 
+    def test_codex_sol_accepts_bundled_max_effort(self):
+        capability = resolve_reasoning_capability(
+            harness="codex",
+            model="gpt-5.6-sol",
+            requested_effort="max",
+            config={},
+        )
+        self.assertIsNotNone(capability)
+        assert capability is not None
+        self.assertEqual(capability.effort, "max")
+        self.assertEqual(capability.source, "bundled")
+
+    def test_codex_terra_rejects_max_effort(self):
+        with self.assertRaises(ReasoningCapabilityError) as ctx:
+            resolve_reasoning_capability(
+                harness="codex",
+                model="gpt-5.6-terra",
+                requested_effort="max",
+                config={},
+            )
+        self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
+        self.assertIn("gpt-5.6-terra", ctx.exception.message)
+        self.assertIn(INSPECT_REASONING_DISCOVERY_HINT, ctx.exception.message)
+
+    def test_non_codex_model_rejects_max_effort(self):
+        with self.assertRaises(ReasoningCapabilityError) as ctx:
+            resolve_reasoning_capability(
+                harness="droid",
+                model="gpt-5.5",
+                requested_effort="max",
+                config={},
+            )
+        self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
+
+    def test_config_can_extend_codex_max_effort_support(self):
+        config = {
+            "reasoning": {
+                "capabilities": {
+                    "codex": {
+                        "gpt-5.6-terra": {
+                            "supported": ["low", "medium", "high", "xhigh", "max"],
+                            "default": "medium",
+                        }
+                    }
+                }
+            }
+        }
+        capability = resolve_reasoning_capability(
+            harness="codex",
+            model="gpt-5.6-terra",
+            requested_effort="max",
+            config=config,
+        )
+        self.assertIsNotNone(capability)
+        assert capability is not None
+        self.assertEqual(capability.effort, "max")
+        self.assertEqual(capability.source, "config")
+
     def test_codex_effort_requires_resolved_model(self):
         with self.assertRaises(ReasoningCapabilityError) as ctx:
             resolve_reasoning_capability(

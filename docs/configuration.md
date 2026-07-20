@@ -502,8 +502,8 @@ provider, including configured custom or local providers.
   "reasoning": {
     "capabilities": {
       "codex": {
-        "custom-model": {
-          "supported": ["low", "medium", "high"],
+        "gpt-5.6-sol": {
+          "supported": ["low", "medium", "high", "xhigh", "max"],
           "default": "medium"
         }
       },
@@ -522,6 +522,7 @@ provider, including configured custom or local providers.
 - `supported`: non-empty array of exact effort strings. Delegate treats these literally; it does not translate `xhigh` to another provider spelling.
 - `default`: optional effort string that must be present in `supported`. It is informational only (shown by `delegate capabilities`); launches apply `<engine>.defaultReasoningEffort`, not per-model defaults.
 - Effort strings may not contain whitespace, double quotes, or backslashes.
+- Codex `max` support is model-scoped and bundled only for `gpt-5.6-sol` as of 2026-07. Other Codex models fail closed unless their exact entry under `reasoning.capabilities.codex` explicitly includes `max`.
 
 Capability precedence is config, then workspace cache, then bundled fallback. Use config for private or newly released models. A malformed workspace cache is ignored (treated as absent) and is overwritten by the next `capabilities refresh`. Use `delegate --json capabilities` to inspect the merged view and `delegate --json capabilities refresh` to refresh the workspace-local cache at `.delegate/capabilities/reasoning.json`.
 

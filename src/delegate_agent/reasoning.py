@@ -17,6 +17,10 @@ ReasoningDeclaration: TypeAlias = Mapping[str, object]
 # require Delegate source changes, and stale bundled data can be bypassed.
 BUNDLED_REASONING_CAPABILITIES: dict[str, dict[str, ReasoningDeclaration]] = {
     "codex": {
+        "gpt-5.6-sol": {
+            "supported": ("low", "medium", "high", "xhigh", "max"),
+            "default": "medium",
+        },
         "gpt-5.5": {
             "supported": ("low", "medium", "high", "xhigh"),
             "default": "medium",
