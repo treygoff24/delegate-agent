@@ -23,6 +23,7 @@ from delegate_agent.argv_builders import (
     build_codex_argv,
     build_devin_argv,
     build_grok_argv,
+    build_kimi_argv,
     build_omp_argv,
     build_opencode_argv,
     build_pi_argv,
@@ -739,6 +740,21 @@ def _devin_describe_argv(
     ]
 
 
+def _kimi_describe_argv(kimi: JsonObject, *, mode: str) -> list[str]:
+    workspace = "<isolated-workspace>" if mode == MODE_SAFE else "<workspace>"
+    prompt = "<skill-review-prompt>"
+    argv = build_kimi_argv(
+        kimi,
+        mode,
+        workspace,
+        _resolve_default_model(kimi),
+        prompt,
+    )
+    prompt_index = argv.index("--prompt") + 1
+    argv[prompt_index] = "<kimi-safe-prefixed-skill-review-prompt>" if mode == MODE_SAFE else prompt
+    return argv
+
+
 def _opencode_describe_argv(
     opencode: JsonObject,
     *,
@@ -781,6 +797,7 @@ def describe_payload(
 ) -> JsonObject:
     codex = config["codex"]
     claude = config["claude"]
+    kimi = config["kimi"]
     grok = config["grok"]
     devin = config["devin"]
     opencode = config["opencode"]
@@ -818,6 +835,8 @@ def describe_payload(
         mode=MODE_WORK,
         policy=claude_work_policy,
     )
+    kimi_safe_argv = _kimi_describe_argv(kimi, mode=MODE_SAFE)
+    kimi_work_argv = _kimi_describe_argv(kimi, mode=MODE_WORK)
     grok_safe_argv = _grok_describe_argv(
         config,
         grok,
@@ -1104,30 +1123,14 @@ def describe_payload(
                 ],
             },
             "kimi": {
-                "safe": [
-                    config["kimi"]["binary"],
-                    "--model",
-                    config["kimi"]["defaultModel"],
-                    "--output-format",
-                    "stream-json",
-                    "--prompt",
-                    "<kimi-safe-prefixed-skill-review-prompt>",
-                ],
+                "safe": kimi_safe_argv,
                 "safeNotes": [
                     SAFE_WORKSPACE_SYNC_NOTE,
                     "Prompt mode cannot be combined with Kimi --plan; Delegate uses a read-only safety prompt instead.",
                     "Kimi prompt mode auto-approves tool actions; the isolated workspace is the effective write boundary and the safety prompt is advisory.",
                     "No CLI workspace flag; Delegate sets subprocess cwd.",
                 ],
-                "work": [
-                    config["kimi"]["binary"],
-                    "--model",
-                    config["kimi"]["defaultModel"],
-                    "--output-format",
-                    "stream-json",
-                    "--prompt",
-                    "<skill-review-prompt>",
-                ],
+                "work": kimi_work_argv,
                 "workNotes": [
                     "Kimi prompt mode auto-approves tool actions; Delegate does not pass --yolo because Kimi rejects combining it with --prompt.",
                     "No CLI workspace flag; Delegate sets subprocess cwd.",

@@ -1517,6 +1517,10 @@ class EngineArgvTests(CommandTestBase):
             with self.subTest(engine=engine):
                 self.assertFalse(payload["engineCapabilities"][engine]["outputSchema"])
         self.assertIn("skill review", payload["promptTransforms"][0])
+        for engine, mapping in payload["modeMapping"].items():
+            for mode in ("safe", "work"):
+                with self.subTest(engine=engine, mode=mode):
+                    self.assertTrue(all(isinstance(item, str) for item in mapping[mode]))
         cursor_safe = payload["modeMapping"]["cursor"]["safe"]
         self.assertNotIn("--mode=plan", cursor_safe)
         self.assertNotIn("--mode=ask", cursor_safe)
@@ -1547,9 +1551,11 @@ class EngineArgvTests(CommandTestBase):
         self.assertNotIn("--plan", kimi_safe)
         self.assertNotIn("--yolo", kimi_safe)
         self.assertNotIn("--auto", kimi_safe)
+        self.assertNotIn("--model", kimi_safe)
         self.assertNotIn("--yolo", kimi_work)
         self.assertIn("--prompt", kimi_work)
         self.assertNotIn("--auto", kimi_work)
+        self.assertNotIn("--model", kimi_work)
         devin_safe = payload["modeMapping"]["devin"]["safe"]
         devin_work = payload["modeMapping"]["devin"]["work"]
         self.assertEqual(payload["promptTransports"]["devin"], "file")
@@ -1591,6 +1597,18 @@ class EngineArgvTests(CommandTestBase):
         )
         self.assertEqual(omp_work[omp_work.index("--thinking") + 1], "high")
         self.assertFalse(payload["isolation"]["safeNoneAllowed"]["omp"])
+
+    def test_describe_kimi_argv_includes_pinned_default_model(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["kimi"]["defaultModel"] = "kimi-code/pinned-model"
+        payload = self.delegate.describe_payload(config, "test")
+
+        for mode in ("safe", "work"):
+            with self.subTest(mode=mode):
+                argv = payload["modeMapping"]["kimi"][mode]
+                self.assertTrue(all(isinstance(item, str) for item in argv))
+                model_index = argv.index("--model")
+                self.assertEqual(argv[model_index + 1], "kimi-code/pinned-model")
 
     def test_grok_safe_argv_uses_prompt_file_and_read_only_controls(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
