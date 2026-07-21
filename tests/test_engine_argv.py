@@ -1640,6 +1640,45 @@ class EngineArgvTests(CommandTestBase):
         payload = self.delegate.dry_run_payload(request)
         self.assertEqual(payload["reasoningCapabilitySource"], "harness-compatibility")
 
+    def test_claude_config_default_uses_new_discovered_harness_effort(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["claude"]["defaultReasoningEffort"] = "future-level"
+        discovery = {
+            "harnesses": {
+                "claude": {
+                    "harnessReasoning": {
+                        "supported": ["future-level"],
+                        "evidence": "harness",
+                    }
+                }
+            }
+        }
+        with mock.patch.object(
+            self.delegate.harness_discovery,
+            "load_discovery_cache",
+            return_value=discovery,
+        ):
+            request = self.build_git_request(
+                "claude", "safe", None, "/repo", "review", config, dry_run=True
+            )
+        self.assertEqual(request.reasoning_effort, "future-level")
+        self.assertEqual(request.reasoning_capability_source, "discovery")
+        self.assertEqual(request.argv[request.argv.index("--effort") + 1], "future-level")
+
+    def test_grok_config_default_uses_manual_exact_model_capability(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["grok"]["defaultModel"] = "future-grok"
+        config["grok"]["defaultReasoningEffort"] = "future-level"
+        config["reasoning"]["capabilities"] = {
+            "grok": {"future-grok": {"supported": ["future-level"]}}
+        }
+        request = self.build_git_request(
+            "grok", "safe", None, "/repo", "review", config, dry_run=True
+        )
+        self.assertEqual(request.reasoning_effort, "future-level")
+        self.assertEqual(request.reasoning_capability_source, "config")
+        self.assertEqual(request.argv[request.argv.index("--effort") + 1], "future-level")
+
     def test_grok_work_harness_bypass_requires_harness_scoped_policy(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
         config["policy"]["profile"] = "external-sandbox"

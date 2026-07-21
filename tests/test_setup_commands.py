@@ -81,8 +81,8 @@ class SetupCommandTests(unittest.TestCase):
             mock.patch.dict(os.environ, env, clear=True),
             mock.patch.object(harness_discovery, "probe_harness", probe),
             mock.patch.object(
-                model_discovery.subprocess,
-                "run",
+                model_discovery,
+                "_probe_devin_models",
                 side_effect=AssertionError("setup must not run legacy prompt probes"),
             ),
         ):
@@ -164,6 +164,53 @@ class SetupCommandTests(unittest.TestCase):
                 json.loads(target.read_text(encoding="utf-8")), {"codex": {"binary": str(codex)}}
             )
             self.assertFalse((home / ".delegate" / "config.json").exists())
+
+    def test_missing_explicit_config_allows_symlinked_ancestor_directory(self):
+        with tempfile.TemporaryDirectory() as raw_home:
+            home = Path(raw_home).resolve()
+            codex = self._binary(home, "codex")
+            real_root = home / "real-config-root"
+            real_root.mkdir()
+            linked_root = home / "linked-config-root"
+            linked_root.symlink_to(real_root, target_is_directory=True)
+            target = linked_root / "nested" / "delegate.json"
+
+            code, stdout, stderr, _ = self._run(
+                ["--json", "setup"],
+                home=home,
+                attempts=self._attempts(codex=codex),
+                extra_env={"DELEGATE_CONFIG": str(target)},
+            )
+            payload = json.loads(stdout)
+
+            self.assertEqual(code, 0, stderr)
+            self.assertEqual(payload["configPath"], str(target))
+            self.assertEqual(
+                json.loads((real_root / "nested" / "delegate.json").read_text()),
+                {"codex": {"binary": str(codex)}},
+            )
+
+    def test_missing_explicit_config_still_rejects_final_component_symlink(self):
+        with tempfile.TemporaryDirectory() as raw_home:
+            home = Path(raw_home).resolve()
+            codex = self._binary(home, "codex")
+            target = home / "config-link.json"
+            outside = home / "outside.json"
+            target.symlink_to(outside)
+
+            code, stdout, stderr, _ = self._run(
+                ["--json", "setup"],
+                home=home,
+                attempts=self._attempts(codex=codex),
+                extra_env={"DELEGATE_CONFIG": str(target)},
+            )
+            payload = json.loads(stdout)
+
+            self.assertEqual(code, cli.EXIT_USAGE, stderr)
+            self.assertEqual(payload["error"], "setup_config_write_failed")
+            self.assertEqual(payload["configState"], "present-unverified")
+            self.assertTrue(target.is_symlink())
+            self.assertFalse(outside.exists())
 
     def test_existing_config_is_preserved_and_malformed_fails_before_probe(self):
         with tempfile.TemporaryDirectory() as raw_home:

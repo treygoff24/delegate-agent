@@ -360,7 +360,12 @@ def emit(
                 ),
             )
         try:
-            created = private_io.write_json_atomic_if_absent(path, minimal)
+            # Preserve the user's path in diagnostics/config resolution, but let
+            # ordinary symlinked ancestor directories resolve before the strict
+            # atomic writer checks the final component. The basename is appended
+            # after resolution so a config-file symlink is still rejected.
+            atomic_path = path.parent.resolve(strict=False) / path.name
+            created = private_io.write_json_atomic_if_absent(atomic_path, minimal)
         except (OSError, ValueError) as exc:
             raise DelegateError(
                 "setup_config_write_failed",

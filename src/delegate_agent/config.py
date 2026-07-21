@@ -648,20 +648,11 @@ def _validate_claude_section(claude: JsonValue) -> None:
     optional_str(
         claude.get("defaultModel"), path="claude.defaultModel", error="invalid_claude_config"
     )
-    default_effort = claude.get("defaultReasoningEffort")
-    if default_effort is not None:
-        if not isinstance(default_effort, str):
-            raise ConfigError(
-                "invalid_claude_config",
-                "claude.defaultReasoningEffort must be a string or null.",
-            )
-        try:
-            reasoning.resolve_claude_native_effort(default_effort)
-        except reasoning.ReasoningCapabilityError as exc:
-            raise ConfigError(
-                "invalid_claude_config",
-                f"claude.defaultReasoningEffort: {exc.message}",
-            ) from exc
+    _validate_provider_default_reasoning_effort(
+        claude.get("defaultReasoningEffort"),
+        path="claude.defaultReasoningEffort",
+        error="invalid_claude_config",
+    )
     permission_mode = claude.get("workPermissionMode", "auto")
     if permission_mode == "bypassPermissions":
         raise ConfigError(
@@ -689,20 +680,11 @@ def _validate_grok_section(grok: JsonValue) -> None:
         raise ConfigError("invalid_grok_config", "grok config must be an object.")
     require_non_empty_str(grok.get("binary"), path="grok.binary", error="invalid_grok_config")
     optional_str(grok.get("defaultModel"), path="grok.defaultModel", error="invalid_grok_config")
-    default_effort = grok.get("defaultReasoningEffort")
-    if default_effort is not None:
-        if not isinstance(default_effort, str):
-            raise ConfigError(
-                "invalid_grok_config",
-                "grok.defaultReasoningEffort must be a string or null.",
-            )
-        try:
-            reasoning.resolve_grok_native_effort(default_effort)
-        except reasoning.ReasoningCapabilityError as exc:
-            raise ConfigError(
-                "invalid_grok_config",
-                f"grok.defaultReasoningEffort: {exc.message}",
-            ) from exc
+    _validate_provider_default_reasoning_effort(
+        grok.get("defaultReasoningEffort"),
+        path="grok.defaultReasoningEffort",
+        error="invalid_grok_config",
+    )
     safe_permission = grok.get("safePermissionMode", "dontAsk")
     if safe_permission == "plan":
         raise ConfigError(

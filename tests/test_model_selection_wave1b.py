@@ -463,6 +463,7 @@ class CursorModelOverrideTests(CommandTestBase):
 
     def test_discovered_cursor_family_routes_explicit_model_to_exact_selector(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["cursor"]["reasoningEffortModels"] = {"max": "global-config-max"}
         with mock.patch.object(
             self.delegate.harness_discovery,
             "load_discovery_cache",
@@ -482,6 +483,43 @@ class CursorModelOverrideTests(CommandTestBase):
         self.assertEqual(request.model, "cursor-grok-4.5-max")
         self.assertEqual(request.reasoning_capability_source, "discovery")
         self.assertEqual(request.reasoning_capability_evidence, "inferred-route")
+        self.assertTrue(any("replaced" in warning for warning in request.warnings))
+
+    def test_configured_cursor_routes_precede_discovery_without_explicit_pin(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["cursor"]["defaultModel"] = "cursor-grok-4.5-low"
+        config["cursor"]["reasoningEffortModels"] = {"max": "global-config-max"}
+        with mock.patch.object(
+            self.delegate.harness_discovery,
+            "load_discovery_cache",
+            return_value=self._cursor_route_discovery(),
+        ):
+            request = self.build_git_request(
+                "cursor",
+                "safe",
+                None,
+                "/repo",
+                "hello",
+                config,
+                True,
+                reasoning_effort="max",
+            )
+        self.assertEqual(request.model, "global-config-max")
+        self.assertEqual(request.reasoning_capability_source, "config")
+
+    def test_unsupported_discovered_route_degrades_config_default_to_base_selector(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["cursor"]["defaultModel"] = "cursor-grok-4.5-low"
+        config["cursor"]["defaultReasoningEffort"] = "xhigh"
+        with mock.patch.object(
+            self.delegate.harness_discovery,
+            "load_discovery_cache",
+            return_value=self._cursor_route_discovery(),
+        ):
+            request = self.build_git_request("cursor", "safe", None, "/repo", "hello", config, True)
+        self.assertEqual(request.model, "cursor-grok-4.5-low")
+        self.assertIsNone(request.reasoning_effort)
+        self.assertTrue(any("defaultReasoningEffort" in warning for warning in request.warnings))
 
     def test_authoritative_cursor_family_missing_effort_fails_closed(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))

@@ -265,6 +265,10 @@ class LauncherShimTests(unittest.TestCase):
                 ["capabilities", "--help", "refresh"],
                 ["worktree", "show", "cursor-1"],
                 ["worktree", "list"],
+                ["cursor", "--help"],
+                ["cursor", "safe", "--help"],
+                ["droid", "opus", "safe", "-h"],
+                ["dry-run", "codex", "safe", "--help"],
             ):
                 with self.subTest(argv=argv):
                     result = self.run_shim(argv, env=env)
@@ -275,6 +279,22 @@ class LauncherShimTests(unittest.TestCase):
                     self.assertIsNone(payload["delegateConfig"])
                     self.assertIn("continuing because", result.stderr)
                     self.assertIn("read-only", result.stderr)
+
+    def test_help_inside_launch_prompt_cannot_bypass_missing_profile_guard(self):
+        with tempfile.TemporaryDirectory() as home:
+            probe = self.write_probe(Path(home))
+            env = self.shim_env(home, probe, "work")
+            for argv in (
+                ["cursor", "safe", "inspect", "--help"],
+                ["codex", "work", "please inspect -h"],
+                ["droid", "opus", "safe", "review", "-h"],
+                ["dry-run", "kimi", "safe", "explain", "--help"],
+            ):
+                with self.subTest(argv=argv):
+                    result = self.run_shim(argv, env=env)
+                    self.assertEqual(result.returncode, 1)
+                    self.assertEqual(result.stdout, "")
+                    self.assertIn("refusing to run a launch or mutation command", result.stderr)
 
     def test_missing_personal_profile_launch_still_fails_closed(self):
         with tempfile.TemporaryDirectory() as home:

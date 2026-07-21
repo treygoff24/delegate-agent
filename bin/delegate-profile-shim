@@ -33,6 +33,75 @@ _delegate_subcommand() {
   done
 }
 
+_delegate_launch_help_request() {
+  _delegate_launch_cmd="${1:-}"
+  [ "$#" -gt 0 ] && shift
+
+  if [ "$_delegate_launch_cmd" = "dry-run" ]; then
+    case "${1:-}" in
+      --help|-h)
+        return 0
+        ;;
+    esac
+    _delegate_launch_cmd="${1:-}"
+    [ "$#" -gt 0 ] && shift
+  fi
+
+  case "$_delegate_launch_cmd" in
+    cursor|codex|kimi|claude|grok|devin|opencode|pi|omp)
+      # Parser parity: help is diagnostic only before the mode or immediately
+      # after it. Once inline prompt text starts, a later help token is data.
+      case "${1:-}" in
+        --help|-h)
+          return 0
+          ;;
+        safe|work|call)
+          case "${2:-}" in
+            --help|-h)
+              return 0
+              ;;
+          esac
+          ;;
+      esac
+      return 1
+      ;;
+    droid)
+      # Droid may place a model alias before the mode, so its last diagnostic
+      # help position is one token later than the modeless harnesses.
+      case "${1:-}" in
+        --help|-h)
+          return 0
+          ;;
+        safe|work|call)
+          case "${2:-}" in
+            --help|-h)
+              return 0
+              ;;
+          esac
+          ;;
+        *)
+          case "${2:-}" in
+            --help|-h)
+              return 0
+              ;;
+            safe|work|call)
+              case "${3:-}" in
+                --help|-h)
+                  return 0
+                  ;;
+              esac
+              ;;
+          esac
+          ;;
+      esac
+      return 1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 _delegate_is_readonly_request() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -50,8 +119,13 @@ _delegate_is_readonly_request() {
   done
   _cmd="${1:-}"
   [ "$#" -gt 0 ] && shift
-  # Help is always read-only, regardless of whether a mutation-like token also
-  # appears before or after it in the subcommand arguments.
+  case "$_cmd" in
+    cursor|droid|codex|kimi|claude|grok|devin|opencode|pi|omp|dry-run)
+      _delegate_launch_help_request "$_cmd" "$@" && return 0
+      return 1
+      ;;
+  esac
+  # Non-launch command parsers treat help as diagnostic wherever accepted.
   for _delegate_help_arg in "$@"; do
     case "$_delegate_help_arg" in
       --help|-h)

@@ -560,6 +560,14 @@ class ValidationTests(unittest.TestCase):
             config_mod.validate_config(config)
         self.assertEqual(ctx.exception.error, "invalid_droid_config")
 
+    def test_harness_enum_defaults_allow_future_transport_safe_efforts(self):
+        config_mod = load_config_module()
+        for engine in ("claude", "grok"):
+            with self.subTest(engine=engine):
+                config = copy.deepcopy(config_mod.DEFAULT_CONFIG)
+                config[engine]["defaultReasoningEffort"] = "future-level"
+                config_mod.validate_config(config)
+
     def test_cursor_reasoning_effort_model_keys_reject_whitespace(self):
         config_mod = load_config_module()
         config = copy.deepcopy(config_mod.DEFAULT_CONFIG)

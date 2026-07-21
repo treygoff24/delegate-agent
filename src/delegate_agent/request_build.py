@@ -1700,8 +1700,8 @@ def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
                     discovered_routes[entry["routeEffort"]] = selector
 
     # An explicit model remains authoritative unless discovery has routes for
-    # that exact selector family. This preserves the established pinned-model
-    # bypass instead of applying a global config route to an unrelated family.
+    # that exact selector family. Without a pin, the user's configured routing
+    # map remains authoritative over observed routes.
     if build.requested_effort is not None and pinned is not None and not discovered_routes:
         model = pinned
         capability_model_source = "explicit"
@@ -1709,10 +1709,24 @@ def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
             "cursor reasoning-effort routing was bypassed by the pinned model; "
             "proceeding with the explicit model selection."
         )
+    elif (
+        build.requested_effort is not None
+        and pinned is None
+        and isinstance(mappings, dict)
+        and mappings
+    ):
+        capability, reasoning_warnings = _capability_with_config_fallback(
+            lambda: resolve_cursor_reasoning_capability(cursor, build.requested_effort),
+            engine="cursor",
+            effort_source=build.effort_source,
+        )
+        warnings.extend(reasoning_warnings)
+        model = capability.model if capability is not None else cursor["defaultModel"]
+        capability_model_source = "config"
     elif build.requested_effort is not None and discovered_routes:
         routed_model = discovered_routes.get(build.requested_effort)
         if routed_model is None:
-            raise DelegateError(
+            error = DelegateError(
                 "unsupported_reasoning_effort",
                 reasoning.format_explicit_reasoning_effort_error(
                     harness="cursor",
@@ -1723,34 +1737,34 @@ def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
                     detail="has authoritative routes that omit the requested effort",
                 ),
             )
-        _reject_opencode_flag_like_value(
-            routed_model,
-            field="discovered Cursor model",
-            error="invalid_model",
-        )
-        model = routed_model
-        capability = reasoning.ReasoningCapability(
-            harness="cursor",
-            model=model,
-            effort=build.requested_effort,
-            supported_efforts=tuple(sorted(discovered_routes)),
-            default_effort=None,
-            transport=reasoning.TRANSPORT_CURSOR_MODEL_SELECTION,
-            source="discovery",
-            evidence="inferred-route",
-        )
-        capability_model_source = "discovery"
-    elif build.requested_effort is not None and isinstance(mappings, dict) and mappings:
-        capability, reasoning_warnings = _capability_with_config_fallback(
-            lambda: resolve_cursor_reasoning_capability(cursor, build.requested_effort),
-            engine="cursor",
-            effort_source=build.effort_source,
-        )
-        warnings.extend(reasoning_warnings)
-        model = capability.model if capability is not None else pinned or cursor["defaultModel"]
-        capability_model_source = (
-            "config" if capability is not None or pinned is None else "explicit"
-        )
+            if build.effort_source != "config":
+                raise error
+            warnings.append(f"ignoring cursor.defaultReasoningEffort: {error.message}")
+            model = base_model
+            capability_model_source = "explicit" if pinned is not None else "config"
+        else:
+            _reject_opencode_flag_like_value(
+                routed_model,
+                field="discovered Cursor model",
+                error="invalid_model",
+            )
+            model = routed_model
+            capability = reasoning.ReasoningCapability(
+                harness="cursor",
+                model=model,
+                effort=build.requested_effort,
+                supported_efforts=tuple(sorted(discovered_routes)),
+                default_effort=None,
+                transport=reasoning.TRANSPORT_CURSOR_MODEL_SELECTION,
+                source="discovery",
+                evidence="inferred-route",
+            )
+            capability_model_source = "discovery"
+            if pinned is not None and model != pinned:
+                warnings.append(
+                    "cursor reasoning-effort routing replaced the explicitly pinned selector "
+                    "with another selector from the same discovered model family."
+                )
     elif build.requested_effort is not None:
         # Config defaults remain mandatory for Cursor, but an effort needs
         # either an explicit map or authoritative routes; never synthesize a

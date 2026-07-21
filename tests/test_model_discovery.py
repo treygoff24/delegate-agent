@@ -454,6 +454,40 @@ class LiveProbeIntegrationTests(unittest.TestCase):
                 ["--model", DEVIN_LIVE_SENTINEL, "-p", "--", "probe"],
             )
 
+    def test_devin_live_uses_bounded_metadata_runner_and_parses_nonzero_output(self):
+        from delegate_agent import harness_discovery
+        from delegate_agent.model_discovery import (
+            DEVIN_LIVE_SENTINEL,
+            LIVE_PROBE_TIMEOUT_SEC,
+        )
+
+        config = self.embedded_default_config()
+        config["devin"]["binary"] = "/configured/devin"
+        result = harness_discovery.ProbeResult(
+            argv=("/configured/devin",),
+            returncode=1,
+            stdout="",
+            stderr="Available: adaptive, bounded-devin",
+            error="probe_failed",
+        )
+        with mock.patch.object(harness_discovery, "run_metadata_probe", return_value=result) as run:
+            payload = self.engine_models_payload(config, "devin", live=True)
+
+        run.assert_called_once_with(
+            [
+                "/configured/devin",
+                "--model",
+                DEVIN_LIVE_SENTINEL,
+                "-p",
+                "--",
+                "probe",
+            ],
+            env=mock.ANY,
+            timeout_sec=LIVE_PROBE_TIMEOUT_SEC,
+        )
+        by_id = {item["id"]: item for item in payload["models"]}
+        self.assertEqual(by_id["bounded-devin"]["source"], "live")
+
     def test_opencode_live_merge(self):
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as workspace:
             argv_log = Path(tmp) / "argv.log"
@@ -471,7 +505,7 @@ class LiveProbeIntegrationTests(unittest.TestCase):
             config["opencode"]["binary"] = str(fake)
             workspace_path = Path(workspace)
             with mock.patch(
-                "delegate_agent.model_discovery.subprocess.run", wraps=subprocess.run
+                "delegate_agent.harness_discovery.subprocess.run", wraps=subprocess.run
             ) as run:
                 payload = self.engine_models_payload(
                     config, "opencode", live=True, workspace=workspace_path
@@ -602,6 +636,49 @@ class LiveProbeIntegrationTests(unittest.TestCase):
                 payload = self.engine_models_payload(config, "cursor", live=True)
             self.assertIs(payload["live"], False)
             self.assertIn("warning", payload)
+
+    def test_live_json_warning_redacts_selector_paths_and_secrets(self):
+        from delegate_agent import harness_discovery
+        from delegate_agent.describe_payload import emit_models
+
+        config = self.embedded_default_config()
+        record = {
+            "installed": True,
+            "probeStatus": "ok",
+            "models": {"live-model": {}},
+            "warnings": ["selector /Users/alice/private/codex failed with api_key=do-not-print"],
+        }
+        with mock.patch.object(harness_discovery, "probe_harness", return_value=record):
+            stdout = io.StringIO()
+            code = emit_models(
+                config,
+                "fixture-config",
+                True,
+                stdout,
+                engine="codex",
+                live=True,
+            )
+        payload = json.loads(stdout.getvalue())
+
+        self.assertEqual(code, 0)
+        self.assertNotIn("/Users/alice/private/codex", payload["warning"])
+        self.assertNotIn("do-not-print", payload["warning"])
+        self.assertIn("<redacted-path>", payload["warning"])
+
+    def test_live_probe_exception_warning_redacts_absolute_path(self):
+        from delegate_agent import harness_discovery
+
+        config = self.embedded_default_config()
+        with mock.patch.object(
+            harness_discovery,
+            "probe_harness",
+            side_effect=RuntimeError("cannot inspect /private/account/selector"),
+        ):
+            payload = self.engine_models_payload(config, "codex", live=True)
+
+        self.assertIs(payload["live"], False)
+        self.assertNotIn("/private/account/selector", payload["warning"])
+        self.assertIn("<redacted-path>", payload["warning"])
 
     def test_live_unsupported_engines(self):
         config = self.embedded_default_config()
@@ -868,7 +945,7 @@ class UnifiedDiscoveryProjectionTests(unittest.TestCase):
         self.assertEqual(by_id["live-only"]["source"], "live")
 
     def test_devin_live_probe_receives_profile_environment(self):
-        from delegate_agent import profiles
+        from delegate_agent import harness_discovery, profiles
         from delegate_agent.model_discovery import engine_models_payload
 
         profile = profiles.ProfileResolution(
@@ -876,14 +953,15 @@ class UnifiedDiscoveryProjectionTests(unittest.TestCase):
             source="test",
             env={"DEVIN_ACCOUNT": "work"},
         )
-        completed = subprocess.CompletedProcess(
-            args=[],
+        completed = harness_discovery.ProbeResult(
+            argv=(),
             returncode=1,
             stdout="",
             stderr="Available: adaptive, profile-devin",
+            error="probe_failed",
         )
-        with mock.patch(
-            "delegate_agent.model_discovery.subprocess.run", return_value=completed
+        with mock.patch.object(
+            harness_discovery, "run_metadata_probe", return_value=completed
         ) as run:
             payload = engine_models_payload(
                 self.config,

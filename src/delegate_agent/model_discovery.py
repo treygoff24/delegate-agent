@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import re
-import subprocess
-import tempfile
 from pathlib import Path
 from typing import TextIO
 
 from delegate_agent import config as delegate_config
-from delegate_agent import harness_discovery, profiles
+from delegate_agent import harness_discovery, profiles, redaction
 from delegate_agent.bundled_models import BUNDLED_MODELS
 from delegate_agent.constants import ENGINES_PROSE, KNOWN_ENGINES
 from delegate_agent.errors import DelegateError
@@ -17,6 +15,7 @@ from delegate_agent.json_types import JsonObject, JsonValue
 
 ENGINE_MODELS_SCHEMA = "delegate.engine-models.v1"
 LIVE_PROBE_TIMEOUT_SEC = 10
+LIVE_WARNING_LIMIT = 8_000
 DEVIN_LIVE_SENTINEL = "delegate-live-probe-sentinel"
 LIVE_UNSUPPORTED_ENGINES = frozenset({"claude"})
 _SOURCE_RANK = {"bundled": 0, "cache": 1, "discovery": 2, "live": 2, "config": 3}
@@ -237,7 +236,7 @@ def _probe_live_models(
             if isinstance(raw_warnings, list)
             else []
         )
-        warning = "; ".join(warnings) or None
+        warning = _public_live_warning("; ".join(warnings)) if warnings else None
         if status in {"missing", "error"}:
             return [], warning or f"{engine} metadata probe {status}", None
         default_model = record.get("defaultModel")
@@ -246,7 +245,11 @@ def _probe_live_models(
         )
         return models, warning, discovered_default
     except Exception as exc:
-        return [], f"live probe failed: {exc}", None
+        return [], _public_live_warning(f"live probe failed: {exc}"), None
+
+
+def _public_live_warning(value: str) -> str:
+    return redaction.redact_progress_label(value)[:LIVE_WARNING_LIMIT]
 
 
 def _legacy_models(fragment: JsonObject) -> list[JsonObject]:
@@ -300,20 +303,14 @@ def parse_droid_custom_models(custom_models: list[object]) -> list[JsonObject]:
 def _probe_devin_models(config: JsonObject, *, env: dict[str, str]) -> list[JsonObject]:
     binary = delegate_config.harness_binary(config, "devin")
     # The invalid sentinel makes devin fail fast pre-session; running from a
-    # throwaway cwd additionally guarantees the probe can never touch the
-    # caller's workspace even if that behavior changes.
-    with tempfile.TemporaryDirectory(prefix="delegate-model-probe-") as probe_cwd:
-        completed = subprocess.run(
-            [binary, "--model", DEVIN_LIVE_SENTINEL, "-p", "--", "probe"],
-            capture_output=True,
-            text=True,
-            timeout=LIVE_PROBE_TIMEOUT_SEC,
-            check=False,
-            stdin=subprocess.DEVNULL,
-            cwd=probe_cwd,
-            env=env,
-        )
-    combined = f"{completed.stderr or ''}\n{completed.stdout or ''}"
+    # neutral cwd metadata runner keeps the explicit prompt-like opt-in bounded
+    # without changing Devin's expected non-zero/Available-line parse behavior.
+    completed = harness_discovery.run_metadata_probe(
+        [binary, "--model", DEVIN_LIVE_SENTINEL, "-p", "--", "probe"],
+        env=env,
+        timeout_sec=LIVE_PROBE_TIMEOUT_SEC,
+    )
+    combined = f"{completed.stderr}\n{completed.stdout}"
     return parse_devin_available_models(combined)
 
 
