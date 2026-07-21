@@ -1,4 +1,4 @@
 provider      model                                               context  max-out  thinking  images
-google        gemini-2.0-flash                                    1.0M     8.2K     no        yes   
-openai-codex  gpt-5.5                                             272K     128K     yes       yes   
+google        gemini-2.0-flash                                    1.0M     8.2K     no        yes
+openai-codex  gpt-5.5                                             272K     128K     yes       yes
   --thinking <level>             Set thinking level: off, minimal, low, medium, high, xhigh, max
