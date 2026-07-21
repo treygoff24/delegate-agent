@@ -262,7 +262,7 @@ Both layers agree on the same rule: when `DELEGATE_CONFIG` is unset and
 is missing or unreadable, launch and mutation commands (any engine, `run`,
 `dry-run`, `wait`, `cancel`, `config`, `worktree remove`/`prune`/`gc`,
 `setup`, `models <engine> --live`, `capabilities refresh`) are refused.
-Read-only diagnostics (`profiles`, `runs`, `run-output`, `snapshot`, cached
+Read-only diagnostics (`profiles`, `runs`, `ps`, `run-output`, `snapshot`, cached
 `capabilities`, `describe`, cached `models`, `worktree show`/`list`) still run,
 with a stderr warning that the check would otherwise fail closed. Once
 `DELEGATE_CONFIG` is set, either by the shim after it validates the overlay or
