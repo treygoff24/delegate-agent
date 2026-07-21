@@ -97,22 +97,28 @@ Install OpenCode from [opencode.ai](https://opencode.ai). Its curl installer
 normally writes the binary to `~/.opencode/bin`, which may not be on `PATH`.
 Extend `PATH` or set `opencode.binary` to the absolute binary path.
 
-Initialize a starter config and replace placeholder Droid model IDs before real Droid runs:
+Let Delegate discover the supported harnesses already on your `PATH`:
 
 ```bash
-delegate config init
-$EDITOR ~/.delegate/config.json
+delegate setup
 ```
 
-`config init` also writes missing `~/.delegate/config.work.json` and
-`~/.delegate/config.personal.json` profile overlays. For an existing install,
-run `env -u AI_PROFILE delegate config sync-profiles` to materialize any missing
-overlays without overwriting ones you already edited.
+`setup` fingerprints installed harnesses, reads their model and reasoning metadata where
+the harness exposes it, and writes a private discovery cache for the active auth profile.
+On a clean install it creates only the absolute binary selectors needed to launch the
+detected harnesses. It never rewrites an existing config, installs a harness, logs in, or
+submits a model prompt.
+
+Use `delegate config init` instead when you want the editable example config and profile
+overlays. Replace its placeholder Droid model IDs before real Droid runs. For an existing
+install, `env -u AI_PROFILE delegate config sync-profiles` creates missing overlays without
+overwriting ones you already edited.
 
 Inspect what Delegate sees:
 
 ```bash
 delegate --version       # installed version — include this in bug reports
+delegate --json setup
 delegate --json describe --summary
 delegate --json models --summary
 delegate --json describe
@@ -123,9 +129,10 @@ delegate --json models opencode --live # query every model visible to OpenCode
 delegate --json models pi --live       # query every model visible to Pi
 delegate --json models omp --live      # query every model visible to Oh My Pi
 delegate --json capabilities
+delegate --json capabilities refresh   # refresh the active profile's discovery cache
 ```
 
-Discover commands as you go: `delegate <command> --help` prints focused help for any command path, and `delegate --json <command> --help` returns an agent-friendly spec of its usage, arguments, and options. For launch and `dry-run` commands, `--json` and `--isolation` may also appear before inline prompt text begins, for example `delegate codex work --prompt-file task.md --json`. `delegate --json describe` includes a `commands` catalog of the whole surface. `delegate --json capabilities` reports reasoning-effort support without launching a child runtime.
+Discover commands as you go: `delegate <command> --help` prints focused help for any command path, and `delegate --json <command> --help` returns an agent-friendly spec of its usage, arguments, and options. For launch and `dry-run` commands, `--json` and `--isolation` may also appear before inline prompt text begins, for example `delegate codex work --prompt-file task.md --json`. `delegate --json describe` includes a `commands` catalog of the whole surface. Cached `models` and `capabilities` reads launch no child process. `models <engine> --live` performs a one-off probe without updating the cache; rerun `delegate setup` or `delegate capabilities refresh` when ordinary launches should consume newly discovered models or effort levels.
 
 From this development checkout, use `python3 bin/delegate.py ...` instead of an installed `delegate` shim.
 
@@ -247,7 +254,16 @@ python3 bin/delegate.py workflow approve wf_0123abcdef45
 See [Delegate Workflows](docs/delegate-workflows.md) for the DSL, safety
 limits, config, and gate semantics.
 
-Reasoning effort is provider-aware. Unsupported combinations fail before launch. It changes only the requested model thinking depth/cost/latency; it does not change safe/work/call mode, sandboxing, approvals, or edit capability. Codex/Droid validate effort against model capability metadata, Cursor maps effort to configured model selection, Claude and Grok map to native `--effort`, OpenCode passes it through as `--variant`, and Pi/Oh My Pi map `low|medium|high|xhigh|max` directly to `--thinking`. Devin and Kimi do not expose a Delegate reasoning-effort flag. Explicit Codex effort can target the harness default model even when `codex.defaultModel` is unset:
+Reasoning effort is provider-aware. Unsupported combinations fail before launch.
+It changes only the requested model thinking depth/cost/latency; it does not
+change safe/work/call mode, sandboxing, approvals, or edit capability.
+Codex/Droid validate exact model metadata, Cursor selects an explicit configured
+or corroborated discovered effort route, Claude and Grok map to native
+`--effort`, OpenCode validates discovered exact variants when present and
+otherwise warns on pass-through, and Pi/Oh My Pi map to `--thinking` with
+evidence-aware validation. Devin and Kimi do not expose a Delegate
+reasoning-effort flag. Explicit Codex effort can target the harness default model
+even when `codex.defaultModel` is unset:
 
 ```bash
 delegate --json dry-run codex safe --reasoning-effort high "Review this repository. Do not edit files."
@@ -260,7 +276,7 @@ run with `--reasoning-effort`. Per-model effort menus (including any efforts
 newer than the bundled data) belong in the private `reasoning.capabilities`
 config block, which overrides the bundled defaults. Codex `max` is bundled only
 for `gpt-5.6-sol` as of 2026-07; other Codex models require an exact config or
-workspace capability-cache declaration.
+profile-discovery declaration, or legacy workspace-cache declaration.
 
 Fast mode is an independent per-run serving choice. `--fast` requests Codex's
 Fast service tier, `--no-fast` explicitly requests Standard, and omitting both

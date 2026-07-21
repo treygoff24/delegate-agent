@@ -11,7 +11,7 @@ Use `delegate --help` for the exact command list from the installed version. Glo
 --pass-through                Stream raw child stdout/stderr. Incompatible with --json and persistent worktree runs.
 --completion-report MODE      markdown or none.
 --no-completion-report        Disable completion-report prompt injection.
---auth-profile NAME           Override detected profiles for launches, dry-run, run --input-json, profiles, and capabilities refresh.
+--auth-profile NAME           Override detected profiles for launches, dry-run, run --input-json, profiles, models, capabilities, and setup.
 --group NAME                  Tag a launch/run-input request with a lightweight group ([A-Za-z0-9._-]{1,64}).
 ```
 
@@ -88,14 +88,28 @@ matches an alias key; otherwise it is passed through verbatim as a raw model ID
 `MODEL_ALIAS` (alias-only/strict); give either the positional or `--model`, not
 both. With neither, Droid uses `droid.defaultModel` when set. Discover aliases
 and advisory catalogs with `delegate models`, `delegate models <engine>`, and
-`delegate models <engine> --live` (live probes for cursor/droid/devin/opencode/pi/omp; other
-engines report live unsupported).
+`delegate models <engine> --live`. Every harness except Claude exposes a live
+model probe; see [Discovery](#discovery) for the evidence and Devin caveats.
 
-`--reasoning-effort LEVEL` is optional and parsed only before prompt text begins. Engines with capability metadata reject unsupported model/effort pairs before launch with `unsupported_reasoning_effort`. It affects only model reasoning depth, cost, or latency; it does not change `safe`/`work`/`call` permissions, sandboxing, approvals, network policy, or edit capability. Cursor effort is model-selection based and requires `cursor.reasoningEffortModels`; an explicit `--model` wins over effort→model routing. Droid emits `--reasoning-effort LEVEL`; Codex emits a `model_reasoning_effort` config override for the resolved model, or for the Codex harness default model when no `codex.defaultModel` is configured and the request was explicit; Claude emits Claude Code `--effort LEVEL`; Grok emits Grok `--effort LEVEL` (`low`, `medium`, `high`, `xhigh`, `max`); OpenCode emits `--variant LEVEL` without validating it against the selected model; Pi and Oh My Pi emit `--thinking LEVEL` and accept the same five Delegate levels. The Kimi CLI exposes no effort flag; k3 supports effort internally via `~/.kimi-code/config.toml`, so Delegate rejects `--reasoning-effort` for Kimi.
+`--reasoning-effort LEVEL` is optional and parsed only before prompt text begins.
+Engines with exact capability metadata reject unsupported model/effort pairs
+before launch with `unsupported_reasoning_effort`. It affects only model
+reasoning depth, cost, or latency; it does not change `safe`/`work`/`call`
+permissions, sandboxing, approvals, network policy, or edit capability. Cursor
+effort is model-selection based. Without an explicit model pin,
+`cursor.reasoningEffortModels` takes precedence over discovered routes. An
+explicit `--model` blocks that global map; when discovery has an exact route
+family for the pinned selector, Delegate may replace it with the requested
+same-family effort selector and records a warning. Droid emits
+`--reasoning-effort LEVEL`; Codex emits a `model_reasoning_effort` config
+override; Claude and Grok emit native `--effort`; OpenCode emits `--variant`
+and validates it when exact discovered variants exist; Pi and Oh My Pi emit
+`--thinking`. Devin and Kimi expose no Delegate effort transport.
 
 Codex `max` support is model-scoped and, as of 2026-07, bundled only for
 `gpt-5.6-sol`. Other Codex models fail closed unless an exact
-config or workspace capability-cache declaration explicitly supports `max`;
+config, profile-discovery, or legacy workspace-cache declaration explicitly
+supports `max`;
 other engines retain their independently documented effort sets.
 
 `--fast` and `--no-fast` are Codex-only, mutually exclusive per-run service-tier overrides. `--fast` emits `service_tier="fast"` plus `features.fast_mode=true` (Codex silently drops a Fast tier when that feature flag is off in the ambient config, so Delegate enables it explicitly); `--no-fast` emits `service_tier="default"` so a globally enabled Fast setting can be turned off for one child. Omitting both emits no override and inherits Codex configuration. Fast is orthogonal to model selection, reasoning effort, and Delegate safety policy. Two upstream caveats: Codex strips the service tier when authenticated with an API key (Fast is a ChatGPT-plan feature), and neither Codex nor the API fails on a tier the model does not offer — Delegate's flag validation is the only fail-closed layer, so an unsupported combination degrades silently to standard routing rather than erroring.
@@ -151,13 +165,13 @@ need separate review or commits, launch each in a persistent worktree and
 integrate them separately; `wait --group` warns when it sees shared same-tree
 work runs.
 
-`--auth-profile NAME` selects a top-level `profiles.definitions` entry and
-injects that profile's flat env map into child processes. It overrides ambient
-profile detection for launches, `dry-run`, `run --input-json`, `delegate profiles`,
-and `capabilities refresh` (which spawns a Codex probe). Unknown names fail with
+`--auth-profile NAME` selects a top-level `profiles.definitions` entry. Delegate
+injects that profile's flat env map into child launches and metadata probes, and
+uses the same profile name to select cached discovery. It overrides ambient
+detection for launches, `dry-run`, `run --input-json`, `delegate profiles`,
+`models`, `capabilities`, and `setup`. Unknown names fail with
 `unknown_profile`. It is rejected for run-inspection, worktree-management, and
-discovery commands, and for the cached `capabilities` report, where no child
-auth/env selection happens.
+unrelated diagnostics where no child env or profile cache selection occurs.
 
 ### `delegate codex`
 
@@ -609,6 +623,35 @@ environment diagnostics. Profile env maps are for routing pointers, not
 secrets; secret-like keys in `profiles.definitions.*.env` are rejected during
 config validation.
 
+### Setup
+
+```bash
+delegate setup
+delegate --json setup
+delegate --json --auth-profile work setup
+```
+
+`delegate setup` is the explicit first-run discovery command. It fingerprints
+every supported harness it can find, runs bounded metadata probes, and updates
+the active auth profile's private discovery cache. It does not install harnesses,
+authenticate accounts, edit harness-native config, or submit a model prompt.
+`--auth-profile` must name an existing `profiles.definitions` entry; setup does
+not create profile definitions.
+
+When the resolved Delegate config does not exist, setup creates a minimal
+owner-only JSON file containing safe absolute selectors for the harnesses it
+found. It does not invent aliases or model defaults. An existing config is
+validated and preserved byte-for-byte while discovery still refreshes. If the
+config changes concurrently, setup preserves the other writer's file and asks
+the caller to rerun rather than combining old probe results with new config.
+
+The JSON result separates `discoveryReady` (at least one successful metadata
+record) from `ready` (at least one harness can launch under the effective
+config). Per-harness records include `installed`, `probeStatus`, `catalogCount`,
+`reasoningStatus`, `launchable`, `stale`, and `nextAction`. For example, Droid
+can be discovered but remain unlaunchable until a model is passed or
+`droid.defaultModel` is configured.
+
 ### Config init
 
 ```bash
@@ -682,6 +725,7 @@ override ambient profile detection for that run.
 ### Discovery
 
 ```bash
+delegate --json setup
 delegate --json describe --summary
 delegate --json models --summary
 delegate --json describe
@@ -693,14 +737,90 @@ delegate --json capabilities refresh
 delegate agent-help
 ```
 
-`describe` reports version, engines, modes, supported isolation values, prompt transforms, effective policy, top-level profile config metadata, and representative argv shapes. It also includes a `commands` catalog derived from the help registry; each full entry includes stable `name`/`command`, usage, arguments, options, and launchOptions fields. Full `describe` is a strict superset of `describe --summary`, so fields present in summary keep the same names in the full payload. `models` reports configured Cursor, Droid, Codex, Claude, Grok, Devin, OpenCode, Pi, Oh My Pi, and Kimi model settings, including non-empty `<engine>.models` alias maps. `models <engine>` returns an advisory per-engine catalog (bundled + config); `--live` merges a harness probe for cursor, droid, devin, opencode, pi, and omp when available. Discovery output applies best-effort credential scrubbing, so secret-shaped values (including model IDs or paths that resemble credentials) are redacted; copy exact values from your config file rather than from scrubbed output. Agents should start with `--summary` for a compact inventory, then use raw output only when needed.
+`describe` reports version, engines, modes, supported isolation values, prompt
+transforms, effective policy, top-level profile config metadata, representative
+argv shapes, and a command catalog. Full `describe` is a strict superset of
+`describe --summary`, so fields present in summary keep the same names in the
+full payload.
+
+`models` reports configured settings and cached discovery for Cursor, Droid,
+Codex, Kimi, Claude, Grok, Devin, OpenCode, Pi, and Oh My Pi. A per-engine
+catalog merges sources in this order: explicit config, current live or
+profile-scoped discovery, the legacy workspace reasoning cache, then bundled
+advisory IDs. `models <engine> --live` runs one fresh probe in the selected
+profile environment, but does not update Delegate config or cache. Use setup or
+`capabilities refresh` when ordinary launches should consume the new record.
+Claude is the only harness without a non-interactive live model catalog.
+
+Automatic setup and refresh use these evidence sources:
+
+| Harness | Discovered model scope | Reasoning evidence |
+| --- | --- | --- |
+| Cursor | Models visible to the active account | Only corroborated catalog routes are recorded as `inferred-route`; explicit config mappings stay authoritative. |
+| Droid | Built-in help plus harness-native custom-model settings | Per-model help details are `exact`; missing or ambiguous details remain unknown. |
+| Codex | Models visible to the active account | Per-model effort menus from `debug models` are `exact`. |
+| Kimi | Models in the active Kimi configuration | Provider metadata may advertise efforts, but Delegate has no Kimi effort transport and still rejects `--reasoning-effort`. |
+| Claude | No model enumeration | The native effort enum is harness-wide evidence. |
+| Grok | Models visible to the active account | Exact config, discovery, or bundled declarations win; otherwise the native effort enum is harness-wide compatibility evidence and model-specific support remains unknown. |
+| Devin | No prompt-free model enumeration | Automatic discovery records only installation/version; Delegate has no Devin effort transport. |
+| OpenCode | Harness catalog | Listed variants are `exact` for that model; models without exact variant evidence retain the documented unvalidated pass-through path. |
+| Pi | Harness catalog | Thinking support is model-specific, but available labels come from a harness-wide enum and are reported as partial model evidence. |
+| Oh My Pi | Harness catalog | A model's explicit `thinking` array is exact; missing arrays use harness-partial compatibility rather than fabricated model evidence. |
+
+`modelScope`/`catalogScope` describes where a list came from, not whether a real
+launch is authenticated: `account` is the active account's visible menu,
+`configured` is harness-native configuration, `catalog` is a CLI catalog, and
+`unknown` means no reliable model list was exposed. Setup does not validate
+credentials online beyond whatever the metadata command itself requires.
+
+Reasoning resolution keeps evidence strength explicit. `exact` binds effort
+labels to one model selector. `inferred-route` is a Cursor model-selection route
+corroborated by the catalog. Harness-wide or model-partial evidence proves a
+transport label but not exact per-model support. `unknown` proves neither. An
+exact empty menu is authoritative and rejects effort instead of falling through
+to a bundled guess.
+
+For a launch, an explicit CLI/JSON model or configured alias/default remains the
+model choice. Exact capability precedence is manual config, profile discovery,
+the read-only legacy workspace cache, then bundled fallback. Harness-specific
+compatibility paths apply only when exact evidence is absent. A discovered
+native default may validate capability metadata without forcing a `--model`
+argument, so the child harness can still choose its own default.
+
+Discovery is scoped to the resolved auth profile. The implicit profile uses
+`~/.delegate/cache/discovery/default.json`; named profiles use separate hashed
+files in the same owner-only directory. A refresh replaces successful harness
+records independently. If one current probe fails, its last-known-good record
+is retained and the refresh response lists that harness in `staleHarnesses`.
+If the configured executable selector changes, cached reads mark that harness
+stale and ordinary launches ignore only that harness's record until refresh.
+Cached reads never run `--version` merely to test staleness.
+
+All automatic probes run with `shell=False`, stdin closed, a neutral temporary
+working directory, bounded output, and a timeout. They pass the active profile
+environment but do not carry a task prompt. Devin is the explicit exception on
+the opt-in one-off surface: `models devin --live` uses a bounded invalid-model,
+prompt-like invocation to make Devin print its available-model error. Setup and
+`capabilities refresh` never use that Devin invocation; they run `--version`
+only.
+
+Discovery output applies best-effort credential scrubbing, so secret-shaped
+model IDs or diagnostic values may appear as `***`. Exact values should come
+from the private config or cache, not a scrubbed public projection. Agents
+should start with `models --summary`, then request one per-engine catalog.
 
 Both `describe` and `models` include provenance fields useful for detecting installed-runtime drift:
 
 - `runtime.version`, `runtime.modulePath`, `runtime.packageRoot`, `runtime.executable`, and `runtime.pythonExecutable`.
 - `configResolution.source`, `configResolution.effectiveConfigPath`, and ordered `configResolution.layers` showing embedded, user, workspace, and `DELEGATE_CONFIG` layers when discoverable.
 
-`capabilities` reports reasoning-effort support from config, the workspace cache, and bundled fallback data without invoking child binaries. `capabilities refresh` may invoke child CLIs, validates the discovered data, and writes `.delegate/capabilities/reasoning.json` in the resolved workspace only after a successful refresh. The cache is runtime state and should not be committed.
+`capabilities` reads config, the selected profile's user cache, the legacy
+workspace cache, and bundled fallbacks without invoking child binaries.
+`capabilities refresh` probes all supported harnesses and atomically writes the
+selected profile's user cache when at least one installed harness returns a
+valid record. It no longer writes `.delegate/capabilities/reasoning.json`; that
+workspace file remains a lower-precedence, read-only compatibility source and
+should not be committed.
 
 ### Help and discovery
 

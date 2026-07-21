@@ -12,7 +12,8 @@ Reasoning effort lets callers request provider-specific model thinking depth wit
 | --- | --- |
 | `src/delegate_agent/reasoning.py` | Capability model and validation. |
 | `src/delegate_agent/capability_commands.py` | Capabilities command. |
-| `src/delegate_agent/cli.py` | Effort resolution and provider emission. |
+| `src/delegate_agent/request_build.py` | Effort resolution and provider emission. |
+| `src/delegate_agent/harness_discovery.py` | Profile-scoped discovered evidence. |
 | `src/delegate_agent/config.py` | Effort config validation. |
 | `tests/test_reasoning_capabilities.py` | Reasoning tests. |
 
@@ -22,12 +23,16 @@ Reasoning effort lets callers request provider-specific model thinking depth wit
 | --- | --- | --- |
 | `ReasoningCapability` | `src/delegate_agent/reasoning.py` | Resolved support for one harness, model, and effort. |
 | `BUNDLED_REASONING_CAPABILITIES` | `src/delegate_agent/reasoning.py` | Fallback declarations. |
-| `resolve_reasoning_capability()` | `src/delegate_agent/reasoning.py` | Validates Codex, Droid, and Cursor support. |
-| `resolve_claude_native_effort()` | `src/delegate_agent/reasoning.py` | Validates Claude native labels. |
+| `resolve_reasoning_capability()` | `src/delegate_agent/reasoning.py` | Resolves exact, partial, and fallback evidence. |
 
 ## How it works
 
-Codex emits a config override, Droid emits `--reasoning-effort`, Cursor maps effort to configured models, Claude emits native `--effort`, OpenCode passes effort through as `--variant` without model validation, and Kimi is unsupported in v1. Config declarations win over cache declarations, which win over bundled fallback data.
+Codex emits a config override, Droid emits `--reasoning-effort`, Cursor selects
+a configured or corroborated discovered model route, Claude and Grok emit
+native `--effort`, OpenCode emits `--variant`, and Pi/Oh My Pi emit
+`--thinking`. Exact model menus fail closed; harness-partial evidence remains
+labeled. Manual config wins over profile discovery, which wins over the legacy
+workspace cache and bundled fallback. Kimi and Devin expose no effort transport.
 
 ## Integration points
 
@@ -35,7 +40,10 @@ Codex emits a config override, Droid emits `--reasoning-effort`, Cursor maps eff
 
 ## Entry points for modification
 
-Update bundled declarations and validation in `src/delegate_agent/reasoning.py`, provider emission in `src/delegate_agent/cli.py`, and validation in `src/delegate_agent/config.py`.
+Update bundled declarations and validation in `src/delegate_agent/reasoning.py`,
+provider emission in `src/delegate_agent/request_build.py`, discovery adapters
+in `src/delegate_agent/harness_discovery.py`, and config validation in
+`src/delegate_agent/config.py`.
 
 ## Key source files
 
@@ -43,6 +51,7 @@ Update bundled declarations and validation in `src/delegate_agent/reasoning.py`,
 | --- | --- |
 | `src/delegate_agent/reasoning.py` | Capability model and validation. |
 | `src/delegate_agent/capability_commands.py` | Capabilities command. |
-| `src/delegate_agent/cli.py` | Effort resolution and provider emission. |
+| `src/delegate_agent/request_build.py` | Effort resolution and provider emission. |
+| `src/delegate_agent/harness_discovery.py` | Profile discovery and exact/partial evidence. |
 | `src/delegate_agent/config.py` | Effort config validation. |
 | `tests/test_reasoning_capabilities.py` | Reasoning tests. |

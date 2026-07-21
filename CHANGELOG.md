@@ -5,6 +5,49 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Added `delegate setup` for first-run harness discovery. It fingerprints all
+  supported installed harnesses, records available model/reasoning metadata in
+  a profile-scoped user cache, creates a minimal selector-only config when no
+  config exists, and reports discovery readiness separately from launchability.
+- Cached `models`/`capabilities` views now project profile discovery with source
+  and evidence metadata. `models <engine> --live` provides a non-persistent
+  one-off probe; `capabilities refresh` persists a full refresh for the selected
+  profile.
+- Runtime model and reasoning metadata now distinguish the requested model,
+  argv-resolved model, capability-validation model, requested effort, resolved
+  effort, source, evidence strength, and transport.
+
+### Changed
+
+- Model and reasoning resolution now prefers explicit CLI/config choices and
+  exact discovered evidence before legacy workspace or bundled fallbacks.
+  Exact negative menus fail closed; partial harness evidence and Cursor inferred
+  routes remain visibly labeled rather than being promoted to model-exact facts.
+- Discovery refresh is last-known-good per harness. Successful records update
+  independently, failed probes retain the prior record and report staleness,
+  and selector drift invalidates only the affected harness without probing on
+  an ordinary launch.
+- `capabilities refresh` now writes the selected profile's private discovery
+  cache. The old workspace reasoning cache remains a lower-precedence read-only
+  compatibility source.
+
+### Security
+
+- Discovery probes use fingerprinted allowlisted selectors, fixed argv with no
+  shell, closed stdin, neutral temporary working directories, bounded output,
+  timeouts, normalized cache schemas, atomic owner-only writes, and scrubbed
+  model/warning projections. Config and cache source paths remain intentionally
+  visible diagnostics. Automatic Devin discovery remains prompt-free; only the
+  explicitly requested `models devin --live` path uses its bounded prompt-like
+  invalid-model probe.
+- Setup never overwrites an existing config and refuses unsafe selectors,
+  final-component symlinks, and concurrent config races rather than mixing
+  discovery results across config states.
+
 ## [0.19.0] - 2026-07-20
 
 ### Added
