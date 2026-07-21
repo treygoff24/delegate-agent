@@ -48,6 +48,7 @@ TOP_LEVEL_COMMANDS = (
     "worktree",
     "workflow",
     "models",
+    "setup",
     "describe",
     "agent-help",
     "capabilities",

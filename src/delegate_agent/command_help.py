@@ -98,7 +98,7 @@ GLOBAL_OPTIONS: tuple[OptionSpec, ...] = (
     OptionSpec(
         "--auth-profile",
         "NAME",
-        "Select a configured profiles.definitions entry for this launch.",
+        "Select an already-defined profiles.definitions environment for a supported command.",
     ),
     OptionSpec(
         "--group",
@@ -1182,6 +1182,32 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "--no-completion-report",
         ),
     ),
+    "setup": CommandSpec(
+        name="setup",
+        summary="Discover installed harnesses and initialize Delegate for first use.",
+        usage=("delegate [--json] [--auth-profile NAME] setup",),
+        examples=(
+            "delegate setup",
+            "delegate --json setup",
+            "delegate --json --auth-profile work setup",
+        ),
+        notes=(
+            "Runs metadata-only harness probes; it does not install harnesses, authenticate "
+            "accounts, or submit model prompts.",
+            "--auth-profile selects an existing profiles.definitions entry; setup does not "
+            "create profile definitions.",
+            "Existing config files are never rewritten.",
+        ),
+        see_also=("models", "capabilities", "config init", "profiles"),
+        unsupported_global_options=(
+            "--cwd",
+            "--isolation",
+            "--group",
+            "--pass-through",
+            "--completion-report",
+            "--no-completion-report",
+        ),
+    ),
     "worktree": CommandSpec(
         name="worktree",
         summary="Manage persistent isolation worktrees (list, show, remove, prune, gc).",
@@ -1387,8 +1413,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         name="models",
         summary="List configured engines and model settings, or an advisory catalog for one engine.",
         usage=(
-            "delegate [--json] models [--summary]",
-            "delegate [--json] models <engine> [--live]",
+            "delegate [--json] [--auth-profile NAME] models [--summary]",
+            "delegate [--json] [--auth-profile NAME] models <engine> [--live]",
         ),
         arguments=(
             ArgSpec(
@@ -1415,15 +1441,16 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         notes=(
             "Discovery output applies best-effort credential scrubbing; secret-shaped model IDs or paths are redacted, so copy exact values from config.",
             "Agent discovery should prefer --summary, then use raw output only when needed.",
-            "Bundled tables are advisory; the harness is the source of truth (use --live where supported).",
-            "Per-engine catalogs merge config aliases/defaultModel over live results over bundled IDs.",
+            "Cached reads use the selected profile's private discovery snapshot and do not invoke child binaries.",
+            "--live runs a fresh metadata probe in the selected profile environment and does not update the cache.",
+            "Bundled tables remain advisory fallbacks; explicit config and harness observations take precedence.",
+            "Per-engine catalogs merge config over discovery/live over legacy cache over bundled IDs.",
         ),
         see_also=("describe", "cursor", "codex", "droid", "kimi", "claude"),
-        unsupported_global_options=("--auth-profile",),
     ),
     "capabilities": CommandSpec(
         name="capabilities",
-        summary="Report reasoning-effort capabilities from config, workspace cache, and bundled fallback.",
+        summary="Report reasoning-effort capabilities from config, profile discovery, and fallbacks.",
         usage=(
             "delegate [--json] [--auth-profile NAME] capabilities",
             "delegate [--json] [--auth-profile NAME] capabilities refresh",
@@ -1433,8 +1460,9 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "delegate capabilities refresh",
         ),
         notes=(
-            "Reporting does not invoke child binaries.",
-            "refresh may invoke child CLIs and writes .delegate/capabilities/reasoning.json in the workspace.",
+            "Cached reporting reads the selected profile's private user cache and invokes no child binaries.",
+            "refresh runs metadata-only probes for every supported harness and updates that profile's user cache.",
+            "The legacy workspace reasoning cache remains a lower-precedence read-only compatibility source.",
         ),
         see_also=("models", "describe", "codex", "droid", "cursor"),
     ),
@@ -1707,9 +1735,10 @@ def render_overview_text() -> str:
         "delegate [--cwd PATH] [--json] workflow result [<wfId>] [--field KEY]",
         "delegate [--cwd PATH] [--json] workflow list",
         "delegate [--cwd PATH] [--json] [--auth-profile NAME] profiles",
-        "delegate [--json] models [--summary]",
-        "delegate [--json] models <engine> [--live]",
-        "delegate [--json] capabilities [refresh]",
+        "delegate [--json] [--auth-profile NAME] setup",
+        "delegate [--json] [--auth-profile NAME] models [--summary]",
+        "delegate [--json] [--auth-profile NAME] models <engine> [--live]",
+        "delegate [--json] [--auth-profile NAME] capabilities [refresh]",
         "delegate [--json] describe [--summary]",
         "delegate agent-help",
         "delegate help [<command> [<subcommand>]]",
@@ -1735,6 +1764,9 @@ def render_overview_text() -> str:
 
     lines.append("")
     lines.append("Discovery:")
+    lines.append(
+        "  delegate setup                 Discover installed harnesses and initialize Delegate."
+    )
     lines.append("  delegate help <command>        Focused help for any command path.")
     lines.append("  delegate --json <command> --help   Machine-readable spec for an agent.")
     lines.append("  delegate --json describe --summary  Compact command/config surface inventory.")

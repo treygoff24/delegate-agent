@@ -50,8 +50,25 @@ _delegate_is_readonly_request() {
   done
   _cmd="${1:-}"
   [ "$#" -gt 0 ] && shift
+  # Help is always read-only, regardless of whether a mutation-like token also
+  # appears before or after it in the subcommand arguments.
+  for _delegate_help_arg in "$@"; do
+    case "$_delegate_help_arg" in
+      --help|-h)
+        return 0
+        ;;
+    esac
+  done
   case "$_cmd" in
-    profiles|runs|run-output|describe|models|snapshot|agent-help|help|--help|-h|--version)
+    profiles|runs|run-output|describe|snapshot|agent-help|help|--help|-h|--version)
+      return 0
+      ;;
+    models)
+      for _delegate_model_arg in "$@"; do
+        if [ "$_delegate_model_arg" = "--live" ]; then
+          return 1
+        fi
+      done
       return 0
       ;;
     capabilities)

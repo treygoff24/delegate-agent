@@ -19,7 +19,7 @@ ENGINE_MODELS_SCHEMA = "delegate.engine-models.v1"
 LIVE_PROBE_TIMEOUT_SEC = 10
 DEVIN_LIVE_SENTINEL = "delegate-live-probe-sentinel"
 LIVE_UNSUPPORTED_ENGINES = frozenset({"claude"})
-_SOURCE_RANK = {"bundled": 0, "live": 1, "config": 2}
+_SOURCE_RANK = {"bundled": 0, "cache": 1, "discovery": 2, "live": 2, "config": 3}
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 
@@ -42,6 +42,9 @@ def engine_models_payload(
     live: bool = False,
     factory_settings_path: Path | None = None,
     workspace: Path | None = None,
+    discovery: JsonObject | None = None,
+    legacy_cache: JsonObject | None = None,
+    profile: profiles.ProfileResolution | None = None,
 ) -> JsonObject:
     validate_engine_name(engine)
     section = config.get(engine)
@@ -73,6 +76,11 @@ def engine_models_payload(
     warning: str | None = None
     live_field: JsonValue = False
 
+    for item in _legacy_reasoning_models(legacy_cache, engine):
+        model_id = item.get("id")
+        if isinstance(model_id, str) and model_id:
+            _merge_entry(entries, model_id, source="cache")
+
     if live:
         if engine in LIVE_UNSUPPORTED_ENGINES:
             live_field = {
@@ -80,17 +88,20 @@ def engine_models_payload(
                 "reason": f"{engine} has no non-interactive model enumeration",
             }
         else:
-            live_models, probe_warning = _probe_live_models(
+            live_models, probe_warning, live_default = _probe_live_models(
                 config,
                 engine,
                 factory_settings_path=factory_settings_path,
                 workspace=workspace,
+                profile=profile,
             )
             if probe_warning:
                 warning = probe_warning
                 live_field = bool(live_models)
             else:
                 live_field = True
+            if default is None and live_default is not None:
+                default = live_default
             for item in live_models:
                 model_id = item.get("id")
                 if not isinstance(model_id, str) or not model_id:
@@ -101,6 +112,19 @@ def engine_models_payload(
                     source="live",
                     note=item.get("note") if isinstance(item.get("note"), str) else None,
                 )
+    else:
+        if default is None:
+            default = _discovered_default(discovery, engine)
+        for item in _discovered_models(discovery, engine):
+            model_id = item.get("id")
+            if not isinstance(model_id, str) or not model_id:
+                continue
+            _merge_entry(
+                entries,
+                model_id,
+                source="discovery",
+                note=item.get("note") if isinstance(item.get("note"), str) else None,
+            )
 
     _merge_config_models(entries, section, aliases)
 
@@ -192,15 +216,17 @@ def _probe_live_models(
     *,
     factory_settings_path: Path | None = None,
     workspace: Path | None = None,
-) -> tuple[list[JsonObject], str | None]:
+    profile: profiles.ProfileResolution | None = None,
+) -> tuple[list[JsonObject], str | None, str | None]:
+    env = profiles.child_environment(overrides=profile.env if profile is not None else None)
     try:
         if engine == "devin":
-            return _probe_devin_models(config), None
+            return _probe_devin_models(config, env=env), None, None
         del workspace  # Global discovery is intentionally repository-neutral.
         record = harness_discovery.probe_harness(
             config,
             engine,
-            env=profiles.child_environment(),
+            env=env,
             factory_settings_path=factory_settings_path,
         )
         models = _legacy_models(record)
@@ -213,10 +239,14 @@ def _probe_live_models(
         )
         warning = "; ".join(warnings) or None
         if status in {"missing", "error"}:
-            return [], warning or f"{engine} metadata probe {status}"
-        return models, warning
+            return [], warning or f"{engine} metadata probe {status}", None
+        default_model = record.get("defaultModel")
+        discovered_default = (
+            default_model if isinstance(default_model, str) and default_model else None
+        )
+        return models, warning, discovered_default
     except Exception as exc:
-        return [], f"live probe failed: {exc}"
+        return [], f"live probe failed: {exc}", None
 
 
 def _legacy_models(fragment: JsonObject) -> list[JsonObject]:
@@ -234,6 +264,31 @@ def _legacy_models(fragment: JsonObject) -> list[JsonObject]:
     return models
 
 
+def _discovered_models(discovery: JsonObject | None, engine: str) -> list[JsonObject]:
+    if not isinstance(discovery, dict):
+        return []
+    harnesses = discovery.get("harnesses")
+    record = harnesses.get(engine) if isinstance(harnesses, dict) else None
+    return _legacy_models(record) if isinstance(record, dict) else []
+
+
+def _discovered_default(discovery: JsonObject | None, engine: str) -> str | None:
+    if not isinstance(discovery, dict):
+        return None
+    harnesses = discovery.get("harnesses")
+    record = harnesses.get(engine) if isinstance(harnesses, dict) else None
+    default = record.get("defaultModel") if isinstance(record, dict) else None
+    return default if isinstance(default, str) and default else None
+
+
+def _legacy_reasoning_models(cache: JsonObject | None, engine: str) -> list[JsonObject]:
+    if not isinstance(cache, dict):
+        return []
+    harnesses = cache.get("harnesses")
+    record = harnesses.get(engine) if isinstance(harnesses, dict) else None
+    return _legacy_models(record) if isinstance(record, dict) else []
+
+
 def parse_cursor_models_output(raw: str) -> list[JsonObject]:
     return _legacy_models(harness_discovery.parse_cursor_catalog(strip_ansi(raw)))
 
@@ -242,7 +297,7 @@ def parse_droid_custom_models(custom_models: list[object]) -> list[JsonObject]:
     return _legacy_models({"models": harness_discovery.parse_droid_settings_models(custom_models)})
 
 
-def _probe_devin_models(config: JsonObject) -> list[JsonObject]:
+def _probe_devin_models(config: JsonObject, *, env: dict[str, str]) -> list[JsonObject]:
     binary = delegate_config.harness_binary(config, "devin")
     # The invalid sentinel makes devin fail fast pre-session; running from a
     # throwaway cwd additionally guarantees the probe can never touch the
@@ -256,6 +311,7 @@ def _probe_devin_models(config: JsonObject) -> list[JsonObject]:
             check=False,
             stdin=subprocess.DEVNULL,
             cwd=probe_cwd,
+            env=env,
         )
     combined = f"{completed.stderr or ''}\n{completed.stdout or ''}"
     return parse_devin_available_models(combined)

@@ -16,6 +16,7 @@ from delegate_agent import (
     command_errors,
     command_help,  # noqa: F401  # re-exported for tests / back-compat
     config_commands,
+    harness_discovery,
     inspection_commands,
     profile_commands,
     profile_guard,
@@ -1095,6 +1096,22 @@ def main(
             config, source = load_config(workspace=config_workspace)
             validate_config(config)
 
+        discovery_profile: profiles.ProfileResolution | None = None
+        discovery_snapshot: JsonObject | None = None
+        if parsed.subcommand in {"models", "capabilities"}:
+            discovery_profile = profiles.resolve_active_profile(
+                config,
+                profiles.child_environment(),
+                cli_override=global_options.auth_profile,
+            )
+            capabilities_refresh = (
+                parsed.subcommand == "capabilities"
+                and parsed.capabilities is not None
+                and parsed.capabilities.refresh
+            )
+            if not capabilities_refresh:
+                discovery_snapshot = harness_discovery.load_discovery_cache(discovery_profile.name)
+
         if parsed.subcommand == "models":
             inspection = parsed.inspection or InspectionOptions()
             return emit_models(
@@ -1106,6 +1123,8 @@ def main(
                 summary=inspection.summary,
                 engine=inspection.engine,
                 live=inspection.live,
+                discovery=discovery_snapshot,
+                profile=discovery_profile,
             )
         if parsed.subcommand == "describe":
             inspection = parsed.inspection or InspectionOptions()
@@ -1133,6 +1152,8 @@ def main(
                 config_source=source,
                 workspace=workspace.path,
                 auth_profile_override=global_options.auth_profile,
+                profile=discovery_profile,
+                discovery=discovery_snapshot,
                 stdout=stdout,
             )
 

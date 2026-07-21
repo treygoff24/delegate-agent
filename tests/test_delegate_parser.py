@@ -59,6 +59,9 @@ class ParserTests(unittest.TestCase):
             ["--json", "describe", "--summary"],
             ["config", "init"],
             ["--json", "config", "init", "--force"],
+            ["setup"],
+            ["--json", "setup"],
+            ["--auth-profile", "work", "setup"],
             ["agent-help"],
             ["dry-run", "cursor", "work", "prompt"],
             ["dry-run", "claude", "safe", "prompt"],
@@ -78,6 +81,48 @@ class ParserTests(unittest.TestCase):
         parsed = self.delegate.parse_cli(["--json", "--cwd", "/tmp/repo", "models"])
         self.assertTrue(parsed.global_options.json_mode)
         self.assertEqual(parsed.global_options.cwd, "/tmp/repo")
+
+    def test_setup_accepts_only_json_and_auth_profile(self):
+        parsed = self.delegate.parse_cli(["--json", "--auth-profile", "work", "setup"])
+        self.assertEqual(parsed.subcommand, "setup")
+        self.assertTrue(parsed.global_options.json_mode)
+        self.assertEqual(parsed.global_options.auth_profile, "work")
+
+        trailing_json = self.delegate.parse_cli(["setup", "--json"])
+        self.assertTrue(trailing_json.global_options.json_mode)
+
+    def test_setup_rejects_trailing_arguments(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(["setup", "unexpected"])
+        self.assertEqual(ctx.exception.error, "unexpected_argument")
+
+    def test_setup_rejects_irrelevant_global_options(self):
+        cases = (
+            ["--cwd", "/tmp", "setup"],
+            ["--isolation", "none", "setup"],
+            ["--pass-through", "setup"],
+            ["--completion-report", "none", "setup"],
+            ["--no-completion-report", "setup"],
+            ["--group", "batch", "setup"],
+        )
+        for argv in cases:
+            with self.subTest(argv=argv), self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.delegate.parse_cli(argv)
+            self.assertEqual(ctx.exception.error, "invalid_option_combination")
+
+    def test_setup_help_does_not_bypass_irrelevant_global_rejection(self):
+        cases = (
+            ["--cwd", "/tmp", "setup", "--help"],
+            ["--isolation", "none", "setup", "--help"],
+            ["--pass-through", "setup", "--help"],
+            ["--completion-report", "none", "setup", "--help"],
+            ["--no-completion-report", "setup", "--help"],
+            ["--group", "batch", "setup", "--help"],
+        )
+        for argv in cases:
+            with self.subTest(argv=argv), self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.delegate.parse_cli(argv)
+            self.assertEqual(ctx.exception.error, "invalid_option_combination")
 
     def test_codex_fast_flags_parse_as_tri_state(self):
         fast = self.delegate.parse_cli(["codex", "safe", "--fast", "review"])
@@ -215,16 +260,25 @@ class ParserTests(unittest.TestCase):
             self.delegate.parse_cli(["models", "--verbose"])
         self.assertEqual(ctx.exception.error, "unexpected_argument")
 
-    def test_auth_profile_rejected_for_non_refresh_capabilities(self):
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.parse_cli(["--auth-profile", "work", "capabilities"])
-        self.assertEqual(ctx.exception.error, "invalid_option_combination")
-        self.assertIn("refresh", ctx.exception.message)
+    def test_auth_profile_accepted_for_models_and_capabilities_reads(self):
+        for argv in (
+            ["--auth-profile", "work", "models"],
+            ["--auth-profile", "work", "models", "codex", "--live"],
+            ["--auth-profile", "work", "capabilities"],
+        ):
+            with self.subTest(argv=argv):
+                parsed = self.delegate.parse_cli(argv)
+                self.assertEqual(parsed.global_options.auth_profile, "work")
 
     def test_auth_profile_accepted_for_capabilities_refresh(self):
         parsed = self.delegate.parse_cli(["--auth-profile", "work", "capabilities", "refresh"])
         self.assertEqual(parsed.global_options.auth_profile, "work")
         self.assertTrue(parsed.capabilities.refresh)
+
+    def test_auth_profile_remains_rejected_for_describe(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(["--auth-profile", "work", "describe"])
+        self.assertEqual(ctx.exception.error, "invalid_option_combination")
 
     def test_auth_profile_accepted_for_grok_launch(self):
         parsed = self.delegate.parse_cli(["--auth-profile", "work", "grok", "safe", "x"])

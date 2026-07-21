@@ -772,6 +772,205 @@ class PlainModelsUnchangedTests(unittest.TestCase):
         )
 
 
+class UnifiedDiscoveryProjectionTests(unittest.TestCase):
+    def setUp(self):
+        from delegate_agent.config import embedded_default_config
+
+        self.config = embedded_default_config()
+
+    def test_cached_engine_models_merge_all_four_layers_without_spawning(self):
+        from delegate_agent import harness_discovery
+        from delegate_agent.model_discovery import engine_models_payload
+
+        self.config["codex"]["models"] = {"configured": "config-only"}
+        legacy = {
+            "harnesses": {
+                "codex": {
+                    "models": {
+                        "legacy-only": {"supported": ["high"]},
+                        "gpt-5.5": {"supported": ["high"]},
+                    }
+                }
+            }
+        }
+        discovery = {
+            "harnesses": {
+                "codex": {
+                    "defaultModel": "discovery-only",
+                    "models": {
+                        "discovery-only": {"displayName": "Fresh"},
+                        "gpt-5.5": {"displayName": "Observed"},
+                    },
+                }
+            }
+        }
+        with (
+            mock.patch.object(
+                harness_discovery,
+                "run_metadata_probe",
+                side_effect=AssertionError("cached models must not spawn"),
+            ),
+            mock.patch.object(
+                harness_discovery,
+                "write_discovery_cache",
+                side_effect=AssertionError("cached models must not write"),
+            ),
+        ):
+            payload = engine_models_payload(
+                self.config,
+                "codex",
+                discovery=discovery,
+                legacy_cache=legacy,
+            )
+
+        by_id = {item["id"]: item for item in payload["models"]}
+        self.assertEqual(by_id["legacy-only"]["source"], "cache")
+        self.assertEqual(by_id["discovery-only"]["source"], "discovery")
+        self.assertEqual(by_id["gpt-5.5"]["source"], "discovery")
+        self.assertEqual(by_id["config-only"]["source"], "config")
+        self.assertEqual(by_id["discovery-only"]["note"], "Fresh")
+        self.assertEqual(payload["default"], "discovery-only")
+
+    def test_live_probe_uses_profile_environment_and_never_writes_cache(self):
+        from delegate_agent import harness_discovery, profiles
+        from delegate_agent.model_discovery import engine_models_payload
+
+        profile = profiles.ProfileResolution(
+            name="work",
+            source="test",
+            env={"DISCOVERY_ACCOUNT": "work"},
+        )
+        record = {
+            "probeStatus": "ok",
+            "models": {"live-only": {"displayName": "Live"}},
+            "warnings": [],
+        }
+
+        def probe(_config, _engine, *, env, factory_settings_path=None):
+            del factory_settings_path
+            self.assertEqual(env["DISCOVERY_ACCOUNT"], "work")
+            return record
+
+        with (
+            mock.patch.object(harness_discovery, "probe_harness", side_effect=probe),
+            mock.patch.object(
+                harness_discovery,
+                "write_discovery_cache",
+                side_effect=AssertionError("models --live must not write"),
+            ),
+        ):
+            payload = engine_models_payload(
+                self.config,
+                "codex",
+                live=True,
+                profile=profile,
+            )
+        by_id = {item["id"]: item for item in payload["models"]}
+        self.assertEqual(by_id["live-only"]["source"], "live")
+
+    def test_devin_live_probe_receives_profile_environment(self):
+        from delegate_agent import profiles
+        from delegate_agent.model_discovery import engine_models_payload
+
+        profile = profiles.ProfileResolution(
+            name="work",
+            source="test",
+            env={"DEVIN_ACCOUNT": "work"},
+        )
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=1,
+            stdout="",
+            stderr="Available: adaptive, profile-devin",
+        )
+        with mock.patch(
+            "delegate_agent.model_discovery.subprocess.run", return_value=completed
+        ) as run:
+            payload = engine_models_payload(
+                self.config,
+                "devin",
+                live=True,
+                profile=profile,
+            )
+        self.assertEqual(run.call_args.kwargs["env"]["DEVIN_ACCOUNT"], "work")
+        by_id = {item["id"]: item for item in payload["models"]}
+        self.assertEqual(by_id["profile-devin"]["source"], "live")
+
+    def test_summary_adds_harness_metadata_without_changing_aliases(self):
+        from delegate_agent import profiles
+        from delegate_agent.constants import KNOWN_ENGINES
+        from delegate_agent.describe_payload import models_summary_payload
+
+        before = models_summary_payload(self.config, "fixture")
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = _write_executable(Path(tmp) / "codex", "#!/bin/sh\nexit 0\n")
+            self.config["codex"]["binary"] = str(binary)
+            discovery = {
+                "harnesses": {
+                    "codex": {
+                        "installed": True,
+                        "selector": [str(binary)],
+                        "probeStatus": "ok",
+                        "modelScope": "account",
+                    }
+                }
+            }
+            after = models_summary_payload(
+                self.config,
+                "fixture",
+                discovery=discovery,
+                profile=profiles.empty_profile_resolution(),
+            )
+
+        self.assertEqual(after["aliases"], before["aliases"])
+        self.assertEqual(after["counts"], before["counts"])
+        self.assertEqual(set(after["harnesses"]), set(KNOWN_ENGINES))
+        codex = after["harnesses"]["codex"]
+        self.assertEqual(codex["catalogScope"], "account")
+        self.assertFalse(codex["stale"])
+        self.assertTrue(codex["launchable"])
+        missing = after["harnesses"]["droid"]
+        self.assertEqual(
+            missing,
+            {
+                "installed": False,
+                "probeStatus": "missing",
+                "catalogScope": "unknown",
+                "stale": False,
+                "launchable": False,
+            },
+        )
+
+    def test_selector_drift_is_stale_and_not_launchable_without_spawning(self):
+        from delegate_agent import harness_discovery, profiles
+        from delegate_agent.describe_payload import models_summary_payload
+
+        discovery = {
+            "harnesses": {
+                "codex": {
+                    "installed": True,
+                    "selector": ["/old/codex"],
+                    "probeStatus": "ok",
+                    "modelScope": "account",
+                }
+            }
+        }
+        self.config["codex"]["binary"] = "/new/codex"
+        with mock.patch.object(
+            harness_discovery,
+            "run_metadata_probe",
+            side_effect=AssertionError("summary drift must not spawn"),
+        ):
+            summary = models_summary_payload(
+                self.config,
+                "fixture",
+                discovery=discovery,
+                profile=profiles.empty_profile_resolution(),
+            )
+        self.assertTrue(summary["harnesses"]["codex"]["stale"])
+        self.assertFalse(summary["harnesses"]["codex"]["launchable"])
+
+
 class CommandHelpModelsTests(unittest.TestCase):
     def test_models_spec_mentions_engine_and_live(self):
         from delegate_agent import command_help
@@ -783,8 +982,11 @@ class CommandHelpModelsTests(unittest.TestCase):
         flags = {opt.flag for opt in spec.options}
         self.assertIn("--live", flags)
         self.assertTrue(any(arg.name == "engine" for arg in spec.arguments))
+        self.assertIn("--auth-profile", usage)
+        self.assertNotIn("--auth-profile", spec.unsupported_global_options)
         notes = " ".join(spec.notes).lower()
         self.assertIn("advisory", notes)
+        self.assertIn("does not update the cache", notes)
 
 
 if __name__ == "__main__":

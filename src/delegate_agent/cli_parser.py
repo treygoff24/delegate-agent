@@ -66,7 +66,7 @@ VALUE_GLOBAL_OPTIONS = frozenset(
 )
 
 AUTH_PROFILE_SUBCOMMANDS = frozenset(KNOWN_ENGINES) | frozenset(
-    {"dry-run", "run", "profiles", "capabilities"}
+    {"dry-run", "run", "profiles", "models", "capabilities", "setup"}
 )
 GROUP_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 GROUP_SUBCOMMANDS = frozenset(KNOWN_ENGINES) | frozenset({"dry-run", "run"})
@@ -244,12 +244,6 @@ def parse_capabilities_subcommand(
         refresh = True
     elif rest:
         require_no_extra(rest, "capabilities")
-    if auth_profile is not None and not refresh:
-        raise DelegateError(
-            "invalid_option_combination",
-            "--auth-profile is only supported with capabilities refresh; "
-            "the cached capabilities report does not spawn a harness.",
-        )
     return ParsedCommand(
         "capabilities",
         global_options=GlobalOptions(
@@ -322,6 +316,32 @@ def parse_config_subcommand(
             force=force,
             json_mode=json_mode,
         ),
+    )
+
+
+def parse_setup_subcommand(
+    rest: list[str],
+    *,
+    json_mode: bool,
+    cwd: str | None,
+    pass_through: bool,
+    completion_report: str | None,
+    isolation: str | None,
+    auth_profile: str | None,
+) -> ParsedCommand:
+    rest, json_mode = consume_json_option(rest, json_mode)
+    if cwd is not None or pass_through or completion_report is not None or isolation is not None:
+        raise DelegateError(
+            "invalid_option_combination",
+            "delegate setup does not use --cwd, --isolation, --pass-through, or "
+            "completion-report options.",
+        )
+    if any(command_help.is_help_token(token) for token in rest):
+        return help_command(json_mode, "setup")
+    require_no_extra(rest, "setup")
+    return ParsedCommand(
+        "setup",
+        global_options=GlobalOptions(json_mode=json_mode, auth_profile=auth_profile),
     )
 
 
@@ -424,7 +444,8 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
         raise DelegateError(
             "invalid_option_combination",
             f"--auth-profile is not supported with delegate {subcommand}; "
-            "use it with launches, dry-run, run --input-json, profiles, or capabilities refresh.",
+            "use it with launches, dry-run, run --input-json, profiles, models, capabilities, "
+            "or setup.",
         )
     if group is not None and subcommand not in GROUP_SUBCOMMANDS:
         raise DelegateError(
@@ -459,6 +480,16 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
         )
     if subcommand == "config":
         return parse_config_subcommand(
+            rest,
+            json_mode=json_mode,
+            cwd=cwd,
+            pass_through=pass_through,
+            completion_report=completion_report,
+            isolation=isolation,
+            auth_profile=auth_profile,
+        )
+    if subcommand == "setup":
+        return parse_setup_subcommand(
             rest,
             json_mode=json_mode,
             cwd=cwd,

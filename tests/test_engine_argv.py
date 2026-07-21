@@ -1,3 +1,4 @@
+import errno
 import io
 import json
 import os
@@ -11,6 +12,33 @@ from tests.delegate_commands_test_base import CommandTestBase, make_git_repo
 
 
 class EngineArgvTests(CommandTestBase):
+    @staticmethod
+    def _successful_discovery_refresh(cache_path: str) -> dict:
+        return {
+            "snapshot": {
+                "schema": 1,
+                "profile": "default",
+                "capturedAt": "2026-07-20T21:00:00Z",
+                "harnesses": {
+                    "codex": {
+                        "models": {
+                            "gpt-refresh": {
+                                "reasoning": {
+                                    "supported": ["medium"],
+                                    "default": "medium",
+                                    "evidence": "exact",
+                                }
+                            }
+                        }
+                    }
+                },
+            },
+            "attempts": {"codex": {"installed": True, "probeStatus": "ok", "warnings": []}},
+            "updatedHarnesses": ["codex"],
+            "staleHarnesses": [],
+            "cachePath": cache_path,
+        }
+
     def test_cursor_safe_argv_agent_prefix(self):
         argv = self.delegate.build_cursor_argv(["agent"], "safe", "/repo", "composer-2.5", "hello")
         self.assertEqual(argv[0], "agent")
@@ -658,34 +686,24 @@ class EngineArgvTests(CommandTestBase):
         self.assertIn('model_reasoning_effort="high"', request.argv)
         self.assertEqual(request.reasoning_capability_source, "bundled")
 
-    def test_capabilities_refresh_overwrites_corrupt_cache(self):
+    def test_capabilities_refresh_leaves_corrupt_legacy_cache_untouched(self):
         with tempfile.TemporaryDirectory() as workspace:
             cache_path = Path(workspace) / ".delegate" / "capabilities" / "reasoning.json"
             cache_path.parent.mkdir(parents=True)
-            cache_path.write_text('{"not": "a cache"}', encoding="utf-8")
-            fake_bin = self.write_fake_executable(
-                "codex",
-                stdout=json.dumps(
-                    {
-                        "models": [
-                            {
-                                "slug": "gpt-refresh",
-                                "default_reasoning_level": "medium",
-                                "supported_reasoning_levels": [{"effort": "medium"}],
-                            }
-                        ]
-                    }
-                ),
-            )
-            code, _out, err = self.run_main(
-                ["--cwd", workspace, "--json", "capabilities", "refresh"],
-                path_prefix=fake_bin,
-            )
+            original = b'{"not": "a cache"}'
+            cache_path.write_bytes(original)
+            result = self._successful_discovery_refresh("/user/discovery/default.json")
+            with mock.patch.object(
+                self.delegate.harness_discovery,
+                "refresh_discovery",
+                return_value=result,
+            ):
+                code, out, err = self.run_main(
+                    ["--cwd", workspace, "--json", "capabilities", "refresh"]
+                )
             self.assertEqual(code, 0, err)
-            cache = json.loads(cache_path.read_text(encoding="utf-8"))
-            self.assertIn("gpt-refresh", cache["harnesses"]["codex"]["models"])
-            if os.name == "posix":
-                self.assertEqual(cache_path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(cache_path.read_bytes(), original)
+            self.assertEqual(json.loads(out)["cachePath"], "/user/discovery/default.json")
 
     def test_request_from_parsed_threads_cli_reasoning_effort(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
@@ -860,56 +878,108 @@ class EngineArgvTests(CommandTestBase):
             "cache",
         )
 
-    def test_capabilities_refresh_writes_valid_cache_from_fake_codex(self):
-        with tempfile.TemporaryDirectory() as workspace:
-            fake_bin = self.write_fake_executable(
-                "codex",
-                stdout=json.dumps(
-                    {
-                        "models": [
-                            {
-                                "slug": "gpt-refresh",
-                                "default_reasoning_level": "medium",
-                                "supported_reasoning_levels": [
-                                    {"effort": "low"},
-                                    {"effort": "medium"},
-                                ],
-                            }
-                        ]
+    def test_models_and_capabilities_select_literal_default_profile_cache_once(self):
+        home = Path(self._config_env["HOME"])
+        config_path = Path(self._config_env["DELEGATE_CONFIG"])
+        config_path.write_text(
+            json.dumps(
+                {
+                    "profiles": {
+                        "detectFrom": [],
+                        "default": "default",
+                        "definitions": {"default": {"env": {"HOME": "/profile/home"}}},
                     }
-                ),
-            )
-            code, _out, err = self.run_main(
-                ["--cwd", workspace, "--json", "capabilities", "refresh"],
-                path_prefix=fake_bin,
-            )
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        def snapshot(model: str) -> dict:
+            value = self.delegate.harness_discovery.empty_snapshot(profile="default")
+            value["harnesses"] = {
+                "codex": {
+                    "installed": True,
+                    "selector": ["/codex"],
+                    "version": "codex-cli 1.0.0",
+                    "probeStatus": "ok",
+                    "modelScope": "account",
+                    "defaultModel": model,
+                    "models": {
+                        model: {
+                            "reasoning": {
+                                "supported": ["high"],
+                                "evidence": "exact",
+                            }
+                        }
+                    },
+                    "harnessReasoning": None,
+                    "warnings": [],
+                }
+            }
+            return value
+
+        self.delegate.harness_discovery.write_discovery_cache(
+            None, snapshot("implicit-model"), home=home
+        )
+        self.delegate.harness_discovery.write_discovery_cache(
+            "default", snapshot("literal-model"), home=home
+        )
+
+        with mock.patch.object(
+            self.delegate.profiles,
+            "resolve_active_profile",
+            wraps=self.delegate.profiles.resolve_active_profile,
+        ) as resolve:
+            models_code, models_out, models_err = self.run_main(["--json", "models", "codex"])
+        self.assertEqual(models_code, 0, models_err)
+        resolve.assert_called_once()
+        model_ids = {item["id"] for item in json.loads(models_out)["models"]}
+        self.assertIn("literal-model", model_ids)
+        self.assertNotIn("implicit-model", model_ids)
+
+        with mock.patch.object(
+            self.delegate.profiles,
+            "resolve_active_profile",
+            wraps=self.delegate.profiles.resolve_active_profile,
+        ) as resolve:
+            caps_code, caps_out, caps_err = self.run_main(["--json", "capabilities"])
+        self.assertEqual(caps_code, 0, caps_err)
+        resolve.assert_called_once()
+        codex_models = json.loads(caps_out)["reasoning"]["harnesses"]["codex"]["models"]
+        self.assertIn("literal-model", codex_models)
+        self.assertNotIn("implicit-model", codex_models)
+        self.assertEqual(
+            json.loads(caps_out)["cachePath"],
+            str(self.delegate.harness_discovery.discovery_cache_path("default", home=home)),
+        )
+
+    def test_capabilities_refresh_projects_unified_discovery_result(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            result = self._successful_discovery_refresh("/user/discovery/default.json")
+            with mock.patch.object(
+                self.delegate.harness_discovery,
+                "refresh_discovery",
+                return_value=result,
+            ):
+                code, out, err = self.run_main(
+                    ["--cwd", workspace, "--json", "capabilities", "refresh"]
+                )
             self.assertEqual(code, 0, err)
-            cache = json.loads(
-                (Path(workspace) / ".delegate" / "capabilities" / "reasoning.json").read_text()
+            self.assertFalse(
+                (Path(workspace) / ".delegate" / "capabilities" / "reasoning.json").exists()
             )
-        self.assertIn("gpt-refresh", cache["harnesses"]["codex"]["models"])
+        payload = json.loads(out)
+        self.assertEqual(
+            payload["reasoning"]["harnesses"]["codex"]["models"]["gpt-refresh"]["source"],
+            "discovery",
+        )
 
     def test_capabilities_refresh_uses_auth_profile_env(self):
         with tempfile.TemporaryDirectory() as workspace, tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            bin_dir = root / "bin"
-            empty_path = root / "empty-path"
             codex_home = root / "codex-home"
             marker = root / "codex-home-seen"
-            bin_dir.mkdir()
-            empty_path.mkdir()
             codex_home.mkdir()
-            fake_codex = bin_dir / "codex"
-            marker_literal = str(marker).replace("'", "'\"'\"'")
-            fake_codex.write_text(
-                "#!/bin/sh\n"
-                f"printf '%s' \"${{CODEX_HOME:-}}\" > '{marker_literal}'\n"
-                "printf '%s\\n' "
-                '\'{"models":[{"slug":"gpt-profile","default_reasoning_level":"medium",'
-                '"supported_reasoning_levels":[{"effort":"medium"}]}]}\'\n',
-                encoding="utf-8",
-            )
-            fake_codex.chmod(0o755)
             config_path = Path(self._config_env["DELEGATE_CONFIG"])
             config_path.write_text(
                 json.dumps(
@@ -921,7 +991,6 @@ class EngineArgvTests(CommandTestBase):
                                 "work": {
                                     "env": {
                                         "CODEX_HOME": str(codex_home),
-                                        "PATH": str(bin_dir),
                                     }
                                 }
                             },
@@ -933,14 +1002,24 @@ class EngineArgvTests(CommandTestBase):
             stdout = io.StringIO()
             stderr = io.StringIO()
 
-            with mock.patch.dict(
-                os.environ,
-                {
-                    "DELEGATE_CONFIG": str(config_path),
-                    "HOME": self._config_env["HOME"],
-                    "PATH": str(empty_path),
-                },
-                clear=False,
+            def refresh(_config, *, profile):
+                marker.write_text(profile.env["CODEX_HOME"], encoding="utf-8")
+                return self._successful_discovery_refresh("/user/discovery/profile-work.json")
+
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "DELEGATE_CONFIG": str(config_path),
+                        "HOME": self._config_env["HOME"],
+                    },
+                    clear=False,
+                ),
+                mock.patch.object(
+                    self.delegate.harness_discovery,
+                    "refresh_discovery",
+                    side_effect=refresh,
+                ),
             ):
                 code = self.delegate.main(
                     [
@@ -959,7 +1038,7 @@ class EngineArgvTests(CommandTestBase):
             self.assertEqual(code, 0, stderr.getvalue())
             self.assertEqual(marker.read_text(encoding="utf-8"), str(codex_home))
             payload = json.loads(stdout.getvalue())
-            self.assertIn("gpt-profile", payload["reasoning"]["harnesses"]["codex"]["models"])
+            self.assertIn("gpt-refresh", payload["reasoning"]["harnesses"]["codex"]["models"])
 
     def test_capabilities_refresh_preserves_non_codex_cache_entries(self):
         with tempfile.TemporaryDirectory() as workspace:
@@ -983,28 +1062,21 @@ class EngineArgvTests(CommandTestBase):
                 ),
                 encoding="utf-8",
             )
-            fake_bin = self.write_fake_executable(
-                "codex",
-                stdout=json.dumps(
-                    {
-                        "models": [
-                            {
-                                "slug": "gpt-refresh",
-                                "default_reasoning_level": "medium",
-                                "supported_reasoning_levels": [{"effort": "medium"}],
-                            }
-                        ]
-                    }
-                ),
-            )
-            code, _out, err = self.run_main(
-                ["--cwd", workspace, "--json", "capabilities", "refresh"],
-                path_prefix=fake_bin,
-            )
+            before = cache_path.read_bytes()
+            result = self._successful_discovery_refresh("/user/discovery/default.json")
+            with mock.patch.object(
+                self.delegate.harness_discovery,
+                "refresh_discovery",
+                return_value=result,
+            ):
+                code, out, err = self.run_main(
+                    ["--cwd", workspace, "--json", "capabilities", "refresh"]
+                )
             self.assertEqual(code, 0, err)
-            cache = json.loads(cache_path.read_text(encoding="utf-8"))
-        self.assertIn("gpt-refresh", cache["harnesses"]["codex"]["models"])
-        self.assertIn("custom:cached", cache["harnesses"]["droid"]["models"])
+            self.assertEqual(cache_path.read_bytes(), before)
+        reasoning_payload = json.loads(out)["reasoning"]
+        self.assertIn("gpt-refresh", reasoning_payload["harnesses"]["codex"]["models"])
+        self.assertIn("custom:cached", reasoning_payload["harnesses"]["droid"]["models"])
 
     def test_capabilities_refresh_invalid_data_does_not_mutate_existing_cache(self):
         with tempfile.TemporaryDirectory() as workspace:
@@ -1014,27 +1086,84 @@ class EngineArgvTests(CommandTestBase):
                 '{"schema":1,"harnesses":{"codex":{"models":{"old":{"supported":["low"],"default":"low"}}}}}',
                 encoding="utf-8",
             )
-            fake_bin = self.write_fake_executable("codex", stdout='{"models":[{"slug":"bad"}]}')
-            code, out, _err = self.run_main(
-                ["--cwd", workspace, "--json", "capabilities", "refresh"],
-                path_prefix=fake_bin,
-            )
+            before = cache_path.read_bytes()
+            result = {
+                "snapshot": self._successful_discovery_refresh("unused")["snapshot"],
+                "attempts": {
+                    "codex": {
+                        "installed": True,
+                        "probeStatus": "error",
+                        "warnings": ["invalid catalog"],
+                    }
+                },
+                "updatedHarnesses": [],
+                "staleHarnesses": ["codex"],
+                "cachePath": "/user/discovery/default.json",
+            }
+            with mock.patch.object(
+                self.delegate.harness_discovery,
+                "refresh_discovery",
+                return_value=result,
+            ):
+                code, out, _err = self.run_main(
+                    ["--cwd", workspace, "--json", "capabilities", "refresh"]
+                )
             self.assertEqual(code, 2)
             self.assertEqual(json.loads(out)["error"], "capability_refresh_failed")
-            cache = json.loads(cache_path.read_text(encoding="utf-8"))
-        self.assertIn("old", cache["harnesses"]["codex"]["models"])
+            self.assertEqual(cache_path.read_bytes(), before)
 
     def test_capabilities_refresh_subprocess_failure_reports_error(self):
         with tempfile.TemporaryDirectory() as workspace:
-            fake_bin = self.write_fake_executable("codex", stderr="boom", exit_code=1)
-            code, out, _err = self.run_main(
-                ["--cwd", workspace, "--json", "capabilities", "refresh"],
-                path_prefix=fake_bin,
-            )
+            result = {
+                "snapshot": self._successful_discovery_refresh("unused")["snapshot"],
+                "attempts": {
+                    "codex": {
+                        "installed": True,
+                        "probeStatus": "error",
+                        "warnings": ["boom"],
+                    }
+                },
+                "updatedHarnesses": [],
+                "staleHarnesses": [],
+                "cachePath": "/user/discovery/default.json",
+            }
+            with mock.patch.object(
+                self.delegate.harness_discovery,
+                "refresh_discovery",
+                return_value=result,
+            ):
+                code, out, _err = self.run_main(
+                    ["--cwd", workspace, "--json", "capabilities", "refresh"]
+                )
         payload = json.loads(out)
         self.assertEqual(code, 2)
         self.assertEqual(payload["error"], "capability_refresh_failed")
-        self.assertIn("boom", payload["message"])
+        self.assertIn("every metadata probe failed", payload["message"])
+
+    def test_capabilities_refresh_cache_write_failure_is_sanitized_json_error(self):
+        secret_path = "/private/cache/sk-proj-abc123456789012345678901234567890.json"
+        failure = OSError(errno.ENOSPC, "no space left on device", secret_path)
+        with (
+            tempfile.TemporaryDirectory() as workspace,
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "refresh_discovery",
+                side_effect=failure,
+            ),
+        ):
+            code, out, err = self.run_main(
+                ["--cwd", workspace, "--json", "capabilities", "refresh"]
+            )
+
+        payload = json.loads(out)
+        self.assertEqual(code, 2, err)
+        self.assertEqual(payload["error"], "capability_refresh_failed")
+        self.assertEqual(
+            payload["message"],
+            "capability refresh could not safely update the discovery cache.",
+        )
+        self.assertNotIn(secret_path, out)
+        self.assertNotIn("sk-proj-", out)
 
     def test_run_input_json_codex_allows_omitted_model(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -212,6 +212,8 @@ class LauncherShimTests(unittest.TestCase):
                 ["worktree", "remove", "cursor-1"],
                 ["worktree", "prune"],
                 ["capabilities", "refresh"],
+                ["models", "codex", "--live"],
+                ["models", "--live", "codex"],
                 # A refresh positional after a flag must still be caught, not just $1.
                 ["capabilities", "--verbose", "refresh"],
                 # Bare `list` is not a documented top-level subcommand (the Python
@@ -239,9 +241,14 @@ class LauncherShimTests(unittest.TestCase):
                 ["run-output", "codex-1"],
                 ["describe"],
                 ["models"],
+                ["models", "codex"],
+                ["models", "codex", "--live", "--help"],
+                ["models", "codex", "--help", "--live"],
                 ["snapshot", "codex-1"],
                 ["capabilities"],
                 ["capabilities", "--json"],
+                ["capabilities", "refresh", "--help"],
+                ["capabilities", "--help", "refresh"],
                 ["worktree", "show", "cursor-1"],
                 ["worktree", "list"],
             ):
@@ -367,6 +374,23 @@ class ProfileGuardCliTests(unittest.TestCase):
         self.assertEqual(allow_code, self.delegate.EXIT_OK, allow_stderr)
         json.loads(allow_stdout)  # capabilities still produced its normal payload
         self.assertIn("continuing because 'capabilities' is read-only", allow_stderr)
+
+    def test_guard_blocks_live_models_but_allows_cached_models(self):
+        with tempfile.TemporaryDirectory() as home:
+            env = self.base_env(home, profile="work")
+            block_code, block_stdout, block_stderr = self.run_main(
+                ["models", "codex", "--live"], env=env
+            )
+            allow_code, allow_stdout, allow_stderr = self.run_main(
+                ["--json", "models", "codex"], env=env
+            )
+
+        self.assertEqual(block_code, self.delegate.EXIT_USAGE)
+        self.assertEqual(block_stdout, "")
+        self.assertIn("refusing to run a launch or mutation command", block_stderr)
+        self.assertEqual(allow_code, self.delegate.EXIT_OK, allow_stderr)
+        self.assertEqual(json.loads(allow_stdout)["engine"], "codex")
+        self.assertIn("continuing because 'models' is read-only", allow_stderr)
 
     def test_guard_allows_read_only_commands_with_warning_when_profile_config_missing(self):
         with tempfile.TemporaryDirectory() as home:

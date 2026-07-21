@@ -535,6 +535,7 @@ class ReasoningCapabilityTests(unittest.TestCase):
                     "alias": "(default)",
                     "supported": None,
                     "source": "none",
+                    "transport": None,
                     "warning": KIMI_UNSUPPORTED_REASONING_WARNING,
                 }
             },
@@ -671,6 +672,105 @@ class ReasoningCapabilityTests(unittest.TestCase):
         self.assertEqual(TRANSPORT_BY_HARNESS["codex"], TRANSPORT_CODEX_CONFIG)
         self.assertEqual(TRANSPORT_BY_HARNESS["droid"], TRANSPORT_DROID_FLAG)
         self.assertEqual(TRANSPORT_BY_HARNESS["cursor"], TRANSPORT_CURSOR_MODEL_SELECTION)
+
+    def test_projection_precedence_is_config_discovery_cache_bundled(self):
+        config = {"reasoning": {"capabilities": {"codex": {"gpt-5.5": {"supported": ["config"]}}}}}
+        cache = {"harnesses": {"codex": {"models": {"gpt-5.5": {"supported": ["cache"]}}}}}
+        discovery = {
+            "harnesses": {
+                "codex": {
+                    "models": {
+                        "gpt-5.5": {
+                            "reasoning": {
+                                "supported": ["discovery"],
+                                "evidence": "exact",
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        def projected(current_config, current_cache, current_discovery):
+            return build_reasoning_capabilities_payload(
+                current_config,
+                current_cache,
+                discovery=current_discovery,
+            )["harnesses"]["codex"]["models"]["gpt-5.5"]
+
+        self.assertEqual(projected(config, cache, discovery)["source"], "config")
+        self.assertEqual(projected({}, cache, discovery)["source"], "discovery")
+        self.assertEqual(projected({}, cache, None)["source"], "cache")
+        self.assertEqual(projected({}, None, None)["source"], "bundled")
+
+    def test_discovery_preserves_empty_support_evidence_and_harness_enum(self):
+        discovery = {
+            "harnesses": {
+                "codex": {
+                    "models": {
+                        "no-reasoning": {"reasoning": {"supported": [], "evidence": "exact"}}
+                    }
+                },
+                "claude": {
+                    "models": {},
+                    "harnessReasoning": {
+                        "supported": ["low", "max"],
+                        "default": "low",
+                        "evidence": "harness",
+                    },
+                },
+            }
+        }
+        payload = build_reasoning_capabilities_payload({}, cache=None, discovery=discovery)[
+            "harnesses"
+        ]
+        empty = payload["codex"]["models"]["no-reasoning"]
+        self.assertEqual(empty["supported"], [])
+        self.assertEqual(empty["evidence"], "exact")
+        self.assertEqual(empty["source"], "discovery")
+        self.assertEqual(payload["claude"]["supported"], ["low", "max"])
+        self.assertEqual(payload["claude"]["default"], "low")
+        self.assertEqual(payload["claude"]["evidence"], "harness")
+
+    def test_kimi_discovery_is_visible_but_transport_remains_unsupported(self):
+        config = {
+            "kimi": {
+                "defaultModel": "kimi-code/default",
+                "models": {"fast": "kimi-code/fast"},
+            }
+        }
+        discovery = {
+            "harnesses": {
+                "kimi": {
+                    "models": {
+                        "kimi-code/default": {
+                            "reasoning": {
+                                "supported": ["low"],
+                                "evidence": "exact",
+                            }
+                        },
+                        "kimi-code/fast": {
+                            "reasoning": {
+                                "supported": ["high", "max"],
+                                "evidence": "exact",
+                            }
+                        },
+                    }
+                }
+            }
+        }
+        payload = build_reasoning_capabilities_payload(config, cache=None, discovery=discovery)
+        kimi = payload["harnesses"]["kimi"]
+        self.assertIsNone(kimi["transport"])
+        self.assertEqual(kimi["models"]["kimi-code/fast"]["supported"], ["high", "max"])
+        self.assertEqual(kimi["warning"], KIMI_UNSUPPORTED_REASONING_WARNING)
+        fast = payload["aliases"]["kimi"]["fast"]
+        self.assertEqual(fast["model"], "kimi-code/fast")
+        self.assertEqual(fast["supported"], ["high", "max"])
+        self.assertEqual(fast["warning"], KIMI_UNSUPPORTED_REASONING_WARNING)
+        for alias in payload["aliases"]["kimi"].values():
+            self.assertIn("transport", alias)
+            self.assertIsNone(alias["transport"])
 
 
 if __name__ == "__main__":

@@ -51,6 +51,7 @@ TOP_LEVEL_COMMANDS = (
     "worktree",
     "workflow",
     "models",
+    "setup",
     "describe",
     "agent-help",
     "help",
@@ -217,6 +218,7 @@ class JsonCommandHelpTests(HelpCliTestBase):
         (["--json", "cancel", "--help"], "cancel"),
         (["--json", "worktree", "--help"], "worktree"),
         (["--json", "models", "--help"], "models"),
+        (["--json", "setup", "--help"], "setup"),
         (["--json", "describe", "--help"], "describe"),
         (["--json", "agent-help", "--help"], "agent-help"),
         (["--json", "help", "--help"], "help"),
@@ -298,6 +300,31 @@ class HelpSubcommandTests(HelpCliTestBase):
         self.assertIn("--progress", payload["launchOptions"])
         self.assertIn("--no-progress", payload["launchOptions"])
         self.assertIn("--forbid-commit", payload["launchOptions"])
+
+    def test_describe_summary_catalog_includes_setup(self):
+        code, out, err = self.run_main(["--json", "describe", "--summary"])
+        self.assertEqual(code, self.delegate.EXIT_OK, err)
+        payload = json.loads(out)
+        self.assertIn("setup", {entry["command"] for entry in payload["commands"]})
+
+    def test_setup_help_advertises_only_supported_global_options(self):
+        code, out, err = self.run_main(["--json", "setup", "--help"])
+        self.assertEqual(code, self.delegate.EXIT_OK, err)
+        payload = json.loads(out)
+        supported = {option["flag"] for option in payload["globalOptions"]}
+        unsupported = set(payload["unsupportedGlobalOptions"])
+        self.assertEqual(supported, {"--json", "--auth-profile"})
+        self.assertEqual(
+            unsupported,
+            {
+                "--cwd",
+                "--isolation",
+                "--group",
+                "--pass-through",
+                "--completion-report",
+                "--no-completion-report",
+            },
+        )
 
     def test_describe_summary_text_renders_without_full_payload_keys(self):
         code, out, _err = self.run_main(["describe", "--summary"])

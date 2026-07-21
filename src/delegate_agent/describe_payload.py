@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 from typing import TextIO
 
-from delegate_agent import VERSION, command_help, reasoning, redaction
+from delegate_agent import VERSION, command_help, harness_discovery, profiles, reasoning, redaction
 from delegate_agent import config as delegate_config
 from delegate_agent import rendering as delegate_rendering
 from delegate_agent.argv_builders import (
@@ -237,6 +237,8 @@ def models_payload(
     config: JsonObject,
     config_source: str,
     workspace: Path | None = None,
+    *,
+    discovery: JsonObject | None = None,
 ) -> JsonObject:
     cache = reasoning.load_reasoning_capability_cache(workspace) if workspace is not None else None
     cursor: JsonObject = {
@@ -315,7 +317,9 @@ def models_payload(
         "configSource": config_source,
         "configResolution": config_resolution_payload(config_source, workspace),
         "runtime": runtime_payload(),
-        "reasoningAliases": reasoning.build_alias_reasoning_summaries(config, cache),
+        "reasoningAliases": reasoning.build_alias_reasoning_summaries(
+            config, cache, discovery=discovery
+        ),
         "cursor": cursor,
         "droid": {
             "models": config["droid"]["models"],
@@ -464,9 +468,14 @@ def models_summary_payload(
     config: JsonObject,
     config_source: str,
     workspace: Path | None = None,
+    *,
+    discovery: JsonObject | None = None,
+    profile: profiles.ProfileResolution | None = None,
 ) -> JsonObject:
     cache = reasoning.load_reasoning_capability_cache(workspace) if workspace is not None else None
-    reasoning_aliases = reasoning.build_alias_reasoning_summaries(config, cache)
+    reasoning_aliases = reasoning.build_alias_reasoning_summaries(
+        config, cache, discovery=discovery
+    )
     aliases: list[JsonObject] = []
 
     for engine in MODEL_SUMMARY_ENGINES:
@@ -553,12 +562,64 @@ def models_summary_payload(
             "aliases": len(aliases),
             "providers": len({str(item.get("provider")) for item in aliases}),
         },
+        "harnesses": _harness_summary_metadata(config, discovery, profile),
         "discovery": {
             "fullModels": "delegate --json models",
             "safeSummary": "delegate --json models --summary",
             "reasoningCapabilities": "delegate --json capabilities",
         },
     }
+
+
+def _harness_summary_metadata(
+    config: JsonObject,
+    discovery: JsonObject | None,
+    profile: profiles.ProfileResolution | None,
+) -> JsonObject:
+    raw_harnesses = discovery.get("harnesses") if isinstance(discovery, dict) else None
+    cached_harnesses = raw_harnesses if isinstance(raw_harnesses, dict) else {}
+    active_profile = profile or profiles.empty_profile_resolution()
+    output: JsonObject = {}
+    for engine in KNOWN_ENGINES:
+        raw_record = cached_harnesses.get(engine)
+        record = raw_record if isinstance(raw_record, dict) else None
+        installed = record is not None and record.get("installed") is True
+        probe_status = record.get("probeStatus") if record is not None else None
+        model_scope = record.get("modelScope") if record is not None else None
+        stale = (
+            installed
+            and record is not None
+            and harness_discovery.selector_has_drifted(
+                config,
+                engine,
+                record,
+                profile=active_profile,
+            )
+        )
+        output[engine] = {
+            "installed": installed,
+            "probeStatus": probe_status if isinstance(probe_status, str) else "missing",
+            "catalogScope": model_scope if isinstance(model_scope, str) else "unknown",
+            "stale": stale,
+            "launchable": _cached_harness_launchable(config, engine, installed and not stale),
+        }
+    return output
+
+
+def _cached_harness_launchable(config: JsonObject, engine: str, installed: bool) -> bool:
+    if not installed:
+        return False
+    section = config.get(engine)
+    if not isinstance(section, dict):
+        return False
+    default_model = section.get("defaultModel")
+    has_default = isinstance(default_model, str) and bool(default_model.strip())
+    if engine == "cursor":
+        return has_default
+    if engine == "droid":
+        models = section.get("models")
+        return has_default or (isinstance(models, dict) and bool(models))
+    return True
 
 
 def _policy_field_support_matrix() -> JsonObject:
@@ -1168,6 +1229,7 @@ def describe_payload(
         },
         "commands": _commands_catalog(),
         "recommendedDiscovery": [
+            "delegate setup",
             "delegate --json describe --summary",
             "delegate --json models --summary",
             "delegate --json help <command>",
@@ -1201,6 +1263,7 @@ def describe_summary_payload(
         },
         "commands": _commands_catalog(),
         "recommendedDiscovery": [
+            "delegate setup",
             "delegate --json describe --summary",
             "delegate --json models --summary",
             "delegate --json help <command>",
@@ -1339,12 +1402,25 @@ def emit_models(
     summary: bool = False,
     engine: str | None = None,
     live: bool = False,
+    discovery: JsonObject | None = None,
+    profile: profiles.ProfileResolution | None = None,
 ) -> int:
+    legacy_cache = (
+        reasoning.load_reasoning_capability_cache(workspace) if workspace is not None else None
+    )
     if engine is not None:
         from delegate_agent import model_discovery
 
         payload = _scrub_discovery_payload(
-            model_discovery.engine_models_payload(config, engine, live=live, workspace=workspace)
+            model_discovery.engine_models_payload(
+                config,
+                engine,
+                live=live,
+                workspace=workspace,
+                discovery=discovery,
+                legacy_cache=legacy_cache,
+                profile=profile,
+            )
         )
         if json_mode:
             delegate_rendering.print_json(payload, stdout)
@@ -1352,7 +1428,15 @@ def emit_models(
             model_discovery.emit_engine_models_text(payload, stdout)
         return EXIT_OK
     if summary:
-        payload = _scrub_discovery_payload(models_summary_payload(config, config_source, workspace))
+        payload = _scrub_discovery_payload(
+            models_summary_payload(
+                config,
+                config_source,
+                workspace,
+                discovery=discovery,
+                profile=profile,
+            )
+        )
         if json_mode:
             delegate_rendering.print_json(payload, stdout)
         else:
@@ -1368,7 +1452,9 @@ def emit_models(
                         file=stdout,
                     )
         return EXIT_OK
-    payload = _scrub_discovery_payload(models_payload(config, config_source, workspace))
+    payload = _scrub_discovery_payload(
+        models_payload(config, config_source, workspace, discovery=discovery)
+    )
     if json_mode:
         delegate_rendering.print_json(payload, stdout)
         return EXIT_OK
@@ -1509,7 +1595,7 @@ Cursor safe mode:
 
 Profiles (auth/env switching):
   - A profile selects which credentials/env every spawned harness inherits; the active profile is detected from env (profiles.detectFrom) or set explicitly with --auth-profile NAME before the subcommand.
-  - --auth-profile applies to launches, dry-run, run, profiles, and capabilities refresh; it is rejected for run-inspection, worktree, discovery, and the cached capabilities report.
+  - --auth-profile applies to launches, dry-run, run, profiles, models, capabilities, and setup; it remains rejected for run-inspection, worktree, and unrelated diagnostics.
   - delegate profiles (optionally with --json) reports the resolved profile, source, and non-secret env keys; it never mutates config.
   - profiles.definitions.<name>.env holds non-secret pointers only (e.g. CODEX_HOME); secret-shaped keys are rejected at config load, and values must not interpolate secrets via $VAR. Export real credentials in the shell instead.
 
