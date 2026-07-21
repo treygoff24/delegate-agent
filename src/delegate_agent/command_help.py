@@ -1147,6 +1147,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         notes=(
             "The starter config includes placeholder Droid aliases and placeholder CODEX_HOME profile pointers.",
             "It also writes missing config.work.json/config.personal.json profile overlays next to the base config.",
+            "Run delegate setup afterward for automatic harness discovery.",
             "Use POSIX paths inside WSL; convert Windows paths with wslpath before putting them in config.",
         ),
         see_also=("config", "config sync-profiles", "profiles", "models"),

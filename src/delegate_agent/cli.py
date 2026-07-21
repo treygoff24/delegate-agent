@@ -26,6 +26,7 @@ from delegate_agent import (
     run_metadata,
     run_output_commands,
     run_registry,
+    setup_commands,
     wait_cancel_commands,
     worktree_commands,
     worktree_execution,
@@ -1073,6 +1074,12 @@ def main(
             return EXIT_OK
         if parsed.subcommand == "config":
             return emit_config_command(parsed, stdout)
+        if parsed.subcommand == "setup":
+            return setup_commands.emit(
+                json_mode=global_options.json_mode,
+                auth_profile_override=global_options.auth_profile,
+                stdout=stdout,
+            )
 
         # For run --input-json, pre-read the JSON to discover config from the
         # JSON-resolved workspace before loading/finalizing config.

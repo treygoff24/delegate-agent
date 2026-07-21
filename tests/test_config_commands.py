@@ -56,6 +56,10 @@ class ConfigCommandTests(unittest.TestCase):
         self.assertEqual(personal_config["profiles"]["default"], "personal")
         self.assertIn(str(work_path), payload["profileConfigs"]["created"])
         self.assertIn(str(personal_path), payload["profileConfigs"]["created"])
+        self.assertEqual(
+            payload["nextAction"],
+            "Run delegate setup for automatic harness discovery.",
+        )
 
     def test_config_sync_profiles_materializes_missing_overlays_only(self):
         with tempfile.TemporaryDirectory() as home:
@@ -133,6 +137,16 @@ class ConfigCommandTests(unittest.TestCase):
 
         self.assertEqual(code, self.delegate.EXIT_USAGE, stderr)
         self.assertEqual(payload["error"], "config_exists")
+
+    def test_config_init_text_recommends_setup(self):
+        with tempfile.TemporaryDirectory() as home:
+            code, stdout, stderr = self.run_main(
+                ["config", "init"],
+                env={"HOME": home, "PATH": os.environ.get("PATH", "")},
+            )
+
+        self.assertEqual(code, self.delegate.EXIT_OK, stderr)
+        self.assertIn("run delegate setup for automatic harness discovery", stdout)
 
     def test_config_init_honors_delegate_config_with_force(self):
         with tempfile.TemporaryDirectory() as tmp:
