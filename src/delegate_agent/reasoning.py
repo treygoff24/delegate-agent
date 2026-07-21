@@ -51,7 +51,7 @@ BUNDLED_REASONING_CAPABILITIES: dict[str, dict[str, ReasoningDeclaration]] = {
             "supported": ("low", "medium", "high", "xhigh"),
             "default": "medium",
         },
-        "gemini-3.5-flash": {
+        "gemini-3.6-flash": {
             "supported": ("minimal", "low", "medium", "high"),
             "default": "high",
         },

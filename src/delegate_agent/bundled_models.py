@@ -37,7 +37,7 @@ BUNDLED_MODELS: dict[str, tuple[BundledModelEntry, ...]] = {
         {"id": "deepseek-v4-pro"},
         {"id": "gemini-3-flash"},
         {"id": "gemini-3.1-pro"},
-        {"id": "gemini-3.5-flash"},
+        {"id": "gemini-3.6-flash"},
         {"id": "glm-5.2"},
         {"id": "gpt-5.2"},
         {"id": "gpt-5.3-codex"},
