@@ -286,6 +286,12 @@ class ParserTests(unittest.TestCase):
             self.delegate.parse_cli(["capabilities", "refresh", "not-a-harness"])
         self.assertEqual(ctx.exception.error, "invalid_engine")
 
+    def test_capabilities_refresh_hints_misplaced_global_option(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(["capabilities", "refresh", "--auth-profile", "work"])
+        self.assertEqual(ctx.exception.error, "misplaced_global_option")
+        self.assertIn("before the subcommand", ctx.exception.message)
+
     def test_ps_rejects_conflicting_runs_filters_with_ps_specific_message(self):
         for flag in ("--running", "--stale"):
             with self.subTest(flag=flag):

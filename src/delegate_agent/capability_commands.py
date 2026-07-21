@@ -138,6 +138,13 @@ def _refresh_payload(
         if isinstance(record, dict) and record.get("installed") is True
     ]
     if not installed:
+        if engines:
+            raise CapabilitiesError(
+                "requested_harnesses_not_installed",
+                "capability refresh found none of the requested harnesses installed: "
+                f"{', '.join(engines)}. Other installed harnesses were not probed.",
+                diagnostics=diagnostics,
+            )
         raise CapabilitiesError(
             "no_harnesses_installed",
             "capability refresh found no installed supported harnesses.",

@@ -497,6 +497,36 @@ class CapabilityCommandTests(unittest.TestCase):
             self.assertEqual(caught.exception.error, "no_harnesses_installed")
             self.assertIn("codex", caught.exception.diagnostics["attempts"])
 
+    def test_subset_refresh_of_uninstalled_engine_reports_requested_not_installed(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            with (
+                mock.patch.object(
+                    capability_commands.harness_discovery,
+                    "refresh_discovery",
+                    return_value={
+                        "snapshot": harness_discovery.empty_snapshot(),
+                        "attempts": {"grok": {"installed": False, "probeStatus": "missing"}},
+                        "updatedHarnesses": [],
+                        "staleHarnesses": [],
+                        "cachePath": "/tmp/default.json",
+                    },
+                ),
+                self.assertRaises(capability_commands.CapabilitiesError) as caught,
+            ):
+                capability_commands.emit(
+                    capability_commands.CapabilitiesCommand(
+                        refresh=True, engines=("grok",), json_mode=True
+                    ),
+                    config={},
+                    config_source="test-config",
+                    workspace=workspace,
+                    stdout=io.StringIO(),
+                )
+
+            self.assertEqual(caught.exception.error, "requested_harnesses_not_installed")
+            self.assertIn("grok", caught.exception.message)
+            self.assertIn("grok", caught.exception.diagnostics["attempts"])
+
     def test_cached_payload_uses_selected_profile_cache_and_never_spawns(self):
         profile = profiles.ProfileResolution(name="work", source="test")
         discovery = {

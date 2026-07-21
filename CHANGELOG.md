@@ -221,6 +221,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   consistently across the CLI reference and worktree guidance.
 - Devin help and discovery surfaces now derive supported modes consistently and
   reject unknown modes before constructing executable arguments.
+- `capabilities refresh` now hints "global options before the subcommand" for a
+  misplaced global option instead of mislabeling it `invalid_engine`, and a
+  subset refresh whose requested harnesses are all uninstalled reports
+  `requested_harnesses_not_installed` instead of the misleading
+  `no_harnesses_installed`.
 
 ## [0.14.0] - 2026-07-15
 

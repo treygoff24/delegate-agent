@@ -244,6 +244,8 @@ def parse_capabilities_subcommand(
     if rest and rest[0] == "refresh":
         refresh = True
         requested = rest[1:]
+        if has_misplaced_global_option(requested):
+            raise_misplaced_global_option("Global options must appear before the subcommand.")
         for engine in requested:
             if engine not in KNOWN_ENGINES:
                 raise DelegateError(
