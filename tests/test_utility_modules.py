@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import errno
+import json
+import os
+import stat
 import sys
 import tarfile
 import tempfile
@@ -343,6 +346,184 @@ class WriteJsonAtomicCleanupTests(unittest.TestCase):
                 private_io.write_json_atomic(target, {"ok": True})
             tmp_files = list(Path(tmp).glob("*.tmp"))
             self.assertEqual(tmp_files, [], f"left-behind tmp files: {tmp_files}")
+
+
+class WriteJsonAtomicIfAbsentTests(unittest.TestCase):
+    def test_creates_private_valid_json_and_parent_directories(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve() / "missing" / "nested"
+            target = root / "config.json"
+            created = private_io.write_json_atomic_if_absent(
+                target,
+                {"models": {"alias": "provider/model"}, "ok": True},
+            )
+
+            self.assertTrue(created)
+            self.assertEqual(
+                json.loads(target.read_text(encoding="utf-8")),
+                {"models": {"alias": "provider/model"}, "ok": True},
+            )
+            if private_io.supports_private_modes():
+                self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o600)
+                self.assertEqual(stat.S_IMODE(root.stat().st_mode), 0o700)
+                self.assertEqual(stat.S_IMODE(root.parent.stat().st_mode), 0o700)
+            self.assertEqual(list(root.glob("*.tmp")), [])
+
+    def test_existing_target_is_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve() / ".delegate"
+            root.mkdir()
+            target = root / "config.json"
+            original = b'{"user": "value"}\n'
+            target.write_bytes(original)
+            original_mode = stat.S_IMODE(target.stat().st_mode)
+
+            created = private_io.write_json_atomic_if_absent(target, {"replacement": True})
+
+            self.assertFalse(created)
+            self.assertEqual(target.read_bytes(), original)
+            self.assertEqual(stat.S_IMODE(target.stat().st_mode), original_mode)
+            self.assertEqual(list(root.glob("*.tmp")), [])
+
+    def test_losing_publish_race_preserves_winner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve() / ".delegate"
+            target = root / "config.json"
+            winner = b'{"winner": true}\n'
+            real_link = private_io.os.link
+
+            def publish_winner_then_link(
+                src: str,
+                dst: str,
+                *,
+                src_dir_fd: int,
+                dst_dir_fd: int,
+                follow_symlinks: bool,
+            ) -> None:
+                fd = os.open(
+                    dst,
+                    os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                    private_io.PRIVATE_FILE_MODE,
+                    dir_fd=dst_dir_fd,
+                )
+                try:
+                    os.write(fd, winner)
+                finally:
+                    os.close(fd)
+                real_link(
+                    src,
+                    dst,
+                    src_dir_fd=src_dir_fd,
+                    dst_dir_fd=dst_dir_fd,
+                    follow_symlinks=follow_symlinks,
+                )
+
+            with mock.patch.object(private_io.os, "link", publish_winner_then_link):
+                created = private_io.write_json_atomic_if_absent(target, {"loser": True})
+
+            self.assertFalse(created)
+            self.assertEqual(target.read_bytes(), winner)
+            self.assertEqual(list(root.glob("*.tmp")), [])
+
+    def test_rejects_symlink_target_and_path_component(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            outside = base / "outside.json"
+            outside.write_text('{"safe": true}\n', encoding="utf-8")
+            root = base / ".delegate"
+            root.mkdir()
+            target = root / "config.json"
+            target.symlink_to(outside)
+
+            with self.assertRaises(OSError) as target_error:
+                private_io.write_json_atomic_if_absent(target, {"unsafe": True})
+            self.assertEqual(target_error.exception.errno, errno.ELOOP)
+            self.assertEqual(outside.read_text(encoding="utf-8"), '{"safe": true}\n')
+
+            symlink_case = base / "symlink-case"
+            symlink_case.mkdir()
+            real_root = base / "real-root"
+            real_root.mkdir()
+            linked_root = symlink_case / "linked"
+            linked_root.symlink_to(real_root, target_is_directory=True)
+            linked_target = linked_root / "nested" / "config.json"
+            with self.assertRaises(OSError) as component_error:
+                private_io.write_json_atomic_if_absent(linked_target, {"unsafe": True})
+            self.assertEqual(component_error.exception.errno, errno.ELOOP)
+
+    def test_rejects_fully_existing_symlink_parent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            real_parent = base / "real" / "nested"
+            real_parent.mkdir(parents=True)
+            linked_parent = base / "linked"
+            linked_parent.symlink_to(real_parent.parent, target_is_directory=True)
+
+            with self.assertRaises(OSError) as caught:
+                private_io.write_json_atomic_if_absent(
+                    linked_parent / "nested" / "config.json",
+                    {"unsafe": True},
+                )
+
+            self.assertEqual(caught.exception.errno, errno.ELOOP)
+            self.assertFalse((real_parent / "config.json").exists())
+
+    def test_creates_missing_prefix_before_delegate_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            target = base / "missing" / "prefix" / ".delegate" / "config.json"
+
+            self.assertTrue(private_io.write_json_atomic_if_absent(target, {"ok": True}))
+
+            self.assertEqual(json.loads(target.read_text(encoding="utf-8")), {"ok": True})
+            if private_io.supports_private_modes():
+                for directory in (
+                    target.parent,
+                    target.parent.parent,
+                    target.parent.parent.parent,
+                ):
+                    self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o700)
+
+    def test_success_fsyncs_file_then_clean_parent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve() / ".delegate"
+            target = root / "config.json"
+            observations: list[tuple[bool, list[str]]] = []
+            real_fsync = private_io.os.fsync
+
+            def observe_fsync(fd: int) -> None:
+                observations.append(
+                    (
+                        target.exists(),
+                        sorted(path.name for path in root.glob("*.tmp")) if root.exists() else [],
+                    )
+                )
+                real_fsync(fd)
+
+            with mock.patch.object(private_io.os, "fsync", observe_fsync):
+                self.assertTrue(private_io.write_json_atomic_if_absent(target, {"ok": True}))
+
+            self.assertEqual(len(observations), 2)
+            self.assertFalse(observations[0][0])
+            self.assertTrue(observations[0][1])
+            self.assertEqual(observations[1], (True, []))
+
+    def test_publish_failure_cleans_temporary_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve() / ".delegate"
+            target = root / "config.json"
+            with (
+                mock.patch.object(
+                    private_io.os,
+                    "link",
+                    side_effect=OSError(errno.ENOSPC, "simulated disk full"),
+                ),
+                self.assertRaises(OSError),
+            ):
+                private_io.write_json_atomic_if_absent(target, {"ok": True})
+
+            self.assertFalse(target.exists())
+            self.assertEqual(list(root.glob("*.tmp")), [])
 
 
 if __name__ == "__main__":
