@@ -672,11 +672,15 @@ def parse_cursor_catalog(raw: str) -> JsonObject:
         if not collecting:
             collecting = stripped.lower().startswith("available models")
             continue
+        if entries and (not stripped or " - " not in stripped):
+            break
         if not stripped or " - " not in stripped:
             continue
         selector, _, label = stripped.partition(" - ")
         selector = selector.strip()
         label = label.strip()
+        if selector.startswith("-"):
+            break
         if not selector:
             continue
         if label.lower().endswith("(default)"):
@@ -777,6 +781,9 @@ def parse_droid_help(raw: str) -> JsonObject:
         if heading in {"available models", "custom models", "model details"}:
             section = heading
             headings.add(heading)
+            continue
+        if line and not line[0].isspace():
+            section = None
             continue
         if section in {"available models", "custom models"}:
             match = _DROID_ENTRY.match(line)
@@ -915,9 +922,13 @@ def parse_grok_catalog(raw: str) -> JsonObject:
         if not collecting:
             collecting = stripped.lower() == "available models:"
             continue
+        if models and (not stripped or (line and not line[0].isspace())):
+            break
         match = re.match(r"^\*?\s*(\S+?)(?:\s+\(default\))?$", stripped)
         if match:
             selector = match.group(1)
+            if selector.startswith("-"):
+                break
             models[selector] = {}
     if not models:
         raise ValueError("Grok catalog had no Available models entries")
@@ -1048,6 +1059,8 @@ def _probe_claude(selector: tuple[str, ...], env: Mapping[str, str], _: Path | N
         env=env,
         timeout_sec=METADATA_PROBE_TIMEOUT_SEC,
     )
+    if result.error not in {None, "probe_failed"}:
+        raise ValueError(f"Claude effort discovery failed: {result.error}")
     combined = f"{result.stdout}\n{result.stderr}"
     return parse_claude_efforts(combined)
 
@@ -1277,8 +1290,9 @@ def refresh_discovery(
     engines: Collection[str] | None = None,
     home: Path | None = None,
     factory_settings_path: Path | None = None,
+    persist: bool = True,
 ) -> JsonObject:
-    """Probe selected harnesses and persist successful last-known-good records."""
+    """Probe harnesses, optionally persisting successful last-known-good records."""
     if isinstance(engines, str):
         raise ValueError("discovery engines must be a collection of harness names")
     selected = tuple(dict.fromkeys(KNOWN_ENGINES if engines is None else engines))
@@ -1326,7 +1340,7 @@ def refresh_discovery(
             stale.append(harness)
 
     cache_path = discovery_cache_path(profile.name, home=home)
-    if updated:
+    if persist and updated:
         write_discovery_cache(profile.name, snapshot, home=home)
     return {
         "snapshot": snapshot,
@@ -1334,5 +1348,5 @@ def refresh_discovery(
         "updatedHarnesses": updated,
         "staleHarnesses": stale,
         "cachePath": str(cache_path),
-        "wrote": bool(updated),
+        "wrote": persist and bool(updated),
     }

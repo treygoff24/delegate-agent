@@ -10,6 +10,23 @@ URL_SCHEME_SEPARATOR = "://"
 SLACK_WEBHOOK_HOST_PATTERN = r"hooks\.slack(?:-gov)?\.com"
 SLACK_WEBHOOK_PATH_PATTERN = r"/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]+"
 SENSITIVE_ENV_KEYS = frozenset({"OPENCODE_CONFIG_CONTENT"})
+PUBLIC_STRUCTURED_PATH_KEYS = frozenset(
+    {
+        "argvPrefix",
+        "binary",
+        "cachePath",
+        "configPath",
+        "configSource",
+        "effectiveConfigPath",
+        "executable",
+        "legacyWorkspaceCachePath",
+        "modulePath",
+        "packageRoot",
+        "path",
+        "pythonExecutable",
+        "workspace",
+    }
+)
 
 REDACT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # Authorization header value, quoted or bare. The optional quote after the key
@@ -192,3 +209,47 @@ def redact_value(value: JsonValue) -> JsonValue:
     if isinstance(value, dict):
         return {key: redact_value(item) for key, item in value.items()}
     return value
+
+
+def scrub_public_projection(value: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    """Redact untrusted JSON keys and values without losing key collisions."""
+    scrubbed = _scrub_public_value(value, preserve_paths=False)
+    return scrubbed if isinstance(scrubbed, dict) else {}
+
+
+def _scrub_public_value(value: object, *, preserve_paths: bool) -> JsonValue:
+    if isinstance(value, dict):
+        scrubbed: dict[str, JsonValue] = {}
+        for key, child in value.items():
+            if not isinstance(key, str):
+                continue
+            secret_key = key_looks_secret(key)
+            projected_key = "***" if secret_key else redact_progress_label(key)
+            projected_key = _collision_safe_key(scrubbed, projected_key)
+            scrubbed[projected_key] = (
+                "***"
+                if secret_key
+                else _scrub_public_value(
+                    child,
+                    preserve_paths=key in PUBLIC_STRUCTURED_PATH_KEYS,
+                )
+            )
+        return scrubbed
+    if isinstance(value, list):
+        return [_scrub_public_value(item, preserve_paths=preserve_paths) for item in value]
+    if isinstance(value, str):
+        return redact_string(value) if preserve_paths else redact_progress_label(value)
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return None
+
+
+def _collision_safe_key(projected: dict[str, JsonValue], key: str) -> str:
+    if key not in projected:
+        return key
+    collision = 2
+    while True:
+        candidate = f"{key}<redacted-key-collision:{collision}>"
+        if candidate not in projected:
+            return candidate
+        collision += 1

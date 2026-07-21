@@ -100,7 +100,9 @@ effort is model-selection based. Without an explicit model pin,
 `cursor.reasoningEffortModels` takes precedence over discovered routes. An
 explicit `--model` blocks that global map; when discovery has an exact route
 family for the pinned selector, Delegate may replace it with the requested
-same-family effort selector and records a warning. Droid emits
+same-family effort selector and records a warning. Without that exact family,
+an explicit effort fails closed; a configured default instead degrades with a
+warning and preserves the pinned selector. Droid emits
 `--reasoning-effort LEVEL`; Codex emits a `model_reasoning_effort` config
 override; Claude and Grok emit native `--effort`; OpenCode emits `--variant`
 and validates it when exact discovered variants exist; Pi and Oh My Pi emit

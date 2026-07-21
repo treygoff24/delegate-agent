@@ -61,6 +61,17 @@ class SetupCommandTests(unittest.TestCase):
             )
         return attempts
 
+    def _seed_cache(self, home: Path) -> tuple[Path, bytes]:
+        snapshot = harness_discovery.empty_snapshot(profile="default")
+        snapshot["harnesses"]["codex"] = _record(
+            installed=True,
+            selector=["/previous/codex"],
+            version="codex-cli 0.9",
+            models={"previous-model": {}},
+        )
+        path = harness_discovery.write_discovery_cache(None, snapshot, home=home)
+        return path, path.read_bytes()
+
     def _run(
         self,
         argv: list[str],
@@ -263,9 +274,10 @@ class SetupCommandTests(unittest.TestCase):
             self.assertEqual(json.loads(stdout)["error"], "config_changed_during_setup")
             probe.assert_not_called()
 
-    def test_no_harnesses_returns_exit_three_without_writing_config_or_cache(self):
+    def test_no_harnesses_returns_exit_three_without_changing_config_or_cache(self):
         with tempfile.TemporaryDirectory() as raw_home:
             home = Path(raw_home).resolve()
+            cache_path, cache_before = self._seed_cache(home)
             code, stdout, stderr, _ = self._run(
                 ["--json", "setup"], home=home, attempts=self._attempts()
             )
@@ -276,7 +288,8 @@ class SetupCommandTests(unittest.TestCase):
             self.assertFalse(payload["discoveryReady"])
             self.assertFalse(payload["ready"])
             self.assertFalse((home / ".delegate" / "config.json").exists())
-            self.assertFalse((home / ".delegate" / "cache" / "discovery" / "default.json").exists())
+            self.assertEqual(payload["cacheState"], "unchanged")
+            self.assertEqual(cache_path.read_bytes(), cache_before)
 
     def test_droid_without_configured_model_is_discovered_but_not_ready(self):
         with tempfile.TemporaryDirectory() as raw_home:
@@ -304,6 +317,7 @@ class SetupCommandTests(unittest.TestCase):
     def test_divergent_race_winner_is_preserved_and_requires_fresh_setup(self):
         with tempfile.TemporaryDirectory() as raw_home:
             home = Path(raw_home).resolve()
+            cache_path, cache_before = self._seed_cache(home)
             codex = self._binary(home, "codex")
             winner_codex = self._binary(home, "winner-codex")
             winner = (
@@ -355,14 +369,17 @@ class SetupCommandTests(unittest.TestCase):
             resolve.assert_called_once()
             self.assertEqual(probe.call_count, len(KNOWN_ENGINES))
             self.assertEqual((home / ".delegate" / "config.json").read_bytes(), winner)
+            self.assertEqual(payload["cacheState"], "unchanged")
+            self.assertEqual(cache_path.read_bytes(), cache_before)
 
     def test_existing_config_mutated_during_probe_is_preserved_and_requires_rerun(self):
         with tempfile.TemporaryDirectory() as raw_home:
             home = Path(raw_home).resolve()
+            cache_path, cache_before = self._seed_cache(home)
             codex = self._binary(home, "codex")
             changed_codex = self._binary(home, "changed-codex")
             path = home / ".delegate" / "config.json"
-            path.parent.mkdir()
+            path.parent.mkdir(exist_ok=True)
             path.write_text(json.dumps({"codex": {"binary": str(codex)}}), encoding="utf-8")
             changed = json.dumps({"codex": {"binary": str(changed_codex)}}).encode() + b"\n"
             attempts = self._attempts(codex=codex)
@@ -386,10 +403,11 @@ class SetupCommandTests(unittest.TestCase):
             self.assertEqual(code, cli.EXIT_USAGE, stderr)
             self.assertEqual(payload["error"], "config_changed_during_setup")
             self.assertEqual(payload["configState"], "changed")
-            self.assertEqual(payload["cacheState"], "updated")
+            self.assertEqual(payload["cacheState"], "unchanged")
             self.assertIn("Rerun delegate setup", payload["nextActions"][0])
             self.assertEqual(probe_mock.call_count, len(KNOWN_ENGINES))
             self.assertEqual(path.read_bytes(), changed)
+            self.assertEqual(cache_path.read_bytes(), cache_before)
 
     def test_profile_environment_and_cache_are_selected_once(self):
         with tempfile.TemporaryDirectory() as raw_home:
@@ -493,9 +511,10 @@ class SetupCommandTests(unittest.TestCase):
             self.assertIn("Config selector drifted", codex["nextAction"])
             self.assertIn("rerun delegate setup", codex["nextAction"])
 
-    def test_config_publication_error_reports_cache_first_partial_state(self):
+    def test_config_publication_error_leaves_prior_cache_unchanged(self):
         with tempfile.TemporaryDirectory() as raw_home:
             home = Path(raw_home).resolve()
+            cache_path, cache_before = self._seed_cache(home)
             codex = self._binary(home, "codex")
             with mock.patch.object(
                 setup_commands.private_io,
@@ -510,15 +529,16 @@ class SetupCommandTests(unittest.TestCase):
             self.assertEqual(code, cli.EXIT_USAGE, stderr)
             self.assertEqual(payload["error"], "setup_config_write_failed")
             self.assertEqual(payload["configState"], "absent")
-            self.assertEqual(payload["cacheState"], "updated")
+            self.assertEqual(payload["cacheState"], "unchanged")
             self.assertTrue(payload["discoveryReady"])
-            self.assertTrue(Path(payload["cachePath"]).exists())
+            self.assertEqual(cache_path.read_bytes(), cache_before)
             self.assertFalse(Path(payload["configPath"]).exists())
             self.assertNotIn("do-not-print", stdout)
 
     def test_post_publication_error_reports_present_unverified_config(self):
         with tempfile.TemporaryDirectory() as raw_home:
             home = Path(raw_home).resolve()
+            cache_path, cache_before = self._seed_cache(home)
             codex = self._binary(home, "codex")
 
             def publish_then_fail(path: Path, payload: object) -> bool:
@@ -539,11 +559,14 @@ class SetupCommandTests(unittest.TestCase):
             self.assertEqual(code, cli.EXIT_USAGE, stderr)
             self.assertEqual(payload["error"], "setup_config_write_failed")
             self.assertEqual(payload["configState"], "present-unverified")
+            self.assertEqual(payload["cacheState"], "unchanged")
             self.assertTrue(Path(payload["configPath"]).exists())
+            self.assertEqual(cache_path.read_bytes(), cache_before)
 
     def test_unsafe_relative_selector_is_never_written_to_config(self):
         with tempfile.TemporaryDirectory() as raw_home:
             home = Path(raw_home).resolve()
+            cache_path, cache_before = self._seed_cache(home)
             attempts = self._attempts()
             attempts["codex"] = _record(
                 installed=True,
@@ -556,7 +579,33 @@ class SetupCommandTests(unittest.TestCase):
 
             self.assertEqual(code, cli.EXIT_USAGE, stderr)
             self.assertEqual(payload["error"], "setup_selector_unsafe")
+            self.assertEqual(payload["cacheState"], "unchanged")
             self.assertFalse((home / ".delegate" / "config.json").exists())
+            self.assertEqual(cache_path.read_bytes(), cache_before)
+
+    def test_cache_publication_error_keeps_reconciled_config_and_prior_cache(self):
+        with tempfile.TemporaryDirectory() as raw_home:
+            home = Path(raw_home).resolve()
+            cache_path, cache_before = self._seed_cache(home)
+            codex = self._binary(home, "codex")
+
+            with mock.patch.object(
+                harness_discovery,
+                "write_discovery_cache",
+                side_effect=OSError("simulated cache failure with api_key=do-not-print"),
+            ):
+                code, stdout, stderr, _ = self._run(
+                    ["--json", "setup"], home=home, attempts=self._attempts(codex=codex)
+                )
+            payload = json.loads(stdout)
+
+            self.assertEqual(code, cli.EXIT_USAGE, stderr)
+            self.assertEqual(payload["error"], "setup_cache_write_failed")
+            self.assertEqual(payload["configState"], "created")
+            self.assertEqual(payload["cacheState"], "error")
+            self.assertTrue(Path(payload["configPath"]).exists())
+            self.assertEqual(cache_path.read_bytes(), cache_before)
+            self.assertNotIn("do-not-print", stdout)
 
     def test_missing_ai_profile_overlay_is_blocked_before_probing(self):
         with tempfile.TemporaryDirectory() as raw_home:

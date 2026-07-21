@@ -34,6 +34,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `capabilities refresh` now writes the selected profile's private discovery
   cache. The old workspace reasoning cache remains a lower-precedence read-only
   compatibility source.
+- Cursor now fails closed when an explicit reasoning effort is combined with a
+  pinned selector that has no exact discovered same-family route. A configured
+  default still warns and degrades while preserving the pin.
+- Embedded Devin and Kimi `defaultModel` values are now `null`, deferring model
+  selection to each harness. The editable `config init` example may still pin
+  an explicit default.
 
 ### Security
 

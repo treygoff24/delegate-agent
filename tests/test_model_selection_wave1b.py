@@ -545,14 +545,17 @@ class CursorModelOverrideTests(CommandTestBase):
         self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
         self.assertIn("low, max", ctx.exception.message)
 
-    def test_pinned_cursor_without_route_evidence_retains_bypass(self):
+    def test_pinned_cursor_without_route_evidence_fails_closed(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
-        with mock.patch.object(
-            self.delegate.harness_discovery,
-            "load_discovery_cache",
-            return_value=self._cursor_route_discovery(),
+        with (
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "load_discovery_cache",
+                return_value=self._cursor_route_discovery(),
+            ),
+            self.assertRaises(self.delegate.DelegateError) as ctx,
         ):
-            request = self.build_git_request(
+            self.build_git_request(
                 "cursor",
                 "safe",
                 None,
@@ -563,50 +566,53 @@ class CursorModelOverrideTests(CommandTestBase):
                 reasoning_effort="max",
                 model_override="composer-2.5",
             )
-        self.assertEqual(request.model, "composer-2.5")
-        self.assertIsNone(request.reasoning_effort)
-        self.assertEqual(request.requested_reasoning_effort, "max")
-        self.assertTrue(any("bypassed" in warning for warning in request.warnings))
-        payload = self.delegate.dry_run_payload(request)
-        self.assertEqual(payload["requestedReasoningEffort"], "max")
-        self.assertNotIn("resolvedReasoningEffort", payload)
+        self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
+        self.assertIn("composer-2.5", ctx.exception.message)
+        self.assertIn("max", ctx.exception.message)
 
-    def test_explicit_model_wins_over_effort_routing(self):
+    def test_unrelated_config_mapping_does_not_override_explicit_model_pin(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
         config["cursor"]["reasoningEffortModels"] = {"high": "sonnet-4-thinking"}
-        request = self.build_git_request(
-            "cursor",
-            "safe",
-            None,
-            "/repo",
-            "hello",
-            config,
-            True,
-            reasoning_effort="high",
-            model_override="pinned-cursor-model",
-        )
-        self.assertEqual(request.model, "pinned-cursor-model")
-        _assert_argv_has_model(self, request.argv, "pinned-cursor-model")
-        self.assertIsNone(request.reasoning_capability_source)
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.build_git_request(
+                "cursor",
+                "safe",
+                None,
+                "/repo",
+                "hello",
+                config,
+                True,
+                reasoning_effort="high",
+                model_override="pinned-cursor-model",
+            )
+        self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
+        self.assertIn("pinned-cursor-model", ctx.exception.message)
 
-    def test_explicit_model_with_effort_emits_bypass_warning(self):
+    def test_cli_model_and_effort_without_exact_route_fail_closed(self):
+        repo = make_git_repo(with_commit=True)
+        self.addCleanup(repo.cleanup)
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
         config["cursor"]["reasoningEffortModels"] = {"high": "sonnet-4-thinking"}
-        request = self.build_git_request(
-            "cursor",
-            "safe",
-            None,
-            "/repo",
-            "hello",
-            config,
-            True,
-            reasoning_effort="high",
-            model_override="pinned-cursor-model",
+        parsed = self.delegate.parse_cli(
+            [
+                "--cwd",
+                repo.name,
+                "dry-run",
+                "cursor",
+                "safe",
+                "--model",
+                "pinned-cursor-model",
+                "--reasoning-effort",
+                "high",
+                "review",
+            ]
         )
-        self.assertTrue(any("bypass" in w.lower() for w in request.warnings))
-        self.assertIsNone(request.reasoning_capability_evidence)
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+        self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
+        self.assertIn("pinned-cursor-model", ctx.exception.message)
 
-    def test_config_sourced_effort_bypass_also_warns(self):
+    def test_config_sourced_effort_with_pin_degrades_and_warns(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
         config["cursor"]["defaultReasoningEffort"] = "high"
         config["cursor"]["reasoningEffortModels"] = {"high": "sonnet-4-thinking"}
@@ -621,7 +627,8 @@ class CursorModelOverrideTests(CommandTestBase):
             model_override="pinned-cursor-model",
         )
         self.assertEqual(request.model, "pinned-cursor-model")
-        self.assertTrue(any("bypass" in w.lower() for w in request.warnings))
+        self.assertIsNone(request.reasoning_effort)
+        self.assertTrue(any("defaultReasoningEffort" in w for w in request.warnings))
 
     def test_input_json_model_override_honored(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -647,6 +654,34 @@ class CursorModelOverrideTests(CommandTestBase):
             request = self.delegate.request_from_input_json(parsed, config)
             self.assertEqual(request.model, "input-json-cursor")
             _assert_argv_has_model(self, request.argv, "input-json-cursor")
+
+    def test_input_json_model_and_effort_without_exact_route_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "task.json"
+            task.write_text(
+                json.dumps(
+                    {
+                        "engine": "cursor",
+                        "mode": "safe",
+                        "model": "input-json-cursor",
+                        "reasoningEffort": "high",
+                        "cwd": tmp,
+                        "prompt": "review",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            parsed = self.delegate.ParsedCommand(
+                "run",
+                global_options=self.delegate.GlobalOptions(json_mode=True),
+                run_json=self.delegate.RunJsonOptions(str(task)),
+            )
+            config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+            config["cursor"]["reasoningEffortModels"] = {"high": "sonnet-4-thinking"}
+            with self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.delegate.request_from_input_json(parsed, config)
+            self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
+            self.assertIn("input-json-cursor", ctx.exception.message)
 
     def test_input_json_model_no_longer_must_match_default(self):
         with tempfile.TemporaryDirectory() as tmp:

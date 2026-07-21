@@ -240,7 +240,7 @@ Controls local run recording.
 - `defaultModel`: non-empty model name passed to Cursor.
 - `models`: optional map of local aliases to Cursor model IDs. Used by `--model` and JSON `model`. Alias keys must not collide with mode names (`safe`/`work`/`call`), equal the engine's own name, or start with `-`.
 - `defaultReasoningEffort`: optional non-empty effort string. It needs either a matching `reasoningEffortModels` entry or an exact discovered route for the selected model family. When neither can satisfy a configured default, the run proceeds without reasoning effort and records a warning (an explicit `--reasoning-effort` flag still fails closed).
-- `reasoningEffortModels`: map from effort strings to Cursor model names. Cursor currently has no standalone reasoning-effort flag, so Delegate implements Cursor effort by selecting a model. Without an explicit model pin, this map outranks discovered routes. An explicit `--model` blocks the global map; Delegate may still select a different exact same-family selector when discovery corroborates that effort route, and reports the replacement as a warning.
+- `reasoningEffortModels`: map from effort strings to Cursor model names. Cursor currently has no standalone reasoning-effort flag, so Delegate implements Cursor effort by selecting a model. Without an explicit model pin, this map outranks discovered routes. An explicit `--model` blocks the global map; Delegate may still select a different exact same-family selector when discovery corroborates that effort route, and reports the replacement as a warning. If no exact same-family route exists, an explicit effort fails closed while a configured default is ignored with a warning.
 - `cursor.binary` is not supported; use `argvPrefix`.
 
 ### `droid`

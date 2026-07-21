@@ -286,7 +286,7 @@ def emit(
     )
 
     try:
-        result = harness_discovery.refresh_discovery(config, profile=profile)
+        result = harness_discovery.refresh_discovery(config, profile=profile, persist=False)
     except (OSError, ValueError) as exc:
         raise DelegateError(
             "setup_discovery_failed",
@@ -408,6 +408,29 @@ def emit(
             )
             raise
 
+    updated = result.get("updatedHarnesses")
+    if isinstance(updated, list) and updated:
+        snapshot = result.get("snapshot")
+        try:
+            if not isinstance(snapshot, dict):
+                raise ValueError("discovery refresh returned no validated snapshot")
+            harness_discovery.write_discovery_cache(profile.name, snapshot)
+        except (OSError, ValueError) as exc:
+            diagnostics = _base_diagnostics(
+                path=path,
+                config_state=config_state,
+                profile=profile,
+                result=result,
+            )
+            diagnostics["cacheState"] = "error"
+            raise DelegateError(
+                "setup_cache_write_failed",
+                "Setup reconciled the config, but could not safely publish discovery.",
+                diagnostics=diagnostics,
+                next_actions=["Inspect the cache path, then rerun delegate setup."],
+            ) from exc
+        result["wrote"] = True
+
     stale_raw = result.get("staleHarnesses")
     stale_harnesses = set(stale_raw) if isinstance(stale_raw, list) else set()
     harnesses = _current_harness_projection(
@@ -421,7 +444,6 @@ def emit(
         for engine in KNOWN_ENGINES
         if isinstance(harnesses.get(engine), dict) and harnesses[engine].get("launchable") is True
     ]
-    updated = result.get("updatedHarnesses")
     discovery_ready = isinstance(updated, list) and bool(updated)
     diagnostics = _base_diagnostics(
         path=path,

@@ -272,6 +272,130 @@ class CapabilityCommandTests(unittest.TestCase):
         config["codex"]["defaultModel"] = model_id
         return config, fake_secret, conn_password, model_id, wrapper_path
 
+    def _adversarial_projection_config(self):
+        from delegate_agent.config import embedded_default_config
+
+        first_secret = "sk-proj-aaaaaaaaaaaaaaaa"
+        second_secret = "sk-proj-bbbbbbbbbbbbbbbb"
+        path_key = "/private/account/models/hidden"
+        path_value = "/private/account/models/value"
+        secret_shaped_key = "API_TOKEN_private-model"
+        config = embedded_default_config()
+        config["codex"]["models"] = {
+            first_secret: "model-a",
+            second_secret: "model-b",
+            path_key: "model-c",
+            "path-value": path_value,
+            secret_shaped_key: "model-d",
+        }
+        config["profiles"] = {
+            "definitions": {
+                first_secret: {"env": {}},
+                second_secret: {"env": {}},
+                path_key: {"env": {}},
+            }
+        }
+        return (
+            config,
+            first_secret,
+            second_secret,
+            path_key,
+            path_value,
+            secret_shaped_key,
+        )
+
+    def test_models_and_describe_share_collision_safe_public_projection_scrub(self):
+        from delegate_agent import config as delegate_config
+        from delegate_agent.describe_payload import emit_describe, emit_models
+
+        config, *private_values = self._adversarial_projection_config()
+        config_source = "/private/structured/config.json"
+        with tempfile.TemporaryDirectory() as workspace:
+            workspace_path = Path(workspace)
+            expected_layer_path = str(delegate_config.workspace_config_path(workspace_path))
+            outputs = {}
+            for name, emitter in (("models", emit_models), ("describe", emit_describe)):
+                stdout = io.StringIO()
+                code = emitter(
+                    config,
+                    config_source,
+                    True,
+                    stdout,
+                    workspace=workspace_path,
+                )
+                self.assertEqual(code, 0)
+                outputs[name] = json.loads(stdout.getvalue())
+
+        for payload in outputs.values():
+            rendered = json.dumps(payload)
+            self.assertEqual(payload["configSource"], config_source)
+            layer_paths = [
+                layer.get("path")
+                for layer in payload["configResolution"]["layers"]
+                if isinstance(layer, dict) and "path" in layer
+            ]
+            self.assertIn(expected_layer_path, layer_paths)
+            for private_value in private_values:
+                self.assertNotIn(private_value, rendered)
+
+        models = outputs["models"]["codex"]["models"]
+        self.assertEqual(len(models), 5)
+        self.assertIn("sk-***", models)
+        self.assertIn("sk-***<redacted-key-collision:2>", models)
+        self.assertIn("<redacted-path>", models)
+        self.assertEqual(models["path-value"], "<redacted-path>")
+        self.assertEqual(models["***"], "***")
+
+        profile_keys = outputs["describe"]["profiles"]["envKeys"]
+        self.assertEqual(len(profile_keys), 3)
+        self.assertIn("sk-***", profile_keys)
+        self.assertIn("sk-***<redacted-key-collision:2>", profile_keys)
+        self.assertIn("<redacted-path>", profile_keys)
+
+    def test_capabilities_uses_same_collision_safe_public_projection_scrub(self):
+        config, *private_values = self._adversarial_projection_config()
+        config_source = "/private/structured/config.json"
+        discovery = harness_discovery.empty_snapshot(profile="default")
+        discovery["harnesses"] = {
+            "codex": {
+                "models": {
+                    private_values[0]: {"reasoning": {"supported": ["high"], "evidence": "exact"}},
+                    private_values[1]: {"reasoning": {"supported": ["low"], "evidence": "exact"}},
+                    private_values[2]: {
+                        "reasoning": {"supported": ["medium"], "evidence": "exact"}
+                    },
+                }
+            }
+        }
+        with tempfile.TemporaryDirectory() as workspace:
+            payload = capability_commands.capabilities_payload(
+                config,
+                config_source,
+                workspace,
+                discovery=discovery,
+            )
+
+        rendered = json.dumps(payload)
+        self.assertEqual(payload["configSource"], config_source)
+        self.assertEqual(
+            payload["cachePath"],
+            str(harness_discovery.discovery_cache_path(None)),
+        )
+        for private_value in private_values:
+            self.assertNotIn(private_value, rendered)
+
+        aliases = payload["reasoning"]["aliases"]["codex"]
+        self.assertIn("sk-***", aliases)
+        self.assertIn("sk-***<redacted-key-collision:2>", aliases)
+        self.assertIn("<redacted-path>", aliases)
+        self.assertEqual(aliases["path-value"]["model"], "<redacted-path>")
+        self.assertEqual(aliases["***"], "***")
+
+        discovered_models = payload["reasoning"]["harnesses"]["codex"]["models"]
+        self.assertIn("sk-***", discovered_models)
+        self.assertIn("sk-***<redacted-key-collision:2>", discovered_models)
+        self.assertIn("<redacted-path>", discovered_models)
+
     def test_discovery_payload_scrub_masks_secrets_and_preserves_model_ids_and_paths(self):
         from delegate_agent import redaction
         from delegate_agent.describe_payload import describe_payload, models_payload

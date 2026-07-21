@@ -1703,12 +1703,21 @@ def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     # that exact selector family. Without a pin, the user's configured routing
     # map remains authoritative over observed routes.
     if build.requested_effort is not None and pinned is not None and not discovered_routes:
+        error = DelegateError(
+            "unsupported_reasoning_effort",
+            reasoning.format_explicit_reasoning_effort_error(
+                harness="cursor",
+                alias=build.model_alias,
+                model=pinned,
+                effort=build.requested_effort,
+                detail="has no authoritative discovered route family for the pinned model",
+            ),
+        )
+        if build.effort_source != "config":
+            raise error
+        warnings.append(f"ignoring cursor.defaultReasoningEffort: {error.message}")
         model = pinned
         capability_model_source = "explicit"
-        warnings.append(
-            "cursor reasoning-effort routing was bypassed by the pinned model; "
-            "proceeding with the explicit model selection."
-        )
     elif (
         build.requested_effort is not None
         and pinned is None
@@ -1798,17 +1807,6 @@ def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         pure=build.pure,
     )
     reasoning_kwargs = reasoning_request_kwargs(capability, build.effort_source)
-    if (
-        capability is None
-        and build.requested_effort is not None
-        and build.effort_source != "config"
-    ):
-        reasoning_kwargs.update(
-            {
-                "requested_reasoning_effort": build.requested_effort,
-                "reasoning_effort_source": build.effort_source or "cli",
-            }
-        )
     return EngineRequestParts(
         model=model,
         argv=argv,

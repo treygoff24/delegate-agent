@@ -144,7 +144,7 @@ Common causes:
 - Pi effort must be `low`, `medium`, `high`, `xhigh`, or `max`; alias-only `thinking` may also use `off` or `minimal`.
 - Pi models advertised with thinking disabled reject effort; thinking-enabled models use the harness-wide label menu as partial model evidence.
 - Oh My Pi effort uses the same levels and alias-only `thinking` values as Pi. Exact per-model validation applies only when its catalog provides a `thinking` array.
-- Cursor effort was requested but neither `cursor.reasoningEffortModels.<level>` nor an exact discovered same-family route could supply a selector. Cursor effort uses model selection rather than a standalone effort flag.
+- Cursor effort was requested but no applicable selector route exists. Without an explicit model pin, `cursor.reasoningEffortModels.<level>` can supply it. With a pin, that global map cannot override the selector, so an explicit effort requires an exact discovered same-family route. Cursor effort uses model selection rather than a standalone effort flag.
 - Droid or Codex model support is not in config, exact profile discovery, the legacy workspace cache, or bundled fallback data.
 - Kimi and Devin expose no Delegate reasoning-effort transport, even if harness metadata mentions an internal effort concept.
 - The effort string is misspelled. Delegate treats labels literally and does not translate between provider naming schemes.

@@ -6,7 +6,7 @@ from typing import TextIO
 
 from delegate_agent import command_errors, harness_discovery, profiles, reasoning, redaction
 from delegate_agent import rendering as delegate_rendering
-from delegate_agent.json_types import JsonObject, JsonValue
+from delegate_agent.json_types import JsonObject
 
 
 @dataclass(frozen=True)
@@ -25,27 +25,6 @@ class CapabilitiesError(command_errors.CommandError):
     ) -> None:
         super().__init__(error, message)
         self.diagnostics = diagnostics
-
-
-def _scrub_projection(value: object) -> JsonValue:
-    """Redact both keys and values in untrusted discovery projections."""
-    if isinstance(value, dict):
-        scrubbed: JsonObject = {}
-        for key, child in value.items():
-            if not isinstance(key, str):
-                continue
-            if redaction.key_looks_secret(key):
-                scrubbed["***"] = "***"
-                continue
-            scrubbed[redaction.redact_string(key)] = _scrub_projection(child)
-        return scrubbed
-    if isinstance(value, list):
-        return [_scrub_projection(item) for item in value]
-    if isinstance(value, str):
-        return redaction.redact_string(value)
-    if isinstance(value, (int, float, bool)) or value is None:
-        return value
-    return None
 
 
 def _public_attempts(attempt_records: JsonObject) -> JsonObject:
@@ -70,8 +49,7 @@ def _public_attempts(attempt_records: JsonObject) -> JsonObject:
         if isinstance(models, dict):
             record["catalogCount"] = len(models)
         projected[harness] = record
-    scrubbed = _scrub_projection(projected)
-    return scrubbed if isinstance(scrubbed, dict) else {}
+    return redaction.scrub_public_projection(projected)
 
 
 def capabilities_payload(
@@ -90,8 +68,7 @@ def capabilities_payload(
         legacy_cache,
         discovery=discovery,
     )
-    scrubbed_reasoning = _scrub_projection(raw_reasoning_payload)
-    reasoning_payload = scrubbed_reasoning if isinstance(scrubbed_reasoning, dict) else {}
+    reasoning_payload = raw_reasoning_payload
     payload: JsonObject = {
         "ok": True,
         "configSource": config_source,
@@ -99,7 +76,7 @@ def capabilities_payload(
         "reasoning": reasoning_payload,
     }
     _add_legacy_cache_fields(payload, legacy_path, reasoning_payload)
-    return payload
+    return redaction.scrub_public_projection(payload)
 
 
 def _add_legacy_cache_fields(
@@ -180,8 +157,7 @@ def _refresh_payload(
         legacy_cache,
         discovery=discovery,
     )
-    scrubbed_reasoning = _scrub_projection(raw_reasoning_payload)
-    reasoning_payload = scrubbed_reasoning if isinstance(scrubbed_reasoning, dict) else {}
+    reasoning_payload = raw_reasoning_payload
     payload: JsonObject = {
         "ok": True,
         "refreshed": True,
@@ -192,7 +168,7 @@ def _refresh_payload(
         "attempts": public_attempts,
     }
     _add_legacy_cache_fields(payload, legacy_path, reasoning_payload)
-    return payload
+    return redaction.scrub_public_projection(payload)
 
 
 def emit(

@@ -783,8 +783,8 @@ def add_reasoning_payload_fields(payload: JsonObject, carrier: ReasoningPayloadC
 
     Used for both the CLI Request and the runner RunContext so dry-run payloads,
     manifests, and snapshots cannot drift. Requested and resolved effort are
-    distinct because Cursor may route to another selector or preserve a pinned
-    selector with an explicit bypass warning.
+    distinct because Cursor may route to another selector or drop an
+    unsatisfied config-sourced default with a warning.
     """
     effort = carrier.reasoning_effort
     requested = getattr(carrier, "requested_reasoning_effort", None)

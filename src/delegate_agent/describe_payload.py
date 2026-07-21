@@ -61,25 +61,6 @@ from delegate_agent.request_build import OPENCODE_SAFE_AGENT, _resolve_default_m
 CONFIG_ENV = delegate_config.CONFIG_ENV
 
 
-def _redact_keys(value: object) -> object:
-    # redact_value scrubs string leaves but leaves dict KEYS untouched; alias
-    # maps (`<engine>.models`) put user-chosen strings in key position, so a
-    # secret-shaped alias key would otherwise pass through discovery verbatim.
-    if isinstance(value, dict):
-        return {
-            redaction.redact_string(key) if isinstance(key, str) else key: _redact_keys(child)
-            for key, child in value.items()
-        }
-    if isinstance(value, list):
-        return [_redact_keys(item) for item in value]
-    return value
-
-
-def _scrub_discovery_payload(payload: JsonObject) -> JsonObject:
-    scrubbed = _redact_keys(redaction.redact_value(payload))
-    return scrubbed if isinstance(scrubbed, dict) else {"ok": False}
-
-
 def _text_or_none(value: object) -> str:
     return value if isinstance(value, str) and value else "(none)"
 
@@ -1414,7 +1395,7 @@ def emit_models(
     if engine is not None:
         from delegate_agent import model_discovery
 
-        payload = _scrub_discovery_payload(
+        payload = redaction.scrub_public_projection(
             model_discovery.engine_models_payload(
                 config,
                 engine,
@@ -1431,7 +1412,7 @@ def emit_models(
             model_discovery.emit_engine_models_text(payload, stdout)
         return EXIT_OK
     if summary:
-        payload = _scrub_discovery_payload(
+        payload = redaction.scrub_public_projection(
             models_summary_payload(
                 config,
                 config_source,
@@ -1455,7 +1436,7 @@ def emit_models(
                         file=stdout,
                     )
         return EXIT_OK
-    payload = _scrub_discovery_payload(
+    payload = redaction.scrub_public_projection(
         models_payload(config, config_source, workspace, discovery=discovery)
     )
     if json_mode:
@@ -1479,7 +1460,7 @@ def emit_describe(
         if summary
         else describe_payload(config, config_source, workspace)
     )
-    payload = _scrub_discovery_payload(raw_payload)
+    payload = redaction.scrub_public_projection(raw_payload)
     if json_mode:
         delegate_rendering.print_json(payload, stdout)
         return EXIT_OK

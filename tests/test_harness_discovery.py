@@ -451,6 +451,12 @@ class TextParserTests(unittest.TestCase):
             self.parse_cursor(mislabeled_high)["models"]["cursor-grok-4.5-high"],
         )
 
+    def test_cursor_stops_before_trailing_help_sections(self):
+        raw = (FIXTURES / "cursor_models.txt").read_text() + ("\nOptions:\n  --help - Show help\n")
+        models = self.parse_cursor(raw)["models"]
+        self.assertNotIn("--help", models)
+        self.assertEqual(len(models), 8)
+
     def test_droid_help_metadata_wins_settings_collision(self):
         fragment = self.parse_droid((FIXTURES / "droid_help.txt").read_text())
         merged = self.merge_droid(
@@ -482,6 +488,14 @@ class TextParserTests(unittest.TestCase):
         self.assertNotIn("reasoning", ambiguous["models"]["second"])
         self.assertEqual(ambiguous["probeStatus"], "partial")
 
+    def test_droid_stops_before_trailing_help_sections(self):
+        raw = (FIXTURES / "droid_help.txt").read_text() + (
+            "\nOptions:\n  --model                                  Choose a model\n"
+        )
+        models = self.parse_droid(raw)["models"]
+        self.assertNotIn("--model", models)
+        self.assertEqual(len(models), 4)
+
     def test_claude_grok_and_pi_partial_capabilities(self):
         claude = self.parse_claude((FIXTURES / "claude_effort_help.txt").read_text())
         self.assertEqual(
@@ -505,8 +519,39 @@ class TextParserTests(unittest.TestCase):
         )
         self.assertEqual(pi["models"]["openai-codex/gpt-5.5"]["reasoning"]["evidence"], "harness")
 
+    def test_grok_stops_before_trailing_help_sections(self):
+        raw = (FIXTURES / "grok_models.txt").read_text() + "Options:\n  --help\n"
+        models = self.parse_grok(raw)["models"]
+        self.assertEqual(models, {"grok-4.5": {}})
+
 
 class AdapterOrchestrationTests(unittest.TestCase):
+    def test_claude_only_parses_expected_nonzero_sentinel_output(self):
+        from delegate_agent import harness_discovery
+
+        valid = (FIXTURES / "claude_effort_help.txt").read_text()
+        sentinel = harness_discovery.ProbeResult(("claude",), 1, "", valid, "probe_failed")
+        with mock.patch.object(harness_discovery, "run_metadata_probe", return_value=sentinel):
+            fragment = harness_discovery._probe_claude(("claude",), {}, None)
+        self.assertEqual(
+            fragment["harnessReasoning"]["supported"],
+            ["low", "medium", "high", "xhigh", "max"],
+        )
+
+        for error in (
+            "probe_timeout",
+            "probe_output_too_large",
+            "probe_missing",
+            "probe_launch_failed",
+        ):
+            with self.subTest(error=error):
+                failed = harness_discovery.ProbeResult(("claude",), None, valid, "", error)
+                with (
+                    mock.patch.object(harness_discovery, "run_metadata_probe", return_value=failed),
+                    self.assertRaisesRegex(ValueError, error),
+                ):
+                    harness_discovery._probe_claude(("claude",), {}, None)
+
     def test_fixture_harnesses_probe_without_prompting_devin(self):
         from delegate_agent.config import embedded_default_config
         from delegate_agent.harness_discovery import probe_all_harnesses, probe_harness
@@ -751,6 +796,30 @@ class DiscoveryCacheTests(unittest.TestCase):
             self.assertEqual(result["staleHarnesses"], ["codex"])
             self.assertEqual(path.read_bytes(), before)
             self.assertEqual(result["snapshot"]["harnesses"]["codex"]["probeStatus"], "ok")
+
+    def test_refresh_can_return_updates_without_persisting_them(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            existing = self._snapshot("work")
+            path = self.discovery.write_discovery_cache("work", existing, home=home)
+            before = path.read_bytes()
+            profile = self.profiles.ProfileResolution(name="work", source="test")
+            updated = copy.deepcopy(existing["harnesses"]["codex"])
+            updated["selector"] = ["/new-codex"]
+
+            with mock.patch.object(self.discovery, "probe_harness", return_value=updated):
+                result = self.discovery.refresh_discovery(
+                    {},
+                    profile=profile,
+                    engines=("codex",),
+                    home=home,
+                    persist=False,
+                )
+
+            self.assertFalse(result["wrote"])
+            self.assertEqual(result["updatedHarnesses"], ["codex"])
+            self.assertEqual(result["snapshot"]["harnesses"]["codex"], updated)
+            self.assertEqual(path.read_bytes(), before)
 
     def test_selector_drift_uses_profile_path_without_spawning(self):
         with tempfile.TemporaryDirectory() as tmp:
