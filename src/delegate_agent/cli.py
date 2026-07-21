@@ -711,6 +711,8 @@ def execute_request(
                         prompt_file_placeholder=PROMPT_FILE_ARG_PLACEHOLDER,
                         agent_config_text=request.agent_config_text,
                         agent_config_placeholder=DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
+                        output_schema_text=request.output_schema_text,
+                        output_schema_path=request.output_schema,
                         manifest_argv=public_argv(request),
                         progress=False,
                         timeout=request.timeout,
@@ -737,6 +739,8 @@ def execute_request(
                     prompt_file_placeholder=PROMPT_FILE_ARG_PLACEHOLDER,
                     agent_config_text=request.agent_config_text,
                     agent_config_placeholder=DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
+                    output_schema_text=request.output_schema_text,
+                    output_schema_path=request.output_schema,
                     env_overrides=request.env_overrides,
                     read_only=request.call_read_only,
                     pure=request.pure,
@@ -802,6 +806,8 @@ def execute_request(
                     }
                     if result.stderr_tail:
                         payload["stderrTail"] = result.stderr_tail
+                if result.codex_thread_fallback is not None:
+                    payload["codexThreadFallback"] = result.codex_thread_fallback
                 reasoning.add_reasoning_payload_fields(payload, request)
                 run_metadata.add_speed_payload_fields(payload, request)
                 if result.exit_code != 0:
@@ -949,6 +955,8 @@ def execute_request(
                 prompt_file_placeholder=PROMPT_FILE_ARG_PLACEHOLDER,
                 agent_config_text=isolated_request.agent_config_text,
                 agent_config_placeholder=DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
+                output_schema_text=isolated_request.output_schema_text,
+                output_schema_path=isolated_request.output_schema,
                 manifest_argv=public_argv(isolated_request),
                 progress=isolated_request.progress,
                 progress_initial_delay_sec=isolated_request.progress_initial_delay_sec,
@@ -1174,6 +1182,7 @@ def main(
         if parsed.subcommand in {
             "snapshot",
             "runs",
+            "ps",
             "run-output",
             "wait",
             "cancel",
@@ -1185,7 +1194,7 @@ def main(
                 maybe_run_retention_pass(existing_registry, config)
         if parsed.subcommand == "snapshot":
             return emit_snapshot(parsed, workspace, stdout)
-        if parsed.subcommand == "runs":
+        if parsed.subcommand in {"runs", "ps"}:
             return emit_runs(parsed, workspace, stdout)
         if parsed.subcommand == "run-output":
             return emit_run_output(parsed, workspace, stdout)

@@ -65,6 +65,9 @@ with Droid's documented `--file` option or Grok's `--prompt-file`. Cursor Agent 
 positional prompt input, and Kimi Code prompt mode currently uses `--prompt`,
 so those Harnesses also use argv transport; Delegate redacts Cursor, Oh My Pi, and Kimi
 prompt argv in dry-run output and run manifests.
+`--prompt-file /dev/stdin` (also `-`, `/dev/fd/0`, and equivalent non-regular
+stdin descriptors) is treated as the stdin source itself, so a pipe is read
+exactly once rather than rejected as a second prompt source.
 
 Temporary safe isolation also re-roots absolute paths under the source workspace
 when it transports the prompt, so `/source/repo/src/app.py` becomes the matching
@@ -189,7 +192,7 @@ delegate [--json] codex call [--read-only] [--timeout SECONDS] [--model <alias-o
 - Model selection uses `--model` (alias from `codex.models` or a raw model ID), the run-input JSON `model`, or `codex.defaultModel`.
 - `--reasoning-effort` maps to a Codex `model_reasoning_effort` config override after the model is resolved. The `max` level is bundled only for `gpt-5.6-sol` as of 2026-07.
 - `--fast` requests Codex Fast for one run; `--no-fast` explicitly requests Standard; omission inherits Codex configuration. The selected tier is recorded as `requestedFast` when explicit.
-- `--output-schema FILE` is **codex-only**. Every other engine rejects it. `FILE` is a path to a JSON Schema that OpenAI enforces on Codex's final message, for machine-parseable output in fan-outs and JSON run input. Relative paths resolve against the process launch cwd, the same rule as `--prompt-file`. When set, Delegate suppresses the completion-report prompt injection for that run so the schema owns the whole final message. Missing or unreadable files fail fast before launch.
+- For Codex, `--output-schema FILE` supplies the JSON Schema OpenAI enforces on the final message. Relative paths resolve against the process launch cwd, the same rule as `--prompt-file`. Delegate recursively preflights strict object schemas: missing `additionalProperties: false` is supplied in a temporary execution copy with a warning, while an incomplete `required` list or `additionalProperties` value other than `false` fails before launch. The source file is never modified. When set, Delegate suppresses completion-report prompt injection so the schema owns the whole final message. Claude also supports `--output-schema` in call mode; other engines reject it.
 
 Examples:
 
@@ -520,7 +523,10 @@ with `--pass-through`, which streams the child without a tracked deadline.
 `--read-only` and `--pure` apply only to `call`; passing them with
 `safe`/`work` is rejected. Empty-result retry applies to safe runs and read-only
 calls when the prompt can be safely extended; write-capable, pure, and verbatim
-calls are not retried.
+calls are not retried. Codex thread-loss recovery follows the same safety
+boundary: `call --read-only` may retry, but a write-capable call returns
+`codex_thread_lost` after its first attempt because external side effects cannot
+be proven absent.
 Because the child call is stateless, `--isolation`, `--pass-through`,
 `--progress`, `--forbid-commit`, and markdown completion reports are rejected.
 An ordinary call also rejects `--cwd`.
@@ -898,6 +904,7 @@ Tracked runs return bounded parent-facing output and store local metadata under 
 
 ```bash
 delegate runs [--active|--running|--stale|--recent] [--harness HARNESS] [--group NAME] [--limit N]
+delegate ps [--harness HARNESS] [--group NAME] [--limit N]
 delegate snapshot [--latest HARNESS] [--no-redact] <handle>
 delegate run-output [--latest HARNESS] <handle> [--completion-report] [--stdout] [--stderr] [--tail N] [--max-chars N] [--raw] [--no-redact]
 delegate wait <handle>... [--latest HARNESS] [--group NAME] [--timeout SEC] [--interval SEC] [--completion-report]
@@ -905,6 +912,8 @@ delegate cancel <handle>...
 ```
 
 `delegate runs` defaults to recent runs. `--active` preserves the legacy active view and includes both live `running` runs and `stale` runs. Use `--running` for only live tracked processes and `--stale` for runs recorded as running whose PID is missing or dead. `--active`, `--running`, `--stale`, and `--recent` are mutually exclusive. `--group NAME` filters by launch group and the runs table shows a `group` column when any visible run has one.
+`delegate ps` is the shorter first-class form of `delegate runs --active` and
+accepts the same harness, group, and limit selectors.
 
 Run-scoped handles (`snapshot`, `run-output`, `wait`, and `cancel`)
 resolve exact run IDs and numbered aliases first. A bare harness name such as
@@ -969,6 +978,16 @@ Tracked run envelopes include `completionReportWritten`, `completionReportSource
 `resultQuality` (`ok`, `housekeeping_noop`, `empty`, `suspect_short`, or
 `no_assistant_text`). Non-`ok` quality adds a warning rather than changing
 exit-code-derived status.
+
+Failed runs classify recognized child output as `usage_limit`, `auth_failed`,
+or `codex_thread_lost`; the envelope, persisted effective-status views, and
+synthesized completion report include the code and a human message. Usage-limit
+messages retain a reset time when the child supplied one. Unknown failures use
+`child_failed`, and raw stdout/stderr remain available through `run-output`.
+Codex thread loss alone activates a narrow escalation ladder: retry once, then
+use an ephemeral `--ignore-user-config` attempt if the same failure repeats.
+Work-mode attempts are never replayed after tool activity or a workspace change.
+`codexThreadFallback` and an event/warning disclose when that fallback engaged.
 
 Run-output JSON uses schema `delegate.run-output.v1` and returns selected completion report, stdout, and/or stderr content. By default, secret-like strings are redacted unless `--no-redact` is supplied. Tracked runs finish in one of the terminal statuses `succeeded`, `failed`, or `cancelled`; explicit harness cancellation/error terminal events override an exit-zero child status.
 

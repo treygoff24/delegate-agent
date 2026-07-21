@@ -155,7 +155,11 @@ intentionally deferred.
 - `passthrough=True` is incompatible with `schema=` and with `mode="call"`; slash pass-through needs a work lane or an argv-enforced-safe lane.
 - Prefer `agent(phase="...")` under concurrency; global `phase()` is intentionally racy like Claude's workflow primitive.
 - Use `--budget N` for run-count control. `budget.spent()` and `budget.remaining()` are available inside scripts. Dry-runs simulate budget ticks but do not consume real budget.
-- Use `schema=` when a stage must return structured JSON. Codex uses native `--output-schema`; other engines get schema instructions and validation retries.
+- Use `schema=` when a stage must return structured JSON. Codex uses native
+  `--output-schema`; every object node must list all properties in `required`,
+  and Delegate supplies missing `additionalProperties: false` in the temporary
+  schema with a warning. Other engines get schema instructions and validation
+  retries.
 
 ## Cross-family parallel review
 

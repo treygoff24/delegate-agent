@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added typed child-failure reporting for usage/quota limits (including reset
+  details when present), expired or rejected auth tokens, and Codex thread/state
+  lookup loss. Run state, snapshots, listings, completion envelopes, and
+  synthesized reports now carry the specific error and message. The existing
+  generic public error remains `child_failed`; `usage_limit`, `auth_failed`, and
+  `codex_thread_lost` are additive typed codes. Classification reads only stderr
+  and normalized harness error/terminal events, never assistant/model output.
+- Added `delegate ps` as the first-class active-run view, equivalent to
+  `delegate runs --active`.
 - Added `delegate setup` for first-run harness discovery. It fingerprints all
   supported installed harnesses, records available model/reasoning metadata in
   a profile-scoped user cache, creates a minimal selector-only config when no
@@ -23,6 +32,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Codex output schemas are now linted before launch. Delegate recursively
+  supplies missing `additionalProperties: false` on object schemas with a loud
+  warning, rejects non-strict `required` lists precisely, and passes a normalized
+  temporary copy without modifying the source schema. Object-bearing `allOf`,
+  `patternProperties`, and external or unresolvable `$ref` values fail closed
+  rather than being rewritten unsafely. Workflow Codex stages and direct
+  `--output-schema`/`outputSchema` launches share the same preflight.
+- On retry-safe paths, Codex thread/state lookup failures now retry once and,
+  only if the same typed failure repeats, retry through an ephemeral
+  `--ignore-user-config` launch. Retry-safe paths are read-only calls and
+  pre-tool attempts whose workspace remains unchanged; work mode also requires
+  a clean captured baseline. Envelopes and events record fallback engagement.
+- `--prompt-file /dev/stdin` and equivalent stdin descriptors now consume the
+  piped prompt once instead of conflicting with stdin as a second source.
 - Model and reasoning resolution now prefers explicit CLI/config choices and
   exact discovered evidence before legacy workspace or bundled fallbacks.
   Exact negative menus fail closed; partial harness evidence and Cursor inferred

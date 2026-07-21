@@ -42,6 +42,7 @@ TOP_LEVEL_COMMANDS = (
     "run",
     "snapshot",
     "runs",
+    "ps",
     "run-output",
     "wait",
     "cancel",

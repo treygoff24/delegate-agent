@@ -148,6 +148,7 @@ class Request:
     capability_model: str | None = None
     capability_model_source: str | None = None
     output_schema: str | None = None
+    output_schema_text: str | None = None
     pure: bool = False
     timeout: int | None = None
     dry_run: bool = False

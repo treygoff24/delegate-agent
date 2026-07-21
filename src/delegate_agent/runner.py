@@ -5,7 +5,6 @@ import io
 import json
 import math
 import os
-import re
 import shlex
 import shutil
 import signal
@@ -18,8 +17,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import BinaryIO, TextIO
 
-from delegate_agent import config as delegate_config
 from delegate_agent import (
+    child_failures,
     harness_events,
     profiles,
     prompt_instructions,
@@ -31,6 +30,7 @@ from delegate_agent import (
     seatbelt,
     worktree_summary,
 )
+from delegate_agent import config as delegate_config
 from delegate_agent.constants import PROMPT_INSTRUCTION_MODE_SLASH, PROMPT_INSTRUCTION_MODE_WRAPPED
 from delegate_agent.json_types import JsonObject
 
@@ -71,18 +71,6 @@ EMPTY_RETRY_SKIPPED_VERBATIM_WARNING = (
 COMPLETION_REPORT_SOURCE_CHILD = "child"
 COMPLETION_REPORT_SOURCE_SYNTHESIZED = "delegate_synthesized"
 COMPLETION_REPORT_SOURCE_STDOUT_RECOVERY = "stdout_recovery"
-# Auth-failure detection matches against the REDACTED STDERR TAIL ONLY (not the
-# normalized-events haystack), so a child report merely DISCUSSING a 401 in its
-# events/report text cannot be misclassified as an auth failure. ``token_expired``
-# and ``refresh token was revoked`` are unambiguous auth signals on their own; a
-# bare ``401`` only counts when auth context appears nearby (unauthorized/token/
-# auth within the same line), otherwise a 401 in unrelated output is ignored.
-AUTH_FAILURE_PATTERNS = (
-    re.compile(r"401[^\n]{0,80}(?:unauthorized|token|auth)", re.IGNORECASE),
-    re.compile(r"token_expired", re.IGNORECASE),
-    re.compile(r"refresh token was revoked", re.IGNORECASE),
-)
-
 SKILL_REVIEW_PREFIX = prompt_instructions.SKILL_REVIEW_PREFIX
 COMPLETION_REPORT_SUFFIX = prompt_instructions.COMPLETION_REPORT_SUFFIX
 prepend_skill_review_instructions = prompt_instructions.prepend_skill_review_instructions
@@ -209,16 +197,9 @@ def _terminal_override_extra(accumulator: harness_events.StreamAccumulator) -> J
         run_registry.STATUS_CANCELLED,
     }:
         return {}
+    extra: JsonObject = {"terminalStatus": accumulator.terminal_status}
     if accumulator.terminal_status == run_registry.STATUS_CANCELLED:
-        failure_reason = "harness_cancelled"
-    elif profiles.classify_codex_usage_limit(_accumulator_message_text(accumulator)):
-        failure_reason = "usage_limit"
-    else:
-        failure_reason = "harness_error"
-    extra: JsonObject = {
-        "terminalStatus": accumulator.terminal_status,
-        "failureReason": failure_reason,
-    }
+        extra["failureReason"] = "harness_cancelled"
     if accumulator.terminal_event is not None:
         extra["terminalEvent"] = accumulator.terminal_event
     return extra
@@ -629,38 +610,32 @@ def _classify_result_quality(
     return RESULT_QUALITY_OK
 
 
-def _auth_failure_seen(stderr_tail: str, accumulator: harness_events.StreamAccumulator) -> bool:
-    # Match against the redacted stderr tail ONLY. Inspecting the normalized
-    # events haystack would misclassify a child report that merely DISCUSSES a
-    # 401 (e.g. a review mentioning "the endpoint returned 401") as an auth
-    # failure. The accumulator is accepted to keep the call site stable but is
-    # intentionally not consulted here.
-    del accumulator  # unused: auth signals come from stderr, not event text
-    return any(pattern.search(stderr_tail) for pattern in AUTH_FAILURE_PATTERNS)
-
-
-def _failure_reason(
+def _failure_details(
     *,
     status: str,
-    stderr_tail: str,
-    accumulator: harness_events.StreamAccumulator,
+    signal_text: str,
     extra: JsonObject,
-) -> str | None:
+) -> child_failures.ChildFailure | None:
     existing = extra.get("failureReason")
-    if isinstance(existing, str) and existing:
-        return existing
     if status not in {run_registry.STATUS_FAILED, run_registry.STATUS_CANCELLED}:
         return None
-    if _auth_failure_seen(stderr_tail, accumulator):
-        return "auth_failed"
     if status == run_registry.STATUS_CANCELLED:
-        return "harness_cancelled"
-    quota_signal = "\n".join(
-        part for part in (stderr_tail, _accumulator_message_text(accumulator)) if part
+        code = existing if isinstance(existing, str) and existing else "harness_cancelled"
+        return child_failures.ChildFailure(code, "Run was cancelled before completion.")
+    existing_error = extra.get("error")
+    if isinstance(existing_error, str) and existing_error:
+        message = extra.get("message")
+        return child_failures.ChildFailure(
+            existing_error,
+            message if isinstance(message, str) and message else "Child harness failed.",
+        )
+    classified = child_failures.classify(signal_text)
+    if classified is not None:
+        return classified
+    return child_failures.ChildFailure(
+        "child_failed",
+        "Child command failed.",
     )
-    if profiles.classify_codex_usage_limit(quota_signal):
-        return "usage_limit"
-    return "child_failed"
 
 
 def _auth_remediation_actions(ctx: RunContext) -> list[str]:
@@ -686,6 +661,7 @@ def _completion_report_text_and_source(
     completion_report_mode: str,
     status: str,
     failure_reason: str | None,
+    failure_message: str | None,
     stderr_tail: str,
 ) -> tuple[str, str | None]:
     child_text = _completion_report_source(
@@ -740,6 +716,8 @@ def _completion_report_text_and_source(
             f"Status: {status}",
             f"Failure reason: {failure_reason or 'child_failed'}",
         ]
+        if failure_message:
+            lines.append(f"Message: {failure_message}")
         terminal = accumulator.terminal_event or {}
         terminal_reason = terminal.get("reason")
         if isinstance(terminal_reason, str) and terminal_reason.strip():
@@ -788,6 +766,12 @@ def emit_bounded_text_summary(
     for warning in ctx.warnings:
         print(f"warning: {warning}", file=stdout)
     if extra is not None:
+        error = extra.get("error")
+        message = extra.get("message")
+        if isinstance(error, str) and error:
+            print(f"error: {error}", file=stdout)
+        if isinstance(message, str) and message:
+            print(f"message: {message}", file=stdout)
         extra_warnings = extra.get("warnings")
         if isinstance(extra_warnings, list):
             for warning in extra_warnings:
@@ -923,8 +907,13 @@ def completion_json_payload(
             payload["error"] = str(extra.get("error") or "commit_policy_violated")
             payload["message"] = str(extra.get("message") or "Commit policy failed.")
         else:
-            payload["error"] = "child_failed"
-            payload["message"] = "Child command failed."
+            payload["error"] = str(
+                (extra.get("error") if extra is not None else None) or "child_failed"
+            )
+            payload["message"] = str(
+                (extra.get("message") if extra is not None else None)
+                or "Child harness failed for an unrecognized reason."
+            )
     return payload
 
 
@@ -1023,6 +1012,27 @@ def _materialize_prompt_file_argv(
     return [replacements.get(item, item) for item in argv], temp_dir
 
 
+def _materialize_output_schema_argv(
+    argv: list[str],
+    *,
+    output_schema_text: str | None,
+    output_schema_path: str | None,
+) -> tuple[list[str], Path | None]:
+    if output_schema_text is None:
+        return list(argv), None
+    if output_schema_path is None or output_schema_path not in argv:
+        raise ValueError("output_schema_path must be present in argv")
+    temp_dir = Path(tempfile.mkdtemp(prefix="delegate-schema-"))
+    os.chmod(temp_dir, run_registry.PRIVATE_DIR_MODE)
+    schema_path = temp_dir / "schema.json"
+    try:
+        run_registry.write_private_text(schema_path, output_schema_text)
+    except BaseException:
+        _cleanup_prompt_file_dir(temp_dir)
+        raise
+    return [str(schema_path) if item == output_schema_path else item for item in argv], temp_dir
+
+
 def _cleanup_prompt_file_dir(temp_dir: Path | None) -> None:
     if temp_dir is not None:
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -1068,6 +1078,7 @@ class CallResult:
     result_quality: str = RESULT_QUALITY_OK
     empty_retry_attempted: bool = False
     empty_retry_resolved: bool = False
+    codex_thread_fallback: JsonObject | None = None
 
 
 @dataclass(frozen=True)
@@ -1596,15 +1607,26 @@ def _finalize_tracked_run(
         status = run_registry.STATUS_CANCELLED
         exit_code = 1
         _reconcile_cancel_extra(merged_extra)
+    elif status == run_registry.STATUS_SUCCEEDED:
+        for key in ("failureReason", "error", "message"):
+            merged_extra.pop(key, None)
     stderr_tail = profiles.read_bounded_stderr_tail(files.stderr_log)
-    failure_reason = _failure_reason(
+    failure = _failure_details(
         status=status,
-        stderr_tail=stderr_tail,
-        accumulator=capture.accumulator,
+        signal_text="\n".join(
+            part
+            for part in (stderr_tail, _accumulator_failure_signal_text(capture.accumulator))
+            if part
+        ),
         extra=merged_extra,
     )
+    failure_reason = failure.code if failure is not None else None
+    failure_message = failure.message if failure is not None else None
     if failure_reason is not None:
         merged_extra["failureReason"] = failure_reason
+        if status != run_registry.STATUS_CANCELLED:
+            merged_extra["error"] = failure_reason
+            merged_extra["message"] = failure_message
         if failure_reason == "auth_failed":
             merged_extra["nextActions"] = _auth_remediation_actions(ctx)
     report_text, report_source = _completion_report_text_and_source(
@@ -1613,6 +1635,7 @@ def _finalize_tracked_run(
         completion_report_mode=completion_report_mode,
         status=status,
         failure_reason=failure_reason,
+        failure_message=failure_message,
         stderr_tail=stderr_tail,
     )
     report_written = write_completion_report(files.run_path, report_text)
@@ -1656,6 +1679,7 @@ def _finalize_tracked_run(
             completion_report_mode=completion_report_mode,
             status=run_registry.STATUS_CANCELLED,
             failure_reason="cancelled_by_user",
+            failure_message="Run was cancelled before completion.",
             stderr_tail=stderr_tail,
         )
         report_written = write_completion_report(files.run_path, report_text)
@@ -1742,6 +1766,8 @@ def _attempt_delimiter(label: str) -> bytes:
     prefix = (
         "delegate codex auth attempt"
         if label == "fallback"
+        else "delegate codex thread attempt"
+        if label in {"thread-retry", "thread-ephemeral-fallback"}
         else "delegate empty-retry attempt"
         if label == "empty-success-retry"
         else "delegate attempt"
@@ -1759,8 +1785,67 @@ def _prepend_attempt_delimiter(stderr_log: Path, *, label: str) -> None:
     stderr_log.write_bytes(_attempt_delimiter(label) + existing)
 
 
-def _accumulator_message_text(accumulator: harness_events.StreamAccumulator) -> str:
-    return "\n".join(event.message for event in accumulator.events if event.message)
+def _accumulator_failure_signal_text(accumulator: harness_events.StreamAccumulator) -> str:
+    return "\n".join(
+        event.message
+        for event in accumulator.events
+        if event.message
+        and (
+            event.kind == "error"
+            or (event.kind == "run.completed" and event.status == run_registry.STATUS_FAILED)
+        )
+    )
+
+
+def _attempt_log_tail(path: Path, byte_count: int) -> str:
+    if byte_count <= 0 or not path.exists():
+        return ""
+    limit = min(byte_count, profiles.STDERR_TAIL_LIMIT)
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        handle.seek(max(handle.tell() - limit, 0), os.SEEK_SET)
+        text = handle.read(limit).decode("utf-8", errors="replace")
+    return redaction.redact_string(text)
+
+
+def _capture_failure(
+    files: TrackedRunFiles, capture: TrackedCaptureResult
+) -> child_failures.ChildFailure | None:
+    if capture.exit_code == 0 and capture.accumulator.terminal_status not in {
+        run_registry.STATUS_FAILED,
+        run_registry.STATUS_CANCELLED,
+    }:
+        return None
+    signal = "\n".join(
+        part
+        for part in (
+            _attempt_log_tail(files.stderr_log, capture.stderr_bytes),
+            _accumulator_failure_signal_text(capture.accumulator),
+        )
+        if part
+    )
+    return child_failures.classify(signal)
+
+
+def _codex_ephemeral_fallback_argv(argv: list[str]) -> list[str]:
+    updated: list[str] = []
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--profile" and i + 1 < len(argv):
+            i += 2
+            continue
+        updated.append(argv[i])
+        i += 1
+    if "exec" in updated and "--ignore-user-config" not in updated:
+        updated.insert(updated.index("exec") + 1, "--ignore-user-config")
+    if "--ephemeral" not in updated:
+        updated.insert(max(len(updated) - 1, 0), "--ephemeral")
+    return updated
+
+
+def _append_runtime_event(files: TrackedRunFiles, kind: str, message: str) -> None:
+    with open_events_log(files.run_path) as handle:
+        append_event(handle, {"kind": kind, "message": message})
 
 
 def _should_retry_profiles(
@@ -1778,13 +1863,29 @@ def _should_retry_profiles(
     # Codex --json reports usage limits as stdout events, not stderr, so the
     # classifier must see both channels (stderr-only missed real quota walls).
     stderr_tail = profiles.read_bounded_stderr_tail(stderr_log)
-    event_text = _accumulator_message_text(capture.accumulator)
+    event_text = _accumulator_failure_signal_text(capture.accumulator)
     signal_text = "\n".join(part for part in (stderr_tail, event_text) if part)
     if not profiles.classify_codex_usage_limit(signal_text):
         return False
+    return _retry_is_safe(ctx, capture, cwd=cwd, workspace_baseline=workspace_baseline)
+
+
+def _retry_is_safe(
+    ctx: RunContext,
+    capture: TrackedCaptureResult,
+    *,
+    cwd: str,
+    workspace_baseline: profiles.WorkspaceBaseline | None,
+) -> bool:
     if profiles.accumulator_had_tool_events(capture.accumulator):
         return False
-    return ctx.mode != "work" or profiles.work_mode_safe_for_codex_fallback(cwd, workspace_baseline)
+    if ctx.mode == "call":
+        return ctx.call_read_only
+    if ctx.mode == "work":
+        return profiles.work_mode_safe_for_codex_fallback(cwd, workspace_baseline)
+    if ctx.mode == "safe" and ctx.isolated_workspace:
+        return profiles.workspace_baseline_unchanged(cwd, workspace_baseline)
+    return True
 
 
 def _cancel_requested_or_cancelled(ctx: RunContext) -> bool:
@@ -1930,6 +2031,7 @@ def _tracked_capture_quality(
         completion_report_mode=completion_report_mode,
         status=run_registry.STATUS_SUCCEEDED,
         failure_reason=None,
+        failure_message=None,
         stderr_tail=profiles.read_bounded_stderr_tail(files.stderr_log),
     )
     return _classify_result_quality(
@@ -1984,6 +2086,8 @@ def execute_tracked(
     prompt_file_placeholder: str | None = None,
     agent_config_text: str | None = None,
     agent_config_placeholder: str | None = None,
+    output_schema_text: str | None = None,
+    output_schema_path: str | None = None,
     manifest_argv: list[str] | None = None,
     progress: bool = False,
     progress_initial_delay_sec: float = PROGRESS_INITIAL_DELAY_SEC,
@@ -2011,8 +2115,20 @@ def execute_tracked(
         agent_config_placeholder=agent_config_placeholder,
         agent_config_dir=files.run_path,
     )
-    workspace_baseline = profiles.capture_workspace_baseline(cwd) if ctx.mode == "work" else None
+    launch_argv, schema_temp_dir = _materialize_output_schema_argv(
+        launch_argv,
+        output_schema_text=output_schema_text,
+        output_schema_path=output_schema_path,
+    )
+    retry_workspace = ctx.execution_cwd if ctx.isolated_workspace else cwd
+    workspace_baseline = (
+        profiles.capture_workspace_baseline(retry_workspace)
+        if ctx.engine == "codex"
+        and (ctx.mode == "work" or (ctx.mode == "safe" and ctx.isolated_workspace))
+        else None
+    )
     fallback_extra: JsonObject | None = None
+    thread_extra: JsonObject | None = None
     empty_retry_extra: JsonObject | None = None
     retry_prompt_temp_dir: str | None = None
     attempt_env = ctx.env_overrides or None
@@ -2033,10 +2149,118 @@ def execute_tracked(
             progress_initial_delay_sec=progress_initial_delay_sec,
             progress_interval_sec=progress_interval_sec,
         )
+        if (
+            ctx.engine == "codex"
+            and not _cancel_requested_or_cancelled(ctx)
+            and (primary_failure := _capture_failure(files, capture)) is not None
+            and primary_failure.code == "codex_thread_lost"
+            and _retry_is_safe(
+                ctx,
+                capture,
+                cwd=retry_workspace,
+                workspace_baseline=workspace_baseline,
+            )
+        ):
+            _prepend_attempt_delimiter(files.stderr_log, label="primary")
+            retry_capture = _run_single_tracked_attempt(
+                launch_argv,
+                cwd,
+                files,
+                ctx,
+                started=started,
+                deadline=deadline,
+                stdin_text=stdin_text,
+                env_overrides=ctx.env_overrides or None,
+                scratch_dir=files.scratch_dir,
+                progress=progress,
+                progress_stderr=stderr if progress else None,
+                progress_initial_delay_sec=progress_initial_delay_sec,
+                progress_interval_sec=progress_interval_sec,
+                attempt_label="thread-retry",
+                prior_capture=capture,
+            )
+            retry_failure = _capture_failure(files, retry_capture)
+            capture = _merge_tracked_attempt_captures(capture, retry_capture)
+            resolved = retry_capture.exit_code == 0 and retry_failure is None
+            thread_extra = {
+                "codexThreadFallback": {
+                    "retryAttempted": True,
+                    "engaged": False,
+                    "resolved": resolved,
+                }
+            }
+            if (
+                not resolved
+                and retry_failure is not None
+                and retry_failure.code == "codex_thread_lost"
+                and not _cancel_requested_or_cancelled(ctx)
+                and _retry_is_safe(
+                    ctx,
+                    retry_capture,
+                    cwd=retry_workspace,
+                    workspace_baseline=workspace_baseline,
+                )
+            ):
+                _append_runtime_event(
+                    files,
+                    "codex_thread_fallback",
+                    "Codex thread lookup failed twice; engaging ephemeral ignore-user-config fallback.",
+                )
+                fallback_capture = _run_single_tracked_attempt(
+                    _codex_ephemeral_fallback_argv(launch_argv),
+                    cwd,
+                    files,
+                    ctx,
+                    started=started,
+                    deadline=deadline,
+                    stdin_text=stdin_text,
+                    env_overrides=ctx.env_overrides or None,
+                    scratch_dir=files.scratch_dir,
+                    progress=progress,
+                    progress_stderr=stderr if progress else None,
+                    progress_initial_delay_sec=progress_initial_delay_sec,
+                    progress_interval_sec=progress_interval_sec,
+                    attempt_label="thread-ephemeral-fallback",
+                    prior_capture=capture,
+                )
+                fallback_failure = _capture_failure(files, fallback_capture)
+                capture = _merge_tracked_attempt_captures(capture, fallback_capture)
+                resolved = fallback_capture.exit_code == 0 and fallback_failure is None
+                thread_extra = {
+                    "codexThreadFallback": {
+                        "retryAttempted": True,
+                        "engaged": True,
+                        "resolved": resolved,
+                    },
+                    "warnings": [
+                        "Codex thread lookup failed twice; ephemeral ignore-user-config "
+                        "fallback engaged."
+                    ],
+                }
+                if not resolved:
+                    final_failure = fallback_failure or child_failures.ChildFailure(
+                        "child_failed",
+                        "Codex ephemeral fallback failed for an unrecognized reason.",
+                    )
+                    thread_extra.update(
+                        failureReason=final_failure.code,
+                        error=final_failure.code,
+                        message=final_failure.message,
+                    )
+            elif not resolved:
+                final_failure = retry_failure or child_failures.ChildFailure(
+                    "child_failed",
+                    "Codex retry failed for an unrecognized reason.",
+                )
+                thread_extra.update(
+                    failureReason=final_failure.code,
+                    error=final_failure.code,
+                    message=final_failure.message,
+                )
         if not _cancel_requested_or_cancelled(ctx) and _should_retry_profiles(
             ctx,
             capture,
-            cwd=cwd,
+            cwd=retry_workspace,
             stderr_log=files.stderr_log,
             workspace_baseline=workspace_baseline,
         ):
@@ -2152,10 +2376,23 @@ def execute_tracked(
     finally:
         _cleanup_prompt_file_dir(prompt_temp_dir)
         _cleanup_prompt_file_dir(retry_prompt_temp_dir)
+        _cleanup_prompt_file_dir(schema_temp_dir)
 
     assert capture is not None
     ctx = _ctx_with_stdin_warnings(ctx, capture.stdin_failures, stderr)
-    final_extra = {**(fallback_extra or {}), **(empty_retry_extra or {})}
+    final_extra: JsonObject = {}
+    final_warnings: list[str] = []
+    for attempt_extra in (fallback_extra, thread_extra, empty_retry_extra):
+        if attempt_extra is None:
+            continue
+        final_extra.update(
+            {key: value for key, value in attempt_extra.items() if key != "warnings"}
+        )
+        for warning in attempt_extra.get("warnings") or []:
+            if isinstance(warning, str):
+                _append_unique(final_warnings, warning)
+    if final_warnings:
+        final_extra["warnings"] = final_warnings
     if capture.error is not None:
         final_extra.update(
             error=capture.error,
@@ -2457,6 +2694,23 @@ def _parse_claude_call_json(
     )
 
 
+def _call_failure_details(
+    exit_code: int,
+    signal_text: str,
+    *,
+    error: str | None = None,
+    message: str | None = None,
+) -> tuple[str | None, str | None]:
+    if exit_code == 0:
+        return None, None
+    if error not in {None, "child_failed"}:
+        return error, message
+    failure = child_failures.classify(signal_text)
+    if failure is not None:
+        return failure.code, failure.message
+    return "child_failed", message
+
+
 def _resolve_codex_auth_file(env: dict[str, str]) -> str:
     """Return the resolved real path to the codex auth.json credential.
 
@@ -2494,6 +2748,8 @@ def _execute_call_once(
     prompt_file_placeholder: str | None = None,
     agent_config_text: str | None = None,
     agent_config_placeholder: str | None = None,
+    output_schema_text: str | None = None,
+    output_schema_path: str | None = None,
     env_overrides: dict[str, str] | None = None,
     pure: bool = False,
     timeout: float | None = None,
@@ -2509,6 +2765,11 @@ def _execute_call_once(
         prompt_file_placeholder=prompt_file_placeholder,
         agent_config_text=agent_config_text,
         agent_config_placeholder=agent_config_placeholder,
+    )
+    launch_argv, schema_temp_dir = _materialize_output_schema_argv(
+        launch_argv,
+        output_schema_text=output_schema_text,
+        output_schema_path=output_schema_path,
     )
     env = profiles.child_environment(overrides=env_overrides, pure=pure)
     started = time.monotonic()
@@ -2580,6 +2841,7 @@ def _execute_call_once(
             with contextlib.suppress(OSError):
                 shutil.rmtree(ephemeral_codex_home, ignore_errors=True)
         _cleanup_prompt_file_dir(prompt_temp_dir)
+        _cleanup_prompt_file_dir(schema_temp_dir)
 
     stdout_bytes = len(stdout_data or b"")
     stderr_bytes = len(stderr_data or b"")
@@ -2591,6 +2853,17 @@ def _execute_call_once(
         )
         text = _bounded_call_fallback_text(raw_text)
         result_exit_code = parsed_exit if process.returncode == 0 else process.returncode
+        failure_signal = stderr_tail
+        if error == "child_failed":
+            # Claude marks result text as a harness error channel only when
+            # is_error=true. Successful result text remains model output.
+            failure_signal = "\n".join(part for part in (stderr_tail, raw_text) if part)
+        error, message = _call_failure_details(
+            result_exit_code,
+            failure_signal,
+            error=error,
+            message=message,
+        )
         return CallResult(
             text=text,
             exit_code=result_exit_code,
@@ -2640,6 +2913,12 @@ def _execute_call_once(
         text = _bounded_call_fallback_text(raw)
         text_chars = len(raw)
         text_truncated = len(raw) > harness_events.ASSISTANT_TEXT_LIMIT
+    error, message = _call_failure_details(
+        process.returncode,
+        "\n".join(
+            part for part in (stderr_tail, _accumulator_failure_signal_text(accumulator)) if part
+        ),
+    )
     return CallResult(
         text=text,
         exit_code=process.returncode,
@@ -2650,6 +2929,8 @@ def _execute_call_once(
         text_truncated=text_truncated,
         stderr_tail=stderr_tail,
         warnings=warnings,
+        error=error,
+        message=message,
         result_quality=(
             RESULT_QUALITY_NO_ASSISTANT_TEXT
             if process.returncode == 0
@@ -2659,6 +2940,23 @@ def _execute_call_once(
             if process.returncode == 0 and not text.strip()
             else RESULT_QUALITY_OK
         ),
+    )
+
+
+def _merge_call_attempts(first: CallResult, last: CallResult, label: str) -> CallResult:
+    warnings = list(first.warnings)
+    for warning in last.warnings:
+        _append_unique(warnings, warning)
+    stderr = f"{first.stderr_tail}\n--- {label} ---\n{last.stderr_tail}".strip()
+    return replace(
+        last,
+        duration_ms=first.duration_ms + last.duration_ms,
+        stdout_bytes=first.stdout_bytes + last.stdout_bytes,
+        stderr_bytes=first.stderr_bytes + last.stderr_bytes,
+        stderr_tail=stderr[-profiles.STDERR_TAIL_LIMIT :],
+        warnings=tuple(warnings),
+        text_truncated=first.text_truncated or last.text_truncated,
+        usage=_aggregate_call_usage(first.usage, last.usage),
     )
 
 
@@ -2672,6 +2970,8 @@ def execute_call(
     prompt_file_placeholder: str | None = None,
     agent_config_text: str | None = None,
     agent_config_placeholder: str | None = None,
+    output_schema_text: str | None = None,
+    output_schema_path: str | None = None,
     env_overrides: dict[str, str] | None = None,
     read_only: bool = False,
     pure: bool = False,
@@ -2690,12 +2990,65 @@ def execute_call(
         prompt_file_placeholder=prompt_file_placeholder,
         agent_config_text=agent_config_text,
         agent_config_placeholder=agent_config_placeholder,
+        output_schema_text=output_schema_text,
+        output_schema_path=output_schema_path,
         env_overrides=env_overrides,
         pure=pure,
         timeout=None if deadline is None else max(deadline - time.monotonic(), 0),
         structured_output=structured_output,
         sensitive_texts=sensitive_texts,
     )
+    if read_only and harness == "codex" and result.error == "codex_thread_lost":
+        retry = _execute_call_once(
+            argv,
+            cwd,
+            harness=harness,
+            stdin_text=stdin_text,
+            prompt_file_text=prompt_file_text,
+            prompt_file_placeholder=prompt_file_placeholder,
+            agent_config_text=agent_config_text,
+            agent_config_placeholder=agent_config_placeholder,
+            output_schema_text=output_schema_text,
+            output_schema_path=output_schema_path,
+            env_overrides=env_overrides,
+            pure=pure,
+            timeout=None if deadline is None else max(deadline - time.monotonic(), 0),
+            structured_output=structured_output,
+            sensitive_texts=sensitive_texts,
+        )
+        result = _merge_call_attempts(result, retry, "codex thread retry")
+        metadata: JsonObject = {
+            "retryAttempted": True,
+            "engaged": False,
+            "resolved": retry.exit_code == 0,
+        }
+        if retry.error == "codex_thread_lost":
+            fallback = _execute_call_once(
+                _codex_ephemeral_fallback_argv(argv),
+                cwd,
+                harness=harness,
+                stdin_text=stdin_text,
+                prompt_file_text=prompt_file_text,
+                prompt_file_placeholder=prompt_file_placeholder,
+                agent_config_text=agent_config_text,
+                agent_config_placeholder=agent_config_placeholder,
+                output_schema_text=output_schema_text,
+                output_schema_path=output_schema_path,
+                env_overrides=env_overrides,
+                pure=pure,
+                timeout=None if deadline is None else max(deadline - time.monotonic(), 0),
+                structured_output=structured_output,
+                sensitive_texts=sensitive_texts,
+            )
+            result = _merge_call_attempts(result, fallback, "codex ephemeral fallback")
+            warnings = list(result.warnings)
+            _append_unique(
+                warnings,
+                "Codex thread lookup failed twice; ephemeral ignore-user-config fallback engaged.",
+            )
+            result = replace(result, warnings=tuple(warnings))
+            metadata.update(engaged=True, resolved=fallback.exit_code == 0)
+        result = replace(result, codex_thread_fallback=metadata)
     if result.result_quality != RESULT_QUALITY_EMPTY:
         return result
     if pure or prompt_instruction_mode == PROMPT_INSTRUCTION_MODE_SLASH:
@@ -2726,6 +3079,8 @@ def execute_call(
         prompt_file_placeholder=prompt_file_placeholder,
         agent_config_text=agent_config_text,
         agent_config_placeholder=agent_config_placeholder,
+        output_schema_text=output_schema_text,
+        output_schema_path=output_schema_path,
         env_overrides=env_overrides,
         pure=pure,
         timeout=None if deadline is None else max(deadline - time.monotonic(), 0),

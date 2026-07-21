@@ -474,6 +474,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertEqual(code, 7)
         self.assertIn("Authorization: ***", stderr.getvalue())
         self.assertNotIn("abcdefghijklmnop", stderr.getvalue())
+        self.assertEqual(len([line for line in stderr.getvalue().splitlines() if line]), 1)
 
     def test_json_success_shape_with_fake_binary(self):
         repo = make_git_repo()

@@ -23,7 +23,14 @@ from pathlib import Path
 from typing import TextIO
 
 from delegate_agent import config as delegate_config
-from delegate_agent import harness_discovery, profiles, reasoning, safe_workspace, wsl
+from delegate_agent import (
+    harness_discovery,
+    profiles,
+    reasoning,
+    safe_workspace,
+    structured_output,
+    wsl,
+)
 from delegate_agent import runner as delegate_runner
 from delegate_agent.argv_builders import (
     SAFE_REVIEW_PREFIX_BY_ENGINE,
@@ -264,21 +271,34 @@ def git_root_for(path: Path) -> str | None:
 def resolve_prompt(
     prompt_parts: list[str] | None,
     prompt_file: str | None,
-    stdin: TextIO,
+    stdin: TextIO | None,
 ) -> str:
     direct = " ".join(prompt_parts or [])
     has_direct = bool(direct)
-    has_prompt_file = prompt_file is not None
-    stdin_text = read_stdin_source(stdin, block=not (has_direct or has_prompt_file))
+    stdin_prompt_file = _prompt_file_is_stdin(prompt_file, stdin)
+    has_prompt_file = prompt_file is not None and not stdin_prompt_file
+    stdin_text = read_stdin_source(
+        stdin, block=stdin_prompt_file or not (has_direct or has_prompt_file)
+    )
     has_stdin = stdin_text is not None
     if sum(1 for present in (has_direct, has_prompt_file, has_stdin) if present) > 1:
+        if stdin_prompt_file and has_direct:
+            message = "Use either direct prompt arguments or --prompt-file /dev/stdin, not both."
+        elif has_prompt_file and has_stdin:
+            message = (
+                "A regular --prompt-file and piped stdin are both present; remove one prompt "
+                "source or redirect stdin from /dev/null."
+            )
+        else:
+            message = "Use exactly one prompt source: direct arguments, --prompt-file, or stdin."
         raise DelegateError(
             "ambiguous_prompt_source",
-            "Use exactly one prompt source: direct args, --prompt-file, or stdin.",
+            message,
         )
     if has_direct:
         return validate_prompt(direct)
-    if prompt_file is not None:
+    if has_prompt_file:
+        assert prompt_file is not None
         _reject_windows_path(prompt_file, "--prompt-file")
         path = Path(prompt_file).expanduser()
         try:
@@ -292,7 +312,21 @@ def resolve_prompt(
     )
 
 
-def read_stdin_source(stdin: TextIO, *, block: bool = False) -> str | None:
+def _prompt_file_is_stdin(prompt_file: str | None, stdin: TextIO | None) -> bool:
+    if prompt_file is None or stdin is None:
+        return False
+    path = Path(prompt_file).expanduser()
+    if str(path) in {"-", "/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"}:
+        return True
+    try:
+        return not path.is_file() and os.path.samefile(path, f"/dev/fd/{stdin.fileno()}")
+    except (AttributeError, FileNotFoundError, OSError, ValueError, io.UnsupportedOperation):
+        return False
+
+
+def read_stdin_source(stdin: TextIO | None, *, block: bool = False) -> str | None:
+    if stdin is None:
+        return None
     if stdin.isatty():
         return None
     if not block:
@@ -348,6 +382,40 @@ def resolve_output_schema(engine: str, output_schema: object) -> str | None:
             "invalid_output_schema", f"Output schema is not readable: {path}"
         ) from exc
     return str(path)
+
+
+def _preflight_codex_output_schema(
+    engine: str, output_schema: str | None
+) -> tuple[str | None, tuple[str, ...]]:
+    if engine != "codex" or output_schema is None:
+        return None, ()
+    try:
+        schema = json.loads(Path(output_schema).read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise DelegateError(
+            "invalid_output_schema",
+            f"Codex output schema is not valid JSON at line {exc.lineno}, column {exc.colno}.",
+        ) from exc
+    except OSError as exc:
+        raise DelegateError(
+            "invalid_output_schema", f"Output schema is not readable: {output_schema}"
+        ) from exc
+    try:
+        normalized, injected = structured_output.normalize_codex_schema(schema)
+    except structured_output.SchemaPreflightError as exc:
+        raise DelegateError("invalid_output_schema", f"Codex strict schema: {exc}") from exc
+    warnings = (
+        (
+            (
+                "Codex strict schema: auto-injected additionalProperties=false at "
+                + ", ".join(injected)
+                + "."
+            ),
+        )
+        if injected
+        else ()
+    )
+    return json.dumps(normalized, sort_keys=True), warnings
 
 
 def _validate_output_schema_mode(engine: str, mode: str, output_schema: object) -> None:
@@ -2476,6 +2544,8 @@ def _build_request_for_workspace(
     agent: str | None = None,
     model_override: str | None = None,
 ) -> Request:
+    output_schema_text, schema_warnings = _preflight_codex_output_schema(engine, output_schema)
+    warnings = (*warnings, *schema_warnings)
     if prompt_instruction_mode != PROMPT_INSTRUCTION_MODE_SLASH:
         prompt = _append_safe_dirty_tree_note(prompt, resolved, mode, isolation_context)
     workspace_warning = wsl.drivefs_workspace_warning(resolved.path)
@@ -2520,6 +2590,7 @@ def _build_request_for_workspace(
             capability_model=parts.capability_model,
             capability_model_source=parts.capability_model_source,
             output_schema=output_schema,
+            output_schema_text=output_schema_text,
             pure=pure,
             timeout=timeout,
             dry_run=dry_run,

@@ -535,6 +535,8 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
         return parse_snapshot(rest, json_mode, cwd)
     if subcommand == "runs":
         return parse_runs(rest, json_mode, cwd)
+    if subcommand == "ps":
+        return parse_ps(rest, json_mode, cwd)
     if subcommand == "run-output":
         return parse_run_output(rest, json_mode, cwd)
     if subcommand == "wait":
@@ -1459,6 +1461,15 @@ def parse_runs(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedComma
             json_mode=json_mode,
         ),
     )
+
+
+def parse_ps(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
+    rest, json_mode = consume_json_option(rest, json_mode)
+    if any(command_help.is_help_token(token) for token in rest):
+        return help_command(json_mode, "ps")
+    parsed = parse_runs(["--active", *rest], json_mode, cwd)
+    parsed.subcommand = "ps"
+    return parsed
 
 
 def parse_run_output(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:

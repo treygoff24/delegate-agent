@@ -45,6 +45,7 @@ TOP_LEVEL_COMMANDS = (
     "run",
     "snapshot",
     "runs",
+    "ps",
     "run-output",
     "wait",
     "cancel",
@@ -510,6 +511,13 @@ class ErgonomicsParserTests(HelpCliTestBase):
         parsed = self.delegate.parse_cli(["list", "--recent"])
         self.assertEqual(parsed.subcommand, "runs")
         self.assertIsNotNone(parsed.runs)
+
+    def test_ps_maps_to_active_runs(self):
+        parsed = self.delegate.parse_cli(["ps"])
+
+        self.assertEqual(parsed.subcommand, "ps")
+        self.assertIsNotNone(parsed.runs)
+        self.assertTrue(parsed.runs.active)
 
     def test_unknown_subcommand_suggests_known_forms(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:

@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from delegate_agent import redaction, wsl
+from delegate_agent import child_failures, redaction, wsl
 from delegate_agent.errors import DelegateError
 from delegate_agent.git_utils import GIT_QUICK_TIMEOUT_SECONDS
 from delegate_agent.git_utils import run_git as _run_git
@@ -21,23 +21,9 @@ PURE_ENV_ALLOWLIST = frozenset(
     {"PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TERM"}
 )
 
-_RATE_LIMIT_PATTERN = re.compile(r"rate limit", re.IGNORECASE)
-
 # Matches $$, ${VAR}, and $VAR. Only ${VAR} and $VAR are expanded against a
 # restricted environment; $$ collapses to a literal $.
 _ENV_VAR_PATTERN = re.compile(r"\$\$|\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
-
-_USAGE_LIMIT_PATTERNS = (
-    re.compile(r"usage limit", re.IGNORECASE),
-    re.compile(r"insufficient_quota", re.IGNORECASE),
-    re.compile(r"exceeded your current quota", re.IGNORECASE),
-    _RATE_LIMIT_PATTERN,
-)
-
-_ACCOUNT_QUOTA_CONTEXT = re.compile(
-    r"(quota|usage|billing|subscription|account|credit)",
-    re.IGNORECASE,
-)
 
 
 @dataclass(frozen=True)
@@ -353,15 +339,7 @@ def codex_fallback_child_env_overrides(
 
 
 def classify_codex_usage_limit(stderr_text: str) -> bool:
-    if not stderr_text.strip():
-        return False
-    for pattern in _USAGE_LIMIT_PATTERNS:
-        if not pattern.search(stderr_text):
-            continue
-        if pattern is _RATE_LIMIT_PATTERN and not _ACCOUNT_QUOTA_CONTEXT.search(stderr_text):
-            continue
-        return True
-    return False
+    return child_failures.is_usage_limit(stderr_text)
 
 
 def read_bounded_stderr_tail(stderr_log: Path, *, limit: int = STDERR_TAIL_LIMIT) -> str:
@@ -416,11 +394,14 @@ class WorkspaceBaseline:
 
 
 def capture_workspace_baseline(cwd: str) -> WorkspaceBaseline | None:
-    porcelain = capture_workspace_porcelain(cwd)
-    if porcelain is None:
-        return None
-    head = capture_head_oid(cwd)
-    if head is None:
+    try:
+        porcelain = capture_workspace_porcelain(cwd)
+        if porcelain is None:
+            return None
+        head = capture_head_oid(cwd)
+        if head is None:
+            return None
+    except Exception:
         return None
     return WorkspaceBaseline(porcelain=porcelain, head=head)
 

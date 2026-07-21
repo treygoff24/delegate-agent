@@ -417,17 +417,33 @@ returned.
 
 ## Structured / JSON-only final output
 
-For a bare machine-parseable final message on Codex, use `--output-schema FILE`
-(codex-only). OpenAI enforces the JSON Schema on Codex's final message; Delegate
+For a bare machine-parseable final message on Codex, use `--output-schema FILE`.
+OpenAI enforces the JSON Schema on Codex's final message; Delegate
 suppresses the completion-report prompt injection for that run, so the report
 will not precede or wrap your payload. Relative schema paths resolve against the
 launch cwd, like `--prompt-file`.
 
-For engines other than Codex there is no native schema enforcement.
-Embed the schema in the prompt and parse the final message yourself. Delegate
-still injects completion-report instructions unless you pass
-`--no-completion-report`; when present, the report precedes any operator-requested
-payload (payload-last ordering).
+Delegate preflights Codex strict schemas recursively. It supplies a missing
+`additionalProperties: false` in a temporary copy and warns; it does not edit
+the source file. Every object property must already appear in `required`, because
+auto-requiring an optional field would change the schema's meaning. Incomplete
+`required` lists and explicit non-false `additionalProperties` fail immediately
+as `invalid_output_schema` with the failing schema path.
+
+Tracked child failures use `usage_limit`, `auth_failed`, and
+`codex_thread_lost` when recognized, otherwise `child_failed`. Inspect the
+typed message first, then use `delegate run-output <handle> --stdout` or
+`--stderr` for raw diagnostics. On retry-safe `codex_thread_lost` failures,
+Delegate retries once; if the same signature repeats it automatically tries an
+ephemeral `--ignore-user-config` launch and records the fallback in the
+envelope/events. Write-capable calls are not retry-safe and return the typed
+failure after the first attempt.
+
+Claude call mode also supports native `--output-schema`; other engines require
+embedding the schema in the prompt and parsing the final message yourself.
+Delegate still injects completion-report instructions unless you pass
+`--no-completion-report`; when present, the report precedes any
+operator-requested payload (payload-last ordering).
 
 ```bash
 delegate --json codex safe --output-schema findings.schema.json "Audit auth handlers."

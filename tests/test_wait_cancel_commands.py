@@ -476,7 +476,7 @@ class WaitCancelCommandTests(unittest.TestCase):
         runner_terminal_state.update(
             {
                 "status": "failed",
-                "failureReason": "harness_error",
+                "failureReason": "child_failed",
                 "exitCode": 1,
                 "finishedAt": run_registry.utc_now_iso(),
             }

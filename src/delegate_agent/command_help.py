@@ -818,7 +818,21 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "delegate runs --group wave4",
         ),
         notes=("--active, --running, --stale, and --recent are mutually exclusive.",),
-        see_also=("snapshot", "run-output"),
+        see_also=("ps", "snapshot", "run-output"),
+        unsupported_global_options=("--auth-profile",),
+    ),
+    "ps": CommandSpec(
+        name="ps",
+        summary="List active tracked runs (alias for runs --active).",
+        usage=("delegate [--json] ps [--harness HARNESS] [--group NAME] [--limit N]",),
+        options=(
+            OptionSpec("--harness", "HARNESS", f"Filter by harness: {ENGINES_PROSE}."),
+            OptionSpec("--limit", "N", "Cap the number of runs listed (positive integer)."),
+            OptionSpec("--group", "NAME", "Filter by launch group."),
+        ),
+        examples=("delegate ps", "delegate ps --harness codex"),
+        notes=("Equivalent to delegate runs --active.",),
+        see_also=("runs", "snapshot", "run-output"),
         unsupported_global_options=("--auth-profile",),
     ),
     "run-output": CommandSpec(
@@ -1712,6 +1726,7 @@ def render_overview_text() -> str:
         "delegate [--cwd PATH] [--json] snapshot [--latest HARNESS] [--no-redact] <handle>",
         "delegate [--cwd PATH] [--json] runs "
         "[--active|--running|--stale|--recent] [--harness HARNESS] [--limit N]",
+        "delegate [--cwd PATH] [--json] ps [--harness HARNESS] [--group NAME] [--limit N]",
         "delegate [--cwd PATH] [--json] run-output <handle> "
         "[--completion-report] [--stdout] [--stderr] [--tail N] [--max-chars N] "
         "[--raw] [--no-redact]",

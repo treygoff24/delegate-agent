@@ -174,7 +174,10 @@ class PureCallTests(CommandTestBase):
     def test_call_output_schema_maps_to_codex_path_and_claude_contents(self):
         with tempfile.TemporaryDirectory() as tmp:
             schema = Path(tmp) / "schema.json"
-            contents = '{"type":"object","properties":{"answer":{"type":"string"}}}'
+            contents = (
+                '{"type":"object","properties":{"answer":{"type":"string"}},'
+                '"required":["answer"],"additionalProperties":false}'
+            )
             schema.write_text(contents, encoding="utf-8")
             codex = self.delegate.build_request(
                 "codex",
@@ -388,6 +391,26 @@ class PureCallTests(CommandTestBase):
         self.assertEqual(result.exit_code, 1)
         self.assertEqual(result.error, "call_output_invalid")
         self.assertEqual(result.text, "")
+
+    def test_claude_is_error_result_keeps_typed_usage_limit(self):
+        events = [
+            {
+                "type": "result",
+                "result": "Usage limit reached; resets at 2026-07-22 01:00 UTC.",
+                "is_error": True,
+                "permission_denials": [],
+            }
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "claude_usage.py"
+            script.write_text(f"print({json.dumps(json.dumps(events))})\n", encoding="utf-8")
+            result = self.delegate.delegate_runner.execute_call(
+                [sys.executable, str(script)], tmp, harness="claude", pure=True
+            )
+
+        self.assertEqual(result.exit_code, 1)
+        self.assertEqual(result.error, "usage_limit")
+        self.assertIn("2026-07-22 01:00 UTC", result.message or "")
 
     def test_pure_claude_schema_dry_run_proves_temp_cwd_and_boundary_argv(self):
         with tempfile.TemporaryDirectory() as tmp:

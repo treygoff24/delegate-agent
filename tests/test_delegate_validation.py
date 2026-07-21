@@ -66,6 +66,16 @@ class NonTtyStdin(io.StringIO):
         return False
 
 
+class CountingNonTtyStdin(NonTtyStdin):
+    def __init__(self, value):
+        super().__init__(value)
+        self.read_count = 0
+
+    def read(self, *args, **kwargs):
+        self.read_count += 1
+        return super().read(*args, **kwargs)
+
+
 class ValidationTests(unittest.TestCase):
     def setUp(self):
         self.delegate = load_delegate()
@@ -162,6 +172,48 @@ class ValidationTests(unittest.TestCase):
         )
         self.assertTrue(any("JSON-only final message" in warning for warning in request.warnings))
 
+    def test_codex_output_schema_preflight_normalizes_without_mutating_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            schema = Path(tmp) / "schema.json"
+            original = {
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
+            }
+            schema.write_text(json.dumps(original), encoding="utf-8")
+            parsed = self.delegate.parse_cli(
+                ["--cwd", tmp, "codex", "safe", "--output-schema", str(schema), "review"]
+            )
+
+            request = self.delegate.request_from_parsed(
+                parsed, self.delegate.DEFAULT_CONFIG, TtyStdin()
+            )
+            self.assertEqual(json.loads(schema.read_text()), original)
+            self.assertIs(json.loads(request.output_schema_text)["additionalProperties"], False)
+            self.assertTrue(any("auto-injected" in warning for warning in request.warnings))
+
+    def test_codex_output_schema_missing_required_property_fails_preflight(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            schema = Path(tmp) / "schema.json"
+            schema.write_text(
+                json.dumps(
+                    {
+                        "type": "object",
+                        "properties": {"name": {"type": "string"}},
+                        "required": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            parsed = self.delegate.parse_cli(
+                ["--cwd", tmp, "codex", "safe", "--output-schema", str(schema), "review"]
+            )
+            with self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.delegate.request_from_parsed(parsed, self.delegate.DEFAULT_CONFIG, TtyStdin())
+
+        self.assertEqual(ctx.exception.error, "invalid_output_schema")
+        self.assertIn("schema.required", ctx.exception.message)
+
     def test_stdin_works(self):
         self.assertEqual(
             self.delegate.resolve_prompt([], None, NonTtyStdin("from stdin")), "from stdin"
@@ -215,9 +267,30 @@ class ValidationTests(unittest.TestCase):
             self.delegate.resolve_prompt([], path, NonTtyStdin("from stdin"))
         self.assertEqual(ctx.exception.error, "ambiguous_prompt_source")
 
+    def test_dev_stdin_prompt_file_is_the_stdin_source_and_reads_once(self):
+        stdin = CountingNonTtyStdin("from stdin")
+
+        prompt = self.delegate.resolve_prompt([], "/dev/stdin", stdin)
+
+        self.assertEqual(prompt, "from stdin")
+        self.assertEqual(stdin.read_count, 1)
+
+    def test_direct_plus_dev_stdin_names_the_conflicting_sources(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.resolve_prompt(["direct"], "/dev/stdin", NonTtyStdin("piped"))
+
+        self.assertEqual(ctx.exception.error, "ambiguous_prompt_source")
+        self.assertIn("direct prompt arguments", ctx.exception.message)
+        self.assertIn("--prompt-file /dev/stdin", ctx.exception.message)
+
     def test_no_prompt_with_tty_fails_without_blocking(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:
             self.delegate.resolve_prompt([], None, TtyStdin())
+        self.assertEqual(ctx.exception.error, "missing_prompt")
+
+    def test_closed_stdin_fails_as_missing_prompt(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.resolve_prompt([], None, None)
         self.assertEqual(ctx.exception.error, "missing_prompt")
 
     def test_control_characters_are_sanitized(self):

@@ -217,7 +217,12 @@ $EDITOR /tmp/delegate-task.json
 delegate --json run --input-json /tmp/delegate-task.json
 ```
 
-For Codex fan-outs that must return machine-parseable records, add `--output-schema` (or JSON `outputSchema`); Delegate suppresses completion-report injection so the schema owns the final message.
+For Codex fan-outs that must return machine-parseable records, add
+`--output-schema` (or JSON `outputSchema`); Delegate suppresses completion-report
+injection so the schema owns the final message. Codex schemas are
+strict-preflighted recursively: every property must be required, and a missing
+`additionalProperties: false` is supplied in a warned temporary copy without
+changing the source file.
 
 For a one-hop prompt that should not see the current repo or create a tracked
 run, use stateless `call` mode:
@@ -291,6 +296,7 @@ Inspect tracked output by alias:
 
 ```bash
 delegate runs --recent
+delegate ps                   # active and stale tracked runs
 delegate snapshot <alias-or-runId>
 delegate run-output <alias-or-runId>
 ```
