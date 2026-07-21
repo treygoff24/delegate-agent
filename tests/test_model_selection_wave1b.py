@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import ClassVar
+from unittest import mock
 
 from tests.delegate_commands_test_base import CommandTestBase, make_git_repo
 
@@ -435,6 +436,103 @@ class DroidModelSelectionTests(CommandTestBase):
 
 
 class CursorModelOverrideTests(CommandTestBase):
+    @staticmethod
+    def _cursor_route_discovery() -> dict:
+        def route(family: str, effort: str) -> dict:
+            return {
+                "routeFamily": family,
+                "routeEffort": effort,
+                "reasoning": {
+                    "supported": [effort],
+                    "default": effort,
+                    "evidence": "inferred-route",
+                },
+            }
+
+        return {
+            "harnesses": {
+                "cursor": {
+                    "models": {
+                        "cursor-grok-4.5-low": route("cursor-grok-4.5", "low"),
+                        "cursor-grok-4.5-max": route("cursor-grok-4.5", "max"),
+                        "composer-2.5": {},
+                    }
+                }
+            }
+        }
+
+    def test_discovered_cursor_family_routes_explicit_model_to_exact_selector(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        with mock.patch.object(
+            self.delegate.harness_discovery,
+            "load_discovery_cache",
+            return_value=self._cursor_route_discovery(),
+        ):
+            request = self.build_git_request(
+                "cursor",
+                "safe",
+                None,
+                "/repo",
+                "hello",
+                config,
+                True,
+                reasoning_effort="max",
+                model_override="cursor-grok-4.5-low",
+            )
+        self.assertEqual(request.model, "cursor-grok-4.5-max")
+        self.assertEqual(request.reasoning_capability_source, "discovery")
+        self.assertEqual(request.reasoning_capability_evidence, "inferred-route")
+
+    def test_authoritative_cursor_family_missing_effort_fails_closed(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        with (
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "load_discovery_cache",
+                return_value=self._cursor_route_discovery(),
+            ),
+            self.assertRaises(self.delegate.DelegateError) as ctx,
+        ):
+            self.build_git_request(
+                "cursor",
+                "safe",
+                None,
+                "/repo",
+                "hello",
+                config,
+                True,
+                reasoning_effort="xhigh",
+                model_override="cursor-grok-4.5-low",
+            )
+        self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
+        self.assertIn("low, max", ctx.exception.message)
+
+    def test_pinned_cursor_without_route_evidence_retains_bypass(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        with mock.patch.object(
+            self.delegate.harness_discovery,
+            "load_discovery_cache",
+            return_value=self._cursor_route_discovery(),
+        ):
+            request = self.build_git_request(
+                "cursor",
+                "safe",
+                None,
+                "/repo",
+                "hello",
+                config,
+                True,
+                reasoning_effort="max",
+                model_override="composer-2.5",
+            )
+        self.assertEqual(request.model, "composer-2.5")
+        self.assertIsNone(request.reasoning_effort)
+        self.assertEqual(request.requested_reasoning_effort, "max")
+        self.assertTrue(any("bypassed" in warning for warning in request.warnings))
+        payload = self.delegate.dry_run_payload(request)
+        self.assertEqual(payload["requestedReasoningEffort"], "max")
+        self.assertNotIn("resolvedReasoningEffort", payload)
+
     def test_explicit_model_wins_over_effort_routing(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
         config["cursor"]["reasoningEffortModels"] = {"high": "sonnet-4-thinking"}
@@ -451,7 +549,7 @@ class CursorModelOverrideTests(CommandTestBase):
         )
         self.assertEqual(request.model, "pinned-cursor-model")
         _assert_argv_has_model(self, request.argv, "pinned-cursor-model")
-        self.assertNotIn("sonnet-4-thinking", request.argv)
+        self.assertIsNone(request.reasoning_capability_source)
 
     def test_explicit_model_with_effort_emits_bypass_warning(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
@@ -467,12 +565,8 @@ class CursorModelOverrideTests(CommandTestBase):
             reasoning_effort="high",
             model_override="pinned-cursor-model",
         )
-        self.assertTrue(
-            any("bypass" in w.lower() or "pinned" in w.lower() for w in request.warnings)
-        )
-        self.assertTrue(
-            any("effort" in w.lower() and "model" in w.lower() for w in request.warnings)
-        )
+        self.assertTrue(any("bypass" in w.lower() for w in request.warnings))
+        self.assertIsNone(request.reasoning_capability_evidence)
 
     def test_config_sourced_effort_bypass_also_warns(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))

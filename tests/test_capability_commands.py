@@ -91,11 +91,11 @@ class CapabilityCommandTests(unittest.TestCase):
                 cursor_alias["effortModelRouting"],
                 [{"effort": "high", "model": "cursor-thinking"}],
             )
-            kimi_key = config["kimi"]["defaultModel"]
+            kimi_key = "(default)"
             kimi = payload["reasoningAliases"]["kimi"][kimi_key]
             self.assertIsNone(kimi["supported"])
             self.assertIn("not supported", kimi["warning"])
-            devin_key = config["devin"]["defaultModel"]
+            devin_key = "(default)"
             devin = payload["reasoningAliases"]["devin"][devin_key]
             self.assertIsNone(devin["supported"])
             self.assertIn("not supported", devin["warning"])

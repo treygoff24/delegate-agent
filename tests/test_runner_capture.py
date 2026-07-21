@@ -1579,6 +1579,28 @@ class RunnerCaptureTests(unittest.TestCase):
         )
         self.assertEqual(payload["exitCode"], 0)
 
+    def test_snapshot_prefers_effective_resolved_model_metadata(self):
+        ctx = self.runner.RunContext(
+            registry_root=Path("/tmp"),
+            run_id="run-1",
+            alias="alias-1",
+            harness="codex",
+            engine="codex",
+            mode="safe",
+            model="requested-alias",
+            model_resolved="effective-model",
+            source_cwd="/tmp",
+            execution_cwd="/tmp",
+            workspace_kind="directory",
+            isolated_workspace=False,
+            started_at="2026-05-20T21:42:33Z",
+        )
+        snapshot = self.runner.build_snapshot(
+            ctx,
+            accumulator=self.runner.harness_events.StreamAccumulator(),
+        )
+        self.assertEqual(snapshot["modelResolved"], "effective-model")
+
     def test_persistent_worktree_completion_payload_includes_force_cleanup_command(self):
         ctx = self.runner.RunContext(
             registry_root=Path("/tmp"),

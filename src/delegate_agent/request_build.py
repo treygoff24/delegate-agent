@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import TextIO
 
 from delegate_agent import config as delegate_config
-from delegate_agent import profiles, reasoning, safe_workspace, wsl
+from delegate_agent import harness_discovery, profiles, reasoning, safe_workspace, wsl
 from delegate_agent import runner as delegate_runner
 from delegate_agent.argv_builders import (
     SAFE_REVIEW_PREFIX_BY_ENGINE,
@@ -623,6 +623,69 @@ def _resolve_engine_model(section: JsonObject, build: EngineBuildInput) -> str |
     return _resolve_default_model(section)
 
 
+def _resolve_model_context(
+    section: JsonObject,
+    build: EngineBuildInput,
+    *,
+    harness: str,
+) -> tuple[str | None, str | None, str | None]:
+    """Return argv model, capability model, and capability-model source.
+
+    A discovered native default is deliberately metadata/validation context
+    only. Passing it to an argv builder would turn a refresh into a persistent
+    pin and defeat the harness's own default selection.
+    """
+    selected = _resolve_engine_model(section, build)
+    if selected is not None:
+        source = (
+            "explicit"
+            if build.model_override is not None or build.model_alias is not None
+            else "config"
+        )
+        return selected, selected, source
+    discovered = reasoning.discovery_default_model(build.discovery, harness)
+    if discovered is not None:
+        return None, discovered, "discovery"
+    return None, None, None
+
+
+def _model_context_kwargs(
+    capability_model: str | None, capability_model_source: str | None
+) -> JsonObject:
+    return {
+        "capability_model": capability_model,
+        "capability_model_source": capability_model_source,
+    }
+
+
+def _runtime_discovery_for_engine(
+    config: JsonObject,
+    engine: str,
+    discovery: JsonObject | None,
+    profile_resolution: profiles.ProfileResolution,
+) -> JsonObject | None:
+    """Drop only a selector-drifted engine record without probing the harness."""
+    if not isinstance(discovery, dict):
+        return None
+    harnesses = discovery.get("harnesses")
+    record = harnesses.get(engine) if isinstance(harnesses, dict) else None
+    # Real snapshots are strictly validated at load. The shape guard keeps this
+    # helper tolerant of direct unit fixtures while ensuring every persisted
+    # installed record is tied to the configured opaque selector.
+    if not isinstance(record, dict) or record.get("installed") is not True:
+        return discovery
+    selector = record.get("selector")
+    selector_missing = not isinstance(selector, list) or not selector
+    if not selector_missing and not harness_discovery.selector_has_drifted(
+        config, engine, record, profile=profile_resolution
+    ):
+        return discovery
+    return {
+        **discovery,
+        "harnesses": {harness: value for harness, value in harnesses.items() if harness != engine},
+    }
+
+
 def _resolve_opencode_alias(section: JsonObject, value: str) -> tuple[str, str | None]:
     models = section.get("models")
     if isinstance(models, dict) and value in models:
@@ -733,12 +796,7 @@ def _resolve_pi_family_selection_detail(
 
     if build.requested_effort is not None and build.effort_source != "config":
         try:
-            thinking = reasoning.resolve_native_effort(
-                engine,
-                build.requested_effort,
-                alias=build.model_alias,
-                model=model,
-            )
+            thinking = reasoning.normalize_effort(build.requested_effort)
         except reasoning.ReasoningCapabilityError as exc:
             raise DelegateError(exc.error, exc.message) from exc
         return model, thinking, build.effort_source or "cli"
@@ -750,16 +808,13 @@ def _resolve_pi_family_selection_detail(
             )
         return model, alias_thinking, "alias"
     if build.requested_effort is not None:
+        if build.effort_source == "config":
+            return model, build.requested_effort, "config"
         try:
-            thinking = reasoning.resolve_native_effort(
-                engine,
-                build.requested_effort,
-                alias=build.model_alias,
-                model=model,
-            )
+            thinking = reasoning.normalize_effort(build.requested_effort)
         except reasoning.ReasoningCapabilityError as exc:
             raise DelegateError(exc.error, exc.message) from exc
-        return model, thinking, build.effort_source or "config"
+        return model, thinking, build.effort_source or "cli"
     return model, None, None
 
 
@@ -1562,6 +1617,21 @@ def build_request(
     if timeout is not None and timeout <= 0:
         raise DelegateError("invalid_timeout", "timeout must be a positive integer.")
 
+    expand_env = profiles.child_environment(pure=True) if pure else os.environ
+    profile_resolution = profiles.resolve_active_profile(
+        config,
+        os.environ,
+        cli_override=auth_profile_override,
+        expand_env=expand_env,
+    )
+    discovery = harness_discovery.load_discovery_cache(profile_resolution.name)
+    discovery = _runtime_discovery_for_engine(
+        config,
+        engine,
+        discovery,
+        profile_resolution,
+    )
+
     return _build_request_for_workspace(
         engine,
         mode,
@@ -1580,7 +1650,8 @@ def build_request(
         progress_interval_sec=progress_interval_sec,
         forbid_commit=forbid_commit,
         include_dirty=include_dirty,
-        auth_profile_override=auth_profile_override,
+        profile_resolution=profile_resolution,
+        discovery=discovery,
         output_schema=output_schema,
         warnings=warnings,
         cleanup_workspace=cleanup_workspace,
@@ -1605,25 +1676,102 @@ def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         pinned = resolve_model_selection(cursor, build.model_alias)
 
     warnings: list[str] = []
-    if pinned is not None:
+    capability: reasoning.ReasoningCapability | None = None
+    mappings = cursor.get("reasoningEffortModels")
+    discovered_routes: dict[str, str] = {}
+    if build.requested_effort is not None:
+        record = reasoning._discovery_harness_record(build.discovery, "cursor")
+        raw_models = record.get("models") if record is not None else None
+        discovered_models = raw_models if isinstance(raw_models, dict) else {}
+        base_model = pinned or cursor["defaultModel"]
+        base_entry = discovered_models.get(base_model)
+        route_family = base_entry.get("routeFamily") if isinstance(base_entry, dict) else None
+        if isinstance(route_family, str) and route_family:
+            for selector, entry in discovered_models.items():
+                if not (isinstance(selector, str) and isinstance(entry, dict)):
+                    continue
+                declaration = entry.get("reasoning")
+                if (
+                    entry.get("routeFamily") == route_family
+                    and isinstance(entry.get("routeEffort"), str)
+                    and isinstance(declaration, dict)
+                    and declaration.get("evidence") == "inferred-route"
+                ):
+                    discovered_routes[entry["routeEffort"]] = selector
+
+    # An explicit model remains authoritative unless discovery has routes for
+    # that exact selector family. This preserves the established pinned-model
+    # bypass instead of applying a global config route to an unrelated family.
+    if build.requested_effort is not None and pinned is not None and not discovered_routes:
         model = pinned
-        capability = None
-        # Warn regardless of where the effort came from (flag, input-json, or
-        # cursor.defaultReasoningEffort): if routing would have applied, the
-        # pinned model materially bypassed it.
-        if build.requested_effort is not None:
-            warnings.append(
-                "cursor reasoning-effort routing was bypassed by the pinned model; "
-                "proceeding with the explicit model selection."
+        capability_model_source = "explicit"
+        warnings.append(
+            "cursor reasoning-effort routing was bypassed by the pinned model; "
+            "proceeding with the explicit model selection."
+        )
+    elif build.requested_effort is not None and discovered_routes:
+        routed_model = discovered_routes.get(build.requested_effort)
+        if routed_model is None:
+            raise DelegateError(
+                "unsupported_reasoning_effort",
+                reasoning.format_explicit_reasoning_effort_error(
+                    harness="cursor",
+                    alias=build.model_alias,
+                    model=base_model,
+                    effort=build.requested_effort,
+                    supported=sorted(discovered_routes),
+                    detail="has authoritative routes that omit the requested effort",
+                ),
             )
-    else:
+        _reject_opencode_flag_like_value(
+            routed_model,
+            field="discovered Cursor model",
+            error="invalid_model",
+        )
+        model = routed_model
+        capability = reasoning.ReasoningCapability(
+            harness="cursor",
+            model=model,
+            effort=build.requested_effort,
+            supported_efforts=tuple(sorted(discovered_routes)),
+            default_effort=None,
+            transport=reasoning.TRANSPORT_CURSOR_MODEL_SELECTION,
+            source="discovery",
+            evidence="inferred-route",
+        )
+        capability_model_source = "discovery"
+    elif build.requested_effort is not None and isinstance(mappings, dict) and mappings:
         capability, reasoning_warnings = _capability_with_config_fallback(
             lambda: resolve_cursor_reasoning_capability(cursor, build.requested_effort),
             engine="cursor",
             effort_source=build.effort_source,
         )
         warnings.extend(reasoning_warnings)
-        model = capability.model if capability is not None else cursor["defaultModel"]
+        model = capability.model if capability is not None else pinned or cursor["defaultModel"]
+        capability_model_source = (
+            "config" if capability is not None or pinned is None else "explicit"
+        )
+    elif build.requested_effort is not None:
+        # Config defaults remain mandatory for Cursor, but an effort needs
+        # either an explicit map or authoritative routes; never synthesize a
+        # selector from a naming convention.
+        error = DelegateError(
+            "unsupported_reasoning_effort",
+            reasoning.format_explicit_reasoning_effort_error(
+                harness="cursor",
+                model=base_model,
+                effort=build.requested_effort,
+                detail="requires configured mappings or authoritative discovered routes",
+            ),
+        )
+        if build.effort_source != "config":
+            raise error
+        warnings.append(f"ignoring cursor.defaultReasoningEffort: {error.message}")
+        model = base_model
+        capability_model_source = "config"
+    else:
+        model = pinned or cursor["defaultModel"]
+        capability_model_source = "explicit" if pinned is not None else "config"
 
     argv = build_cursor_argv(
         cursor["argvPrefix"],
@@ -1635,6 +1783,18 @@ def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         call_read_only=build.call_read_only,
         pure=build.pure,
     )
+    reasoning_kwargs = reasoning_request_kwargs(capability, build.effort_source)
+    if (
+        capability is None
+        and build.requested_effort is not None
+        and build.effort_source != "config"
+    ):
+        reasoning_kwargs.update(
+            {
+                "requested_reasoning_effort": build.requested_effort,
+                "reasoning_effort_source": build.effort_source or "cli",
+            }
+        )
     return EngineRequestParts(
         model=model,
         argv=argv,
@@ -1642,7 +1802,8 @@ def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         prompt_transport=PROMPT_TRANSPORT_ARGV,
         display_argv=redacted_prompt_argv(argv),
         warnings=tuple(warnings),
-        **reasoning_request_kwargs(capability, build.effort_source),
+        **_model_context_kwargs(model, capability_model_source),
+        **reasoning_kwargs,
     )
 
 
@@ -1661,27 +1822,36 @@ def _droid_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         else:
             model = build.model_override
             alias_for_errors = None
+        capability_model = model
+        capability_model_source = "explicit"
     elif build.model_alias is not None:
         _validate_droid_model_alias(build.config, build.model_alias)
         model = models[build.model_alias]
         alias_for_errors = build.model_alias
+        capability_model = model
+        capability_model_source = "explicit"
     else:
         model = _resolve_default_model(droid)
         alias_for_errors = None
         if model is None:
             raise DelegateError(
                 "missing_model",
-                "droid requires a positional model alias, --model, or droid.defaultModel.",
+                "droid requires a positional model alias, --model, or droid.defaultModel; "
+                "captured help does not prove that --model may be omitted.",
             )
+        else:
+            capability_model = model
+            capability_model_source = "config"
 
-    _guard_droid_placeholder_model(model, alias=alias_for_errors)
+    _guard_droid_placeholder_model(capability_model, alias=alias_for_errors)
     capability, reasoning_warnings = _capability_with_config_fallback(
         lambda: reasoning.resolve_reasoning_capability(
             harness="droid",
-            model=model,
+            model=capability_model,
             requested_effort=build.requested_effort,
             config=build.config,
             cache=build.cache,
+            discovery=build.discovery,
             alias=alias_for_errors,
         ),
         engine="droid",
@@ -1714,17 +1884,24 @@ def _droid_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         prompt_file_text=prompt,
         display_argv=display_argv,
         warnings=reasoning_warnings,
+        **_model_context_kwargs(capability_model, capability_model_source),
         **reasoning_request_kwargs(capability, build.effort_source),
     )
 
 
 def _codex_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     codex = build.config["codex"]
-    model = _resolve_engine_model(codex, build)
+    model, capability_model, capability_model_source = _resolve_model_context(
+        codex, build, harness="codex"
+    )
     policy = delegate_config.effective_policy(
         build.config, engine="codex", mode=_policy_mode(build)
     )
-    if model is None and build.requested_effort is not None and build.effort_source != "config":
+    if (
+        capability_model is None
+        and build.requested_effort is not None
+        and build.effort_source != "config"
+    ):
         effort = reasoning.normalize_effort(build.requested_effort)
         if effort not in CODEX_HARNESS_DEFAULT_REASONING_EFFORTS:
             raise DelegateError(
@@ -1744,6 +1921,7 @@ def _codex_request_parts(build: EngineBuildInput) -> EngineRequestParts:
             default_effort=None,
             transport=reasoning.TRANSPORT_BY_HARNESS["codex"],
             source="harness-default",
+            evidence="harness",
         )
         reasoning_warnings = (
             "codex.defaultModel is unset; applying --reasoning-effort to the Codex "
@@ -1753,11 +1931,12 @@ def _codex_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         capability, reasoning_warnings = _capability_with_config_fallback(
             lambda: reasoning.resolve_reasoning_capability(
                 harness="codex",
-                model=model,
+                model=capability_model,
                 requested_effort=build.requested_effort,
                 config=build.config,
                 cache=build.cache,
-                alias=build.model_alias or model,
+                discovery=build.discovery,
+                alias=build.model_alias or capability_model,
             ),
             engine="codex",
             effort_source=build.effort_source,
@@ -1786,29 +1965,31 @@ def _codex_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         stdin_text=build.prompt,
         display_argv=list(argv),
         warnings=reasoning_warnings,
+        **_model_context_kwargs(capability_model, capability_model_source),
         **reasoning_request_kwargs(capability, build.effort_source),
     )
 
 
 def _claude_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     claude = build.config["claude"]
-    model = _resolve_engine_model(claude, build)
+    model, capability_model, capability_model_source = _resolve_model_context(
+        claude, build, harness="claude"
+    )
     policy = delegate_config.effective_policy(
         build.config, engine="claude", mode=_policy_mode(build)
     )
-    effort: str | None = None
-    warnings: tuple[str, ...] = ()
-    if build.requested_effort is not None:
-        try:
-            effort = reasoning.resolve_claude_native_effort(
-                build.requested_effort,
-                alias=build.model_alias,
-                model=model,
-            )
-        except reasoning.ReasoningCapabilityError as exc:
-            if build.effort_source != "config":
-                raise DelegateError(exc.error, exc.message) from exc
-            warnings = (f"ignoring claude.defaultReasoningEffort: {exc.message}",)
+    capability, warnings = _capability_with_config_fallback(
+        lambda: reasoning.resolve_harness_enum_capability(
+            harness="claude",
+            model=capability_model,
+            requested_effort=build.requested_effort,
+            discovery=build.discovery,
+            alias=build.model_alias,
+        ),
+        engine="claude",
+        effort_source=build.effort_source,
+    )
+    effort = capability.effort if capability is not None else None
     schema_contents = None
     if build.output_schema is not None:
         try:
@@ -1837,27 +2018,38 @@ def _claude_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         stdin_text=build.prompt,
         display_argv=list(argv),
         warnings=warnings,
-        **claude_reasoning_request_kwargs(effort, build.effort_source),
+        **_model_context_kwargs(capability_model, capability_model_source),
+        **reasoning_request_kwargs(capability, build.effort_source),
     )
 
 
 def _grok_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     grok = build.config["grok"]
-    model = _resolve_engine_model(grok, build)
+    model, capability_model, capability_model_source = _resolve_model_context(
+        grok, build, harness="grok"
+    )
     policy = delegate_config.effective_policy(build.config, engine="grok", mode=_policy_mode(build))
-    effort: str | None = None
-    warnings: tuple[str, ...] = ()
-    if build.requested_effort is not None:
-        try:
-            effort = reasoning.resolve_grok_native_effort(
-                build.requested_effort,
-                alias=build.model_alias,
-                model=model,
-            )
-        except reasoning.ReasoningCapabilityError as exc:
-            if build.effort_source != "config":
-                raise DelegateError(exc.error, exc.message) from exc
-            warnings = (f"ignoring grok.defaultReasoningEffort: {exc.message}",)
+    compatibility_warnings: list[str] = []
+
+    def resolve_capability() -> reasoning.ReasoningCapability | None:
+        capability, warnings = reasoning.resolve_grok_reasoning_capability(
+            model=capability_model,
+            requested_effort=build.requested_effort,
+            config=build.config,
+            discovery=build.discovery,
+            cache=build.cache,
+            alias=build.model_alias,
+        )
+        compatibility_warnings.extend(warnings)
+        return capability
+
+    capability, fallback_warnings = _capability_with_config_fallback(
+        resolve_capability,
+        engine="grok",
+        effort_source=build.effort_source,
+    )
+    warnings = (*compatibility_warnings, *fallback_warnings)
+    effort = capability.effort if capability is not None else None
     argv = build_grok_argv(
         grok,
         build.mode,
@@ -1881,21 +2073,24 @@ def _grok_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         prompt_file_text=build.prompt,
         display_argv=display_argv,
         warnings=warnings,
-        **grok_reasoning_request_kwargs(effort, build.effort_source),
+        **_model_context_kwargs(capability_model, capability_model_source),
+        **reasoning_request_kwargs(capability, build.effort_source),
     )
 
 
 def _devin_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     _ = build.effort_source, build.cache
     devin = build.config["devin"]
-    model = _resolve_engine_model(devin, build)
+    model, capability_model, capability_model_source = _resolve_model_context(
+        devin, build, harness="devin"
+    )
     if build.requested_effort is not None:
         raise DelegateError(
             "unsupported_reasoning_effort",
             reasoning.format_explicit_reasoning_effort_error(
                 harness="devin",
                 alias=build.model_alias,
-                model=model,
+                model=capability_model,
                 effort=build.requested_effort,
                 detail="reasoning effort is not supported",
             ),
@@ -1924,6 +2119,7 @@ def _devin_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         prompt_file_text=build.prompt,
         agent_config_text=DEVIN_READ_ONLY_AGENT_CONFIG_TEXT if read_only else None,
         display_argv=display_argv,
+        **_model_context_kwargs(capability_model, capability_model_source),
     )
 
 
@@ -1955,6 +2151,48 @@ def _opencode_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     _ = build.cache
     opencode = build.config["opencode"]
     model, variant, variant_source = _resolve_opencode_selection_detail(opencode, build)
+    if model is not None:
+        capability_model = model
+        capability_model_source = (
+            "explicit"
+            if build.model_override is not None or build.model_alias is not None
+            else "config"
+        )
+    else:
+        capability_model = reasoning.discovery_default_model(build.discovery, "opencode")
+        capability_model_source = "discovery" if capability_model is not None else None
+    capability_warnings: list[str] = []
+
+    def resolve_capability() -> reasoning.ReasoningCapability | None:
+        capability, warnings = reasoning.resolve_discovered_model_capability(
+            harness="opencode",
+            model=capability_model,
+            requested_effort=variant,
+            discovery=build.discovery,
+            alias=build.model_alias,
+        )
+        capability_warnings.extend(warnings)
+        return capability
+
+    if variant is not None and variant_source == "alias":
+        capability = reasoning.ReasoningCapability(
+            harness="opencode",
+            model=capability_model or "",
+            effort=variant,
+            supported_efforts=(variant,),
+            default_effort=None,
+            transport=reasoning.TRANSPORT_OPENCODE_VARIANT_FLAG,
+            source="alias",
+            evidence="exact",
+        )
+        fallback_warnings: tuple[str, ...] = ()
+    else:
+        capability, fallback_warnings = _capability_with_config_fallback(
+            resolve_capability,
+            engine="opencode",
+            effort_source=variant_source,
+        )
+    resolved_variant = capability.effort if capability is not None else None
     agent = _resolve_opencode_agent(opencode, build)
     read_only = build.mode == MODE_SAFE or (
         build.mode == MODE_CALL and (build.call_read_only or build.pure)
@@ -1967,7 +2205,7 @@ def _opencode_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         build.resolved.path,
         model,
         agent,
-        variant,
+        resolved_variant,
         call_read_only=build.call_read_only,
         pure=build.pure,
     )
@@ -1978,8 +2216,10 @@ def _opencode_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         prompt_transport=PROMPT_TRANSPORT_STDIN,
         stdin_text=build.prompt,
         display_argv=list(argv),
+        warnings=(*capability_warnings, *fallback_warnings),
         env_overrides=_opencode_env_overrides(read_only=read_only, pure=build.pure, agent=agent),
-        **opencode_reasoning_request_kwargs(variant, variant_source),
+        **_model_context_kwargs(capability_model, capability_model_source),
+        **reasoning_request_kwargs(capability, variant_source),
     )
 
 
@@ -1991,11 +2231,53 @@ def _pi_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         build,
         engine="pi",
     )
+    if model is not None:
+        capability_model = model
+        capability_model_source = (
+            "explicit"
+            if build.model_override is not None or build.model_alias is not None
+            else "config"
+        )
+    else:
+        capability_model = reasoning.discovery_default_model(build.discovery, "pi")
+        capability_model_source = "discovery" if capability_model is not None else None
+    capability_warnings: list[str] = []
+
+    def resolve_capability() -> reasoning.ReasoningCapability | None:
+        capability, warnings = reasoning.resolve_discovered_model_capability(
+            harness="pi",
+            model=capability_model,
+            requested_effort=thinking,
+            discovery=build.discovery,
+            alias=build.model_alias,
+        )
+        capability_warnings.extend(warnings)
+        return capability
+
+    if thinking is not None and thinking_source == "alias":
+        capability = reasoning.ReasoningCapability(
+            harness="pi",
+            model=capability_model or "",
+            effort=thinking,
+            supported_efforts=reasoning.PI_THINKING_LEVELS,
+            default_effort=None,
+            transport=reasoning.TRANSPORT_PI_THINKING_FLAG,
+            source="alias",
+            evidence="exact",
+        )
+        fallback_warnings: tuple[str, ...] = ()
+    else:
+        capability, fallback_warnings = _capability_with_config_fallback(
+            resolve_capability,
+            engine="pi",
+            effort_source=thinking_source,
+        )
+    resolved_thinking = capability.effort if capability is not None else None
     argv = build_pi_argv(
         pi,
         build.mode,
         model,
-        thinking,
+        resolved_thinking,
         call_read_only=build.call_read_only,
         pure=build.pure,
     )
@@ -2006,7 +2288,9 @@ def _pi_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         prompt_transport=PROMPT_TRANSPORT_STDIN,
         stdin_text=build.prompt,
         display_argv=list(argv),
-        **pi_reasoning_request_kwargs(thinking, thinking_source),
+        warnings=(*capability_warnings, *fallback_warnings),
+        **_model_context_kwargs(capability_model, capability_model_source),
+        **reasoning_request_kwargs(capability, thinking_source),
     )
 
 
@@ -2018,11 +2302,53 @@ def _omp_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         build,
         engine="omp",
     )
+    if model is not None:
+        capability_model = model
+        capability_model_source = (
+            "explicit"
+            if build.model_override is not None or build.model_alias is not None
+            else "config"
+        )
+    else:
+        capability_model = reasoning.discovery_default_model(build.discovery, "omp")
+        capability_model_source = "discovery" if capability_model is not None else None
+    capability_warnings: list[str] = []
+
+    def resolve_capability() -> reasoning.ReasoningCapability | None:
+        capability, warnings = reasoning.resolve_discovered_model_capability(
+            harness="omp",
+            model=capability_model,
+            requested_effort=thinking,
+            discovery=build.discovery,
+            alias=build.model_alias,
+        )
+        capability_warnings.extend(warnings)
+        return capability
+
+    if thinking is not None and thinking_source == "alias":
+        capability = reasoning.ReasoningCapability(
+            harness="omp",
+            model=capability_model or "",
+            effort=thinking,
+            supported_efforts=reasoning.PI_THINKING_LEVELS,
+            default_effort=None,
+            transport=reasoning.TRANSPORT_PI_THINKING_FLAG,
+            source="alias",
+            evidence="exact",
+        )
+        fallback_warnings: tuple[str, ...] = ()
+    else:
+        capability, fallback_warnings = _capability_with_config_fallback(
+            resolve_capability,
+            engine="omp",
+            effort_source=thinking_source,
+        )
+    resolved_thinking = capability.effort if capability is not None else None
     argv = build_omp_argv(
         omp,
         build.mode,
         model,
-        thinking,
+        resolved_thinking,
         build.prompt,
         call_read_only=build.call_read_only,
         pure=build.pure,
@@ -2033,21 +2359,25 @@ def _omp_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         model_alias=build.model_alias,
         prompt_transport=PROMPT_TRANSPORT_ARGV,
         display_argv=redacted_prompt_argv(argv, replacement=OMP_PROMPT_REDACTION),
-        **pi_reasoning_request_kwargs(thinking, thinking_source),
+        warnings=(*capability_warnings, *fallback_warnings),
+        **_model_context_kwargs(capability_model, capability_model_source),
+        **reasoning_request_kwargs(capability, thinking_source),
     )
 
 
 def _kimi_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     _ = build.effort_source, build.cache
     kimi = build.config["kimi"]
-    model = _resolve_engine_model(kimi, build)
+    model, capability_model, capability_model_source = _resolve_model_context(
+        kimi, build, harness="kimi"
+    )
     if build.requested_effort is not None:
         raise DelegateError(
             "unsupported_reasoning_effort",
             reasoning.format_explicit_reasoning_effort_error(
                 harness="kimi",
                 alias=build.model_alias,
-                model=model,
+                model=capability_model,
                 effort=build.requested_effort,
                 detail="reasoning effort is not supported",
             ),
@@ -2067,6 +2397,7 @@ def _kimi_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         model_alias=build.model_alias,
         prompt_transport=PROMPT_TRANSPORT_ARGV,
         display_argv=redacted_prompt_argv(argv, replacement=KIMI_PROMPT_REDACTION),
+        **_model_context_kwargs(capability_model, capability_model_source),
     )
 
 
@@ -2119,7 +2450,8 @@ def _build_request_for_workspace(
     progress_interval_sec: float,
     forbid_commit: bool,
     include_dirty: bool,
-    auth_profile_override: str | None,
+    profile_resolution: profiles.ProfileResolution,
+    discovery: JsonObject | None,
     output_schema: str | None,
     warnings: tuple[str, ...],
     cleanup_workspace: bool,
@@ -2154,6 +2486,7 @@ def _build_request_for_workspace(
             requested_effort=requested_effort,
             effort_source=effort_source,
             cache=cache,
+            discovery=discovery,
             fast=fast,
             output_schema=output_schema,
             call_read_only=call_read_only,
@@ -2172,6 +2505,8 @@ def _build_request_for_workspace(
             parts.model,
             model_alias=parts.model_alias,
             model_requested=model_override or model_alias,
+            capability_model=parts.capability_model,
+            capability_model_source=parts.capability_model_source,
             output_schema=output_schema,
             pure=pure,
             timeout=timeout,
@@ -2179,8 +2514,16 @@ def _build_request_for_workspace(
             workspace_kind=resolved.kind,
             isolation_context=isolation_context,
             reasoning_effort=parts.reasoning_effort,
+            requested_reasoning_effort=(
+                parts.requested_reasoning_effort
+                if parts.requested_reasoning_effort is not None
+                else requested_effort
+                if effort_source != "config"
+                else None
+            ),
             reasoning_effort_source=parts.reasoning_effort_source,
             reasoning_capability_source=parts.reasoning_capability_source,
+            reasoning_capability_evidence=parts.reasoning_capability_evidence,
             reasoning_transport=parts.reasoning_transport,
             fast=fast,
             progress=progress,
@@ -2202,7 +2545,7 @@ def _build_request_for_workspace(
             prompt_instruction_mode=prompt_instruction_mode,
         ),
         config,
-        auth_profile_override=auth_profile_override,
+        resolution=profile_resolution,
     )
 
 
@@ -2218,12 +2561,11 @@ def _dedupe_warnings(warnings: tuple[str, ...]) -> tuple[str, ...]:
 
 
 def _apply_profile_resolution(
-    request: Request, config: JsonObject, *, auth_profile_override: str | None = None
+    request: Request,
+    config: JsonObject,
+    *,
+    resolution: profiles.ProfileResolution,
 ) -> Request:
-    expand_env = profiles.child_environment(pure=True) if request.pure else os.environ
-    resolution = profiles.resolve_active_profile(
-        config, os.environ, cli_override=auth_profile_override, expand_env=expand_env
-    )
     env_overrides = dict(request.env_overrides or {})
     env_overrides.update(resolution.env)
     if request.engine == "opencode":
@@ -2279,8 +2621,11 @@ def resolve_effective_reasoning_effort(
         if default is not None:
             try:
                 return reasoning.normalize_effort(default), "config"
-            except reasoning.ReasoningCapabilityError as exc:
-                raise DelegateError(exc.error, exc.message) from exc
+            except reasoning.ReasoningCapabilityError:
+                # Capability resolution owns config-default degradation. Carry
+                # malformed defaults far enough to produce the same warning +
+                # omission behavior as a well-formed but unsupported default.
+                return default if isinstance(default, str) else None, "config"
     return None, None
 
 
@@ -2356,6 +2701,7 @@ def resolve_cursor_reasoning_capability(
         default_effort=None,
         transport=reasoning.TRANSPORT_BY_HARNESS["cursor"],
         source="config",
+        evidence="exact",
     )
 
 
@@ -2367,69 +2713,12 @@ def reasoning_request_kwargs(
         return {}
     return {
         "reasoning_effort": capability.effort,
+        "requested_reasoning_effort": capability.effort,
         "reasoning_effort_source": source or "cli",
         "reasoning_capability_source": capability.source,
+        "reasoning_capability_evidence": capability.evidence,
         "reasoning_transport": capability.transport,
     }
-
-
-def _native_reasoning_request_kwargs(
-    effort: str | None,
-    source: str | None,
-    *,
-    transport: str,
-    capability_source: str,
-) -> JsonObject:
-    if effort is None:
-        return {}
-    return {
-        "reasoning_effort": effort,
-        "reasoning_effort_source": source,
-        "reasoning_capability_source": capability_source,
-        "reasoning_transport": transport,
-    }
-
-
-def claude_reasoning_request_kwargs(effort: str | None, source: str | None) -> JsonObject:
-    """Reasoning payload fields for Claude's static native-effort flag.
-
-    The sibling of ``reasoning_request_kwargs`` for the engine that resolves a
-    flag (``--effort``) rather than a ``ReasoningCapability`` object. Returns
-    ``{}`` when no effort applies so the request-parts defaults stand.
-    """
-    return _native_reasoning_request_kwargs(
-        effort,
-        source,
-        transport=reasoning.TRANSPORT_CLAUDE_EFFORT_FLAG,
-        capability_source="static",
-    )
-
-
-def grok_reasoning_request_kwargs(effort: str | None, source: str | None) -> JsonObject:
-    return _native_reasoning_request_kwargs(
-        effort,
-        source,
-        transport=reasoning.TRANSPORT_GROK_EFFORT_FLAG,
-        capability_source="static",
-    )
-
-
-def opencode_reasoning_request_kwargs(variant: str | None, source: str | None) -> JsonObject:
-    return _native_reasoning_request_kwargs(
-        variant,
-        source,
-        transport=reasoning.TRANSPORT_OPENCODE_VARIANT_FLAG,
-        capability_source="pass-through",
-    )
-
-
-def pi_reasoning_request_kwargs(thinking: str | None, source: str | None) -> JsonObject:
-    return _native_reasoning_request_kwargs(
-        thinking,
-        source,
-        transport=reasoning.TRANSPORT_PI_THINKING_FLAG,
-        capability_source="static" if source != "alias" else "alias",
-    )
 
 
 def _resolve_default_model(section: JsonObject) -> str | None:

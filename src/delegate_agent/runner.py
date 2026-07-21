@@ -123,6 +123,9 @@ class RunContext:
     started_at: str
     model_alias: str | None = None
     model_resolved: str | None = None
+    model_requested: str | None = None
+    capability_model: str | None = None
+    capability_model_source: str | None = None
     creation_context: JsonObject | None = None
     source_git_root: str | None = None
     isolation_mode: str = "none"
@@ -134,8 +137,10 @@ class RunContext:
     safe_workspace_method: str | None = None
     warnings: tuple[str, ...] = ()
     reasoning_effort: str | None = None
+    requested_reasoning_effort: str | None = None
     reasoning_effort_source: str | None = None
     reasoning_capability_source: str | None = None
+    reasoning_capability_evidence: str | None = None
     reasoning_transport: str | None = None
     fast: bool | None = None
     prompt_transport: str = "argv"
@@ -260,6 +265,7 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
         "promptInstructionMode": ctx.prompt_instruction_mode,
     }
     run_metadata.add_run_metadata_payload_fields(payload, ctx)
+    run_metadata.add_model_payload_fields(payload, ctx)
     reasoning.add_reasoning_payload_fields(payload, ctx)
     run_metadata.add_speed_payload_fields(payload, ctx)
     if ctx.forbid_commit:
@@ -389,6 +395,7 @@ def build_snapshot(
         **events_meta,
     }
     run_metadata.add_run_metadata_payload_fields(snapshot, ctx)
+    run_metadata.add_model_payload_fields(snapshot, ctx)
     reasoning.add_reasoning_payload_fields(snapshot, ctx)
     run_metadata.add_speed_payload_fields(snapshot, ctx)
 
@@ -895,6 +902,7 @@ def completion_json_payload(
         payload["syncedFiles"] = ctx.synced_files
     payload["promptInstructionMode"] = ctx.prompt_instruction_mode
     run_metadata.add_run_metadata_payload_fields(payload, ctx)
+    run_metadata.add_model_payload_fields(payload, ctx)
     reasoning.add_reasoning_payload_fields(payload, ctx)
     run_metadata.add_speed_payload_fields(payload, ctx)
     if assistant_meta is not None:

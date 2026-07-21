@@ -88,16 +88,17 @@ class CommandTestBase(unittest.TestCase):
         dry_run: bool,
         **kwargs,
     ):
-        return self.delegate.build_request(
-            engine,
-            mode,
-            model_alias,
-            self.delegate.ResolvedWorkspace(workspace, "git"),
-            prompt,
-            config,
-            dry_run,
-            **kwargs,
-        )
+        with mock.patch.dict(os.environ, self._config_env, clear=False):
+            return self.delegate.build_request(
+                engine,
+                mode,
+                model_alias,
+                self.delegate.ResolvedWorkspace(workspace, "git"),
+                prompt,
+                config,
+                dry_run,
+                **kwargs,
+            )
 
     def write_fake_executable(
         self,

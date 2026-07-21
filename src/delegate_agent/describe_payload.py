@@ -617,8 +617,11 @@ def _cached_harness_launchable(config: JsonObject, engine: str, installed: bool)
     if engine == "cursor":
         return has_default
     if engine == "droid":
-        models = section.get("models")
-        return has_default or (isinstance(models, dict) and bool(models))
+        # The captured catalog can name Droid's native default, but the
+        # currently captured help grammar does not prove that --model is
+        # optional. Keep plain launches fail-closed until that provenance is
+        # available rather than mistaking a menu entry for argv support.
+        return has_default
     return True
 
 

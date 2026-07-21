@@ -27,7 +27,15 @@ REASONING_METADATA_KEYS: MetadataKeyGroup = (
     "resolvedReasoningEffort",
     "reasoningEffortSource",
     "reasoningCapabilitySource",
+    "reasoningCapabilityEvidence",
     "reasoningTransport",
+)
+
+MODEL_METADATA_KEYS: MetadataKeyGroup = (
+    "modelRequested",
+    "modelResolved",
+    "capabilityModel",
+    "capabilityModelSource",
 )
 
 SPEED_METADATA_KEYS: MetadataKeyGroup = ("requestedFast",)
@@ -41,6 +49,7 @@ SNAPSHOT_MANIFEST_FALLBACK_KEYS: MetadataKeyGroup = (
     *ISOLATION_METADATA_KEYS[1:],
     *PERSISTENT_WORKTREE_METADATA_KEYS,
     "worktreeCleanupCommands",
+    *MODEL_METADATA_KEYS,
     *REASONING_METADATA_KEYS,
     *SPEED_METADATA_KEYS,
 )
@@ -53,6 +62,24 @@ class SpeedMetadataCarrier(Protocol):
 def add_speed_payload_fields(payload: JsonObject, carrier: SpeedMetadataCarrier) -> None:
     if carrier.fast is not None:
         payload["requestedFast"] = carrier.fast
+
+
+class ModelMetadataCarrier(Protocol):
+    model: str | None
+    model_requested: str | None
+    capability_model: str | None
+    capability_model_source: str | None
+
+
+def add_model_payload_fields(payload: JsonObject, carrier: ModelMetadataCarrier) -> None:
+    if payload.get("modelRequested") is None:
+        payload["modelRequested"] = carrier.model_requested
+    if payload.get("modelResolved") is None:
+        payload["modelResolved"] = getattr(carrier, "model_resolved", None) or carrier.model
+    if carrier.capability_model is not None:
+        payload["capabilityModel"] = carrier.capability_model
+    if carrier.capability_model_source is not None:
+        payload["capabilityModelSource"] = carrier.capability_model_source
 
 
 class RunMetadataCarrier(Protocol):

@@ -193,6 +193,8 @@ def _validate_harness_record(harness: str, record: JsonObject) -> None:
 def _validate_model_record(
     harness: str, selector: str, model: JsonObject
 ) -> tuple[str, str] | None:
+    if selector.startswith("-"):
+        raise ValueError(f"discovery model {harness}/{selector} selector is unsafe")
     _reject_extra_fields(model, _MODEL_FIELDS, f"discovery model {harness}/{selector}")
     display_name = model.get("displayName")
     if display_name is not None and not _nonempty_string(display_name):
@@ -259,6 +261,7 @@ def _transport_safe_effort(value: object) -> bool:
     # that higher-level module and creating a future discovery/reasoning cycle.
     return (
         _nonempty_string(value)
+        and not value.startswith("-")
         and not any(character.isspace() for character in value)
         and '"' not in value
         and "\\" not in value

@@ -145,6 +145,8 @@ class Request:
     model: str | None
     model_alias: str | None = None
     model_requested: str | None = None
+    capability_model: str | None = None
+    capability_model_source: str | None = None
     output_schema: str | None = None
     pure: bool = False
     timeout: int | None = None
@@ -152,8 +154,10 @@ class Request:
     workspace_kind: str = "git"
     isolation_context: IsolationContext | None = None
     reasoning_effort: str | None = None
+    requested_reasoning_effort: str | None = None
     reasoning_effort_source: str | None = None
     reasoning_capability_source: str | None = None
+    reasoning_capability_evidence: str | None = None
     reasoning_transport: str | None = None
     fast: bool | None = None
     progress: bool = False
@@ -185,6 +189,8 @@ class EngineRequestParts:
     model: str | None
     argv: list[str]
     model_alias: str | None = None
+    capability_model: str | None = None
+    capability_model_source: str | None = None
     prompt_transport: str = PROMPT_TRANSPORT_ARGV
     display_argv: list[str] | None = None
     warnings: tuple[str, ...] = ()
@@ -192,8 +198,10 @@ class EngineRequestParts:
     prompt_file_text: str | None = None
     agent_config_text: str | None = None
     reasoning_effort: str | None = None
+    requested_reasoning_effort: str | None = None
     reasoning_effort_source: str | None = None
     reasoning_capability_source: str | None = None
+    reasoning_capability_evidence: str | None = None
     reasoning_transport: str | None = None
     env_overrides: dict[str, str] | None = None
 
@@ -209,6 +217,7 @@ class EngineBuildInput:
     requested_effort: str | None
     effort_source: str | None
     cache: JsonObject | None
+    discovery: JsonObject | None = None
     fast: bool | None = None
     output_schema: str | None = None
     call_read_only: bool = False

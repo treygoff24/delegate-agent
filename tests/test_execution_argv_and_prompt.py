@@ -939,7 +939,8 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertNotIn("SECRET CLAUDE PROMPT", request.argv)
         self.assertEqual(request.reasoning_effort, "high")
         self.assertEqual(request.reasoning_transport, "claude-effort-flag")
-        self.assertEqual(request.reasoning_capability_source, "static")
+        self.assertEqual(request.reasoning_capability_source, "harness-compatibility")
+        self.assertEqual(request.reasoning_capability_evidence, "harness")
         self.assertIn("--effort", request.argv)
         self.assertIn("high", request.argv)
 

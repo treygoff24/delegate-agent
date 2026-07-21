@@ -521,6 +521,21 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(ctx.exception.error, "invalid_reasoning_config")
         self.assertIn("cursor.reasoningEffortModels", ctx.exception.message)
 
+    def test_reasoning_capabilities_accept_grok_model_declarations(self):
+        config_mod = load_config_module()
+        config = copy.deepcopy(config_mod.DEFAULT_CONFIG)
+        config["reasoning"] = {
+            "capabilities": {
+                "grok": {
+                    "future-grok": {
+                        "supported": ["low", "high", "max"],
+                        "default": "high",
+                    }
+                }
+            }
+        }
+        config_mod.validate_config(config)
+
     def test_cursor_reasoning_effort_models_must_be_strings(self):
         config_mod = load_config_module()
         config = copy.deepcopy(config_mod.DEFAULT_CONFIG)

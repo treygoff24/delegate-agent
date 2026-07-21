@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 from typing import Protocol, TypeAlias, TypeGuard
@@ -11,9 +11,10 @@ from delegate_agent.json_types import JsonObject, JsonValue
 
 ReasoningDeclaration: TypeAlias = Mapping[str, object]
 
-# Bundled capabilities are a conservative fallback only. User config and a
-# refreshed workspace cache take precedence so private/custom models do not
-# require Delegate source changes, and stale bundled data can be bypassed.
+# Bundled capabilities are a conservative fallback only. User config,
+# profile-scoped discovery, and the legacy workspace cache take precedence so
+# private/custom models do not require Delegate source changes and stale
+# bundled data can be bypassed.
 BUNDLED_REASONING_CAPABILITIES: dict[str, dict[str, ReasoningDeclaration]] = {
     "codex": {
         "gpt-5.6-sol": {
@@ -56,6 +57,12 @@ BUNDLED_REASONING_CAPABILITIES: dict[str, dict[str, ReasoningDeclaration]] = {
         },
         "glm-5.1": {"supported": ("off", "high"), "default": "high"},
         "minimax-m2.7": {"supported": ("high",), "default": "high"},
+    },
+    "grok": {
+        "grok-4.5": {
+            "supported": ("low", "medium", "high"),
+            "default": "high",
+        },
     },
 }
 
@@ -177,6 +184,7 @@ class ReasoningCapability:
     default_effort: str | None
     transport: str
     source: str
+    evidence: str | None = None
 
 
 class ReasoningCapabilityError(Exception):
@@ -188,8 +196,10 @@ class ReasoningCapabilityError(Exception):
 
 class ReasoningPayloadCarrier(Protocol):
     reasoning_effort: str | None
+    requested_reasoning_effort: str | None
     reasoning_effort_source: str | None
     reasoning_capability_source: str | None
+    reasoning_capability_evidence: str | None
     reasoning_transport: str | None
 
 
@@ -200,6 +210,7 @@ def is_valid_effort_string(value: object) -> TypeGuard[str]:
     return (
         isinstance(value, str)
         and bool(value)
+        and not value.startswith("-")
         and not any(ch.isspace() for ch in value)
         and '"' not in value
         and "\\" not in value
@@ -210,8 +221,8 @@ def normalize_effort(value: object) -> str:
     if not is_valid_effort_string(value):
         raise ReasoningCapabilityError(
             "invalid_reasoning_effort",
-            "reasoning effort must be a non-empty string without whitespace, "
-            "double quotes, or backslashes.",
+            "reasoning effort must be a non-empty string that does not start with '-' and "
+            "contains no whitespace, double quotes, or backslashes.",
         )
     return value
 
@@ -413,6 +424,12 @@ def _lookup_declaration(
         ("bundled", BUNDLED_REASONING_CAPABILITIES.get(harness, {})),
     ):
         declaration = declarations.get(model)
+        if (
+            source == "discovery"
+            and declaration is not None
+            and declaration.get("evidence") != "exact"
+        ):
+            continue
         if declaration is not None:
             return declaration, source
     return None, "none"
@@ -425,6 +442,7 @@ def resolve_reasoning_capability(
     requested_effort: str | None,
     config: JsonObject,
     cache: JsonObject | None = None,
+    discovery: JsonObject | None = None,
     alias: str | None = None,
 ) -> ReasoningCapability | None:
     if requested_effort is None:
@@ -455,6 +473,7 @@ def resolve_reasoning_capability(
         model=model,
         config=config,
         cache=cache,
+        discovery=discovery,
     )
     if declaration is None:
         raise ReasoningCapabilityError(
@@ -467,7 +486,7 @@ def resolve_reasoning_capability(
                 detail="has no declared reasoning-effort capability",
             ),
         )
-    supported = _supported_tuple(declaration)
+    supported = _supported_tuple(declaration, allow_empty=source == "discovery")
     if supported is None:
         raise ReasoningCapabilityError(
             "invalid_reasoning_config",
@@ -499,6 +518,263 @@ def resolve_reasoning_capability(
         default_effort=_default_effort(declaration, supported),
         transport=TRANSPORT_BY_HARNESS[harness],
         source=source,
+        evidence=(
+            declaration.get("evidence")
+            if source == "discovery" and isinstance(declaration.get("evidence"), str)
+            else "exact"
+        ),
+    )
+
+
+def discovery_default_model(discovery: JsonObject | None, harness: str) -> str | None:
+    """Return a captured native default without treating it as an argv choice."""
+    record = _discovery_harness_record(discovery, harness)
+    value = record.get("defaultModel") if record is not None else None
+    return value if isinstance(value, str) and value else None
+
+
+def _capability_from_declaration(
+    *,
+    harness: str,
+    model: str,
+    effort: str,
+    declaration: ReasoningDeclaration,
+    source: str,
+    transport: str,
+    alias: str | None,
+    fallback_evidence: str,
+) -> ReasoningCapability:
+    supported = _supported_tuple(declaration, allow_empty=source == "discovery")
+    if supported is None:
+        detail = (
+            "advertises no reasoning-effort enum"
+            if source == "discovery" and declaration.get("supported") is None
+            else "has malformed reasoning capability data"
+        )
+        error = (
+            "unsupported_reasoning_effort" if source == "discovery" else "invalid_reasoning_config"
+        )
+        raise ReasoningCapabilityError(
+            error,
+            format_explicit_reasoning_effort_error(
+                harness=harness,
+                alias=alias,
+                model=model,
+                effort=effort,
+                detail=detail,
+            ),
+        )
+    if effort not in supported:
+        raise ReasoningCapabilityError(
+            "unsupported_reasoning_effort",
+            format_explicit_reasoning_effort_error(
+                harness=harness,
+                alias=alias,
+                model=model,
+                effort=effort,
+                supported=supported,
+                detail="does not support reasoning effort",
+            ),
+        )
+    raw_evidence = declaration.get("evidence") if source == "discovery" else None
+    return ReasoningCapability(
+        harness=harness,
+        model=model,
+        effort=effort,
+        supported_efforts=supported,
+        default_effort=_default_effort(declaration, supported),
+        transport=transport,
+        source=source,
+        evidence=raw_evidence if isinstance(raw_evidence, str) else fallback_evidence,
+    )
+
+
+def resolve_harness_enum_capability(
+    *,
+    harness: str,
+    model: str | None,
+    requested_effort: str | None,
+    discovery: JsonObject | None,
+    alias: str | None = None,
+) -> ReasoningCapability | None:
+    """Resolve a process-wide effort enum, preferring captured help evidence."""
+    if requested_effort is None:
+        return None
+    effort = normalize_effort(requested_effort)
+    profile = REASONING_PROFILES[harness]
+    declaration = _discovery_harness_reasoning(discovery, harness)
+    if declaration is not None:
+        return _capability_from_declaration(
+            harness=harness,
+            model=model or "",
+            effort=effort,
+            declaration=declaration,
+            source="discovery",
+            transport=profile.transport or "",
+            alias=alias,
+            fallback_evidence="harness",
+        )
+    declaration = {"supported": profile.static_efforts or ()}
+    return _capability_from_declaration(
+        harness=harness,
+        model=model or "",
+        effort=effort,
+        declaration=declaration,
+        source="harness-compatibility",
+        transport=profile.transport or "",
+        alias=alias,
+        fallback_evidence="harness",
+    )
+
+
+def resolve_grok_reasoning_capability(
+    *,
+    model: str | None,
+    requested_effort: str | None,
+    config: JsonObject,
+    discovery: JsonObject | None,
+    cache: JsonObject | None = None,
+    alias: str | None = None,
+) -> tuple[ReasoningCapability | None, tuple[str, ...]]:
+    """Resolve Grok exact declarations, then its documented CLI enum."""
+    if requested_effort is None:
+        return None, ()
+    effort = normalize_effort(requested_effort)
+    if model:
+        declaration: ReasoningDeclaration | None = None
+        source = "none"
+        for candidate_source, declarations in (
+            ("config", _config_model_declarations(config, "grok")),
+            ("discovery", _discovery_model_declarations(discovery, "grok")),
+            ("cache", _cache_model_declarations(cache, "grok")),
+            ("bundled", BUNDLED_REASONING_CAPABILITIES.get("grok", {})),
+        ):
+            candidate = declarations.get(model)
+            if candidate is None:
+                continue
+            if candidate_source == "discovery" and candidate.get("evidence") != "exact":
+                continue
+            declaration = candidate
+            source = candidate_source
+            break
+        if declaration is not None:
+            return (
+                _capability_from_declaration(
+                    harness="grok",
+                    model=model,
+                    effort=effort,
+                    declaration=declaration,
+                    source=source,
+                    transport=TRANSPORT_GROK_EFFORT_FLAG,
+                    alias=alias,
+                    fallback_evidence="exact",
+                ),
+                (),
+            )
+    capability = resolve_harness_enum_capability(
+        harness="grok",
+        model=model,
+        requested_effort=effort,
+        discovery=discovery,
+        alias=alias,
+    )
+    return capability, (
+        "grok reasoning effort was validated against the harness compatibility enum; "
+        "model-specific support is not known.",
+    )
+
+
+def resolve_discovered_model_capability(
+    *,
+    harness: str,
+    model: str | None,
+    requested_effort: str | None,
+    discovery: JsonObject | None,
+    alias: str | None = None,
+) -> tuple[ReasoningCapability | None, tuple[str, ...]]:
+    """Resolve OpenCode/Pi/OMP discovery strategies without inventing model facts."""
+    if requested_effort is None:
+        return None, ()
+    effort = normalize_effort(requested_effort)
+    declarations = _discovery_model_declarations(discovery, harness)
+    declaration = declarations.get(model) if model else None
+    transport = REASONING_PROFILES[harness].transport
+    if harness == "opencode":
+        if (
+            declaration is None
+            or declaration.get("evidence") != "exact"
+            or declaration.get("supported") is None
+        ):
+            return (
+                ReasoningCapability(
+                    harness=harness,
+                    model=model or "",
+                    effort=effort,
+                    supported_efforts=(effort,),
+                    default_effort=None,
+                    transport=TRANSPORT_OPENCODE_VARIANT_FLAG,
+                    source="pass-through",
+                    evidence="unknown",
+                ),
+                ("opencode_variant_unvalidated",),
+            )
+        return (
+            _capability_from_declaration(
+                harness=harness,
+                model=model or "",
+                effort=effort,
+                declaration=declaration,
+                source="discovery",
+                transport=TRANSPORT_OPENCODE_VARIANT_FLAG,
+                alias=alias,
+                fallback_evidence="exact",
+            ),
+            (),
+        )
+
+    evidence = declaration.get("evidence") if declaration is not None else None
+    has_usable_declaration = (
+        declaration is not None
+        and declaration.get("supported") is not None
+        and (evidence == "exact" or (harness == "pi" and evidence == "harness"))
+    )
+    if has_usable_declaration:
+        capability = _capability_from_declaration(
+            harness=harness,
+            model=model or "",
+            effort=effort,
+            declaration=declaration,
+            source="discovery",
+            transport=transport or "",
+            alias=alias,
+            fallback_evidence="exact",
+        )
+        if harness == "pi" and capability.evidence == "harness":
+            capability = replace(capability, evidence="model-partial")
+            return capability, (
+                "pi reasoning effort was validated against a harness-wide enum; "
+                "model-specific levels are partial evidence.",
+            )
+        return capability, ()
+
+    harness_declaration = _discovery_harness_reasoning(discovery, harness)
+    source = "discovery" if harness_declaration is not None else "harness-compatibility"
+    fallback_evidence = "model-partial" if harness == "pi" else "harness-partial"
+    capability = _capability_from_declaration(
+        harness=harness,
+        model=model or "",
+        effort=effort,
+        declaration=harness_declaration
+        or {"supported": REASONING_PROFILES[harness].static_efforts or ()},
+        source=source,
+        transport=transport or "",
+        alias=alias,
+        fallback_evidence=fallback_evidence,
+    )
+    capability = replace(capability, evidence=fallback_evidence)
+    return capability, (
+        f"{harness} reasoning effort was validated against a harness-wide enum; "
+        "model-specific levels are partial evidence.",
     )
 
 
@@ -506,18 +782,25 @@ def add_reasoning_payload_fields(payload: JsonObject, carrier: ReasoningPayloadC
     """Emit the reasoning JSON fields from any carrier with the shared attribute names.
 
     Used for both the CLI Request and the runner RunContext so dry-run payloads,
-    manifests, and snapshots cannot drift. The documented schema exposes both
-    requestedReasoningEffort and resolvedReasoningEffort; resolution never
-    rewrites the value today, so both keys carry the single internal effort.
+    manifests, and snapshots cannot drift. Requested and resolved effort are
+    distinct because Cursor may route to another selector or preserve a pinned
+    selector with an explicit bypass warning.
     """
     effort = carrier.reasoning_effort
-    if effort is not None:
+    requested = getattr(carrier, "requested_reasoning_effort", None)
+    if requested is not None:
+        payload["requestedReasoningEffort"] = requested
+    elif effort is not None:
         payload["requestedReasoningEffort"] = effort
+    if effort is not None:
         payload["resolvedReasoningEffort"] = effort
     if carrier.reasoning_effort_source is not None:
         payload["reasoningEffortSource"] = carrier.reasoning_effort_source
     if carrier.reasoning_capability_source is not None:
         payload["reasoningCapabilitySource"] = carrier.reasoning_capability_source
+    evidence = getattr(carrier, "reasoning_capability_evidence", None)
+    if evidence is not None:
+        payload["reasoningCapabilityEvidence"] = evidence
     if carrier.reasoning_transport is not None:
         payload["reasoningTransport"] = carrier.reasoning_transport
 
@@ -1084,6 +1367,12 @@ def build_reasoning_capabilities_payload(
     }
     for harness in ("claude", "grok", "pi", "omp"):
         models_payload = {}
+        if harness == "grok":
+            _overlay_payload_models(
+                models_payload,
+                BUNDLED_REASONING_CAPABILITIES.get("grok", {}),
+                "bundled",
+            )
         _overlay_payload_models(
             models_payload,
             _discovery_model_declarations(discovery, harness),
@@ -1095,6 +1384,13 @@ def build_reasoning_capabilities_payload(
             "supported": list(REASONING_PROFILES[harness].static_efforts),
             "models": models_payload,
         }
+        if harness == "grok":
+            _overlay_payload_models(
+                models_payload,
+                _config_model_declarations(config, "grok"),
+                "config",
+            )
+            harness_payload["source"] = "harness-compatibility"
         harness_reasoning = _discovery_harness_reasoning(discovery, harness)
         observed = (
             _copy_payload_model(harness_reasoning, source="discovery")

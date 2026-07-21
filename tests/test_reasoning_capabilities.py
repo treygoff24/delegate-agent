@@ -28,7 +28,9 @@ from delegate_agent.reasoning import (  # noqa: E402
     format_explicit_reasoning_effort_error,
     normalize_effort,
     resolve_claude_native_effort,
+    resolve_discovered_model_capability,
     resolve_grok_native_effort,
+    resolve_grok_reasoning_capability,
     resolve_pi_native_effort,
     resolve_reasoning_capability,
 )
@@ -264,7 +266,7 @@ class ReasoningCapabilityTests(unittest.TestCase):
     def test_effort_strings_reject_toml_quoting_hazards(self):
         # Effort values are interpolated into a quoted Codex TOML override, so
         # quote/backslash characters must be rejected at the input boundary.
-        for bad in ('hi"gh', "hi\\gh", "hi gh", "", None, 3):
+        for bad in ('hi"gh', "hi\\gh", "hi gh", "--high", "", None, 3):
             with self.assertRaises(ReasoningCapabilityError):
                 normalize_effort(bad)
         self.assertEqual(normalize_effort("xhigh"), "xhigh")
@@ -320,8 +322,10 @@ class ReasoningCapabilityTests(unittest.TestCase):
         payload = build_reasoning_capabilities_payload({}, cache=None)
         grok = payload["harnesses"]["grok"]
         self.assertEqual(grok["transport"], "grok-effort-flag")
-        self.assertEqual(grok["source"], "static")
+        self.assertEqual(grok["source"], "harness-compatibility")
         self.assertEqual(grok["supported"], ["low", "medium", "high", "xhigh", "max"])
+        self.assertEqual(grok["models"]["grok-4.5"]["supported"], ["low", "medium", "high"])
+        self.assertEqual(grok["models"]["grok-4.5"]["source"], "bundled")
 
     def test_cursor_capabilities_aggregate_efforts_by_model(self):
         payload = build_reasoning_capabilities_payload(
@@ -771,6 +775,204 @@ class ReasoningCapabilityTests(unittest.TestCase):
         for alias in payload["aliases"]["kimi"].values():
             self.assertIn("transport", alias)
             self.assertIsNone(alias["transport"])
+
+    def test_runtime_exact_discovery_overrides_bundled_and_preserves_empty_negative(self):
+        discovery = {
+            "harnesses": {
+                "codex": {
+                    "models": {"gpt-5.5": {"reasoning": {"supported": [], "evidence": "exact"}}}
+                }
+            }
+        }
+        with self.assertRaises(ReasoningCapabilityError) as ctx:
+            resolve_reasoning_capability(
+                harness="codex",
+                model="gpt-5.5",
+                requested_effort="high",
+                config={},
+                discovery=discovery,
+            )
+        self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
+
+    def test_runtime_config_overrides_discovery(self):
+        config = {
+            "reasoning": {
+                "capabilities": {
+                    "codex": {"gpt-5.5": {"supported": ["max"], "evidence": "unknown"}}
+                }
+            }
+        }
+        discovery = {
+            "harnesses": {
+                "codex": {
+                    "models": {
+                        "gpt-5.5": {"reasoning": {"supported": ["low"], "evidence": "exact"}}
+                    }
+                }
+            }
+        }
+        capability = resolve_reasoning_capability(
+            harness="codex",
+            model="gpt-5.5",
+            requested_effort="max",
+            config=config,
+            discovery=discovery,
+        )
+        assert capability is not None
+        self.assertEqual(capability.source, "config")
+        self.assertEqual(capability.evidence, "exact")
+
+    def test_grok_exact_bundle_precedes_harness_compatibility(self):
+        with self.assertRaises(ReasoningCapabilityError):
+            resolve_grok_reasoning_capability(
+                model="grok-4.5",
+                requested_effort="xhigh",
+                config={},
+                discovery=None,
+            )
+        capability, warnings = resolve_grok_reasoning_capability(
+            model="future-grok",
+            requested_effort="xhigh",
+            config={},
+            discovery=None,
+        )
+        assert capability is not None
+        self.assertEqual(capability.source, "harness-compatibility")
+        self.assertEqual(capability.evidence, "harness")
+        self.assertTrue(warnings)
+
+    def test_grok_manual_exact_declaration_precedes_compatibility(self):
+        config = {
+            "reasoning": {"capabilities": {"grok": {"future-grok": {"supported": ["ultra"]}}}}
+        }
+        capability, warnings = resolve_grok_reasoning_capability(
+            model="future-grok",
+            requested_effort="ultra",
+            config=config,
+            discovery=None,
+        )
+        assert capability is not None
+        self.assertEqual(capability.source, "config")
+        self.assertEqual(capability.evidence, "exact")
+        self.assertEqual(warnings, ())
+
+    def test_grok_non_exact_discovery_does_not_suppress_bundled_exact_model(self):
+        discovery = {
+            "harnesses": {
+                "grok": {
+                    "models": {
+                        "grok-4.5": {"reasoning": {"supported": None, "evidence": "unknown"}}
+                    }
+                }
+            }
+        }
+        with self.assertRaises(ReasoningCapabilityError):
+            resolve_grok_reasoning_capability(
+                model="grok-4.5",
+                requested_effort="xhigh",
+                config={},
+                discovery=discovery,
+            )
+
+    def test_non_exact_discovery_does_not_suppress_generic_fallback(self):
+        discovery = {
+            "harnesses": {
+                "codex": {
+                    "models": {"gpt-5.5": {"reasoning": {"supported": None, "evidence": "unknown"}}}
+                }
+            }
+        }
+        capability = resolve_reasoning_capability(
+            harness="codex",
+            model="gpt-5.5",
+            requested_effort="high",
+            config={},
+            discovery=discovery,
+        )
+        assert capability is not None
+        self.assertEqual(capability.source, "bundled")
+
+    def test_opencode_exact_variants_fail_closed_and_unknown_passes_through(self):
+        discovery = {
+            "harnesses": {
+                "opencode": {
+                    "models": {
+                        "provider/model": {
+                            "reasoning": {"supported": ["fast"], "evidence": "exact"}
+                        }
+                    }
+                }
+            }
+        }
+        with self.assertRaises(ReasoningCapabilityError):
+            resolve_discovered_model_capability(
+                harness="opencode",
+                model="provider/model",
+                requested_effort="slow",
+                discovery=discovery,
+            )
+        capability, warnings = resolve_discovered_model_capability(
+            harness="opencode",
+            model="provider/unknown",
+            requested_effort="future",
+            discovery=discovery,
+        )
+        assert capability is not None
+        self.assertEqual(capability.source, "pass-through")
+        self.assertEqual(warnings, ("opencode_variant_unvalidated",))
+
+    def test_pi_and_omp_preserve_exact_and_partial_evidence(self):
+        discovery = {
+            "harnesses": {
+                "pi": {
+                    "models": {
+                        "provider/off": {"reasoning": {"supported": [], "evidence": "exact"}},
+                        "provider/on": {
+                            "reasoning": {
+                                "supported": ["low", "high"],
+                                "evidence": "harness",
+                            }
+                        },
+                    },
+                    "harnessReasoning": {"supported": ["low", "high"], "evidence": "harness"},
+                },
+                "omp": {
+                    "models": {
+                        "provider/exact": {
+                            "reasoning": {"supported": ["minimal"], "evidence": "exact"}
+                        },
+                        "provider/unknown": {
+                            "reasoning": {"supported": None, "evidence": "unknown"}
+                        },
+                    }
+                },
+            }
+        }
+        with self.assertRaises(ReasoningCapabilityError):
+            resolve_discovered_model_capability(
+                harness="pi",
+                model="provider/off",
+                requested_effort="low",
+                discovery=discovery,
+            )
+        pi, pi_warnings = resolve_discovered_model_capability(
+            harness="pi",
+            model="provider/on",
+            requested_effort="high",
+            discovery=discovery,
+        )
+        assert pi is not None
+        self.assertEqual(pi.evidence, "model-partial")
+        self.assertTrue(pi_warnings)
+        omp, omp_warnings = resolve_discovered_model_capability(
+            harness="omp",
+            model="provider/unknown",
+            requested_effort="high",
+            discovery=discovery,
+        )
+        assert omp is not None
+        self.assertEqual(omp.evidence, "harness-partial")
+        self.assertTrue(omp_warnings)
 
 
 if __name__ == "__main__":

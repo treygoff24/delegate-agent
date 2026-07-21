@@ -311,6 +311,7 @@ def dry_run_payload(request: Request) -> JsonObject:
         "promptTransport": request.prompt_transport,
         "promptInstructionMode": request.prompt_instruction_mode,
     }
+    run_metadata.add_model_payload_fields(payload, request)
     reasoning.add_reasoning_payload_fields(payload, request)
     run_metadata.add_speed_payload_fields(payload, request)
     if request.warnings:
@@ -549,6 +550,9 @@ def make_run_context(
         started_at=run_registry.utc_now_iso(),
         model_alias=request.model_alias,
         model_resolved=request.model,
+        model_requested=request.model_requested,
+        capability_model=request.capability_model,
+        capability_model_source=request.capability_model_source,
         creation_context=creation_context,
         source_git_root=source_git_root,
         isolation_mode=isolation_mode,
@@ -559,8 +563,10 @@ def make_run_context(
         safe_workspace_method=safe_workspace_method,
         warnings=(*warnings, *request.warnings),
         reasoning_effort=request.reasoning_effort,
+        requested_reasoning_effort=request.requested_reasoning_effort,
         reasoning_effort_source=request.reasoning_effort_source,
         reasoning_capability_source=request.reasoning_capability_source,
+        reasoning_capability_evidence=request.reasoning_capability_evidence,
         reasoning_transport=request.reasoning_transport,
         fast=request.fast,
         prompt_transport=request.prompt_transport,
@@ -770,6 +776,7 @@ def execute_request(
                     "stderrBytes": result.stderr_bytes,
                     "durationMs": result.duration_ms,
                 }
+                run_metadata.add_model_payload_fields(payload, request)
                 if request.engine in {"pi", "omp"}:
                     # Keep the established call-mode `text` field while giving
                     # Pi-family engines the same assistantText contract as tracked modes.

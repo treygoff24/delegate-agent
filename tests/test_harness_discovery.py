@@ -88,6 +88,20 @@ class SnapshotSchemaTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.validate_snapshot(snapshot)
 
+    def test_rejects_flag_like_model_selectors_and_efforts(self):
+        snapshot = copy.deepcopy(self.snapshot)
+        model = snapshot["harnesses"]["codex"]["models"].pop("gpt-test")
+        snapshot["harnesses"]["codex"]["models"]["--unsafe"] = model
+        with self.assertRaises(ValueError):
+            self.validate_snapshot(snapshot)
+
+        snapshot = copy.deepcopy(self.snapshot)
+        reasoning = snapshot["harnesses"]["codex"]["models"]["gpt-test"]["reasoning"]
+        reasoning["supported"] = ["--unsafe"]
+        reasoning.pop("default")
+        with self.assertRaises(ValueError):
+            self.validate_snapshot(snapshot)
+
     def test_rejects_incomplete_or_non_cursor_route_pair(self):
         snapshot = copy.deepcopy(self.snapshot)
         model = snapshot["harnesses"]["codex"]["models"]["gpt-test"]

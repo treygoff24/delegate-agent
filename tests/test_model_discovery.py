@@ -623,8 +623,7 @@ class LiveProbeIntegrationTests(unittest.TestCase):
             expected = {
                 "codex": ("gpt-5.6-sol", "live"),
                 "grok": ("grok-4.5", "live"),
-                # Config precedence remains higher than the live observation.
-                "kimi": ("kimi-code/k3", "config"),
+                "kimi": ("kimi-code/k3", "live"),
             }
             for engine, (selector, source) in expected.items():
                 with self.subTest(engine=engine):
@@ -765,7 +764,7 @@ class PlainModelsUnchangedTests(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["engine"], "kimi")
         self.assertEqual(payload["schema"], "delegate.engine-models.v1")
-        self.assertEqual(payload["default"], "kimi-code/k3")
+        self.assertIsNone(payload["default"])
         self.assertEqual(
             [item["id"] for item in payload["models"]],
             ["kimi-code/k3", "kimi-code/kimi-for-coding", "kimi-code/kimi-for-coding-highspeed"],
@@ -901,10 +900,13 @@ class UnifiedDiscoveryProjectionTests(unittest.TestCase):
         from delegate_agent.constants import KNOWN_ENGINES
         from delegate_agent.describe_payload import models_summary_payload
 
+        self.config["droid"]["models"] = {"known": "provider/model"}
         before = models_summary_payload(self.config, "fixture")
         with tempfile.TemporaryDirectory() as tmp:
             binary = _write_executable(Path(tmp) / "codex", "#!/bin/sh\nexit 0\n")
+            droid_binary = _write_executable(Path(tmp) / "droid", "#!/bin/sh\nexit 0\n")
             self.config["codex"]["binary"] = str(binary)
+            self.config["droid"]["binary"] = str(droid_binary)
             discovery = {
                 "harnesses": {
                     "codex": {
@@ -912,7 +914,13 @@ class UnifiedDiscoveryProjectionTests(unittest.TestCase):
                         "selector": [str(binary)],
                         "probeStatus": "ok",
                         "modelScope": "account",
-                    }
+                    },
+                    "droid": {
+                        "installed": True,
+                        "selector": [str(droid_binary)],
+                        "probeStatus": "ok",
+                        "modelScope": "account",
+                    },
                 }
             }
             after = models_summary_payload(
@@ -929,7 +937,8 @@ class UnifiedDiscoveryProjectionTests(unittest.TestCase):
         self.assertEqual(codex["catalogScope"], "account")
         self.assertFalse(codex["stale"])
         self.assertTrue(codex["launchable"])
-        missing = after["harnesses"]["droid"]
+        self.assertFalse(after["harnesses"]["droid"]["launchable"])
+        missing = after["harnesses"]["claude"]
         self.assertEqual(
             missing,
             {

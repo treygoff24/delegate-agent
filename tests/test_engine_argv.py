@@ -63,6 +63,274 @@ class EngineArgvTests(CommandTestBase):
         self.assertNotIn("--force", argv)
         self.assertNotIn("--approve-mcps", argv)
 
+    def test_discovered_codex_default_validates_effort_without_pinning_argv(self):
+        discovery = {
+            "harnesses": {
+                "codex": {
+                    "defaultModel": "gpt-live",
+                    "models": {
+                        "gpt-live": {"reasoning": {"supported": ["high"], "evidence": "exact"}}
+                    },
+                }
+            }
+        }
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["codex"]["defaultModel"] = None
+        with (
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "load_discovery_cache",
+                return_value=discovery,
+            ),
+            mock.patch.object(self.delegate.harness_discovery, "probe_harness") as probe,
+        ):
+            request = self.build_git_request(
+                "codex",
+                "safe",
+                None,
+                "/repo",
+                "review",
+                config,
+                True,
+                reasoning_effort="high",
+            )
+        probe.assert_not_called()
+        self.assertIsNone(request.model)
+        self.assertEqual(request.capability_model, "gpt-live")
+        self.assertEqual(request.capability_model_source, "discovery")
+        self.assertNotIn("--model", request.argv)
+        self.assertEqual(request.reasoning_capability_source, "discovery")
+        payload = self.delegate.dry_run_payload(request)
+        self.assertIsNone(payload["modelResolved"])
+        self.assertEqual(payload["capabilityModel"], "gpt-live")
+        self.assertEqual(payload["reasoningCapabilityEvidence"], "exact")
+        context = self.delegate.make_run_context(
+            Path("/tmp/delegate-registry"),
+            request,
+            run_id="run-test",
+            alias="quiet-otter",
+            source_workspace=self.delegate.ResolvedWorkspace("/repo", "git"),
+        )
+        manifest = self.delegate.delegate_runner.build_manifest(context, request.argv)
+        self.assertEqual(manifest["modelRequested"], None)
+        self.assertEqual(manifest["modelResolved"], None)
+        self.assertEqual(manifest["capabilityModel"], "gpt-live")
+        self.assertEqual(manifest["reasoningCapabilityEvidence"], "exact")
+
+    def test_selector_drifted_runtime_discovery_is_ignored_without_probing(self):
+        discovery = {
+            "harnesses": {
+                "codex": {
+                    "installed": True,
+                    "selector": ["/old/codex"],
+                    "defaultModel": "gpt-live",
+                    "models": {
+                        "gpt-live": {"reasoning": {"supported": ["max"], "evidence": "exact"}}
+                    },
+                }
+            }
+        }
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        with (
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "load_discovery_cache",
+                return_value=discovery,
+            ),
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "selector_has_drifted",
+                return_value=True,
+            ) as drifted,
+            mock.patch.object(self.delegate.harness_discovery, "probe_harness") as probe,
+            self.assertRaises(self.delegate.DelegateError),
+        ):
+            self.build_git_request(
+                "codex",
+                "safe",
+                None,
+                "/repo",
+                "review",
+                config,
+                True,
+                reasoning_effort="max",
+            )
+        drifted.assert_called_once()
+        probe.assert_not_called()
+
+    def test_optional_embedded_models_do_not_emit_model_flags(self):
+        for engine in ("kimi", "devin"):
+            with self.subTest(engine=engine):
+                request = self.build_git_request(
+                    engine,
+                    "work" if engine == "devin" else "safe",
+                    None,
+                    "/repo",
+                    "review",
+                    self.delegate.DEFAULT_CONFIG,
+                    True,
+                )
+                self.assertIsNone(request.model)
+                self.assertNotIn("--model", request.argv)
+
+    def test_opencode_runtime_enforces_exact_variants_and_warns_on_unknown(self):
+        discovery = {
+            "harnesses": {
+                "opencode": {
+                    "models": {
+                        "provider/model": {
+                            "reasoning": {"supported": ["fast"], "evidence": "exact"}
+                        }
+                    }
+                }
+            }
+        }
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["opencode"]["defaultModel"] = "provider/model"
+        with (
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "load_discovery_cache",
+                return_value=discovery,
+            ),
+            self.assertRaises(self.delegate.DelegateError),
+        ):
+            self.build_git_request(
+                "opencode",
+                "work",
+                None,
+                "/repo",
+                "task",
+                config,
+                True,
+                reasoning_effort="slow",
+            )
+
+        config["opencode"]["defaultModel"] = "provider/unknown"
+        with mock.patch.object(
+            self.delegate.harness_discovery,
+            "load_discovery_cache",
+            return_value=discovery,
+        ):
+            request = self.build_git_request(
+                "opencode",
+                "work",
+                None,
+                "/repo",
+                "task",
+                config,
+                True,
+                reasoning_effort="future",
+            )
+        self.assertIn("future", request.argv)
+        self.assertIn("opencode_variant_unvalidated", request.warnings)
+        self.assertEqual(request.reasoning_capability_evidence, "unknown")
+
+    def test_opencode_alias_variant_precedes_discovered_exact_variants(self):
+        discovery = {
+            "harnesses": {
+                "opencode": {
+                    "models": {
+                        "provider/model": {
+                            "reasoning": {"supported": ["fast"], "evidence": "exact"}
+                        }
+                    }
+                }
+            }
+        }
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["opencode"]["models"] = {"turbo": {"model": "provider/model", "variant": "turbo"}}
+        with mock.patch.object(
+            self.delegate.harness_discovery,
+            "load_discovery_cache",
+            return_value=discovery,
+        ):
+            request = self.build_git_request(
+                "opencode", "work", "turbo", "/repo", "task", config, True
+            )
+        self.assertIn("turbo", request.argv)
+        self.assertEqual(request.reasoning_capability_source, "alias")
+        self.assertEqual(request.reasoning_capability_evidence, "exact")
+
+    def test_request_resolves_profile_once_and_reuses_it_for_cache_and_child_env(self):
+        resolution = self.delegate.profiles.ProfileResolution(
+            name="work",
+            source="flag",
+            env={"PROFILE_MARKER": "work-value"},
+        )
+        with (
+            mock.patch.object(
+                self.delegate.profiles,
+                "resolve_active_profile",
+                return_value=resolution,
+            ) as resolve_profile,
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "load_discovery_cache",
+                return_value=None,
+            ) as load_cache,
+        ):
+            request = self.build_git_request(
+                "claude",
+                "call",
+                None,
+                "/temporary-call-cwd",
+                "answer",
+                self.delegate.DEFAULT_CONFIG,
+                True,
+                auth_profile_override="work",
+            )
+        resolve_profile.assert_called_once()
+        load_cache.assert_called_once_with("work")
+        self.assertEqual(request.profile_resolution, resolution)
+        self.assertEqual((request.env_overrides or {}).get("PROFILE_MARKER"), "work-value")
+
+    def test_profile_specific_discovery_snapshots_select_different_capability_models(self):
+        profiles = [
+            self.delegate.profiles.ProfileResolution(
+                name="personal", source="flag", codex_home="/tmp/personal-codex"
+            ),
+            self.delegate.profiles.ProfileResolution(
+                name="work", source="flag", codex_home="/tmp/work-codex"
+            ),
+        ]
+
+        def snapshot(profile_name):
+            model = f"{profile_name}-model"
+            return {
+                "harnesses": {
+                    "codex": {
+                        "defaultModel": model,
+                        "models": {
+                            model: {"reasoning": {"supported": ["high"], "evidence": "exact"}}
+                        },
+                    }
+                }
+            }
+
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["codex"]["defaultModel"] = None
+        with (
+            mock.patch.object(
+                self.delegate.profiles,
+                "resolve_active_profile",
+                side_effect=profiles,
+            ),
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "load_discovery_cache",
+                side_effect=snapshot,
+            ),
+        ):
+            personal = self.build_git_request(
+                "codex", "safe", None, "/repo", "task", config, True, reasoning_effort="high"
+            )
+            work = self.build_git_request(
+                "codex", "safe", None, "/repo", "task", config, True, reasoning_effort="high"
+            )
+        self.assertEqual(personal.capability_model, "personal-model")
+        self.assertEqual(work.capability_model, "work-model")
+
     def test_safe_review_prefix_is_read_only_text_only(self):
         for engine, prefix in self.delegate.SAFE_REVIEW_PREFIX_BY_ENGINE.items():
             with self.subTest(engine=engine):
@@ -627,6 +895,26 @@ class EngineArgvTests(CommandTestBase):
         payload = self.delegate.dry_run_payload(request)
         self.assertNotIn("requestedReasoningEffort", payload)
         self.assertIn("warnings", payload)
+
+    def test_malformed_config_default_effort_warns_and_is_omitted(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["codex"]["defaultModel"] = "gpt-5.5"
+        config["codex"]["defaultReasoningEffort"] = "bad effort"
+        request = self.build_git_request(
+            "codex",
+            "safe",
+            None,
+            "/repo",
+            "hello",
+            config,
+            True,
+        )
+        self.assertIsNone(request.reasoning_effort)
+        self.assertNotIn("model_reasoning_effort", " ".join(request.argv))
+        self.assertTrue(any("defaultReasoningEffort" in warning for warning in request.warnings))
+        payload = self.delegate.dry_run_payload(request)
+        self.assertNotIn("requestedReasoningEffort", payload)
+        self.assertNotIn("resolvedReasoningEffort", payload)
 
     def test_cursor_config_default_effort_degrades_to_warning_without_mapping(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
@@ -1222,7 +1510,7 @@ class EngineArgvTests(CommandTestBase):
         self.assertTrue(payload["engineCapabilities"]["codex"]["outputSchema"])
         self.assertTrue(payload["engineCapabilities"]["claude"]["outputSchema"])
         self.assertEqual(payload["engineDefaults"]["devin"]["binary"], "devin")
-        self.assertEqual(payload["engineDefaults"]["devin"]["defaultModel"], "swe-1.7")
+        self.assertIsNone(payload["engineDefaults"]["devin"]["defaultModel"])
         self.assertEqual(payload["engineDefaults"]["opencode"]["binary"], "opencode")
         self.assertIsNone(payload["engineDefaults"]["opencode"]["defaultAgent"])
         for engine in ("cursor", "droid", "kimi", "grok", "devin", "opencode"):
@@ -1347,9 +1635,10 @@ class EngineArgvTests(CommandTestBase):
         )
         self.assertIn("--effort", request.argv)
         self.assertIn("high", request.argv)
-        self.assertEqual(request.reasoning_capability_source, "static")
+        self.assertEqual(request.reasoning_capability_source, "harness-compatibility")
+        self.assertEqual(request.reasoning_capability_evidence, "harness")
         payload = self.delegate.dry_run_payload(request)
-        self.assertEqual(payload["reasoningCapabilitySource"], "static")
+        self.assertEqual(payload["reasoningCapabilitySource"], "harness-compatibility")
 
     def test_grok_work_harness_bypass_requires_harness_scoped_policy(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
@@ -1794,7 +2083,8 @@ class EngineArgvTests(CommandTestBase):
         )
         self.assertEqual(request.reasoning_effort, "xhigh")
         self.assertEqual(request.reasoning_transport, "pi-thinking-flag")
-        self.assertEqual(request.reasoning_capability_source, "static")
+        self.assertEqual(request.reasoning_capability_source, "harness-compatibility")
+        self.assertEqual(request.reasoning_capability_evidence, "harness-partial")
 
     def test_pi_work_resolves_structured_alias_and_cli_thinking(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
@@ -1831,7 +2121,8 @@ class EngineArgvTests(CommandTestBase):
         )
         self.assertEqual(request.reasoning_effort, "xhigh")
         self.assertEqual(request.reasoning_transport, "pi-thinking-flag")
-        self.assertEqual(request.reasoning_capability_source, "static")
+        self.assertEqual(request.reasoning_capability_source, "harness-compatibility")
+        self.assertEqual(request.reasoning_capability_evidence, "model-partial")
 
     def test_pi_alias_can_pin_minimal_thinking(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
