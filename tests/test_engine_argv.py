@@ -1290,7 +1290,7 @@ class EngineArgvTests(CommandTestBase):
             stdout = io.StringIO()
             stderr = io.StringIO()
 
-            def refresh(_config, *, profile):
+            def refresh(_config, *, profile, engines=None):
                 marker.write_text(profile.env["CODEX_HOME"], encoding="utf-8")
                 return self._successful_discovery_refresh("/user/discovery/profile-work.json")
 

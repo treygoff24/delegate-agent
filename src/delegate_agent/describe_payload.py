@@ -780,6 +780,10 @@ def _opencode_describe_argv(
 def _pi_family_describe_argv(section: JsonObject, engine: str, *, mode: str) -> list[str]:
     model = _resolve_default_model(section)
     default_effort = section.get("defaultReasoningEffort")
+    # describe rejects --auth-profile, so profile-scoped discovery is out of
+    # reach here by design; representative argv validates against the static
+    # enum while real launches consult discovery and may accept more or fewer
+    # levels.
     thinking = reasoning.resolve_native_effort(
         engine,
         default_effort if isinstance(default_effort, str) else None,

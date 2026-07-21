@@ -27,10 +27,9 @@ from delegate_agent.reasoning import (  # noqa: E402
     build_reasoning_capabilities_payload,
     format_explicit_reasoning_effort_error,
     normalize_effort,
-    resolve_claude_native_effort,
     resolve_discovered_model_capability,
-    resolve_grok_native_effort,
     resolve_grok_reasoning_capability,
+    resolve_native_effort,
     resolve_pi_native_effort,
     resolve_reasoning_capability,
 )
@@ -274,28 +273,28 @@ class ReasoningCapabilityTests(unittest.TestCase):
     def test_claude_native_effort_accepts_static_cli_levels(self):
         for effort in ("low", "medium", "high", "xhigh", "max"):
             with self.subTest(effort=effort):
-                self.assertEqual(resolve_claude_native_effort(effort), effort)
+                self.assertEqual(resolve_native_effort("claude", effort), effort)
 
     def test_claude_native_effort_rejects_non_cli_levels(self):
         with self.assertRaises(ReasoningCapabilityError) as ctx:
-            resolve_claude_native_effort("off")
+            resolve_native_effort("claude", "off")
         self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
 
     def test_grok_native_effort_accepts_static_cli_levels(self):
         for effort in ("low", "medium", "high", "xhigh", "max"):
             with self.subTest(effort=effort):
-                self.assertEqual(resolve_grok_native_effort(effort), effort)
+                self.assertEqual(resolve_native_effort("grok", effort), effort)
 
     def test_grok_native_effort_rejects_invalid_levels(self):
         with self.assertRaises(ReasoningCapabilityError) as ctx:
-            resolve_grok_native_effort("off")
+            resolve_native_effort("grok", "off")
         self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
 
     def test_grok_native_effort_rejects_malformed_values(self):
         for bad in ("", 'hi"gh', "hi\\gh", "hi gh"):
             with self.subTest(effort=bad):
                 with self.assertRaises(ReasoningCapabilityError) as ctx:
-                    resolve_grok_native_effort(bad)
+                    resolve_native_effort("grok", bad)
                 self.assertEqual(ctx.exception.error, "invalid_reasoning_effort")
 
     def test_pi_native_effort_accepts_delegate_levels_only(self):

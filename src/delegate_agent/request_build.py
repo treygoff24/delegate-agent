@@ -876,13 +876,9 @@ def _resolve_pi_family_selection_detail(
             )
         return model, alias_thinking, "alias"
     if build.requested_effort is not None:
-        if build.effort_source == "config":
-            return model, build.requested_effort, "config"
-        try:
-            thinking = reasoning.normalize_effort(build.requested_effort)
-        except reasoning.ReasoningCapabilityError as exc:
-            raise DelegateError(exc.error, exc.message) from exc
-        return model, thinking, build.effort_source or "cli"
+        # Only a config-sourced effort can reach this point: the first branch
+        # already returned for every non-config effort source.
+        return model, build.requested_effort, "config"
     return model, None, None
 
 

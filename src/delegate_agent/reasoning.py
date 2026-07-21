@@ -282,32 +282,6 @@ def resolve_native_effort(
     return effort
 
 
-def resolve_claude_native_effort(
-    requested_effort: str | None,
-    *,
-    alias: str | None = None,
-    model: str | None = None,
-) -> str | None:
-    """Validate Claude Code's native --effort values.
-
-    Claude Code exposes reasoning effort as a process-level flag, not a
-    per-model capability declaration. Keep this separate from
-    ``resolve_reasoning_capability`` so user/cache model capability tables do
-    not imply Claude model catalog support.
-    """
-    return resolve_native_effort("claude", requested_effort, alias=alias, model=model)
-
-
-def resolve_grok_native_effort(
-    requested_effort: str | None,
-    *,
-    alias: str | None = None,
-    model: str | None = None,
-) -> str | None:
-    """Validate Grok Build CLI native --effort values."""
-    return resolve_native_effort("grok", requested_effort, alias=alias, model=model)
-
-
 def resolve_pi_native_effort(
     requested_effort: str | None,
     *,

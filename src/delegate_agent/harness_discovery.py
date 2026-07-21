@@ -62,7 +62,6 @@ _CURSOR_EFFORT_LABELS = {
     "medium": "Medium",
     "high": "High",
     "xhigh": "Extra High",
-    "extra-high": "Extra High",
     "max": "Max",
 }
 _SNAPSHOT_FIELDS = frozenset({"schema", "profile", "capturedAt", "harnesses"})
@@ -552,9 +551,6 @@ def parse_omp_catalog(raw: str) -> JsonObject:
     return _fragment(model_scope="catalog", models=models)
 
 
-_SELECTOR_LINE = re.compile(r"^[^\s/]+/[^\s/]+$")
-
-
 def _next_opencode_selector(raw: str, start: int) -> re.Match[str] | None:
     return re.compile(r"(?m)^([^\s/]+/[^\s/]+)\r?\n(?=\s*\{)").search(raw, start)
 
@@ -731,16 +727,15 @@ def parse_cursor_catalog(raw: str) -> JsonObject:
 
 def _cursor_route_candidate(selector: str, label: str) -> tuple[str, bool, str, bool] | None:
     match = re.fullmatch(
-        r"(?P<family>.+)-(?P<effort>extra-high|none|low|medium|high|xhigh|max)(?P<fast>-fast)?",
+        r"(?P<family>.+)-(?P<effort>none|low|medium|high|xhigh|max)(?P<fast>-fast)?",
         selector,
     )
     if match is None:
         return None
     effort = match.group("effort")
-    normalized_effort = "xhigh" if effort == "extra-high" else effort
     expected_label = _CURSOR_EFFORT_LABELS[effort]
     direct = re.search(rf"\b{re.escape(expected_label)}\b", label, re.IGNORECASE) is not None
-    return match.group("family"), match.group("fast") is not None, normalized_effort, direct
+    return match.group("family"), match.group("fast") is not None, effort, direct
 
 
 def _cursor_high_corroborated(efforts: dict[str, tuple[str, bool, str]], *, fast: bool) -> bool:
@@ -897,6 +892,12 @@ def merge_droid_settings(fragment: JsonObject, settings_raw: str | None) -> Json
 
 
 def parse_claude_efforts(raw: str) -> JsonObject:
+    # Claude Code has no model/effort enumeration command; the only
+    # non-interactive source is the "Valid values: ..." warning emitted when
+    # --effort rejects our sentinel. A CLI rewording of that warning (or the
+    # sentinel ever becoming a valid effort) degrades this harness to an error
+    # record rather than producing wrong data — watch probe warnings after
+    # Claude Code upgrades.
     match = re.search(r"Valid values:\s*([^\r\n.]+)", raw, re.IGNORECASE)
     if match is None:
         raise ValueError("Claude help had no Valid values list")
