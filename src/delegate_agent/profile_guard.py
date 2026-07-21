@@ -39,6 +39,7 @@ READ_ONLY_SUBCOMMANDS = frozenset(
         "profiles",
         "snapshot",
         "runs",
+        "ps",
         "run-output",
     }
 )

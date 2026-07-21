@@ -252,6 +252,7 @@ class LauncherShimTests(unittest.TestCase):
             for argv in (
                 ["profiles"],
                 ["runs"],
+                ["ps"],
                 ["run-output", "codex-1"],
                 ["describe"],
                 ["models"],
@@ -439,6 +440,16 @@ class ProfileGuardCliTests(unittest.TestCase):
             "Launch and mutation commands remain blocked until the profile config exists",
             stderr,
         )
+
+    def test_guard_allows_ps_alias_with_warning(self):
+        with tempfile.TemporaryDirectory() as home:
+            env = self.base_env(home, profile="work")
+            code, stdout, stderr = self.run_main(["--json", "--cwd", home, "ps"], env=env)
+
+        self.assertEqual(code, self.delegate.EXIT_OK, stderr)
+        json.loads(stdout)
+        self.assertNotIn("refusing to run a launch or mutation command", stderr)
+        self.assertIn("continuing because 'ps' is read-only", stderr)
 
     def test_guard_allows_worktree_list_with_warning(self):
         # An empty tmp cwd has no run registry at all, so worktree list still
