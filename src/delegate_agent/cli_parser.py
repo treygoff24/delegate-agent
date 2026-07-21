@@ -1478,7 +1478,14 @@ def parse_ps(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand
     rest, json_mode = consume_json_option(rest, json_mode)
     if any(command_help.is_help_token(token) for token in rest):
         return help_command(json_mode, "ps")
-    parsed = parse_runs(["--active", *rest], json_mode, cwd)
+    conflicting = [token for token in rest if token in {"--running", "--stale"}]
+    if conflicting:
+        raise DelegateError(
+            "invalid_option_combination",
+            f"delegate ps always shows active runs; use delegate runs {conflicting[0]} instead.",
+        )
+    filtered = [token for token in rest if token != "--active"]
+    parsed = parse_runs(["--active", *filtered], json_mode, cwd)
     parsed.subcommand = "ps"
     return parsed
 

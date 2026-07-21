@@ -34,6 +34,16 @@ class CodexSchemaPreflightTests(unittest.TestCase):
         self.assertIs(normalized["properties"]["items"]["items"]["additionalProperties"], False)
         self.assertEqual(injected, ("schema", "schema.properties.items.items"))
 
+    def test_explicit_non_object_root_type_fails_preflight(self):
+        for root in ({"type": "string"}, {"type": ["string", "null"]}, {"type": "array"}):
+            with self.subTest(root=root), self.assertRaises(structured_output.SchemaPreflightError):
+                structured_output.normalize_codex_schema(root)
+
+    def test_typeless_root_is_left_untouched(self):
+        normalized, injected = structured_output.normalize_codex_schema({})
+        self.assertEqual(normalized, {})
+        self.assertEqual(injected, ())
+
     def test_already_strict_schema_is_untouched(self):
         schema = {
             "type": "object",

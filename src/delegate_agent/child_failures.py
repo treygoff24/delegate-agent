@@ -40,11 +40,22 @@ _USAGE_PATTERNS = (
     re.compile(r"\busage limit\b", re.IGNORECASE),
     re.compile(r"\binsufficient_quota\b", re.IGNORECASE),
     re.compile(r"\bexceeded your current quota\b", re.IGNORECASE),
-    re.compile(
-        r"\brate limit\b[^\n]{0,80}\b(?:quota|usage|billing|subscription|account|credit)\b",
-        re.IGNORECASE,
-    ),
 )
+# A bare "rate limit" is often transient throttling, not an account/quota
+# problem, so it only classifies when account-context wording appears anywhere
+# in the same diagnostic text (before or after, any line).
+_RATE_LIMIT_PATTERN = re.compile(r"\brate limit(?:s|ed)?\b", re.IGNORECASE)
+_ACCOUNT_CONTEXT_PATTERN = re.compile(
+    r"\b(?:quota|usage|billing|subscription|account|credit)\b", re.IGNORECASE
+)
+
+
+def _matches_usage_limit(text: str) -> bool:
+    if any(pattern.search(text) for pattern in _USAGE_PATTERNS):
+        return True
+    return bool(_RATE_LIMIT_PATTERN.search(text)) and bool(_ACCOUNT_CONTEXT_PATTERN.search(text))
+
+
 _RESET_PATTERN = re.compile(
     r"\b(?:resets?(?: again)?|reset time|try again|available again)\b[^\n.\"}]{0,120}",
     re.IGNORECASE,
@@ -65,7 +76,7 @@ def classify(text: str) -> ChildFailure | None:
             "auth_failed",
             "Child harness authentication failed because its token expired or was rejected.",
         )
-    if any(pattern.search(text) for pattern in _USAGE_PATTERNS):
+    if _matches_usage_limit(text):
         reset = _RESET_PATTERN.search(text)
         suffix = f" {reset.group(0).strip().rstrip('.')}." if reset else ""
         return ChildFailure("usage_limit", f"Child harness usage or quota limit reached.{suffix}")
@@ -73,4 +84,4 @@ def classify(text: str) -> ChildFailure | None:
 
 
 def is_usage_limit(text: str) -> bool:
-    return bool(text.strip()) and any(pattern.search(text) for pattern in _USAGE_PATTERNS)
+    return bool(text.strip()) and _matches_usage_limit(text)

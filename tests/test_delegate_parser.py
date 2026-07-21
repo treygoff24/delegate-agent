@@ -286,6 +286,20 @@ class ParserTests(unittest.TestCase):
             self.delegate.parse_cli(["capabilities", "refresh", "not-a-harness"])
         self.assertEqual(ctx.exception.error, "invalid_engine")
 
+    def test_ps_rejects_conflicting_runs_filters_with_ps_specific_message(self):
+        for flag in ("--running", "--stale"):
+            with self.subTest(flag=flag):
+                with self.assertRaises(self.delegate.DelegateError) as ctx:
+                    self.delegate.parse_cli(["ps", flag])
+                self.assertEqual(ctx.exception.error, "invalid_option_combination")
+                self.assertIn("delegate ps always shows active runs", ctx.exception.message)
+                self.assertNotIn("mutually exclusive", ctx.exception.message)
+
+    def test_ps_tolerates_explicit_active_flag(self):
+        parsed = self.delegate.parse_cli(["ps", "--active"])
+        self.assertEqual(parsed.subcommand, "ps")
+        self.assertTrue(parsed.runs.active)
+
     def test_capabilities_read_rejects_engine_arguments(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:
             self.delegate.parse_cli(["capabilities", "codex"])

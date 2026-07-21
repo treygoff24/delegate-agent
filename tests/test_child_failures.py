@@ -40,6 +40,20 @@ class ChildFailureClassifierTests(unittest.TestCase):
                 self.assertIsNotNone(failure)
                 self.assertEqual(failure.code, "codex_thread_lost")
 
+    def test_rate_limit_with_account_context_anywhere_is_usage_limit(self):
+        for text in (
+            "Quota exceeded for this billing period.\nRate limit response from upstream.",
+            "You were rate limited.\nCheck your subscription for details.",
+            "rate limit reached; account credit exhausted",
+        ):
+            with self.subTest(text=text):
+                failure = child_failures.classify(text)
+                self.assertIsNotNone(failure)
+                self.assertEqual(failure.code, "usage_limit")
+
+    def test_bare_rate_limit_without_account_context_is_not_usage_limit(self):
+        self.assertIsNone(child_failures.classify("429 rate limit exceeded, retrying in 3s"))
+
     def test_unknown_failure_is_not_misclassified(self):
         self.assertIsNone(child_failures.classify("child command exited unexpectedly"))
 

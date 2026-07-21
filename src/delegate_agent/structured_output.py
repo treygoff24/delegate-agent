@@ -13,6 +13,13 @@ class SchemaPreflightError(ValueError):
 def normalize_codex_schema(schema: object) -> tuple[dict[str, Any], tuple[str, ...]]:
     if not isinstance(schema, dict):
         raise SchemaPreflightError("schema must be a JSON object.")
+    # Codex strict output requires an object-typed root; catch the explicit
+    # non-object declaration here instead of letting the child fail with an
+    # opaque 400. Type-less roots (e.g. {}) are deliberately left alone.
+    if "type" in schema and not _is_object_node(schema):
+        raise SchemaPreflightError(
+            "schema root must be object-typed for Codex strict structured output."
+        )
     normalized = copy.deepcopy(schema)
     injected: list[str] = []
     _normalize_node(normalized, "schema", injected, normalized, set())

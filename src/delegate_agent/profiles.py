@@ -401,7 +401,9 @@ def capture_workspace_baseline(cwd: str) -> WorkspaceBaseline | None:
         head = capture_head_oid(cwd)
         if head is None:
             return None
-    except Exception:
+    except (OSError, subprocess.SubprocessError, ValueError):
+        # No baseline means retry stays disabled — safe degradation, but only
+        # for environment failures; programming errors should still surface.
         return None
     return WorkspaceBaseline(porcelain=porcelain, head=head)
 
