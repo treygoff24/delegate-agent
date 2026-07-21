@@ -240,8 +240,18 @@ def parse_capabilities_subcommand(
     if any(command_help.is_help_token(token) for token in rest):
         return help_command(json_mode, "capabilities")
     refresh = False
-    if rest == ["refresh"]:
+    engines: tuple[str, ...] | None = None
+    if rest and rest[0] == "refresh":
         refresh = True
+        requested = rest[1:]
+        for engine in requested:
+            if engine not in KNOWN_ENGINES:
+                raise DelegateError(
+                    "invalid_engine",
+                    f"engine must be {ENGINES_PROSE}.",
+                )
+        if requested:
+            engines = tuple(dict.fromkeys(requested))
     elif rest:
         require_no_extra(rest, "capabilities")
     return ParsedCommand(
@@ -256,6 +266,7 @@ def parse_capabilities_subcommand(
         ),
         capabilities=capability_commands.CapabilitiesCommand(
             refresh=refresh,
+            engines=engines,
             json_mode=json_mode,
         ),
     )

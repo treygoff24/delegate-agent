@@ -624,13 +624,35 @@ class CapabilityCommandTests(unittest.TestCase):
         ):
             payload = capability_commands._refresh_payload({}, workspace, profile=profile)
 
-        refresh.assert_called_once_with({}, profile=profile)
+        refresh.assert_called_once_with({}, profile=profile, engines=None)
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["updatedHarnesses"], ["codex"])
         self.assertEqual(payload["staleHarnesses"], ["droid"])
         self.assertEqual(payload["cachePath"], "/user/discovery/work.json")
         fresh = payload["reasoning"]["harnesses"]["codex"]["models"]["fresh"]
         self.assertEqual(fresh["source"], "discovery")
+
+    def test_refresh_forwards_engine_subset_to_discovery(self):
+        profile = profiles.ProfileResolution(name="work", source="test")
+        snapshot = harness_discovery.empty_snapshot(profile="work")
+        snapshot["harnesses"] = {"codex": {"models": {}}}
+        result = {
+            "snapshot": snapshot,
+            "attempts": {"codex": {"installed": True, "probeStatus": "ok", "warnings": []}},
+            "updatedHarnesses": ["codex"],
+            "staleHarnesses": [],
+            "cachePath": "/user/discovery/work.json",
+        }
+        with (
+            tempfile.TemporaryDirectory() as workspace,
+            mock.patch.object(
+                capability_commands.harness_discovery,
+                "refresh_discovery",
+                return_value=result,
+            ) as refresh,
+        ):
+            capability_commands._refresh_payload({}, workspace, profile=profile, engines=("codex",))
+        refresh.assert_called_once_with({}, profile=profile, engines=("codex",))
 
     def test_refresh_projects_bounded_attempts_and_scrubs_reasoning_keys_and_values(self):
         profile = profiles.ProfileResolution(name="work", source="test")

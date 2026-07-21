@@ -274,6 +274,22 @@ class ParserTests(unittest.TestCase):
         parsed = self.delegate.parse_cli(["--auth-profile", "work", "capabilities", "refresh"])
         self.assertEqual(parsed.global_options.auth_profile, "work")
         self.assertTrue(parsed.capabilities.refresh)
+        self.assertIsNone(parsed.capabilities.engines)
+
+    def test_capabilities_refresh_accepts_engine_subset(self):
+        parsed = self.delegate.parse_cli(["capabilities", "refresh", "codex", "claude", "codex"])
+        self.assertTrue(parsed.capabilities.refresh)
+        self.assertEqual(parsed.capabilities.engines, ("codex", "claude"))
+
+    def test_capabilities_refresh_rejects_unknown_engine(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(["capabilities", "refresh", "not-a-harness"])
+        self.assertEqual(ctx.exception.error, "invalid_engine")
+
+    def test_capabilities_read_rejects_engine_arguments(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(["capabilities", "codex"])
+        self.assertEqual(ctx.exception.error, "unexpected_argument")
 
     def test_auth_profile_remains_rejected_for_describe(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:

@@ -742,6 +742,7 @@ delegate --json models <engine>
 delegate --json models <engine> --live
 delegate --json capabilities
 delegate --json capabilities refresh
+delegate --json capabilities refresh <engine> [...]
 delegate agent-help
 ```
 
@@ -826,7 +827,9 @@ Both `describe` and `models` include provenance fields useful for detecting inst
 workspace cache, and bundled fallbacks without invoking child binaries.
 `capabilities refresh` probes all supported harnesses and atomically writes the
 selected profile's user cache when at least one installed harness returns a
-valid record. It no longer writes `.delegate/capabilities/reasoning.json`; that
+valid record. `capabilities refresh <engine> [...]` probes only the named
+harnesses — useful when one harness ships a new model — while every other
+harness keeps its last-known-good record. It no longer writes `.delegate/capabilities/reasoning.json`; that
 workspace file remains a lower-precedence, read-only compatibility source and
 should not be committed.
 

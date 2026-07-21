@@ -1468,15 +1468,17 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         summary="Report reasoning-effort capabilities from config, profile discovery, and fallbacks.",
         usage=(
             "delegate [--json] [--auth-profile NAME] capabilities",
-            "delegate [--json] [--auth-profile NAME] capabilities refresh",
+            "delegate [--json] [--auth-profile NAME] capabilities refresh [<engine> ...]",
         ),
         examples=(
             "delegate --json capabilities",
             "delegate capabilities refresh",
+            "delegate capabilities refresh codex",
         ),
         notes=(
             "Cached reporting reads the selected profile's private user cache and invokes no child binaries.",
             "refresh runs metadata-only probes for every supported harness and updates that profile's user cache.",
+            "refresh <engine> probes only the named harnesses; other harnesses keep their last-known-good records.",
             "The legacy workspace reasoning cache remains a lower-precedence read-only compatibility source.",
         ),
         see_also=("models", "describe", "codex", "droid", "cursor"),
@@ -1754,7 +1756,7 @@ def render_overview_text() -> str:
         "delegate [--json] [--auth-profile NAME] setup",
         "delegate [--json] [--auth-profile NAME] models [--summary]",
         "delegate [--json] [--auth-profile NAME] models <engine> [--live]",
-        "delegate [--json] [--auth-profile NAME] capabilities [refresh]",
+        "delegate [--json] [--auth-profile NAME] capabilities [refresh [<engine> ...]]",
         "delegate [--json] describe [--summary]",
         "delegate agent-help",
         "delegate help [<command> [<subcommand>]]",

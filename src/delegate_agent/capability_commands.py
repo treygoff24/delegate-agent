@@ -12,6 +12,7 @@ from delegate_agent.json_types import JsonObject
 @dataclass(frozen=True)
 class CapabilitiesCommand:
     refresh: bool = False
+    engines: tuple[str, ...] | None = None
     json_mode: bool = False
 
 
@@ -105,9 +106,10 @@ def _refresh_payload(
     workspace: str,
     *,
     profile: profiles.ProfileResolution,
+    engines: tuple[str, ...] | None = None,
 ) -> JsonObject:
     try:
-        result = harness_discovery.refresh_discovery(config, profile=profile)
+        result = harness_discovery.refresh_discovery(config, profile=profile, engines=engines)
     except OSError as exc:
         raise CapabilitiesError(
             "capability_refresh_failed",
@@ -188,7 +190,9 @@ def emit(
         cli_override=auth_profile_override,
     )
     if command.refresh:
-        payload = _refresh_payload(config, workspace, profile=active_profile)
+        payload = _refresh_payload(
+            config, workspace, profile=active_profile, engines=command.engines
+        )
     else:
         payload = capabilities_payload(
             config,
