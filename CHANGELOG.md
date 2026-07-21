@@ -25,7 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cached `models`/`capabilities` views now project profile discovery with source
   and evidence metadata. `models <engine> --live` provides a non-persistent
   one-off probe; `capabilities refresh` persists a full refresh for the selected
-  profile.
+  profile, and `capabilities refresh <engine> [...]` re-probes only the named
+  harnesses while the rest keep their last-known-good records.
 - Runtime model and reasoning metadata now distinguish the requested model,
   argv-resolved model, capability-validation model, requested effort, resolved
   effort, source, evidence strength, and transport.
@@ -63,6 +64,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Embedded Devin and Kimi `defaultModel` values are now `null`, deferring model
   selection to each harness. The editable `config init` example may still pin
   an explicit default.
+- Claude and Grok `defaultReasoningEffort` config values are now only
+  format-checked at load time instead of validated against the static enum; an
+  unsupported configured default degrades to a launch-time warning so that
+  discovery, not a hardcoded table, decides which levels are accepted.
 
 ### Security
 
