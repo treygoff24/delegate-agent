@@ -209,6 +209,61 @@ class EngineArgvTests(CommandTestBase):
         version_drifted.assert_called_once()
         self.assertEqual(version_drifted.call_args.args[0], "codex")
 
+    def _build_with_drift(self, *, dry_run: bool, selector_drifted: bool, version_drifted: bool):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        with (
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "load_discovery_cache",
+                return_value=self._upgraded_codex_discovery(),
+            ),
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "selector_has_drifted",
+                return_value=selector_drifted,
+            ),
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "cached_version_has_drifted",
+                return_value=version_drifted,
+            ) as probe,
+        ):
+            request = self.build_git_request(
+                "codex", "safe", None, "/repo", "review", config, dry_run
+            )
+        return request, probe
+
+    def test_version_drift_tells_the_user_which_command_repairs_the_cache(self):
+        """The drop fixes this run only; the stale record outlives it.
+
+        Without a warning the loss is invisible and permanent: discovery-sourced
+        models and reasoning levels simply stop existing on every later launch.
+        """
+        request, _ = self._build_with_drift(
+            dry_run=False, selector_drifted=False, version_drifted=True
+        )
+        drift = [note for note in request.warnings if "capabilities refresh codex" in note]
+        self.assertEqual(len(drift), 1, f"expected one refresh hint, got {request.warnings}")
+        # Naming the command is only half of it: a warning that does not say the
+        # harness moved leaves the user unable to tell a repair from a ritual.
+        self.assertIn("different version", drift[0])
+
+    def test_a_dry_run_never_warns_about_version_drift(self):
+        """A dry run does not probe, so it has nothing to report."""
+        request, probe = self._build_with_drift(
+            dry_run=True, selector_drifted=False, version_drifted=True
+        )
+        probe.assert_not_called()
+        self.assertEqual([note for note in request.warnings if "capabilities refresh" in note], [])
+
+    def test_selector_drift_alone_does_not_emit_the_version_drift_warning(self):
+        """Selector drift already reports itself; a second voice would be noise."""
+        request, probe = self._build_with_drift(
+            dry_run=False, selector_drifted=True, version_drifted=False
+        )
+        probe.assert_not_called()
+        self.assertEqual([note for note in request.warnings if "capabilities refresh" in note], [])
+
     def test_a_foreign_version_banner_refuses_the_launch(self):
         """A configured codex path answering as grok must never reach a runner.
 
@@ -256,6 +311,9 @@ class EngineArgvTests(CommandTestBase):
         error = caught.exception
         self.assertEqual(error.error, "harness_identity_mismatch")
         self.assertEqual(error.exit_code, 2)
+        cache_path = self.delegate.harness_discovery.discovery_cache_path(
+            None, home=Path(self._config_env["HOME"])
+        )
         self.assertEqual(
             error.diagnostics,
             {
@@ -263,7 +321,15 @@ class EngineArgvTests(CommandTestBase):
                 "identifiedHarness": "grok",
                 "selector": [str(binary)],
                 "configKey": "codex.binary",
+                "cachePath": str(cache_path),
             },
+        )
+        # `capabilities refresh` keeps the last-known-good record, so a wrong
+        # identification would refuse forever if the refusal did not say which
+        # file holds it.
+        self.assertTrue(
+            any(str(cache_path) in action for action in error.next_actions),
+            f"no next action names the cache: {error.next_actions}",
         )
         for expected in ("codex", "grok", str(binary), "Refusing to launch"):
             self.assertIn(expected, error.message)
@@ -332,6 +398,57 @@ class EngineArgvTests(CommandTestBase):
         self.assertEqual(error.diagnostics["engine"], "codex")
         self.assertEqual(error.diagnostics["identifiedHarness"], "grok")
         self.assertIn(str(binary), rendered)
+
+    def test_the_refusal_names_the_active_profiles_cache_not_the_default(self):
+        """Each profile caches separately, so the wrong path is a dead end.
+
+        Deleting ``default.json`` on a machine running under a named profile
+        clears nothing and the next launch refuses again -- the same loop the
+        path was added to break.
+        """
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["codex"]["defaultModel"] = None
+        discovery = self._upgraded_codex_discovery()
+        selector = tuple(discovery["harnesses"]["codex"]["selector"])
+        resolution = self.delegate.profiles.ProfileResolution(name="work", source="flag")
+
+        with (
+            mock.patch.object(
+                self.delegate.profiles,
+                "resolve_active_profile",
+                return_value=resolution,
+            ),
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "load_discovery_cache",
+                return_value=discovery,
+            ),
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "selector_has_drifted",
+                return_value=False,
+            ),
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "cached_version_has_drifted",
+                side_effect=self.delegate.harness_discovery.HarnessIdentityMismatchError(
+                    "codex", "grok", selector
+                ),
+            ),
+            self.assertRaises(self.delegate.DelegateError) as caught,
+        ):
+            self.build_git_request("codex", "safe", None, "/repo", "review", config, False)
+
+        home = Path(self._config_env["HOME"])
+        expected = self.delegate.harness_discovery.discovery_cache_path("work", home=home)
+        default = self.delegate.harness_discovery.discovery_cache_path(None, home=home)
+        error = caught.exception
+        self.assertEqual(error.diagnostics["cachePath"], str(expected))
+        self.assertNotEqual(str(expected), str(default))
+        self.assertTrue(
+            any(str(expected) in action for action in error.next_actions),
+            f"no next action names the profile cache: {error.next_actions}",
+        )
 
     def test_dry_run_never_executes_the_harness_binary(self):
         """Dry run promises no child runtime, and a version probe is one."""

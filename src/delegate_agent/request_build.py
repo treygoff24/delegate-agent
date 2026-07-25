@@ -734,7 +734,7 @@ def _runtime_discovery_for_engine(
     profile_resolution: profiles.ProfileResolution,
     *,
     probe_version: bool,
-) -> JsonObject | None:
+) -> tuple[JsonObject | None, tuple[str, ...]]:
     """Drop the engine record when its selector drifted or its harness moved on.
 
     Only the engine this launch is about to spawn is checked. The selector
@@ -751,39 +751,54 @@ def _runtime_discovery_for_engine(
     A probe that identifies the selector as a *different* harness aborts the
     launch instead of returning a trimmed snapshot. See
     ``_harness_identity_mismatch_error``.
+
+    Version drift returns a warning alongside the trimmed snapshot, because the
+    drop repairs this run and nothing else: the superseded record stays on disk,
+    so every later launch discards it again and silently loses the same
+    discovered models and reasoning levels until a refresh rewrites it. Selector
+    drift stays quiet -- ``delegate capabilities`` already reports it as
+    ``driftedHarnesses``, and a second voice for one event is noise.
     """
     if not isinstance(discovery, dict):
-        return None
+        return None, ()
     harnesses = discovery.get("harnesses")
     record = harnesses.get(engine) if isinstance(harnesses, dict) else None
     # Real snapshots are strictly validated at load. The shape guard keeps this
     # helper tolerant of direct unit fixtures while ensuring every persisted
     # installed record is tied to the configured opaque selector.
     if not isinstance(record, dict) or record.get("installed") is not True:
-        return discovery
+        return discovery, ()
     selector = record.get("selector")
     selector_missing = not isinstance(selector, list) or not selector
+    warnings: tuple[str, ...] = ()
     if not selector_missing and not harness_discovery.selector_has_drifted(
         config, engine, record, profile=profile_resolution
     ):
         if not probe_version:
-            return discovery
+            return discovery, ()
         try:
             version_drifted = harness_discovery.cached_version_has_drifted(
                 engine, record, profile=profile_resolution
             )
         except harness_discovery.HarnessIdentityMismatchError as exc:
-            raise _harness_identity_mismatch_error(exc) from exc
+            raise _harness_identity_mismatch_error(exc, profile_resolution) from exc
         if not version_drifted:
-            return discovery
+            return discovery, ()
+        warnings = (
+            f"ignoring the cached {engine} capabilities: {engine} reports a different "
+            f"version than the cache recorded. Run `delegate capabilities refresh {engine}` "
+            f"to update it; until then every launch discards the record and loses its "
+            f"discovered models and reasoning levels.",
+        )
     return {
         **discovery,
         "harnesses": {harness: value for harness, value in harnesses.items() if harness != engine},
-    }
+    }, warnings
 
 
 def _harness_identity_mismatch_error(
     exc: harness_discovery.HarnessIdentityMismatchError,
+    profile_resolution: profiles.ProfileResolution,
 ) -> DelegateError:
     """Refuse to run one harness's binary under another harness's rules.
 
@@ -799,9 +814,17 @@ def _harness_identity_mismatch_error(
     already credential-scrubbed; see ``HarnessIdentityMismatchError``. It is
     shown whole rather than as its first element, because a wrapper prefix keeps
     the harness somewhere after the leading ``env`` or shim.
+
+    The cache file is named too, because a refresh cannot clear this. Refreshing
+    keeps the last-known-good record when a probe fails, which is right for a
+    flaky probe and wrong for this one: the record is what is wrong, so it
+    survives and the next launch refuses again. Deleting the file is the only
+    escape that does not require editing configuration, and a refusal that
+    leaves the user to guess the path has not finished refusing.
     """
     probe = " ".join(exc.selector)
     config_key = "cursor.argvPrefix" if exc.harness == "cursor" else f"{exc.harness}.binary"
+    cache_path = harness_discovery.discovery_cache_path(profile_resolution.name)
     message = (
         f"Configured {exc.harness} binary identifies itself as {exc.identified}: "
         f"{probe} --version printed a {exc.identified} banner. Refusing to launch, "
@@ -817,11 +840,14 @@ def _harness_identity_mismatch_error(
             "identifiedHarness": exc.identified,
             "selector": list(exc.selector),
             "configKey": config_key,
+            "cachePath": str(cache_path),
         },
         next_actions=[
             f"{probe} --version",
             f"set {config_key} to a {exc.harness} executable",
             f"delegate {exc.identified} ... (to use the harness that answered)",
+            f"if the identification is wrong, delete {cache_path} to clear the cached "
+            f"record, or refresh after fixing {config_key} (a refresh alone keeps it)",
         ],
     )
 
@@ -1761,13 +1787,14 @@ def build_request(
         expand_env=expand_env,
     )
     discovery = harness_discovery.load_discovery_cache(profile_resolution.name)
-    discovery = _runtime_discovery_for_engine(
+    discovery, drift_warnings = _runtime_discovery_for_engine(
         config,
         engine,
         discovery,
         profile_resolution,
         probe_version=not dry_run,
     )
+    warnings = (*warnings, *drift_warnings)
 
     return _build_request_for_workspace(
         engine,
