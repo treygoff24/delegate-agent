@@ -732,6 +732,8 @@ def _runtime_discovery_for_engine(
     engine: str,
     discovery: JsonObject | None,
     profile_resolution: profiles.ProfileResolution,
+    *,
+    probe_version: bool,
 ) -> JsonObject | None:
     """Drop the engine record when its selector drifted or its harness moved on.
 
@@ -740,6 +742,11 @@ def _runtime_discovery_for_engine(
     ``--version`` call against a run that is about to occupy a harness for
     minutes, and fails open, so the launch proceeds on the cached record
     whenever the probe cannot answer.
+
+    ``probe_version`` is false for a dry run, which promises never to launch a
+    child runtime and never to require the real child binary. Only the two
+    filesystem-local checks run there; a stale record shows up in the planned
+    argv, which is a dry run's job to report rather than to prevent.
     """
     if not isinstance(discovery, dict):
         return None
@@ -757,8 +764,11 @@ def _runtime_discovery_for_engine(
         and not harness_discovery.selector_has_drifted(
             config, engine, record, profile=profile_resolution
         )
-        and not harness_discovery.cached_version_has_drifted(
-            engine, record, profile=profile_resolution
+        and not (
+            probe_version
+            and harness_discovery.cached_version_has_drifted(
+                engine, record, profile=profile_resolution
+            )
         )
     ):
         return discovery
@@ -1708,6 +1718,7 @@ def build_request(
         engine,
         discovery,
         profile_resolution,
+        probe_version=not dry_run,
     )
 
     return _build_request_for_workspace(

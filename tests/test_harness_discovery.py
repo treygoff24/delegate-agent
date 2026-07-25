@@ -1167,6 +1167,71 @@ class CachedVersionDriftTests(unittest.TestCase):
                     )
                 )
 
+    def test_a_selector_answering_as_another_harness_is_drift(self):
+        """Contrary evidence, not uncertainty: this path no longer runs codex."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            binary = write_version_harness(root / "codex", "grok 2.4.0")
+            record = _harness_record()
+            record["selector"] = [str(binary)]
+            record["version"] = "codex-cli 1.0.0"
+            self.assertTrue(
+                self.discovery.cached_version_has_drifted(
+                    "codex", record, profile=self._profile(root)
+                )
+            )
+
+    def test_an_ansi_colored_banner_is_read_rather_than_ignored(self):
+        """Escapes around a line-anchored banner must not freeze the record."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            binary = write_version_harness(root / "codex", "\x1b[32mcodex-cli 1.0.0\x1b[0m")
+            record = _harness_record()
+            record["selector"] = [str(binary)]
+            record["version"] = "codex-cli 1.0.0"
+            self.assertFalse(
+                self.discovery.cached_version_has_drifted(
+                    "codex", record, profile=self._profile(root)
+                )
+            )
+
+            upgraded = _harness_record()
+            upgraded["selector"] = [str(binary)]
+            upgraded["version"] = "codex-cli 0.9.0"
+            self.assertTrue(
+                self.discovery.cached_version_has_drifted(
+                    "codex", upgraded, profile=self._profile(root)
+                )
+            )
+
+
+class VersionIdentityTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from delegate_agent import harness_discovery
+
+        self.discovery = harness_discovery
+
+    def test_a_banner_is_classified_as_this_harness_another_one_or_neither(self):
+        cases = (
+            ("codex-cli 1.0.0", "expected", "codex-cli 1.0.0", "codex"),
+            ("grok 2.4.0", "known-other", None, "grok"),
+            ("2026.07.25-abcdef", "known-other", None, "cursor"),
+            ("some unreadable banner", "unrecognized", None, None),
+            ("", "unrecognized", None, None),
+        )
+        for output, status, version, identified in cases:
+            with self.subTest(output=output):
+                identity = self.discovery._identify_version("codex", ("/bin/codex",), output)
+                self.assertEqual(identity.status, status)
+                self.assertEqual(identity.version, version)
+                self.assertEqual(identity.identified, identified)
+
+    def test_a_generic_banner_counts_only_for_a_harness_named_binary(self):
+        expected = self.discovery._identify_version("droid", ("/bin/droid",), "1.2.3")
+        self.assertEqual((expected.status, expected.version), ("expected", "1.2.3"))
+        renamed = self.discovery._identify_version("droid", ("/bin/something-else",), "1.2.3")
+        self.assertEqual((renamed.status, renamed.version), ("unrecognized", None))
+
 
 class FutureSchemaCacheTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -1240,6 +1305,34 @@ class FutureSchemaCacheTests(unittest.TestCase):
             self.assertNotIn("futureSchemaCache", result)
             self.assertTrue(result["wrote"])
             self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["schema"], 1)
+
+    def test_a_newer_cache_published_mid_probe_degrades_instead_of_failing(self):
+        """Losing the race costs persistence only; the probe results still stand."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            profile = self.profiles.ProfileResolution(name="work", source="test")
+            probed = copy.deepcopy(_harness_record())
+            probed["selector"] = ["/codex"]
+            published: list[bytes] = []
+
+            def probe_then_lose_the_race(*args, **kwargs):
+                del args, kwargs
+                published.append(self._write_raw(home, 2).read_bytes())
+                return probed
+
+            with mock.patch.object(
+                self.discovery, "probe_harness", side_effect=probe_then_lose_the_race
+            ):
+                result = self.discovery.refresh_discovery(
+                    {}, profile=profile, engines=("codex",), home=home
+                )
+
+            self.assertTrue(result["futureSchemaCache"])
+            self.assertFalse(result["wrote"])
+            self.assertEqual(result["updatedHarnesses"], ["codex"])
+            self.assertEqual(result["snapshot"]["harnesses"]["codex"], probed)
+            path = self.discovery.discovery_cache_path("work", home=home)
+            self.assertEqual(path.read_bytes(), published[0])
 
 
 class ProbeProgressTests(unittest.TestCase):

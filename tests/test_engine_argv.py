@@ -3,6 +3,7 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -201,11 +202,54 @@ class EngineArgvTests(CommandTestBase):
                 "/repo",
                 "review",
                 config,
-                True,
+                False,
                 reasoning_effort="max",
             )
         version_drifted.assert_called_once()
         self.assertEqual(version_drifted.call_args.args[0], "codex")
+
+    def test_dry_run_never_executes_the_harness_binary(self):
+        """Dry run promises no child runtime, and a version probe is one."""
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["codex"]["defaultModel"] = None
+        real_run = subprocess.run
+        spawned: list[tuple[str, ...]] = []
+
+        def record(argv, *args, **kwargs):
+            spawned.append(tuple(argv) if isinstance(argv, list | tuple) else (str(argv),))
+            return real_run(argv, *args, **kwargs)
+
+        with (
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "load_discovery_cache",
+                return_value=self._upgraded_codex_discovery(),
+            ),
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "selector_has_drifted",
+                return_value=False,
+            ),
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "run_metadata_probe",
+                side_effect=AssertionError("dry run must not probe the harness"),
+            ),
+            mock.patch.object(subprocess, "run", side_effect=record),
+        ):
+            request = self.build_git_request(
+                "codex",
+                "safe",
+                None,
+                "/repo",
+                "review",
+                config,
+                True,
+                reasoning_effort="max",
+            )
+        self.assertTrue(request.dry_run)
+        self.assertEqual(request.capability_model, "gpt-live")
+        self.assertEqual([argv for argv in spawned if "/live/codex" in argv], [])
 
     def test_matching_version_keeps_the_cached_record_launchable(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
@@ -234,7 +278,7 @@ class EngineArgvTests(CommandTestBase):
                 "/repo",
                 "review",
                 config,
-                True,
+                False,
                 reasoning_effort="max",
             )
         self.assertEqual(request.capability_model, "gpt-live")
@@ -268,7 +312,7 @@ class EngineArgvTests(CommandTestBase):
                 "/repo",
                 "review",
                 config,
-                True,
+                False,
                 reasoning_effort="max",
             )
 

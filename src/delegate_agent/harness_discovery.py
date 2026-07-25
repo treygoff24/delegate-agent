@@ -67,6 +67,11 @@ _CANONICAL_VERSION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
 )
 _GENERIC_VERSION = re.compile(r"^\d+(?:\.\d+)+(?:[-+][0-9A-Za-z.-]+)?$")
+# Outcomes of reading a --version banner: it identifies the harness asked for,
+# it identifies a different known harness, or it identifies nothing at all.
+_VERSION_EXPECTED = "expected"
+_VERSION_KNOWN_OTHER = "known-other"
+_VERSION_UNRECOGNIZED = "unrecognized"
 _AMBIGUOUS_VERSION_BASENAMES = frozenset({"agent"})
 _DIAGNOSTIC_LIMIT = 8_000
 METADATA_PROBE_TIMEOUT_SEC = 15
@@ -299,6 +304,15 @@ class SelectorResolution:
     warnings: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class VersionIdentity:
+    """What a ``--version`` banner proves about the program that printed it."""
+
+    status: str
+    version: str | None = None
+    identified: str | None = None
+
+
 def run_metadata_probe(
     argv: list[str],
     *,
@@ -448,19 +462,38 @@ def _normalize_selector(
     return (str(Path(binary).absolute()), *selector[1:])
 
 
-def _canonical_version(harness: str, selector: tuple[str, ...], output: str) -> str | None:
+def _identify_version(harness: str, selector: tuple[str, ...], output: str) -> VersionIdentity:
+    """Classify a ``--version`` banner as this harness, another one, or unreadable.
+
+    The middle case has to stay separate from the last one. A banner matching
+    another harness's canonical pattern is positive evidence that the selector
+    now resolves to a different program; a banner nothing recognizes is only an
+    absence of evidence, and callers weigh the two differently.
+
+    Escape sequences are stripped first: every canonical pattern is line
+    anchored, so a harness that colorizes its banner would otherwise be
+    unrecognizable forever.
+    """
+    text = _ANSI_RE.sub("", output)
     for identified_harness, pattern in _CANONICAL_VERSION_PATTERNS:
-        match = pattern.search(output)
-        if match is not None:
-            return match.group(0) if identified_harness == harness else None
+        match = pattern.search(text)
+        if match is None:
+            continue
+        if identified_harness == harness:
+            return VersionIdentity(_VERSION_EXPECTED, match.group(0), harness)
+        return VersionIdentity(_VERSION_KNOWN_OTHER, None, identified_harness)
     binary_name = Path(selector[0]).name
     if binary_name not in _PATH_CANDIDATES[harness] or binary_name in _AMBIGUOUS_VERSION_BASENAMES:
-        return None
-    for line in output.splitlines():
+        return VersionIdentity(_VERSION_UNRECOGNIZED)
+    for line in text.splitlines():
         candidate = line.strip()
         if _GENERIC_VERSION.fullmatch(candidate):
-            return candidate
-    return None
+            return VersionIdentity(_VERSION_EXPECTED, candidate, harness)
+    return VersionIdentity(_VERSION_UNRECOGNIZED)
+
+
+def _canonical_version(harness: str, selector: tuple[str, ...], output: str) -> str | None:
+    return _identify_version(harness, selector, output).version
 
 
 def _fragment(
@@ -1459,8 +1492,13 @@ def cached_version_has_drifted(
     directories, stable-path binaries, and ephemeral session shims alike.
 
     Fails open by design: a probe that errors, times out, exceeds its output
-    bound, or no longer identifies as this harness keeps the cached record, so
-    a broken version probe can never make a launch impossible.
+    bound, or prints a banner nothing recognizes keeps the cached record, so a
+    broken version probe can never make a launch impossible.
+
+    A banner that positively identifies a *different* known harness is the one
+    exception. That is contrary evidence rather than uncertainty, and running a
+    Grok binary under Codex capability metadata, argv policy, and safety rules
+    is worse than discarding the record and re-probing.
     """
     cached_version = cached_record.get("version")
     selector = cached_record.get("selector")
@@ -1478,10 +1516,12 @@ def cached_version_has_drifted(
     if probe.error is not None:
         return False
     output = "\n".join(part for part in (probe.stdout, probe.stderr) if part)
-    live_version = _canonical_version(harness, tuple(selector), output)
-    if live_version is None:
+    identity = _identify_version(harness, tuple(selector), output)
+    if identity.status == _VERSION_KNOWN_OTHER:
+        return True
+    if identity.version is None:
         return False
-    return live_version != cached_version
+    return identity.version != cached_version
 
 
 def refresh_discovery(
@@ -1547,7 +1587,14 @@ def refresh_discovery(
     cache_path = discovery_cache_path(profile.name, home=home)
     wrote = persist and bool(updated) and not future_schema
     if wrote:
-        write_discovery_cache(profile.name, snapshot, home=home)
+        try:
+            write_discovery_cache(profile.name, snapshot, home=home)
+        except FutureCacheSchemaError:
+            # A newer delegate published while these probes ran. Its cache
+            # wins; the probe results are still valid for this run, so only
+            # persistence is skipped and the caller degrades rather than fails.
+            future_schema = True
+            wrote = False
     result: JsonObject = {
         "snapshot": snapshot,
         "attempts": attempts,

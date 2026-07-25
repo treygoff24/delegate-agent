@@ -230,7 +230,7 @@ def _base_diagnostics(
 ) -> JsonObject:
     updated = result.get("updatedHarnesses")
     stale = result.get("staleHarnesses")
-    return {
+    diagnostics: JsonObject = {
         "action": "setup",
         "configPath": str(path),
         "configState": config_state,
@@ -245,11 +245,17 @@ def _base_diagnostics(
         "updatedHarnesses": list(updated) if isinstance(updated, list) else [],
         "staleHarnesses": list(stale) if isinstance(stale, list) else [],
     }
+    if result.get("futureSchemaCache") is True:
+        diagnostics["cacheWriteSkipped"] = harness_discovery.FUTURE_SCHEMA_CACHE_WARNING
+    return diagnostics
 
 
 def _emit_text(payload: JsonObject, stdout: TextIO) -> None:
     print(f"config: {payload['configState']} ({payload['configPath']})", file=stdout)
     print(f"cache: {payload['cacheState']} ({payload['cachePath']})", file=stdout)
+    skipped = payload.get("cacheWriteSkipped")
+    if isinstance(skipped, str):
+        print(skipped, file=stdout)
     print(f"discovery ready: {str(payload['discoveryReady']).lower()}", file=stdout)
     print(f"ready: {str(payload['ready']).lower()}", file=stdout)
     harnesses = payload.get("harnesses")
@@ -445,6 +451,12 @@ def emit(
             if not isinstance(snapshot, dict):
                 raise ValueError("discovery refresh returned no validated snapshot")
             harness_discovery.write_discovery_cache(profile.name, snapshot)
+        except harness_discovery.FutureCacheSchemaError:
+            # A newer delegate published between the pre-check and this write.
+            # Losing that race costs only persistence, so setup reports what it
+            # probed and exits successfully instead of failing the command.
+            result["futureSchemaCache"] = True
+            result["wrote"] = False
         except (OSError, ValueError) as exc:
             diagnostics = _base_diagnostics(
                 path=path,
@@ -459,7 +471,8 @@ def emit(
                 diagnostics=diagnostics,
                 next_actions=["Inspect the cache path, then rerun delegate setup."],
             ) from exc
-        result["wrote"] = True
+        else:
+            result["wrote"] = True
 
     stale_raw = result.get("staleHarnesses")
     stale_harnesses = set(stale_raw) if isinstance(stale_raw, list) else set()
