@@ -7,7 +7,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.worktree_mgmt_test_base import WorktreeMgmtTestBase, git
+from tests.worktree_mgmt_test_base import WorktreeMgmtTestBase, git  # isort: split
+
+# Imported after the base module, which is what puts src/ on sys.path.
+from delegate_agent import isolation, worktree_gc
 
 
 class WorktreePruneGcTests(WorktreeMgmtTestBase):
@@ -1039,24 +1042,37 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
     def test_parse_worktree_backlink_reads_git_file_as_text(self):
         with tempfile.TemporaryDirectory() as tmp:
             pool = Path(tmp) / "pool"
-            worktree = self._pool_worktree(pool, "abc123", "cursor-1", gitdir="/gone/.git/x")
-            self.assertEqual(
-                self.delegate.worktree_mgmt._parse_worktree_backlink(worktree),
-                "/gone/.git/x",
-            )
+            worktree = self._pool_worktree(pool, "abc123def456", "cursor-1", gitdir="/gone/.git/x")
+            parsed = self.delegate.worktree_mgmt._parse_worktree_backlink(worktree)
 
-    def test_parse_worktree_backlink_returns_none_without_git_file(self):
+            self.assertEqual(parsed.gitdir, "/gone/.git/x")
+            self.assertIsNone(parsed.unverifiable)
+
+    def test_parse_worktree_backlink_reports_a_missing_git_file_as_settled_absence(self):
+        """No `.git` at all is the one absence definite enough to call an orphan."""
         with tempfile.TemporaryDirectory() as tmp:
             pool = Path(tmp) / "pool"
-            worktree = self._pool_worktree(pool, "abc123", "cursor-1", gitdir=None)
-            self.assertIsNone(self.delegate.worktree_mgmt._parse_worktree_backlink(worktree))
+            worktree = self._pool_worktree(pool, "abc123def456", "cursor-1", gitdir=None)
+            parsed = self.delegate.worktree_mgmt._parse_worktree_backlink(worktree)
 
-    def test_parse_worktree_backlink_returns_none_for_git_directory(self):
+            self.assertIsNone(parsed.gitdir)
+            self.assertIsNone(parsed.unverifiable)
+            self.assertEqual(self._scan(pool)["orphans"][0]["reason"], "worktree_metadata_missing")
+
+    def test_git_directory_is_unverifiable_rather_than_an_orphan(self):
+        """A `.git` directory is a whole repository, not a broken worktree backlink."""
         with tempfile.TemporaryDirectory() as tmp:
             pool = Path(tmp) / "pool"
-            worktree = self._pool_worktree(pool, "abc123", "cursor-1", gitdir=None)
+            worktree = self._pool_worktree(pool, "abc123def456", "cursor-1", gitdir=None)
             (worktree / ".git").mkdir()
-            self.assertIsNone(self.delegate.worktree_mgmt._parse_worktree_backlink(worktree))
+
+            parsed = self.delegate.worktree_mgmt._parse_worktree_backlink(worktree)
+            result = self._scan(pool)
+
+            self.assertIsNone(parsed.gitdir)
+            self.assertEqual(parsed.unverifiable, "is not a regular file")
+            self.assertEqual(result["orphans"], [])
+            self.assertEqual(result["warnings"][0]["reason"], "worktree_metadata_unverifiable")
 
     def test_source_root_recovered_from_standard_backlink(self):
         self.assertEqual(
@@ -1077,7 +1093,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
             gone = Path(tmp) / "deleted-repo"
             worktree = self._pool_worktree(
                 pool,
-                "abc123",
+                "abc123def456",
                 "cursor-1",
                 gitdir=str(gone / ".git" / "worktrees" / "cursor-1"),
             )
@@ -1088,7 +1104,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
             self.assertEqual(len(result["orphans"]), 1)
             orphan = result["orphans"][0]
             self.assertEqual(orphan["worktreePath"], str(worktree))
-            self.assertEqual(orphan["fingerprint"], "abc123")
+            self.assertEqual(orphan["fingerprint"], "abc123def456")
             self.assertEqual(orphan["sourceGitRoot"], str(gone))
             self.assertEqual(orphan["reason"], "source_root_missing")
             self.assertEqual(
@@ -1100,10 +1116,10 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
         with tempfile.TemporaryDirectory() as tmp:
             pool = Path(tmp) / "pool"
             source = Path(tmp) / "live-repo"
-            worktree = pool / "abc123" / "cursor-1"
+            worktree = pool / "abc123def456" / "cursor-1"
             self._pool_worktree(
                 pool,
-                "abc123",
+                "abc123def456",
                 "cursor-1",
                 gitdir=self._live_gitdir(source, "cursor-1", worktree),
             )
@@ -1120,7 +1136,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
             (source / ".git").mkdir(parents=True)
             self._pool_worktree(
                 pool,
-                "abc123",
+                "abc123def456",
                 "cursor-1",
                 gitdir=str(source / ".git" / "worktrees" / "cursor-1"),
             )
@@ -1134,7 +1150,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
     def test_pool_scan_flags_worktree_without_backlink(self):
         with tempfile.TemporaryDirectory() as tmp:
             pool = Path(tmp) / "pool"
-            self._pool_worktree(pool, "abc123", "cursor-1", gitdir=None)
+            self._pool_worktree(pool, "abc123def456", "cursor-1", gitdir=None)
 
             orphan = self._scan(pool)["orphans"][0]
 
@@ -1148,7 +1164,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
             pool = Path(tmp) / "pool"
             self._pool_worktree(
                 pool,
-                "abc123",
+                "abc123def456",
                 "cursor-1",
                 gitdir=str(Path(tmp) / "separate-gitdir" / "worktrees" / "cursor-1"),
             )
@@ -1163,7 +1179,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
             pool = Path(tmp) / "pool"
             worktree = self._pool_worktree(
                 pool,
-                "abc123",
+                "abc123def456",
                 "cursor-1",
                 gitdir=str(Path(tmp) / "gone" / ".git" / "worktrees" / "cursor-1"),
                 contents="dirty.txt",
@@ -1177,7 +1193,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
     def test_empty_fingerprint_dir_is_reported_and_left_alone(self):
         with tempfile.TemporaryDirectory() as tmp:
             pool = Path(tmp) / "pool"
-            empty = pool / "abc123"
+            empty = pool / "abc123def456"
             empty.mkdir(parents=True)
 
             result = self._scan(pool)
@@ -1185,21 +1201,25 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
             self.assertEqual(result["scannedWorktrees"], 0)
             self.assertEqual(
                 result["emptyFingerprintDirs"],
-                [{"fingerprint": "abc123", "path": str(empty)}],
+                [{"fingerprint": "abc123def456", "path": str(empty)}],
             )
             self.assertTrue(empty.is_dir())
 
-    def test_fingerprint_dir_with_loose_files_is_left_alone(self):
+    def test_fingerprint_dir_with_loose_files_is_not_reported_as_empty(self):
+        """A directory holding files is not empty, whatever its subdirectories say."""
         with tempfile.TemporaryDirectory() as tmp:
             pool = Path(tmp) / "pool"
-            fingerprint = pool / "abc123"
+            fingerprint = pool / "abc123def456"
             fingerprint.mkdir(parents=True)
             (fingerprint / ".DS_Store").write_text("junk\n", encoding="utf-8")
 
-            entry = self._scan(pool)["emptyFingerprintDirs"][0]
+            result = self._scan(pool)
 
-            self.assertEqual(entry, {"fingerprint": "abc123", "path": str(fingerprint)})
-            self.assertTrue(fingerprint.is_dir())
+            self.assertEqual(result["emptyFingerprintDirs"], [])
+            self.assertEqual(result["orphans"], [])
+            warning = result["warnings"][0]
+            self.assertEqual(warning["reason"], "fingerprint_dir_not_empty")
+            self.assertEqual(warning["path"], str(fingerprint))
             self.assertTrue((fingerprint / ".DS_Store").is_file())
 
     def test_pool_scan_never_removes_anything_under_the_pool(self):
@@ -1210,7 +1230,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
             empty.mkdir(parents=True)
             orphan = self._pool_worktree(
                 pool,
-                "abc123",
+                "abc123def456",
                 "cursor-1",
                 gitdir=str(Path(tmp) / "gone" / ".git" / "worktrees" / "cursor-1"),
                 contents="work.txt",
@@ -1231,7 +1251,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
     def test_gc_effects_no_longer_advertise_pool_removal(self):
         with tempfile.TemporaryDirectory() as tmp:
             pool = Path(tmp) / "pool"
-            (pool / "abc123").mkdir(parents=True)
+            (pool / "abc123def456").mkdir(parents=True)
 
             payload = self.delegate.worktree_mgmt.gc_worktrees(None, pool_data_home=pool)
 
@@ -1242,7 +1262,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
         """A relative backlink is valid Git; resolving it against the CWD invents an orphan."""
         with tempfile.TemporaryDirectory() as tmp:
             pool = Path(tmp) / "pool"
-            worktree = pool / "abc123" / "cursor-1"
+            worktree = pool / "abc123def456" / "cursor-1"
             worktree.mkdir(parents=True)
             admin = worktree / "admin"
             admin.mkdir()
@@ -1258,7 +1278,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
         with tempfile.TemporaryDirectory() as tmp:
             pool = Path(tmp) / "pool"
             source = Path(tmp) / "live-repo"
-            worktree = pool / "abc123" / "cursor-1"
+            worktree = pool / "abc123def456" / "cursor-1"
             worktree.mkdir(parents=True)
             admin = source / ".git" / "worktrees" / "cursor-1"
             admin.mkdir(parents=True)
@@ -1276,7 +1296,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
         """
         _repo, source = self._make_repo()
         with tempfile.TemporaryDirectory() as tmp:
-            worktree = Path(tmp) / "pool" / "abc123" / "cursor-1"
+            worktree = Path(tmp) / "pool" / "abc123def456" / "cursor-1"
             worktree.parent.mkdir(parents=True)
             added = git(
                 "worktree",
@@ -1299,12 +1319,16 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
             self.assertEqual(result["scannedWorktrees"], 1)
             self.assertEqual(result["orphans"], [])
 
-    def test_symlinked_git_entry_is_refused(self):
-        """A `.git` symlink could point the walk anywhere; it is not followed."""
+    def test_symlinked_git_entry_is_unverifiable_not_an_orphan(self):
+        """A `.git` symlink is not followed, so where it points stays unknown.
+
+        Git itself reads through the symlink, so this worktree may well be live.
+        Reporting it as an orphan would invite deleting a working checkout.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             pool = Path(tmp) / "pool"
             source = Path(tmp) / "live-repo"
-            worktree = pool / "abc123" / "cursor-1"
+            worktree = pool / "abc123def456" / "cursor-1"
             worktree.mkdir(parents=True)
             elsewhere = Path(tmp) / "elsewhere-git"
             elsewhere.write_text(
@@ -1313,50 +1337,85 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
             )
             (worktree / ".git").symlink_to(elsewhere)
 
-            self.assertIsNone(self.delegate.worktree_mgmt._parse_worktree_backlink(worktree))
-            orphan = self._scan(pool)["orphans"][0]
-            self.assertEqual(orphan["reason"], "worktree_metadata_missing")
-            self.assertIsNone(orphan["gitdir"])
+            parsed = self.delegate.worktree_mgmt._parse_worktree_backlink(worktree)
+            result = self._scan(pool)
 
-    def test_oversized_git_entry_is_refused_rather_than_truncated(self):
+            self.assertIsNone(parsed.gitdir)
+            self.assertIsNotNone(parsed.unverifiable)
+            self.assertEqual(result["orphans"], [])
+            warning = result["warnings"][0]
+            self.assertEqual(warning["reason"], "worktree_metadata_unverifiable")
+            self.assertEqual(warning["path"], str(worktree))
+
+    def test_oversized_git_entry_is_unverifiable_rather_than_truncated(self):
+        """Refusing to read the file establishes nothing about where it points."""
         with tempfile.TemporaryDirectory() as tmp:
             pool = Path(tmp) / "pool"
-            worktree = self._pool_worktree(pool, "abc123", "cursor-1", gitdir=None)
+            worktree = self._pool_worktree(pool, "abc123def456", "cursor-1", gitdir=None)
             limit = self.delegate.worktree_mgmt.BACKLINK_MAX_BYTES
             (worktree / ".git").write_bytes(b"gitdir: /somewhere\n" + b"x" * limit)
 
-            self.assertIsNone(self.delegate.worktree_mgmt._parse_worktree_backlink(worktree))
-            self.assertIsNone(self._scan(pool)["orphans"][0]["gitdir"])
+            parsed = self.delegate.worktree_mgmt._parse_worktree_backlink(worktree)
+            result = self._scan(pool)
+
+            self.assertIsNone(parsed.gitdir)
+            self.assertIn(str(limit), parsed.unverifiable)
+            self.assertEqual(result["orphans"], [])
+            self.assertEqual(result["warnings"][0]["reason"], "worktree_metadata_unverifiable")
 
     def test_git_entry_at_the_size_limit_is_still_parsed(self):
         with tempfile.TemporaryDirectory() as tmp:
             pool = Path(tmp) / "pool"
-            worktree = self._pool_worktree(pool, "abc123", "cursor-1", gitdir=None)
+            worktree = self._pool_worktree(pool, "abc123def456", "cursor-1", gitdir=None)
             limit = self.delegate.worktree_mgmt.BACKLINK_MAX_BYTES
             line = b"gitdir: /gone/.git/worktrees/cursor-1\n"
             (worktree / ".git").write_bytes(line + b"#" * (limit - len(line)))
 
             self.assertEqual(
-                self.delegate.worktree_mgmt._parse_worktree_backlink(worktree),
+                self.delegate.worktree_mgmt._parse_worktree_backlink(worktree).gitdir,
                 "/gone/.git/worktrees/cursor-1",
             )
 
     def test_fifo_git_entry_does_not_block_the_scan(self):
         with tempfile.TemporaryDirectory() as tmp:
             pool = Path(tmp) / "pool"
-            worktree = self._pool_worktree(pool, "abc123", "cursor-1", gitdir=None)
+            worktree = self._pool_worktree(pool, "abc123def456", "cursor-1", gitdir=None)
             os.mkfifo(worktree / ".git")
 
-            self.assertIsNone(self.delegate.worktree_mgmt._parse_worktree_backlink(worktree))
-            self.assertEqual(self._scan(pool)["orphans"][0]["reason"], "worktree_metadata_missing")
+            parsed = self.delegate.worktree_mgmt._parse_worktree_backlink(worktree)
+            result = self._scan(pool)
+
+            self.assertEqual(parsed.unverifiable, "is not a regular file")
+            self.assertEqual(result["orphans"], [])
+            self.assertEqual(result["warnings"][0]["reason"], "worktree_metadata_unverifiable")
+
+    def test_backlink_read_refuses_to_open_without_the_safety_flags(self):
+        """Missing O_NOFOLLOW would mean following a symlink out of the pool."""
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = Path(tmp) / "pool"
+            worktree = self._pool_worktree(
+                pool,
+                "abc123def456",
+                "cursor-1",
+                gitdir=str(Path(tmp) / "gone" / ".git" / "worktrees" / "cursor-1"),
+            )
+
+            with mock.patch.object(worktree_gc, "BACKLINK_OPEN_FLAGS", None):
+                parsed = self.delegate.worktree_mgmt._parse_worktree_backlink(worktree)
+                result = self._scan(pool)
+
+            self.assertIsNone(parsed.gitdir)
+            self.assertEqual(parsed.unverifiable, "cannot be opened safely on this platform")
+            self.assertEqual(result["orphans"], [])
+            self.assertEqual(result["warnings"][0]["reason"], "worktree_metadata_unverifiable")
 
     def test_non_utf8_backlink_bytes_survive_decoding(self):
         with tempfile.TemporaryDirectory() as tmp:
             pool = Path(tmp) / "pool"
-            worktree = self._pool_worktree(pool, "abc123", "cursor-1", gitdir=None)
+            worktree = self._pool_worktree(pool, "abc123def456", "cursor-1", gitdir=None)
             (worktree / ".git").write_bytes(b"gitdir: /gone/\xff/.git/worktrees/cursor-1\n")
 
-            parsed = self.delegate.worktree_mgmt._parse_worktree_backlink(worktree)
+            parsed = self.delegate.worktree_mgmt._parse_worktree_backlink(worktree).gitdir
 
             self.assertEqual(parsed, "/gone/\udcff/.git/worktrees/cursor-1")
             self.assertEqual(
@@ -1371,7 +1430,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
             source = Path(tmp) / "live-repo"
             admin = source / ".git" / "worktrees" / "cursor-1"
             admin.mkdir(parents=True)
-            self._pool_worktree(pool, "abc123", "cursor-1", gitdir=str(admin))
+            self._pool_worktree(pool, "abc123def456", "cursor-1", gitdir=str(admin))
 
             orphan = self._scan(pool)["orphans"][0]
 
@@ -1385,7 +1444,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
             admin = source / ".git" / "worktrees" / "cursor-1"
             admin.mkdir(parents=True)
             (admin / "gitdir").write_text(f"{Path(tmp) / 'other' / '.git'}\n", encoding="utf-8")
-            self._pool_worktree(pool, "abc123", "cursor-1", gitdir=str(admin))
+            self._pool_worktree(pool, "abc123def456", "cursor-1", gitdir=str(admin))
 
             self.assertEqual(self._scan(pool)["orphans"][0]["reason"], "worktree_metadata_missing")
 
@@ -1393,7 +1452,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
         """`gitdir: /` points at something that exists but serves no worktree."""
         with tempfile.TemporaryDirectory() as tmp:
             pool = Path(tmp) / "pool"
-            self._pool_worktree(pool, "abc123", "cursor-1", gitdir="/")
+            self._pool_worktree(pool, "abc123def456", "cursor-1", gitdir="/")
 
             orphan = self._scan(pool)["orphans"][0]
 
@@ -1405,7 +1464,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
             pool = Path(tmp) / "pool"
             not_a_dir = Path(tmp) / "not-a-dir"
             not_a_dir.write_text("\n", encoding="utf-8")
-            self._pool_worktree(pool, "abc123", "cursor-1", gitdir=str(not_a_dir))
+            self._pool_worktree(pool, "abc123def456", "cursor-1", gitdir=str(not_a_dir))
 
             self.assertEqual(len(self._scan(pool)["orphans"]), 1)
 
@@ -1416,7 +1475,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
         with tempfile.TemporaryDirectory() as tmp:
             pool = Path(tmp) / "pool"
             source = Path(tmp) / "live-repo"
-            worktree = pool / "abc123" / "cursor-1"
+            worktree = pool / "abc123def456" / "cursor-1"
             worktree.mkdir(parents=True)
             admin = source / ".git" / "worktrees" / "cursor-1"
             admin.mkdir(parents=True)
@@ -1436,7 +1495,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
         with tempfile.TemporaryDirectory() as tmp:
             pool = Path(tmp) / "pool"
             source = Path(tmp) / "live-repo"
-            worktree = pool / "abc123" / "cursor-1"
+            worktree = pool / "abc123def456" / "cursor-1"
             worktree.mkdir(parents=True)
             admin = source / ".git" / "worktrees" / "cursor-1"
             admin.mkdir(parents=True)
@@ -1474,7 +1533,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
             self.skipTest("root ignores directory permissions")
         with tempfile.TemporaryDirectory() as tmp:
             pool = Path(tmp) / "pool"
-            fingerprint = pool / "abc123"
+            fingerprint = pool / "abc123def456"
             fingerprint.mkdir(parents=True)
             fingerprint.chmod(0o000)
             try:
@@ -1513,13 +1572,133 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
 
             self.assertEqual(caught.exception.payload["reason"], "pool_root_not_a_directory")
 
+    def _scandir_failing_after_the_root_check(self, error: OSError):
+        """Let the pool-root check pass, then fail the walk's own listing."""
+        real_scandir = os.scandir
+        calls: list[object] = []
+
+        def flaky(path, *args, **kwargs):
+            calls.append(path)
+            if len(calls) == 1:
+                return real_scandir(path, *args, **kwargs)
+            raise error
+
+        return mock.patch.object(os, "scandir", flaky)
+
+    def test_required_pool_that_becomes_unreadable_mid_walk_is_an_error(self):
+        """Validation and the walk are separate syscalls; the gap must not read as success."""
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = Path(tmp) / "pool"
+            pool.mkdir()
+
+            with (
+                self._scandir_failing_after_the_root_check(PermissionError(13, "Denied")),
+                self.assertRaises(self.delegate.worktree_mgmt.WorktreeManagementError) as caught,
+            ):
+                self._scan(pool, required=True)
+
+            self.assertEqual(caught.exception.payload["code"], "invalid_pool_root")
+            self.assertEqual(caught.exception.payload["reason"], "pool_root_unreadable")
+
+    def test_configured_pool_that_becomes_unreadable_mid_walk_warns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = Path(tmp) / "pool"
+            pool.mkdir()
+
+            with self._scandir_failing_after_the_root_check(PermissionError(13, "Denied")):
+                result = self._scan(pool)
+
+            self.assertEqual(result["scannedWorktrees"], 0)
+            self.assertEqual(result["warnings"][0]["reason"], "pool_root_unreadable")
+
+    def test_pool_walk_raises_rather_than_yielding_nothing_for_a_missing_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(isolation.PoolRootUnreadable) as caught:
+                list(isolation.iter_pool_fingerprints(Path(tmp) / "never-created"))
+
+            self.assertEqual(caught.exception.reason, "missing")
+
+    def test_arbitrary_root_yields_no_cleanup_claims_about_ordinary_directories(self):
+        """`--pool ~` must not describe someone's home directory as Delegate's."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            (home / "Documents" / "taxes-2025").mkdir(parents=True)
+            (home / "Pictures").mkdir()
+            (home / ".zshrc").write_text("export PATH\n", encoding="utf-8")
+
+            result = self._scan(home)
+
+            self.assertEqual(result["scannedWorktrees"], 0)
+            self.assertEqual(result["orphans"], [])
+            self.assertEqual(result["emptyFingerprintDirs"], [])
+            self.assertEqual(len(result["warnings"]), 1)
+            warning = result["warnings"][0]
+            self.assertEqual(warning["reason"], "not_a_pool_fingerprint_dir")
+            self.assertEqual(warning["path"], str(home))
+            self.assertIn("Skipped 2 directories", warning["message"])
+
+    def test_hundreds_of_foreign_directories_collapse_into_one_warning(self):
+        """A wrong --pool must not bury the report under a line per child."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            for index in range(40):
+                (home / f"project-{index:02d}").mkdir(parents=True)
+
+            result = self._scan(home)
+
+            self.assertEqual(len(result["warnings"]), 1)
+            message = result["warnings"][0]["message"]
+            self.assertIn("Skipped 40 directories", message)
+            self.assertIn("and 35 more", message)
+
+    def test_non_fingerprint_directory_is_never_descended(self):
+        """Even a worktree-shaped child does not make a stranger's directory Delegate's."""
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = Path(tmp) / "pool"
+            self._pool_worktree(pool, "my-projects", "cursor-1", gitdir=None)
+
+            result = self._scan(pool)
+
+            self.assertEqual(result["scannedWorktrees"], 0)
+            self.assertEqual(result["orphans"], [])
+            self.assertEqual(result["warnings"][0]["reason"], "not_a_pool_fingerprint_dir")
+            self.assertIn("Skipped 1 directory", result["warnings"][0]["message"])
+
+    def test_fingerprint_contract_matches_what_delegate_actually_writes(self):
+        _repo, path = self._make_repo()
+        computed = isolation.compute_repo_fingerprint_from_common_dir(str(Path(path) / ".git"))
+
+        self.assertTrue(isolation.is_pool_fingerprint_name(computed))
+        for rejected in ("abc123", "abc123def4567", "ABC123DEF456", "abc123def45g", ""):
+            self.assertFalse(isolation.is_pool_fingerprint_name(rejected), rejected)
+
+    def test_same_file_spelled_two_ways_is_not_an_orphan(self):
+        """A case-insensitive filesystem spells one path many ways; all name one file."""
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = Path(tmp) / "pool"
+            source = Path(tmp) / "live-repo"
+            worktree = pool / "abc123def456" / "cursor-1"
+            worktree.mkdir(parents=True)
+            other_spelling = worktree.parent / worktree.name.upper()
+            admin = source / ".git" / "worktrees" / "cursor-1"
+            admin.mkdir(parents=True)
+            (worktree / ".git").write_text(f"gitdir: {admin}\n", encoding="utf-8")
+            if not (other_spelling / ".git").is_file():
+                self.skipTest("filesystem is case-sensitive")
+            (admin / "gitdir").write_text(f"{other_spelling / '.git'}\n", encoding="utf-8")
+
+            result = self._scan(pool)
+
+            self.assertEqual(result["scannedWorktrees"], 1)
+            self.assertEqual(result["orphans"], [])
+
     def test_gc_all_scans_configured_data_home(self):
         _repo, path = self._make_repo()
         with tempfile.TemporaryDirectory() as fake_home:
             pool = Path(fake_home) / ".delegate" / "worktrees"
             self._pool_worktree(
                 pool,
-                "abc123",
+                "abc123def456",
                 "cursor-1",
                 gitdir=str(Path(fake_home) / "gone" / ".git" / "worktrees" / "cursor-1"),
             )
@@ -1557,7 +1736,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
             pool = Path(fake_home) / ".delegate" / "worktrees"
             self._pool_worktree(
                 pool,
-                "abc123",
+                "abc123def456",
                 "cursor-1",
                 gitdir=str(Path(fake_home) / "gone" / ".git" / "worktrees" / "cursor-1"),
             )
@@ -1594,7 +1773,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
             legacy_pool = Path(fake_home) / "legacy-worktrees"
             self._pool_worktree(
                 legacy_pool,
-                "abc123",
+                "abc123def456",
                 "cursor-1",
                 gitdir=str(Path(fake_home) / "gone" / ".git" / "worktrees" / "cursor-1"),
             )
@@ -1684,7 +1863,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
         with tempfile.TemporaryDirectory() as fake_home:
             workspace = Path(fake_home) / "no-registry"
             workspace.mkdir()
-            empty = Path(fake_home) / ".delegate" / "worktrees" / "abc123"
+            empty = Path(fake_home) / ".delegate" / "worktrees" / "abc123def456"
             empty.mkdir(parents=True)
 
             code, out, _err = self._run_cli(
@@ -1696,7 +1875,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
             payload = json.loads(out)
             self.assertEqual(
                 payload["pool"]["emptyFingerprintDirs"],
-                [{"fingerprint": "abc123", "path": str(empty)}],
+                [{"fingerprint": "abc123def456", "path": str(empty)}],
             )
             self.assertTrue(empty.is_dir())
 
@@ -1707,7 +1886,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
             pool = Path(fake_home) / ".delegate" / "worktrees"
             worktree = self._pool_worktree(
                 pool,
-                "abc123",
+                "abc123def456",
                 "cursor-1",
                 gitdir=str(Path(fake_home) / "gone" / ".git" / "worktrees" / "cursor-1"),
             )
@@ -1720,7 +1899,7 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
             self.assertEqual(code, 0)
             self.assertIn(str(worktree), out)
             self.assertIn("source_root_missing", out)
-            self.assertIn("reported only", out)
+            self.assertIn("reported for inspection, not verified as safe to remove", out)
             self.assertNotIn("rm ", out)
 
     def test_gc_all_help_documents_report_only_contract(self):

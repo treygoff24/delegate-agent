@@ -19,6 +19,7 @@ from delegate_agent.git_utils import run_git as _run_git
 from delegate_agent.isolation import (
     IsolationContext,
     IsolationExecutionError,
+    PoolRootUnreadable,
     branch_label,
     compute_repo_fingerprint_from_common_dir,
     create_persistent_worktree,
@@ -118,7 +119,12 @@ def execute_persistent_worktree(
 def _worktree_pool_count(data_home: Path) -> int:
     # ponytail: count-based guardrail only — a full-tree byte walk was slowest
     # exactly when the pool was large, the case the warning exists to catch.
-    return sum(len(fingerprint.worktrees) for fingerprint in iter_pool_fingerprints(data_home))
+    try:
+        return sum(len(fingerprint.worktrees) for fingerprint in iter_pool_fingerprints(data_home))
+    except PoolRootUnreadable:
+        # An advisory warning must never block a launch: a pool root that is
+        # absent (nothing created yet) or unreadable simply has no count to give.
+        return 0
 
 
 def _warn_if_worktree_pool_large(config: JsonObject, stderr: TextIO) -> None:

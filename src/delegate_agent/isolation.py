@@ -110,15 +110,61 @@ def plan_worktree_path(data_home: Path, fingerprint: str, label: str, short_id: 
 class PoolFingerprint(NamedTuple):
     """One fingerprint directory in the worktree pool and the worktrees under it.
 
-    ``unreadable`` distinguishes "this directory holds no worktrees" from "this
-    directory could not be listed". Collapsing the two would report an
-    inaccessible fingerprint as an empty one, which is the more dangerous
-    reading: empty directories look disposable.
+    Three flags keep apart the states a caller must not confuse, because each
+    collapse reports someone's data as disposable:
+
+    ``unreadable`` — the directory could not be listed, so its worktrees were
+    never seen. Reporting that as "holds no worktrees" makes an inaccessible
+    fingerprint look empty.
+
+    ``unrecognized`` — the name does not match the fingerprint contract, so this
+    is not Delegate's directory and nothing under it was examined at all.
+
+    ``other_entries`` — the directory holds entries that are not worktree
+    directories. It is therefore not empty, whatever ``worktrees`` says.
     """
 
     path: Path
     worktrees: list[Path]
     unreadable: bool = False
+    unrecognized: bool = False
+    other_entries: bool = False
+
+
+# Delegate names every fingerprint directory with the first 12 hex characters of
+# a SHA-256 digest (``compute_repo_fingerprint_from_common_dir``). The pool walk
+# descends whatever root it is handed, so this name is the only evidence that a
+# directory belongs to Delegate at all; a directory that fails it is somebody
+# else's data and must never be classified as a Delegate worktree.
+POOL_FINGERPRINT_PATTERN = re.compile(r"\A[0-9a-f]{12}\Z")
+
+
+def is_pool_fingerprint_name(name: str) -> bool:
+    """Does ``name`` match the pool's fingerprint-directory contract?"""
+    return POOL_FINGERPRINT_PATTERN.match(name) is not None
+
+
+class PoolRootUnreadable(Exception):
+    """The pool root could not be listed once the walk actually reached it.
+
+    ``pool_root_problem`` checks the root before the walk, but the check and the
+    walk are separate syscalls: an explicitly requested root can disappear or
+    lose permissions in between. Raising keeps that from surfacing as a
+    successful scan that found nothing.
+    """
+
+    def __init__(self, path: Path, reason: str) -> None:
+        super().__init__(f"Worktree pool root could not be read: {path}")
+        self.path = path
+        self.reason = reason
+
+
+def _pool_scandir_reason(error: OSError) -> str:
+    if isinstance(error, FileNotFoundError):
+        return "missing"
+    if isinstance(error, NotADirectoryError):
+        return "not_a_directory"
+    return "unreadable"
 
 
 def pool_root_problem(data_home: Path) -> str | None:
@@ -150,29 +196,40 @@ def iter_pool_fingerprints(data_home: Path) -> Iterator[PoolFingerprint]:
     """Walk the two-level worktree pool, yielding each fingerprint dir and its worktrees.
 
     The pool layout is ``<data_home>/<fingerprint>/<label>-<short_id>`` (see
-    ``plan_worktree_path``). An unreadable fingerprint directory is yielded with
-    ``unreadable=True`` rather than aborting the walk, so a single bad entry
-    cannot hide the rest of the pool from callers that scan it.
+    ``plan_worktree_path``). A first-level directory whose name is not a
+    fingerprint is yielded with ``unrecognized=True`` and is never descended:
+    the root is caller-supplied, so treating every child as Delegate's would
+    make the walk describe arbitrary directories. An unreadable fingerprint
+    directory is yielded with ``unreadable=True`` rather than aborting the walk,
+    so a single bad entry cannot hide the rest of the pool.
+
+    Raises ``PoolRootUnreadable`` when the root itself cannot be listed.
     """
-    if not data_home.is_dir():
-        return
     try:
         with os.scandir(data_home) as fingerprints:
             fingerprint_dirs = [
                 Path(entry.path) for entry in fingerprints if entry.is_dir(follow_symlinks=False)
             ]
-    except OSError:
-        return
+    except OSError as error:
+        raise PoolRootUnreadable(data_home, _pool_scandir_reason(error)) from error
     for fingerprint_dir in sorted(fingerprint_dirs):
+        if not is_pool_fingerprint_name(fingerprint_dir.name):
+            yield PoolFingerprint(fingerprint_dir, [], unrecognized=True)
+            continue
         try:
-            with os.scandir(fingerprint_dir) as worktrees:
-                worktree_dirs = [
-                    Path(entry.path) for entry in worktrees if entry.is_dir(follow_symlinks=False)
+            with os.scandir(fingerprint_dir) as entries:
+                children = [
+                    (Path(entry.path), entry.is_dir(follow_symlinks=False)) for entry in entries
                 ]
         except OSError:
             yield PoolFingerprint(fingerprint_dir, [], unreadable=True)
             continue
-        yield PoolFingerprint(fingerprint_dir, sorted(worktree_dirs))
+        worktree_dirs = sorted(path for path, is_dir in children if is_dir)
+        yield PoolFingerprint(
+            fingerprint_dir,
+            worktree_dirs,
+            other_entries=len(children) > len(worktree_dirs),
+        )
 
 
 def worktrees_data_home(config: JsonObject) -> Path:

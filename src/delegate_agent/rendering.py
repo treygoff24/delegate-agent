@@ -600,10 +600,12 @@ def _render_worktree_pool_text(pool: object, stdout: TextIO) -> None:
                     f"source: {orphan.get('sourceGitRoot') or 'unknown'}",
                     file=stdout,
                 )
-        # No removal is offered: an orphan's dirtiness cannot be determined, so
-        # each path is a manual, deliberate call by whoever owns the work.
+        # Deliberately not phrased as a cleanup instruction. Delegate cannot see
+        # what an orphan holds — git cannot run inside one — so the report is
+        # evidence for a human decision, not a list of directories to remove.
         print(
-            "pool orphans are reported only — inspect each path before removing it by hand.",
+            "pool orphans are reported for inspection, not verified as safe to remove: "
+            "Delegate cannot see what they hold. Open each path and judge it yourself.",
             file=stdout,
         )
     empty_dirs = pool.get("emptyFingerprintDirs")

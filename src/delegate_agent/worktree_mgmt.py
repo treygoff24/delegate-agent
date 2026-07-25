@@ -746,9 +746,14 @@ def _worktree_list_paths_with_warning(source_git_root: str) -> tuple[set[str] | 
 # Re-export the prune/gc pipelines for the same reason.
 from delegate_agent.worktree_gc import (  # noqa: E402, F401  # re-exported
     BACKLINK_MAX_BYTES,
+    BACKLINK_OPEN_FLAGS,
     ORPHAN_SAFE_ACTIONS,
+    Backlink,
+    BacklinkRead,
     GcFreshAction,
+    PoolVerdict,
     _admin_dir_serves_worktree,
+    _classify_pool_worktree,
     _entry_ref,
     _gc_missing_entry,
     _gc_orphan_entry,
