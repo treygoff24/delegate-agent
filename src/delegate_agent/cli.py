@@ -1087,6 +1087,7 @@ def main(
                 json_mode=global_options.json_mode,
                 auth_profile_override=global_options.auth_profile,
                 stdout=stdout,
+                stderr=stderr,
             )
 
         # For run --input-json, pre-read the JSON to discover config from the
@@ -1177,6 +1178,7 @@ def main(
                 profile=discovery_profile,
                 discovery=discovery_snapshot,
                 stdout=stdout,
+                stderr=stderr,
             )
 
         if parsed.subcommand in {

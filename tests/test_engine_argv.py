@@ -158,6 +158,120 @@ class EngineArgvTests(CommandTestBase):
         drifted.assert_called_once()
         probe.assert_not_called()
 
+    def _upgraded_codex_discovery(self) -> dict:
+        return {
+            "harnesses": {
+                "codex": {
+                    "installed": True,
+                    "selector": ["/live/codex"],
+                    "version": "codex-cli 1.0.0",
+                    "defaultModel": "gpt-live",
+                    "models": {
+                        "gpt-live": {"reasoning": {"supported": ["max"], "evidence": "exact"}}
+                    },
+                }
+            }
+        }
+
+    def test_version_drifted_runtime_discovery_is_dropped_for_the_launched_engine(self):
+        """An in-place upgrade invalidates the record its unchanged selector hides."""
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        with (
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "load_discovery_cache",
+                return_value=self._upgraded_codex_discovery(),
+            ),
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "selector_has_drifted",
+                return_value=False,
+            ),
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "cached_version_has_drifted",
+                return_value=True,
+            ) as version_drifted,
+            self.assertRaises(self.delegate.DelegateError),
+        ):
+            self.build_git_request(
+                "codex",
+                "safe",
+                None,
+                "/repo",
+                "review",
+                config,
+                True,
+                reasoning_effort="max",
+            )
+        version_drifted.assert_called_once()
+        self.assertEqual(version_drifted.call_args.args[0], "codex")
+
+    def test_matching_version_keeps_the_cached_record_launchable(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["codex"]["defaultModel"] = None
+        with (
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "load_discovery_cache",
+                return_value=self._upgraded_codex_discovery(),
+            ),
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "selector_has_drifted",
+                return_value=False,
+            ),
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "cached_version_has_drifted",
+                return_value=False,
+            ),
+        ):
+            request = self.build_git_request(
+                "codex",
+                "safe",
+                None,
+                "/repo",
+                "review",
+                config,
+                True,
+                reasoning_effort="max",
+            )
+        self.assertEqual(request.capability_model, "gpt-live")
+        self.assertEqual(request.capability_model_source, "discovery")
+
+    def test_a_drifted_selector_short_circuits_before_the_version_probe(self):
+        """The free comparison decides first; a dead selector never spawns."""
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        with (
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "load_discovery_cache",
+                return_value=self._upgraded_codex_discovery(),
+            ),
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "selector_has_drifted",
+                return_value=True,
+            ),
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "cached_version_has_drifted",
+                side_effect=AssertionError("a drifted selector must not spawn a version probe"),
+            ),
+            self.assertRaises(self.delegate.DelegateError),
+        ):
+            self.build_git_request(
+                "codex",
+                "safe",
+                None,
+                "/repo",
+                "review",
+                config,
+                True,
+                reasoning_effort="max",
+            )
+
     def test_optional_embedded_models_do_not_emit_model_flags(self):
         for engine in ("kimi", "devin"):
             with self.subTest(engine=engine):
@@ -1340,7 +1454,7 @@ class EngineArgvTests(CommandTestBase):
             stdout = io.StringIO()
             stderr = io.StringIO()
 
-            def refresh(_config, *, profile, engines=None):
+            def refresh(_config, *, profile, engines=None, progress=None):
                 marker.write_text(profile.env["CODEX_HOME"], encoding="utf-8")
                 return self._successful_discovery_refresh("/user/discovery/profile-work.json")
 

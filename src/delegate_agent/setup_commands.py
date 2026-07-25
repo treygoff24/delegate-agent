@@ -294,6 +294,7 @@ def emit(
     json_mode: bool,
     auth_profile_override: str | None,
     stdout: TextIO,
+    stderr: TextIO | None = None,
 ) -> int:
     path = _target_path()
     existed = path.exists()
@@ -306,7 +307,12 @@ def emit(
     )
 
     try:
-        result = harness_discovery.refresh_discovery(config, profile=profile, persist=False)
+        result = harness_discovery.refresh_discovery(
+            config,
+            profile=profile,
+            persist=False,
+            progress=None if json_mode else harness_discovery.stderr_probe_progress(stderr),
+        )
     except (OSError, ValueError) as exc:
         raise DelegateError(
             "setup_discovery_failed",
@@ -430,7 +436,10 @@ def emit(
             raise
 
     updated = result.get("updatedHarnesses")
-    if isinstance(updated, list) and updated:
+    # A cache a newer delegate wrote is left exactly as found: setup still
+    # reconciles the config and reports what it probed, it just publishes
+    # nothing over the newer file.
+    if isinstance(updated, list) and updated and result.get("futureSchemaCache") is not True:
         snapshot = result.get("snapshot")
         try:
             if not isinstance(snapshot, dict):

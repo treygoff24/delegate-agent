@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import io
 import json
 import os
 import stat
@@ -995,6 +996,305 @@ class DiscoveryCacheTests(unittest.TestCase):
             self.assertTrue(
                 self.discovery.selector_has_drifted(explicit, "cursor", record, profile=profile)
             )
+
+    def test_vanished_session_shim_selector_is_drifted_without_spawning(self):
+        """A cached shim path that no longer exists cannot be launched."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            shim_dir = root / "session-shims"
+            shim_dir.mkdir()
+            shim = write_version_harness(shim_dir / "codex", "codex-cli 1.0.0")
+            config = {"codex": {"binary": str(shim)}}
+            profile = self.profiles.ProfileResolution(
+                name="work", source="test", env={"PATH": str(root)}
+            )
+            record = _harness_record()
+            record["selector"] = [str(shim)]
+
+            with mock.patch.object(
+                self.discovery,
+                "run_metadata_probe",
+                side_effect=AssertionError("selector existence must not spawn"),
+            ):
+                self.assertFalse(
+                    self.discovery.selector_has_drifted(config, "codex", record, profile=profile)
+                )
+                shim.rename(shim_dir / "codex.gone")
+                self.assertTrue(
+                    self.discovery.selector_has_drifted(config, "codex", record, profile=profile)
+                )
+
+    def test_relative_cached_selector_is_left_to_the_configured_comparison(self):
+        """A bare-name selector is not a filesystem path, so it is not stat-ed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_version_harness(root / "codex", "codex-cli 1.0.0")
+            profile = self.profiles.ProfileResolution(
+                name="work", source="test", env={"PATH": str(root)}
+            )
+            record = _harness_record()
+            record["selector"] = ["codex"]
+
+            with mock.patch.object(
+                self.discovery,
+                "run_metadata_probe",
+                side_effect=AssertionError("selector existence must not spawn"),
+            ):
+                # Drifted because a persisted record always stores the absolute
+                # path, never because a bare name failed an existence check.
+                self.assertTrue(
+                    self.discovery.selector_has_drifted(
+                        {"codex": {"binary": "codex"}}, "codex", record, profile=profile
+                    )
+                )
+
+
+class CachedVersionDriftTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from delegate_agent import harness_discovery, profiles
+
+        self.discovery = harness_discovery
+        self.profiles = profiles
+
+    def _profile(self, root: Path):
+        return self.profiles.ProfileResolution(name="work", source="test", env={"PATH": str(root)})
+
+    def test_in_place_upgrade_is_detected_behind_an_unchanged_selector(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            binary = write_version_harness(root / "codex", "codex-cli 1.0.0")
+            record = _harness_record()
+            record["selector"] = [str(binary)]
+            record["version"] = "codex-cli 1.0.0"
+
+            self.assertFalse(
+                self.discovery.cached_version_has_drifted(
+                    "codex", record, profile=self._profile(root)
+                )
+            )
+            write_version_harness(binary, "codex-cli 2.0.0")
+            self.assertTrue(
+                self.discovery.cached_version_has_drifted(
+                    "codex", record, profile=self._profile(root)
+                )
+            )
+
+    def test_only_the_named_harness_is_probed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            binary = write_version_harness(root / "codex", "codex-cli 1.0.0")
+            record = _harness_record()
+            record["selector"] = [str(binary)]
+            probed: list[tuple[str, ...]] = []
+
+            def probe(argv, *, env, **kwargs):
+                del env, kwargs
+                probed.append(tuple(argv))
+                return self.discovery.ProbeResult(tuple(argv), 0, "codex-cli 1.0.0", "", None)
+
+            with mock.patch.object(self.discovery, "run_metadata_probe", side_effect=probe):
+                self.discovery.cached_version_has_drifted(
+                    "codex", record, profile=self._profile(root)
+                )
+            self.assertEqual(probed, [(str(binary), "--version")])
+
+    def test_every_probe_failure_keeps_the_cached_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            binary = write_version_harness(root / "codex", "codex-cli 1.0.0")
+            base = _harness_record()
+            base["selector"] = [str(binary)]
+
+            failures = {
+                "probe_failed": self.discovery.ProbeResult((), 1, "", "boom", "probe_failed"),
+                "probe_timeout": self.discovery.ProbeResult((), None, "", "", "probe_timeout"),
+                "probe_missing": self.discovery.ProbeResult((), None, "", "", "probe_missing"),
+                "probe_output_too_large": self.discovery.ProbeResult(
+                    (), 0, "codex-cli 9.9.9", "", "probe_output_too_large"
+                ),
+            }
+            for error, result in failures.items():
+                with (
+                    self.subTest(error=error),
+                    mock.patch.object(self.discovery, "run_metadata_probe", return_value=result),
+                ):
+                    self.assertFalse(
+                        self.discovery.cached_version_has_drifted(
+                            "codex", copy.deepcopy(base), profile=self._profile(root)
+                        )
+                    )
+
+            with mock.patch.object(
+                self.discovery, "run_metadata_probe", side_effect=OSError("spawn refused")
+            ):
+                self.assertFalse(
+                    self.discovery.cached_version_has_drifted(
+                        "codex", copy.deepcopy(base), profile=self._profile(root)
+                    )
+                )
+
+    def test_unidentifiable_or_unrecorded_versions_are_not_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            binary = write_version_harness(root / "codex", "not a version banner")
+            record = _harness_record()
+            record["selector"] = [str(binary)]
+            record["version"] = "codex-cli 1.0.0"
+            self.assertFalse(
+                self.discovery.cached_version_has_drifted(
+                    "codex", record, profile=self._profile(root)
+                )
+            )
+
+            no_version = _harness_record()
+            no_version["selector"] = [str(binary)]
+            no_version["version"] = None
+            with mock.patch.object(
+                self.discovery,
+                "run_metadata_probe",
+                side_effect=AssertionError("an unrecorded version must not spawn"),
+            ):
+                self.assertFalse(
+                    self.discovery.cached_version_has_drifted(
+                        "codex", no_version, profile=self._profile(root)
+                    )
+                )
+                empty_selector = _harness_record()
+                empty_selector["selector"] = []
+                self.assertFalse(
+                    self.discovery.cached_version_has_drifted(
+                        "codex", empty_selector, profile=self._profile(root)
+                    )
+                )
+
+
+class FutureSchemaCacheTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from delegate_agent import harness_discovery, private_io, profiles
+
+        self.discovery = harness_discovery
+        self.private_io = private_io
+        self.profiles = profiles
+
+    def _write_raw(self, home: Path, schema: object) -> Path:
+        snapshot = self.discovery.empty_snapshot(profile="work", captured_at="2026-07-25T10:00:00Z")
+        snapshot["schema"] = schema
+        path = self.discovery.discovery_cache_path("work", home=home)
+        self.private_io.write_json_atomic(path, snapshot)
+        return path
+
+    def test_newer_schema_is_recognized_and_lower_or_invalid_is_not(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            for schema, expected in ((2, True), (99, True), (1, False), (0, False), ("2", False)):
+                with self.subTest(schema=schema):
+                    self._write_raw(home, schema)
+                    self.assertEqual(
+                        self.discovery.cache_schema_is_future("work", home=home), expected
+                    )
+            self.assertFalse(self.discovery.cache_schema_is_future("absent", home=home))
+
+    def test_write_refuses_to_replace_a_newer_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            path = self._write_raw(home, 2)
+            before = path.read_bytes()
+            snapshot = self.discovery.empty_snapshot(profile="work")
+            with self.assertRaises(self.discovery.FutureCacheSchemaError):
+                self.discovery.write_discovery_cache("work", snapshot, home=home)
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_refresh_probes_fresh_and_preserves_the_newer_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            path = self._write_raw(home, 2)
+            before = path.read_bytes()
+            profile = self.profiles.ProfileResolution(name="work", source="test")
+            probed = copy.deepcopy(_harness_record())
+            probed["selector"] = ["/codex"]
+
+            with mock.patch.object(self.discovery, "probe_harness", return_value=probed):
+                result = self.discovery.refresh_discovery(
+                    {}, profile=profile, engines=("codex",), home=home
+                )
+
+            self.assertTrue(result["futureSchemaCache"])
+            self.assertFalse(result["wrote"])
+            self.assertEqual(result["updatedHarnesses"], ["codex"])
+            self.assertEqual(result["snapshot"]["harnesses"]["codex"], probed)
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_a_lower_schema_cache_is_still_replaced(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            path = self._write_raw(home, 0)
+            profile = self.profiles.ProfileResolution(name="work", source="test")
+            probed = copy.deepcopy(_harness_record())
+            probed["selector"] = ["/codex"]
+
+            with mock.patch.object(self.discovery, "probe_harness", return_value=probed):
+                result = self.discovery.refresh_discovery(
+                    {}, profile=profile, engines=("codex",), home=home
+                )
+
+            self.assertNotIn("futureSchemaCache", result)
+            self.assertTrue(result["wrote"])
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["schema"], 1)
+
+
+class ProbeProgressTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from delegate_agent import harness_discovery, profiles
+
+        self.discovery = harness_discovery
+        self.profiles = profiles
+
+    def test_each_harness_is_named_before_it_is_probed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            profile = self.profiles.ProfileResolution(name="work", source="test")
+            events: list[str] = []
+
+            def probe(_config, harness, *, env, factory_settings_path=None):
+                del env, factory_settings_path
+                events.append(f"probe:{harness}")
+                return copy.deepcopy(_harness_record())
+
+            with mock.patch.object(self.discovery, "probe_harness", side_effect=probe):
+                self.discovery.refresh_discovery(
+                    {},
+                    profile=profile,
+                    engines=("codex", "droid"),
+                    home=home,
+                    persist=False,
+                    progress=lambda harness: events.append(f"progress:{harness}"),
+                )
+
+            self.assertEqual(
+                events,
+                ["progress:codex", "probe:codex", "progress:droid", "probe:droid"],
+            )
+
+    def test_probe_all_harnesses_reports_every_engine_in_order(self):
+        from delegate_agent.constants import KNOWN_ENGINES
+
+        seen: list[str] = []
+        with mock.patch.object(
+            self.discovery, "probe_harness", return_value=copy.deepcopy(_harness_record())
+        ):
+            records = self.discovery.probe_all_harnesses({}, env={"PATH": ""}, progress=seen.append)
+        self.assertEqual(seen, list(KNOWN_ENGINES))
+        self.assertEqual(list(records), list(KNOWN_ENGINES))
+
+    def test_stderr_callback_writes_one_named_line_per_harness(self):
+        stream = io.StringIO()
+        report = self.discovery.stderr_probe_progress(stream)
+        report("codex")
+        report("droid")
+        self.assertEqual(
+            stream.getvalue().splitlines(),
+            ["discovery: probing codex", "discovery: probing droid"],
+        )
 
 
 class DetectionTests(unittest.TestCase):

@@ -733,7 +733,14 @@ def _runtime_discovery_for_engine(
     discovery: JsonObject | None,
     profile_resolution: profiles.ProfileResolution,
 ) -> JsonObject | None:
-    """Drop only a selector-drifted engine record without probing the harness."""
+    """Drop the engine record when its selector drifted or its harness moved on.
+
+    Only the engine this launch is about to spawn is checked. The selector
+    comparison is free and runs first; the version probe costs one bounded
+    ``--version`` call against a run that is about to occupy a harness for
+    minutes, and fails open, so the launch proceeds on the cached record
+    whenever the probe cannot answer.
+    """
     if not isinstance(discovery, dict):
         return None
     harnesses = discovery.get("harnesses")
@@ -745,8 +752,14 @@ def _runtime_discovery_for_engine(
         return discovery
     selector = record.get("selector")
     selector_missing = not isinstance(selector, list) or not selector
-    if not selector_missing and not harness_discovery.selector_has_drifted(
-        config, engine, record, profile=profile_resolution
+    if (
+        not selector_missing
+        and not harness_discovery.selector_has_drifted(
+            config, engine, record, profile=profile_resolution
+        )
+        and not harness_discovery.cached_version_has_drifted(
+            engine, record, profile=profile_resolution
+        )
     ):
         return discovery
     return {

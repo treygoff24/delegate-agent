@@ -13,12 +13,13 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
-from collections.abc import Collection, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, TextIO
 
 from delegate_agent import config as delegate_config
 from delegate_agent import private_io, profiles, redaction
@@ -33,6 +34,16 @@ EVIDENCE_LEVELS = frozenset({"exact", "harness", "inferred-route", "unknown"})
 # resolves while the harness binary is still on PATH, so callers can tell a
 # stale config apart from an uninstalled harness.
 CONFIGURED_SELECTOR_MISSING = "configured_selector_missing"
+# Emitted once when an on-disk cache carries a newer schema than this build
+# understands: the newer file is preserved and this run stays cache-less.
+FUTURE_SCHEMA_CACHE_WARNING = (
+    "discovery cache was written by a newer delegate; probing without reading or replacing it"
+)
+
+
+class FutureCacheSchemaError(ValueError):
+    """Raised rather than replacing a cache a newer delegate wrote."""
+
 
 _PATH_CANDIDATES: dict[str, tuple[str, ...]] = {
     "cursor": ("agent", "cursor-agent"),
@@ -1261,21 +1272,39 @@ def probe_harness(
         )
 
 
+def stderr_probe_progress(stream: TextIO | None = None) -> Callable[[str], None]:
+    """Return a progress callback that names each harness as probing starts.
+
+    Every probe is bounded by ``METADATA_PROBE_TIMEOUT_SEC``, so a wedged
+    harness stalls a refresh for seconds with nothing on screen. Naming the
+    harness before spawning it is what makes the culprit identifiable.
+    """
+    target = sys.stderr if stream is None else stream
+
+    def report(harness: str) -> None:
+        print(f"discovery: probing {harness}", file=target, flush=True)
+
+    return report
+
+
 def probe_all_harnesses(
     config: JsonObject,
     *,
     env: Mapping[str, str],
     factory_settings_path: Path | None = None,
+    progress: Callable[[str], None] | None = None,
 ) -> JsonObject:
-    return {
-        harness: probe_harness(
+    records: JsonObject = {}
+    for harness in KNOWN_ENGINES:
+        if progress is not None:
+            progress(harness)
+        records[harness] = probe_harness(
             config,
             harness,
             env=env,
             factory_settings_path=factory_settings_path,
         )
-        for harness in KNOWN_ENGINES
-    }
+    return records
 
 
 def _normalized_profile_name(profile_name: str | None) -> str:
@@ -1295,6 +1324,25 @@ def discovery_cache_path(profile_name: str | None, *, home: Path | None = None) 
     normalized = _normalized_profile_name(profile_name)
     digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
     return root / f"profile-{digest}.json"
+
+
+def cache_schema_is_future(profile_name: str | None, *, home: Path | None = None) -> bool:
+    """Report whether the on-disk cache was written by a newer delegate.
+
+    ``validate_snapshot`` rejects any schema but its own, so a newer cache is
+    indistinguishable from a corrupt one at load time -- and the next refresh
+    would replace it. Reading the raw schema first keeps the newer file intact
+    for the delegate that wrote it while this build carries on cache-less.
+    """
+    path = discovery_cache_path(profile_name, home=home)
+    try:
+        raw = private_io.read_json_object(path)
+    except private_io.RegistryJsonError:
+        return False
+    if raw is None:
+        return False
+    schema = raw.get("schema")
+    return not isinstance(schema, bool) and isinstance(schema, int) and schema > DISCOVERY_SCHEMA
 
 
 def load_discovery_cache(
@@ -1336,9 +1384,14 @@ def write_discovery_cache(
     """Atomically replace one whole validated profile snapshot.
 
     Same-profile concurrent refreshes intentionally remain whole-snapshot
-    last-writer-wins. Different profiles never share a writable file.
+    last-writer-wins. Different profiles never share a writable file. A cache
+    carrying a newer schema is never among the writes: callers are expected to
+    skip persistence via ``cache_schema_is_future``, and this raise is the
+    backstop that keeps any path they miss from destroying it.
     """
     validate_snapshot(snapshot, expected_profile=_normalized_profile_name(profile_name))
+    if cache_schema_is_future(profile_name, home=home):
+        raise FutureCacheSchemaError(FUTURE_SCHEMA_CACHE_WARNING)
     path = discovery_cache_path(profile_name, home=home)
     private_io.write_json_atomic(path, snapshot)
     return path
@@ -1361,6 +1414,20 @@ def _effective_configured_selectors(
     )
 
 
+def _selector_binary_is_gone(selector: tuple[str, ...]) -> bool:
+    """Report whether an absolute cached selector's executable no longer exists.
+
+    Harnesses that resolve through per-session shims under ``TMPDIR`` leave a
+    cached selector pointing at a directory that vanishes with the session, so
+    a record can name a live-looking path that nothing can execute. One stat
+    catches it; a relative head is left alone because every persisted record
+    stores the absolute path ``_normalize_selector`` resolved, which means a
+    bare name is a fixture shape the configured-selector comparison rejects on
+    its own.
+    """
+    return os.path.isabs(selector[0]) and not os.path.exists(selector[0])
+
+
 def selector_has_drifted(
     config: JsonObject,
     harness: str,
@@ -1372,7 +1439,49 @@ def selector_has_drifted(
     cached = cached_record.get("selector")
     if not _string_list(cached, allow_empty=False):
         return True
+    if _selector_binary_is_gone(tuple(cached)):
+        return True
     return tuple(cached) not in _effective_configured_selectors(config, harness, profile=profile)
+
+
+def cached_version_has_drifted(
+    harness: str,
+    cached_record: JsonObject,
+    *,
+    profile: profiles.ProfileResolution,
+) -> bool:
+    """Re-ask one harness for its version and compare it to the cached string.
+
+    An in-place upgrade keeps the selector byte-identical while the catalog,
+    default model, and reasoning levels behind it all move, so the selector
+    comparison alone cannot see it. Asking the harness is the only signal that
+    holds across every install topology on a real machine -- versioned realpath
+    directories, stable-path binaries, and ephemeral session shims alike.
+
+    Fails open by design: a probe that errors, times out, exceeds its output
+    bound, or no longer identifies as this harness keeps the cached record, so
+    a broken version probe can never make a launch impossible.
+    """
+    cached_version = cached_record.get("version")
+    selector = cached_record.get("selector")
+    if not _nonempty_string(cached_version) or not _string_list(selector, allow_empty=False):
+        return False
+    env = profiles.child_environment(overrides=profile.env)
+    try:
+        probe = run_metadata_probe(
+            [*selector, "--version"],
+            env=env,
+            timeout_sec=METADATA_PROBE_TIMEOUT_SEC,
+        )
+    except (OSError, ValueError):
+        return False
+    if probe.error is not None:
+        return False
+    output = "\n".join(part for part in (probe.stdout, probe.stderr) if part)
+    live_version = _canonical_version(harness, tuple(selector), output)
+    if live_version is None:
+        return False
+    return live_version != cached_version
 
 
 def refresh_discovery(
@@ -1383,6 +1492,7 @@ def refresh_discovery(
     home: Path | None = None,
     factory_settings_path: Path | None = None,
     persist: bool = True,
+    progress: Callable[[str], None] | None = None,
 ) -> JsonObject:
     """Probe harnesses, optionally persisting successful last-known-good records."""
     if isinstance(engines, str):
@@ -1393,7 +1503,8 @@ def refresh_discovery(
         raise ValueError(f"unknown discovery harness: {unknown[0]}")
 
     profile_name = _normalized_profile_name(profile.name)
-    existing = load_discovery_cache(profile.name, home=home)
+    future_schema = cache_schema_is_future(profile.name, home=home)
+    existing = None if future_schema else load_discovery_cache(profile.name, home=home)
     snapshot = existing if existing is not None else empty_snapshot(profile=profile_name)
     attempts: JsonObject = {}
     updated: list[str] = []
@@ -1401,6 +1512,8 @@ def refresh_discovery(
     env = profiles.child_environment(overrides=profile.env)
 
     for harness in selected:
+        if progress is not None:
+            progress(harness)
         try:
             record = probe_harness(
                 config,
@@ -1432,13 +1545,17 @@ def refresh_discovery(
             stale.append(harness)
 
     cache_path = discovery_cache_path(profile.name, home=home)
-    if persist and updated:
+    wrote = persist and bool(updated) and not future_schema
+    if wrote:
         write_discovery_cache(profile.name, snapshot, home=home)
-    return {
+    result: JsonObject = {
         "snapshot": snapshot,
         "attempts": attempts,
         "updatedHarnesses": updated,
         "staleHarnesses": stale,
         "cachePath": str(cache_path),
-        "wrote": persist and bool(updated),
+        "wrote": wrote,
     }
+    if future_schema:
+        result["futureSchemaCache"] = True
+    return result

@@ -473,6 +473,74 @@ class CapabilityCommandTests(unittest.TestCase):
             self.assertIn("reasoning capabilities:", output)
             self.assertIn("cursor: 1 model(s)", output)
 
+    @staticmethod
+    def _refresh_result(**overrides) -> dict:
+        snapshot = harness_discovery.empty_snapshot()
+        snapshot["harnesses"] = {"codex": {"models": {}}}
+        result = {
+            "snapshot": snapshot,
+            "attempts": {"codex": {"installed": True, "probeStatus": "ok", "warnings": []}},
+            "updatedHarnesses": ["codex"],
+            "staleHarnesses": [],
+            "cachePath": "/user/discovery/default.json",
+        }
+        result.update(overrides)
+        return result
+
+    def test_refresh_names_each_harness_on_stderr_and_stays_silent_under_json(self):
+        for json_mode in (False, True):
+            with self.subTest(json_mode=json_mode):
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                with (
+                    tempfile.TemporaryDirectory() as workspace,
+                    mock.patch.object(
+                        capability_commands.harness_discovery,
+                        "refresh_discovery",
+                        side_effect=lambda config, *, profile, engines, progress: (
+                            progress("codex") if progress is not None else None,
+                            self._refresh_result(),
+                        )[1],
+                    ),
+                ):
+                    code = capability_commands.emit(
+                        capability_commands.CapabilitiesCommand(refresh=True, json_mode=json_mode),
+                        config={},
+                        config_source="test-config",
+                        workspace=workspace,
+                        profile=profiles.empty_profile_resolution(),
+                        stdout=stdout,
+                        stderr=stderr,
+                    )
+                self.assertEqual(code, 0)
+                if json_mode:
+                    self.assertEqual(stderr.getvalue(), "")
+                    json.loads(stdout.getvalue())
+                else:
+                    self.assertIn("discovery: probing codex", stderr.getvalue())
+
+    def test_refresh_reports_a_cache_it_refused_to_replace(self):
+        stdout = io.StringIO()
+        with (
+            tempfile.TemporaryDirectory() as workspace,
+            mock.patch.object(
+                capability_commands.harness_discovery,
+                "refresh_discovery",
+                return_value=self._refresh_result(futureSchemaCache=True, wrote=False),
+            ),
+        ):
+            code = capability_commands.emit(
+                capability_commands.CapabilitiesCommand(refresh=True, json_mode=False),
+                config={},
+                config_source="test-config",
+                workspace=workspace,
+                profile=profiles.empty_profile_resolution(),
+                stdout=stdout,
+                stderr=io.StringIO(),
+            )
+        self.assertEqual(code, 0)
+        self.assertIn("newer delegate", stdout.getvalue())
+
     def test_refresh_with_no_installed_harnesses_raises_specific_error(self):
         with tempfile.TemporaryDirectory() as workspace:
             with (
@@ -809,7 +877,7 @@ class CapabilityCommandTests(unittest.TestCase):
         ):
             payload = capability_commands._refresh_payload({}, workspace, profile=profile)
 
-        refresh.assert_called_once_with({}, profile=profile, engines=None)
+        refresh.assert_called_once_with({}, profile=profile, engines=None, progress=None)
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["updatedHarnesses"], ["codex"])
         self.assertEqual(payload["staleHarnesses"], ["droid"])
@@ -837,7 +905,7 @@ class CapabilityCommandTests(unittest.TestCase):
             ) as refresh,
         ):
             capability_commands._refresh_payload({}, workspace, profile=profile, engines=("codex",))
-        refresh.assert_called_once_with({}, profile=profile, engines=("codex",))
+        refresh.assert_called_once_with({}, profile=profile, engines=("codex",), progress=None)
 
     def test_refresh_projects_bounded_attempts_and_scrubs_reasoning_keys_and_values(self):
         profile = profiles.ProfileResolution(name="work", source="test")
