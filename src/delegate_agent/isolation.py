@@ -11,6 +11,7 @@ import hashlib
 import os
 import re
 import subprocess  # nosec B404 - isolation helpers intentionally run fixed git argv with shell=False.
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -102,6 +103,34 @@ def plan_branch_name(label: str, short_id: str) -> str:
 
 def plan_worktree_path(data_home: Path, fingerprint: str, label: str, short_id: str) -> Path:
     return data_home / fingerprint / f"{label}-{short_id}"
+
+
+def iter_pool_fingerprints(data_home: Path) -> Iterator[tuple[Path, list[Path]]]:
+    """Walk the two-level worktree pool, yielding each fingerprint dir and its worktrees.
+
+    The pool layout is ``<data_home>/<fingerprint>/<label>-<short_id>`` (see
+    ``plan_worktree_path``). Unreadable directories yield no worktrees rather
+    than aborting the walk, so a single bad entry cannot hide the rest of the
+    pool from callers that scan it.
+    """
+    if not data_home.is_dir():
+        return
+    try:
+        with os.scandir(data_home) as fingerprints:
+            fingerprint_dirs = [
+                Path(entry.path) for entry in fingerprints if entry.is_dir(follow_symlinks=False)
+            ]
+    except OSError:
+        return
+    for fingerprint_dir in sorted(fingerprint_dirs):
+        try:
+            with os.scandir(fingerprint_dir) as worktrees:
+                worktree_dirs = [
+                    Path(entry.path) for entry in worktrees if entry.is_dir(follow_symlinks=False)
+                ]
+        except OSError:
+            worktree_dirs = []
+        yield fingerprint_dir, sorted(worktree_dirs)
 
 
 def worktrees_data_home(config: JsonObject) -> Path:

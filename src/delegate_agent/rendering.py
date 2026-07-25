@@ -581,6 +581,37 @@ def render_worktree_gc_text(payload: JsonObject, stdout: TextIO) -> None:
                     f"{orphan.get('reason')} {orphan.get('executionCwd')}",
                     file=stdout,
                 )
+    _render_worktree_pool_text(payload.get("pool"), stdout)
+
+
+def _render_worktree_pool_text(pool: object, stdout: TextIO) -> None:
+    if not isinstance(pool, dict):
+        return
+    print(f"pool: {pool.get('dataHome')}", file=stdout)
+    print(f"pool worktrees scanned: {pool.get('scannedWorktrees', 0)}", file=stdout)
+    pool_orphans = pool.get("orphans")
+    if isinstance(pool_orphans, list) and pool_orphans:
+        print(f"pool orphans: {len(pool_orphans)}", file=stdout)
+        for orphan in pool_orphans:
+            if isinstance(orphan, dict):
+                print(f"  - {orphan.get('worktreePath')}", file=stdout)
+                print(
+                    f"      reason: {orphan.get('reason')}  "
+                    f"source: {orphan.get('sourceGitRoot') or 'unknown'}",
+                    file=stdout,
+                )
+        # No deletion is offered: an orphan's dirtiness cannot be determined, so
+        # each path is a manual, deliberate call by whoever owns the work.
+        print(
+            "pool orphans are reported only — inspect each path before removing it by hand.",
+            file=stdout,
+        )
+    empty_dirs = pool.get("emptyFingerprintDirs")
+    if isinstance(empty_dirs, list) and empty_dirs:
+        print(f"empty pool dirs: {len(empty_dirs)}", file=stdout)
+        for entry in empty_dirs:
+            if isinstance(entry, dict):
+                print(f"  - {entry.get('path')} ({entry.get('action')})", file=stdout)
 
 
 def print_json(payload: JsonObject, stdout: TextIO) -> None:

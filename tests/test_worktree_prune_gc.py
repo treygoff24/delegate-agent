@@ -1005,5 +1005,364 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
             self.assertIn("rawGit", cleanup)
 
 
+class WorktreePoolGcTests(WorktreeMgmtTestBase):
+    """`worktree gc --all`: the machine-wide pool walk for repo-less orphans."""
+
+    def _pool_worktree(
+        self,
+        pool: Path,
+        fingerprint: str,
+        name: str,
+        *,
+        gitdir: str | None,
+        contents: str | None = None,
+    ) -> Path:
+        worktree = pool / fingerprint / name
+        worktree.mkdir(parents=True)
+        if gitdir is not None:
+            (worktree / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
+        if contents is not None:
+            (worktree / contents).write_text("unique work\n", encoding="utf-8")
+        return worktree
+
+    def _live_gitdir(self, source: Path, name: str) -> str:
+        admin = source / ".git" / "worktrees" / name
+        admin.mkdir(parents=True)
+        return str(admin)
+
+    def _scan(self, pool: Path, *, dry_run: bool = True) -> dict:
+        return self.delegate.worktree_mgmt.scan_worktree_pool(pool, dry_run=dry_run)
+
+    def test_parse_worktree_backlink_reads_git_file_as_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = Path(tmp) / "pool"
+            worktree = self._pool_worktree(pool, "abc123", "cursor-1", gitdir="/gone/.git/x")
+            self.assertEqual(
+                self.delegate.worktree_mgmt._parse_worktree_backlink(worktree),
+                "/gone/.git/x",
+            )
+
+    def test_parse_worktree_backlink_returns_none_without_git_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = Path(tmp) / "pool"
+            worktree = self._pool_worktree(pool, "abc123", "cursor-1", gitdir=None)
+            self.assertIsNone(self.delegate.worktree_mgmt._parse_worktree_backlink(worktree))
+
+    def test_parse_worktree_backlink_returns_none_for_git_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = Path(tmp) / "pool"
+            worktree = self._pool_worktree(pool, "abc123", "cursor-1", gitdir=None)
+            (worktree / ".git").mkdir()
+            self.assertIsNone(self.delegate.worktree_mgmt._parse_worktree_backlink(worktree))
+
+    def test_source_root_recovered_from_standard_backlink(self):
+        self.assertEqual(
+            self.delegate.worktree_mgmt._source_root_from_backlink(
+                "/tmp/src/.git/worktrees/cursor-1"
+            ),
+            "/tmp/src",
+        )
+
+    def test_source_root_is_none_for_non_standard_backlink(self):
+        self.assertIsNone(
+            self.delegate.worktree_mgmt._source_root_from_backlink("/elsewhere/gitdir/worktrees/x")
+        )
+
+    def test_pool_scan_reports_orphan_whose_source_repo_is_gone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = Path(tmp) / "pool"
+            gone = Path(tmp) / "deleted-repo"
+            worktree = self._pool_worktree(
+                pool,
+                "abc123",
+                "cursor-1",
+                gitdir=str(gone / ".git" / "worktrees" / "cursor-1"),
+            )
+
+            result = self._scan(pool)
+
+            self.assertEqual(result["scannedWorktrees"], 1)
+            self.assertEqual(len(result["orphans"]), 1)
+            orphan = result["orphans"][0]
+            self.assertEqual(orphan["worktreePath"], str(worktree))
+            self.assertEqual(orphan["fingerprint"], "abc123")
+            self.assertEqual(orphan["sourceGitRoot"], str(gone))
+            self.assertEqual(orphan["reason"], "source_root_missing")
+            self.assertEqual(
+                orphan["safeAction"],
+                "restore_source_root_or_inspect_path_before_manual_cleanup",
+            )
+
+    def test_pool_scan_ignores_live_worktree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = Path(tmp) / "pool"
+            source = Path(tmp) / "live-repo"
+            self._pool_worktree(
+                pool,
+                "abc123",
+                "cursor-1",
+                gitdir=self._live_gitdir(source, "cursor-1"),
+            )
+
+            result = self._scan(pool)
+
+            self.assertEqual(result["scannedWorktrees"], 1)
+            self.assertEqual(result["orphans"], [])
+
+    def test_pool_scan_flags_live_source_with_missing_admin_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = Path(tmp) / "pool"
+            source = Path(tmp) / "live-repo"
+            (source / ".git").mkdir(parents=True)
+            self._pool_worktree(
+                pool,
+                "abc123",
+                "cursor-1",
+                gitdir=str(source / ".git" / "worktrees" / "cursor-1"),
+            )
+
+            orphan = self._scan(pool)["orphans"][0]
+
+            self.assertEqual(orphan["reason"], "worktree_metadata_missing")
+            self.assertEqual(orphan["sourceGitRoot"], str(source))
+            self.assertEqual(orphan["safeAction"], "inspect_path_before_manual_cleanup")
+
+    def test_pool_scan_flags_worktree_without_backlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = Path(tmp) / "pool"
+            self._pool_worktree(pool, "abc123", "cursor-1", gitdir=None)
+
+            orphan = self._scan(pool)["orphans"][0]
+
+            self.assertEqual(orphan["reason"], "worktree_metadata_missing")
+            self.assertIsNone(orphan["sourceGitRoot"])
+            self.assertNotIn("gitdir", orphan)
+
+    def test_pool_scan_degrades_on_non_standard_backlink_layout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = Path(tmp) / "pool"
+            self._pool_worktree(
+                pool,
+                "abc123",
+                "cursor-1",
+                gitdir=str(Path(tmp) / "separate-gitdir" / "worktrees" / "cursor-1"),
+            )
+
+            orphan = self._scan(pool)["orphans"][0]
+
+            self.assertEqual(orphan["reason"], "source_root_missing")
+            self.assertIsNone(orphan["sourceGitRoot"])
+
+    def test_pool_scan_never_deletes_orphan_worktrees(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = Path(tmp) / "pool"
+            worktree = self._pool_worktree(
+                pool,
+                "abc123",
+                "cursor-1",
+                gitdir=str(Path(tmp) / "gone" / ".git" / "worktrees" / "cursor-1"),
+                contents="dirty.txt",
+            )
+
+            self._scan(pool, dry_run=False)
+
+            self.assertTrue(worktree.is_dir())
+            self.assertEqual((worktree / "dirty.txt").read_text(encoding="utf-8"), "unique work\n")
+
+    def test_empty_fingerprint_dir_is_reclaimed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = Path(tmp) / "pool"
+            empty = pool / "abc123"
+            empty.mkdir(parents=True)
+
+            result = self._scan(pool, dry_run=False)
+
+            self.assertEqual(result["scannedWorktrees"], 0)
+            self.assertEqual(
+                result["emptyFingerprintDirs"],
+                [{"fingerprint": "abc123", "path": str(empty), "action": "removed"}],
+            )
+            self.assertFalse(empty.exists())
+
+    def test_empty_fingerprint_dir_survives_dry_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = Path(tmp) / "pool"
+            empty = pool / "abc123"
+            empty.mkdir(parents=True)
+
+            result = self._scan(pool)
+
+            self.assertEqual(result["emptyFingerprintDirs"][0]["action"], "would_remove")
+            self.assertTrue(empty.is_dir())
+
+    def test_fingerprint_dir_with_loose_files_is_not_reclaimed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = Path(tmp) / "pool"
+            fingerprint = pool / "abc123"
+            fingerprint.mkdir(parents=True)
+            (fingerprint / ".DS_Store").write_text("junk\n", encoding="utf-8")
+
+            entry = self._scan(pool, dry_run=False)["emptyFingerprintDirs"][0]
+
+            self.assertEqual(entry["action"], "skipped")
+            self.assertIn("message", entry)
+            self.assertTrue(fingerprint.is_dir())
+
+    def test_gc_all_scans_configured_data_home(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            pool = Path(fake_home) / ".delegate" / "worktrees"
+            self._pool_worktree(
+                pool,
+                "abc123",
+                "cursor-1",
+                gitdir=str(Path(fake_home) / "gone" / ".git" / "worktrees" / "cursor-1"),
+            )
+            self._seed_persistent_run(path)
+
+            code, out, _err = self._run_cli(
+                ["--cwd", path, "--json", "worktree", "gc", "--all", "--dry-run"],
+                home=fake_home,
+            )
+
+            self.assertEqual(code, 0)
+            payload = json.loads(out)
+            self.assertEqual(payload["pool"]["dataHome"], str(pool))
+            self.assertEqual(payload["pool"]["orphans"][0]["reason"], "source_root_missing")
+            self.assertFalse(payload["effects"]["deletesWorktreePaths"])
+            self.assertFalse(payload["effects"]["removesEmptyPoolDirs"])
+
+    def test_gc_without_all_omits_pool_section(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            self._seed_persistent_run(path)
+
+            code, out, _err = self._run_cli(
+                ["--cwd", path, "--json", "worktree", "gc", "--dry-run"],
+                home=fake_home,
+            )
+
+            self.assertEqual(code, 0)
+            self.assertNotIn("pool", json.loads(out))
+
+    def test_gc_all_works_without_a_registry(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            workspace = Path(fake_home) / "no-registry"
+            workspace.mkdir()
+            pool = Path(fake_home) / ".delegate" / "worktrees"
+            self._pool_worktree(
+                pool,
+                "abc123",
+                "cursor-1",
+                gitdir=str(Path(fake_home) / "gone" / ".git" / "worktrees" / "cursor-1"),
+            )
+
+            code, out, _err = self._run_cli(
+                ["--cwd", str(workspace), "--json", "worktree", "gc", "--all"],
+                home=fake_home,
+            )
+
+            self.assertEqual(code, 0)
+            payload = json.loads(out)
+            self.assertEqual(payload["mode"], "report-pool")
+            self.assertEqual(payload["reconciled"], 0)
+            self.assertFalse(payload["effects"]["registryWrites"])
+            self.assertEqual(len(payload["pool"]["orphans"]), 1)
+
+    def test_gc_without_all_still_requires_a_registry(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            workspace = Path(fake_home) / "no-registry"
+            workspace.mkdir()
+
+            code, out, _err = self._run_cli(
+                ["--cwd", str(workspace), "--json", "worktree", "gc"],
+                home=fake_home,
+            )
+
+            self.assertNotEqual(code, 0)
+            self.assertEqual(json.loads(out)["code"], "no_registry")
+
+    def test_gc_pool_flag_overrides_configured_data_home(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            workspace = Path(fake_home) / "no-registry"
+            workspace.mkdir()
+            legacy_pool = Path(fake_home) / "legacy-worktrees"
+            self._pool_worktree(
+                legacy_pool,
+                "abc123",
+                "cursor-1",
+                gitdir=str(Path(fake_home) / "gone" / ".git" / "worktrees" / "cursor-1"),
+            )
+
+            code, out, _err = self._run_cli(
+                [
+                    "--cwd",
+                    str(workspace),
+                    "--json",
+                    "worktree",
+                    "gc",
+                    "--dry-run",
+                    "--pool",
+                    str(legacy_pool),
+                ],
+                home=fake_home,
+            )
+
+            self.assertEqual(code, 0)
+            payload = json.loads(out)
+            self.assertEqual(payload["pool"]["dataHome"], str(legacy_pool))
+            self.assertEqual(len(payload["pool"]["orphans"]), 1)
+
+    def test_gc_pool_rejects_empty_path(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            code, out, _err = self._run_cli(
+                ["--json", "worktree", "gc", "--pool", ""],
+                home=fake_home,
+            )
+
+            self.assertEqual(code, self.delegate.EXIT_USAGE)
+            self.assertEqual(json.loads(out)["error"], "invalid_option_value")
+
+    def test_gc_all_text_output_offers_manual_cleanup_only(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            workspace = Path(fake_home) / "no-registry"
+            workspace.mkdir()
+            pool = Path(fake_home) / ".delegate" / "worktrees"
+            worktree = self._pool_worktree(
+                pool,
+                "abc123",
+                "cursor-1",
+                gitdir=str(Path(fake_home) / "gone" / ".git" / "worktrees" / "cursor-1"),
+            )
+
+            code, out, _err = self._run_cli(
+                ["--cwd", str(workspace), "worktree", "gc", "--all", "--dry-run"],
+                home=fake_home,
+            )
+
+            self.assertEqual(code, 0)
+            self.assertIn(str(worktree), out)
+            self.assertIn("source_root_missing", out)
+            self.assertIn("reported only", out)
+            self.assertNotIn("rm ", out)
+
+    def test_gc_all_help_documents_report_only_contract(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            code, out, _err = self._run_cli(
+                ["--json", "worktree", "gc", "--help"],
+                home=fake_home,
+            )
+
+            self.assertEqual(code, 0)
+            spec = json.loads(out)
+            option_names = {option["flag"] for option in spec["options"]}
+            self.assertIn("--all", option_names)
+            self.assertIn("--pool", option_names)
+            self.assertTrue(
+                any("reported, never removed" in note for note in spec["notes"]),
+                spec["notes"],
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

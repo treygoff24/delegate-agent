@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import shlex
 import subprocess  # nosec B404 - persistent worktree cleanup intentionally runs fixed git argv with shell=False.
 from collections.abc import Callable
@@ -23,6 +22,7 @@ from delegate_agent.isolation import (
     branch_label,
     compute_repo_fingerprint_from_common_dir,
     create_persistent_worktree,
+    iter_pool_fingerprints,
     plan_branch_name,
     plan_worktree_path,
     prepend_persistent_worktree_context,
@@ -118,21 +118,7 @@ def execute_persistent_worktree(
 def _worktree_pool_count(data_home: Path) -> int:
     # ponytail: count-based guardrail only — a full-tree byte walk was slowest
     # exactly when the pool was large, the case the warning exists to catch.
-    if not data_home.is_dir():
-        return 0
-    worktree_count = 0
-    try:
-        with os.scandir(data_home) as repositories:
-            for repository in repositories:
-                if not repository.is_dir(follow_symlinks=False):
-                    continue
-                with os.scandir(repository.path) as worktrees:
-                    worktree_count += sum(
-                        entry.is_dir(follow_symlinks=False) for entry in worktrees
-                    )
-    except OSError:
-        pass
-    return worktree_count
+    return sum(len(worktrees) for _fingerprint, worktrees in iter_pool_fingerprints(data_home))
 
 
 def _warn_if_worktree_pool_large(config: JsonObject, stderr: TextIO) -> None:

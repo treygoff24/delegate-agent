@@ -19,7 +19,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from delegate_agent import run_registry
+from delegate_agent import isolation, run_registry
 from delegate_agent.json_types import JsonObject, is_non_negative_int
 from delegate_agent.worktree_records import (
     SCHEMA_GC,
@@ -225,6 +225,15 @@ def _gc_missing_entry(
     }
 
 
+ORPHAN_SAFE_ACTIONS = {
+    "source_root_missing": "restore_source_root_or_inspect_path_before_manual_cleanup",
+    "worktree_metadata_missing": "inspect_path_before_manual_cleanup",
+    "branch_missing": "inspect_branch_metadata_before_manual_cleanup",
+    "detached_backlink": "inspect_path_before_manual_cleanup",
+    "worktree_list_failed": "retry_after_git_worktree_list_succeeds",
+}
+
+
 def _gc_orphan_entry(
     record: PersistentWorktreeRecord,
     execution: str,
@@ -240,15 +249,8 @@ def _gc_orphan_entry(
     }
     if message:
         entry["message"] = message
-    safe_actions = {
-        "source_root_missing": "restore_source_root_or_inspect_path_before_manual_cleanup",
-        "worktree_metadata_missing": "inspect_path_before_manual_cleanup",
-        "branch_missing": "inspect_branch_metadata_before_manual_cleanup",
-        "detached_backlink": "inspect_path_before_manual_cleanup",
-        "worktree_list_failed": "retry_after_git_worktree_list_succeeds",
-    }
-    if reason in safe_actions:
-        entry["safeAction"] = safe_actions[reason]
+    if reason in ORPHAN_SAFE_ACTIONS:
+        entry["safeAction"] = ORPHAN_SAFE_ACTIONS[reason]
     return entry
 
 
@@ -441,8 +443,132 @@ def _gc_reconcile_missing_branch(
     return True
 
 
-def gc_worktrees(registry_root: Path, *, dry_run: bool = False) -> JsonObject:
-    records = load_persistent_records(registry_root)
+WORKTREE_BACKLINK_MARKER = "/.git/worktrees/"
+
+
+def _gc_mode(dry_run: bool, registry_root: Path | None) -> str:
+    if dry_run:
+        return "dry-run"
+    return "report-pool" if registry_root is None else "reconcile-registry"
+
+
+def _parse_worktree_backlink(worktree: Path) -> str | None:
+    """Return the ``gitdir:`` target recorded in ``<worktree>/.git``, or None.
+
+    Read as plain text on purpose. Inside an orphaned worktree every ``git``
+    invocation hard-fails (``fatal: not a git repository``, exit 128), so the
+    git-shelling classifiers cannot see this population at all.
+    """
+    try:
+        text = (worktree / ".git").read_text(encoding="utf-8", errors="replace")
+    except (OSError, ValueError):
+        return None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("gitdir:"):
+            target = stripped.removeprefix("gitdir:").strip()
+            return target or None
+    return None
+
+
+def _source_root_from_backlink(gitdir: str) -> str | None:
+    """Recover the source checkout from a worktree backlink, for reporting only.
+
+    Exact for the standard ``<source>/.git/worktrees/<name>`` layout; returns
+    None under ``--separate-git-dir`` or a bare repo rather than guessing.
+    """
+    marker = gitdir.rfind(WORKTREE_BACKLINK_MARKER)
+    return gitdir[:marker] if marker > 0 else None
+
+
+def _pool_orphan_entry(worktree: Path, gitdir: str | None) -> JsonObject | None:
+    """Classify one pooled worktree, returning None when it is still live.
+
+    The predicate is "the backlink target is gone". It is safe to apply across
+    repositories because git refuses to operate in a worktree whose backlink is
+    missing — a live worktree necessarily has a live backlink, so this walk can
+    never misjudge a worktree another repo's run is currently using.
+    """
+    if gitdir is None:
+        reason = "worktree_metadata_missing"
+        source_root = None
+    elif Path(gitdir).exists():
+        return None
+    else:
+        source_root = _source_root_from_backlink(gitdir)
+        reason = (
+            "worktree_metadata_missing"
+            if source_root is not None and Path(source_root).exists()
+            else "source_root_missing"
+        )
+    entry: JsonObject = {
+        "worktreePath": str(worktree),
+        "fingerprint": worktree.parent.name,
+        "sourceGitRoot": source_root,
+        "reason": reason,
+        "safeAction": ORPHAN_SAFE_ACTIONS[reason],
+    }
+    if gitdir is not None:
+        entry["gitdir"] = gitdir
+    return entry
+
+
+def _reap_empty_fingerprint_dir(fingerprint_dir: Path, *, dry_run: bool) -> JsonObject:
+    entry: JsonObject = {
+        "fingerprint": fingerprint_dir.name,
+        "path": str(fingerprint_dir),
+        "action": "would_remove",
+    }
+    if dry_run:
+        return entry
+    try:
+        # rmdir, never a recursive delete: it refuses anything but an empty
+        # directory, so this cannot reach worktree content even if the walk is
+        # wrong about what lives here.
+        fingerprint_dir.rmdir()
+    except OSError as exc:
+        entry["action"] = "skipped"
+        entry["message"] = str(exc)
+    else:
+        entry["action"] = "removed"
+    return entry
+
+
+def scan_worktree_pool(data_home: Path, *, dry_run: bool = False) -> JsonObject:
+    """Report pooled worktrees whose backing repository is gone, machine-wide.
+
+    Report-only for worktrees: an orphan's dirtiness is structurally unknowable
+    (``git status`` cannot run there), so nothing can distinguish committed from
+    uncommitted work and deleting one could silently discard the only copy.
+    Empty fingerprint directories carry no such risk and are reaped.
+    """
+    orphans: list[JsonObject] = []
+    empty_dirs: list[JsonObject] = []
+    scanned = 0
+    for fingerprint_dir, worktrees in isolation.iter_pool_fingerprints(data_home):
+        if not worktrees:
+            empty_dirs.append(_reap_empty_fingerprint_dir(fingerprint_dir, dry_run=dry_run))
+            continue
+        for worktree in worktrees:
+            scanned += 1
+            entry = _pool_orphan_entry(worktree, _parse_worktree_backlink(worktree))
+            if entry is not None:
+                orphans.append(entry)
+    return {
+        "dataHome": str(data_home),
+        "scannedWorktrees": scanned,
+        "orphans": orphans,
+        "emptyFingerprintDirs": empty_dirs,
+    }
+
+
+def gc_worktrees(
+    registry_root: Path | None,
+    *,
+    dry_run: bool = False,
+    pool_data_home: Path | None = None,
+) -> JsonObject:
+    records = load_persistent_records(registry_root) if registry_root is not None else []
     paths_by_root: dict[str, set[str] | None] = {}
     prune_roots: set[str] = set()
     reconciled: list[JsonObject] = []
@@ -514,15 +640,26 @@ def gc_worktrees(registry_root: Path, *, dry_run: bool = False) -> JsonObject:
     if not dry_run:
         for source in prune_roots:
             wm._run_git(source, ["worktree", "prune"])
-    return {
+    pool = (
+        wm.scan_worktree_pool(pool_data_home, dry_run=dry_run)
+        if pool_data_home is not None
+        else None
+    )
+    removed_empty_dirs = (
+        any(entry.get("action") == "removed" for entry in pool["emptyFingerprintDirs"])
+        if isinstance(pool, dict) and isinstance(pool.get("emptyFingerprintDirs"), list)
+        else False
+    )
+    payload: JsonObject = {
         "schema": SCHEMA_GC,
         "ok": True,
         "dryRun": dry_run,
-        "mode": "dry-run" if dry_run else "reconcile-registry",
+        "mode": _gc_mode(dry_run, registry_root),
         "effects": {
-            "registryWrites": not dry_run,
+            "registryWrites": not dry_run and registry_root is not None,
             "deletesWorktreePaths": False,
             "runsGitWorktreePrune": (not dry_run and bool(prune_roots)),
+            "removesEmptyPoolDirs": removed_empty_dirs,
         },
         "prunedSourceRoots": 0 if dry_run else len(prune_roots),
         "wouldPruneSourceRoots": len(prune_roots) if dry_run else 0,
@@ -531,6 +668,12 @@ def gc_worktrees(registry_root: Path, *, dry_run: bool = False) -> JsonObject:
         "orphans": orphans,
         "warnings": warnings,
     }
+    if pool is not None:
+        # Kept out of the registry-shaped top-level ``orphans`` list: pool
+        # entries are keyed by path, not by alias/runId, and existing consumers
+        # read ``orphans`` expecting registry records.
+        payload["pool"] = pool
+    return payload
 
 
 def maybe_auto_prune(

@@ -5,8 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
 
+from delegate_agent import isolation, run_registry, worktree_mgmt
 from delegate_agent import rendering as delegate_rendering
-from delegate_agent import run_registry, worktree_mgmt
 from delegate_agent.json_types import JsonObject
 
 
@@ -29,6 +29,8 @@ class WorktreeCommand:
     older_than_days: int | None = None
     include_detached: bool = False
     dry_run: bool = False
+    all_pools: bool = False
+    pool: str | None = None
 
 
 def _list_payload(command: WorktreeCommand, registry_root: Path, config: JsonObject) -> JsonObject:
@@ -158,14 +160,23 @@ def _prune_payload(
     )
 
 
-def _gc_payload(command: WorktreeCommand, registry_root: Path, _config: JsonObject) -> JsonObject:
+def _gc_pool_data_home(command: WorktreeCommand, config: JsonObject) -> Path | None:
+    if command.pool is not None:
+        return Path(command.pool).expanduser()
+    return isolation.worktrees_data_home(config) if command.all_pools else None
+
+
+def _gc_payload(
+    command: WorktreeCommand, registry_root: Path | None, config: JsonObject
+) -> JsonObject:
     return worktree_mgmt.gc_worktrees(
         registry_root,
         dry_run=command.dry_run,
+        pool_data_home=_gc_pool_data_home(command, config),
     )
 
 
-PayloadBuilder = Callable[[WorktreeCommand, Path, JsonObject], JsonObject]
+PayloadBuilder = Callable[[WorktreeCommand, Path | None, JsonObject], JsonObject]
 TextRenderer = Callable[[JsonObject, TextIO], None]
 ACTION_DISPATCH: dict[str, tuple[PayloadBuilder, TextRenderer]] = {
     "list": (_list_payload, delegate_rendering.render_worktree_list_text),
@@ -184,7 +195,11 @@ def emit(
     stdout: TextIO,
 ) -> int:
     registry_root = run_registry.registry_root_if_exists(Path(workspace_path))
-    if registry_root is None:
+    # `gc --all` / `gc --pool` scan the machine-global worktree pool, which is
+    # exactly the surface that outlives its per-repo registry — requiring one
+    # here would make the leak it reports unreportable.
+    scans_pool = command.action == "gc" and (command.all_pools or command.pool is not None)
+    if registry_root is None and not scans_pool:
         raise worktree_mgmt.WorktreeManagementError(
             {
                 "ok": False,

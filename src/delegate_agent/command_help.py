@@ -1408,19 +1408,35 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
     "worktree gc": CommandSpec(
         name="worktree gc",
         summary="Garbage-collect orphaned worktree metadata and stale registry entries.",
-        usage=("delegate [--cwd PATH] [--json] worktree gc [--dry-run]",),
+        usage=("delegate [--cwd PATH] [--json] worktree gc [--dry-run] [--all] [--pool PATH]",),
         options=(
             OptionSpec(
                 "--dry-run",
                 None,
                 "Report source roots that would be pruned and un-prunable worktree reasons without changing anything.",
             ),
+            OptionSpec(
+                "--all",
+                None,
+                "Also scan the machine-wide worktree pool for worktrees whose source repository is gone. Reports them; never removes them.",
+            ),
+            OptionSpec(
+                "--pool",
+                "PATH",
+                "Scan this worktree pool root instead of the configured worktrees.dataHome (finds pools left behind by an earlier dataHome).",
+            ),
         ),
         examples=(
             "delegate worktree gc",
             "delegate worktree gc --dry-run",
+            "delegate worktree gc --all",
+            "delegate worktree gc --all --dry-run",
         ),
-        notes=("GC reconciles registry and Git metadata; it never removes worktree paths.",),
+        notes=(
+            "GC reconciles registry and Git metadata; it never removes worktree paths.",
+            "--all works outside a Delegate registry, since pooled worktrees outlive the repositories that created them.",
+            "Pool orphans are reported, never removed: their uncommitted state cannot be inspected once the source repository is gone. Only empty pool directories are reclaimed.",
+        ),
         see_also=("worktree list", "worktree prune", "worktree remove"),
         unsupported_global_options=("--isolation", "--auth-profile"),
     ),

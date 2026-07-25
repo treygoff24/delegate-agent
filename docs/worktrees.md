@@ -216,6 +216,20 @@ delegate worktree gc
 
 In dry-run mode, `gc` reports `wouldPruneSourceRoots` and classifies un-prunable worktrees with reasons such as `source_root_missing`, `worktree_metadata_missing`, `branch_missing`, and `detached_backlink`. Without `--dry-run`, it may update Delegate registry status (for example, marking missing paths as `missing` or inconsistent metadata as `unknown`) and may run `git worktree prune` to clean Git administrative metadata for already-missing paths, but it does not delete worktree directories. JSON output includes an `effects` object that makes those mutation boundaries explicit.
 
+## Find pooled worktrees whose repository is gone
+
+```bash
+delegate worktree gc --all
+delegate worktree gc --all --dry-run
+delegate worktree gc --pool ~/.delegate/worktrees
+```
+
+Persistent worktrees live in a machine-global pool under `worktrees.dataHome` (default `~/.delegate/worktrees`), but they are tracked in a run registry inside the source repository. Delete the source repository and its registry goes with it, leaving a pooled worktree that no per-repository `gc` can reach. `--all` finds these by walking the pool directly and reading each worktree's `.git` backlink file as text — the ordinary Git-based checks cannot classify them, because every `git` command fails inside a worktree whose repository is gone. Because a live worktree always has a live backlink, the walk is safe to run across every repository on the machine at once. `--all` works outside a Delegate registry for the same reason.
+
+The scan adds a `pool` object to the JSON with `dataHome`, `scannedWorktrees`, `orphans`, and `emptyFingerprintDirs`. Each orphan carries `worktreePath`, `fingerprint`, the recovered `sourceGitRoot` (null when the layout does not reveal it), `gitdir`, a `reason`, and a `safeAction`.
+
+`--all` reports orphans; it never deletes them. With the source repository gone there is no way to tell whether an orphan holds uncommitted work, so removal is a deliberate manual decision — inspect the reported path, rescue anything you need, then delete it yourself. The one exception is an empty fingerprint directory left behind when its last worktree was removed; `--all` reclaims those with `rmdir`, which cannot touch a directory that still has contents. Use `--pool PATH` to scan a pool root that is no longer the configured `dataHome`.
+
 ## Security boundary
 
 Worktree isolation is source-checkout isolation, not a full sandbox. The child process may still use credentials, network access, external tools, and absolute paths according to its runtime and host permissions. See [Security model](security-model.md).
