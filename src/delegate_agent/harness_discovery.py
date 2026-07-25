@@ -45,6 +45,23 @@ class FutureCacheSchemaError(ValueError):
     """Raised rather than replacing a cache a newer delegate wrote."""
 
 
+class HarnessIdentityMismatchError(ValueError):
+    """Raised when a selector's own banner names a different known harness.
+
+    Carries everything a caller needs to name the mistake back to the user:
+    the harness the configuration claims, the harness the binary says it is,
+    and the selector that resolved to it.
+    """
+
+    def __init__(self, harness: str, identified: str, selector: tuple[str, ...]) -> None:
+        super().__init__(
+            f"configured {harness} selector {' '.join(selector)!r} identifies itself as {identified}"
+        )
+        self.harness = harness
+        self.identified = identified
+        self.selector = selector
+
+
 _PATH_CANDIDATES: dict[str, tuple[str, ...]] = {
     "cursor": ("agent", "cursor-agent"),
     **{engine: (engine,) for engine in KNOWN_ENGINES if engine != "cursor"},
@@ -306,7 +323,11 @@ class SelectorResolution:
 
 @dataclass(frozen=True)
 class VersionIdentity:
-    """What a ``--version`` banner proves about the program that printed it."""
+    """What a ``--version`` banner proves about the program that printed it.
+
+    ``identified`` is always set when ``status`` is ``known-other``: that
+    status exists precisely to name the harness the banner belongs to.
+    """
 
     status: str
     version: str | None = None
@@ -462,6 +483,13 @@ def _normalize_selector(
     return (str(Path(binary).absolute()), *selector[1:])
 
 
+def _expected_first_version_patterns(
+    harness: str,
+) -> tuple[tuple[str, re.Pattern[str]], ...]:
+    """Order the canonical patterns so ``harness`` gets first refusal."""
+    return tuple(sorted(_CANONICAL_VERSION_PATTERNS, key=lambda entry: entry[0] != harness))
+
+
 def _identify_version(harness: str, selector: tuple[str, ...], output: str) -> VersionIdentity:
     """Classify a ``--version`` banner as this harness, another one, or unreadable.
 
@@ -473,9 +501,15 @@ def _identify_version(harness: str, selector: tuple[str, ...], output: str) -> V
     Escape sequences are stripped first: every canonical pattern is line
     anchored, so a harness that colorizes its banner would otherwise be
     unrecognizable forever.
+
+    The expected harness's own pattern is tried before anyone else's. A banner
+    is free to mention several tools -- an update notice, a bundled runtime, a
+    hash-and-date line another harness would also match -- and under a fixed
+    declaration order whichever pattern happened to be listed first would win,
+    turning a healthy harness into a positive identification of a foreign one.
     """
     text = _ANSI_RE.sub("", output)
-    for identified_harness, pattern in _CANONICAL_VERSION_PATTERNS:
+    for identified_harness, pattern in _expected_first_version_patterns(harness):
         match = pattern.search(text)
         if match is None:
             continue
@@ -1421,12 +1455,22 @@ def write_discovery_cache(
     carrying a newer schema is never among the writes: callers are expected to
     skip persistence via ``cache_schema_is_future``, and this raise is the
     backstop that keeps any path they miss from destroying it.
+
+    The schema is re-read immediately before the replacement rather than up
+    front, which is as tight as the POSIX filesystem primitives get: there is
+    no compare-and-swap for ``os.replace``, and a lock file would only bind
+    delegate builds that already know to take it -- never the older ones this
+    contract exists to constrain. A newer delegate that publishes inside the
+    remaining microseconds is still overwritten.
     """
     validate_snapshot(snapshot, expected_profile=_normalized_profile_name(profile_name))
-    if cache_schema_is_future(profile_name, home=home):
-        raise FutureCacheSchemaError(FUTURE_SCHEMA_CACHE_WARNING)
     path = discovery_cache_path(profile_name, home=home)
-    private_io.write_json_atomic(path, snapshot)
+
+    def refuse_to_replace_a_newer_cache() -> None:
+        if cache_schema_is_future(profile_name, home=home):
+            raise FutureCacheSchemaError(FUTURE_SCHEMA_CACHE_WARNING)
+
+    private_io.write_json_atomic(path, snapshot, before_replace=refuse_to_replace_a_newer_cache)
     return path
 
 
@@ -1495,10 +1539,12 @@ def cached_version_has_drifted(
     bound, or prints a banner nothing recognizes keeps the cached record, so a
     broken version probe can never make a launch impossible.
 
-    A banner that positively identifies a *different* known harness is the one
-    exception. That is contrary evidence rather than uncertainty, and running a
-    Grok binary under Codex capability metadata, argv policy, and safety rules
-    is worse than discarding the record and re-probing.
+    Raises ``HarnessIdentityMismatchError`` when the banner positively names a
+    *different* known harness. That is contrary evidence about what the binary
+    is, not uncertainty about its version, and no cache decision can repair it:
+    dropping the record still leaves the caller building this harness's argv,
+    sandbox flags, and approval policy for someone else's program against the
+    very same path. The configuration is wrong and the caller has to say so.
     """
     cached_version = cached_record.get("version")
     selector = cached_record.get("selector")
@@ -1518,7 +1564,7 @@ def cached_version_has_drifted(
     output = "\n".join(part for part in (probe.stdout, probe.stderr) if part)
     identity = _identify_version(harness, tuple(selector), output)
     if identity.status == _VERSION_KNOWN_OTHER:
-        return True
+        raise HarnessIdentityMismatchError(harness, identity.identified, tuple(selector))
     if identity.version is None:
         return False
     return identity.version != cached_version

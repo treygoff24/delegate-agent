@@ -747,6 +747,10 @@ def _runtime_discovery_for_engine(
     child runtime and never to require the real child binary. Only the two
     filesystem-local checks run there; a stale record shows up in the planned
     argv, which is a dry run's job to report rather than to prevent.
+
+    A probe that identifies the selector as a *different* harness aborts the
+    launch instead of returning a trimmed snapshot. See
+    ``_harness_identity_mismatch_error``.
     """
     if not isinstance(discovery, dict):
         return None
@@ -759,23 +763,62 @@ def _runtime_discovery_for_engine(
         return discovery
     selector = record.get("selector")
     selector_missing = not isinstance(selector, list) or not selector
-    if (
-        not selector_missing
-        and not harness_discovery.selector_has_drifted(
-            config, engine, record, profile=profile_resolution
-        )
-        and not (
-            probe_version
-            and harness_discovery.cached_version_has_drifted(
+    if not selector_missing and not harness_discovery.selector_has_drifted(
+        config, engine, record, profile=profile_resolution
+    ):
+        if not probe_version:
+            return discovery
+        try:
+            version_drifted = harness_discovery.cached_version_has_drifted(
                 engine, record, profile=profile_resolution
             )
-        )
-    ):
-        return discovery
+        except harness_discovery.HarnessIdentityMismatchError as exc:
+            raise _harness_identity_mismatch_error(exc) from exc
+        if not version_drifted:
+            return discovery
     return {
         **discovery,
         "harnesses": {harness: value for harness, value in harnesses.items() if harness != engine},
     }
+
+
+def _harness_identity_mismatch_error(
+    exc: harness_discovery.HarnessIdentityMismatchError,
+) -> DelegateError:
+    """Refuse to run one harness's binary under another harness's rules.
+
+    Version drift is handled by discarding metadata, because the binary is
+    still the harness it claims to be and only its capabilities moved. An
+    identification as a different known harness is a different failure: the
+    configured path resolves to a program that would receive this engine's
+    argv, sandbox flags, and approval policy. Dropping the cached record would
+    not change any of that, so the launch stops here and names all three facts
+    the user needs -- what was configured, what answered, and where.
+    """
+    binary = exc.selector[0] if exc.selector else ""
+    config_key = "cursor.argvPrefix" if exc.harness == "cursor" else f"{exc.harness}.binary"
+    message = (
+        f"Configured {exc.harness} binary identifies itself as {exc.identified}: "
+        f"{binary} --version printed a {exc.identified} banner. Refusing to launch, "
+        f"because Delegate would build {exc.harness} argv and {exc.harness} safety "
+        f"policy for a different program. Fix: point {config_key} at a real "
+        f"{exc.harness} executable, or run the {exc.identified} engine instead."
+    )
+    return DelegateError(
+        "harness_identity_mismatch",
+        message,
+        diagnostics={
+            "engine": exc.harness,
+            "identifiedHarness": exc.identified,
+            "selector": list(exc.selector),
+            "configKey": config_key,
+        },
+        next_actions=[
+            f"{binary} --version",
+            f"set {config_key} to a {exc.harness} executable",
+            f"delegate {exc.identified} ... (to use the harness that answered)",
+        ],
+    )
 
 
 def _resolve_opencode_alias(section: JsonObject, value: str) -> tuple[str, str | None]:

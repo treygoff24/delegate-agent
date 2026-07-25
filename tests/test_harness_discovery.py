@@ -1167,7 +1167,7 @@ class CachedVersionDriftTests(unittest.TestCase):
                     )
                 )
 
-    def test_a_selector_answering_as_another_harness_is_drift(self):
+    def test_a_selector_answering_as_another_harness_refuses_instead_of_drifting(self):
         """Contrary evidence, not uncertainty: this path no longer runs codex."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1175,11 +1175,13 @@ class CachedVersionDriftTests(unittest.TestCase):
             record = _harness_record()
             record["selector"] = [str(binary)]
             record["version"] = "codex-cli 1.0.0"
-            self.assertTrue(
+            with self.assertRaises(self.discovery.HarnessIdentityMismatchError) as caught:
                 self.discovery.cached_version_has_drifted(
                     "codex", record, profile=self._profile(root)
                 )
-            )
+            self.assertEqual(caught.exception.harness, "codex")
+            self.assertEqual(caught.exception.identified, "grok")
+            self.assertEqual(caught.exception.selector, (str(binary),))
 
     def test_an_ansi_colored_banner_is_read_rather_than_ignored(self):
         """Escapes around a line-anchored banner must not freeze the record."""
@@ -1226,6 +1228,22 @@ class VersionIdentityTests(unittest.TestCase):
                 self.assertEqual(identity.version, version)
                 self.assertEqual(identity.identified, identified)
 
+    def test_the_expected_harness_outranks_an_earlier_listed_one(self):
+        """A banner naming two harnesses belongs to the one that was asked for."""
+        banner = "codex-cli 1.0.0\ngrok 2.4.0"
+        codex = self.discovery._identify_version("codex", ("/bin/codex",), banner)
+        self.assertEqual((codex.status, codex.version), ("expected", "codex-cli 1.0.0"))
+        grok = self.discovery._identify_version("grok", ("/bin/grok",), banner)
+        self.assertEqual((grok.status, grok.version), ("expected", "grok 2.4.0"))
+
+        # An unbranded cursor banner is the collision this ordering protects:
+        # it would otherwise claim any harness whose own line is listed later.
+        collision = "2026.07.25-abcdef\nomp/3.1.0"
+        cursor = self.discovery._identify_version("cursor", ("/bin/cursor-agent",), collision)
+        self.assertEqual((cursor.status, cursor.version), ("expected", "2026.07.25-abcdef"))
+        omp = self.discovery._identify_version("omp", ("/bin/omp",), collision)
+        self.assertEqual((omp.status, omp.version), ("expected", "omp/3.1.0"))
+
     def test_a_generic_banner_counts_only_for_a_harness_named_binary(self):
         expected = self.discovery._identify_version("droid", ("/bin/droid",), "1.2.3")
         self.assertEqual((expected.status, expected.version), ("expected", "1.2.3"))
@@ -1268,6 +1286,33 @@ class FutureSchemaCacheTests(unittest.TestCase):
             with self.assertRaises(self.discovery.FutureCacheSchemaError):
                 self.discovery.write_discovery_cache("work", snapshot, home=home)
             self.assertEqual(path.read_bytes(), before)
+
+    def test_the_schema_check_runs_after_the_replacement_is_staged(self):
+        """Narrow the check/replace race to the os.replace call itself."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            path = self.discovery.discovery_cache_path("work", home=home)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            staged: list[list[str]] = []
+
+            def check(profile_name, *, home):
+                del profile_name, home
+                staged.append(sorted(entry.name for entry in path.parent.iterdir()))
+                return True
+
+            with (
+                mock.patch.object(self.discovery, "cache_schema_is_future", side_effect=check),
+                self.assertRaises(self.discovery.FutureCacheSchemaError),
+            ):
+                self.discovery.write_discovery_cache(
+                    "work", self.discovery.empty_snapshot(profile="work"), home=home
+                )
+
+            # Checked exactly once, with the finished replacement already on
+            # disk: everything but os.replace happens before the decision.
+            self.assertEqual(len(staged), 1)
+            self.assertTrue(any(name.endswith(".tmp") for name in staged[0]))
+            self.assertEqual(list(path.parent.iterdir()), [])
 
     def test_refresh_probes_fresh_and_preserves_the_newer_cache(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -5,6 +5,7 @@ import json
 import os
 import secrets
 import stat
+from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 
@@ -177,9 +178,24 @@ def write_text_atomic(path: Path, text: str, *, encoding: str = "utf-8") -> None
         raise
 
 
-def write_json_atomic(path: Path, payload: JsonObject) -> None:
+def write_json_atomic(
+    path: Path,
+    payload: JsonObject,
+    *,
+    before_replace: Callable[[], None] | None = None,
+) -> None:
+    """Atomically replace private JSON, optionally re-checking the destination first.
+
+    ``before_replace`` runs after the temporary file is complete and
+    immediately before ``os.replace``, so a caller whose decision to write
+    depends on what is already on disk can re-read it with the narrowest
+    possible window rather than deciding before serialization. Raising from it
+    aborts the write and removes the temporary file; the destination is left
+    exactly as it was.
+    """
     parent_fd, name = _open_parent(path, create=True)
     temp_name = f".{name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+    replaced = False
     try:
         try:
             existing = os.lstat(name, dir_fd=parent_fd)
@@ -195,12 +211,14 @@ def write_json_atomic(path: Path, payload: JsonObject) -> None:
         )
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        if before_replace is not None:
+            before_replace()
         os.replace(temp_name, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
-    except OSError:
-        with suppress(OSError):
-            os.unlink(temp_name, dir_fd=parent_fd)
-        raise
+        replaced = True
     finally:
+        if not replaced:
+            with suppress(OSError):
+                os.unlink(temp_name, dir_fd=parent_fd)
         os.close(parent_fd)
 
 

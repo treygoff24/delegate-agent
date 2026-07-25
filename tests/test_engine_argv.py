@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from tests.delegate_commands_test_base import CommandTestBase, make_git_repo
+from tests.discovery_fakes import write_version_harness
 
 
 class EngineArgvTests(CommandTestBase):
@@ -207,6 +208,70 @@ class EngineArgvTests(CommandTestBase):
             )
         version_drifted.assert_called_once()
         self.assertEqual(version_drifted.call_args.args[0], "codex")
+
+    def test_a_foreign_version_banner_refuses_the_launch(self):
+        """A configured codex path answering as grok must never reach a runner.
+
+        Dropping the cached record is not enough: the argv builder and the
+        safety policy behind it are still codex's, aimed at the same binary.
+        """
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["codex"]["defaultModel"] = None
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        binary = write_version_harness(Path(temp.name) / "codex", "grok 2.4.0")
+        discovery = self._upgraded_codex_discovery()
+        discovery["harnesses"]["codex"]["selector"] = [str(binary)]
+        real_run = subprocess.run
+        spawned: list[tuple[str, ...]] = []
+
+        def record(argv, *args, **kwargs):
+            spawned.append(tuple(argv) if isinstance(argv, list | tuple) else (str(argv),))
+            return real_run(argv, *args, **kwargs)
+
+        with (
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "load_discovery_cache",
+                return_value=discovery,
+            ),
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "selector_has_drifted",
+                return_value=False,
+            ),
+            mock.patch.object(subprocess, "run", side_effect=record),
+            mock.patch.multiple(
+                self.delegate.delegate_runner,
+                execute_tracked=mock.DEFAULT,
+                execute_call=mock.DEFAULT,
+                execute_passthrough=mock.DEFAULT,
+            ) as runners,
+            self.assertRaises(self.delegate.DelegateError) as caught,
+        ):
+            self.build_git_request("codex", "safe", None, "/repo", "review", config, False)
+
+        for name, runner in runners.items():
+            self.assertEqual(runner.call_count, 0, f"{name} ran for a misidentified harness")
+        error = caught.exception
+        self.assertEqual(error.error, "harness_identity_mismatch")
+        self.assertEqual(error.exit_code, 2)
+        self.assertEqual(
+            error.diagnostics,
+            {
+                "engine": "codex",
+                "identifiedHarness": "grok",
+                "selector": [str(binary)],
+                "configKey": "codex.binary",
+            },
+        )
+        for expected in ("codex", "grok", str(binary), "Refusing to launch"):
+            self.assertIn(expected, error.message)
+        # The refusal came from a real probe of the real binary, and that
+        # probe was the only thing the configured path was ever asked to do.
+        self.assertEqual(
+            [argv for argv in spawned if str(binary) in argv], [(str(binary), "--version")]
+        )
 
     def test_dry_run_never_executes_the_harness_binary(self):
         """Dry run promises no child runtime, and a version probe is one."""
