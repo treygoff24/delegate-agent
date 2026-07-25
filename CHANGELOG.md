@@ -15,11 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   by the run registry inside each source repository and that registry dies with
   the repository. The scan adds no catalog or persistent state: it reads each
   worktree's Git backlink directly, and treats a backlink whose target is gone
-  as the sole orphan signal. Pool orphans are reported and never removed, since
-  a missing source repository makes their uncommitted state impossible to
-  inspect; only empty pool directories are reclaimed. `--pool PATH` scans a
-  different pool root, which reaches pools stranded by an earlier
-  `worktrees.dataHome`.
+  as the sole orphan signal. The scan removes nothing at all, at any depth: a
+  missing source repository makes a worktree's uncommitted state impossible to
+  inspect, so orphans and empty pool directories alike are reported for
+  deliberate manual cleanup. `--pool PATH` scans a different pool root, which
+  reaches pools stranded by an earlier `worktrees.dataHome`.
 - `capabilities refresh` and `setup` now name each harness on stderr as it is
   probed, so a harness that hangs is identifiable rather than anonymous
   silence. Progress output is suppressed under `--json`.
@@ -33,13 +33,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `capabilities refresh`. The launch path now re-probes `--version` for the
   single harness it is about to use and compares it against the version already
   stored in the record. The check fails open: a probe that errors, times out, or
-  no longer identifies as that harness keeps the cached record, so a failing
-  probe can never prevent a launch. A cached selector whose binary no longer
-  exists is also treated as drift.
+  prints a banner nothing recognizes keeps the cached record, so a failing probe
+  can never prevent a launch. A banner that positively identifies a *different*
+  known harness is the exception and counts as drift, because running one
+  harness under another's capability metadata, argv, and safety policy is worse
+  than re-probing. Banners are read with escape sequences stripped, so a
+  colorized version line no longer freezes a record permanently. A cached
+  selector whose binary no longer exists is also treated as drift.
+- A dry run never probes the harness for its version. Dry run documents that it
+  neither launches a child runtime nor requires the real child binary, and the
+  drift probe is a child runtime; it now runs only on a real launch, leaving dry
+  run with the two filesystem-local checks.
 - A discovery cache carrying a newer schema than the running build is no longer
   discarded and overwritten. It is left intact while the run degrades to
   probing without persisting, so an older Delegate can no longer destroy a newer
-  cache.
+  cache. Losing that race mid-probe degrades the same way rather than failing the
+  command: `capabilities refresh` and `setup` report `cacheWriteSkipped` with
+  `wrote` false and exit successfully, since only persistence was lost.
 - The test suite no longer writes into the developer's real
   `~/.delegate/worktrees`. Tests exercising persistent-worktree runs created
   real pooled worktrees over temporary source repositories and orphaned them
