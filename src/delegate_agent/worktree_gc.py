@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import stat
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -574,25 +575,36 @@ def _source_root_from_backlink(gitdir: str) -> str | None:
     return gitdir[:marker] if marker > 0 else None
 
 
-def _paths_match(left: Path, right: Path) -> bool:
-    """Compare two paths that may be spelled differently but name the same place.
+def _paths_match(left: Path, right: Path) -> bool | None:
+    """Do two paths name the same place? None when that cannot be established.
 
-    ``samefile`` first, because string comparison of two spellings is wrong in
-    the dangerous direction here: a case-insensitive, bind-mounted, or network
-    filesystem can spell one file two ways, and a mismatch makes a healthy
-    worktree look orphaned. It needs both paths to exist, so string comparison
-    remains the fallback for the case where one of them does not.
+    ``samefile`` decides it, because string comparison of two spellings is wrong
+    in the dangerous direction here: a case-insensitive, bind-mounted, or network
+    filesystem can spell one file two ways, and a spurious mismatch makes a
+    healthy worktree look orphaned.
+
+    Only two answers are definite. Identical spellings match, and a ``samefile``
+    that completed answers on inode identity — including its refusal when one
+    side is simply not there, which is a real mismatch rather than a failure to
+    look. Every other outcome is a comparison that could not be performed: on the
+    filesystems where two spellings do name one file, ``samefile`` is the only
+    thing that can tell, so its failure leaves realpath equality able to confirm
+    a match but never to deny one.
     """
     if os.path.normpath(str(left)) == os.path.normpath(str(right)):
         return True
     try:
         return os.path.samefile(left, right)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
     except OSError:
         pass
     try:
-        return os.path.realpath(left) == os.path.realpath(right)
+        if os.path.realpath(left) == os.path.realpath(right):
+            return True
     except OSError:
-        return False
+        pass
+    return None
 
 
 def _admin_dir_serves_worktree(admin_dir: Path, worktree: Path) -> bool | None:
@@ -631,7 +643,16 @@ def _admin_dir_serves_worktree(admin_dir: Path, worktree: Path) -> bool | None:
     target = Path(recorded)
     if not target.is_absolute():
         target = admin_dir / target
-    return _paths_match(target, worktree / ".git") or _paths_match(target, worktree)
+    # Either spelling Git may have recorded proves the round trip. Short of a
+    # match, a comparison that could not be performed leaves the question open
+    # rather than answering it against the worktree.
+    pointer_match = _paths_match(target, worktree / ".git")
+    if pointer_match is True:
+        return True
+    directory_match = _paths_match(target, worktree)
+    if directory_match is True:
+        return True
+    return None if None in (pointer_match, directory_match) else False
 
 
 class PoolVerdict(NamedTuple):
@@ -693,8 +714,58 @@ def _unverifiable_worktree_warning(worktree: Path, detail: str) -> JsonObject:
     )
 
 
-def _classify_pool_worktree(worktree: Path) -> PoolVerdict:
-    """Classify one pooled worktree as an orphan, a warning, or neither.
+# Creating a persistent worktree is not one atomic act. Delegate makes the pool
+# parent, then `git worktree add` creates the worktree directory, writes its
+# `.git` pointer, and writes the admin directory's backfile as separate steps.
+# A pool walk that lands inside that window sees a directory whose metadata is
+# not there yet, which in a single observation is indistinguishable from one
+# whose repository was deleted months ago. The walk crosses every repository on
+# the machine, so it can neither see the creating process nor take a lock
+# against it; elapsed time is the only evidence it has.
+#
+# A worktree being born is seconds old, while a real orphan's absence is
+# permanent, so anything younger than this window is reported as unsettled
+# rather than classified. The margin is far wider than any checkout needs on
+# purpose: waiting defers a report until the next run, whereas judging too early
+# invites an operator to delete a live workspace by hand.
+POOL_SETTLE_SECONDS = 15 * 60
+
+
+def _unsettled_detail(path: Path) -> str | None:
+    """Why ``path`` is too recently changed to classify, or None once it settled.
+
+    Modification time is the signal because it is what creation moves: the
+    directory is stamped when it appears and again as each top-level entry lands
+    in it. Later writes only push it forward, which errs toward silence. A stat
+    that fails, or a timestamp ahead of the clock, establishes no elapsed time at
+    all and is treated the same as freshly changed.
+    """
+    try:
+        modified = os.stat(path).st_mtime
+    except OSError as error:
+        return f"its age could not be read ({error.strerror})"
+    age = time.time() - modified
+    if age >= POOL_SETTLE_SECONDS:
+        return None
+    if age < 0:
+        return "it was last modified in the future, so no age can be established"
+    return f"it was last modified {int(age)} seconds ago and may still be under construction"
+
+
+def _unsettled_warning(path: Path, reason: str, detail: str) -> JsonObject:
+    return _pool_warning(
+        path,
+        reason,
+        (
+            f"{path}: {detail}, so it is not classified yet "
+            f"(a pool entry must be unchanged for {POOL_SETTLE_SECONDS} seconds "
+            "to rule out a worktree still being created). Re-run the scan later."
+        ),
+    )
+
+
+def _judge_pool_worktree(worktree: Path) -> PoolVerdict:
+    """Read one pooled worktree's metadata and say what it shows.
 
     The orphan predicate is "this worktree's Git admin directory no longer
     serves it". It is safe to apply across repositories because git refuses to
@@ -735,6 +806,24 @@ def _classify_pool_worktree(worktree: Path) -> PoolVerdict:
         else "source_root_missing"
     )
     return PoolVerdict(orphan=_pool_orphan_entry(worktree, backlink.gitdir, source_root, reason))
+
+
+def _classify_pool_worktree(worktree: Path) -> PoolVerdict:
+    """Classify one pooled worktree, refusing to judge one that may be mid-creation.
+
+    Every orphan verdict rests on metadata being absent, and absence only counts
+    once it has settled: the same reading taken seconds into ``git worktree add``
+    describes a worktree that becomes healthy moments later. The age check runs
+    only against a verdict that would accuse, since a worktree whose metadata
+    reads back healthy is healthy however new it is.
+    """
+    verdict = _judge_pool_worktree(worktree)
+    if verdict.orphan is None:
+        return verdict
+    unsettled = _unsettled_detail(worktree)
+    if unsettled is None:
+        return verdict
+    return PoolVerdict(warning=_unsettled_warning(worktree, "worktree_unsettled", unsettled))
 
 
 POOL_ROOT_PROBLEM_MESSAGES = {
@@ -791,6 +880,12 @@ def scan_worktree_pool(data_home: Path, *, required: bool = False) -> JsonObject
     as Delegate's; the root may be any path the caller passed, and a report that
     an operator acts on by hand must never describe a stranger's directory.
 
+    Nothing changed within the last ``POOL_SETTLE_SECONDS`` is called an orphan
+    or an empty directory, because worktree creation writes the directory before
+    its metadata and this walk runs in a different process from the one creating
+    it. Those entries are reported as unsettled warnings and judged on a later
+    run instead.
+
     ``required`` marks a root the caller named explicitly, where an unusable
     path is a mistake worth failing on — including one that becomes unusable
     between the check and the walk. The configured root is not required: it
@@ -838,9 +933,20 @@ def scan_worktree_pool(data_home: Path, *, required: bool = False) -> JsonObject
                         )
                     )
                 else:
-                    empty_dirs.append(
-                        {"fingerprint": fingerprint.path.name, "path": str(fingerprint.path)}
-                    )
+                    # Delegate makes this directory before `git worktree add`
+                    # fills it, so a brand-new empty one is the first half of a
+                    # worktree, not a leftover.
+                    unsettled = _unsettled_detail(fingerprint.path)
+                    if unsettled is not None:
+                        warnings.append(
+                            _unsettled_warning(
+                                fingerprint.path, "fingerprint_dir_unsettled", unsettled
+                            )
+                        )
+                    else:
+                        empty_dirs.append(
+                            {"fingerprint": fingerprint.path.name, "path": str(fingerprint.path)}
+                        )
                 continue
             for worktree in fingerprint.worktrees:
                 scanned += 1
