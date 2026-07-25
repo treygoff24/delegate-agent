@@ -1063,6 +1063,47 @@ class EngineArgvTests(CommandTestBase):
         )
         self.assertTrue(any("JSON-only final message" in warning for warning in request.warnings))
 
+    def test_normalized_output_schema_preserves_property_order(self):
+        # Property order drives generation order under strict structured output,
+        # so a think-before-answer schema must not be alphabetized.
+        with tempfile.TemporaryDirectory() as tmp:
+            schema = Path(tmp) / "schema.json"
+            schema.write_text(
+                json.dumps(
+                    {
+                        "type": "object",
+                        "properties": {
+                            "reasoning": {"type": "string"},
+                            "answer": {"type": "string"},
+                        },
+                        "required": ["reasoning", "answer"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            task = Path(tmp) / "task.json"
+            task.write_text(
+                json.dumps(
+                    {
+                        "engine": "codex",
+                        "mode": "safe",
+                        "cwd": tmp,
+                        "outputSchema": str(schema),
+                        "prompt": "review",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            parsed = self.delegate.ParsedCommand(
+                "run",
+                global_options=self.delegate.GlobalOptions(json_mode=True),
+                run_json=self.delegate.RunJsonOptions(str(task)),
+            )
+            request = self.delegate.request_from_input_json(parsed, self.delegate.DEFAULT_CONFIG)
+        assert request.output_schema_text is not None
+        emitted = json.loads(request.output_schema_text)
+        self.assertEqual(list(emitted["properties"]), ["reasoning", "answer"])
+
     def test_request_from_input_json_rejects_output_schema_for_non_codex(self):
         with tempfile.TemporaryDirectory() as tmp:
             schema = Path(tmp) / "schema.json"
@@ -1225,11 +1266,20 @@ class EngineArgvTests(CommandTestBase):
         self.assertIn("literal-model", model_ids)
         self.assertNotIn("implicit-model", model_ids)
 
-        with mock.patch.object(
-            self.delegate.profiles,
-            "resolve_active_profile",
-            wraps=self.delegate.profiles.resolve_active_profile,
-        ) as resolve:
+        with (
+            mock.patch.object(
+                self.delegate.profiles,
+                "resolve_active_profile",
+                wraps=self.delegate.profiles.resolve_active_profile,
+            ) as resolve,
+            # This fixture's selector cannot resolve in the test environment;
+            # drift exclusion is covered separately and is not what this asserts.
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "selector_has_drifted",
+                return_value=False,
+            ),
+        ):
             caps_code, caps_out, caps_err = self.run_main(["--json", "capabilities"])
         self.assertEqual(caps_code, 0, caps_err)
         resolve.assert_called_once()

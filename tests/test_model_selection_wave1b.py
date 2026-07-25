@@ -545,17 +545,14 @@ class CursorModelOverrideTests(CommandTestBase):
         self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
         self.assertIn("low, max", ctx.exception.message)
 
-    def test_pinned_cursor_without_route_evidence_fails_closed(self):
+    def test_pinned_cursor_without_route_evidence_warns_and_proceeds(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
-        with (
-            mock.patch.object(
-                self.delegate.harness_discovery,
-                "load_discovery_cache",
-                return_value=self._cursor_route_discovery(),
-            ),
-            self.assertRaises(self.delegate.DelegateError) as ctx,
+        with mock.patch.object(
+            self.delegate.harness_discovery,
+            "load_discovery_cache",
+            return_value=self._cursor_route_discovery(),
         ):
-            self.build_git_request(
+            request = self.build_git_request(
                 "cursor",
                 "safe",
                 None,
@@ -566,29 +563,30 @@ class CursorModelOverrideTests(CommandTestBase):
                 reasoning_effort="max",
                 model_override="composer-2.5",
             )
-        self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
-        self.assertIn("composer-2.5", ctx.exception.message)
-        self.assertIn("max", ctx.exception.message)
+        self.assertEqual(request.model, "composer-2.5")
+        self.assertIsNone(request.reasoning_effort)
+        self.assertTrue(any("bypassed by the pinned model" in w for w in request.warnings))
 
     def test_unrelated_config_mapping_does_not_override_explicit_model_pin(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
         config["cursor"]["reasoningEffortModels"] = {"high": "sonnet-4-thinking"}
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.build_git_request(
-                "cursor",
-                "safe",
-                None,
-                "/repo",
-                "hello",
-                config,
-                True,
-                reasoning_effort="high",
-                model_override="pinned-cursor-model",
-            )
-        self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
-        self.assertIn("pinned-cursor-model", ctx.exception.message)
+        request = self.build_git_request(
+            "cursor",
+            "safe",
+            None,
+            "/repo",
+            "hello",
+            config,
+            True,
+            reasoning_effort="high",
+            model_override="pinned-cursor-model",
+        )
+        self.assertEqual(request.model, "pinned-cursor-model")
+        _assert_argv_has_model(self, request.argv, "pinned-cursor-model")
+        self.assertNotIn("sonnet-4-thinking", request.argv)
+        self.assertTrue(any("bypassed by the pinned model" in w for w in request.warnings))
 
-    def test_cli_model_and_effort_without_exact_route_fail_closed(self):
+    def test_cli_model_and_effort_without_exact_route_warn_and_proceed(self):
         repo = make_git_repo(with_commit=True)
         self.addCleanup(repo.cleanup)
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
@@ -607,12 +605,11 @@ class CursorModelOverrideTests(CommandTestBase):
                 "review",
             ]
         )
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
-        self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
-        self.assertIn("pinned-cursor-model", ctx.exception.message)
+        request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+        self.assertEqual(request.model, "pinned-cursor-model")
+        self.assertTrue(any("bypassed by the pinned model" in w for w in request.warnings))
 
-    def test_config_sourced_effort_with_pin_degrades_and_warns(self):
+    def test_config_sourced_effort_with_pin_bypasses_routing_and_warns(self):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
         config["cursor"]["defaultReasoningEffort"] = "high"
         config["cursor"]["reasoningEffortModels"] = {"high": "sonnet-4-thinking"}
@@ -628,7 +625,7 @@ class CursorModelOverrideTests(CommandTestBase):
         )
         self.assertEqual(request.model, "pinned-cursor-model")
         self.assertIsNone(request.reasoning_effort)
-        self.assertTrue(any("defaultReasoningEffort" in w for w in request.warnings))
+        self.assertTrue(any("bypassed by the pinned model" in w for w in request.warnings))
 
     def test_input_json_model_override_honored(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -655,7 +652,7 @@ class CursorModelOverrideTests(CommandTestBase):
             self.assertEqual(request.model, "input-json-cursor")
             _assert_argv_has_model(self, request.argv, "input-json-cursor")
 
-    def test_input_json_model_and_effort_without_exact_route_fail_closed(self):
+    def test_input_json_model_and_effort_without_exact_route_warn_and_proceed(self):
         with tempfile.TemporaryDirectory() as tmp:
             task = Path(tmp) / "task.json"
             task.write_text(
@@ -678,10 +675,9 @@ class CursorModelOverrideTests(CommandTestBase):
             )
             config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
             config["cursor"]["reasoningEffortModels"] = {"high": "sonnet-4-thinking"}
-            with self.assertRaises(self.delegate.DelegateError) as ctx:
-                self.delegate.request_from_input_json(parsed, config)
-            self.assertEqual(ctx.exception.error, "unsupported_reasoning_effort")
-            self.assertIn("input-json-cursor", ctx.exception.message)
+            request = self.delegate.request_from_input_json(parsed, config)
+            self.assertEqual(request.model, "input-json-cursor")
+            self.assertTrue(any("bypassed by the pinned model" in w for w in request.warnings))
 
     def test_input_json_model_no_longer_must_match_default(self):
         with tempfile.TemporaryDirectory() as tmp:

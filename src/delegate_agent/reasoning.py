@@ -58,12 +58,9 @@ BUNDLED_REASONING_CAPABILITIES: dict[str, dict[str, ReasoningDeclaration]] = {
         "glm-5.1": {"supported": ("off", "high"), "default": "high"},
         "minimax-m2.7": {"supported": ("high",), "default": "high"},
     },
-    "grok": {
-        "grok-4.5": {
-            "supported": ("low", "medium", "high"),
-            "default": "high",
-        },
-    },
+    # No grok rows: `grok --help` enumerates no per-model efforts, so any
+    # bundled declaration would narrow GROK_NATIVE_EFFORTS without evidence.
+    # Grok model facts must come from config, discovery, or the cache.
 }
 
 # Argv builders compare a capability's transport against these constants, so
@@ -82,7 +79,8 @@ PI_NATIVE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 PI_THINKING_LEVELS = ("off", "minimal", *PI_NATIVE_EFFORTS)
 INSPECT_REASONING_DISCOVERY_HINT = (
     "Inspect `delegate --json models --summary` or "
-    "`delegate --json capabilities` for reasoning-effort support."
+    "`delegate --json capabilities` for reasoning-effort support; "
+    "run `delegate capabilities refresh` if that data is stale or missing."
 )
 KIMI_UNSUPPORTED_REASONING_WARNING = "reasoning effort is not supported for kimi."
 DEVIN_UNSUPPORTED_REASONING_WARNING = "reasoning effort is not supported for devin."

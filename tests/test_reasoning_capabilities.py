@@ -323,8 +323,8 @@ class ReasoningCapabilityTests(unittest.TestCase):
         self.assertEqual(grok["transport"], "grok-effort-flag")
         self.assertEqual(grok["source"], "harness-compatibility")
         self.assertEqual(grok["supported"], ["low", "medium", "high", "xhigh", "max"])
-        self.assertEqual(grok["models"]["grok-4.5"]["supported"], ["low", "medium", "high"])
-        self.assertEqual(grok["models"]["grok-4.5"]["source"], "bundled")
+        # No bundled grok rows: nothing may narrow the harness enum without evidence.
+        self.assertEqual(grok["models"], {})
 
     def test_cursor_capabilities_aggregate_efforts_by_model(self):
         payload = build_reasoning_capabilities_payload(
@@ -821,24 +821,23 @@ class ReasoningCapabilityTests(unittest.TestCase):
         self.assertEqual(capability.source, "config")
         self.assertEqual(capability.evidence, "exact")
 
-    def test_grok_exact_bundle_precedes_harness_compatibility(self):
-        with self.assertRaises(ReasoningCapabilityError):
-            resolve_grok_reasoning_capability(
-                model="grok-4.5",
-                requested_effort="xhigh",
-                config={},
-                discovery=None,
-            )
-        capability, warnings = resolve_grok_reasoning_capability(
-            model="future-grok",
-            requested_effort="xhigh",
-            config={},
-            discovery=None,
-        )
-        assert capability is not None
-        self.assertEqual(capability.source, "harness-compatibility")
-        self.assertEqual(capability.evidence, "harness")
-        self.assertTrue(warnings)
+    def test_grok_full_native_enum_available_without_discovery(self):
+        # Regression: a bundled grok row once narrowed the harness enum to
+        # low/medium/high, so a configured defaultModel broke `xhigh`/`max`
+        # while an unset one worked.
+        for effort in ("xhigh", "max"):
+            with self.subTest(effort=effort):
+                capability, warnings = resolve_grok_reasoning_capability(
+                    model="grok-4.5",
+                    requested_effort=effort,
+                    config={},
+                    discovery=None,
+                )
+                assert capability is not None
+                self.assertEqual(capability.effort, effort)
+                self.assertEqual(capability.source, "harness-compatibility")
+                self.assertEqual(capability.evidence, "harness")
+                self.assertTrue(warnings)
 
     def test_grok_manual_exact_declaration_precedes_compatibility(self):
         config = {
@@ -855,7 +854,7 @@ class ReasoningCapabilityTests(unittest.TestCase):
         self.assertEqual(capability.evidence, "exact")
         self.assertEqual(warnings, ())
 
-    def test_grok_non_exact_discovery_does_not_suppress_bundled_exact_model(self):
+    def test_grok_non_exact_discovery_does_not_suppress_cached_exact_model(self):
         discovery = {
             "harnesses": {
                 "grok": {
@@ -865,13 +864,25 @@ class ReasoningCapabilityTests(unittest.TestCase):
                 }
             }
         }
+        cache = {"harnesses": {"grok": {"models": {"grok-4.5": {"supported": ["low", "high"]}}}}}
         with self.assertRaises(ReasoningCapabilityError):
             resolve_grok_reasoning_capability(
                 model="grok-4.5",
                 requested_effort="xhigh",
                 config={},
                 discovery=discovery,
+                cache=cache,
             )
+        capability, warnings = resolve_grok_reasoning_capability(
+            model="grok-4.5",
+            requested_effort="high",
+            config={},
+            discovery=discovery,
+            cache=cache,
+        )
+        assert capability is not None
+        self.assertEqual(capability.source, "cache")
+        self.assertEqual(warnings, ())
 
     def test_non_exact_discovery_does_not_suppress_generic_fallback(self):
         discovery = {

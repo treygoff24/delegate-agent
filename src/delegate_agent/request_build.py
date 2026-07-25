@@ -407,15 +407,16 @@ def _preflight_codex_output_schema(
     warnings = (
         (
             (
-                "Codex strict schema: auto-injected additionalProperties=false at "
-                + ", ".join(injected)
-                + "."
+                "Codex strict schema: auto-injected strict-mode requirements "
+                "(additionalProperties=false and/or full required) at " + ", ".join(injected) + "."
             ),
         )
         if injected
         else ()
     )
-    return json.dumps(normalized, sort_keys=True), warnings
+    # Property order drives generation order under strict structured output, so
+    # the normalized schema must keep the author's key order.
+    return json.dumps(normalized), warnings
 
 
 def _validate_output_schema_mode(engine: str, mode: str, output_schema: object) -> None:
@@ -1767,19 +1768,12 @@ def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     # that exact selector family. Without a pin, the user's configured routing
     # map remains authoritative over observed routes.
     if build.requested_effort is not None and pinned is not None and not discovered_routes:
-        error = DelegateError(
-            "unsupported_reasoning_effort",
-            reasoning.format_explicit_reasoning_effort_error(
-                harness="cursor",
-                alias=build.model_alias,
-                model=pinned,
-                effort=build.requested_effort,
-                detail="has no authoritative discovered route family for the pinned model",
-            ),
+        # No route family for the pinned selector — most installs have no
+        # discovery snapshot at all — so the pin wins and routing is bypassed.
+        warnings.append(
+            "cursor reasoning-effort routing was bypassed by the pinned model; "
+            "proceeding with the explicit model selection."
         )
-        if build.effort_source != "config":
-            raise error
-        warnings.append(f"ignoring cursor.defaultReasoningEffort: {error.message}")
         model = pinned
         capability_model_source = "explicit"
     elif (
