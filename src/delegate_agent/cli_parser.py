@@ -66,7 +66,7 @@ VALUE_GLOBAL_OPTIONS = frozenset(
 )
 
 AUTH_PROFILE_SUBCOMMANDS = frozenset(KNOWN_ENGINES) | frozenset(
-    {"dry-run", "run", "profiles", "capabilities"}
+    {"dry-run", "run", "profiles", "models", "capabilities", "setup"}
 )
 GROUP_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 GROUP_SUBCOMMANDS = frozenset(KNOWN_ENGINES) | frozenset({"dry-run", "run"})
@@ -240,16 +240,22 @@ def parse_capabilities_subcommand(
     if any(command_help.is_help_token(token) for token in rest):
         return help_command(json_mode, "capabilities")
     refresh = False
-    if rest == ["refresh"]:
+    engines: tuple[str, ...] | None = None
+    if rest and rest[0] == "refresh":
         refresh = True
+        requested = rest[1:]
+        if has_misplaced_global_option(requested):
+            raise_misplaced_global_option("Global options must appear before the subcommand.")
+        for engine in requested:
+            if engine not in KNOWN_ENGINES:
+                raise DelegateError(
+                    "invalid_engine",
+                    f"engine must be {ENGINES_PROSE}.",
+                )
+        if requested:
+            engines = tuple(dict.fromkeys(requested))
     elif rest:
         require_no_extra(rest, "capabilities")
-    if auth_profile is not None and not refresh:
-        raise DelegateError(
-            "invalid_option_combination",
-            "--auth-profile is only supported with capabilities refresh; "
-            "the cached capabilities report does not spawn a harness.",
-        )
     return ParsedCommand(
         "capabilities",
         global_options=GlobalOptions(
@@ -262,6 +268,7 @@ def parse_capabilities_subcommand(
         ),
         capabilities=capability_commands.CapabilitiesCommand(
             refresh=refresh,
+            engines=engines,
             json_mode=json_mode,
         ),
     )
@@ -322,6 +329,32 @@ def parse_config_subcommand(
             force=force,
             json_mode=json_mode,
         ),
+    )
+
+
+def parse_setup_subcommand(
+    rest: list[str],
+    *,
+    json_mode: bool,
+    cwd: str | None,
+    pass_through: bool,
+    completion_report: str | None,
+    isolation: str | None,
+    auth_profile: str | None,
+) -> ParsedCommand:
+    rest, json_mode = consume_json_option(rest, json_mode)
+    if cwd is not None or pass_through or completion_report is not None or isolation is not None:
+        raise DelegateError(
+            "invalid_option_combination",
+            "delegate setup does not use --cwd, --isolation, --pass-through, or "
+            "completion-report options.",
+        )
+    if any(command_help.is_help_token(token) for token in rest):
+        return help_command(json_mode, "setup")
+    require_no_extra(rest, "setup")
+    return ParsedCommand(
+        "setup",
+        global_options=GlobalOptions(json_mode=json_mode, auth_profile=auth_profile),
     )
 
 
@@ -424,7 +457,8 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
         raise DelegateError(
             "invalid_option_combination",
             f"--auth-profile is not supported with delegate {subcommand}; "
-            "use it with launches, dry-run, run --input-json, profiles, or capabilities refresh.",
+            "use it with launches, dry-run, run --input-json, profiles, models, capabilities, "
+            "or setup.",
         )
     if group is not None and subcommand not in GROUP_SUBCOMMANDS:
         raise DelegateError(
@@ -459,6 +493,16 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
         )
     if subcommand == "config":
         return parse_config_subcommand(
+            rest,
+            json_mode=json_mode,
+            cwd=cwd,
+            pass_through=pass_through,
+            completion_report=completion_report,
+            isolation=isolation,
+            auth_profile=auth_profile,
+        )
+    if subcommand == "setup":
+        return parse_setup_subcommand(
             rest,
             json_mode=json_mode,
             cwd=cwd,
@@ -504,6 +548,8 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
         return parse_snapshot(rest, json_mode, cwd)
     if subcommand == "runs":
         return parse_runs(rest, json_mode, cwd)
+    if subcommand == "ps":
+        return parse_ps(rest, json_mode, cwd)
     if subcommand == "run-output":
         return parse_run_output(rest, json_mode, cwd)
     if subcommand == "wait":
@@ -1342,8 +1388,16 @@ def parse_snapshot(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedC
     )
 
 
-def parse_runs(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
+def parse_runs(
+    rest: list[str],
+    json_mode: bool,
+    cwd: str | None,
+    *,
+    command_label: str = "runs",
+) -> ParsedCommand:
     # Help wins over flags: a help token anywhere is help.
+    # ``command_label`` names the command the user actually typed so delegating
+    # front-ends (ps) do not report errors against flags nobody entered.
     rest, json_mode = consume_json_option(rest, json_mode)
     if any(command_help.is_help_token(token) for token in rest):
         return help_command(json_mode, "runs")
@@ -1375,18 +1429,22 @@ def parse_runs(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedComma
             continue
         if token == "--harness":
             if i + 1 >= len(rest):
-                raise DelegateError("missing_harness", "runs --harness requires a harness name.")
+                raise DelegateError(
+                    "missing_harness", f"{command_label} --harness requires a harness name."
+                )
             harness = rest[i + 1]
             if harness not in KNOWN_ENGINES:
                 raise DelegateError(
                     "invalid_harness",
-                    f"runs --harness must be one of {', '.join(KNOWN_ENGINES)}.",
+                    f"{command_label} --harness must be one of {', '.join(KNOWN_ENGINES)}.",
                 )
             i += 2
             continue
         if token == "--group":
             if i + 1 >= len(rest):
-                raise DelegateError("missing_group", "runs --group requires a group name.")
+                raise DelegateError(
+                    "missing_group", f"{command_label} --group requires a group name."
+                )
             group = validate_group(rest[i + 1])
             i += 2
             continue
@@ -1394,12 +1452,12 @@ def parse_runs(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedComma
             limit, i = parse_required_positive_int_option(
                 rest,
                 i,
-                option_label="runs --limit",
+                option_label=f"{command_label} --limit",
                 missing_error="missing_limit",
                 invalid_error="invalid_limit",
             )
             continue
-        raise DelegateError("unknown_option", f"runs does not support option: {token}")
+        raise DelegateError("unknown_option", f"{command_label} does not support option: {token}")
     selected_modes = [
         label
         for label, selected in (
@@ -1413,7 +1471,7 @@ def parse_runs(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedComma
     if len(selected_modes) > 1:
         raise DelegateError(
             "invalid_option_combination",
-            f"runs filters are mutually exclusive: {', '.join(selected_modes)}.",
+            f"{command_label} filters are mutually exclusive: {', '.join(selected_modes)}.",
         )
     return ParsedCommand(
         "runs",
@@ -1428,6 +1486,22 @@ def parse_runs(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedComma
             json_mode=json_mode,
         ),
     )
+
+
+def parse_ps(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
+    rest, json_mode = consume_json_option(rest, json_mode)
+    if any(command_help.is_help_token(token) for token in rest):
+        return help_command(json_mode, "ps")
+    conflicting = [token for token in rest if token in {"--running", "--stale", "--recent"}]
+    if conflicting:
+        raise DelegateError(
+            "invalid_option_combination",
+            f"delegate ps always shows active runs; use delegate runs {conflicting[0]} instead.",
+        )
+    filtered = [token for token in rest if token != "--active"]
+    parsed = parse_runs(["--active", *filtered], json_mode, cwd, command_label="ps")
+    parsed.subcommand = "ps"
+    return parsed
 
 
 def parse_run_output(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:

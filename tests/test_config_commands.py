@@ -56,6 +56,10 @@ class ConfigCommandTests(unittest.TestCase):
         self.assertEqual(personal_config["profiles"]["default"], "personal")
         self.assertIn(str(work_path), payload["profileConfigs"]["created"])
         self.assertIn(str(personal_path), payload["profileConfigs"]["created"])
+        self.assertEqual(
+            payload["nextAction"],
+            "Run delegate setup for automatic harness discovery.",
+        )
 
     def test_config_sync_profiles_materializes_missing_overlays_only(self):
         with tempfile.TemporaryDirectory() as home:
@@ -133,6 +137,16 @@ class ConfigCommandTests(unittest.TestCase):
 
         self.assertEqual(code, self.delegate.EXIT_USAGE, stderr)
         self.assertEqual(payload["error"], "config_exists")
+
+    def test_config_init_text_recommends_setup(self):
+        with tempfile.TemporaryDirectory() as home:
+            code, stdout, stderr = self.run_main(
+                ["config", "init"],
+                env={"HOME": home, "PATH": os.environ.get("PATH", "")},
+            )
+
+        self.assertEqual(code, self.delegate.EXIT_OK, stderr)
+        self.assertIn("run delegate setup for automatic harness discovery", stdout)
 
     def test_config_init_honors_delegate_config_with_force(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -212,6 +226,8 @@ class LauncherShimTests(unittest.TestCase):
                 ["worktree", "remove", "cursor-1"],
                 ["worktree", "prune"],
                 ["capabilities", "refresh"],
+                ["models", "codex", "--live"],
+                ["models", "--live", "codex"],
                 # A refresh positional after a flag must still be caught, not just $1.
                 ["capabilities", "--verbose", "refresh"],
                 # Bare `list` is not a documented top-level subcommand (the Python
@@ -236,14 +252,24 @@ class LauncherShimTests(unittest.TestCase):
             for argv in (
                 ["profiles"],
                 ["runs"],
+                ["ps"],
                 ["run-output", "codex-1"],
                 ["describe"],
                 ["models"],
+                ["models", "codex"],
+                ["models", "codex", "--live", "--help"],
+                ["models", "codex", "--help", "--live"],
                 ["snapshot", "codex-1"],
                 ["capabilities"],
                 ["capabilities", "--json"],
+                ["capabilities", "refresh", "--help"],
+                ["capabilities", "--help", "refresh"],
                 ["worktree", "show", "cursor-1"],
                 ["worktree", "list"],
+                ["cursor", "--help"],
+                ["cursor", "safe", "--help"],
+                ["droid", "opus", "safe", "-h"],
+                ["dry-run", "codex", "safe", "--help"],
             ):
                 with self.subTest(argv=argv):
                     result = self.run_shim(argv, env=env)
@@ -254,6 +280,22 @@ class LauncherShimTests(unittest.TestCase):
                     self.assertIsNone(payload["delegateConfig"])
                     self.assertIn("continuing because", result.stderr)
                     self.assertIn("read-only", result.stderr)
+
+    def test_help_inside_launch_prompt_cannot_bypass_missing_profile_guard(self):
+        with tempfile.TemporaryDirectory() as home:
+            probe = self.write_probe(Path(home))
+            env = self.shim_env(home, probe, "work")
+            for argv in (
+                ["cursor", "safe", "inspect", "--help"],
+                ["codex", "work", "please inspect -h"],
+                ["droid", "opus", "safe", "review", "-h"],
+                ["dry-run", "kimi", "safe", "explain", "--help"],
+            ):
+                with self.subTest(argv=argv):
+                    result = self.run_shim(argv, env=env)
+                    self.assertEqual(result.returncode, 1)
+                    self.assertEqual(result.stdout, "")
+                    self.assertIn("refusing to run a launch or mutation command", result.stderr)
 
     def test_missing_personal_profile_launch_still_fails_closed(self):
         with tempfile.TemporaryDirectory() as home:
@@ -368,6 +410,23 @@ class ProfileGuardCliTests(unittest.TestCase):
         json.loads(allow_stdout)  # capabilities still produced its normal payload
         self.assertIn("continuing because 'capabilities' is read-only", allow_stderr)
 
+    def test_guard_blocks_live_models_but_allows_cached_models(self):
+        with tempfile.TemporaryDirectory() as home:
+            env = self.base_env(home, profile="work")
+            block_code, block_stdout, block_stderr = self.run_main(
+                ["models", "codex", "--live"], env=env
+            )
+            allow_code, allow_stdout, allow_stderr = self.run_main(
+                ["--json", "models", "codex"], env=env
+            )
+
+        self.assertEqual(block_code, self.delegate.EXIT_USAGE)
+        self.assertEqual(block_stdout, "")
+        self.assertIn("refusing to run a launch or mutation command", block_stderr)
+        self.assertEqual(allow_code, self.delegate.EXIT_OK, allow_stderr)
+        self.assertEqual(json.loads(allow_stdout)["engine"], "codex")
+        self.assertIn("continuing because 'models' is read-only", allow_stderr)
+
     def test_guard_allows_read_only_commands_with_warning_when_profile_config_missing(self):
         with tempfile.TemporaryDirectory() as home:
             env = self.base_env(home, profile="work")
@@ -381,6 +440,16 @@ class ProfileGuardCliTests(unittest.TestCase):
             "Launch and mutation commands remain blocked until the profile config exists",
             stderr,
         )
+
+    def test_guard_allows_ps_alias_with_warning(self):
+        with tempfile.TemporaryDirectory() as home:
+            env = self.base_env(home, profile="work")
+            code, stdout, stderr = self.run_main(["--json", "--cwd", home, "ps"], env=env)
+
+        self.assertEqual(code, self.delegate.EXIT_OK, stderr)
+        json.loads(stdout)
+        self.assertNotIn("refusing to run a launch or mutation command", stderr)
+        self.assertIn("continuing because 'ps' is read-only", stderr)
 
     def test_guard_allows_worktree_list_with_warning(self):
         # An empty tmp cwd has no run registry at all, so worktree list still

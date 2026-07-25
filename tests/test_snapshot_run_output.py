@@ -109,6 +109,17 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
         self.assertEqual(len(lines), 1)
         self.assertIn(active_alias, lines[0])
 
+    def test_ps_lists_active_runs(self):
+        self.write_run(status="succeeded", pid=None)
+        _, active_alias = self.write_run()
+        stdout = io.StringIO()
+
+        code = self.delegate.main(["--cwd", str(self.workspace), "ps"], stdout=stdout)
+
+        self.assertEqual(code, 0)
+        self.assertIn("mode: active", stdout.getvalue())
+        self.assertIn(active_alias, stdout.getvalue())
+
     def test_runs_running_and_stale_filters_split_effective_status(self):
         self.write_run(status="succeeded", pid=None)
         _, running_alias = self.write_run()

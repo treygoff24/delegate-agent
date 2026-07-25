@@ -184,10 +184,12 @@ def build_run_summary(
     # way snapshot_view does, deduping to avoid repeating the same warning across
     # channels.
     warnings: list[str] = list(large_log_warnings(stdout_bytes, stderr_bytes))
-    if isinstance(state, dict):
-        state_warnings = state.get("warnings")
-        if isinstance(state_warnings, list):
-            for warning in state_warnings:
+    for source in (manifest, state):
+        if isinstance(source, dict):
+            source_warnings = source.get("warnings")
+            if not isinstance(source_warnings, list):
+                continue
+            for warning in source_warnings:
                 if isinstance(warning, str) and warning not in warnings:
                     warnings.append(warning)
     summary: JsonObject = {
@@ -210,6 +212,8 @@ def build_run_summary(
             "terminalEvent",
             "terminalStatus",
             "failureReason",
+            "error",
+            "message",
             "pgid",
             "completionReportWritten",
             "completionReportSource",

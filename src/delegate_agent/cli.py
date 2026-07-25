@@ -16,6 +16,7 @@ from delegate_agent import (
     command_errors,
     command_help,  # noqa: F401  # re-exported for tests / back-compat
     config_commands,
+    harness_discovery,
     inspection_commands,
     profile_commands,
     profile_guard,
@@ -25,6 +26,7 @@ from delegate_agent import (
     run_metadata,
     run_output_commands,
     run_registry,
+    setup_commands,
     wait_cancel_commands,
     worktree_commands,
     worktree_execution,
@@ -310,6 +312,7 @@ def dry_run_payload(request: Request) -> JsonObject:
         "promptTransport": request.prompt_transport,
         "promptInstructionMode": request.prompt_instruction_mode,
     }
+    run_metadata.add_model_payload_fields(payload, request)
     reasoning.add_reasoning_payload_fields(payload, request)
     run_metadata.add_speed_payload_fields(payload, request)
     if request.warnings:
@@ -548,6 +551,9 @@ def make_run_context(
         started_at=run_registry.utc_now_iso(),
         model_alias=request.model_alias,
         model_resolved=request.model,
+        model_requested=request.model_requested,
+        capability_model=request.capability_model,
+        capability_model_source=request.capability_model_source,
         creation_context=creation_context,
         source_git_root=source_git_root,
         isolation_mode=isolation_mode,
@@ -558,8 +564,10 @@ def make_run_context(
         safe_workspace_method=safe_workspace_method,
         warnings=(*warnings, *request.warnings),
         reasoning_effort=request.reasoning_effort,
+        requested_reasoning_effort=request.requested_reasoning_effort,
         reasoning_effort_source=request.reasoning_effort_source,
         reasoning_capability_source=request.reasoning_capability_source,
+        reasoning_capability_evidence=request.reasoning_capability_evidence,
         reasoning_transport=request.reasoning_transport,
         fast=request.fast,
         prompt_transport=request.prompt_transport,
@@ -703,6 +711,8 @@ def execute_request(
                         prompt_file_placeholder=PROMPT_FILE_ARG_PLACEHOLDER,
                         agent_config_text=request.agent_config_text,
                         agent_config_placeholder=DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
+                        output_schema_text=request.output_schema_text,
+                        output_schema_path=request.output_schema,
                         manifest_argv=public_argv(request),
                         progress=False,
                         timeout=request.timeout,
@@ -729,6 +739,8 @@ def execute_request(
                     prompt_file_placeholder=PROMPT_FILE_ARG_PLACEHOLDER,
                     agent_config_text=request.agent_config_text,
                     agent_config_placeholder=DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
+                    output_schema_text=request.output_schema_text,
+                    output_schema_path=request.output_schema,
                     env_overrides=request.env_overrides,
                     read_only=request.call_read_only,
                     pure=request.pure,
@@ -769,6 +781,7 @@ def execute_request(
                     "stderrBytes": result.stderr_bytes,
                     "durationMs": result.duration_ms,
                 }
+                run_metadata.add_model_payload_fields(payload, request)
                 if request.engine in {"pi", "omp"}:
                     # Keep the established call-mode `text` field while giving
                     # Pi-family engines the same assistantText contract as tracked modes.
@@ -793,6 +806,8 @@ def execute_request(
                     }
                     if result.stderr_tail:
                         payload["stderrTail"] = result.stderr_tail
+                if result.codex_thread_fallback is not None:
+                    payload["codexThreadFallback"] = result.codex_thread_fallback
                 reasoning.add_reasoning_payload_fields(payload, request)
                 run_metadata.add_speed_payload_fields(payload, request)
                 if result.exit_code != 0:
@@ -940,6 +955,8 @@ def execute_request(
                 prompt_file_placeholder=PROMPT_FILE_ARG_PLACEHOLDER,
                 agent_config_text=isolated_request.agent_config_text,
                 agent_config_placeholder=DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
+                output_schema_text=isolated_request.output_schema_text,
+                output_schema_path=isolated_request.output_schema,
                 manifest_argv=public_argv(isolated_request),
                 progress=isolated_request.progress,
                 progress_initial_delay_sec=isolated_request.progress_initial_delay_sec,
@@ -1065,6 +1082,12 @@ def main(
             return EXIT_OK
         if parsed.subcommand == "config":
             return emit_config_command(parsed, stdout)
+        if parsed.subcommand == "setup":
+            return setup_commands.emit(
+                json_mode=global_options.json_mode,
+                auth_profile_override=global_options.auth_profile,
+                stdout=stdout,
+            )
 
         # For run --input-json, pre-read the JSON to discover config from the
         # JSON-resolved workspace before loading/finalizing config.
@@ -1095,6 +1118,22 @@ def main(
             config, source = load_config(workspace=config_workspace)
             validate_config(config)
 
+        discovery_profile: profiles.ProfileResolution | None = None
+        discovery_snapshot: JsonObject | None = None
+        if parsed.subcommand in {"models", "capabilities"}:
+            discovery_profile = profiles.resolve_active_profile(
+                config,
+                profiles.child_environment(),
+                cli_override=global_options.auth_profile,
+            )
+            capabilities_refresh = (
+                parsed.subcommand == "capabilities"
+                and parsed.capabilities is not None
+                and parsed.capabilities.refresh
+            )
+            if not capabilities_refresh:
+                discovery_snapshot = harness_discovery.load_discovery_cache(discovery_profile.name)
+
         if parsed.subcommand == "models":
             inspection = parsed.inspection or InspectionOptions()
             return emit_models(
@@ -1106,6 +1145,8 @@ def main(
                 summary=inspection.summary,
                 engine=inspection.engine,
                 live=inspection.live,
+                discovery=discovery_snapshot,
+                profile=discovery_profile,
             )
         if parsed.subcommand == "describe":
             inspection = parsed.inspection or InspectionOptions()
@@ -1133,12 +1174,15 @@ def main(
                 config_source=source,
                 workspace=workspace.path,
                 auth_profile_override=global_options.auth_profile,
+                profile=discovery_profile,
+                discovery=discovery_snapshot,
                 stdout=stdout,
             )
 
         if parsed.subcommand in {
             "snapshot",
             "runs",
+            "ps",
             "run-output",
             "wait",
             "cancel",
@@ -1150,7 +1194,7 @@ def main(
                 maybe_run_retention_pass(existing_registry, config)
         if parsed.subcommand == "snapshot":
             return emit_snapshot(parsed, workspace, stdout)
-        if parsed.subcommand == "runs":
+        if parsed.subcommand in {"runs", "ps"}:
             return emit_runs(parsed, workspace, stdout)
         if parsed.subcommand == "run-output":
             return emit_run_output(parsed, workspace, stdout)

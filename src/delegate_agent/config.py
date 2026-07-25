@@ -83,7 +83,7 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
     },
     "kimi": {
         "binary": "kimi",
-        "defaultModel": "kimi-code/k3",
+        "defaultModel": None,
         "defaultReasoningEffort": None,
         "models": {},
     },
@@ -110,7 +110,7 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
     },
     "devin": {
         "binary": "devin",
-        "defaultModel": "swe-1.7",
+        "defaultModel": None,
         "defaultReasoningEffort": None,
         "models": {},
     },
@@ -648,20 +648,11 @@ def _validate_claude_section(claude: JsonValue) -> None:
     optional_str(
         claude.get("defaultModel"), path="claude.defaultModel", error="invalid_claude_config"
     )
-    default_effort = claude.get("defaultReasoningEffort")
-    if default_effort is not None:
-        if not isinstance(default_effort, str):
-            raise ConfigError(
-                "invalid_claude_config",
-                "claude.defaultReasoningEffort must be a string or null.",
-            )
-        try:
-            reasoning.resolve_claude_native_effort(default_effort)
-        except reasoning.ReasoningCapabilityError as exc:
-            raise ConfigError(
-                "invalid_claude_config",
-                f"claude.defaultReasoningEffort: {exc.message}",
-            ) from exc
+    _validate_provider_default_reasoning_effort(
+        claude.get("defaultReasoningEffort"),
+        path="claude.defaultReasoningEffort",
+        error="invalid_claude_config",
+    )
     permission_mode = claude.get("workPermissionMode", "auto")
     if permission_mode == "bypassPermissions":
         raise ConfigError(
@@ -689,20 +680,11 @@ def _validate_grok_section(grok: JsonValue) -> None:
         raise ConfigError("invalid_grok_config", "grok config must be an object.")
     require_non_empty_str(grok.get("binary"), path="grok.binary", error="invalid_grok_config")
     optional_str(grok.get("defaultModel"), path="grok.defaultModel", error="invalid_grok_config")
-    default_effort = grok.get("defaultReasoningEffort")
-    if default_effort is not None:
-        if not isinstance(default_effort, str):
-            raise ConfigError(
-                "invalid_grok_config",
-                "grok.defaultReasoningEffort must be a string or null.",
-            )
-        try:
-            reasoning.resolve_grok_native_effort(default_effort)
-        except reasoning.ReasoningCapabilityError as exc:
-            raise ConfigError(
-                "invalid_grok_config",
-                f"grok.defaultReasoningEffort: {exc.message}",
-            ) from exc
+    _validate_provider_default_reasoning_effort(
+        grok.get("defaultReasoningEffort"),
+        path="grok.defaultReasoningEffort",
+        error="invalid_grok_config",
+    )
     safe_permission = grok.get("safePermissionMode", "dontAsk")
     if safe_permission == "plan":
         raise ConfigError(
@@ -860,7 +842,10 @@ def _validate_provider_default_reasoning_effort(
     if value is None:
         return
     if not reasoning.is_valid_effort_string(value):
-        raise ConfigError(error, f"{path} must be a non-empty string without whitespace or null.")
+        raise ConfigError(
+            error,
+            f"{path} must be a non-empty string that does not start with '-' and has no whitespace.",
+        )
 
 
 def _validate_engine_models(models: JsonValue, *, engine: str, error: str) -> None:
@@ -985,7 +970,7 @@ def _validate_reasoning_effort_value(value: JsonValue, *, path: str) -> str:
     if not reasoning.is_valid_effort_string(value):
         raise ConfigError(
             "invalid_reasoning_config",
-            f"{path} must be a non-empty string without whitespace.",
+            f"{path} must be a non-empty string that does not start with '-' and has no whitespace.",
         )
     return value
 
@@ -1002,12 +987,14 @@ def _validate_cursor_reasoning_models(value: JsonValue) -> None:
         if not reasoning.is_valid_effort_string(effort):
             raise ConfigError(
                 "invalid_cursor_config",
-                "cursor.reasoningEffortModels effort keys must be non-empty strings without whitespace.",
+                "cursor.reasoningEffortModels effort keys must be non-empty strings that do not "
+                "start with '-' and have no whitespace.",
             )
-        if not isinstance(model, str) or not model:
+        if not isinstance(model, str) or not model.strip() or model.startswith("-"):
             raise ConfigError(
                 "invalid_cursor_config",
-                "cursor.reasoningEffortModels values must be non-empty strings.",
+                "cursor.reasoningEffortModels values must be non-empty strings that do not "
+                "start with '-'.",
             )
 
 
@@ -1025,15 +1012,14 @@ def _validate_reasoning_section(section: JsonValue) -> None:
             "reasoning.capabilities must be an object.",
         )
     for harness, models in capabilities.items():
-        # Only codex and droid consult this table at launch. Accepting other
-        # keys (e.g. cursor, claude, or a typo) would validate cleanly and then
-        # be silently ignored; cursor reasoning lives in cursor.reasoningEffortModels
-        # and Claude uses static native --effort labels.
-        if harness not in ("codex", "droid"):
+        # Exact per-model declarations are consulted by these launch paths.
+        # Cursor reasoning lives in cursor.reasoningEffortModels and Claude
+        # exposes a harness-wide native enum instead.
+        if harness not in ("codex", "droid", "grok"):
             raise ConfigError(
                 "invalid_reasoning_config",
                 f"reasoning.capabilities.{harness} is not supported; capability "
-                "declarations apply to codex and droid only (cursor uses "
+                "declarations apply to codex, droid, and grok only (cursor uses "
                 "cursor.reasoningEffortModels; claude uses native --effort labels).",
             )
         if not isinstance(models, dict):

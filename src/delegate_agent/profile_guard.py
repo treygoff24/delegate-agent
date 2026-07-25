@@ -35,11 +35,11 @@ READ_ONLY_SUBCOMMANDS = frozenset(
         "help",
         "version",
         "agent-help",
-        "models",
         "describe",
         "profiles",
         "snapshot",
         "runs",
+        "ps",
         "run-output",
     }
 )
@@ -52,8 +52,9 @@ READ_ONLY_WORKFLOW_ACTIONS = frozenset(
 def is_read_only_command(parsed: ParsedCommand) -> bool:
     """Classify a parsed command as read-only diagnostic vs launch/mutation.
 
-    ``capabilities`` is read-only except ``capabilities refresh`` (which can
-    spawn a child probe process). ``worktree`` is read-only only for
+    Cached ``models`` and ``capabilities`` are read-only, while ``models
+    --live`` and ``capabilities refresh`` spawn auth-sensitive child probes.
+    ``worktree`` is read-only only for
     ``show``/``list``; ``remove``/``prune``/``gc`` mutate the worktree store.
     ``config``, ``dry-run``, ``wait``, ``cancel``, and every engine/``run``
     launch remain classified as mutation/launch (conservative by design).
@@ -61,6 +62,8 @@ def is_read_only_command(parsed: ParsedCommand) -> bool:
     subcommand = parsed.subcommand
     if subcommand in READ_ONLY_SUBCOMMANDS:
         return True
+    if subcommand == "models":
+        return parsed.inspection is not None and not parsed.inspection.live
     if subcommand == "capabilities":
         return parsed.capabilities is not None and not parsed.capabilities.refresh
     if subcommand == "worktree":

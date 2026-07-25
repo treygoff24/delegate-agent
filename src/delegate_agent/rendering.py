@@ -33,6 +33,8 @@ SnapshotTextField = tuple[str, str]
 
 
 SNAPSHOT_CONTEXT_FIELDS: tuple[SnapshotTextField, ...] = (
+    ("error", "error"),
+    ("message", "message"),
     ("cwd", "cwd"),
     ("executionCwd", "execution cwd"),
     ("model", "model"),

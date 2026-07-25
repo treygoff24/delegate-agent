@@ -1,0 +1,17 @@
+{
+  "providers": {
+    "fixture": {
+      "apiKey": "fixture-secret-sentinel",
+      "token": "fixture-token-sentinel"
+    }
+  },
+  "models": {
+    "kimi-code/k3": {
+      "displayName": "K3",
+      "supportEfforts": [
+        "max"
+      ],
+      "defaultEffort": "max"
+    }
+  }
+}

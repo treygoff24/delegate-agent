@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import json
-import subprocess
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
 from typing import Protocol, TypeAlias, TypeGuard
 
@@ -12,9 +11,10 @@ from delegate_agent.json_types import JsonObject, JsonValue
 
 ReasoningDeclaration: TypeAlias = Mapping[str, object]
 
-# Bundled capabilities are a conservative fallback only. User config and a
-# refreshed workspace cache take precedence so private/custom models do not
-# require Delegate source changes, and stale bundled data can be bypassed.
+# Bundled capabilities are a conservative fallback only. User config,
+# profile-scoped discovery, and the legacy workspace cache take precedence so
+# private/custom models do not require Delegate source changes and stale
+# bundled data can be bypassed.
 BUNDLED_REASONING_CAPABILITIES: dict[str, dict[str, ReasoningDeclaration]] = {
     "codex": {
         "gpt-5.6-sol": {
@@ -51,13 +51,16 @@ BUNDLED_REASONING_CAPABILITIES: dict[str, dict[str, ReasoningDeclaration]] = {
             "supported": ("low", "medium", "high", "xhigh"),
             "default": "medium",
         },
-        "gemini-3.5-flash": {
+        "gemini-3.6-flash": {
             "supported": ("minimal", "low", "medium", "high"),
             "default": "high",
         },
         "glm-5.1": {"supported": ("off", "high"), "default": "high"},
         "minimax-m2.7": {"supported": ("high",), "default": "high"},
     },
+    # No grok rows: `grok --help` enumerates no per-model efforts, so any
+    # bundled declaration would narrow GROK_NATIVE_EFFORTS without evidence.
+    # Grok model facts must come from config, discovery, or the cache.
 }
 
 # Argv builders compare a capability's transport against these constants, so
@@ -76,7 +79,8 @@ PI_NATIVE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 PI_THINKING_LEVELS = ("off", "minimal", *PI_NATIVE_EFFORTS)
 INSPECT_REASONING_DISCOVERY_HINT = (
     "Inspect `delegate --json models --summary` or "
-    "`delegate --json capabilities` for reasoning-effort support."
+    "`delegate --json capabilities` for reasoning-effort support; "
+    "run `delegate capabilities refresh` if that data is stale or missing."
 )
 KIMI_UNSUPPORTED_REASONING_WARNING = "reasoning effort is not supported for kimi."
 DEVIN_UNSUPPORTED_REASONING_WARNING = "reasoning effort is not supported for devin."
@@ -178,6 +182,7 @@ class ReasoningCapability:
     default_effort: str | None
     transport: str
     source: str
+    evidence: str | None = None
 
 
 class ReasoningCapabilityError(Exception):
@@ -189,8 +194,10 @@ class ReasoningCapabilityError(Exception):
 
 class ReasoningPayloadCarrier(Protocol):
     reasoning_effort: str | None
+    requested_reasoning_effort: str | None
     reasoning_effort_source: str | None
     reasoning_capability_source: str | None
+    reasoning_capability_evidence: str | None
     reasoning_transport: str | None
 
 
@@ -201,6 +208,7 @@ def is_valid_effort_string(value: object) -> TypeGuard[str]:
     return (
         isinstance(value, str)
         and bool(value)
+        and not value.startswith("-")
         and not any(ch.isspace() for ch in value)
         and '"' not in value
         and "\\" not in value
@@ -211,8 +219,8 @@ def normalize_effort(value: object) -> str:
     if not is_valid_effort_string(value):
         raise ReasoningCapabilityError(
             "invalid_reasoning_effort",
-            "reasoning effort must be a non-empty string without whitespace, "
-            "double quotes, or backslashes.",
+            "reasoning effort must be a non-empty string that does not start with '-' and "
+            "contains no whitespace, double quotes, or backslashes.",
         )
     return value
 
@@ -272,32 +280,6 @@ def resolve_native_effort(
     return effort
 
 
-def resolve_claude_native_effort(
-    requested_effort: str | None,
-    *,
-    alias: str | None = None,
-    model: str | None = None,
-) -> str | None:
-    """Validate Claude Code's native --effort values.
-
-    Claude Code exposes reasoning effort as a process-level flag, not a
-    per-model capability declaration. Keep this separate from
-    ``resolve_reasoning_capability`` so user/cache model capability tables do
-    not imply Claude model catalog support.
-    """
-    return resolve_native_effort("claude", requested_effort, alias=alias, model=model)
-
-
-def resolve_grok_native_effort(
-    requested_effort: str | None,
-    *,
-    alias: str | None = None,
-    model: str | None = None,
-) -> str | None:
-    """Validate Grok Build CLI native --effort values."""
-    return resolve_native_effort("grok", requested_effort, alias=alias, model=model)
-
-
 def resolve_pi_native_effort(
     requested_effort: str | None,
     *,
@@ -340,11 +322,52 @@ def _cache_model_declarations(cache: JsonObject | None, harness: str) -> dict[st
     return _as_models_map(harness_decl.get("models"))
 
 
-def _supported_tuple(declaration: ReasoningDeclaration) -> tuple[str, ...] | None:
+def _discovery_harness_record(discovery: JsonObject | None, harness: str) -> JsonObject | None:
+    if not isinstance(discovery, dict):
+        return None
+    harnesses = discovery.get("harnesses")
+    if not isinstance(harnesses, dict):
+        return None
+    record = harnesses.get(harness)
+    return record if isinstance(record, dict) else None
+
+
+def _discovery_model_declarations(
+    discovery: JsonObject | None, harness: str
+) -> dict[str, JsonObject]:
+    record = _discovery_harness_record(discovery, harness)
+    models = record.get("models") if record is not None else None
+    if not isinstance(models, dict):
+        return {}
+    declarations: dict[str, JsonObject] = {}
+    for model, entry in models.items():
+        reasoning = entry.get("reasoning") if isinstance(entry, dict) else None
+        if isinstance(model, str) and model and isinstance(reasoning, dict):
+            declarations[model] = reasoning
+    return declarations
+
+
+def _discovery_harness_reasoning(discovery: JsonObject | None, harness: str) -> JsonObject | None:
+    record = _discovery_harness_record(discovery, harness)
+    declaration = record.get("harnessReasoning") if record is not None else None
+    return declaration if isinstance(declaration, dict) else None
+
+
+def _supported_tuple(
+    declaration: ReasoningDeclaration, *, allow_empty: bool = False
+) -> tuple[str, ...] | None:
     raw = declaration.get("supported")
-    if isinstance(raw, tuple) and raw and all(isinstance(item, str) and item for item in raw):
+    if (
+        isinstance(raw, tuple)
+        and (allow_empty or bool(raw))
+        and all(isinstance(item, str) and item for item in raw)
+    ):
         return raw
-    if isinstance(raw, list) and raw and all(isinstance(item, str) and item for item in raw):
+    if (
+        isinstance(raw, list)
+        and (allow_empty or bool(raw))
+        and all(isinstance(item, str) and item for item in raw)
+    ):
         return tuple(raw)
     return None
 
@@ -364,13 +387,21 @@ def _lookup_declaration(
     model: str,
     config: JsonObject,
     cache: JsonObject | None,
+    discovery: JsonObject | None = None,
 ) -> tuple[ReasoningDeclaration | None, str]:
     for source, declarations in (
         ("config", _config_model_declarations(config, harness)),
+        ("discovery", _discovery_model_declarations(discovery, harness)),
         ("cache", _cache_model_declarations(cache, harness)),
         ("bundled", BUNDLED_REASONING_CAPABILITIES.get(harness, {})),
     ):
         declaration = declarations.get(model)
+        if (
+            source == "discovery"
+            and declaration is not None
+            and declaration.get("evidence") != "exact"
+        ):
+            continue
         if declaration is not None:
             return declaration, source
     return None, "none"
@@ -383,6 +414,7 @@ def resolve_reasoning_capability(
     requested_effort: str | None,
     config: JsonObject,
     cache: JsonObject | None = None,
+    discovery: JsonObject | None = None,
     alias: str | None = None,
 ) -> ReasoningCapability | None:
     if requested_effort is None:
@@ -413,6 +445,7 @@ def resolve_reasoning_capability(
         model=model,
         config=config,
         cache=cache,
+        discovery=discovery,
     )
     if declaration is None:
         raise ReasoningCapabilityError(
@@ -425,7 +458,7 @@ def resolve_reasoning_capability(
                 detail="has no declared reasoning-effort capability",
             ),
         )
-    supported = _supported_tuple(declaration)
+    supported = _supported_tuple(declaration, allow_empty=source == "discovery")
     if supported is None:
         raise ReasoningCapabilityError(
             "invalid_reasoning_config",
@@ -457,6 +490,263 @@ def resolve_reasoning_capability(
         default_effort=_default_effort(declaration, supported),
         transport=TRANSPORT_BY_HARNESS[harness],
         source=source,
+        evidence=(
+            declaration.get("evidence")
+            if source == "discovery" and isinstance(declaration.get("evidence"), str)
+            else "exact"
+        ),
+    )
+
+
+def discovery_default_model(discovery: JsonObject | None, harness: str) -> str | None:
+    """Return a captured native default without treating it as an argv choice."""
+    record = _discovery_harness_record(discovery, harness)
+    value = record.get("defaultModel") if record is not None else None
+    return value if isinstance(value, str) and value else None
+
+
+def _capability_from_declaration(
+    *,
+    harness: str,
+    model: str,
+    effort: str,
+    declaration: ReasoningDeclaration,
+    source: str,
+    transport: str,
+    alias: str | None,
+    fallback_evidence: str,
+) -> ReasoningCapability:
+    supported = _supported_tuple(declaration, allow_empty=source == "discovery")
+    if supported is None:
+        detail = (
+            "advertises no reasoning-effort enum"
+            if source == "discovery" and declaration.get("supported") is None
+            else "has malformed reasoning capability data"
+        )
+        error = (
+            "unsupported_reasoning_effort" if source == "discovery" else "invalid_reasoning_config"
+        )
+        raise ReasoningCapabilityError(
+            error,
+            format_explicit_reasoning_effort_error(
+                harness=harness,
+                alias=alias,
+                model=model,
+                effort=effort,
+                detail=detail,
+            ),
+        )
+    if effort not in supported:
+        raise ReasoningCapabilityError(
+            "unsupported_reasoning_effort",
+            format_explicit_reasoning_effort_error(
+                harness=harness,
+                alias=alias,
+                model=model,
+                effort=effort,
+                supported=supported,
+                detail="does not support reasoning effort",
+            ),
+        )
+    raw_evidence = declaration.get("evidence") if source == "discovery" else None
+    return ReasoningCapability(
+        harness=harness,
+        model=model,
+        effort=effort,
+        supported_efforts=supported,
+        default_effort=_default_effort(declaration, supported),
+        transport=transport,
+        source=source,
+        evidence=raw_evidence if isinstance(raw_evidence, str) else fallback_evidence,
+    )
+
+
+def resolve_harness_enum_capability(
+    *,
+    harness: str,
+    model: str | None,
+    requested_effort: str | None,
+    discovery: JsonObject | None,
+    alias: str | None = None,
+) -> ReasoningCapability | None:
+    """Resolve a process-wide effort enum, preferring captured help evidence."""
+    if requested_effort is None:
+        return None
+    effort = normalize_effort(requested_effort)
+    profile = REASONING_PROFILES[harness]
+    declaration = _discovery_harness_reasoning(discovery, harness)
+    if declaration is not None:
+        return _capability_from_declaration(
+            harness=harness,
+            model=model or "",
+            effort=effort,
+            declaration=declaration,
+            source="discovery",
+            transport=profile.transport or "",
+            alias=alias,
+            fallback_evidence="harness",
+        )
+    declaration = {"supported": profile.static_efforts or ()}
+    return _capability_from_declaration(
+        harness=harness,
+        model=model or "",
+        effort=effort,
+        declaration=declaration,
+        source="harness-compatibility",
+        transport=profile.transport or "",
+        alias=alias,
+        fallback_evidence="harness",
+    )
+
+
+def resolve_grok_reasoning_capability(
+    *,
+    model: str | None,
+    requested_effort: str | None,
+    config: JsonObject,
+    discovery: JsonObject | None,
+    cache: JsonObject | None = None,
+    alias: str | None = None,
+) -> tuple[ReasoningCapability | None, tuple[str, ...]]:
+    """Resolve Grok exact declarations, then its documented CLI enum."""
+    if requested_effort is None:
+        return None, ()
+    effort = normalize_effort(requested_effort)
+    if model:
+        declaration: ReasoningDeclaration | None = None
+        source = "none"
+        for candidate_source, declarations in (
+            ("config", _config_model_declarations(config, "grok")),
+            ("discovery", _discovery_model_declarations(discovery, "grok")),
+            ("cache", _cache_model_declarations(cache, "grok")),
+            ("bundled", BUNDLED_REASONING_CAPABILITIES.get("grok", {})),
+        ):
+            candidate = declarations.get(model)
+            if candidate is None:
+                continue
+            if candidate_source == "discovery" and candidate.get("evidence") != "exact":
+                continue
+            declaration = candidate
+            source = candidate_source
+            break
+        if declaration is not None:
+            return (
+                _capability_from_declaration(
+                    harness="grok",
+                    model=model,
+                    effort=effort,
+                    declaration=declaration,
+                    source=source,
+                    transport=TRANSPORT_GROK_EFFORT_FLAG,
+                    alias=alias,
+                    fallback_evidence="exact",
+                ),
+                (),
+            )
+    capability = resolve_harness_enum_capability(
+        harness="grok",
+        model=model,
+        requested_effort=effort,
+        discovery=discovery,
+        alias=alias,
+    )
+    return capability, (
+        "grok reasoning effort was validated against the harness compatibility enum; "
+        "model-specific support is not known.",
+    )
+
+
+def resolve_discovered_model_capability(
+    *,
+    harness: str,
+    model: str | None,
+    requested_effort: str | None,
+    discovery: JsonObject | None,
+    alias: str | None = None,
+) -> tuple[ReasoningCapability | None, tuple[str, ...]]:
+    """Resolve OpenCode/Pi/OMP discovery strategies without inventing model facts."""
+    if requested_effort is None:
+        return None, ()
+    effort = normalize_effort(requested_effort)
+    declarations = _discovery_model_declarations(discovery, harness)
+    declaration = declarations.get(model) if model else None
+    transport = REASONING_PROFILES[harness].transport
+    if harness == "opencode":
+        if (
+            declaration is None
+            or declaration.get("evidence") != "exact"
+            or declaration.get("supported") is None
+        ):
+            return (
+                ReasoningCapability(
+                    harness=harness,
+                    model=model or "",
+                    effort=effort,
+                    supported_efforts=(effort,),
+                    default_effort=None,
+                    transport=TRANSPORT_OPENCODE_VARIANT_FLAG,
+                    source="pass-through",
+                    evidence="unknown",
+                ),
+                ("opencode_variant_unvalidated",),
+            )
+        return (
+            _capability_from_declaration(
+                harness=harness,
+                model=model or "",
+                effort=effort,
+                declaration=declaration,
+                source="discovery",
+                transport=TRANSPORT_OPENCODE_VARIANT_FLAG,
+                alias=alias,
+                fallback_evidence="exact",
+            ),
+            (),
+        )
+
+    evidence = declaration.get("evidence") if declaration is not None else None
+    has_usable_declaration = (
+        declaration is not None
+        and declaration.get("supported") is not None
+        and (evidence == "exact" or (harness == "pi" and evidence == "harness"))
+    )
+    if has_usable_declaration:
+        capability = _capability_from_declaration(
+            harness=harness,
+            model=model or "",
+            effort=effort,
+            declaration=declaration,
+            source="discovery",
+            transport=transport or "",
+            alias=alias,
+            fallback_evidence="exact",
+        )
+        if harness == "pi" and capability.evidence == "harness":
+            capability = replace(capability, evidence="model-partial")
+            return capability, (
+                "pi reasoning effort was validated against a harness-wide enum; "
+                "model-specific levels are partial evidence.",
+            )
+        return capability, ()
+
+    harness_declaration = _discovery_harness_reasoning(discovery, harness)
+    source = "discovery" if harness_declaration is not None else "harness-compatibility"
+    fallback_evidence = "model-partial" if harness == "pi" else "harness-partial"
+    capability = _capability_from_declaration(
+        harness=harness,
+        model=model or "",
+        effort=effort,
+        declaration=harness_declaration
+        or {"supported": REASONING_PROFILES[harness].static_efforts or ()},
+        source=source,
+        transport=transport or "",
+        alias=alias,
+        fallback_evidence=fallback_evidence,
+    )
+    capability = replace(capability, evidence=fallback_evidence)
+    return capability, (
+        f"{harness} reasoning effort was validated against a harness-wide enum; "
+        "model-specific levels are partial evidence.",
     )
 
 
@@ -464,18 +754,25 @@ def add_reasoning_payload_fields(payload: JsonObject, carrier: ReasoningPayloadC
     """Emit the reasoning JSON fields from any carrier with the shared attribute names.
 
     Used for both the CLI Request and the runner RunContext so dry-run payloads,
-    manifests, and snapshots cannot drift. The documented schema exposes both
-    requestedReasoningEffort and resolvedReasoningEffort; resolution never
-    rewrites the value today, so both keys carry the single internal effort.
+    manifests, and snapshots cannot drift. Requested and resolved effort are
+    distinct because Cursor may route to another selector or drop an
+    unsatisfied config-sourced default with a warning.
     """
     effort = carrier.reasoning_effort
-    if effort is not None:
+    requested = getattr(carrier, "requested_reasoning_effort", None)
+    if requested is not None:
+        payload["requestedReasoningEffort"] = requested
+    elif effort is not None:
         payload["requestedReasoningEffort"] = effort
+    if effort is not None:
         payload["resolvedReasoningEffort"] = effort
     if carrier.reasoning_effort_source is not None:
         payload["reasoningEffortSource"] = carrier.reasoning_effort_source
     if carrier.reasoning_capability_source is not None:
         payload["reasoningCapabilitySource"] = carrier.reasoning_capability_source
+    evidence = getattr(carrier, "reasoning_capability_evidence", None)
+    if evidence is not None:
+        payload["reasoningCapabilityEvidence"] = evidence
     if carrier.reasoning_transport is not None:
         payload["reasoningTransport"] = carrier.reasoning_transport
 
@@ -505,13 +802,22 @@ def load_reasoning_capability_cache(workspace: str | Path) -> JsonObject | None:
 
 
 def _copy_payload_model(declaration: ReasoningDeclaration, *, source: str) -> JsonObject | None:
-    supported = _supported_tuple(declaration)
+    supported = _supported_tuple(declaration, allow_empty=source == "discovery")
+    if source == "discovery" and declaration.get("supported") is None:
+        payload: JsonObject = {"supported": None, "source": source}
+        evidence = declaration.get("evidence")
+        if isinstance(evidence, str):
+            payload["evidence"] = evidence
+        return payload
     if supported is None:
         return None
     payload: JsonObject = {"supported": list(supported), "source": source}
     default = _default_effort(declaration, supported)
     if default is not None:
         payload["default"] = default
+    evidence = declaration.get("evidence")
+    if source == "discovery" and isinstance(evidence, str):
+        payload["evidence"] = evidence
     return payload
 
 
@@ -545,6 +851,7 @@ def _model_reasoning_summary(
     model: str | None,
     config: JsonObject,
     cache: JsonObject | None,
+    discovery: JsonObject | None = None,
     config_default: str | None = None,
 ) -> JsonObject:
     payload: JsonObject = {"alias": alias}
@@ -561,6 +868,7 @@ def _model_reasoning_summary(
         model=model,
         config=config,
         cache=cache,
+        discovery=discovery,
     )
     if declaration is None:
         payload["supported"] = None
@@ -570,7 +878,17 @@ def _model_reasoning_summary(
         )
         return payload
 
-    supported = _supported_tuple(declaration)
+    supported = _supported_tuple(declaration, allow_empty=source == "discovery")
+    if source == "discovery" and declaration.get("supported") is None:
+        payload["supported"] = None
+        payload["source"] = source
+        evidence = declaration.get("evidence")
+        if isinstance(evidence, str):
+            payload["evidence"] = evidence
+        payload["warning"] = f"{harness} model {model!r} advertises no effort enum."
+        if config_default is not None:
+            payload["configDefault"] = config_default
+        return payload
     if supported is None:
         payload["supported"] = None
         payload["source"] = source
@@ -582,6 +900,9 @@ def _model_reasoning_summary(
     default = _default_effort(declaration, supported)
     if default is not None:
         payload["default"] = default
+    evidence = declaration.get("evidence")
+    if source == "discovery" and isinstance(evidence, str):
+        payload["evidence"] = evidence
     if config_default is not None:
         payload["configDefault"] = config_default
     return payload
@@ -615,61 +936,79 @@ def _cursor_alias_reasoning_summary(cursor: JsonObject) -> JsonObject:
     return payload
 
 
-def _claude_alias_reasoning_summary(claude: JsonObject) -> JsonObject:
-    default_model = claude.get("defaultModel")
+def _static_alias_reasoning_summary(
+    harness: str,
+    section: JsonObject,
+    discovery: JsonObject | None,
+) -> JsonObject:
+    default_model = section.get("defaultModel")
     alias = _alias_key_for_default_model(default_model)
-    payload: JsonObject = {
-        "alias": alias,
-        "supported": list(REASONING_PROFILES["claude"].static_efforts),
-        "source": "static",
-        "transport": REASONING_PROFILES["claude"].transport,
-    }
+    payload: JsonObject = {"alias": alias}
     if isinstance(default_model, str) and default_model:
         payload["model"] = default_model
-    default_effort = claude.get("defaultReasoningEffort")
+    declaration = (
+        _discovery_model_declarations(discovery, harness).get(default_model)
+        if isinstance(default_model, str) and default_model
+        else None
+    )
+    if declaration is None:
+        declaration = _discovery_harness_reasoning(discovery, harness)
+    observed = (
+        _copy_payload_model(declaration, source="discovery") if declaration is not None else None
+    )
+    if observed is not None:
+        payload.update(observed)
+    else:
+        payload.update(
+            {
+                "supported": list(REASONING_PROFILES[harness].static_efforts),
+                "source": "static",
+            }
+        )
+    payload["transport"] = REASONING_PROFILES[harness].transport
+    default_effort = section.get("defaultReasoningEffort")
     if isinstance(default_effort, str):
         payload["configDefault"] = default_effort
     return payload
 
 
-def _grok_alias_reasoning_summary(grok: JsonObject) -> JsonObject:
-    default_model = grok.get("defaultModel")
-    alias = _alias_key_for_default_model(default_model)
-    payload: JsonObject = {
-        "alias": alias,
-        "supported": list(REASONING_PROFILES["grok"].static_efforts),
-        "source": "static",
-        "transport": REASONING_PROFILES["grok"].transport,
-    }
-    if isinstance(default_model, str) and default_model:
-        payload["model"] = default_model
-    default_effort = grok.get("defaultReasoningEffort")
-    if isinstance(default_effort, str):
-        payload["configDefault"] = default_effort
-    return payload
+def _claude_alias_reasoning_summary(
+    claude: JsonObject, discovery: JsonObject | None = None
+) -> JsonObject:
+    return _static_alias_reasoning_summary("claude", claude, discovery)
 
 
-def _pi_alias_reasoning_summary(pi: JsonObject) -> JsonObject:
-    default_model = pi.get("defaultModel")
-    alias = _alias_key_for_default_model(default_model)
-    payload: JsonObject = {
-        "alias": alias,
-        "supported": list(PI_NATIVE_EFFORTS),
-        "source": "static",
-        "transport": TRANSPORT_PI_THINKING_FLAG,
-    }
-    if isinstance(default_model, str) and default_model:
-        payload["model"] = default_model
-    default_effort = pi.get("defaultReasoningEffort")
-    if isinstance(default_effort, str):
-        payload["configDefault"] = default_effort
-    return payload
+def _grok_alias_reasoning_summary(
+    grok: JsonObject, discovery: JsonObject | None = None
+) -> JsonObject:
+    return _static_alias_reasoning_summary("grok", grok, discovery)
 
 
-def _kimi_alias_reasoning_summary(kimi: JsonObject) -> JsonObject:
+def _pi_alias_reasoning_summary(
+    pi: JsonObject, discovery: JsonObject | None = None, *, harness: str = "pi"
+) -> JsonObject:
+    return _static_alias_reasoning_summary(harness, pi, discovery)
+
+
+def _kimi_alias_reasoning_summary(
+    kimi: JsonObject, discovery: JsonObject | None = None
+) -> JsonObject:
     default_model = kimi.get("defaultModel")
     alias = _alias_key_for_default_model(default_model)
-    payload: JsonObject = {"alias": alias, **_kimi_unsupported_reasoning_fields()}
+    declaration = (
+        _discovery_model_declarations(discovery, "kimi").get(default_model)
+        if isinstance(default_model, str) and default_model
+        else None
+    )
+    observed = (
+        _copy_payload_model(declaration, source="discovery") if declaration is not None else None
+    )
+    payload: JsonObject = {
+        "alias": alias,
+        **(observed or _kimi_unsupported_reasoning_fields()),
+        "transport": None,
+        "warning": KIMI_UNSUPPORTED_REASONING_WARNING,
+    }
     if isinstance(default_model, str) and default_model:
         payload["model"] = default_model
     return payload
@@ -684,13 +1023,22 @@ def _devin_alias_reasoning_summary(devin: JsonObject) -> JsonObject:
     return payload
 
 
-def _opencode_alias_reasoning_summary(opencode: JsonObject) -> JsonObject:
+def _opencode_alias_reasoning_summary(
+    opencode: JsonObject, discovery: JsonObject | None = None
+) -> JsonObject:
     default_model = opencode.get("defaultModel")
     alias = _alias_key_for_default_model(default_model)
+    declaration = (
+        _discovery_model_declarations(discovery, "opencode").get(default_model)
+        if isinstance(default_model, str) and default_model
+        else None
+    )
+    observed = (
+        _copy_payload_model(declaration, source="discovery") if declaration is not None else None
+    )
     payload: JsonObject = {
         "alias": alias,
-        "supported": None,
-        "source": "pass-through",
+        **(observed or {"supported": None, "source": "pass-through"}),
         "transport": TRANSPORT_OPENCODE_VARIANT_FLAG,
     }
     if isinstance(default_model, str) and default_model:
@@ -706,33 +1054,34 @@ def _add_static_alias_summaries(
     section: JsonObject,
     summary_fn: Callable[[JsonObject], JsonObject],
 ) -> None:
-    """Add `<engine>.models` alias entries for a static-enum engine.
-
-    Effort validity is model-independent for these engines, so each alias
-    reuses the section summary with the alias key and its mapped model.
-    """
+    """Add alias entries, selecting discovery evidence for each mapped model."""
     models = section.get("models")
     if not isinstance(models, dict):
         return
     for alias, model_id in sorted(models.items()):
         if not (isinstance(alias, str) and alias and isinstance(model_id, str) and model_id):
             continue
-        entry = dict(summary_fn(section))
+        alias_section = {**section, "defaultModel": model_id}
+        entry = dict(summary_fn(alias_section))
         entry["alias"] = alias
         entry["model"] = model_id
         aliases[alias] = entry
 
 
-def _add_opencode_alias_summaries(aliases: JsonObject, opencode: JsonObject) -> None:
+def _add_opencode_alias_summaries(
+    aliases: JsonObject, opencode: JsonObject, discovery: JsonObject | None
+) -> None:
     models = opencode.get("models")
     if not isinstance(models, dict):
         return
     for alias, mapping in sorted(models.items()):
         if not isinstance(alias, str) or not alias:
             continue
-        entry = dict(_opencode_alias_reasoning_summary(opencode))
-        entry["alias"] = alias
         if isinstance(mapping, str) and mapping:
+            entry = dict(
+                _opencode_alias_reasoning_summary({**opencode, "defaultModel": mapping}, discovery)
+            )
+            entry["alias"] = alias
             entry["model"] = mapping
             aliases[alias] = entry
             continue
@@ -742,22 +1091,36 @@ def _add_opencode_alias_summaries(aliases: JsonObject, opencode: JsonObject) -> 
         variant = mapping.get("variant")
         if not (isinstance(model, str) and model and isinstance(variant, str) and variant):
             continue
+        entry = dict(
+            _opencode_alias_reasoning_summary({**opencode, "defaultModel": model}, discovery)
+        )
+        entry["alias"] = alias
         entry["model"] = model
         entry["pinnedVariant"] = variant
         entry["source"] = "alias"
         aliases[alias] = entry
 
 
-def _add_pi_alias_summaries(aliases: JsonObject, pi: JsonObject) -> None:
+def _add_pi_alias_summaries(
+    aliases: JsonObject,
+    pi: JsonObject,
+    discovery: JsonObject | None,
+    *,
+    harness: str,
+) -> None:
     models = pi.get("models")
     if not isinstance(models, dict):
         return
     for alias, mapping in sorted(models.items()):
         if not isinstance(alias, str) or not alias:
             continue
-        entry = dict(_pi_alias_reasoning_summary(pi))
-        entry["alias"] = alias
         if isinstance(mapping, str) and mapping:
+            entry = dict(
+                _pi_alias_reasoning_summary(
+                    {**pi, "defaultModel": mapping}, discovery, harness=harness
+                )
+            )
+            entry["alias"] = alias
             entry["model"] = mapping
             aliases[alias] = entry
             continue
@@ -767,6 +1130,10 @@ def _add_pi_alias_summaries(aliases: JsonObject, pi: JsonObject) -> None:
         thinking = mapping.get("thinking")
         if not (isinstance(model, str) and model and isinstance(thinking, str) and thinking):
             continue
+        entry = dict(
+            _pi_alias_reasoning_summary({**pi, "defaultModel": model}, discovery, harness=harness)
+        )
+        entry["alias"] = alias
         entry["model"] = model
         entry["pinnedThinking"] = thinking
         entry["source"] = "alias"
@@ -776,6 +1143,8 @@ def _add_pi_alias_summaries(aliases: JsonObject, pi: JsonObject) -> None:
 def build_alias_reasoning_summaries(
     config: JsonObject,
     cache: JsonObject | None,
+    *,
+    discovery: JsonObject | None = None,
 ) -> JsonObject:
     summaries: JsonObject = {}
 
@@ -797,6 +1166,7 @@ def build_alias_reasoning_summaries(
                     model=model_id,
                     config=config,
                     cache=cache,
+                    discovery=discovery,
                     config_default=default_effort,
                 )
     summaries["droid"] = droid_aliases
@@ -814,6 +1184,7 @@ def build_alias_reasoning_summaries(
                 model=default_model,
                 config=config,
                 cache=cache,
+                discovery=discovery,
                 config_default=default_effort,
             )
         else:
@@ -839,6 +1210,7 @@ def build_alias_reasoning_summaries(
                     model=model_id,
                     config=config,
                     cache=cache,
+                    discovery=discovery,
                     config_default=default_effort,
                 )
     summaries["codex"] = codex_aliases
@@ -855,8 +1227,9 @@ def build_alias_reasoning_summaries(
     if isinstance(claude, dict):
         default_model = claude.get("defaultModel")
         alias_key = _alias_key_for_default_model(default_model)
-        claude_aliases: JsonObject = {alias_key: _claude_alias_reasoning_summary(claude)}
-        _add_static_alias_summaries(claude_aliases, claude, _claude_alias_reasoning_summary)
+        summary_fn = partial(_claude_alias_reasoning_summary, discovery=discovery)
+        claude_aliases: JsonObject = {alias_key: summary_fn(claude)}
+        _add_static_alias_summaries(claude_aliases, claude, summary_fn)
         summaries["claude"] = claude_aliases
     else:
         summaries["claude"] = {}
@@ -865,8 +1238,9 @@ def build_alias_reasoning_summaries(
     if isinstance(grok, dict):
         default_model = grok.get("defaultModel")
         alias_key = _alias_key_for_default_model(default_model)
-        grok_aliases: JsonObject = {alias_key: _grok_alias_reasoning_summary(grok)}
-        _add_static_alias_summaries(grok_aliases, grok, _grok_alias_reasoning_summary)
+        summary_fn = partial(_grok_alias_reasoning_summary, discovery=discovery)
+        grok_aliases: JsonObject = {alias_key: summary_fn(grok)}
+        _add_static_alias_summaries(grok_aliases, grok, summary_fn)
         summaries["grok"] = grok_aliases
     else:
         summaries["grok"] = {}
@@ -885,8 +1259,10 @@ def build_alias_reasoning_summaries(
     if isinstance(opencode, dict):
         default_model = opencode.get("defaultModel")
         alias_key = _alias_key_for_default_model(default_model)
-        opencode_aliases: JsonObject = {alias_key: _opencode_alias_reasoning_summary(opencode)}
-        _add_opencode_alias_summaries(opencode_aliases, opencode)
+        opencode_aliases: JsonObject = {
+            alias_key: _opencode_alias_reasoning_summary(opencode, discovery)
+        }
+        _add_opencode_alias_summaries(opencode_aliases, opencode, discovery)
         summaries["opencode"] = opencode_aliases
     else:
         summaries["opencode"] = {}
@@ -896,8 +1272,10 @@ def build_alias_reasoning_summaries(
         if isinstance(section, dict):
             default_model = section.get("defaultModel")
             alias_key = _alias_key_for_default_model(default_model)
-            aliases: JsonObject = {alias_key: _pi_alias_reasoning_summary(section)}
-            _add_pi_alias_summaries(aliases, section)
+            aliases: JsonObject = {
+                alias_key: _pi_alias_reasoning_summary(section, discovery, harness=engine)
+            }
+            _add_pi_alias_summaries(aliases, section, discovery, harness=engine)
             summaries[engine] = aliases
         else:
             summaries[engine] = {}
@@ -906,8 +1284,9 @@ def build_alias_reasoning_summaries(
     if isinstance(kimi, dict):
         default_model = kimi.get("defaultModel")
         alias_key = _alias_key_for_default_model(default_model)
-        kimi_aliases: JsonObject = {alias_key: _kimi_alias_reasoning_summary(kimi)}
-        _add_static_alias_summaries(kimi_aliases, kimi, _kimi_alias_reasoning_summary)
+        summary_fn = partial(_kimi_alias_reasoning_summary, discovery=discovery)
+        kimi_aliases: JsonObject = {alias_key: summary_fn(kimi)}
+        _add_static_alias_summaries(kimi_aliases, kimi, summary_fn)
         summaries["kimi"] = kimi_aliases
     else:
         summaries["kimi"] = {}
@@ -918,6 +1297,8 @@ def build_alias_reasoning_summaries(
 def build_reasoning_capabilities_payload(
     config: JsonObject,
     cache: JsonObject | None,
+    *,
+    discovery: JsonObject | None = None,
 ) -> JsonObject:
     harnesses: JsonObject = {}
     for harness in [h for h, p in REASONING_PROFILES.items() if p.strategy == "model-table"]:
@@ -930,6 +1311,11 @@ def build_reasoning_capabilities_payload(
         _overlay_payload_models(models_payload, _cache_model_declarations(cache, harness), "cache")
         _overlay_payload_models(
             models_payload,
+            _discovery_model_declarations(discovery, harness),
+            "discovery",
+        )
+        _overlay_payload_models(
+            models_payload,
             _config_model_declarations(config, harness),
             "config",
         )
@@ -940,47 +1326,91 @@ def build_reasoning_capabilities_payload(
 
     cursor = config.get("cursor")
     mappings = cursor.get("reasoningEffortModels") if isinstance(cursor, dict) else None
+    cursor_models: JsonObject = {}
+    _overlay_payload_models(
+        cursor_models,
+        _discovery_model_declarations(discovery, "cursor"),
+        "discovery",
+    )
+    cursor_models.update(_cursor_reasoning_models_payload(mappings))
     harnesses["cursor"] = {
         "transport": TRANSPORT_BY_HARNESS["cursor"],
-        "models": _cursor_reasoning_models_payload(mappings),
+        "models": cursor_models,
     }
-    harnesses["claude"] = {
-        "transport": REASONING_PROFILES["claude"].transport,
-        "source": "static",
-        "supported": list(REASONING_PROFILES["claude"].static_efforts),
-        "models": {},
-    }
-    harnesses["grok"] = {
-        "transport": REASONING_PROFILES["grok"].transport,
-        "source": "static",
-        "supported": list(REASONING_PROFILES["grok"].static_efforts),
-        "models": {},
-    }
-    for harness in ("pi", "omp"):
-        harnesses[harness] = {
+    for harness in ("claude", "grok", "pi", "omp"):
+        models_payload = {}
+        if harness == "grok":
+            _overlay_payload_models(
+                models_payload,
+                BUNDLED_REASONING_CAPABILITIES.get("grok", {}),
+                "bundled",
+            )
+        _overlay_payload_models(
+            models_payload,
+            _discovery_model_declarations(discovery, harness),
+            "discovery",
+        )
+        harness_payload: JsonObject = {
             "transport": REASONING_PROFILES[harness].transport,
             "source": "static",
             "supported": list(REASONING_PROFILES[harness].static_efforts),
-            "models": {},
+            "models": models_payload,
         }
+        if harness == "grok":
+            _overlay_payload_models(
+                models_payload,
+                _config_model_declarations(config, "grok"),
+                "config",
+            )
+            harness_payload["source"] = "harness-compatibility"
+        harness_reasoning = _discovery_harness_reasoning(discovery, harness)
+        observed = (
+            _copy_payload_model(harness_reasoning, source="discovery")
+            if harness_reasoning is not None
+            else None
+        )
+        if observed is not None:
+            harness_payload.update(observed)
+        harnesses[harness] = harness_payload
     for harness in [h for h, p in REASONING_PROFILES.items() if p.strategy == "pass-through"]:
+        models_payload = {}
+        _overlay_payload_models(
+            models_payload,
+            _discovery_model_declarations(discovery, harness),
+            "discovery",
+        )
         harnesses[harness] = {
             "transport": TRANSPORT_OPENCODE_VARIANT_FLAG,
             "source": "pass-through",
             "supported": None,
-            "models": {},
+            "models": models_payload,
         }
+    kimi_models: JsonObject = {}
+    _overlay_payload_models(
+        kimi_models,
+        _discovery_model_declarations(discovery, "kimi"),
+        "discovery",
+    )
     harnesses["kimi"] = {
         "transport": REASONING_PROFILES["kimi"].transport,
         **_kimi_unsupported_reasoning_fields(),
-        "models": {},
+        "models": kimi_models,
     }
+    devin_models: JsonObject = {}
+    _overlay_payload_models(
+        devin_models,
+        _discovery_model_declarations(discovery, "devin"),
+        "discovery",
+    )
     harnesses["devin"] = {
         "transport": REASONING_PROFILES["devin"].transport,
         **_unsupported_reasoning_fields("devin"),
-        "models": {},
+        "models": devin_models,
     }
-    return {"harnesses": harnesses, "aliases": build_alias_reasoning_summaries(config, cache)}
+    return {
+        "harnesses": harnesses,
+        "aliases": build_alias_reasoning_summaries(config, cache, discovery=discovery),
+    }
 
 
 def validate_cache_payload(cache: JsonObject) -> None:
@@ -1067,48 +1497,6 @@ def parse_codex_models_payload(raw: JsonObject) -> JsonObject:
         target[slug] = declaration
     validate_cache_payload(parsed)
     return parsed
-
-
-def refresh_reasoning_capabilities(
-    *,
-    cwd: str,
-    codex_binary: str = "codex",
-    env: dict[str, str] | None = None,
-) -> JsonObject:
-    try:
-        completed = subprocess.run(  # nosec B603 - configured Codex binary is executed with shell=False and a timeout.
-            [codex_binary, "debug", "models"],
-            cwd=cwd,
-            env=env,
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=30,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise ReasoningCapabilityError(
-            "capability_refresh_failed",
-            f"could not run {codex_binary} debug models: {exc}",
-        ) from exc
-    if completed.returncode != 0:
-        stderr = completed.stderr.strip()
-        raise ReasoningCapabilityError(
-            "capability_refresh_failed",
-            f"{codex_binary} debug models failed: {stderr or completed.returncode}",
-        )
-    try:
-        raw: JsonValue = json.loads(completed.stdout)
-    except json.JSONDecodeError as exc:
-        raise ReasoningCapabilityError(
-            "capability_refresh_failed",
-            f"{codex_binary} debug models did not return JSON: {exc}",
-        ) from exc
-    if not isinstance(raw, dict):
-        raise ReasoningCapabilityError(
-            "capability_refresh_failed",
-            f"{codex_binary} debug models returned a non-object payload.",
-        )
-    return parse_codex_models_payload(raw)
 
 
 def merge_reasoning_capability_cache(

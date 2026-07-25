@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import ClassVar
 from unittest import mock
 
+from tests.discovery_fakes import FIXTURES, materialize_minimum_harnesses
 from tests.test_model_selection_wave1b import (
     _MODELS_KEYS,
     _MODELS_SUMMARY_KEYS,
@@ -294,6 +295,7 @@ class LiveProbeIntegrationTests(unittest.TestCase):
             fake = _write_executable(
                 bin_dir / "fake-cursor",
                 "#!/usr/bin/env bash\n"
+                'if [ "$1" = --version ]; then echo 2026.07.17-3e2a980; exit 0; fi\n'
                 "echo 'Available models'\n"
                 "printf '\\033[32mlive-cursor-model\\033[0m - Live Cursor\\n'\n"
                 "exit 0\n",
@@ -371,6 +373,7 @@ class LiveProbeIntegrationTests(unittest.TestCase):
             fake = _write_executable(
                 Path(tmp) / "fake-cursor",
                 "#!/usr/bin/env bash\n"
+                'if [ "$1" = --version ]; then echo 2026.07.17-3e2a980; exit 0; fi\n'
                 "echo side-effect > probe-side-effect.txt\n"
                 'pwd > "$SIDE_EFFECT_LOG"\n'
                 "echo 'Available models'\n"
@@ -391,6 +394,12 @@ class LiveProbeIntegrationTests(unittest.TestCase):
 
     def test_droid_live_merge_from_settings(self):
         with tempfile.TemporaryDirectory() as tmp:
+            fake = _write_executable(
+                Path(tmp) / "droid",
+                "#!/usr/bin/env bash\n"
+                'if [ "$1" = --version ]; then echo 0.175.0; exit 0; fi\n'
+                f'cat "{FIXTURES / "droid_help.txt"}"\n',
+            )
             settings = Path(tmp) / "settings.json"
             settings.write_text(
                 json.dumps(
@@ -403,6 +412,7 @@ class LiveProbeIntegrationTests(unittest.TestCase):
                 encoding="utf-8",
             )
             config = self.embedded_default_config()
+            config["droid"]["binary"] = str(fake)
             payload = self.engine_models_payload(
                 config,
                 "droid",
@@ -444,40 +454,72 @@ class LiveProbeIntegrationTests(unittest.TestCase):
                 ["--model", DEVIN_LIVE_SENTINEL, "-p", "--", "probe"],
             )
 
+    def test_devin_live_uses_bounded_metadata_runner_and_parses_nonzero_output(self):
+        from delegate_agent import harness_discovery
+        from delegate_agent.model_discovery import (
+            DEVIN_LIVE_SENTINEL,
+            LIVE_PROBE_TIMEOUT_SEC,
+        )
+
+        config = self.embedded_default_config()
+        config["devin"]["binary"] = "/configured/devin"
+        result = harness_discovery.ProbeResult(
+            argv=("/configured/devin",),
+            returncode=1,
+            stdout="",
+            stderr="Available: adaptive, bounded-devin",
+            error="probe_failed",
+        )
+        with mock.patch.object(harness_discovery, "run_metadata_probe", return_value=result) as run:
+            payload = self.engine_models_payload(config, "devin", live=True)
+
+        run.assert_called_once_with(
+            [
+                "/configured/devin",
+                "--model",
+                DEVIN_LIVE_SENTINEL,
+                "-p",
+                "--",
+                "probe",
+            ],
+            env=mock.ANY,
+            timeout_sec=LIVE_PROBE_TIMEOUT_SEC,
+        )
+        by_id = {item["id"]: item for item in payload["models"]}
+        self.assertEqual(by_id["bounded-devin"]["source"], "live")
+
     def test_opencode_live_merge(self):
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as workspace:
             argv_log = Path(tmp) / "argv.log"
             cwd_log = Path(tmp) / "cwd.log"
             fake = _write_executable(
-                Path(tmp) / "fake-opencode",
+                Path(tmp) / "opencode",
                 "#!/usr/bin/env bash\n"
                 f'printf \'%s\\n\' "$@" > "{argv_log}"\n'
                 f'pwd > "{cwd_log}"\n'
-                "echo 'openai/gpt-5'\n"
-                "echo 'junk with spaces'\n"
-                "echo 'anthropic/claude-sonnet-4-5'\n"
+                'if [ "$1" = --version ]; then echo 1.17.18; exit 0; fi\n'
+                f'cat "{FIXTURES / "opencode_models_verbose.txt"}"\n'
                 "exit 0\n",
             )
             config = self.embedded_default_config()
             config["opencode"]["binary"] = str(fake)
             workspace_path = Path(workspace)
             with mock.patch(
-                "delegate_agent.model_discovery.subprocess.run", wraps=subprocess.run
+                "delegate_agent.harness_discovery.subprocess.run", wraps=subprocess.run
             ) as run:
                 payload = self.engine_models_payload(
                     config, "opencode", live=True, workspace=workspace_path
                 )
             self.assertIs(payload["live"], True)
             by_id = {item["id"]: item for item in payload["models"]}
-            self.assertEqual(by_id["openai/gpt-5"]["source"], "live")
-            self.assertEqual(by_id["anthropic/claude-sonnet-4-5"]["source"], "live")
+            self.assertEqual(by_id["openai/gpt-5.5"]["source"], "live")
             self.assertIn("opencode/gpt-5", by_id)
             self.assertEqual(
-                argv_log.read_text(encoding="utf-8").splitlines(), ["--pure", "models"]
+                argv_log.read_text(encoding="utf-8").splitlines(),
+                ["--pure", "models", "--verbose"],
             )
-            self.assertEqual(run.call_args.args[0], [str(fake), "--pure", "models"])
-            self.assertEqual(run.call_args.kwargs["cwd"], workspace_path)
-            self.assertEqual(
+            self.assertTrue(run.called)
+            self.assertNotEqual(
                 Path(cwd_log.read_text(encoding="utf-8").strip()).resolve(),
                 workspace_path.resolve(),
             )
@@ -486,11 +528,11 @@ class LiveProbeIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             argv_log = Path(tmp) / "argv.log"
             fake = _write_executable(
-                Path(tmp) / "fake-pi",
+                Path(tmp) / "pi",
                 "#!/usr/bin/env bash\n"
-                f'printf \'%s\\n\' "$@" > "{argv_log}"\n'
-                "echo 'provider model context max-out thinking images'\n"
-                "echo 'openai-codex gpt-5.6-sol 272K 128K yes yes'\n"
+                f'printf \'%s\\n\' "$*" >> "{argv_log}"\n'
+                'if [ "$1" = --version ]; then echo 0.80.10; exit 0; fi\n'
+                f'cat "{FIXTURES / "pi_models.txt"}"\n'
                 "exit 0\n",
             )
             config = self.embedded_default_config()
@@ -502,12 +544,9 @@ class LiveProbeIntegrationTests(unittest.TestCase):
             self.assertEqual(
                 argv_log.read_text(encoding="utf-8").splitlines(),
                 [
-                    "--offline",
-                    "--no-extensions",
-                    "--no-skills",
-                    "--no-prompt-templates",
-                    "--no-approve",
-                    "--list-models",
+                    "--version",
+                    "--offline --no-extensions --no-skills --no-prompt-templates --no-approve --list-models",
+                    "--help",
                 ],
             )
 
@@ -515,10 +554,11 @@ class LiveProbeIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             argv_log = Path(tmp) / "argv.log"
             fake = _write_executable(
-                Path(tmp) / "fake-omp",
+                Path(tmp) / "omp",
                 "#!/usr/bin/env bash\n"
-                f'printf \'%s\\n\' "$@" > "{argv_log}"\n'
-                'printf \'%s\\n\' \'{"models":[{"selector":"openai-codex/gpt-5.6-sol"}]}\'\n'
+                f'printf \'%s\\n\' "$*" >> "{argv_log}"\n'
+                'if [ "$1" = --version ]; then echo omp/17.0.4; exit 0; fi\n'
+                f'cat "{FIXTURES / "omp_models.json"}"\n'
                 "exit 0\n",
             )
             config = self.embedded_default_config()
@@ -528,7 +568,7 @@ class LiveProbeIntegrationTests(unittest.TestCase):
 
             self.assertIs(payload["live"], True)
             argv = argv_log.read_text(encoding="utf-8").splitlines()
-            self.assertEqual(argv, ["models", "--json", "--no-extensions"])
+            self.assertEqual(argv, ["--version", "models --json --no-extensions"])
             for role_flag in ("--smol", "--slow", "--plan", "--prewalk", "--plan-yolo"):
                 self.assertNotIn(role_flag, argv)
 
@@ -549,7 +589,9 @@ class LiveProbeIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             fake = _write_executable(
                 Path(tmp) / "fake-cursor",
-                "#!/usr/bin/env bash\necho 'totally unrelated'\nexit 0\n",
+                "#!/usr/bin/env bash\n"
+                'if [ "$1" = --version ]; then echo 2026.07.17-3e2a980; exit 0; fi\n'
+                "echo 'totally unrelated'\nexit 0\n",
             )
             config = self.embedded_default_config()
             config["cursor"]["argvPrefix"] = [str(fake)]
@@ -560,8 +602,10 @@ class LiveProbeIntegrationTests(unittest.TestCase):
     def test_opencode_live_degrades_on_failure_to_bundled_and_config(self):
         with tempfile.TemporaryDirectory() as tmp:
             fake = _write_executable(
-                Path(tmp) / "fake-opencode",
-                "#!/usr/bin/env bash\necho nope >&2\nexit 7\n",
+                Path(tmp) / "opencode",
+                "#!/usr/bin/env bash\n"
+                'if [ "$1" = --version ]; then echo 1.17.18; exit 0; fi\n'
+                "echo nope >&2\nexit 7\n",
             )
             config = self.embedded_default_config()
             config["opencode"]["binary"] = str(fake)
@@ -579,21 +623,66 @@ class LiveProbeIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             fake = _write_executable(
                 Path(tmp) / "fake-cursor",
-                "#!/usr/bin/env bash\nsleep 30\n",
+                "#!/usr/bin/env bash\n"
+                'if [ "$1" = --version ]; then echo 2026.07.17-3e2a980; exit 0; fi\n'
+                "sleep 30\n",
             )
             config = self.embedded_default_config()
             config["cursor"]["argvPrefix"] = [str(fake)]
             with mock.patch(
-                "delegate_agent.model_discovery.LIVE_PROBE_TIMEOUT_SEC",
+                "delegate_agent.harness_discovery.METADATA_PROBE_TIMEOUT_SEC",
                 0.05,
             ):
                 payload = self.engine_models_payload(config, "cursor", live=True)
             self.assertIs(payload["live"], False)
             self.assertIn("warning", payload)
 
+    def test_live_json_warning_redacts_selector_paths_and_secrets(self):
+        from delegate_agent import harness_discovery
+        from delegate_agent.describe_payload import emit_models
+
+        config = self.embedded_default_config()
+        record = {
+            "installed": True,
+            "probeStatus": "ok",
+            "models": {"live-model": {}},
+            "warnings": ["selector /Users/alice/private/codex failed with api_key=do-not-print"],
+        }
+        with mock.patch.object(harness_discovery, "probe_harness", return_value=record):
+            stdout = io.StringIO()
+            code = emit_models(
+                config,
+                "fixture-config",
+                True,
+                stdout,
+                engine="codex",
+                live=True,
+            )
+        payload = json.loads(stdout.getvalue())
+
+        self.assertEqual(code, 0)
+        self.assertNotIn("/Users/alice/private/codex", payload["warning"])
+        self.assertNotIn("do-not-print", payload["warning"])
+        self.assertIn("<redacted-path>", payload["warning"])
+
+    def test_live_probe_exception_warning_redacts_absolute_path(self):
+        from delegate_agent import harness_discovery
+
+        config = self.embedded_default_config()
+        with mock.patch.object(
+            harness_discovery,
+            "probe_harness",
+            side_effect=RuntimeError("cannot inspect /private/account/selector"),
+        ):
+            payload = self.engine_models_payload(config, "codex", live=True)
+
+        self.assertIs(payload["live"], False)
+        self.assertNotIn("/private/account/selector", payload["warning"])
+        self.assertIn("<redacted-path>", payload["warning"])
+
     def test_live_unsupported_engines(self):
         config = self.embedded_default_config()
-        for engine in ("codex", "claude", "grok", "kimi"):
+        for engine in ("claude",):
             with self.subTest(engine=engine):
                 payload = self.engine_models_payload(config, engine, live=True)
                 live = payload["live"]
@@ -604,10 +693,29 @@ class LiveProbeIntegrationTests(unittest.TestCase):
                 self.assertTrue(sources <= {"bundled", "config"})
                 self.assertNotIn("live", sources)
 
+    def test_codex_grok_and_kimi_live_use_metadata_adapters(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            harnesses = materialize_minimum_harnesses(Path(tmp))
+            config = self.embedded_default_config()
+            expected = {
+                "codex": ("gpt-5.6-sol", "live"),
+                "grok": ("grok-4.5", "live"),
+                "kimi": ("kimi-code/k3", "live"),
+            }
+            for engine, (selector, source) in expected.items():
+                with self.subTest(engine=engine):
+                    config[engine]["binary"] = str(harnesses[engine])
+                    payload = self.engine_models_payload(config, engine, live=True)
+                    self.assertIs(payload["live"], True)
+                    by_id = {item["id"]: item for item in payload["models"]}
+                    self.assertEqual(by_id[selector]["source"], source)
+                    if engine == "kimi":
+                        self.assertEqual(by_id[selector]["note"], "K3")
+
     def test_opencode_is_not_live_unsupported(self):
         from delegate_agent.model_discovery import LIVE_UNSUPPORTED_ENGINES
 
-        self.assertNotIn("opencode", LIVE_UNSUPPORTED_ENGINES)
+        self.assertEqual(LIVE_UNSUPPORTED_ENGINES, frozenset({"claude"}))
 
 
 class NonDroidModelsSummaryExtensionTests(unittest.TestCase):
@@ -733,11 +841,221 @@ class PlainModelsUnchangedTests(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["engine"], "kimi")
         self.assertEqual(payload["schema"], "delegate.engine-models.v1")
-        self.assertEqual(payload["default"], "kimi-code/k3")
+        self.assertIsNone(payload["default"])
         self.assertEqual(
             [item["id"] for item in payload["models"]],
             ["kimi-code/k3", "kimi-code/kimi-for-coding", "kimi-code/kimi-for-coding-highspeed"],
         )
+
+
+class UnifiedDiscoveryProjectionTests(unittest.TestCase):
+    def setUp(self):
+        from delegate_agent.config import embedded_default_config
+
+        self.config = embedded_default_config()
+
+    def test_cached_engine_models_merge_all_four_layers_without_spawning(self):
+        from delegate_agent import harness_discovery
+        from delegate_agent.model_discovery import engine_models_payload
+
+        self.config["codex"]["models"] = {"configured": "config-only"}
+        legacy = {
+            "harnesses": {
+                "codex": {
+                    "models": {
+                        "legacy-only": {"supported": ["high"]},
+                        "gpt-5.5": {"supported": ["high"]},
+                    }
+                }
+            }
+        }
+        discovery = {
+            "harnesses": {
+                "codex": {
+                    "defaultModel": "discovery-only",
+                    "models": {
+                        "discovery-only": {"displayName": "Fresh"},
+                        "gpt-5.5": {"displayName": "Observed"},
+                    },
+                }
+            }
+        }
+        with (
+            mock.patch.object(
+                harness_discovery,
+                "run_metadata_probe",
+                side_effect=AssertionError("cached models must not spawn"),
+            ),
+            mock.patch.object(
+                harness_discovery,
+                "write_discovery_cache",
+                side_effect=AssertionError("cached models must not write"),
+            ),
+        ):
+            payload = engine_models_payload(
+                self.config,
+                "codex",
+                discovery=discovery,
+                legacy_cache=legacy,
+            )
+
+        by_id = {item["id"]: item for item in payload["models"]}
+        self.assertEqual(by_id["legacy-only"]["source"], "cache")
+        self.assertEqual(by_id["discovery-only"]["source"], "discovery")
+        self.assertEqual(by_id["gpt-5.5"]["source"], "discovery")
+        self.assertEqual(by_id["config-only"]["source"], "config")
+        self.assertEqual(by_id["discovery-only"]["note"], "Fresh")
+        self.assertEqual(payload["default"], "discovery-only")
+
+    def test_live_probe_uses_profile_environment_and_never_writes_cache(self):
+        from delegate_agent import harness_discovery, profiles
+        from delegate_agent.model_discovery import engine_models_payload
+
+        profile = profiles.ProfileResolution(
+            name="work",
+            source="test",
+            env={"DISCOVERY_ACCOUNT": "work"},
+        )
+        record = {
+            "probeStatus": "ok",
+            "models": {"live-only": {"displayName": "Live"}},
+            "warnings": [],
+        }
+
+        def probe(_config, _engine, *, env, factory_settings_path=None):
+            del factory_settings_path
+            self.assertEqual(env["DISCOVERY_ACCOUNT"], "work")
+            return record
+
+        with (
+            mock.patch.object(harness_discovery, "probe_harness", side_effect=probe),
+            mock.patch.object(
+                harness_discovery,
+                "write_discovery_cache",
+                side_effect=AssertionError("models --live must not write"),
+            ),
+        ):
+            payload = engine_models_payload(
+                self.config,
+                "codex",
+                live=True,
+                profile=profile,
+            )
+        by_id = {item["id"]: item for item in payload["models"]}
+        self.assertEqual(by_id["live-only"]["source"], "live")
+
+    def test_devin_live_probe_receives_profile_environment(self):
+        from delegate_agent import harness_discovery, profiles
+        from delegate_agent.model_discovery import engine_models_payload
+
+        profile = profiles.ProfileResolution(
+            name="work",
+            source="test",
+            env={"DEVIN_ACCOUNT": "work"},
+        )
+        completed = harness_discovery.ProbeResult(
+            argv=(),
+            returncode=1,
+            stdout="",
+            stderr="Available: adaptive, profile-devin",
+            error="probe_failed",
+        )
+        with mock.patch.object(
+            harness_discovery, "run_metadata_probe", return_value=completed
+        ) as run:
+            payload = engine_models_payload(
+                self.config,
+                "devin",
+                live=True,
+                profile=profile,
+            )
+        self.assertEqual(run.call_args.kwargs["env"]["DEVIN_ACCOUNT"], "work")
+        by_id = {item["id"]: item for item in payload["models"]}
+        self.assertEqual(by_id["profile-devin"]["source"], "live")
+
+    def test_summary_adds_harness_metadata_without_changing_aliases(self):
+        from delegate_agent import profiles
+        from delegate_agent.constants import KNOWN_ENGINES
+        from delegate_agent.describe_payload import models_summary_payload
+
+        self.config["droid"]["models"] = {"known": "provider/model"}
+        before = models_summary_payload(self.config, "fixture")
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = _write_executable(Path(tmp) / "codex", "#!/bin/sh\nexit 0\n")
+            droid_binary = _write_executable(Path(tmp) / "droid", "#!/bin/sh\nexit 0\n")
+            self.config["codex"]["binary"] = str(binary)
+            self.config["droid"]["binary"] = str(droid_binary)
+            discovery = {
+                "harnesses": {
+                    "codex": {
+                        "installed": True,
+                        "selector": [str(binary)],
+                        "probeStatus": "ok",
+                        "modelScope": "account",
+                    },
+                    "droid": {
+                        "installed": True,
+                        "selector": [str(droid_binary)],
+                        "probeStatus": "ok",
+                        "modelScope": "account",
+                    },
+                }
+            }
+            after = models_summary_payload(
+                self.config,
+                "fixture",
+                discovery=discovery,
+                profile=profiles.empty_profile_resolution(),
+            )
+
+        self.assertEqual(after["aliases"], before["aliases"])
+        self.assertEqual(after["counts"], before["counts"])
+        self.assertEqual(set(after["harnesses"]), set(KNOWN_ENGINES))
+        codex = after["harnesses"]["codex"]
+        self.assertEqual(codex["catalogScope"], "account")
+        self.assertFalse(codex["stale"])
+        self.assertTrue(codex["launchable"])
+        self.assertFalse(after["harnesses"]["droid"]["launchable"])
+        missing = after["harnesses"]["claude"]
+        self.assertEqual(
+            missing,
+            {
+                "installed": False,
+                "probeStatus": "missing",
+                "catalogScope": "unknown",
+                "stale": False,
+                "launchable": False,
+            },
+        )
+
+    def test_selector_drift_is_stale_and_not_launchable_without_spawning(self):
+        from delegate_agent import harness_discovery, profiles
+        from delegate_agent.describe_payload import models_summary_payload
+
+        discovery = {
+            "harnesses": {
+                "codex": {
+                    "installed": True,
+                    "selector": ["/old/codex"],
+                    "probeStatus": "ok",
+                    "modelScope": "account",
+                }
+            }
+        }
+        self.config["codex"]["binary"] = "/new/codex"
+        with mock.patch.object(
+            harness_discovery,
+            "run_metadata_probe",
+            side_effect=AssertionError("summary drift must not spawn"),
+        ):
+            summary = models_summary_payload(
+                self.config,
+                "fixture",
+                discovery=discovery,
+                profile=profiles.empty_profile_resolution(),
+            )
+        self.assertTrue(summary["harnesses"]["codex"]["stale"])
+        self.assertFalse(summary["harnesses"]["codex"]["launchable"])
 
 
 class CommandHelpModelsTests(unittest.TestCase):
@@ -751,8 +1069,11 @@ class CommandHelpModelsTests(unittest.TestCase):
         flags = {opt.flag for opt in spec.options}
         self.assertIn("--live", flags)
         self.assertTrue(any(arg.name == "engine" for arg in spec.arguments))
+        self.assertIn("--auth-profile", usage)
+        self.assertNotIn("--auth-profile", spec.unsupported_global_options)
         notes = " ".join(spec.notes).lower()
         self.assertIn("advisory", notes)
+        self.assertIn("does not update the cache", notes)
 
 
 if __name__ == "__main__":

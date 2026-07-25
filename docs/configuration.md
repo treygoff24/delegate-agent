@@ -31,6 +31,12 @@ $EDITOR ~/.delegate/config.json
 installs can run `env -u AI_PROFILE delegate config sync-profiles` to create
 missing overlays without overwriting ones already present.
 
+For automatic first-run configuration, use `delegate setup`. If no config
+exists, setup writes only safe absolute harness selectors. If one exists, setup
+validates it and leaves its bytes unchanged. Model catalogs, native defaults,
+and observed reasoning menus belong in the discovery cache rather than being
+copied into config.
+
 Config objects are deep-merged. That means an explicit config can override a
 specific key, but nested maps such as `droid.models` are merged with lower layers
 rather than cleared. For a deterministic automation run with no user-level
@@ -53,6 +59,39 @@ delegate --json models
 the embedded defaults plus discoverable user, workspace, and `DELEGATE_CONFIG`
 layers. This is read-only observability; inspecting it does not modify
 `~/.delegate` or workspace config files.
+
+## Discovery cache and precedence
+
+Discovery state is separate from config. The implicit auth profile uses
+`~/.delegate/cache/discovery/default.json`; every named profile gets a separate
+hashed file under `~/.delegate/cache/discovery/`. These files are owner-only,
+atomically replaced, and never selected by repository config.
+
+The private cache format is schema `1`. Its root contains only `schema`,
+`profile`, `capturedAt`, and `harnesses`; each normalized harness record is
+limited to installation/fingerprint data, model scope/default/catalog data,
+reasoning evidence, and normalized warnings. Raw provider objects, profile env,
+and raw probe output are not cache fields. Do not edit the cache by hand. A
+malformed snapshot is treated as absent and can be replaced by the next refresh.
+
+`delegate setup` and `delegate capabilities refresh` probe all supported
+harnesses and write the selected profile's cache. Successful harness records
+replace their previous records independently. A failed probe retains its
+last-known-good record and appears in `staleHarnesses` in the refresh response.
+Changing a configured binary selector also marks that harness stale; runtime
+resolution ignores the mismatched record without probing during the launch.
+
+`delegate models <engine> --live` is deliberately non-persistent. It shows a
+fresh per-engine projection but writes neither config nor cache. Plain `models`,
+plain `capabilities`, dry-run, and ordinary launches only read cached state.
+
+Runtime model selection remains explicit: a CLI/JSON model or configured
+alias/default wins. Model catalog display precedence is config, profile
+discovery (or the one-off live result), the legacy workspace reasoning cache,
+then bundled advisory data. Exact reasoning declarations use config, profile
+discovery, the legacy workspace cache, then bundled fallback. Harness-wide
+compatibility applies only where that harness documents it and exact evidence
+is absent.
 
 ## Example
 
@@ -200,8 +239,8 @@ Controls local run recording.
 - `argvPrefix`: command prefix for Cursor Agent. Use an array so wrappers are possible.
 - `defaultModel`: non-empty model name passed to Cursor.
 - `models`: optional map of local aliases to Cursor model IDs. Used by `--model` and JSON `model`. Alias keys must not collide with mode names (`safe`/`work`/`call`), equal the engine's own name, or start with `-`.
-- `defaultReasoningEffort`: optional non-empty effort string. If set, it requires a matching `reasoningEffortModels` entry. When no mapping exists, the run proceeds without reasoning effort and records a warning (an explicit `--reasoning-effort` flag still fails closed).
-- `reasoningEffortModels`: map from effort strings to Cursor model names. Cursor currently has no standalone reasoning-effort flag, so Delegate implements Cursor effort by selecting the configured model for that effort. An explicit `--model` wins over effort→model routing.
+- `defaultReasoningEffort`: optional non-empty effort string. It needs either a matching `reasoningEffortModels` entry or an exact discovered route for the selected model family. When neither can satisfy a configured default, the run proceeds without reasoning effort and records a warning (an explicit `--reasoning-effort` flag still fails closed).
+- `reasoningEffortModels`: map from effort strings to Cursor model names. Cursor currently has no standalone reasoning-effort flag, so Delegate implements Cursor effort by selecting a model. Without an explicit model pin, this map outranks discovered routes. An explicit `--model` blocks the global map; Delegate may still select a different exact same-family selector when discovery corroborates that effort route, and reports the replacement as a warning. If no exact same-family route exists, an explicit effort fails closed while a configured default is ignored with a warning.
 - `cursor.binary` is not supported; use `argvPrefix`.
 
 ### `droid`
@@ -298,8 +337,8 @@ Controls local run recording.
   pins `profiles.default` and carries that profile's `CODEX_HOME` pointer; it
   does not contain secrets.
 - `--auth-profile NAME` overrides ambient detection for launches, `dry-run`,
-  `run --input-json`, `delegate profiles`, and `capabilities refresh`. Unknown
-  names fail closed with `unknown_profile`.
+  `run --input-json`, `delegate profiles`, `models`, `capabilities`, and
+  `setup`. Unknown names fail closed with `unknown_profile`.
 - `delegate profiles` reports the detected profile, source, and resolved env
   keys. JSON output includes redacted values and never emits unredacted
   secret-keyed values.
@@ -325,7 +364,7 @@ Controls local run recording.
 - `binary`: child executable for Claude Code.
 - `defaultModel`: optional Claude model string. `null` lets Claude Code choose its own default.
 - `models`: optional map of local aliases to Claude model IDs for `--model` / JSON `model`. Alias keys must not collide with mode names, equal the engine's own name, or start with `-`.
-- `defaultReasoningEffort`: optional Claude Code effort string: `low`, `medium`, `high`, `xhigh`, or `max`. Delegate emits it as `--effort`.
+- `defaultReasoningEffort`: optional Claude Code effort string. Delegate validates it against the selected profile's discovered harness enum when available (with bundled native labels as compatibility fallback) and emits it as `--effort`. This allows a newly advertised Claude effort label without requiring a Delegate release.
 - `workPermissionMode`: Claude Code permission mode for work runs. Allowed values are `acceptEdits`, `auto`, `default`, `dontAsk`, and `plan`.
 - `workPermissionMode` cannot be `bypassPermissions`; use `policy.harness.claude.work.bypassApprovalsAndSandbox` when you explicitly want Delegate to emit Claude `--permission-mode bypassPermissions`.
 - `noSessionPersistence`: defaults to `true`, adding `--no-session-persistence` to headless calls.
@@ -354,7 +393,7 @@ Controls local run recording.
 - `binary`: path to the Grok Build CLI executable. Delegate also searches `~/.grok/bin`.
 - `defaultModel`: optional Grok model string. `null` lets Grok choose its own default.
 - `models`: optional map of local aliases to Grok model IDs for `--model` / JSON `model`. Alias keys must not collide with mode names, equal the engine's own name, or start with `-`.
-- `defaultReasoningEffort`: optional Grok effort string: `low`, `medium`, `high`, `xhigh`, or `max`. Delegate emits it as `--effort`.
+- `defaultReasoningEffort`: optional Grok effort string. Delegate validates exact model declarations before using the harness-wide compatibility enum and emits accepted values as `--effort`. A manual `reasoning.capabilities.grok` declaration can teach Delegate a newly released exact model/effort pair.
 - `workPermissionMode`: Grok permission mode for work runs. Allowed values include `acceptEdits`, `auto`, `default`, and `dontAsk`.
 - `workPermissionMode` cannot be `bypassPermissions`; use `policy.harness.grok.work.bypassApprovalsAndSandbox` when you explicitly want Delegate to emit Grok `--permission-mode bypassPermissions`.
 - `safePermissionMode`: Grok permission mode for safe runs. Allowed values are `dontAsk`, `default`, and `auto`. Defaults to `dontAsk`.
@@ -378,7 +417,7 @@ Controls local run recording.
 ```
 
 - `binary`: path to the `kimi` executable.
-- `defaultModel`: default Kimi model alias (e.g. `kimi-code/k3`). Set to `null` to let Kimi use its own configured default.
+- `defaultModel`: optional Kimi model alias. The editable example pins one; the embedded default is `null` so Kimi can use its own configured default.
 - `models`: optional map of local aliases to Kimi model IDs for `--model` / JSON `model`. Alias keys must not collide with mode names, equal the engine's own name, or start with `-`.
 - `defaultReasoningEffort`: not supported in v1; must be `null`.
 - Kimi's thinking/effort level is configured in `~/.kimi-code/config.toml`, not through Delegate.
@@ -399,7 +438,7 @@ Controls local run recording.
 ```
 
 - `binary`: path to the Devin CLI executable.
-- `defaultModel`: default Devin model ID (embedded default `swe-1.7`).
+- `defaultModel`: optional Devin model ID. The editable example pins one; the embedded default is `null` so Devin can use its own configured default.
 - `models`: optional map of local aliases to Devin model IDs for `--model` / JSON `model`. Alias keys must not collide with mode names, equal the engine's own name, or start with `-`.
 - `defaultReasoningEffort`: not supported in v1; must be `null`.
 - Discover live Devin model IDs with `delegate models devin --live`.
@@ -431,7 +470,10 @@ Controls local run recording.
 - `defaultModel`: optional OpenCode `provider/model` ID. `null` lets OpenCode use
   its configured default.
 - `defaultReasoningEffort`: optional OpenCode variant. Delegate emits it as
-  `--variant` without model validation; OpenCode silently ignores bogus variants.
+  `--variant` and validates it when exact discovered variants exist for the
+  selected model. Without exact evidence, Delegate preserves pass-through
+  compatibility and reports `opencode_variant_unvalidated`; OpenCode may then
+  silently ignore a bogus variant.
 - `defaultAgent`: optional OpenCode agent name used when a run does not pass
   `--agent`.
 - `models`: optional map of local aliases. A value may be a model string or an
@@ -439,7 +481,7 @@ Controls local run recording.
 - Delegate rejects OpenCode model, variant, agent, and alias values that start
   with `-` in config and per-run input.
 
-`delegate models opencode --live` shells out to `opencode --pure models`. Live
+`delegate models opencode --live` runs `opencode --pure models --verbose`. Live
 discovery returns more than 450 `provider/model` IDs and includes any models.dev
 provider, including configured custom or local providers.
 
@@ -512,19 +554,30 @@ provider, including configured custom or local providers.
           "supported": ["high", "xhigh"],
           "default": "high"
         }
+      },
+      "grok": {
+        "provider/custom-model": {
+          "supported": ["low", "medium", "high"],
+          "default": "high"
+        }
       }
     }
   }
 }
 ```
 
-- `capabilities`: optional map of harness name (`codex` or `droid` only; cursor uses `cursor.reasoningEffortModels`, and Claude uses static native `--effort` labels) to model capability declarations.
+- `capabilities`: optional map of harness name (`codex`, `droid`, or `grok`; Cursor uses `cursor.reasoningEffortModels`, and Claude uses native harness-wide `--effort` labels) to exact per-model capability declarations.
 - `supported`: non-empty array of exact effort strings. Delegate treats these literally; it does not translate `xhigh` to another provider spelling.
 - `default`: optional effort string that must be present in `supported`. It is informational only (shown by `delegate capabilities`); launches apply `<engine>.defaultReasoningEffort`, not per-model defaults.
-- Effort strings may not contain whitespace, double quotes, or backslashes.
-- Codex `max` support is model-scoped and bundled only for `gpt-5.6-sol` as of 2026-07. Other Codex models fail closed unless an exact config or workspace capability-cache declaration includes `max`.
+- Effort strings may not start with `-` or contain whitespace, double quotes, or backslashes.
+- Codex `max` support is model-scoped and bundled only for `gpt-5.6-sol` as of 2026-07. Other Codex models fail closed unless an exact config, profile-discovery, or legacy workspace-cache declaration includes `max`.
 
-Capability precedence is config, then workspace cache, then bundled fallback. Use config for private or newly released models. A malformed workspace cache is ignored (treated as absent) and is overwritten by the next `capabilities refresh`. Use `delegate --json capabilities` to inspect the merged view and `delegate --json capabilities refresh` to refresh the workspace-local cache at `.delegate/capabilities/reasoning.json`.
+Use config for private models or a deliberate override. A malformed profile
+cache is treated as absent and can be replaced by the next setup or refresh.
+The older `.delegate/capabilities/reasoning.json` file is still read at lower
+precedence for compatibility, but refresh no longer writes it. Use
+`delegate --json capabilities` to inspect the merged view and
+`delegate --json capabilities refresh` to refresh the selected profile.
 
 ### `policy`
 

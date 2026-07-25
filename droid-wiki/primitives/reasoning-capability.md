@@ -12,6 +12,7 @@ A reasoning capability records whether a runtime/model pair supports a requested
 | --- | --- |
 | `src/delegate_agent/reasoning.py` | Capability model and validation. |
 | `src/delegate_agent/capability_commands.py` | Capability command output. |
+| `src/delegate_agent/harness_discovery.py` | Profile-scoped discovered model and effort evidence. |
 | `tests/test_reasoning_capabilities.py` | Capability tests. |
 
 ## Key abstractions
@@ -25,7 +26,14 @@ A reasoning capability records whether a runtime/model pair supports a requested
 
 ## How it works
 
-For Codex and Droid, Delegate looks up declarations in config, then cache, then bundled fallback. Cursor uses `cursor.reasoningEffortModels`. Claude uses static native labels. OpenCode passes effort through as `--variant` without model validation. Kimi is unsupported in v1.
+Exact model declarations resolve from manual config, profile discovery, the
+read-only legacy workspace cache, then bundled fallback. Cursor uses explicit
+`reasoningEffortModels` or corroborated discovered route families. Claude and Pi
+can use harness-wide evidence without claiming model-exact support. OpenCode and
+Oh My Pi validate exact discovered model menus when present and otherwise keep
+their documented compatibility paths. Grok combines exact model declarations
+with a harness-wide native transport fallback. Kimi may advertise effort
+metadata, but Kimi and Devin expose no Delegate effort transport.
 
 ## Integration points
 
@@ -41,4 +49,5 @@ Change declarations and validation in `src/delegate_agent/reasoning.py`, command
 | --- | --- |
 | `src/delegate_agent/reasoning.py` | Capability model and validation. |
 | `src/delegate_agent/capability_commands.py` | Capability command output. |
+| `src/delegate_agent/harness_discovery.py` | Normalized discovery evidence and cache. |
 | `tests/test_reasoning_capabilities.py` | Capability tests. |

@@ -15,3 +15,8 @@ f50b9d15300a288443e70a3082ccc4fc05e0beb4:tests/test_snapshot_commands.py:stripe-
 # historical commits that carried the literal, so pin those two fingerprints.
 9e976345a1273855b2e2ed6aa7ceb9f42dbb43bb:tests/test_profiles.py:generic-api-key:198
 efc8ad8fe936aaddca6154a7b0a866eeedcae228:tests/test_profiles.py:generic-api-key:273
+# Fake tokens in redaction tests on the harness-discovery branch. The current
+# tree assembles both at runtime; these pin the historical blobs that carried
+# the literals (63638cf usage-limit redaction test, 8b5516f profile discovery).
+63638cf5d73ef07afa93557df2ee04bf4b96a3c0:tests/test_codex_thread_resilience.py:generic-api-key:214
+8b5516f45092bab51cebadfcd882d1b2de9c7078:tests/test_capability_commands.py:generic-api-key:513

@@ -73,6 +73,21 @@ def _open_parent(path: Path, *, create: bool) -> tuple[int, str]:
     return _open_directory_parts(anchor, parts[:-1], create=create), parts[-1]
 
 
+def _open_strict_parent(path: Path) -> tuple[int, str]:
+    """Open/create a parent by traversing every component from the filesystem anchor.
+
+    Unlike the registry-root anchoring used by existing helpers, this rejects
+    symlinks anywhere in the caller's spelling. Callers using system path aliases
+    (for example ``/var`` pointing at ``/private/var``) must pass a resolved path.
+    """
+    absolute = Path(os.path.abspath(path))
+    anchor = Path(absolute.anchor)
+    parts = absolute.relative_to(anchor).parts
+    if not parts or not parts[-1]:
+        raise ValueError(f"path must name a file: {path}")
+    return _open_directory_parts(anchor, parts[:-1], create=True), parts[-1]
+
+
 def open_private_file(path: Path, flags: int, mode: int = PRIVATE_FILE_MODE) -> int:
     """Open a registry file without following symlinks in it or its registry path."""
     parent_fd, name = _open_parent(path, create=bool(flags & os.O_CREAT))
@@ -186,6 +201,60 @@ def write_json_atomic(path: Path, payload: JsonObject) -> None:
             os.unlink(temp_name, dir_fd=parent_fd)
         raise
     finally:
+        os.close(parent_fd)
+
+
+def write_json_atomic_if_absent(path: Path, payload: JsonObject) -> bool:
+    """Atomically create private JSON without replacing an existing target."""
+    parent_fd, name = _open_strict_parent(path)
+    temp_name = f".{name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+    temp_exists = False
+    try:
+        try:
+            existing = os.lstat(name, dir_fd=parent_fd)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None:
+            if stat.S_ISLNK(existing.st_mode):
+                raise OSError(errno.ELOOP, "registry file is a symlink", str(path))
+            return False
+
+        fd = os.open(
+            temp_name,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY | _NOFOLLOW_FLAGS,
+            PRIVATE_FILE_MODE,
+            dir_fd=parent_fd,
+        )
+        temp_exists = True
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        try:
+            os.link(
+                temp_name,
+                name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+        except FileExistsError:
+            try:
+                existing = os.lstat(name, dir_fd=parent_fd)
+            except FileNotFoundError:
+                return False
+            if stat.S_ISLNK(existing.st_mode):
+                raise OSError(errno.ELOOP, "registry file is a symlink", str(path)) from None
+            return False
+        os.unlink(temp_name, dir_fd=parent_fd)
+        temp_exists = False
+        os.fsync(parent_fd)
+        return True
+    finally:
+        if temp_exists:
+            with suppress(OSError):
+                os.unlink(temp_name, dir_fd=parent_fd)
         os.close(parent_fd)
 
 

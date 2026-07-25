@@ -8,6 +8,8 @@ Delegate is a single Python package with a CLI front door, runtime-specific requ
 graph TD
     User[User or parent agent] --> CLI[bin/delegate.py and src/delegate_agent/cli.py]
     CLI --> Config[src/delegate_agent/config.py]
+    CLI --> Discovery[src/delegate_agent/harness_discovery.py]
+    Discovery --> Cache[profile discovery cache]
     CLI --> Isolation[src/delegate_agent/isolation.py]
     CLI --> Builders[Runtime request builders]
     Builders --> Request[Request]
@@ -15,13 +17,19 @@ graph TD
     Request --> Worktree[src/delegate_agent/worktree_execution.py]
     SafeIso --> Runner[src/delegate_agent/runner.py]
     Worktree --> Runner
-    Runner --> Child[Cursor, Droid, Codex, Claude, Grok, Devin, OpenCode, or Kimi]
+    Runner --> Child[Cursor, Droid, Codex, Claude, Grok, Devin, OpenCode, Pi, Oh My Pi, or Kimi]
     Runner --> Events[src/delegate_agent/harness_events.py]
     Runner --> Registry[src/delegate_agent/run_registry.py]
     Registry --> Inspect[runs, snapshot, run-output]
 ```
 
-The entry point in `bin/delegate.py` delegates to `src/delegate_agent/cli.py`. That module parses commands, loads config through `src/delegate_agent/config.py`, resolves workspace and isolation metadata, builds a `Request`, and hands execution to either `src/delegate_agent/runner.py` or `src/delegate_agent/worktree_execution.py`.
+The entry point in `bin/delegate.py` delegates to `src/delegate_agent/cli.py`.
+That module parses commands, loads config through `src/delegate_agent/config.py`,
+resolves the active profile and its discovery snapshot, resolves workspace and
+isolation metadata, builds a `Request`, and hands execution to either
+`src/delegate_agent/runner.py` or `src/delegate_agent/worktree_execution.py`.
+Setup and capability refresh are explicit mutation paths; ordinary requests
+only read discovery state.
 
 ## Core components
 
@@ -29,7 +37,8 @@ The entry point in `bin/delegate.py` delegates to `src/delegate_agent/cli.py`. T
 | --- | --- | --- |
 | CLI orchestration | `src/delegate_agent/cli.py`, `src/delegate_agent/command_help.py` | Parse commands, build requests, render help, dispatch subcommands. |
 | Config and policy | `src/delegate_agent/config.py`, `config.example.json` | Merge config layers, validate provider sections, resolve policy and isolation defaults. |
-| Runtime harnesses | `src/delegate_agent/cli.py`, `src/delegate_agent/prompt_transport.py`, `src/delegate_agent/prompt_instructions.py` | Build child argv and prompt transport for each runtime. |
+| Harness discovery | `src/delegate_agent/harness_discovery.py`, `src/delegate_agent/model_discovery.py`, `src/delegate_agent/setup_commands.py` | Fingerprint installed harnesses, normalize model/reasoning metadata, maintain profile caches, and initialize minimal config. |
+| Runtime harnesses | `src/delegate_agent/request_build.py`, `src/delegate_agent/request_models.py`, `src/delegate_agent/prompt_transport.py`, `src/delegate_agent/prompt_instructions.py` | Build child argv and prompt transport for each runtime. |
 | Reasoning | `src/delegate_agent/reasoning.py`, `src/delegate_agent/capability_commands.py` | Validate effort labels and report provider/model support. |
 | Isolation | `src/delegate_agent/isolation.py`, temporary helpers in `src/delegate_agent/cli.py` | Plan temporary safe isolation and persistent worktree metadata. |
 | Persistent worktrees | `src/delegate_agent/worktree_execution.py`, `src/delegate_agent/worktree_mgmt.py`, `src/delegate_agent/worktree_commands.py` | Create, inspect, remove, prune, and reconcile preserved worktrees. |
@@ -59,7 +68,11 @@ sequenceDiagram
     Runner-->>Caller: exit payload with alias and inspection commands
 ```
 
-The `Request` dataclass in `src/delegate_agent/cli.py` is the boundary between parsing/building and execution. It carries the engine, mode, source cwd, execution cwd, prompt text or prompt-file text, public argv, real argv, isolation fields, reasoning fields, and warnings.
+The `Request` dataclass in `src/delegate_agent/request_models.py` is the boundary
+between parsing/building and execution. It carries the engine, mode, source cwd,
+execution cwd, prompt text or prompt-file text, public argv, real argv,
+isolation fields, selected and capability model metadata, reasoning evidence,
+and warnings.
 
 ## Data flow through tracking
 

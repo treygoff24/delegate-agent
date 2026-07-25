@@ -1,9 +1,11 @@
 import importlib.util
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = str(ROOT / "src")
@@ -44,6 +46,9 @@ def safe_temp_dirs() -> set[Path]:
 class ExecutionTestBase(unittest.TestCase):
     def setUp(self):
         self.delegate = load_delegate()
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        self._test_home = home.name
 
     def build_git_request(
         self,
@@ -56,16 +61,17 @@ class ExecutionTestBase(unittest.TestCase):
         dry_run: bool,
         **kwargs,
     ):
-        return self.delegate.build_request(
-            engine,
-            mode,
-            model_alias,
-            self.delegate.ResolvedWorkspace(workspace, "git"),
-            prompt,
-            config,
-            dry_run,
-            **kwargs,
-        )
+        with mock.patch.dict(os.environ, {"HOME": self._test_home}, clear=False):
+            return self.delegate.build_request(
+                engine,
+                mode,
+                model_alias,
+                self.delegate.ResolvedWorkspace(workspace, "git"),
+                prompt,
+                config,
+                dry_run,
+                **kwargs,
+            )
 
     def parsed_launch(
         self,

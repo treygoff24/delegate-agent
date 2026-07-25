@@ -1120,6 +1120,25 @@ class WorkflowCommandTests(unittest.TestCase):
         result = self.run_delegate(["--json", "workflow", "result", wf_id])
         self.assertEqual(json.loads(result.stdout)["result"], {"ok": True, "value": "structured"})
 
+    def test_codex_workflow_schema_preflight_warns_and_auto_injects(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "schema-preflight", "defaults": {"engine": "codex", "mode": "safe"}}
+            SCHEMA = {"type": "object", "required": ["ok", "value"], "properties": {"ok": {"type": "boolean"}, "value": {"type": "string"}}}
+            return agent("structured", schema=SCHEMA)
+            """
+        )
+        launch = self.run_delegate(["--json", "workflow", "run", str(script)])
+        wf_id = json.loads(launch.stdout)["wfId"]
+        self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
+
+        result = self.run_delegate(["--json", "workflow", "result", wf_id])
+        runs = self.run_delegate(["--json", "runs", "--group", wf_id])
+
+        self.assertEqual(json.loads(result.stdout)["result"], {"ok": True, "value": "structured"})
+        warnings = json.loads(runs.stdout)["runs"][0]["warnings"]
+        self.assertTrue(any("auto-injected" in warning for warning in warnings))
+
     def test_codex_structured_output_uses_exact_final_completion(self) -> None:
         script = self.write_workflow(
             """

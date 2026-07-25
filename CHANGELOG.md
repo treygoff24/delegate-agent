@@ -5,6 +5,148 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.0] - 2026-07-25
+
+### Added
+
+- Added typed child-failure reporting for usage/quota limits (including reset
+  details when present), expired or rejected auth tokens, and Codex thread/state
+  lookup loss. Run state, snapshots, listings, completion envelopes, and
+  synthesized reports now carry the specific error and message. The existing
+  generic public error remains `child_failed`; `usage_limit`, `auth_failed`, and
+  `codex_thread_lost` are additive typed codes. Classification reads only stderr
+  and normalized harness error/terminal events, never assistant/model output.
+- Added `delegate ps` as the first-class active-run view, equivalent to
+  `delegate runs --active`.
+- Added `delegate setup` for first-run harness discovery. It fingerprints all
+  supported installed harnesses, records available model/reasoning metadata in
+  a profile-scoped user cache, creates a minimal selector-only config when no
+  config exists, and reports discovery readiness separately from launchability.
+- Cached `models`/`capabilities` views now project profile discovery with source
+  and evidence metadata. `models <engine> --live` provides a non-persistent
+  one-off probe; `capabilities refresh` persists a full refresh for the selected
+  profile, and `capabilities refresh <engine> [...]` re-probes only the named
+  harnesses while the rest keep their last-known-good records.
+- Runtime model and reasoning metadata now distinguish the requested model,
+  argv-resolved model, capability-validation model, requested effort, resolved
+  effort, source, evidence strength, and transport.
+
+### Changed
+
+- Codex output schemas are now linted before launch. Delegate recursively
+  supplies missing `additionalProperties: false` on object schemas with a loud
+  warning, rejects partial `required` lists precisely, and passes a normalized
+  temporary copy without modifying the source schema. Object-bearing `allOf`,
+  `patternProperties`, and external or unresolvable `$ref` values fail closed
+  rather than being rewritten unsafely. Workflow Codex stages and direct
+  `--output-schema`/`outputSchema` launches share the same preflight. The
+  normalized copy preserves the source schema's property order, so
+  think-before-answer schemas keep their intended generation order.
+- On retry-safe paths, Codex thread/state lookup failures now retry once and,
+  only if the same typed failure repeats, retry through an ephemeral
+  `--ignore-user-config` launch. Retry-safe paths are read-only calls and
+  pre-tool attempts whose workspace remains unchanged; work mode also requires
+  a clean captured baseline. Envelopes and events record fallback engagement.
+- `--prompt-file /dev/stdin` and equivalent stdin descriptors now consume the
+  piped prompt once instead of conflicting with stdin as a second source.
+- Model and reasoning resolution now prefers explicit CLI/config choices and
+  exact discovered evidence before legacy workspace or bundled fallbacks.
+  Exact negative menus fail closed; partial harness evidence and Cursor inferred
+  routes remain visibly labeled rather than being promoted to model-exact facts.
+- Discovery refresh is last-known-good per harness. Successful records update
+  independently, failed probes retain the prior record and report staleness,
+  and selector drift invalidates only the affected harness without probing on
+  an ordinary launch.
+- `capabilities refresh` now writes the selected profile's private discovery
+  cache. The old workspace reasoning cache remains a lower-precedence read-only
+  compatibility source. The cached `capabilities` read reports the discovery
+  cache location in `cachePath`; the previous workspace path, when present, is
+  reported under `legacyWorkspaceCachePath`.
+- `reasoning.capabilities` config entries are now accepted for `grok` in
+  addition to `codex` and `droid`.
+- `--auth-profile` is now accepted on cached `capabilities` reads (previously
+  rejected as an invalid option combination) and on `models` and `setup`.
+- Cursor reasoning-effort routing now defers to a pinned selector when discovery
+  has no same-family route for it: the run proceeds on the pinned model and
+  records a bypass warning. When discovery does carry exact same-family routes,
+  the requested effort still routes to the matching selector, and a family that
+  omits the requested effort still fails closed.
+- Grok reasoning-effort support is once again governed by the documented CLI
+  enum (low, medium, high, xhigh, max); a bundled `grok-4.5` declaration that
+  narrowed it to low/medium/high was removed, since `grok --help` enumerates no
+  per-model efforts. Config, discovery-exact, and cached grok declarations
+  still take precedence.
+- Embedded Devin and Kimi `defaultModel` values are now `null`, deferring model
+  selection to each harness. The editable `config init` example may still pin
+  an explicit default.
+- Claude and Grok `defaultReasoningEffort` config values are now only
+  format-checked at load time instead of validated against the static enum; an
+  unsupported configured default degrades to a launch-time warning so that
+  discovery, not a hardcoded table, decides which levels are accepted.
+
+### Security
+
+- Discovery probes use fingerprinted allowlisted selectors, fixed argv with no
+  shell, closed stdin, neutral temporary working directories, bounded output,
+  timeouts, normalized cache schemas, atomic owner-only writes, and scrubbed
+  model/warning projections. Config and cache source paths remain intentionally
+  visible diagnostics. Automatic Devin discovery remains prompt-free; only the
+  explicitly requested `models devin --live` path uses its bounded prompt-like
+  invalid-model probe.
+- Setup never overwrites an existing config and refuses unsafe selectors,
+  final-component symlinks, and concurrent config races rather than mixing
+  discovery results across config states.
+
+### Fixed
+
+- Credentials appearing in a child harness quota or reset message are now
+  redacted before they reach `state.json`, `snapshot.json`, the completion
+  report, or the run envelope; Codex reports quota walls as stdout events,
+  which bypassed the stderr-tail redaction. The in-progress activity label is
+  likewise redacted when persisted, matching the progress heartbeat.
+- A Codex output schema that omits `required` entirely is now repaired to list
+  every property (in declaration order) instead of being rejected, matching how
+  a missing `additionalProperties` is handled. A partial `required` is still an
+  error.
+- The `primary` attempt banner is written once in the run's stderr log even
+  when several retry paths run in sequence.
+- `delegate ps` now reports argument errors in its own terms — unknown options,
+  `--limit`, `--harness`, and `--group` failures name `ps` instead of the
+  `runs` command it delegates to, and `ps --recent` gets the same tailored
+  redirect as `--running` and `--stale`.
+- `delegate capabilities refresh` exits 3 (missing binary) when no supported
+  harness is installed — including when an engine subset such as
+  `capabilities refresh codex` names only uninstalled harnesses — matching
+  `delegate setup` on identical machine state instead of returning the generic
+  usage code 2.
+- `delegate capabilities` no longer advertises harnesses whose configured
+  selector has drifted from the cached record, on both the cached read and
+  after a refresh — a subset refresh returns the full snapshot, so engines it
+  never probed could otherwise surface stale catalogs the launch path would
+  refuse. Excluded harnesses are named in a new `driftedHarnesses` payload
+  field and in the text output.
+- Pi catalog rows whose column count does not match the header are skipped
+  instead of being read by shifted column position, which could cache a
+  thinking-capable model as having no reasoning support (unrecoverable, since
+  Pi has no config override) or hand a non-thinking model the full effort enum.
+- A configured harness binary or argv prefix that no longer resolves while the
+  CLI is still on PATH is now reported as a stale config setting rather than an
+  uninstalled harness, and `delegate setup` names the config key and file to
+  fix instead of telling you to install a CLI you already have.
+- An unreadable `~/.factory/settings.json` (permissions or I/O error) is
+  reported as a read failure instead of being misreported as invalid JSON.
+- Two Cursor selectors that normalize to the same route family and effort now
+  drop just the ambiguous routes with a warning, instead of turning the entire
+  Cursor discovery record into an error record.
+- OpenCode catalog parsing resumes past a malformed entry's whole object, so a
+  `provider/model`-shaped line nested inside the rejected body can no longer be
+  re-read as a real selector.
+- `capabilities refresh` now hints "global options before the subcommand" for a
+  misplaced global option instead of mislabeling it `invalid_engine`, and a
+  subset refresh whose requested harnesses are all uninstalled reports
+  `requested_harnesses_not_installed` instead of the misleading
+  `no_harnesses_installed`.
+
 ## [0.19.0] - 2026-07-20
 
 ### Added
@@ -144,7 +286,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   consistently across the CLI reference and worktree guidance.
 - Devin help and discovery surfaces now derive supported modes consistently and
   reject unknown modes before constructing executable arguments.
-
 ## [0.14.0] - 2026-07-15
 
 ### Added
@@ -490,6 +631,7 @@ Usage-audit fix wave: 82 sessions and 1,241 delegate invocations from one week o
 
 - Releases before 0.1.3 predate this changelog.
 
+[0.20.0]: https://github.com/treygoff24/delegate-agent/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/treygoff24/delegate-agent/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/treygoff24/delegate-agent/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/treygoff24/delegate-agent/compare/v0.16.0...v0.17.0

@@ -133,6 +133,7 @@ def emit(command: ConfigCommand, stdout: TextIO) -> int:
         "action": "init",
         "force": command.force,
         "profileConfigs": profile_configs,
+        "nextAction": "Run delegate setup for automatic harness discovery.",
     }
     if command.json_mode:
         delegate_rendering.print_json(result, stdout)
@@ -140,4 +141,5 @@ def emit(command: ConfigCommand, stdout: TextIO) -> int:
         print(f"wrote config: {path}", file=stdout)
         for created in profile_configs["created"]:
             print(f"wrote profile config: {created}", file=stdout)
+        print("next: run delegate setup for automatic harness discovery", file=stdout)
     return EXIT_OK

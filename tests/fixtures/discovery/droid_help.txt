@@ -1,0 +1,12 @@
+Available Models:
+  auto                                       Auto Model
+  claude-opus-4-8                            Opus 4.8 (default)
+  gpt-5.5                                    GPT-5.5
+
+Custom Models:
+  custom:fixture-public-model-0              Fixture Public Model
+
+Model details:
+  - Auto Model: supports reasoning: No; supported: [none]; default: none
+  - Opus 4.8: supports reasoning: Yes; supported: [off, low, medium, high, xhigh, max]; default: high
+  - GPT-5.5: supports reasoning: Yes; supported: [low, medium, high, xhigh]; default: medium

@@ -1,5 +1,8 @@
+import errno
 import io
 import json
+import os
+import stat
 import sys
 import tempfile
 import unittest
@@ -14,6 +17,9 @@ if SRC not in sys.path:
 
 from delegate_agent import (  # noqa: E402
     capability_commands,
+    errors,
+    harness_discovery,
+    profiles,
     reasoning,
 )
 from delegate_agent.config import harness_binary  # noqa: E402
@@ -59,7 +65,7 @@ class CapabilityCommandTests(unittest.TestCase):
             self.assertEqual(payload["configSource"], "test-config")
             self.assertEqual(
                 payload["cachePath"],
-                str(Path(workspace) / ".delegate" / "capabilities" / "reasoning.json"),
+                str(harness_discovery.discovery_cache_path(None)),
             )
             self.assertIn("codex", payload["reasoning"]["harnesses"])
             cursor_models = payload["reasoning"]["harnesses"]["cursor"]["models"]
@@ -88,11 +94,11 @@ class CapabilityCommandTests(unittest.TestCase):
                 cursor_alias["effortModelRouting"],
                 [{"effort": "high", "model": "cursor-thinking"}],
             )
-            kimi_key = config["kimi"]["defaultModel"]
+            kimi_key = "(default)"
             kimi = payload["reasoningAliases"]["kimi"][kimi_key]
             self.assertIsNone(kimi["supported"])
             self.assertIn("not supported", kimi["warning"])
-            devin_key = config["devin"]["defaultModel"]
+            devin_key = "(default)"
             devin = payload["reasoningAliases"]["devin"][devin_key]
             self.assertIsNone(devin["supported"])
             self.assertIn("not supported", devin["warning"])
@@ -136,6 +142,7 @@ class CapabilityCommandTests(unittest.TestCase):
                 "delegate --json models --summary",
                 describe_summary["recommendedDiscovery"],
             )
+            self.assertIn("delegate setup", describe_summary["recommendedDiscovery"])
 
     def test_opencode_describe_and_models_surfaces(self):
         from delegate_agent.config import embedded_default_config
@@ -268,6 +275,130 @@ class CapabilityCommandTests(unittest.TestCase):
         config["codex"]["defaultModel"] = model_id
         return config, fake_secret, conn_password, model_id, wrapper_path
 
+    def _adversarial_projection_config(self):
+        from delegate_agent.config import embedded_default_config
+
+        first_secret = "sk-proj-aaaaaaaaaaaaaaaa"
+        second_secret = "sk-proj-bbbbbbbbbbbbbbbb"
+        path_key = "/private/account/models/hidden"
+        path_value = "/private/account/models/value"
+        secret_shaped_key = "API_TOKEN_private-model"
+        config = embedded_default_config()
+        config["codex"]["models"] = {
+            first_secret: "model-a",
+            second_secret: "model-b",
+            path_key: "model-c",
+            "path-value": path_value,
+            secret_shaped_key: "model-d",
+        }
+        config["profiles"] = {
+            "definitions": {
+                first_secret: {"env": {}},
+                second_secret: {"env": {}},
+                path_key: {"env": {}},
+            }
+        }
+        return (
+            config,
+            first_secret,
+            second_secret,
+            path_key,
+            path_value,
+            secret_shaped_key,
+        )
+
+    def test_models_and_describe_share_collision_safe_public_projection_scrub(self):
+        from delegate_agent import config as delegate_config
+        from delegate_agent.describe_payload import emit_describe, emit_models
+
+        config, *private_values = self._adversarial_projection_config()
+        config_source = "/private/structured/config.json"
+        with tempfile.TemporaryDirectory() as workspace:
+            workspace_path = Path(workspace)
+            expected_layer_path = str(delegate_config.workspace_config_path(workspace_path))
+            outputs = {}
+            for name, emitter in (("models", emit_models), ("describe", emit_describe)):
+                stdout = io.StringIO()
+                code = emitter(
+                    config,
+                    config_source,
+                    True,
+                    stdout,
+                    workspace=workspace_path,
+                )
+                self.assertEqual(code, 0)
+                outputs[name] = json.loads(stdout.getvalue())
+
+        for payload in outputs.values():
+            rendered = json.dumps(payload)
+            self.assertEqual(payload["configSource"], config_source)
+            layer_paths = [
+                layer.get("path")
+                for layer in payload["configResolution"]["layers"]
+                if isinstance(layer, dict) and "path" in layer
+            ]
+            self.assertIn(expected_layer_path, layer_paths)
+            for private_value in private_values:
+                self.assertNotIn(private_value, rendered)
+
+        models = outputs["models"]["codex"]["models"]
+        self.assertEqual(len(models), 5)
+        self.assertIn("sk-***", models)
+        self.assertIn("sk-***<redacted-key-collision:2>", models)
+        self.assertIn("<redacted-path>", models)
+        self.assertEqual(models["path-value"], "<redacted-path>")
+        self.assertEqual(models["***"], "***")
+
+        profile_keys = outputs["describe"]["profiles"]["envKeys"]
+        self.assertEqual(len(profile_keys), 3)
+        self.assertIn("sk-***", profile_keys)
+        self.assertIn("sk-***<redacted-key-collision:2>", profile_keys)
+        self.assertIn("<redacted-path>", profile_keys)
+
+    def test_capabilities_uses_same_collision_safe_public_projection_scrub(self):
+        config, *private_values = self._adversarial_projection_config()
+        config_source = "/private/structured/config.json"
+        discovery = harness_discovery.empty_snapshot(profile="default")
+        discovery["harnesses"] = {
+            "codex": {
+                "models": {
+                    private_values[0]: {"reasoning": {"supported": ["high"], "evidence": "exact"}},
+                    private_values[1]: {"reasoning": {"supported": ["low"], "evidence": "exact"}},
+                    private_values[2]: {
+                        "reasoning": {"supported": ["medium"], "evidence": "exact"}
+                    },
+                }
+            }
+        }
+        with tempfile.TemporaryDirectory() as workspace:
+            payload = capability_commands.capabilities_payload(
+                config,
+                config_source,
+                workspace,
+                discovery=discovery,
+            )
+
+        rendered = json.dumps(payload)
+        self.assertEqual(payload["configSource"], config_source)
+        self.assertEqual(
+            payload["cachePath"],
+            str(harness_discovery.discovery_cache_path(None)),
+        )
+        for private_value in private_values:
+            self.assertNotIn(private_value, rendered)
+
+        aliases = payload["reasoning"]["aliases"]["codex"]
+        self.assertIn("sk-***", aliases)
+        self.assertIn("sk-***<redacted-key-collision:2>", aliases)
+        self.assertIn("<redacted-path>", aliases)
+        self.assertEqual(aliases["path-value"]["model"], "<redacted-path>")
+        self.assertEqual(aliases["***"], "***")
+
+        discovered_models = payload["reasoning"]["harnesses"]["codex"]["models"]
+        self.assertIn("sk-***", discovered_models)
+        self.assertIn("sk-***<redacted-key-collision:2>", discovered_models)
+        self.assertIn("<redacted-path>", discovered_models)
+
     def test_discovery_payload_scrub_masks_secrets_and_preserves_model_ids_and_paths(self):
         from delegate_agent import redaction
         from delegate_agent.describe_payload import describe_payload, models_payload
@@ -342,15 +473,19 @@ class CapabilityCommandTests(unittest.TestCase):
             self.assertIn("reasoning capabilities:", output)
             self.assertIn("cursor: 1 model(s)", output)
 
-    def test_refresh_failure_raises_command_error_with_original_code(self):
+    def test_refresh_with_no_installed_harnesses_raises_specific_error(self):
         with tempfile.TemporaryDirectory() as workspace:
-            failure = reasoning.ReasoningCapabilityError("refresh_failed", "codex failed")
-
             with (
                 mock.patch.object(
-                    capability_commands.reasoning,
-                    "refresh_reasoning_capabilities",
-                    side_effect=failure,
+                    capability_commands.harness_discovery,
+                    "refresh_discovery",
+                    return_value={
+                        "snapshot": harness_discovery.empty_snapshot(),
+                        "attempts": {"codex": {"installed": False, "probeStatus": "missing"}},
+                        "updatedHarnesses": [],
+                        "staleHarnesses": [],
+                        "cachePath": "/tmp/default.json",
+                    },
                 ),
                 self.assertRaises(capability_commands.CapabilitiesError) as caught,
             ):
@@ -362,8 +497,462 @@ class CapabilityCommandTests(unittest.TestCase):
                     stdout=io.StringIO(),
                 )
 
-            self.assertEqual(caught.exception.error, "refresh_failed")
-            self.assertEqual(caught.exception.message, "codex failed")
+            self.assertEqual(caught.exception.error, "no_harnesses_installed")
+            self.assertIn("codex", caught.exception.diagnostics["attempts"])
+            # Same machine state as delegate setup's no_harnesses_found, so the
+            # exit code must match it rather than the generic usage code.
+            self.assertEqual(caught.exception.exit_code, errors.EXIT_MISSING_BINARY)
+
+    def test_refresh_with_no_installed_harnesses_exits_missing_binary(self):
+        from delegate_agent import cli
+
+        stdout = io.StringIO()
+        with (
+            tempfile.TemporaryDirectory() as home,
+            mock.patch.object(
+                capability_commands.harness_discovery,
+                "refresh_discovery",
+                return_value={
+                    "snapshot": harness_discovery.empty_snapshot(),
+                    "attempts": {"codex": {"installed": False, "probeStatus": "missing"}},
+                    "updatedHarnesses": [],
+                    "staleHarnesses": [],
+                    "cachePath": "/tmp/default.json",
+                },
+            ),
+            mock.patch.dict(os.environ, {"HOME": home, "PATH": ""}, clear=True),
+        ):
+            code = cli.main(
+                ["--json", "capabilities", "refresh"],
+                stdout=stdout,
+                stderr=io.StringIO(),
+            )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(code, errors.EXIT_MISSING_BINARY)
+        self.assertEqual(payload["exitCode"], errors.EXIT_MISSING_BINARY)
+        self.assertEqual(payload["error"], "no_harnesses_installed")
+        self.assertIn("attempts", payload["diagnostics"])
+
+    def test_subset_refresh_of_uninstalled_engine_reports_requested_not_installed(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            with (
+                mock.patch.object(
+                    capability_commands.harness_discovery,
+                    "refresh_discovery",
+                    return_value={
+                        "snapshot": harness_discovery.empty_snapshot(),
+                        "attempts": {"grok": {"installed": False, "probeStatus": "missing"}},
+                        "updatedHarnesses": [],
+                        "staleHarnesses": [],
+                        "cachePath": "/tmp/default.json",
+                    },
+                ),
+                self.assertRaises(capability_commands.CapabilitiesError) as caught,
+            ):
+                capability_commands.emit(
+                    capability_commands.CapabilitiesCommand(
+                        refresh=True, engines=("grok",), json_mode=True
+                    ),
+                    config={},
+                    config_source="test-config",
+                    workspace=workspace,
+                    stdout=io.StringIO(),
+                )
+
+            self.assertEqual(caught.exception.error, "requested_harnesses_not_installed")
+            self.assertIn("grok", caught.exception.message)
+            self.assertIn("grok", caught.exception.diagnostics["attempts"])
+            # "Requested harness is not installed" is the same machine state as
+            # the full refresh finding nothing, so it exits the same way.
+            self.assertEqual(caught.exception.exit_code, errors.EXIT_MISSING_BINARY)
+
+    def test_cached_payload_uses_selected_profile_cache_and_never_spawns(self):
+        profile = profiles.ProfileResolution(name="work", source="test")
+        discovery = {
+            "harnesses": {
+                "codex": {
+                    "models": {
+                        "profile-model": {
+                            "reasoning": {
+                                "supported": ["max"],
+                                "evidence": "exact",
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        with (
+            tempfile.TemporaryDirectory() as workspace,
+            mock.patch.object(
+                capability_commands.harness_discovery,
+                "refresh_discovery",
+                side_effect=AssertionError("cached capabilities must not probe"),
+            ),
+        ):
+            payload = capability_commands.capabilities_payload(
+                {},
+                "fixture",
+                workspace,
+                profile=profile,
+                discovery=discovery,
+            )
+        self.assertEqual(
+            payload["cachePath"],
+            str(harness_discovery.discovery_cache_path("work")),
+        )
+        model = payload["reasoning"]["harnesses"]["codex"]["models"]["profile-model"]
+        self.assertEqual(model["source"], "discovery")
+
+    @staticmethod
+    def _installed_codex_record(selector: list[str]) -> dict:
+        return {
+            "installed": True,
+            "probeStatus": "ok",
+            "selector": selector,
+            "models": {
+                "cached-model": {
+                    "reasoning": {
+                        "supported": ["high"],
+                        "evidence": "exact",
+                    }
+                }
+            },
+        }
+
+    def test_cached_payload_hides_records_the_launch_path_would_refuse(self):
+        with tempfile.TemporaryDirectory() as workspace, tempfile.TemporaryDirectory() as bindir:
+            binary = Path(bindir) / "codex-test"
+            binary.write_text("#!/bin/sh\nexit 0\n")
+            binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
+            config = {"codex": {"binary": "codex-test"}}
+
+            with mock.patch.dict(os.environ, {"PATH": bindir}):
+                matching = capability_commands.capabilities_payload(
+                    config,
+                    "fixture",
+                    workspace,
+                    discovery={
+                        "harnesses": {
+                            "codex": self._installed_codex_record([str(binary.absolute())])
+                        }
+                    },
+                )
+                drifted = capability_commands.capabilities_payload(
+                    config,
+                    "fixture",
+                    workspace,
+                    discovery={
+                        "harnesses": {"codex": self._installed_codex_record(["codex-other"])}
+                    },
+                )
+
+        live = matching["reasoning"]["harnesses"]["codex"]["models"]
+        self.assertEqual(live["cached-model"]["source"], "discovery")
+        self.assertNotIn("driftedHarnesses", matching)
+
+        self.assertEqual(drifted["driftedHarnesses"], ["codex"])
+        self.assertNotIn("cached-model", drifted["reasoning"]["harnesses"]["codex"]["models"])
+
+    def test_cached_text_output_names_excluded_drifted_harnesses(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            stdout = io.StringIO()
+            code = capability_commands.emit(
+                capability_commands.CapabilitiesCommand(),
+                config={"codex": {"binary": "codex-test"}},
+                config_source="fixture",
+                workspace=workspace,
+                profile=profiles.empty_profile_resolution(),
+                discovery={"harnesses": {"codex": self._installed_codex_record(["codex-other"])}},
+                stdout=stdout,
+            )
+
+        self.assertEqual(code, 0)
+        self.assertIn("config selector drifted", stdout.getvalue())
+        self.assertIn("codex", stdout.getvalue())
+
+    def test_legacy_workspace_fields_report_existence_and_actual_contribution(self):
+        cache = {
+            "schema": 1,
+            "harnesses": {
+                "codex": {
+                    "models": {
+                        "legacy-only": {"supported": ["high"]},
+                        "overridden": {"supported": ["low"]},
+                    }
+                }
+            },
+        }
+        discovery = {
+            "harnesses": {
+                "codex": {
+                    "models": {
+                        "overridden": {
+                            "reasoning": {
+                                "supported": ["max"],
+                                "evidence": "exact",
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        with tempfile.TemporaryDirectory() as workspace:
+            legacy_path = reasoning.write_reasoning_capability_cache(workspace, cache)
+            payload = capability_commands.capabilities_payload(
+                {}, "fixture", workspace, discovery=discovery
+            )
+            self.assertEqual(payload["legacyWorkspaceCachePath"], str(legacy_path))
+            self.assertTrue(payload["legacyWorkspaceCache"])
+            models = payload["reasoning"]["harnesses"]["codex"]["models"]
+            self.assertEqual(models["overridden"]["source"], "discovery")
+            self.assertEqual(models["legacy-only"]["source"], "cache")
+
+            cache["harnesses"]["codex"]["models"].pop("legacy-only")
+            reasoning.write_reasoning_capability_cache(workspace, cache)
+            overridden_only = capability_commands.capabilities_payload(
+                {}, "fixture", workspace, discovery=discovery
+            )
+            self.assertIn("legacyWorkspaceCachePath", overridden_only)
+            self.assertNotIn("legacyWorkspaceCache", overridden_only)
+
+    def test_subset_refresh_hides_untouched_engines_drifted_records(self):
+        """A subset refresh returns the whole snapshot, including engines it never probed."""
+        profile = profiles.empty_profile_resolution()
+        snapshot = harness_discovery.empty_snapshot()
+        with tempfile.TemporaryDirectory() as workspace, tempfile.TemporaryDirectory() as bindir:
+            binary = Path(bindir) / "codex-test"
+            binary.write_text("#!/bin/sh\nexit 0\n")
+            binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
+            snapshot["harnesses"] = {
+                "codex": self._installed_codex_record([str(binary.absolute())]),
+                "droid": {
+                    "installed": True,
+                    "probeStatus": "ok",
+                    "selector": ["/nonexistent/droid"],
+                    "models": {
+                        "stale-droid-model": {
+                            "reasoning": {"supported": ["high"], "evidence": "exact"}
+                        }
+                    },
+                },
+            }
+            result = {
+                "snapshot": snapshot,
+                "attempts": {"codex": {"installed": True, "probeStatus": "ok", "warnings": []}},
+                "updatedHarnesses": ["codex"],
+                "staleHarnesses": [],
+                "cachePath": "/user/discovery/default.json",
+            }
+            with (
+                mock.patch.object(
+                    capability_commands.harness_discovery,
+                    "refresh_discovery",
+                    return_value=result,
+                ),
+                mock.patch.dict(os.environ, {"PATH": bindir}),
+            ):
+                payload = capability_commands._refresh_payload(
+                    {"codex": {"binary": "codex-test"}},
+                    workspace,
+                    profile=profile,
+                    engines=("codex",),
+                )
+
+        harnesses = payload["reasoning"]["harnesses"]
+        self.assertEqual(payload["driftedHarnesses"], ["droid"])
+        self.assertEqual(harnesses["codex"]["models"]["cached-model"]["source"], "discovery")
+        self.assertNotIn("stale-droid-model", harnesses["droid"]["models"])
+
+    def test_refresh_partial_success_uses_unified_snapshot_and_never_writes_legacy(self):
+        profile = profiles.ProfileResolution(name="work", source="test")
+        snapshot = harness_discovery.empty_snapshot(profile="work")
+        snapshot["harnesses"] = {
+            "codex": {
+                "models": {
+                    "fresh": {
+                        "reasoning": {
+                            "supported": ["high"],
+                            "evidence": "exact",
+                        }
+                    }
+                }
+            }
+        }
+        result = {
+            "snapshot": snapshot,
+            "attempts": {
+                "codex": {"installed": True, "probeStatus": "ok", "warnings": []},
+                "droid": {
+                    "installed": False,
+                    "probeStatus": "missing",
+                    "warnings": ["not found"],
+                },
+            },
+            "updatedHarnesses": ["codex"],
+            "staleHarnesses": ["droid"],
+            "cachePath": "/user/discovery/work.json",
+        }
+        with (
+            tempfile.TemporaryDirectory() as workspace,
+            mock.patch.object(
+                capability_commands.harness_discovery,
+                "refresh_discovery",
+                return_value=result,
+            ) as refresh,
+            mock.patch.object(
+                capability_commands.reasoning,
+                "write_reasoning_capability_cache",
+                side_effect=AssertionError("refresh must not write the legacy cache"),
+            ),
+        ):
+            payload = capability_commands._refresh_payload({}, workspace, profile=profile)
+
+        refresh.assert_called_once_with({}, profile=profile, engines=None)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["updatedHarnesses"], ["codex"])
+        self.assertEqual(payload["staleHarnesses"], ["droid"])
+        self.assertEqual(payload["cachePath"], "/user/discovery/work.json")
+        fresh = payload["reasoning"]["harnesses"]["codex"]["models"]["fresh"]
+        self.assertEqual(fresh["source"], "discovery")
+
+    def test_refresh_forwards_engine_subset_to_discovery(self):
+        profile = profiles.ProfileResolution(name="work", source="test")
+        snapshot = harness_discovery.empty_snapshot(profile="work")
+        snapshot["harnesses"] = {"codex": {"models": {}}}
+        result = {
+            "snapshot": snapshot,
+            "attempts": {"codex": {"installed": True, "probeStatus": "ok", "warnings": []}},
+            "updatedHarnesses": ["codex"],
+            "staleHarnesses": [],
+            "cachePath": "/user/discovery/work.json",
+        }
+        with (
+            tempfile.TemporaryDirectory() as workspace,
+            mock.patch.object(
+                capability_commands.harness_discovery,
+                "refresh_discovery",
+                return_value=result,
+            ) as refresh,
+        ):
+            capability_commands._refresh_payload({}, workspace, profile=profile, engines=("codex",))
+        refresh.assert_called_once_with({}, profile=profile, engines=("codex",))
+
+    def test_refresh_projects_bounded_attempts_and_scrubs_reasoning_keys_and_values(self):
+        profile = profiles.ProfileResolution(name="work", source="test")
+        secret = "sk-proj-abc123456789012345678901234567890"
+        secret_model = f"API_TOKEN_{secret}"
+        selector_path = "/private/account/bin/codex-wrapper"
+        snapshot = harness_discovery.empty_snapshot(profile="work")
+        snapshot["harnesses"] = {
+            "codex": {
+                "models": {
+                    secret_model: {
+                        "reasoning": {
+                            "supported": ["high"],
+                            "evidence": secret,
+                        }
+                    }
+                }
+            }
+        }
+        result = {
+            "snapshot": snapshot,
+            "attempts": {
+                "codex": {
+                    "installed": True,
+                    "probeStatus": "ok",
+                    "selector": [selector_path],
+                    "version": f"codex 1.0 {secret}",
+                    "modelScope": "account",
+                    "models": {secret_model: {"displayName": secret}},
+                    "warnings": [f"loaded {selector_path}"],
+                    "rawOutput": secret,
+                }
+            },
+            "updatedHarnesses": ["codex"],
+            "staleHarnesses": [],
+            "cachePath": "/user/discovery/work.json",
+        }
+        with (
+            tempfile.TemporaryDirectory() as workspace,
+            mock.patch.object(
+                capability_commands.harness_discovery,
+                "refresh_discovery",
+                return_value=result,
+            ),
+        ):
+            payload = capability_commands._refresh_payload({}, workspace, profile=profile)
+
+        rendered = json.dumps(payload)
+        attempt = payload["attempts"]["codex"]
+        self.assertEqual(
+            set(attempt),
+            {"installed", "probeStatus", "version", "modelScope", "catalogCount"},
+        )
+        self.assertEqual(attempt["catalogCount"], 1)
+        self.assertNotIn("selector", attempt)
+        self.assertNotIn("models", attempt)
+        self.assertNotIn("warnings", attempt)
+        self.assertNotIn("rawOutput", attempt)
+        self.assertNotIn(selector_path, rendered)
+        self.assertNotIn(secret, rendered)
+        self.assertNotIn(secret_model, rendered)
+        self.assertIn("***", rendered)
+        self.assertEqual(payload["cachePath"], "/user/discovery/work.json")
+
+    def test_refresh_cache_write_oserrors_are_generic_and_path_safe(self):
+        profile = profiles.ProfileResolution(name="work", source="test")
+        secret_path = "/private/cache/sk-proj-abc123456789012345678901234567890.json"
+        failures = (
+            PermissionError(errno.EACCES, "permission denied", secret_path),
+            OSError(errno.ELOOP, "registry path component is a symlink", secret_path),
+            OSError(errno.ENOSPC, "no space left on device", secret_path),
+        )
+        for failure in failures:
+            with (
+                self.subTest(error=failure.errno),
+                tempfile.TemporaryDirectory() as workspace,
+                mock.patch.object(
+                    capability_commands.harness_discovery,
+                    "refresh_discovery",
+                    side_effect=failure,
+                ),
+                self.assertRaises(capability_commands.CapabilitiesError) as caught,
+            ):
+                capability_commands._refresh_payload({}, workspace, profile=profile)
+            self.assertEqual(caught.exception.error, "capability_refresh_failed")
+            self.assertEqual(
+                caught.exception.message,
+                "capability refresh could not safely update the discovery cache.",
+            )
+            self.assertNotIn(secret_path, caught.exception.message)
+
+    def test_refresh_installed_but_all_failed_has_distinct_error(self):
+        profile = profiles.ProfileResolution(name="work", source="test")
+        result = {
+            "snapshot": harness_discovery.empty_snapshot(profile="work"),
+            "attempts": {"codex": {"installed": True, "probeStatus": "error", "warnings": []}},
+            "updatedHarnesses": [],
+            "staleHarnesses": [],
+            "cachePath": "/user/discovery/work.json",
+        }
+        with (
+            tempfile.TemporaryDirectory() as workspace,
+            mock.patch.object(
+                capability_commands.harness_discovery,
+                "refresh_discovery",
+                return_value=result,
+            ),
+            self.assertRaises(capability_commands.CapabilitiesError) as caught,
+        ):
+            capability_commands._refresh_payload({}, workspace, profile=profile)
+        self.assertEqual(caught.exception.error, "capability_refresh_failed")
+        self.assertEqual(
+            caught.exception.diagnostics["attempts"]["codex"]["probeStatus"],
+            "error",
+        )
 
 
 if __name__ == "__main__":

@@ -33,6 +33,75 @@ _delegate_subcommand() {
   done
 }
 
+_delegate_launch_help_request() {
+  _delegate_launch_cmd="${1:-}"
+  [ "$#" -gt 0 ] && shift
+
+  if [ "$_delegate_launch_cmd" = "dry-run" ]; then
+    case "${1:-}" in
+      --help|-h)
+        return 0
+        ;;
+    esac
+    _delegate_launch_cmd="${1:-}"
+    [ "$#" -gt 0 ] && shift
+  fi
+
+  case "$_delegate_launch_cmd" in
+    cursor|codex|kimi|claude|grok|devin|opencode|pi|omp)
+      # Parser parity: help is diagnostic only before the mode or immediately
+      # after it. Once inline prompt text starts, a later help token is data.
+      case "${1:-}" in
+        --help|-h)
+          return 0
+          ;;
+        safe|work|call)
+          case "${2:-}" in
+            --help|-h)
+              return 0
+              ;;
+          esac
+          ;;
+      esac
+      return 1
+      ;;
+    droid)
+      # Droid may place a model alias before the mode, so its last diagnostic
+      # help position is one token later than the modeless harnesses.
+      case "${1:-}" in
+        --help|-h)
+          return 0
+          ;;
+        safe|work|call)
+          case "${2:-}" in
+            --help|-h)
+              return 0
+              ;;
+          esac
+          ;;
+        *)
+          case "${2:-}" in
+            --help|-h)
+              return 0
+              ;;
+            safe|work|call)
+              case "${3:-}" in
+                --help|-h)
+                  return 0
+                  ;;
+              esac
+              ;;
+          esac
+          ;;
+      esac
+      return 1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 _delegate_is_readonly_request() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -51,7 +120,29 @@ _delegate_is_readonly_request() {
   _cmd="${1:-}"
   [ "$#" -gt 0 ] && shift
   case "$_cmd" in
-    profiles|runs|run-output|describe|models|snapshot|agent-help|help|--help|-h|--version)
+    cursor|droid|codex|kimi|claude|grok|devin|opencode|pi|omp|dry-run)
+      _delegate_launch_help_request "$_cmd" "$@" && return 0
+      return 1
+      ;;
+  esac
+  # Non-launch command parsers treat help as diagnostic wherever accepted.
+  for _delegate_help_arg in "$@"; do
+    case "$_delegate_help_arg" in
+      --help|-h)
+        return 0
+        ;;
+    esac
+  done
+  case "$_cmd" in
+    profiles|runs|ps|run-output|describe|snapshot|agent-help|help|--help|-h|--version)
+      return 0
+      ;;
+    models)
+      for _delegate_model_arg in "$@"; do
+        if [ "$_delegate_model_arg" = "--live" ]; then
+          return 1
+        fi
+      done
       return 0
       ;;
     capabilities)

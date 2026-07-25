@@ -409,6 +409,8 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertEqual(code, 7)
             assert payload is not None
             self.assertEqual(payload["failureReason"], "auth_failed")
+            self.assertEqual(payload["error"], "auth_failed")
+            self.assertIn("token", payload["message"].lower())
             self.assertTrue(payload["completionReportWritten"])
             self.assertEqual(payload["completionReportSource"], "delegate_synthesized")
             report = (root / "runs" / run_id / "completion-report.md").read_text(encoding="utf-8")
@@ -1579,6 +1581,28 @@ class RunnerCaptureTests(unittest.TestCase):
         )
         self.assertEqual(payload["exitCode"], 0)
 
+    def test_snapshot_prefers_effective_resolved_model_metadata(self):
+        ctx = self.runner.RunContext(
+            registry_root=Path("/tmp"),
+            run_id="run-1",
+            alias="alias-1",
+            harness="codex",
+            engine="codex",
+            mode="safe",
+            model="requested-alias",
+            model_resolved="effective-model",
+            source_cwd="/tmp",
+            execution_cwd="/tmp",
+            workspace_kind="directory",
+            isolated_workspace=False,
+            started_at="2026-05-20T21:42:33Z",
+        )
+        snapshot = self.runner.build_snapshot(
+            ctx,
+            accumulator=self.runner.harness_events.StreamAccumulator(),
+        )
+        self.assertEqual(snapshot["modelResolved"], "effective-model")
+
     def test_persistent_worktree_completion_payload_includes_force_cleanup_command(self):
         ctx = self.runner.RunContext(
             registry_root=Path("/tmp"),
@@ -2292,17 +2316,14 @@ class RunnerCaptureTests(unittest.TestCase):
             )
 
     def test_child_report_discussing_401_is_not_auth_failed(self):
-        # F3: a child report that DISCUSSES a 401 in its events/report text, with a
-        # non-auth failure (no auth context in stderr), must NOT be classified
-        # auth_failed. The 401 must appear in the redacted stderr tail with auth
-        # context to count.
+        # Model text is untrusted classifier input even when the child exits nonzero.
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         script = Path(temp.name) / "codex"
         script.write_text(
             "#!/usr/bin/env bash\n"
             "set -euo pipefail\n"
-            'printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"The endpoint returned 401 during the review."}}\'\n'
+            'printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"Fixture says: 401 Unauthorized: invalid token."}}\'\n'
             "printf '%s\\n' '{\"type\":\"turn.completed\"}'\n"
             "printf 'runtime error: something broke\\n' >&2\n"
             "exit 9\n",
@@ -2336,7 +2357,8 @@ class RunnerCaptureTests(unittest.TestCase):
             )
             self.assertEqual(code, 9)
             assert payload is not None
-            self.assertNotEqual(payload.get("failureReason"), "auth_failed")
+            self.assertEqual(payload.get("failureReason"), "child_failed")
+            self.assertEqual(payload.get("error"), "child_failed")
 
     def test_auth_401_with_unauthorized_context_in_stderr_is_auth_failed(self):
         # F3: a 401 in stderr with auth context (unauthorized nearby) counts as

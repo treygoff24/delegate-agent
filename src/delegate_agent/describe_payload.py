@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 from typing import TextIO
 
-from delegate_agent import VERSION, command_help, reasoning, redaction
+from delegate_agent import VERSION, command_help, harness_discovery, profiles, reasoning, redaction
 from delegate_agent import config as delegate_config
 from delegate_agent import rendering as delegate_rendering
 from delegate_agent.argv_builders import (
@@ -23,6 +23,7 @@ from delegate_agent.argv_builders import (
     build_codex_argv,
     build_devin_argv,
     build_grok_argv,
+    build_kimi_argv,
     build_omp_argv,
     build_opencode_argv,
     build_pi_argv,
@@ -59,25 +60,6 @@ from delegate_agent.prompt_transport import (
 from delegate_agent.request_build import OPENCODE_SAFE_AGENT, _resolve_default_model
 
 CONFIG_ENV = delegate_config.CONFIG_ENV
-
-
-def _redact_keys(value: object) -> object:
-    # redact_value scrubs string leaves but leaves dict KEYS untouched; alias
-    # maps (`<engine>.models`) put user-chosen strings in key position, so a
-    # secret-shaped alias key would otherwise pass through discovery verbatim.
-    if isinstance(value, dict):
-        return {
-            redaction.redact_string(key) if isinstance(key, str) else key: _redact_keys(child)
-            for key, child in value.items()
-        }
-    if isinstance(value, list):
-        return [_redact_keys(item) for item in value]
-    return value
-
-
-def _scrub_discovery_payload(payload: JsonObject) -> JsonObject:
-    scrubbed = _redact_keys(redaction.redact_value(payload))
-    return scrubbed if isinstance(scrubbed, dict) else {"ok": False}
 
 
 def _text_or_none(value: object) -> str:
@@ -237,6 +219,8 @@ def models_payload(
     config: JsonObject,
     config_source: str,
     workspace: Path | None = None,
+    *,
+    discovery: JsonObject | None = None,
 ) -> JsonObject:
     cache = reasoning.load_reasoning_capability_cache(workspace) if workspace is not None else None
     cursor: JsonObject = {
@@ -315,7 +299,9 @@ def models_payload(
         "configSource": config_source,
         "configResolution": config_resolution_payload(config_source, workspace),
         "runtime": runtime_payload(),
-        "reasoningAliases": reasoning.build_alias_reasoning_summaries(config, cache),
+        "reasoningAliases": reasoning.build_alias_reasoning_summaries(
+            config, cache, discovery=discovery
+        ),
         "cursor": cursor,
         "droid": {
             "models": config["droid"]["models"],
@@ -464,9 +450,14 @@ def models_summary_payload(
     config: JsonObject,
     config_source: str,
     workspace: Path | None = None,
+    *,
+    discovery: JsonObject | None = None,
+    profile: profiles.ProfileResolution | None = None,
 ) -> JsonObject:
     cache = reasoning.load_reasoning_capability_cache(workspace) if workspace is not None else None
-    reasoning_aliases = reasoning.build_alias_reasoning_summaries(config, cache)
+    reasoning_aliases = reasoning.build_alias_reasoning_summaries(
+        config, cache, discovery=discovery
+    )
     aliases: list[JsonObject] = []
 
     for engine in MODEL_SUMMARY_ENGINES:
@@ -553,12 +544,67 @@ def models_summary_payload(
             "aliases": len(aliases),
             "providers": len({str(item.get("provider")) for item in aliases}),
         },
+        "harnesses": _harness_summary_metadata(config, discovery, profile),
         "discovery": {
             "fullModels": "delegate --json models",
             "safeSummary": "delegate --json models --summary",
             "reasoningCapabilities": "delegate --json capabilities",
         },
     }
+
+
+def _harness_summary_metadata(
+    config: JsonObject,
+    discovery: JsonObject | None,
+    profile: profiles.ProfileResolution | None,
+) -> JsonObject:
+    raw_harnesses = discovery.get("harnesses") if isinstance(discovery, dict) else None
+    cached_harnesses = raw_harnesses if isinstance(raw_harnesses, dict) else {}
+    active_profile = profile or profiles.empty_profile_resolution()
+    output: JsonObject = {}
+    for engine in KNOWN_ENGINES:
+        raw_record = cached_harnesses.get(engine)
+        record = raw_record if isinstance(raw_record, dict) else None
+        installed = record is not None and record.get("installed") is True
+        probe_status = record.get("probeStatus") if record is not None else None
+        model_scope = record.get("modelScope") if record is not None else None
+        stale = (
+            installed
+            and record is not None
+            and harness_discovery.selector_has_drifted(
+                config,
+                engine,
+                record,
+                profile=active_profile,
+            )
+        )
+        output[engine] = {
+            "installed": installed,
+            "probeStatus": probe_status if isinstance(probe_status, str) else "missing",
+            "catalogScope": model_scope if isinstance(model_scope, str) else "unknown",
+            "stale": stale,
+            "launchable": _cached_harness_launchable(config, engine, installed and not stale),
+        }
+    return output
+
+
+def _cached_harness_launchable(config: JsonObject, engine: str, installed: bool) -> bool:
+    if not installed:
+        return False
+    section = config.get(engine)
+    if not isinstance(section, dict):
+        return False
+    default_model = section.get("defaultModel")
+    has_default = isinstance(default_model, str) and bool(default_model.strip())
+    if engine == "cursor":
+        return has_default
+    if engine == "droid":
+        # The captured catalog can name Droid's native default, but the
+        # currently captured help grammar does not prove that --model is
+        # optional. Keep plain launches fail-closed until that provenance is
+        # available rather than mistaking a menu entry for argv support.
+        return has_default
+    return True
 
 
 def _policy_field_support_matrix() -> JsonObject:
@@ -694,6 +740,21 @@ def _devin_describe_argv(
     ]
 
 
+def _kimi_describe_argv(kimi: JsonObject, *, mode: str) -> list[str]:
+    workspace = "<isolated-workspace>" if mode == MODE_SAFE else "<workspace>"
+    prompt = "<skill-review-prompt>"
+    argv = build_kimi_argv(
+        kimi,
+        mode,
+        workspace,
+        _resolve_default_model(kimi),
+        prompt,
+    )
+    prompt_index = argv.index("--prompt") + 1
+    argv[prompt_index] = "<kimi-safe-prefixed-skill-review-prompt>" if mode == MODE_SAFE else prompt
+    return argv
+
+
 def _opencode_describe_argv(
     opencode: JsonObject,
     *,
@@ -719,6 +780,10 @@ def _opencode_describe_argv(
 def _pi_family_describe_argv(section: JsonObject, engine: str, *, mode: str) -> list[str]:
     model = _resolve_default_model(section)
     default_effort = section.get("defaultReasoningEffort")
+    # describe rejects --auth-profile, so profile-scoped discovery is out of
+    # reach here by design; representative argv validates against the static
+    # enum while real launches consult discovery and may accept more or fewer
+    # levels.
     thinking = reasoning.resolve_native_effort(
         engine,
         default_effort if isinstance(default_effort, str) else None,
@@ -736,6 +801,7 @@ def describe_payload(
 ) -> JsonObject:
     codex = config["codex"]
     claude = config["claude"]
+    kimi = config["kimi"]
     grok = config["grok"]
     devin = config["devin"]
     opencode = config["opencode"]
@@ -773,6 +839,8 @@ def describe_payload(
         mode=MODE_WORK,
         policy=claude_work_policy,
     )
+    kimi_safe_argv = _kimi_describe_argv(kimi, mode=MODE_SAFE)
+    kimi_work_argv = _kimi_describe_argv(kimi, mode=MODE_WORK)
     grok_safe_argv = _grok_describe_argv(
         config,
         grok,
@@ -1059,30 +1127,14 @@ def describe_payload(
                 ],
             },
             "kimi": {
-                "safe": [
-                    config["kimi"]["binary"],
-                    "--model",
-                    config["kimi"]["defaultModel"],
-                    "--output-format",
-                    "stream-json",
-                    "--prompt",
-                    "<kimi-safe-prefixed-skill-review-prompt>",
-                ],
+                "safe": kimi_safe_argv,
                 "safeNotes": [
                     SAFE_WORKSPACE_SYNC_NOTE,
                     "Prompt mode cannot be combined with Kimi --plan; Delegate uses a read-only safety prompt instead.",
                     "Kimi prompt mode auto-approves tool actions; the isolated workspace is the effective write boundary and the safety prompt is advisory.",
                     "No CLI workspace flag; Delegate sets subprocess cwd.",
                 ],
-                "work": [
-                    config["kimi"]["binary"],
-                    "--model",
-                    config["kimi"]["defaultModel"],
-                    "--output-format",
-                    "stream-json",
-                    "--prompt",
-                    "<skill-review-prompt>",
-                ],
+                "work": kimi_work_argv,
                 "workNotes": [
                     "Kimi prompt mode auto-approves tool actions; Delegate does not pass --yolo because Kimi rejects combining it with --prompt.",
                     "No CLI workspace flag; Delegate sets subprocess cwd.",
@@ -1168,6 +1220,7 @@ def describe_payload(
         },
         "commands": _commands_catalog(),
         "recommendedDiscovery": [
+            "delegate setup",
             "delegate --json describe --summary",
             "delegate --json models --summary",
             "delegate --json help <command>",
@@ -1201,6 +1254,7 @@ def describe_summary_payload(
         },
         "commands": _commands_catalog(),
         "recommendedDiscovery": [
+            "delegate setup",
             "delegate --json describe --summary",
             "delegate --json models --summary",
             "delegate --json help <command>",
@@ -1339,12 +1393,25 @@ def emit_models(
     summary: bool = False,
     engine: str | None = None,
     live: bool = False,
+    discovery: JsonObject | None = None,
+    profile: profiles.ProfileResolution | None = None,
 ) -> int:
+    legacy_cache = (
+        reasoning.load_reasoning_capability_cache(workspace) if workspace is not None else None
+    )
     if engine is not None:
         from delegate_agent import model_discovery
 
-        payload = _scrub_discovery_payload(
-            model_discovery.engine_models_payload(config, engine, live=live, workspace=workspace)
+        payload = redaction.scrub_public_projection(
+            model_discovery.engine_models_payload(
+                config,
+                engine,
+                live=live,
+                workspace=workspace,
+                discovery=discovery,
+                legacy_cache=legacy_cache,
+                profile=profile,
+            )
         )
         if json_mode:
             delegate_rendering.print_json(payload, stdout)
@@ -1352,7 +1419,15 @@ def emit_models(
             model_discovery.emit_engine_models_text(payload, stdout)
         return EXIT_OK
     if summary:
-        payload = _scrub_discovery_payload(models_summary_payload(config, config_source, workspace))
+        payload = redaction.scrub_public_projection(
+            models_summary_payload(
+                config,
+                config_source,
+                workspace,
+                discovery=discovery,
+                profile=profile,
+            )
+        )
         if json_mode:
             delegate_rendering.print_json(payload, stdout)
         else:
@@ -1368,7 +1443,9 @@ def emit_models(
                         file=stdout,
                     )
         return EXIT_OK
-    payload = _scrub_discovery_payload(models_payload(config, config_source, workspace))
+    payload = redaction.scrub_public_projection(
+        models_payload(config, config_source, workspace, discovery=discovery)
+    )
     if json_mode:
         delegate_rendering.print_json(payload, stdout)
         return EXIT_OK
@@ -1390,7 +1467,7 @@ def emit_describe(
         if summary
         else describe_payload(config, config_source, workspace)
     )
-    payload = _scrub_discovery_payload(raw_payload)
+    payload = redaction.scrub_public_projection(raw_payload)
     if json_mode:
         delegate_rendering.print_json(payload, stdout)
         return EXIT_OK
@@ -1509,7 +1586,7 @@ Cursor safe mode:
 
 Profiles (auth/env switching):
   - A profile selects which credentials/env every spawned harness inherits; the active profile is detected from env (profiles.detectFrom) or set explicitly with --auth-profile NAME before the subcommand.
-  - --auth-profile applies to launches, dry-run, run, profiles, and capabilities refresh; it is rejected for run-inspection, worktree, discovery, and the cached capabilities report.
+  - --auth-profile applies to launches, dry-run, run, profiles, models, capabilities, and setup; it remains rejected for run-inspection, worktree, and unrelated diagnostics.
   - delegate profiles (optionally with --json) reports the resolved profile, source, and non-secret env keys; it never mutates config.
   - profiles.definitions.<name>.env holds non-secret pointers only (e.g. CODEX_HOME); secret-shaped keys are rejected at config load, and values must not interpolate secrets via $VAR. Export real credentials in the shell instead.
 

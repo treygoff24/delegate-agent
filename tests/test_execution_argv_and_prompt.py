@@ -474,6 +474,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertEqual(code, 7)
         self.assertIn("Authorization: ***", stderr.getvalue())
         self.assertNotIn("abcdefghijklmnop", stderr.getvalue())
+        self.assertEqual(len([line for line in stderr.getvalue().splitlines() if line]), 1)
 
     def test_json_success_shape_with_fake_binary(self):
         repo = make_git_repo()
@@ -939,7 +940,8 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertNotIn("SECRET CLAUDE PROMPT", request.argv)
         self.assertEqual(request.reasoning_effort, "high")
         self.assertEqual(request.reasoning_transport, "claude-effort-flag")
-        self.assertEqual(request.reasoning_capability_source, "static")
+        self.assertEqual(request.reasoning_capability_source, "harness-compatibility")
+        self.assertEqual(request.reasoning_capability_evidence, "harness")
         self.assertIn("--effort", request.argv)
         self.assertIn("high", request.argv)
 

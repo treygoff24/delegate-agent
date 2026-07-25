@@ -1,0 +1,10 @@
+Available models
+
+auto - Auto (default)
+cursor-grok-4.5-high - Cursor Grok 4.5
+cursor-grok-4.5-high-fast - Cursor Grok 4.5 Fast
+composer-2.5 - Composer 2.5
+cursor-grok-4.5-low - Cursor Grok 4.5 Low
+cursor-grok-4.5-low-fast - Cursor Grok 4.5 Low Fast
+cursor-grok-4.5-medium - Cursor Grok 4.5 Medium
+cursor-grok-4.5-medium-fast - Cursor Grok 4.5 Medium Fast

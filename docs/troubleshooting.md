@@ -46,6 +46,46 @@ The OpenCode curl installer normally writes `opencode` under
 other non-interactive processes. Add that directory to their `PATH` or set
 `opencode.binary` to the absolute executable path.
 
+After fixing `PATH` or a configured binary selector, refresh discovery:
+
+```bash
+delegate --json setup
+```
+
+Setup creates a minimal config only when none exists. It never repairs or
+rewrites an existing config.
+
+## Setup is not ready, or cached discovery is stale
+
+`delegate --json setup` reports `discoveryReady` separately from `ready`.
+Discovery can succeed while no harness is launchable. The per-harness
+`nextAction` explains the remaining requirement. Droid, for example, stays
+unlaunchable until a model is passed or `droid.defaultModel` is configured.
+
+Use the smallest command that answers the question:
+
+```bash
+delegate --json models --summary
+delegate --json models <engine> --live
+delegate --json capabilities
+delegate --json capabilities refresh
+```
+
+`models <engine> --live` performs a fresh one-off probe and never writes config
+or cache. `capabilities refresh` probes all supported harnesses and updates the
+active auth profile's cache. Add `--auth-profile NAME` before the command when
+you need a defined profile other than the detected/default one.
+
+Refresh is last-known-good by harness. One successful record can be written
+while another failed probe retains its previous record and appears in
+`staleHarnesses`. A configured executable selector that no longer matches the
+cached selector is different: cached diagnostics mark that harness `stale`, and
+ordinary launches ignore its discovered record until setup or refresh succeeds.
+
+If setup reports `config_changed_during_setup`, another process created or
+changed the config during probing. Its file was preserved. Rerun setup so the
+profile and selectors are resolved from that current config.
+
 ## OpenCode exits `1` and mentions `OPENCODE_CONFIG_CONTENT`
 
 OpenCode validates injected config against its current strict schema. If this
@@ -97,35 +137,44 @@ delegate --json capabilities
 Common causes:
 
 - Codex effort was requested with a label not supported by the resolved model or the harness-default fallback capability.
-- Codex `max` was requested for a model other than `gpt-5.6-sol`, the only bundled Codex model that supports it as of 2026-07, without an exact config or workspace capability-cache declaration.
-- Claude effort must be one of Claude Code's native labels: `low`, `medium`, `high`, `xhigh`, or `max`.
+- Codex `max` was requested for a model other than `gpt-5.6-sol`, the only bundled Codex model that supports it as of 2026-07, without an exact config, profile-discovery, or legacy workspace-cache declaration.
+- Claude effort was absent from the installed harness's discovered native enum and from Delegate's bundled compatibility labels.
+- Grok exact model declarations override its harness-wide compatibility enum; an effort can therefore be valid at the flag level but rejected for the selected model.
+- OpenCode rejects a variant missing from an exact discovered variant menu. Without exact evidence, it preserves pass-through behavior and records `opencode_variant_unvalidated`.
 - Pi effort must be `low`, `medium`, `high`, `xhigh`, or `max`; alias-only `thinking` may also use `off` or `minimal`.
-- Oh My Pi effort uses the same levels and alias-only `thinking` values as Pi.
-- Cursor effort was requested but `cursor.reasoningEffortModels.<level>` is missing. Cursor effort uses model selection rather than a standalone effort flag.
-- Droid or Codex model support is not in config, the workspace cache, or bundled fallback data.
+- Pi models advertised with thinking disabled reject effort; thinking-enabled models use the harness-wide label menu as partial model evidence.
+- Oh My Pi effort uses the same levels and alias-only `thinking` values as Pi. Exact per-model validation applies only when its catalog provides a `thinking` array.
+- Cursor effort was requested but no applicable selector route exists. Without an explicit model pin, `cursor.reasoningEffortModels.<level>` can supply it. With a pin, that global map cannot override the selector, so an explicit effort requires an exact discovered same-family route. Cursor effort uses model selection rather than a standalone effort flag.
+- Droid or Codex model support is not in config, exact profile discovery, the legacy workspace cache, or bundled fallback data.
+- Kimi and Devin expose no Delegate reasoning-effort transport, even if harness metadata mentions an internal effort concept.
 - The effort string is misspelled. Delegate treats labels literally and does not translate between provider naming schemes.
 
-These failures apply to explicit per-run effort (`--reasoning-effort` or JSON run input). For Cursor, Droid, and Codex, a config `defaultReasoningEffort` that cannot be satisfied does not fail the run; the run proceeds without reasoning effort and records a warning in the dry-run payload, manifest, and snapshot. Claude config defaults are validated against its static native labels at config load. For Kimi, `--reasoning-effort` is rejected outright: the Kimi CLI exposes no effort flag (k3 supports effort internally via `~/.kimi-code/config.toml`), so `kimi.defaultReasoningEffort` must stay `null`.
+These failures apply to explicit per-run effort (`--reasoning-effort` or JSON run input). A config `defaultReasoningEffort` that current exact discovery or compatibility evidence cannot satisfy degrades to no requested effort and records a warning rather than failing the launch. Claude and Grok defaults are transport-safe strings at config load; runtime discovery/manual exact evidence is authoritative, so newly advertised labels do not require a Delegate release. For Kimi, `--reasoning-effort` is rejected outright: the Kimi CLI exposes no effort flag (k3 supports effort internally via `~/.kimi-code/config.toml`), so `kimi.defaultReasoningEffort` must stay `null`.
 
-For private or newly released models, declare support in `reasoning.capabilities` in config. Inspect first with plain `capabilities`. To refresh workspace-local discovered data, run:
+For private or newly released models, inspect the active profile's discovery
+first. Use `reasoning.capabilities` in config for a deliberate Codex, Droid, or
+Grok override. Refresh with:
 
 ```bash
 delegate --json capabilities refresh
 ```
 
-Refresh is not read-only: it may invoke child CLIs and writes
-`.delegate/capabilities/reasoning.json` only after the refreshed schema
-validates. A malformed cache file is ignored at run time and overwritten by the
-next refresh. That file is runtime state; do not commit it.
+Refresh is not read-only: it invokes child metadata commands and atomically
+writes the selected profile's private user cache after at least one valid
+result. The older `.delegate/capabilities/reasoning.json` file is still read at
+lower precedence but is no longer a refresh target. Do not commit that legacy
+runtime state.
 
 ## OpenCode silently ignores an unknown variant
 
-Delegate maps OpenCode `--reasoning-effort LEVEL` directly to `--variant LEVEL`
-without model validation. OpenCode silently ignores bogus variant names, so a
-typo can leave the run at its normal variant without an error. Inspect the
-dry-run argv and correct the variant spelling:
+When Delegate has an exact discovered variant menu for the selected OpenCode
+model, it rejects an unknown variant before launch. When no exact menu exists,
+Delegate retains pass-through compatibility and records the warning
+`opencode_variant_unvalidated`; OpenCode can then silently ignore a bogus
+variant. Inspect discovery and the dry-run payload before retrying:
 
 ```bash
+delegate --json models opencode --live
 delegate --json dry-run opencode safe --reasoning-effort high "Review only."
 ```
 
@@ -175,6 +224,10 @@ cached `capabilities`, `worktree show`, `worktree list`, `describe`, `models`)
 should still run with a warning. This check runs in the Python CLI itself, so
 it applies whether or not a profile-aware launcher shim
 (`bin/delegate-profile-shim`) is in front of `delegate`.
+
+`setup`, `capabilities refresh`, and `models <engine> --live` are not read-only:
+they run account-sensitive metadata probes, and the first two can write the
+profile cache. The guard blocks them when the recognized overlay is missing.
 
 A miscased or unrecognized `AI_PROFILE` value (anything other than exactly
 `work` or `personal`) is not treated as a profile crossover risk at all --
@@ -364,17 +417,33 @@ returned.
 
 ## Structured / JSON-only final output
 
-For a bare machine-parseable final message on Codex, use `--output-schema FILE`
-(codex-only). OpenAI enforces the JSON Schema on Codex's final message; Delegate
+For a bare machine-parseable final message on Codex, use `--output-schema FILE`.
+OpenAI enforces the JSON Schema on Codex's final message; Delegate
 suppresses the completion-report prompt injection for that run, so the report
 will not precede or wrap your payload. Relative schema paths resolve against the
 launch cwd, like `--prompt-file`.
 
-For engines other than Codex there is no native schema enforcement.
-Embed the schema in the prompt and parse the final message yourself. Delegate
-still injects completion-report instructions unless you pass
-`--no-completion-report`; when present, the report precedes any operator-requested
-payload (payload-last ordering).
+Delegate preflights Codex strict schemas recursively. It supplies a missing
+`additionalProperties: false` in a temporary copy and warns; it does not edit
+the source file. Every object property must already appear in `required`, because
+auto-requiring an optional field would change the schema's meaning. Incomplete
+`required` lists and explicit non-false `additionalProperties` fail immediately
+as `invalid_output_schema` with the failing schema path.
+
+Tracked child failures use `usage_limit`, `auth_failed`, and
+`codex_thread_lost` when recognized, otherwise `child_failed`. Inspect the
+typed message first, then use `delegate run-output <handle> --stdout` or
+`--stderr` for raw diagnostics. On retry-safe `codex_thread_lost` failures,
+Delegate retries once; if the same signature repeats it automatically tries an
+ephemeral `--ignore-user-config` launch and records the fallback in the
+envelope/events. Write-capable calls are not retry-safe and return the typed
+failure after the first attempt.
+
+Claude call mode also supports native `--output-schema`; other engines require
+embedding the schema in the prompt and parsing the final message yourself.
+Delegate still injects completion-report instructions unless you pass
+`--no-completion-report`; when present, the report precedes any
+operator-requested payload (payload-last ordering).
 
 ```bash
 delegate --json codex safe --output-schema findings.schema.json "Audit auth handlers."

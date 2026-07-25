@@ -208,6 +208,35 @@ Persistent worktree isolation is not a security sandbox. It does not prevent:
 - Run secret and path scans before publishing.
 - Profiles never store secrets. `profiles.definitions.*.env` is for non-secret routing pointers only (for example `CODEX_HOME`); secret-shaped keys are rejected at config load with `secret_in_profile_env`. Enforcement is by key name, so do not embed a credential in an innocuously named value or interpolate one via `$VAR` — keep real credentials in shell env or harness-native key stores. Resolved profile env is injected into child processes; only profile *names* are persisted in run state, and `delegate profiles` / dry-run echo env values through the same best-effort credential scrubbing as other surfaces.
 
+### Harness discovery probes
+
+`delegate setup`, `delegate capabilities refresh`, and
+`delegate models <engine> --live` execute installed child CLIs. Treat them as
+explicit local execution, not as passive file inspection. Delegate uses a
+fixed argv per harness with `shell=False`, closed stdin, a neutral temporary
+working directory, a timeout, and bounded stdout/stderr files. Automatic setup,
+refresh, and every live adapter except Devin resolve only configured selectors
+and known `PATH` candidates, fingerprint the binary with `--version`, and never
+search the workspace for an executable.
+
+Setup and refresh then use metadata-only commands. They carry the active
+profile environment, so the child CLI can still consult its own credentials or
+network according to that CLI's behavior, but Delegate does not submit a task
+prompt. Devin exposes no prompt-free model list, so automatic discovery stops
+at `devin --version`. The explicitly requested `models devin --live` command is
+the exception: it uses a bounded invalid-model, prompt-like invocation to obtain
+Devin's available-model error. Do not use that live form when only passive
+installation detection is acceptable.
+
+Discovery caches are separated by resolved auth profile and stored under the
+user's `~/.delegate/cache/discovery/` directory. The normalized schema retains
+the absolute executable selector, version, model IDs, display names, and
+reasoning evidence needed at runtime. It does not retain raw probe output,
+provider/auth objects, or profile environment values. Successful records are
+written atomically with owner-only POSIX permissions. A failed refresh keeps
+the last-known-good record; a configured-selector mismatch makes that harness's
+record stale and unusable until refresh.
+
 ### AI_PROFILE account-crossover guard
 
 Some installs run every harness launch inside a shell that sets
@@ -232,11 +261,12 @@ Both layers agree on the same rule: when `DELEGATE_CONFIG` is unset and
 `AI_PROFILE` is exactly `work` or `personal`, and the matching overlay config
 is missing or unreadable, launch and mutation commands (any engine, `run`,
 `dry-run`, `wait`, `cancel`, `config`, `worktree remove`/`prune`/`gc`,
-`capabilities refresh`) are refused. Read-only diagnostics (`profiles`,
-`runs`, `run-output`, `snapshot`, cached `capabilities`, `describe`, `models`,
-`worktree show`/`list`) still run, with a stderr warning that the check would
-otherwise fail closed. Once `DELEGATE_CONFIG` is set — by the shim, after it
-validates the overlay, or directly by a caller — the Python-layer guard does
+`setup`, `models <engine> --live`, `capabilities refresh`) are refused.
+Read-only diagnostics (`profiles`, `runs`, `ps`, `run-output`, `snapshot`, cached
+`capabilities`, `describe`, cached `models`, `worktree show`/`list`) still run,
+with a stderr warning that the check would otherwise fail closed. Once
+`DELEGATE_CONFIG` is set, either by the shim after it validates the overlay or
+directly by a caller, the Python-layer guard does
 not re-check `AI_PROFILE`; it treats an explicit `DELEGATE_CONFIG` as already
 having answered the question.
 
@@ -249,9 +279,20 @@ name against.
 
 ## Output and redaction
 
-Newly-created `.delegate/` registry directories and files are made owner-only on POSIX systems.
+Newly-created `.delegate/` registry files and `~/.delegate` discovery/config
+files are made owner-only on POSIX systems.
 
-Delegate output may contain secrets the child runtime emitted. Credential scrubbing is best-effort defense-in-depth across run-output, snapshot, heartbeat, and discovery surfaces (`describe`/`models`). It catches recognizable shapes such as authorization headers, bearer/basic tokens, JWT-like strings, connection-string passwords, and common `token=` / `api_key=` / `password=` key-values. It does not guarantee removal of every secret (for example, a literal secret split across separate argv elements in config may still appear in discovery output). The real boundary for safe review is safe-mode isolation, not output scrubbing.
+Delegate output may contain secrets the child runtime emitted. Credential
+scrubbing is best-effort defense-in-depth across run-output, snapshot,
+heartbeat, setup, models, and capabilities surfaces. Refresh diagnostics expose
+bounded status/count projections rather than raw probe argv, catalogs, or
+stderr; setup reports config/cache paths and a scrubbed version, not executable
+selectors. Scrubbing catches recognizable shapes such as authorization headers,
+bearer/basic tokens, JWT-like strings, connection-string passwords, and common
+`token=` / `api_key=` / `password=` key-values. It does not guarantee removal
+of every secret. In particular, config/cache paths are intentionally reported,
+and an opaque value that does not resemble a credential can remain visible. The
+real boundary for safe review is safe-mode isolation, not output scrubbing.
 
 `snapshot` and `run-output` apply the same credential scrubbing by default. Raw local logs and child runtime state can still contain secrets. `--no-redact` intentionally disables display-side redaction on run-output and snapshot.
 

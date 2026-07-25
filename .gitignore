@@ -56,3 +56,4 @@ docs/dogfood/
 
 # uv release-tooling artifact, not a project dependency lock (stdlib-only)
 uv.lock
+docs/briefs/

@@ -59,6 +59,9 @@ class ParserTests(unittest.TestCase):
             ["--json", "describe", "--summary"],
             ["config", "init"],
             ["--json", "config", "init", "--force"],
+            ["setup"],
+            ["--json", "setup"],
+            ["--auth-profile", "work", "setup"],
             ["agent-help"],
             ["dry-run", "cursor", "work", "prompt"],
             ["dry-run", "claude", "safe", "prompt"],
@@ -78,6 +81,48 @@ class ParserTests(unittest.TestCase):
         parsed = self.delegate.parse_cli(["--json", "--cwd", "/tmp/repo", "models"])
         self.assertTrue(parsed.global_options.json_mode)
         self.assertEqual(parsed.global_options.cwd, "/tmp/repo")
+
+    def test_setup_accepts_only_json_and_auth_profile(self):
+        parsed = self.delegate.parse_cli(["--json", "--auth-profile", "work", "setup"])
+        self.assertEqual(parsed.subcommand, "setup")
+        self.assertTrue(parsed.global_options.json_mode)
+        self.assertEqual(parsed.global_options.auth_profile, "work")
+
+        trailing_json = self.delegate.parse_cli(["setup", "--json"])
+        self.assertTrue(trailing_json.global_options.json_mode)
+
+    def test_setup_rejects_trailing_arguments(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(["setup", "unexpected"])
+        self.assertEqual(ctx.exception.error, "unexpected_argument")
+
+    def test_setup_rejects_irrelevant_global_options(self):
+        cases = (
+            ["--cwd", "/tmp", "setup"],
+            ["--isolation", "none", "setup"],
+            ["--pass-through", "setup"],
+            ["--completion-report", "none", "setup"],
+            ["--no-completion-report", "setup"],
+            ["--group", "batch", "setup"],
+        )
+        for argv in cases:
+            with self.subTest(argv=argv), self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.delegate.parse_cli(argv)
+            self.assertEqual(ctx.exception.error, "invalid_option_combination")
+
+    def test_setup_help_does_not_bypass_irrelevant_global_rejection(self):
+        cases = (
+            ["--cwd", "/tmp", "setup", "--help"],
+            ["--isolation", "none", "setup", "--help"],
+            ["--pass-through", "setup", "--help"],
+            ["--completion-report", "none", "setup", "--help"],
+            ["--no-completion-report", "setup", "--help"],
+            ["--group", "batch", "setup", "--help"],
+        )
+        for argv in cases:
+            with self.subTest(argv=argv), self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.delegate.parse_cli(argv)
+            self.assertEqual(ctx.exception.error, "invalid_option_combination")
 
     def test_codex_fast_flags_parse_as_tri_state(self):
         fast = self.delegate.parse_cli(["codex", "safe", "--fast", "review"])
@@ -215,16 +260,86 @@ class ParserTests(unittest.TestCase):
             self.delegate.parse_cli(["models", "--verbose"])
         self.assertEqual(ctx.exception.error, "unexpected_argument")
 
-    def test_auth_profile_rejected_for_non_refresh_capabilities(self):
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.parse_cli(["--auth-profile", "work", "capabilities"])
-        self.assertEqual(ctx.exception.error, "invalid_option_combination")
-        self.assertIn("refresh", ctx.exception.message)
+    def test_auth_profile_accepted_for_models_and_capabilities_reads(self):
+        for argv in (
+            ["--auth-profile", "work", "models"],
+            ["--auth-profile", "work", "models", "codex", "--live"],
+            ["--auth-profile", "work", "capabilities"],
+        ):
+            with self.subTest(argv=argv):
+                parsed = self.delegate.parse_cli(argv)
+                self.assertEqual(parsed.global_options.auth_profile, "work")
 
     def test_auth_profile_accepted_for_capabilities_refresh(self):
         parsed = self.delegate.parse_cli(["--auth-profile", "work", "capabilities", "refresh"])
         self.assertEqual(parsed.global_options.auth_profile, "work")
         self.assertTrue(parsed.capabilities.refresh)
+        self.assertIsNone(parsed.capabilities.engines)
+
+    def test_capabilities_refresh_accepts_engine_subset(self):
+        parsed = self.delegate.parse_cli(["capabilities", "refresh", "codex", "claude", "codex"])
+        self.assertTrue(parsed.capabilities.refresh)
+        self.assertEqual(parsed.capabilities.engines, ("codex", "claude"))
+
+    def test_capabilities_refresh_rejects_unknown_engine(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(["capabilities", "refresh", "not-a-harness"])
+        self.assertEqual(ctx.exception.error, "invalid_engine")
+
+    def test_capabilities_refresh_hints_misplaced_global_option(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(["capabilities", "refresh", "--auth-profile", "work"])
+        self.assertEqual(ctx.exception.error, "misplaced_global_option")
+        self.assertIn("before the subcommand", ctx.exception.message)
+
+    def test_ps_rejects_conflicting_runs_filters_with_ps_specific_message(self):
+        for flag in ("--running", "--stale", "--recent"):
+            with self.subTest(flag=flag):
+                with self.assertRaises(self.delegate.DelegateError) as ctx:
+                    self.delegate.parse_cli(["ps", flag])
+                self.assertEqual(ctx.exception.error, "invalid_option_combination")
+                self.assertIn("delegate ps always shows active runs", ctx.exception.message)
+                self.assertNotIn("mutually exclusive", ctx.exception.message)
+
+    def test_ps_tolerates_explicit_active_flag(self):
+        parsed = self.delegate.parse_cli(["ps", "--active"])
+        self.assertEqual(parsed.subcommand, "ps")
+        self.assertTrue(parsed.runs.active)
+
+    def test_ps_errors_name_ps_not_the_delegated_runs_command(self):
+        cases = (
+            (["ps", "bogus"], "unknown_option", "ps does not support option: bogus"),
+            (["ps", "--limit", "0"], "invalid_limit", "ps --limit must be at least 1."),
+            (["ps", "--limit"], "missing_limit", "ps --limit requires a positive integer."),
+            (["ps", "--harness"], "missing_harness", "ps --harness requires a harness name."),
+            (["ps", "--harness", "nope"], "invalid_harness", "ps --harness must be one of"),
+            (["ps", "--group"], "missing_group", "ps --group requires a group name."),
+        )
+        for argv, error, message in cases:
+            with self.subTest(argv=argv):
+                with self.assertRaises(self.delegate.DelegateError) as ctx:
+                    self.delegate.parse_cli(argv)
+                self.assertEqual(ctx.exception.error, error)
+                self.assertIn(message, ctx.exception.message)
+                self.assertNotIn("runs", ctx.exception.message)
+
+    def test_runs_errors_still_name_runs(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(["runs", "bogus"])
+        self.assertEqual(ctx.exception.message, "runs does not support option: bogus")
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(["runs", "--limit", "0"])
+        self.assertEqual(ctx.exception.message, "runs --limit must be at least 1.")
+
+    def test_capabilities_read_rejects_engine_arguments(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(["capabilities", "codex"])
+        self.assertEqual(ctx.exception.error, "unexpected_argument")
+
+    def test_auth_profile_remains_rejected_for_describe(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(["--auth-profile", "work", "describe"])
+        self.assertEqual(ctx.exception.error, "invalid_option_combination")
 
     def test_auth_profile_accepted_for_grok_launch(self):
         parsed = self.delegate.parse_cli(["--auth-profile", "work", "grok", "safe", "x"])

@@ -47,18 +47,25 @@ This guide covers both human setup and non-interactive setup for agents or CI jo
 
    The Claude harness requires Claude Code 2.1.x or newer (verified on 2.1.181) for `--effort`, `--permission-mode auto`, and `--no-session-persistence`.
 
-4. Initialize and edit config:
+4. Discover installed harnesses and initialize Delegate:
 
    ```bash
-   delegate config init
-   $EDITOR ~/.delegate/config.json
+   delegate --json setup
    ```
 
-   Replace placeholder Droid model IDs. Use local aliases such as `reviewer` and `implementer`; the alias names are yours and do not need to reveal the provider.
-   `config init` also writes missing `config.work.json` and
-   `config.personal.json` profile overlays next to the base config. For an
-   existing install, run `env -u AI_PROFILE delegate config sync-profiles` to
-   create missing overlays without overwriting existing ones.
+   Setup checks all supported harnesses, records normalized model and reasoning
+   metadata in the active auth profile's private cache, and reports which
+   harnesses are launchable. If no config exists, it creates a minimal config
+   containing safe absolute binary selectors. It never changes an existing
+   config. Setup does not install or authenticate a harness, edit harness-native
+   config, or submit a model prompt.
+
+   Use `delegate config init` when you want the editable example config and
+   profile overlays instead. Replace its placeholder Droid model IDs. Local
+   alias names such as `reviewer` and `implementer` are yours and need not reveal
+   the provider. For an existing install, run
+   `env -u AI_PROFILE delegate config sync-profiles` to create missing overlays
+   without overwriting existing ones.
 
    In a development checkout, `cp config.example.json ~/.delegate/config.json`
    is still fine. Installed users should prefer `delegate config init`.
@@ -87,7 +94,22 @@ When running on Windows through WSL, treat Delegate as a Linux CLI:
    delegate --json worktree remove --help
    ```
 
-   `delegate --json capabilities` reports reasoning-effort support from config, workspace cache, and bundled fallback data without launching a child runtime. Run `delegate --json capabilities refresh` only when you explicitly want Delegate to call child CLIs and update the workspace-local `.delegate/capabilities/reasoning.json` cache.
+   `delegate --json capabilities` reports reasoning-effort support from config,
+   the active profile's discovery cache, the legacy workspace cache, and bundled
+   fallback data without launching a child runtime.
+
+   Rediscover after a harness upgrade, account change, or new model release:
+
+   ```bash
+   delegate --json models --summary
+   delegate --json models <engine> --live
+   delegate --json capabilities refresh
+   delegate --json capabilities
+   ```
+
+   `models <engine> --live` is a one-off view and never writes Delegate config or
+   cache. `capabilities refresh` and `setup` update the selected profile's cache,
+   preserving the last good record for a harness whose current probe fails.
 
 6. Run a dry-run smoke test. Dry-run does not require the real child binary and does not launch the runtime:
 
@@ -166,6 +188,10 @@ For an orchestrating agent, script, or CI job:
    `DELEGATE_CONFIG` has highest precedence, but config objects are deep-merged;
    a temporary `HOME` avoids inheriting nested maps such as user-level Droid
    aliases.
+
+   For a persistent user installation, run `delegate --json setup` once before
+   the first launch. Do not add setup to every CI invocation: it calls installed
+   harness metadata commands and writes the selected profile's user cache.
 
 4. Start with dry-run JSON:
 
