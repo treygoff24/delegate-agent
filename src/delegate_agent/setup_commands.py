@@ -132,14 +132,32 @@ def _reasoning_status(record: object) -> str:
     return "unknown"
 
 
+def _selector_config_key(engine: str) -> str:
+    return "cursor.argvPrefix" if engine == "cursor" else f"{engine}.binary"
+
+
+def _configured_selector_missing(record: object) -> bool:
+    if not isinstance(record, dict):
+        return False
+    warnings = record.get("warnings")
+    return isinstance(warnings, list) and harness_discovery.CONFIGURED_SELECTOR_MISSING in warnings
+
+
 def _next_action(
     engine: str,
     record: object,
     *,
+    config_path: Path,
     launchable: bool,
     selector_drift: bool,
 ) -> str:
     if not isinstance(record, dict) or record.get("installed") is not True:
+        if _configured_selector_missing(record):
+            return (
+                f"Configured {_selector_config_key(engine)} in {config_path} no longer "
+                f"resolves, but a {engine} binary is on PATH; fix or remove that setting, "
+                "then rerun delegate setup."
+            )
         return f"Install and authenticate the {engine} CLI, then rerun delegate setup."
     if selector_drift:
         return f"Config selector drifted for {engine}; rerun delegate setup."
@@ -157,6 +175,7 @@ def _current_harness_projection(
     config: JsonObject,
     attempts: JsonObject,
     *,
+    config_path: Path,
     profile: profiles.ProfileResolution,
     stale_harnesses: set[str],
 ) -> JsonObject:
@@ -194,6 +213,7 @@ def _current_harness_projection(
             "nextAction": _next_action(
                 engine,
                 record,
+                config_path=config_path,
                 launchable=launchable,
                 selector_drift=selector_drift,
             ),
@@ -330,6 +350,7 @@ def emit(
                 "harnesses": _current_harness_projection(
                     config,
                     attempts,
+                    config_path=path,
                     profile=profile,
                     stale_harnesses=set(diagnostics["staleHarnesses"]),
                 ),
@@ -436,6 +457,7 @@ def emit(
     harnesses = _current_harness_projection(
         config,
         attempts,
+        config_path=path,
         profile=profile,
         stale_harnesses=stale_harnesses,
     )

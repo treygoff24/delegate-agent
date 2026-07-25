@@ -511,6 +511,62 @@ class SetupCommandTests(unittest.TestCase):
             self.assertIn("Config selector drifted", codex["nextAction"])
             self.assertIn("rerun delegate setup", codex["nextAction"])
 
+    def test_dead_configured_binary_with_cli_on_path_names_the_stale_setting(self):
+        real_probe = harness_discovery.probe_harness
+        with tempfile.TemporaryDirectory() as raw_home:
+            home = Path(raw_home).resolve()
+            bin_dir = home / "bin"
+            bin_dir.mkdir()
+            cursor = self._binary(home, "cursor-agent")
+            config_path = home / ".delegate" / "config.json"
+            config_path.parent.mkdir()
+            config_path.write_text(
+                json.dumps({"codex": {"binary": str(home / "deleted-codex")}}),
+                encoding="utf-8",
+            )
+            config_bytes = config_path.read_bytes()
+            attempts = self._attempts(cursor=cursor)
+
+            def probe(config, harness, **kwargs):
+                if harness == "codex":
+                    return real_probe(config, harness, **kwargs)
+                return attempts[harness]
+
+            self._binary(bin_dir, "codex")
+            code, stdout, stderr, _ = self._run(
+                ["--json", "setup"],
+                home=home,
+                attempts=attempts,
+                extra_env={"PATH": str(bin_dir)},
+                probe_side_effect=probe,
+            )
+            codex = json.loads(stdout)["harnesses"]["codex"]
+
+            self.assertEqual(code, 0, stderr)
+            self.assertFalse(codex["installed"])
+            self.assertEqual(codex["probeStatus"], "error")
+            self.assertNotIn("Install and authenticate", codex["nextAction"])
+            self.assertIn("codex.binary", codex["nextAction"])
+            self.assertIn(str(config_path), codex["nextAction"])
+            self.assertEqual(config_path.read_bytes(), config_bytes)
+
+            (bin_dir / "codex").unlink()
+            code, stdout, stderr, _ = self._run(
+                ["--json", "setup"],
+                home=home,
+                attempts=attempts,
+                extra_env={"PATH": str(bin_dir)},
+                probe_side_effect=probe,
+            )
+            uninstalled = json.loads(stdout)["harnesses"]["codex"]
+
+            self.assertEqual(code, 0, stderr)
+            self.assertEqual(uninstalled["probeStatus"], "missing")
+            self.assertEqual(
+                uninstalled["nextAction"],
+                "Install and authenticate the codex CLI, then rerun delegate setup.",
+            )
+
     def test_config_publication_error_leaves_prior_cache_unchanged(self):
         with tempfile.TemporaryDirectory() as raw_home:
             home = Path(raw_home).resolve()

@@ -29,6 +29,10 @@ DISCOVERY_SCHEMA = 1
 PROBE_STATUSES = frozenset({"ok", "partial", "missing", "error"})
 MODEL_SCOPES = frozenset({"account", "configured", "catalog", "unknown"})
 EVIDENCE_LEVELS = frozenset({"exact", "harness", "inferred-route", "unknown"})
+# Recorded as a harness warning when an explicitly configured selector no longer
+# resolves while the harness binary is still on PATH, so callers can tell a
+# stale config apart from an uninstalled harness.
+CONFIGURED_SELECTOR_MISSING = "configured_selector_missing"
 
 _PATH_CANDIDATES: dict[str, tuple[str, ...]] = {
     "cursor": ("agent", "cursor-agent"),
@@ -388,7 +392,16 @@ def resolve_harness_selector(
         normalized = _normalize_selector(selector, env=env)
         if normalized is None:
             if explicit:
-                return SelectorResolution(None, None, "probe_missing", tuple(warnings))
+                # A configured selector that no longer resolves is a stale
+                # config, not an uninstalled harness, whenever the harness
+                # binary is still reachable on PATH. Never silently fall back
+                # to it: report the distinction so setup can name the fix.
+                error = (
+                    CONFIGURED_SELECTOR_MISSING
+                    if _path_candidate_resolves(config, harness, env=env)
+                    else "probe_missing"
+                )
+                return SelectorResolution(None, None, error, tuple(warnings))
             continue
         selector = normalized
         probe = run_metadata_probe([*selector, "--version"], env=env)
@@ -406,6 +419,13 @@ def resolve_harness_selector(
             continue
         return SelectorResolution(selector, version, None, tuple(warnings))
     return SelectorResolution(None, None, "probe_missing", tuple(warnings))
+
+
+def _path_candidate_resolves(config: JsonObject, harness: str, *, env: Mapping[str, str]) -> bool:
+    return any(
+        not explicit and _normalize_selector(selector, env=env) is not None
+        for selector, explicit in selector_candidates(config, harness)
+    )
 
 
 def _normalize_selector(
@@ -551,6 +571,38 @@ def parse_omp_catalog(raw: str) -> JsonObject:
     return _fragment(model_scope="catalog", models=models)
 
 
+def _opencode_object_end(raw: str, start: int) -> int | None:
+    """Return the index just past the brace-balanced object opened at ``start``.
+
+    String-aware so a malformed entry can be skipped whole; resuming the scan
+    inside a rejected body lets a nested ``provider/model``-shaped line be
+    re-read as a top-level selector. Returns None when the braces never
+    balance, which leaves the caller no delimiter to trust.
+    """
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(raw)):
+        character = raw[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+        if character == '"':
+            in_string = True
+        elif character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+    return None
+
+
 def _next_opencode_selector(raw: str, start: int) -> re.Match[str] | None:
     return re.compile(r"(?m)^([^\s/]+/[^\s/]+)\r?\n(?=\s*\{)").search(raw, start)
 
@@ -569,7 +621,9 @@ def parse_opencode_catalog(raw: str) -> JsonObject:
             entry, end = decoder.raw_decode(raw, object_start)
         except json.JSONDecodeError:
             warnings.append(f"ignored malformed OpenCode entry for {selector!r}")
-            position = match.end()
+            # Skip the whole rejected object when its braces balance; only an
+            # unbalanced (truncated) body falls back to the next selector line.
+            position = _opencode_object_end(raw, object_start) or match.end()
             continue
         position = end
         if not isinstance(entry, dict):
@@ -702,6 +756,23 @@ def parse_cursor_catalog(raw: str) -> JsonObject:
                 route_family = f"{family}-fast" if fast else family
                 accepted[selector] = (route_family, effort)
 
+    # "<family>-fast-<effort>" and "<family>-<effort>-fast" name the same route,
+    # so a catalog carrying both would emit an ambiguous pair. Drop every
+    # colliding selector's route rather than failing the whole harness record.
+    warnings: list[str] = []
+    owners: dict[tuple[str, str], list[str]] = {}
+    for selector, route in accepted.items():
+        owners.setdefault(route, []).append(selector)
+    for route, selectors in sorted(owners.items()):
+        if len(selectors) < 2:
+            continue
+        for selector in selectors:
+            del accepted[selector]
+        warnings.append(
+            f"ignored ambiguous Cursor route {route[0]}/{route[1]} claimed by "
+            f"{', '.join(sorted(selectors))}"
+        )
+
     models: JsonObject = {}
     for selector, label in entries:
         model: JsonObject = {}
@@ -722,7 +793,13 @@ def parse_cursor_catalog(raw: str) -> JsonObject:
                 }
             )
         models[selector] = model
-    return _fragment(model_scope="account", models=models, default_model=default_model)
+    return _fragment(
+        model_scope="account",
+        models=models,
+        default_model=default_model,
+        probe_status="partial" if warnings else "ok",
+        warnings=warnings,
+    )
 
 
 def _cursor_route_candidate(selector: str, label: str) -> tuple[str, bool, str, bool] | None:
@@ -858,6 +935,14 @@ def parse_droid_settings_models(custom_models: object) -> JsonObject:
     return models
 
 
+def degrade_droid_settings(fragment: JsonObject, warning: str) -> JsonObject:
+    """Return ``fragment`` degraded to partial with one Factory settings warning."""
+    merged = dict(fragment)
+    merged["probeStatus"] = "partial"
+    merged["warnings"] = [*fragment.get("warnings", []), warning]
+    return merged
+
+
 def merge_droid_settings(fragment: JsonObject, settings_raw: str | None) -> JsonObject:
     if settings_raw is None:
         return fragment
@@ -866,21 +951,12 @@ def merge_droid_settings(fragment: JsonObject, settings_raw: str | None) -> Json
     try:
         settings = json.loads(settings_raw)
     except json.JSONDecodeError:
-        warnings.append("Factory settings JSON was invalid")
-        merged["probeStatus"] = "partial"
-        merged["warnings"] = warnings
-        return merged
+        return degrade_droid_settings(fragment, "Factory settings JSON was invalid")
     if not isinstance(settings, dict):
-        warnings.append("Factory settings root was not an object")
-        merged["probeStatus"] = "partial"
-        merged["warnings"] = warnings
-        return merged
+        return degrade_droid_settings(fragment, "Factory settings root was not an object")
     custom = settings.get("customModels")
     if custom is not None and not isinstance(custom, list):
-        warnings.append("Factory settings customModels was not an array")
-        merged["probeStatus"] = "partial"
-        merged["warnings"] = warnings
-        return merged
+        return degrade_droid_settings(fragment, "Factory settings customModels was not an array")
     settings_models = parse_droid_settings_models(custom)
     help_models = fragment.get("models")
     models: JsonObject = dict(settings_models)
@@ -972,12 +1048,20 @@ def parse_pi_catalog(raw: str) -> JsonObject:
     if harness_efforts and not all(_transport_safe_effort(item) for item in harness_efforts):
         harness_efforts = []
     models: JsonObject = {}
+    ragged_rows = 0
     for line in lines[header_index + 1 :]:
         columns = line.split()
         if len(columns) <= max(provider_index, model_index, thinking_index):
             continue
         thinking = columns[thinking_index].lower()
         if thinking not in {"yes", "no"}:
+            continue
+        if len(columns) != len(headings):
+            # A blank cell shifts every later column, so a row that does not
+            # match the header width cannot be indexed by header position: a
+            # neighbouring flag would be read as the thinking flag. Drop the
+            # row instead of caching a wrong capability.
+            ragged_rows += 1
             continue
         selector = f"{columns[provider_index]}/{columns[model_index]}"
         if thinking == "no":
@@ -992,12 +1076,17 @@ def parse_pi_catalog(raw: str) -> JsonObject:
     harness_reasoning = (
         {"supported": harness_efforts, "evidence": "harness"} if harness_efforts else None
     )
+    warnings: list[str] = []
+    if not harness_efforts:
+        warnings.append("Pi help had no thinking-level enum")
+    if ragged_rows:
+        warnings.append(f"Pi catalog skipped {ragged_rows} row(s) that did not match the header")
     return _fragment(
         model_scope="catalog",
         models=models,
         harness_reasoning=harness_reasoning,
-        probe_status="ok" if harness_efforts else "partial",
-        warnings=[] if harness_efforts else ["Pi help had no thinking-level enum"],
+        probe_status="partial" if warnings else "ok",
+        warnings=warnings,
     )
 
 
@@ -1048,9 +1137,11 @@ def _probe_droid(
     try:
         settings_raw = settings_path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        settings_raw = None
+        return merge_droid_settings(fragment, None)
     except OSError:
-        settings_raw = "{"
+        # A settings file we cannot read (permissions, I/O) is a different
+        # failure from one holding invalid JSON; do not conflate the two.
+        return degrade_droid_settings(fragment, "Factory settings could not be read")
     return merge_droid_settings(fragment, settings_raw)
 
 

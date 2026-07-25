@@ -380,6 +380,25 @@ class StructuredParserTests(unittest.TestCase):
         self.assertNotIn("wrong/selector", fragment["models"])
         self.assertGreaterEqual(len(fragment["warnings"]), 2)
 
+    def test_opencode_malformed_entry_never_resyncs_inside_its_body(self):
+        valid = (FIXTURES / "opencode_models_verbose.txt").read_text()
+        tail = (
+            "fixture/broken\n"
+            "{\n"
+            '  "id": "broken",\n'
+            '  "providerID": "fixture",\n'
+            '  "note": oops,\n'
+            "nested/model\n"
+            '{"id":"model","providerID":"nested","variants":{"high":{}}}\n'
+            "}\n"
+            'fixture/ok\n{"id":"ok","providerID":"fixture","name":"OK"}\n'
+        )
+        fragment = self.parse_opencode(valid + tail)
+        self.assertNotIn("nested/model", fragment["models"])
+        self.assertIn("fixture/ok", fragment["models"])
+        self.assertEqual(fragment["probeStatus"], "partial")
+        self.assertIn("ignored malformed OpenCode entry for 'fixture/broken'", fragment["warnings"])
+
     def test_kimi_allowlists_top_level_models_only(self):
         raw = (FIXTURES / "kimi_providers.json").read_text()
         fragment = self.parse_kimi(raw)
@@ -451,6 +470,39 @@ class TextParserTests(unittest.TestCase):
             self.parse_cursor(mislabeled_high)["models"]["cursor-grok-4.5-high"],
         )
 
+    def test_cursor_colliding_route_names_drop_without_failing_the_record(self):
+        from delegate_agent import harness_discovery
+
+        raw = (
+            "Available models:\n"
+            "  fixture-fast-high - Fixture Fast High\n"
+            "  fixture-high-fast - Fixture High Fast\n"
+            "  fixture-low - Fixture Low\n"
+        )
+        fragment = self.parse_cursor(raw)
+        models = fragment["models"]
+
+        self.assertNotIn("routeFamily", models["fixture-fast-high"])
+        self.assertNotIn("routeFamily", models["fixture-high-fast"])
+        self.assertEqual(models["fixture-low"]["routeFamily"], "fixture")
+        self.assertEqual(fragment["probeStatus"], "partial")
+        self.assertEqual(
+            fragment["warnings"],
+            [
+                "ignored ambiguous Cursor route fixture-fast/high claimed by "
+                "fixture-fast-high, fixture-high-fast"
+            ],
+        )
+        harness_discovery._validate_harness_record(
+            "cursor",
+            {
+                "installed": True,
+                "selector": ["cursor-agent"],
+                "version": "2026.07.17-3e2a980",
+                **fragment,
+            },
+        )
+
     def test_cursor_stops_before_trailing_help_sections(self):
         raw = (FIXTURES / "cursor_models.txt").read_text() + ("\nOptions:\n  --help - Show help\n")
         models = self.parse_cursor(raw)["models"]
@@ -519,6 +571,35 @@ class TextParserTests(unittest.TestCase):
         )
         self.assertEqual(pi["models"]["openai-codex/gpt-5.5"]["reasoning"]["evidence"], "harness")
 
+    def test_pi_ragged_rows_are_skipped_instead_of_column_shifted(self):
+        lines = (FIXTURES / "pi_models.txt").read_text().splitlines()
+        header_index = next(
+            index for index, line in enumerate(lines) if line.split()[:2] == ["provider", "model"]
+        )
+        # Both directions of the blank-cell shift: with max-out empty the images
+        # flag lands under thinking, so a thinking model reads as "no" and a
+        # non-thinking model reads as "yes".
+        ragged = [
+            "fixture       blank-max-out-thinking      272K              yes       no",
+            "fixture       blank-max-out-plain         272K              no        yes",
+        ]
+        raw = "\n".join(lines[: header_index + 1] + ragged + lines[header_index + 1 :]) + "\n"
+
+        fragment = self.parse_pi(raw)
+        models = fragment["models"]
+
+        self.assertNotIn("fixture/blank-max-out-thinking", models)
+        self.assertNotIn("fixture/blank-max-out-plain", models)
+        self.assertEqual(
+            models["google/gemini-2.0-flash"]["reasoning"],
+            {"supported": [], "evidence": "exact"},
+        )
+        self.assertEqual(models["openai-codex/gpt-5.5"]["reasoning"]["evidence"], "harness")
+        self.assertEqual(fragment["probeStatus"], "partial")
+        self.assertEqual(
+            fragment["warnings"], ["Pi catalog skipped 2 row(s) that did not match the header"]
+        )
+
     def test_grok_stops_before_trailing_help_sections(self):
         raw = (FIXTURES / "grok_models.txt").read_text() + "Options:\n  --help\n"
         models = self.parse_grok(raw)["models"]
@@ -551,6 +632,23 @@ class AdapterOrchestrationTests(unittest.TestCase):
                     self.assertRaisesRegex(ValueError, error),
                 ):
                     harness_discovery._probe_claude(("claude",), {}, None)
+
+    def test_droid_unreadable_settings_is_not_reported_as_invalid_json(self):
+        from delegate_agent import harness_discovery
+
+        help_output = (FIXTURES / "droid_help.txt").read_text(encoding="utf-8")
+        probe = harness_discovery.ProbeResult(("droid",), 0, help_output, "", None)
+        with tempfile.TemporaryDirectory() as tmp:
+            # Reading a directory raises OSError without being FileNotFoundError,
+            # standing in for a settings file we lack permission to read.
+            unreadable = Path(tmp) / "settings.json"
+            unreadable.mkdir()
+            with mock.patch.object(harness_discovery, "run_metadata_probe", return_value=probe):
+                fragment = harness_discovery._probe_droid(("droid",), {}, unreadable)
+
+        self.assertEqual(fragment["probeStatus"], "partial")
+        self.assertIn("Factory settings could not be read", fragment["warnings"])
+        self.assertNotIn("Factory settings JSON was invalid", fragment["warnings"])
 
     def test_fixture_harnesses_probe_without_prompting_devin(self):
         from delegate_agent.config import embedded_default_config
@@ -935,6 +1033,28 @@ class DetectionTests(unittest.TestCase):
             result = self.resolve_harness_selector(config, "cursor", env=env)
         self.assertEqual(result.error, "fingerprint_mismatch")
         self.assertIsNone(result.selector)
+
+    def test_dead_configured_selector_is_distinguished_from_a_missing_harness(self):
+        from delegate_agent import harness_discovery
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_version_harness(root / "codex", "codex-cli 1.2.3")
+            empty = root / "empty"
+            empty.mkdir()
+            config = self.embedded_default_config()
+            config["codex"]["binary"] = str(root / "deleted-codex")
+
+            resolution = self.resolve_harness_selector(config, "codex", env={"PATH": str(root)})
+            record = harness_discovery.probe_harness(config, "codex", env={"PATH": str(root)})
+            uninstalled = self.resolve_harness_selector(config, "codex", env={"PATH": str(empty)})
+
+        self.assertEqual(resolution.error, harness_discovery.CONFIGURED_SELECTOR_MISSING)
+        self.assertIsNone(resolution.selector)
+        self.assertFalse(record["installed"])
+        self.assertEqual(record["probeStatus"], "error")
+        self.assertIn(harness_discovery.CONFIGURED_SELECTOR_MISSING, record["warnings"])
+        self.assertEqual(uninstalled.error, "probe_missing")
 
     def test_candidates_preserve_configured_argv_prefix(self):
         config = self.embedded_default_config()
