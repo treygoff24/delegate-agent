@@ -18,7 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as the sole orphan signal. The scan removes nothing at all, at any depth: a
   missing source repository makes a worktree's uncommitted state impossible to
   inspect, so orphans and empty pool directories alike are reported for
-  deliberate manual cleanup. `--pool PATH` scans a different pool root, which
+  deliberate manual cleanup. Because that output invites manual deletion, every
+  uncertainty resolves away from an orphan verdict: a pointer file that cannot
+  be read, a path comparison the filesystem cannot answer, an entry too recently
+  modified to have settled, and a directory whose name does not match the pool's
+  own fingerprint contract are all reported as warnings rather than orphans.
+  That last rule is what keeps a scan of an arbitrary root from labelling
+  somebody else's directories. `--pool PATH` scans a different pool root, which
   reaches pools stranded by an earlier `worktrees.dataHome`.
 - `capabilities refresh` and `setup` now name each harness on stderr as it is
   probed, so a harness that hangs is identifiable rather than anonymous
@@ -34,10 +40,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the configured harness, the harness that answered, and the selector path.
   Previously the launch continued against that same binary with the same Codex
   argv, sandbox flags, and approval policy, and only the cached capability
-  metadata was discarded. This fires solely on a positive identification of
-  another known harness, never on uncertainty: a probe that errors, times out,
-  exceeds its output bound, or prints something unrecognizable still fails open
-  and launches on the cached record. Dry runs do not probe and are unaffected.
+  metadata was discarded. This fires solely on a banner that NAMES another known
+  harness, never on uncertainty: a probe that errors, times out, exceeds its
+  output bound, or prints an unbranded banner still fails open and launches on
+  the cached record. An unbranded shape — a bare date-and-hash build ID is the
+  clearest case — is deliberately not identification, because wrapper prefixes
+  are a supported configuration and refusing a legitimate launch costs more than
+  carrying a stale record until the next refresh. The selector is scrubbed of
+  credentials before it reaches the message or the diagnostics, since a wrapper
+  prefix can carry a token inline or after a flag. Dry runs do not probe and are
+  unaffected.
 
 ### Fixed
 
