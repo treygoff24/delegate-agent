@@ -1388,8 +1388,16 @@ def parse_snapshot(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedC
     )
 
 
-def parse_runs(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
+def parse_runs(
+    rest: list[str],
+    json_mode: bool,
+    cwd: str | None,
+    *,
+    command_label: str = "runs",
+) -> ParsedCommand:
     # Help wins over flags: a help token anywhere is help.
+    # ``command_label`` names the command the user actually typed so delegating
+    # front-ends (ps) do not report errors against flags nobody entered.
     rest, json_mode = consume_json_option(rest, json_mode)
     if any(command_help.is_help_token(token) for token in rest):
         return help_command(json_mode, "runs")
@@ -1421,18 +1429,22 @@ def parse_runs(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedComma
             continue
         if token == "--harness":
             if i + 1 >= len(rest):
-                raise DelegateError("missing_harness", "runs --harness requires a harness name.")
+                raise DelegateError(
+                    "missing_harness", f"{command_label} --harness requires a harness name."
+                )
             harness = rest[i + 1]
             if harness not in KNOWN_ENGINES:
                 raise DelegateError(
                     "invalid_harness",
-                    f"runs --harness must be one of {', '.join(KNOWN_ENGINES)}.",
+                    f"{command_label} --harness must be one of {', '.join(KNOWN_ENGINES)}.",
                 )
             i += 2
             continue
         if token == "--group":
             if i + 1 >= len(rest):
-                raise DelegateError("missing_group", "runs --group requires a group name.")
+                raise DelegateError(
+                    "missing_group", f"{command_label} --group requires a group name."
+                )
             group = validate_group(rest[i + 1])
             i += 2
             continue
@@ -1440,12 +1452,12 @@ def parse_runs(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedComma
             limit, i = parse_required_positive_int_option(
                 rest,
                 i,
-                option_label="runs --limit",
+                option_label=f"{command_label} --limit",
                 missing_error="missing_limit",
                 invalid_error="invalid_limit",
             )
             continue
-        raise DelegateError("unknown_option", f"runs does not support option: {token}")
+        raise DelegateError("unknown_option", f"{command_label} does not support option: {token}")
     selected_modes = [
         label
         for label, selected in (
@@ -1459,7 +1471,7 @@ def parse_runs(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedComma
     if len(selected_modes) > 1:
         raise DelegateError(
             "invalid_option_combination",
-            f"runs filters are mutually exclusive: {', '.join(selected_modes)}.",
+            f"{command_label} filters are mutually exclusive: {', '.join(selected_modes)}.",
         )
     return ParsedCommand(
         "runs",
@@ -1480,14 +1492,14 @@ def parse_ps(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand
     rest, json_mode = consume_json_option(rest, json_mode)
     if any(command_help.is_help_token(token) for token in rest):
         return help_command(json_mode, "ps")
-    conflicting = [token for token in rest if token in {"--running", "--stale"}]
+    conflicting = [token for token in rest if token in {"--running", "--stale", "--recent"}]
     if conflicting:
         raise DelegateError(
             "invalid_option_combination",
             f"delegate ps always shows active runs; use delegate runs {conflicting[0]} instead.",
         )
     filtered = [token for token in rest if token != "--active"]
-    parsed = parse_runs(["--active", *filtered], json_mode, cwd)
+    parsed = parse_runs(["--active", *filtered], json_mode, cwd, command_label="ps")
     parsed.subcommand = "ps"
     return parsed
 

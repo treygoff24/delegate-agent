@@ -4,8 +4,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
 
-from delegate_agent import command_errors, harness_discovery, profiles, reasoning, redaction
+from delegate_agent import harness_discovery, profiles, reasoning, redaction
 from delegate_agent import rendering as delegate_rendering
+from delegate_agent.constants import KNOWN_ENGINES
+from delegate_agent.errors import EXIT_MISSING_BINARY, DelegateError
 from delegate_agent.json_types import JsonObject
 
 
@@ -16,16 +18,13 @@ class CapabilitiesCommand:
     json_mode: bool = False
 
 
-class CapabilitiesError(command_errors.CommandError):
-    def __init__(
-        self,
-        error: str,
-        message: str,
-        *,
-        diagnostics: JsonObject | None = None,
-    ) -> None:
-        super().__init__(error, message)
-        self.diagnostics = diagnostics
+class CapabilitiesError(DelegateError):
+    """Capability failure that carries its own process exit code.
+
+    Deriving from ``DelegateError`` keeps the machine state a caller sees
+    consistent across commands: "no harness installed" exits with
+    ``EXIT_MISSING_BINARY`` from both setup and capability refresh.
+    """
 
 
 def _public_attempts(attempt_records: JsonObject) -> JsonObject:
@@ -53,6 +52,35 @@ def _public_attempts(attempt_records: JsonObject) -> JsonObject:
     return redaction.scrub_public_projection(projected)
 
 
+def _drop_drifted_records(
+    config: JsonObject,
+    discovery: JsonObject | None,
+    profile: profiles.ProfileResolution,
+) -> tuple[JsonObject | None, list[str]]:
+    """Hide cached records whose selector no longer matches the config.
+
+    A launch refuses a drifted record (``request_build._runtime_discovery_for_engine``),
+    so inspection must not advertise its catalog as live capability.
+    """
+    if not isinstance(discovery, dict):
+        return discovery, []
+    harnesses = discovery.get("harnesses")
+    if not isinstance(harnesses, dict):
+        return discovery, []
+    drifted = {
+        harness
+        for harness, record in harnesses.items()
+        if harness in KNOWN_ENGINES
+        and isinstance(record, dict)
+        and record.get("installed") is True
+        and harness_discovery.selector_has_drifted(config, harness, record, profile=profile)
+    }
+    if not drifted:
+        return discovery, []
+    kept = {harness: record for harness, record in harnesses.items() if harness not in drifted}
+    return {**discovery, "harnesses": kept}, sorted(drifted)
+
+
 def capabilities_payload(
     config: JsonObject,
     config_source: str,
@@ -62,12 +90,13 @@ def capabilities_payload(
     discovery: JsonObject | None = None,
 ) -> JsonObject:
     active_profile = profile or profiles.empty_profile_resolution()
+    live_discovery, drifted_harnesses = _drop_drifted_records(config, discovery, active_profile)
     legacy_cache = reasoning.load_reasoning_capability_cache(workspace)
     legacy_path = reasoning.reasoning_capability_cache_path(workspace)
     raw_reasoning_payload = reasoning.build_reasoning_capabilities_payload(
         config,
         legacy_cache,
-        discovery=discovery,
+        discovery=live_discovery,
     )
     reasoning_payload = raw_reasoning_payload
     payload: JsonObject = {
@@ -76,6 +105,8 @@ def capabilities_payload(
         "cachePath": str(harness_discovery.discovery_cache_path(active_profile.name)),
         "reasoning": reasoning_payload,
     }
+    if drifted_harnesses:
+        payload["driftedHarnesses"] = drifted_harnesses
     _add_legacy_cache_fields(payload, legacy_path, reasoning_payload)
     return redaction.scrub_public_projection(payload)
 
@@ -143,11 +174,13 @@ def _refresh_payload(
                 "requested_harnesses_not_installed",
                 "capability refresh found none of the requested harnesses installed: "
                 f"{', '.join(engines)}. Other installed harnesses were not probed.",
+                EXIT_MISSING_BINARY,
                 diagnostics=diagnostics,
             )
         raise CapabilitiesError(
             "no_harnesses_installed",
             "capability refresh found no installed supported harnesses.",
+            EXIT_MISSING_BINARY,
             diagnostics=diagnostics,
         )
     if not updated_harnesses:
@@ -159,12 +192,16 @@ def _refresh_payload(
 
     snapshot = result.get("snapshot")
     discovery = snapshot if isinstance(snapshot, dict) else None
+    # A refreshed record carries the selector it was just probed with, but the
+    # snapshot also returns records this run never touched: engines outside an
+    # engine subset, and probe failures that kept their last-known-good record.
+    live_discovery, drifted_harnesses = _drop_drifted_records(config, discovery, profile)
     legacy_cache = reasoning.load_reasoning_capability_cache(workspace)
     legacy_path = reasoning.reasoning_capability_cache_path(workspace)
     raw_reasoning_payload = reasoning.build_reasoning_capabilities_payload(
         config,
         legacy_cache,
-        discovery=discovery,
+        discovery=live_discovery,
     )
     reasoning_payload = raw_reasoning_payload
     payload: JsonObject = {
@@ -176,6 +213,8 @@ def _refresh_payload(
         "staleHarnesses": result.get("staleHarnesses", []),
         "attempts": public_attempts,
     }
+    if drifted_harnesses:
+        payload["driftedHarnesses"] = drifted_harnesses
     _add_legacy_cache_fields(payload, legacy_path, reasoning_payload)
     return redaction.scrub_public_projection(payload)
 
@@ -213,6 +252,13 @@ def emit(
         delegate_rendering.print_json(payload, stdout)
     else:
         print(f"reasoning capabilities: {payload['cachePath']}", file=stdout)
+        drifted = payload.get("driftedHarnesses")
+        if isinstance(drifted, list) and drifted:
+            print(
+                "excluded (config selector drifted; rerun delegate setup): "
+                f"{', '.join(str(harness) for harness in drifted)}",
+                file=stdout,
+            )
         harnesses = payload["reasoning"]["harnesses"]
         if not isinstance(harnesses, dict):
             return 0

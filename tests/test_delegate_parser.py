@@ -293,7 +293,7 @@ class ParserTests(unittest.TestCase):
         self.assertIn("before the subcommand", ctx.exception.message)
 
     def test_ps_rejects_conflicting_runs_filters_with_ps_specific_message(self):
-        for flag in ("--running", "--stale"):
+        for flag in ("--running", "--stale", "--recent"):
             with self.subTest(flag=flag):
                 with self.assertRaises(self.delegate.DelegateError) as ctx:
                     self.delegate.parse_cli(["ps", flag])
@@ -305,6 +305,31 @@ class ParserTests(unittest.TestCase):
         parsed = self.delegate.parse_cli(["ps", "--active"])
         self.assertEqual(parsed.subcommand, "ps")
         self.assertTrue(parsed.runs.active)
+
+    def test_ps_errors_name_ps_not_the_delegated_runs_command(self):
+        cases = (
+            (["ps", "bogus"], "unknown_option", "ps does not support option: bogus"),
+            (["ps", "--limit", "0"], "invalid_limit", "ps --limit must be at least 1."),
+            (["ps", "--limit"], "missing_limit", "ps --limit requires a positive integer."),
+            (["ps", "--harness"], "missing_harness", "ps --harness requires a harness name."),
+            (["ps", "--harness", "nope"], "invalid_harness", "ps --harness must be one of"),
+            (["ps", "--group"], "missing_group", "ps --group requires a group name."),
+        )
+        for argv, error, message in cases:
+            with self.subTest(argv=argv):
+                with self.assertRaises(self.delegate.DelegateError) as ctx:
+                    self.delegate.parse_cli(argv)
+                self.assertEqual(ctx.exception.error, error)
+                self.assertIn(message, ctx.exception.message)
+                self.assertNotIn("runs", ctx.exception.message)
+
+    def test_runs_errors_still_name_runs(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(["runs", "bogus"])
+        self.assertEqual(ctx.exception.message, "runs does not support option: bogus")
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(["runs", "--limit", "0"])
+        self.assertEqual(ctx.exception.message, "runs --limit must be at least 1.")
 
     def test_capabilities_read_rejects_engine_arguments(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:
