@@ -24,6 +24,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   probed, so a harness that hangs is identifiable rather than anonymous
   silence. Progress output is suppressed under `--json`.
 
+### Changed
+
+- A real launch now fails instead of proceeding when the configured binary for
+  a harness identifies itself as a *different* known harness. Delegate
+  re-probes `--version` before a real launch (see Fixed); when that banner
+  positively names another harness — a Codex path replaced in place by Grok,
+  say — the run stops with `harness_identity_mismatch` and exit code 2, naming
+  the configured harness, the harness that answered, and the selector path.
+  Previously the launch continued against that same binary with the same Codex
+  argv, sandbox flags, and approval policy, and only the cached capability
+  metadata was discarded. This fires solely on a positive identification of
+  another known harness, never on uncertainty: a probe that errors, times out,
+  exceeds its output bound, or prints something unrecognizable still fails open
+  and launches on the cached record. Dry runs do not probe and are unaffected.
+
 ### Fixed
 
 - Discovery now detects a harness that was upgraded in place. Cached capability
@@ -35,11 +50,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stored in the record. The check fails open: a probe that errors, times out, or
   prints a banner nothing recognizes keeps the cached record, so a failing probe
   can never prevent a launch. A banner that positively identifies a *different*
-  known harness is the exception and counts as drift, because running one
-  harness under another's capability metadata, argv, and safety policy is worse
-  than re-probing. Banners are read with escape sequences stripped, so a
-  colorized version line no longer freezes a record permanently. A cached
-  selector whose binary no longer exists is also treated as drift.
+  known harness is the exception, and it aborts the launch rather than merely
+  invalidating the record — see Changed. Each banner is matched against the
+  expected harness's own pattern before anyone else's, so a banner mentioning
+  more than one tool is read as the harness that was asked for instead of
+  whichever pattern happens to be declared earlier. Banners are read with escape
+  sequences stripped, so a colorized version line no longer freezes a record
+  permanently. A cached selector whose binary no longer exists is also treated
+  as drift.
 - A dry run never probes the harness for its version. Dry run documents that it
   neither launches a child runtime nor requires the real child binary, and the
   drift probe is a child runtime; it now runs only on a real launch, leaving dry
@@ -49,7 +67,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   probing without persisting, so an older Delegate can no longer destroy a newer
   cache. Losing that race mid-probe degrades the same way rather than failing the
   command: `capabilities refresh` and `setup` report `cacheWriteSkipped` with
-  `wrote` false and exit successfully, since only persistence was lost.
+  `wrote` false and exit successfully, since only persistence was lost. The
+  schema is re-read immediately before the atomic replacement rather than before
+  the snapshot is serialized, which narrows the window in which a newer cache
+  could be published and then overwritten down to the `os.replace` call itself.
+  POSIX offers no compare-and-swap for a rename, so that last window remains.
 - The test suite no longer writes into the developer's real
   `~/.delegate/worktrees`. Tests exercising persistent-worktree runs created
   real pooled worktrees over temporary source repositories and orphaned them
