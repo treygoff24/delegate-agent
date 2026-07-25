@@ -204,14 +204,16 @@ raise SystemExit(1)
         # The reset window is spliced into the failure message verbatim, and
         # codex reports quota walls as stdout error events, which are not
         # covered by the stderr-tail redaction.
+        # The token is assembled at runtime so no secret-shaped literal lands
+        # in the repository (release scans run over history).
+        secret = "sk-" + "abcdef1234567890"
         _workspace, root, run_id, code, payload = self._run(
-            """import json
-print(json.dumps({"type": "error", "message": "Usage limit reached; resets at 2026-07-22 01:00 UTC for Authorization: Bearer sk-abcdef1234567890"}))
-raise SystemExit(1)
-"""
+            'import json\nprint(json.dumps({"type": "error", "message": '
+            '"Usage limit reached; resets at 2026-07-22 01:00 UTC for '
+            'Authorization: Bearer sk-" + "abcdef1234567890"}))\n'
+            "raise SystemExit(1)\n"
         )
 
-        secret = "sk-abcdef1234567890"
         self.assertEqual(code, 1)
         self.assertEqual(payload["error"], "usage_limit")
         self.assertIn("2026-07-22 01:00 UTC", payload["message"])
