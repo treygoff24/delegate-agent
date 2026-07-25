@@ -104,8 +104,15 @@ def _normalize_node(
             raise SchemaPreflightError(f"{path}.properties must be an object.")
         property_names = set(properties)
         required = schema.get("required")
-        if "required" not in schema and not property_names:
-            schema["required"] = []
+        repaired = False
+        if "required" not in schema:
+            # Strict mode requires every property to be listed, so an absent
+            # `required` has exactly one correct value. Repair it like
+            # additionalProperties instead of rejecting the schema; a present
+            # but partial list stays an error because the author's intent for
+            # the unlisted properties is genuinely ambiguous.
+            schema["required"] = list(properties)
+            repaired = bool(property_names)
         elif not isinstance(required, list) or any(not isinstance(name, str) for name in required):
             raise SchemaPreflightError(
                 f"{path}.required must be an array listing every property exactly."
@@ -124,11 +131,13 @@ def _normalize_node(
         additional = schema.get("additionalProperties")
         if "additionalProperties" not in schema:
             schema["additionalProperties"] = False
-            injected.append(path)
+            repaired = True
         elif additional is not False:
             raise SchemaPreflightError(
                 f"{path}.additionalProperties must be false for Codex strict output."
             )
+        if repaired:
+            injected.append(path)
         for name, child in properties.items():
             if not isinstance(child, dict):
                 raise SchemaPreflightError(f"{path}.properties.{name} must be an object.")

@@ -303,7 +303,7 @@ def build_state(
         state["exitCode"] = exit_code
         state["finishedAt"] = now
     if current:
-        state["current"] = current
+        state["current"] = redaction.redact_string(current)
     if pid is not None:
         state["pid"] = pid
         with contextlib.suppress(OSError):
@@ -367,7 +367,11 @@ def build_snapshot(
         "mode": ctx.mode,
         "model": ctx.model,
         "startedAt": ctx.started_at,
-        "current": accumulator.current,
+        "current": (
+            redaction.redact_string(accumulator.current)
+            if accumulator.current
+            else accumulator.current
+        ),
         "recentEvents": recent_events,
         "completionReportWritten": completion_report_written,
         "completionReportSource": None,
@@ -717,7 +721,7 @@ def _completion_report_text_and_source(
             f"Failure reason: {failure_reason or 'child_failed'}",
         ]
         if failure_message:
-            lines.append(f"Message: {failure_message}")
+            lines.append(f"Message: {redaction.redact_string(failure_message)}")
         terminal = accumulator.terminal_event or {}
         terminal_reason = terminal.get("reason")
         if isinstance(terminal_reason, str) and terminal_reason.strip():
@@ -1781,18 +1785,29 @@ def _append_attempt_delimiter(stderr_log: Path, *, label: str) -> None:
 
 
 def _prepend_attempt_delimiter(stderr_log: Path, *, label: str) -> None:
+    # Several retry paths can each precede the same run's first attempt (codex
+    # thread-retry, auth fallback, empty-success retry), so prepending is
+    # idempotent: the label is written once no matter how many retries stack.
     existing = stderr_log.read_bytes() if stderr_log.exists() else b""
-    stderr_log.write_bytes(_attempt_delimiter(label) + existing)
+    delimiter = _attempt_delimiter(label)
+    if existing.startswith(delimiter):
+        return
+    stderr_log.write_bytes(delimiter + existing)
 
 
 def _accumulator_failure_signal_text(accumulator: harness_events.StreamAccumulator) -> str:
-    return "\n".join(
-        event.message
-        for event in accumulator.events
-        if event.message
-        and (
-            event.kind == "error"
-            or (event.kind == "run.completed" and event.status == run_registry.STATUS_FAILED)
+    # Redacted here rather than at each call site: this is the only classifier
+    # input that is not already scrubbed, and the classified message reaches
+    # state.json, the snapshot, and the completion report.
+    return redaction.redact_string(
+        "\n".join(
+            event.message
+            for event in accumulator.events
+            if event.message
+            and (
+                event.kind == "error"
+                or (event.kind == "run.completed" and event.status == run_registry.STATUS_FAILED)
+            )
         )
     )
 
@@ -2322,8 +2337,7 @@ def execute_tracked(
                     agent_config_placeholder=agent_config_placeholder,
                     agent_config_dir=files.run_path,
                 )
-                if fallback_extra is None:
-                    _prepend_attempt_delimiter(files.stderr_log, label="primary")
+                _prepend_attempt_delimiter(files.stderr_log, label="primary")
                 retry_capture = _run_single_tracked_attempt(
                     retry_argv,
                     cwd,

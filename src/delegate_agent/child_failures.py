@@ -9,6 +9,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from delegate_agent import redaction
+
 
 @dataclass(frozen=True)
 class ChildFailure:
@@ -78,7 +80,11 @@ def classify(text: str) -> ChildFailure | None:
         )
     if _matches_usage_limit(text):
         reset = _RESET_PATTERN.search(text)
-        suffix = f" {reset.group(0).strip().rstrip('.')}." if reset else ""
+        # This is the one branch that splices caller text into the message, and
+        # the message is persisted to state.json and the completion report, so
+        # the spliced window is redacted even though callers pass trusted text.
+        window = redaction.redact_string(reset.group(0).strip().rstrip(".")) if reset else ""
+        suffix = f" {window}." if window else ""
         return ChildFailure("usage_limit", f"Child harness usage or quota limit reached.{suffix}")
     return None
 

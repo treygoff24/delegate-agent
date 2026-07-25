@@ -59,6 +59,33 @@ class CodexSchemaPreflightTests(unittest.TestCase):
         self.assertEqual(schema, original)
         self.assertEqual(injected, ())
 
+    def test_absent_required_is_injected_in_property_order(self):
+        schema = {
+            "type": "object",
+            "properties": {"name": {"type": "string"}, "age": {"type": "integer"}},
+            "additionalProperties": False,
+        }
+
+        normalized, injected = structured_output.normalize_codex_schema(schema)
+
+        self.assertEqual(normalized["required"], ["name", "age"])
+        self.assertEqual(injected, ("schema",))
+
+    def test_absent_required_on_a_property_less_object_stays_silent(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "nested": {"type": "object", "properties": {}, "additionalProperties": False}
+            },
+            "required": ["nested"],
+            "additionalProperties": False,
+        }
+
+        normalized, injected = structured_output.normalize_codex_schema(schema)
+
+        self.assertEqual(normalized["properties"]["nested"]["required"], [])
+        self.assertEqual(injected, ())
+
     def test_missing_required_property_fails_precisely(self):
         schema = {
             "type": "object",

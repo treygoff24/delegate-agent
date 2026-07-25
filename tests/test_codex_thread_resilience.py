@@ -1,4 +1,5 @@
 import io
+import json
 import subprocess
 import sys
 import tempfile
@@ -196,6 +197,35 @@ raise SystemExit(1)
         self.assertEqual(payload["error"], "usage_limit")
         self.assertIn("2026-07-22 01:00 UTC", payload["message"])
         report = (root / "runs" / run_id / "completion-report.md").read_text()
+        self.assertIn("usage_limit", report)
+        self.assertIn("2026-07-22 01:00 UTC", report)
+
+    def test_usage_limit_reset_window_is_redacted_before_it_reaches_disk(self):
+        # The reset window is spliced into the failure message verbatim, and
+        # codex reports quota walls as stdout error events, which are not
+        # covered by the stderr-tail redaction.
+        _workspace, root, run_id, code, payload = self._run(
+            """import json
+print(json.dumps({"type": "error", "message": "Usage limit reached; resets at 2026-07-22 01:00 UTC for Authorization: Bearer sk-abcdef1234567890"}))
+raise SystemExit(1)
+"""
+        )
+
+        secret = "sk-abcdef1234567890"
+        self.assertEqual(code, 1)
+        self.assertEqual(payload["error"], "usage_limit")
+        self.assertIn("2026-07-22 01:00 UTC", payload["message"])
+        self.assertNotIn(secret, payload["message"])
+        run_path = root / "runs" / run_id
+        for name in ("state.json", "completion-report.md"):
+            with self.subTest(artifact=name):
+                self.assertNotIn(secret, (run_path / name).read_text(encoding="utf-8"))
+        # recentEvents deliberately mirrors the raw event log, so the snapshot
+        # is checked on the fields delegate itself composes.
+        snapshot = json.loads((run_path / "snapshot.json").read_text(encoding="utf-8"))
+        self.assertNotIn(secret, snapshot["message"])
+        self.assertNotIn(secret, snapshot["current"])
+        report = (run_path / "completion-report.md").read_text(encoding="utf-8")
         self.assertIn("usage_limit", report)
         self.assertIn("2026-07-22 01:00 UTC", report)
 

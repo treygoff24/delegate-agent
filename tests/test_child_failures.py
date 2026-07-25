@@ -20,6 +20,17 @@ class ChildFailureClassifierTests(unittest.TestCase):
         self.assertEqual(failure.code, "usage_limit")
         self.assertIn("2026-07-22 01:00 UTC", failure.message)
 
+    def test_usage_limit_redacts_credentials_inside_the_reset_window(self):
+        failure = child_failures.classify(
+            "Usage limit reached. Your allowance resets at 2026-07-22 01:00 UTC "
+            "for Authorization: Bearer sk-abcdef1234567890"
+        )
+
+        self.assertIsNotNone(failure)
+        self.assertEqual(failure.code, "usage_limit")
+        self.assertIn("2026-07-22 01:00 UTC", failure.message)
+        self.assertNotIn("sk-abcdef1234567890", failure.message)
+
     def test_expired_token_and_401_are_auth_failures(self):
         for text in (
             "Authentication failed: access token expired.",
