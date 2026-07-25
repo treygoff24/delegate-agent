@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.20.0] - 2026-07-25
 
 ### Added
 
@@ -631,6 +631,7 @@ Usage-audit fix wave: 82 sessions and 1,241 delegate invocations from one week o
 
 - Releases before 0.1.3 predate this changelog.
 
+[0.20.0]: https://github.com/treygoff24/delegate-agent/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/treygoff24/delegate-agent/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/treygoff24/delegate-agent/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/treygoff24/delegate-agent/compare/v0.16.0...v0.17.0
