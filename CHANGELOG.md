@@ -49,7 +49,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   carrying a stale record until the next refresh. The selector is scrubbed of
   credentials before it reaches the message or the diagnostics, since a wrapper
   prefix can carry a token inline or after a flag. Dry runs do not probe and are
-  unaffected.
+  unaffected. The refusal also names the discovery cache file for the active
+  auth profile, in its `cachePath` diagnostic and in a next action, because
+  `capabilities refresh` cannot clear this state: a refresh keeps the
+  last-known-good record whenever a probe fails, which is correct for a flaky
+  probe and wrong here, where the record itself is the problem. Without the
+  path, a wrong identification would refuse every launch with no documented way
+  out short of editing configuration.
+- A run whose cached capability record is discarded for version drift now says
+  so, naming `delegate capabilities refresh <engine>`. The record is dropped for
+  that run only and the superseded copy stays on disk, so every later launch
+  repeats the drop and loses the same discovery-sourced models and reasoning
+  levels — previously with no indication that a stale cache was the cause.
+  Selector drift stays silent, since `capabilities` already reports it under
+  `driftedHarnesses`.
 
 ### Fixed
 
