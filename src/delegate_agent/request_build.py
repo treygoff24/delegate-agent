@@ -794,12 +794,17 @@ def _harness_identity_mismatch_error(
     argv, sandbox flags, and approval policy. Dropping the cached record would
     not change any of that, so the launch stops here and names all three facts
     the user needs -- what was configured, what answered, and where.
+
+    The selector reaches the message, the diagnostics, and the next actions
+    already credential-scrubbed; see ``HarnessIdentityMismatchError``. It is
+    shown whole rather than as its first element, because a wrapper prefix keeps
+    the harness somewhere after the leading ``env`` or shim.
     """
-    binary = exc.selector[0] if exc.selector else ""
+    probe = " ".join(exc.selector)
     config_key = "cursor.argvPrefix" if exc.harness == "cursor" else f"{exc.harness}.binary"
     message = (
         f"Configured {exc.harness} binary identifies itself as {exc.identified}: "
-        f"{binary} --version printed a {exc.identified} banner. Refusing to launch, "
+        f"{probe} --version printed a {exc.identified} banner. Refusing to launch, "
         f"because Delegate would build {exc.harness} argv and {exc.harness} safety "
         f"policy for a different program. Fix: point {config_key} at a real "
         f"{exc.harness} executable, or run the {exc.identified} engine instead."
@@ -814,7 +819,7 @@ def _harness_identity_mismatch_error(
             "configKey": config_key,
         },
         next_actions=[
-            f"{binary} --version",
+            f"{probe} --version",
             f"set {config_key} to a {exc.harness} executable",
             f"delegate {exc.identified} ... (to use the harness that answered)",
         ],

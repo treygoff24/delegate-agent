@@ -273,6 +273,66 @@ class EngineArgvTests(CommandTestBase):
             [argv for argv in spawned if str(binary) in argv], [(str(binary), "--version")]
         )
 
+    def test_identity_mismatch_redacts_credentials_carried_by_a_wrapper_selector(self):
+        """The refusal must not print the secrets the selector carries.
+
+        A selector is not always a bare path. Wrapper prefixes take arbitrary
+        argv, so a working configuration can carry a credential inline or after
+        a flag, and this error renders the selector into both a human message
+        and machine diagnostics. A safety check that leaks the token every time
+        it fires is worse than the misconfiguration it reports.
+        """
+        inline_secret = "sk-live-INLINESECRET"
+        flagged_secret = "sk-live-FLAGGEDSECRET"
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["codex"]["defaultModel"] = None
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        binary = write_version_harness(Path(temp.name) / "codex", "grok 2.4.0")
+        discovery = self._upgraded_codex_discovery()
+        discovery["harnesses"]["codex"]["selector"] = [
+            "/usr/bin/env",
+            f"API_TOKEN={inline_secret}",
+            "--api-key",
+            flagged_secret,
+            str(binary),
+        ]
+
+        with (
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "load_discovery_cache",
+                return_value=discovery,
+            ),
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "selector_has_drifted",
+                return_value=False,
+            ),
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "cached_version_has_drifted",
+                side_effect=self.delegate.harness_discovery.HarnessIdentityMismatchError(
+                    "codex", "grok", tuple(discovery["harnesses"]["codex"]["selector"])
+                ),
+            ),
+            self.assertRaises(self.delegate.DelegateError) as caught,
+        ):
+            self.build_git_request("codex", "safe", None, "/repo", "review", config, False)
+
+        error = caught.exception
+        self.assertEqual(error.error, "harness_identity_mismatch")
+        rendered = json.dumps(
+            {"message": error.message, "diagnostics": error.diagnostics}, sort_keys=True
+        )
+        for secret in (inline_secret, flagged_secret):
+            self.assertNotIn(secret, rendered, "identity mismatch leaked a selector credential")
+        # Redaction must not hollow out the report: the operator still has to be
+        # able to tell which configuration produced this.
+        self.assertEqual(error.diagnostics["engine"], "codex")
+        self.assertEqual(error.diagnostics["identifiedHarness"], "grok")
+        self.assertIn(str(binary), rendered)
+
     def test_dry_run_never_executes_the_harness_binary(self):
         """Dry run promises no child runtime, and a version probe is one."""
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))

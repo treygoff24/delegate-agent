@@ -1217,7 +1217,6 @@ class VersionIdentityTests(unittest.TestCase):
         cases = (
             ("codex-cli 1.0.0", "expected", "codex-cli 1.0.0", "codex"),
             ("grok 2.4.0", "known-other", None, "grok"),
-            ("2026.07.25-abcdef", "known-other", None, "cursor"),
             ("some unreadable banner", "unrecognized", None, None),
             ("", "unrecognized", None, None),
         )
@@ -1249,6 +1248,43 @@ class VersionIdentityTests(unittest.TestCase):
         self.assertEqual((expected.status, expected.version), ("expected", "1.2.3"))
         renamed = self.discovery._identify_version("droid", ("/bin/something-else",), "1.2.3")
         self.assertEqual((renamed.status, renamed.version), ("unrecognized", None))
+
+    def test_unbranded_cursor_shaped_build_id_is_uncertain_for_other_harnesses(self):
+        """A bare build ID names no tool, so it cannot convict a selector.
+
+        Cursor's banner is the one canonical pattern that brands nothing, and
+        wrapper shims print build IDs of exactly this shape. Reading it as proof
+        that some other harness "is Cursor" refuses a launch that would have
+        worked, which is the costlier error of the two.
+        """
+        banner = "2026.07.25-abcdef"
+        for harness, selector in (
+            ("codex", ("/opt/shim/codex",)),
+            ("droid", ("/opt/shim/droid",)),
+            ("claude", ("/opt/shim/claude",)),
+        ):
+            with self.subTest(harness=harness):
+                identity = self.discovery._identify_version(harness, selector, banner)
+                self.assertNotEqual(identity.status, "known-other")
+                self.assertNotEqual(identity.identified, "cursor")
+
+        # Under a name the expected harness never answers to, the bare-version
+        # fallback cannot claim the banner either, so the verdict is the honest
+        # one: nothing here is recognizable, keep the cached record and launch.
+        wrapper = self.discovery._identify_version("codex", ("/opt/shim/run-codex",), banner)
+        self.assertEqual((wrapper.status, wrapper.identified), ("unrecognized", None))
+
+    def test_a_bare_version_outranks_a_foreign_banner_for_an_unpatterned_harness(self):
+        """Ordering must not let a mentioned tool beat the harness asked for.
+
+        Droid, opencode, pi and kimi have no canonical banner of their own, so
+        every foreign pattern used to be tried before their bare-version
+        fallback -- and an update notice naming another CLI was enough to refuse
+        the launch.
+        """
+        banner = "1.2.3\ngrok 2.4.0 is available; run droid upgrade"
+        identity = self.discovery._identify_version("droid", ("/bin/droid",), banner)
+        self.assertEqual((identity.status, identity.version), ("expected", "1.2.3"))
 
 
 class FutureSchemaCacheTests(unittest.TestCase):

@@ -51,37 +51,52 @@ class HarnessIdentityMismatchError(ValueError):
     Carries everything a caller needs to name the mistake back to the user:
     the harness the configuration claims, the harness the binary says it is,
     and the selector that resolved to it.
+
+    ``selector`` is credential-scrubbed at construction, and so is this error's
+    own message. Every consumer is a user-facing diagnostic -- a message, a JSON
+    error payload, a suggested next command -- and a selector is arbitrary user
+    configuration (``cursor.argvPrefix`` is a documented opaque wrapper contract
+    that can legitimately carry ``env API_TOKEN=...``). Scrubbing here rather
+    than at each surface means no future surface can forget.
     """
 
     def __init__(self, harness: str, identified: str, selector: tuple[str, ...]) -> None:
+        scrubbed = redaction.redact_argv(selector)
         super().__init__(
-            f"configured {harness} selector {' '.join(selector)!r} identifies itself as {identified}"
+            f"configured {harness} selector {' '.join(scrubbed)!r} identifies itself as {identified}"
         )
         self.harness = harness
         self.identified = identified
-        self.selector = selector
+        self.selector = scrubbed
 
 
 _PATH_CANDIDATES: dict[str, tuple[str, ...]] = {
     "cursor": ("agent", "cursor-agent"),
     **{engine: (engine,) for engine in KNOWN_ENGINES if engine != "cursor"},
 }
-_CANONICAL_VERSION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("grok", re.compile(r"^grok\s+[0-9][0-9A-Za-z.+-]*", re.IGNORECASE | re.MULTILINE)),
-    ("codex", re.compile(r"^codex-cli\s+[0-9][0-9A-Za-z.+-]*", re.IGNORECASE | re.MULTILINE)),
-    (
-        "claude",
-        re.compile(
-            r"^[0-9][0-9A-Za-z.+-]*\s+\(Claude Code\)$",
-            re.IGNORECASE | re.MULTILINE,
-        ),
+_CANONICAL_VERSION_PATTERNS: dict[str, re.Pattern[str]] = {
+    "grok": re.compile(r"^grok\s+[0-9][0-9A-Za-z.+-]*", re.IGNORECASE | re.MULTILINE),
+    "codex": re.compile(r"^codex-cli\s+[0-9][0-9A-Za-z.+-]*", re.IGNORECASE | re.MULTILINE),
+    "claude": re.compile(
+        r"^[0-9][0-9A-Za-z.+-]*\s+\(Claude Code\)$",
+        re.IGNORECASE | re.MULTILINE,
     ),
-    ("devin", re.compile(r"^devin\s+[0-9][0-9A-Za-z.+-]*", re.IGNORECASE | re.MULTILINE)),
-    ("omp", re.compile(r"^omp/[0-9][0-9A-Za-z.+-]*", re.IGNORECASE | re.MULTILINE)),
-    (
-        "cursor",
-        re.compile(r"^\d{4}\.\d{2}\.\d{2}-[0-9a-f]+$", re.IGNORECASE | re.MULTILINE),
-    ),
+    "devin": re.compile(r"^devin\s+[0-9][0-9A-Za-z.+-]*", re.IGNORECASE | re.MULTILINE),
+    "omp": re.compile(r"^omp/[0-9][0-9A-Za-z.+-]*", re.IGNORECASE | re.MULTILINE),
+    "cursor": re.compile(r"^\d{4}\.\d{2}\.\d{2}-[0-9a-f]+$", re.IGNORECASE | re.MULTILINE),
+}
+# Cursor's banner is a bare `YYYY.MM.DD-<hash>` build ID that names no tool, so
+# any wrapper shim, vendored binary, or unrelated program is free to print the
+# same shape. It reads Cursor's own version, but it is not evidence that some
+# other harness's selector "is Cursor".
+_UNBRANDED_VERSION_HARNESSES = frozenset({"cursor"})
+# The only banners allowed to identify a harness other than the one asked for:
+# each names its tool outright, so a match is a positive identification rather
+# than a shape coincidence.
+_BRANDED_VERSION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
+    (harness, pattern)
+    for harness, pattern in _CANONICAL_VERSION_PATTERNS.items()
+    if harness not in _UNBRANDED_VERSION_HARNESSES
 )
 _GENERIC_VERSION = re.compile(r"^\d+(?:\.\d+)+(?:[-+][0-9A-Za-z.-]+)?$")
 # Outcomes of reading a --version banner: it identifies the harness asked for,
@@ -483,47 +498,57 @@ def _normalize_selector(
     return (str(Path(binary).absolute()), *selector[1:])
 
 
-def _expected_first_version_patterns(
-    harness: str,
-) -> tuple[tuple[str, re.Pattern[str]], ...]:
-    """Order the canonical patterns so ``harness`` gets first refusal."""
-    return tuple(sorted(_CANONICAL_VERSION_PATTERNS, key=lambda entry: entry[0] != harness))
-
-
 def _identify_version(harness: str, selector: tuple[str, ...], output: str) -> VersionIdentity:
     """Classify a ``--version`` banner as this harness, another one, or unreadable.
 
-    The middle case has to stay separate from the last one. A banner matching
-    another harness's canonical pattern is positive evidence that the selector
-    now resolves to a different program; a banner nothing recognizes is only an
-    absence of evidence, and callers weigh the two differently.
+    The middle case has to stay separate from the last one. A banner that names
+    another harness outright is positive evidence that the selector now resolves
+    to a different program; a banner nothing recognizes is only an absence of
+    evidence, and callers weigh the two differently.
 
     Escape sequences are stripped first: every canonical pattern is line
     anchored, so a harness that colorizes its banner would otherwise be
     unrecognizable forever.
 
-    The expected harness's own pattern is tried before anyone else's. A banner
-    is free to mention several tools -- an update notice, a bundled runtime, a
-    hash-and-date line another harness would also match -- and under a fixed
-    declaration order whichever pattern happened to be listed first would win,
-    turning a healthy harness into a positive identification of a foreign one.
+    Two rules keep the ``known-other`` verdict from firing on a healthy setup,
+    because that verdict refuses a launch and a wrong refusal costs the user
+    their work now, while a wrong ``unrecognized`` costs only a stale record
+    until the next refresh:
+
+    * Everything the expected harness could plausibly be is tried first -- its
+      own banner, then the bare-version fallback. A banner is free to mention
+      several tools (an update notice, a bundled runtime), and a foreign match
+      must not outrank the harness that was actually asked for.
+    * Only a *branded* banner may identify a foreign harness. An unbranded shape
+      such as a bare date-and-hash build ID proves nothing about who printed it,
+      and wrapper shims -- a documented, opaque part of ``cursor.argvPrefix`` --
+      routinely print their own build IDs.
     """
     text = _ANSI_RE.sub("", output)
-    for identified_harness, pattern in _expected_first_version_patterns(harness):
+    expected = _expected_version(harness, selector, text)
+    if expected is not None:
+        return VersionIdentity(_VERSION_EXPECTED, expected, harness)
+    for identified_harness, pattern in _BRANDED_VERSION_PATTERNS:
+        if identified_harness != harness and pattern.search(text) is not None:
+            return VersionIdentity(_VERSION_KNOWN_OTHER, None, identified_harness)
+    return VersionIdentity(_VERSION_UNRECOGNIZED)
+
+
+def _expected_version(harness: str, selector: tuple[str, ...], text: str) -> str | None:
+    """Read ``harness``'s own version out of a banner, or return None."""
+    pattern = _CANONICAL_VERSION_PATTERNS.get(harness)
+    if pattern is not None:
         match = pattern.search(text)
-        if match is None:
-            continue
-        if identified_harness == harness:
-            return VersionIdentity(_VERSION_EXPECTED, match.group(0), harness)
-        return VersionIdentity(_VERSION_KNOWN_OTHER, None, identified_harness)
+        if match is not None:
+            return match.group(0)
     binary_name = Path(selector[0]).name
     if binary_name not in _PATH_CANDIDATES[harness] or binary_name in _AMBIGUOUS_VERSION_BASENAMES:
-        return VersionIdentity(_VERSION_UNRECOGNIZED)
+        return None
     for line in text.splitlines():
         candidate = line.strip()
         if _GENERIC_VERSION.fullmatch(candidate):
-            return VersionIdentity(_VERSION_EXPECTED, candidate, harness)
-    return VersionIdentity(_VERSION_UNRECOGNIZED)
+            return candidate
+    return None
 
 
 def _canonical_version(harness: str, selector: tuple[str, ...], output: str) -> str | None:
