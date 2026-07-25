@@ -35,11 +35,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Codex output schemas are now linted before launch. Delegate recursively
   supplies missing `additionalProperties: false` on object schemas with a loud
-  warning, rejects non-strict `required` lists precisely, and passes a normalized
+  warning, rejects partial `required` lists precisely, and passes a normalized
   temporary copy without modifying the source schema. Object-bearing `allOf`,
   `patternProperties`, and external or unresolvable `$ref` values fail closed
   rather than being rewritten unsafely. Workflow Codex stages and direct
-  `--output-schema`/`outputSchema` launches share the same preflight.
+  `--output-schema`/`outputSchema` launches share the same preflight. The
+  normalized copy preserves the source schema's property order, so
+  think-before-answer schemas keep their intended generation order.
 - On retry-safe paths, Codex thread/state lookup failures now retry once and,
   only if the same typed failure repeats, retry through an ephemeral
   `--ignore-user-config` launch. Retry-safe paths are read-only calls and
@@ -57,10 +59,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an ordinary launch.
 - `capabilities refresh` now writes the selected profile's private discovery
   cache. The old workspace reasoning cache remains a lower-precedence read-only
-  compatibility source.
-- Cursor now fails closed when an explicit reasoning effort is combined with a
-  pinned selector that has no exact discovered same-family route. A configured
-  default still warns and degrades while preserving the pin.
+  compatibility source. The cached `capabilities` read reports the discovery
+  cache location in `cachePath`; the previous workspace path, when present, is
+  reported under `legacyWorkspaceCachePath`.
+- `reasoning.capabilities` config entries are now accepted for `grok` in
+  addition to `codex` and `droid`.
+- `--auth-profile` is now accepted on cached `capabilities` reads (previously
+  rejected as an invalid option combination) and on `models` and `setup`.
+- Cursor reasoning-effort routing now defers to a pinned selector when discovery
+  has no same-family route for it: the run proceeds on the pinned model and
+  records a bypass warning. When discovery does carry exact same-family routes,
+  the requested effort still routes to the matching selector, and a family that
+  omits the requested effort still fails closed.
+- Grok reasoning-effort support is once again governed by the documented CLI
+  enum (low, medium, high, xhigh, max); a bundled `grok-4.5` declaration that
+  narrowed it to low/medium/high was removed, since `grok --help` enumerates no
+  per-model efforts. Config, discovery-exact, and cached grok declarations
+  still take precedence.
 - Embedded Devin and Kimi `defaultModel` values are now `null`, deferring model
   selection to each harness. The editable `config init` example may still pin
   an explicit default.
@@ -81,6 +96,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Setup never overwrites an existing config and refuses unsafe selectors,
   final-component symlinks, and concurrent config races rather than mixing
   discovery results across config states.
+
+### Fixed
+
+- Credentials appearing in a child harness quota or reset message are now
+  redacted before they reach `state.json`, `snapshot.json`, the completion
+  report, or the run envelope; Codex reports quota walls as stdout events,
+  which bypassed the stderr-tail redaction. The in-progress activity label is
+  likewise redacted when persisted, matching the progress heartbeat.
+- A Codex output schema that omits `required` entirely is now repaired to list
+  every property (in declaration order) instead of being rejected, matching how
+  a missing `additionalProperties` is handled. A partial `required` is still an
+  error.
+- The `primary` attempt banner is written once in the run's stderr log even
+  when several retry paths run in sequence.
+- `delegate ps` now reports argument errors in its own terms — unknown options,
+  `--limit`, `--harness`, and `--group` failures name `ps` instead of the
+  `runs` command it delegates to, and `ps --recent` gets the same tailored
+  redirect as `--running` and `--stale`.
+- `delegate capabilities refresh` exits 3 (missing binary) when no supported
+  harness is installed — including when an engine subset such as
+  `capabilities refresh codex` names only uninstalled harnesses — matching
+  `delegate setup` on identical machine state instead of returning the generic
+  usage code 2.
+- `delegate capabilities` no longer advertises harnesses whose configured
+  selector has drifted from the cached record, on both the cached read and
+  after a refresh — a subset refresh returns the full snapshot, so engines it
+  never probed could otherwise surface stale catalogs the launch path would
+  refuse. Excluded harnesses are named in a new `driftedHarnesses` payload
+  field and in the text output.
+- Pi catalog rows whose column count does not match the header are skipped
+  instead of being read by shifted column position, which could cache a
+  thinking-capable model as having no reasoning support (unrecoverable, since
+  Pi has no config override) or hand a non-thinking model the full effort enum.
+- A configured harness binary or argv prefix that no longer resolves while the
+  CLI is still on PATH is now reported as a stale config setting rather than an
+  uninstalled harness, and `delegate setup` names the config key and file to
+  fix instead of telling you to install a CLI you already have.
+- An unreadable `~/.factory/settings.json` (permissions or I/O error) is
+  reported as a read failure instead of being misreported as invalid JSON.
+- Two Cursor selectors that normalize to the same route family and effort now
+  drop just the ambiguous routes with a warning, instead of turning the entire
+  Cursor discovery record into an error record.
+- OpenCode catalog parsing resumes past a malformed entry's whole object, so a
+  `provider/model`-shaped line nested inside the rejected body can no longer be
+  re-read as a real selector.
+- `capabilities refresh` now hints "global options before the subcommand" for a
+  misplaced global option instead of mislabeling it `invalid_engine`, and a
+  subset refresh whose requested harnesses are all uninstalled reports
+  `requested_harnesses_not_installed` instead of the misleading
+  `no_harnesses_installed`.
 
 ## [0.19.0] - 2026-07-20
 
@@ -221,12 +286,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   consistently across the CLI reference and worktree guidance.
 - Devin help and discovery surfaces now derive supported modes consistently and
   reject unknown modes before constructing executable arguments.
-- `capabilities refresh` now hints "global options before the subcommand" for a
-  misplaced global option instead of mislabeling it `invalid_engine`, and a
-  subset refresh whose requested harnesses are all uninstalled reports
-  `requested_harnesses_not_installed` instead of the misleading
-  `no_harnesses_installed`.
-
 ## [0.14.0] - 2026-07-15
 
 ### Added
