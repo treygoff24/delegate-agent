@@ -1423,7 +1423,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             OptionSpec(
                 "--pool",
                 "PATH",
-                "Scan this worktree pool root instead of the configured worktrees.dataHome (finds pools left behind by an earlier dataHome).",
+                "Scan this worktree pool root instead of the configured worktrees.dataHome (finds pools left behind by an earlier dataHome). The path must exist and be a readable directory.",
             ),
         ),
         examples=(
@@ -1435,7 +1435,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         notes=(
             "GC reconciles registry and Git metadata; it never removes worktree paths.",
             "--all works outside a Delegate registry, since pooled worktrees outlive the repositories that created them.",
-            "Pool orphans are reported, never removed: their uncommitted state cannot be inspected once the source repository is gone. Only empty pool directories are reclaimed.",
+            "Pool orphans are reported, never removed: their uncommitted state cannot be inspected once the source repository is gone.",
+            "The pool scan removes nothing at all, including empty pool directories — it reports them so you can clear them yourself.",
         ),
         see_also=("worktree list", "worktree prune", "worktree remove"),
         unsupported_global_options=("--isolation", "--auth-profile"),

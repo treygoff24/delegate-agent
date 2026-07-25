@@ -118,7 +118,7 @@ def execute_persistent_worktree(
 def _worktree_pool_count(data_home: Path) -> int:
     # ponytail: count-based guardrail only — a full-tree byte walk was slowest
     # exactly when the pool was large, the case the warning exists to catch.
-    return sum(len(worktrees) for _fingerprint, worktrees in iter_pool_fingerprints(data_home))
+    return sum(len(fingerprint.worktrees) for fingerprint in iter_pool_fingerprints(data_home))
 
 
 def _warn_if_worktree_pool_large(config: JsonObject, stderr: TextIO) -> None:

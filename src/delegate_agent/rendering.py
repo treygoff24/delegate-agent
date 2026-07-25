@@ -600,7 +600,7 @@ def _render_worktree_pool_text(pool: object, stdout: TextIO) -> None:
                     f"source: {orphan.get('sourceGitRoot') or 'unknown'}",
                     file=stdout,
                 )
-        # No deletion is offered: an orphan's dirtiness cannot be determined, so
+        # No removal is offered: an orphan's dirtiness cannot be determined, so
         # each path is a manual, deliberate call by whoever owns the work.
         print(
             "pool orphans are reported only — inspect each path before removing it by hand.",
@@ -608,10 +608,16 @@ def _render_worktree_pool_text(pool: object, stdout: TextIO) -> None:
         )
     empty_dirs = pool.get("emptyFingerprintDirs")
     if isinstance(empty_dirs, list) and empty_dirs:
-        print(f"empty pool dirs: {len(empty_dirs)}", file=stdout)
+        print(f"empty pool dirs: {len(empty_dirs)} (reported only, never removed)", file=stdout)
         for entry in empty_dirs:
             if isinstance(entry, dict):
-                print(f"  - {entry.get('path')} ({entry.get('action')})", file=stdout)
+                print(f"  - {entry.get('path')}", file=stdout)
+    pool_warnings = pool.get("warnings")
+    if isinstance(pool_warnings, list) and pool_warnings:
+        print(f"pool warnings: {len(pool_warnings)}", file=stdout)
+        for warning in pool_warnings:
+            if isinstance(warning, dict):
+                print(f"  - {warning.get('message')}", file=stdout)
 
 
 def print_json(payload: JsonObject, stdout: TextIO) -> None:

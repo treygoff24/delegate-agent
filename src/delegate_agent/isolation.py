@@ -10,10 +10,12 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import stat
 import subprocess  # nosec B404 - isolation helpers intentionally run fixed git argv with shell=False.
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 # Re-export isolation constants from config for convenience
 from delegate_agent.config import (  # noqa: F401  # re-exported
@@ -105,13 +107,52 @@ def plan_worktree_path(data_home: Path, fingerprint: str, label: str, short_id: 
     return data_home / fingerprint / f"{label}-{short_id}"
 
 
-def iter_pool_fingerprints(data_home: Path) -> Iterator[tuple[Path, list[Path]]]:
+class PoolFingerprint(NamedTuple):
+    """One fingerprint directory in the worktree pool and the worktrees under it.
+
+    ``unreadable`` distinguishes "this directory holds no worktrees" from "this
+    directory could not be listed". Collapsing the two would report an
+    inaccessible fingerprint as an empty one, which is the more dangerous
+    reading: empty directories look disposable.
+    """
+
+    path: Path
+    worktrees: list[Path]
+    unreadable: bool = False
+
+
+def pool_root_problem(data_home: Path) -> str | None:
+    """Return why ``data_home`` cannot be scanned as a pool root, or None.
+
+    One of ``missing``, ``not_a_directory``, or ``unreadable``. Callers decide
+    whether that is fatal: an explicitly requested root must exist, while the
+    configured one is simply absent until the first persistent worktree.
+    """
+    try:
+        info = os.stat(data_home)
+    except FileNotFoundError:
+        return "missing"
+    except NotADirectoryError:
+        return "not_a_directory"
+    except OSError:
+        return "unreadable"
+    if not stat.S_ISDIR(info.st_mode):
+        return "not_a_directory"
+    try:
+        with os.scandir(data_home) as entries:
+            next(entries, None)
+    except OSError:
+        return "unreadable"
+    return None
+
+
+def iter_pool_fingerprints(data_home: Path) -> Iterator[PoolFingerprint]:
     """Walk the two-level worktree pool, yielding each fingerprint dir and its worktrees.
 
     The pool layout is ``<data_home>/<fingerprint>/<label>-<short_id>`` (see
-    ``plan_worktree_path``). Unreadable directories yield no worktrees rather
-    than aborting the walk, so a single bad entry cannot hide the rest of the
-    pool from callers that scan it.
+    ``plan_worktree_path``). An unreadable fingerprint directory is yielded with
+    ``unreadable=True`` rather than aborting the walk, so a single bad entry
+    cannot hide the rest of the pool from callers that scan it.
     """
     if not data_home.is_dir():
         return
@@ -129,8 +170,9 @@ def iter_pool_fingerprints(data_home: Path) -> Iterator[tuple[Path, list[Path]]]
                     Path(entry.path) for entry in worktrees if entry.is_dir(follow_symlinks=False)
                 ]
         except OSError:
-            worktree_dirs = []
-        yield fingerprint_dir, sorted(worktree_dirs)
+            yield PoolFingerprint(fingerprint_dir, [], unreadable=True)
+            continue
+        yield PoolFingerprint(fingerprint_dir, sorted(worktree_dirs))
 
 
 def worktrees_data_home(config: JsonObject) -> Path:

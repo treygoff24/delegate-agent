@@ -173,6 +173,9 @@ def _gc_payload(
         registry_root,
         dry_run=command.dry_run,
         pool_data_home=_gc_pool_data_home(command, config),
+        # An explicitly named pool root has to exist; the configured one is
+        # simply absent until the first persistent worktree is created.
+        pool_required=command.pool is not None,
     )
 
 
