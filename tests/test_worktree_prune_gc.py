@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import time
@@ -1307,11 +1308,20 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
                 contents="work.txt",
             )
 
+            removed_dir = AssertionError("gc removed a dir")
+            removed_file = AssertionError("gc removed a file")
+            moved = AssertionError("gc moved a path")
             with (
-                mock.patch.object(Path, "rmdir", side_effect=AssertionError("gc removed a dir")),
-                mock.patch.object(Path, "unlink", side_effect=AssertionError("gc removed a file")),
-                mock.patch.object(os, "rmdir", side_effect=AssertionError("gc removed a dir")),
-                mock.patch.object(os, "remove", side_effect=AssertionError("gc removed a file")),
+                mock.patch.object(Path, "rmdir", side_effect=removed_dir),
+                mock.patch.object(Path, "unlink", side_effect=removed_file),
+                mock.patch.object(Path, "rename", side_effect=moved),
+                mock.patch.object(Path, "replace", side_effect=moved),
+                mock.patch.object(os, "rmdir", side_effect=removed_dir),
+                mock.patch.object(os, "remove", side_effect=removed_file),
+                mock.patch.object(os, "unlink", side_effect=removed_file),
+                mock.patch.object(os, "rename", side_effect=moved),
+                mock.patch.object(os, "replace", side_effect=moved),
+                mock.patch.object(shutil, "rmtree", side_effect=removed_dir),
             ):
                 result = self._scan(pool)
 

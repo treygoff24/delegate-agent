@@ -214,11 +214,17 @@ def redact_argv(argv: Sequence[str]) -> tuple[str, ...]:
     Everything else survives -- the wrapper name, its paths, its ordinary flags
     -- because a command line the user cannot recognize is not a usable clue
     about which configuration to fix.
+
+    A credential flag whose value is missing (``--api-key --verbose``) must not
+    swallow the following flag, so the value is skipped when it looks like one.
+    That test is ``--`` rather than ``-``: a secret is free to begin with a dash,
+    and masking a short flag that followed a credential flag costs one unreadable
+    token in a diagnostic, while not masking it costs the secret.
     """
     scrubbed: list[str] = []
     mask_next = False
     for element in argv:
-        if mask_next and not element.startswith("-"):
+        if mask_next and not element.startswith("--"):
             scrubbed.append("***")
             mask_next = False
             continue

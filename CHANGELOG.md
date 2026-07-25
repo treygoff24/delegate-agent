@@ -78,8 +78,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   discarded and overwritten. It is left intact while the run degrades to
   probing without persisting, so an older Delegate can no longer destroy a newer
   cache. Losing that race mid-probe degrades the same way rather than failing the
-  command: `capabilities refresh` and `setup` report `cacheWriteSkipped` with
-  `wrote` false and exit successfully, since only persistence was lost. The
+  command: `capabilities refresh` and `setup` both report `cacheWriteSkipped`,
+  `setup` additionally leaving `cacheState` at `unchanged`, and each exits
+  successfully, since only persistence was lost. The
   schema is re-read immediately before the atomic replacement rather than before
   the snapshot is serialized, which narrows the window in which a newer cache
   could be published and then overwritten down to the `os.replace` call itself.
