@@ -5,6 +5,48 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Added `delegate worktree gc --all`, which scans the machine-wide worktree
+  pool for worktrees whose source repository no longer exists. Such worktrees
+  were previously unreachable by any `gc` invocation, because reaping is driven
+  by the run registry inside each source repository and that registry dies with
+  the repository. The scan adds no catalog or persistent state: it reads each
+  worktree's Git backlink directly, and treats a backlink whose target is gone
+  as the sole orphan signal. Pool orphans are reported and never removed, since
+  a missing source repository makes their uncommitted state impossible to
+  inspect; only empty pool directories are reclaimed. `--pool PATH` scans a
+  different pool root, which reaches pools stranded by an earlier
+  `worktrees.dataHome`.
+- `capabilities refresh` and `setup` now name each harness on stderr as it is
+  probed, so a harness that hangs is identifiable rather than anonymous
+  silence. Progress output is suppressed under `--json`.
+
+### Fixed
+
+- Discovery now detects a harness that was upgraded in place. Cached capability
+  records were invalidated only by comparing the configured selector, so an
+  upgrade behind an unchanged selector left stale capabilities cached
+  indefinitely and a newly supported reasoning level was rejected until a manual
+  `capabilities refresh`. The launch path now re-probes `--version` for the
+  single harness it is about to use and compares it against the version already
+  stored in the record. The check fails open: a probe that errors, times out, or
+  no longer identifies as that harness keeps the cached record, so a failing
+  probe can never prevent a launch. A cached selector whose binary no longer
+  exists is also treated as drift.
+- A discovery cache carrying a newer schema than the running build is no longer
+  discarded and overwritten. It is left intact while the run degrades to
+  probing without persisting, so an older Delegate can no longer destroy a newer
+  cache.
+- The test suite no longer writes into the developer's real
+  `~/.delegate/worktrees`. Tests exercising persistent-worktree runs created
+  real pooled worktrees over temporary source repositories and orphaned them
+  permanently, because `worktrees_data_home` falls through to the user's home
+  directory with no seam a test could redirect. `HOME` is now redirected at test
+  collection time, which reaches every such resolver at once.
+
 ## [0.20.0] - 2026-07-25
 
 ### Added
