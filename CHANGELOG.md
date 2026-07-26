@@ -74,15 +74,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `capabilities refresh`. Delegate now re-probes `--version` for the single
   harness it is about to use and compares it against the version already stored
   in the record, then rebuilds the run against the refreshed picture. The probe
-  runs only once the cached record has already refused the launch, never on the
-  ordinary path: a stale record can only be short of what the harness now
-  supports, never claim more, so a record that satisfies the request cannot be
-  hiding an upgrade that this run would notice. An ordinary launch therefore
-  spawns no extra process at all, which matters because the probe costs 26-668ms
-  and is slowest on the Node and Bun harnesses that are already slow to start.
-  The check fails open: a probe that errors, times out, or prints a banner
-  nothing recognizes keeps the cached record, so a failing probe can never
-  prevent a launch. A banner that positively identifies a *different*
+  runs only once the cached record has already cost the run something, never on
+  the ordinary path, which therefore spawns no extra process at all — and that
+  matters because the probe costs 26-668ms, worst on the Node and Bun harnesses
+  that are already slow to start. Two things trigger it: an explicit
+  `--reasoning-effort` the record refuses, and a `defaultReasoningEffort` the
+  record silently drops. The second is the one most likely to go unnoticed,
+  since a configured default degrades to a warning rather than failing the
+  launch, and it is set once and then never typed again. A probe that cannot
+  repair the default leaves the run exactly as it was: a launch that succeeded
+  is never turned into a failure. The check fails open — a probe that errors,
+  times out, or prints a banner nothing recognizes keeps the cached record, so a
+  failing probe can never prevent a launch.
+- Not covered, deliberately: a harness that *removes* a capability leaves its
+  cached record listing more than the harness now supports, which produces no
+  refusal and so no probe. The child rejects the effort it was handed, which is
+  loud; the one quiet case is Cursor's route table aiming a run at a superseded
+  model id. Catching either would cost a probe on every launch, which is the
+  trade this path exists to refuse. `capabilities refresh` remains the cure. A banner that positively identifies a *different*
   known harness is the exception, and it aborts the launch rather than merely
   invalidating the record — see Changed. Each banner is matched against the
   expected harness's own pattern before anyone else's, so a banner mentioning

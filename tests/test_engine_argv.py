@@ -196,6 +196,7 @@ class EngineArgvTests(CommandTestBase):
         dry_run: bool = False,
         selector_drifted: bool = False,
         version_drifted: bool = False,
+        effort_from_config: bool = False,
     ):
         config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
         # The model has to be named by config, not only by the discovery record.
@@ -204,6 +205,9 @@ class EngineArgvTests(CommandTestBase):
         # harness-default path instead of resolving the upgraded capability --
         # which would make every repair look like a failure for the wrong reason.
         config["codex"]["defaultModel"] = self._BUNDLED_CODEX_MODEL
+        if effort_from_config:
+            config["codex"]["defaultReasoningEffort"] = effort
+            effort = None
         with (
             mock.patch.object(
                 self.delegate.harness_discovery,
@@ -236,11 +240,13 @@ class EngineArgvTests(CommandTestBase):
     def test_a_cache_that_satisfies_the_run_is_never_probed(self):
         """The ordinary launch pays nothing at all for upgrade detection.
 
-        A cached record can only fall short of what the harness now supports,
-        never claim more than it did at probe time, so a record that already
-        answers the request cannot be hiding an upgrade that matters to it.
-        Re-verifying it would spend a subprocess -- up to two thirds of a second
-        on the Node and Bun harnesses -- to learn nothing this run can use.
+        An upgrade that adds capabilities leaves the record short of what the
+        harness now supports, so a record that already answers the request is
+        not hiding an addition this run could use. Re-verifying it would spend a
+        subprocess -- up to two thirds of a second on the Node and Bun harnesses
+        -- to learn nothing. (A harness that REMOVES a capability leaves the
+        record long instead, which this path deliberately does not catch; see
+        the note in ``build_request``.)
         """
         request, probe = self._build_against_cache(cached_supported=["max"], effort="max")
         probe.assert_not_called()
@@ -265,6 +271,52 @@ class EngineArgvTests(CommandTestBase):
         # The stale record is gone, so resolution reaches the bundled table that
         # the record had been shadowing -- which is what repairs the run.
         self.assertEqual(request.reasoning_capability_source, "bundled")
+        # A repair that does not reach argv is not a repair: the run has to
+        # actually launch at the effort the stale record refused.
+        self.assertIn('model_reasoning_effort="max"', " ".join(request.argv))
+
+    def test_a_dropped_config_default_effort_also_probes_for_an_upgrade(self):
+        """A configured default never raises, so a refusal alone misses it.
+
+        `codex.defaultReasoningEffort` is set once and then never typed again,
+        which makes it the likeliest way to lose an effort to a stale record
+        without noticing. Capability resolution degrades it to a warning instead
+        of failing the launch, so the run "succeeds" quieter than configured and
+        nothing signals that a probe would have repaired it.
+        """
+        request, probe = self._build_against_cache(
+            cached_supported=["low"],
+            effort="max",
+            version_drifted=True,
+            effort_from_config=True,
+        )
+        probe.assert_called_once()
+        self.assertIn('model_reasoning_effort="max"', " ".join(request.argv))
+        self.assertEqual(
+            [note for note in request.warnings if "defaultReasoningEffort" in note],
+            [],
+            "the repaired run should not still be reporting a dropped default",
+        )
+
+    def test_a_config_default_no_probe_can_repair_still_launches(self):
+        """A probe must never turn a run that succeeded into one that fails.
+
+        When the refreshed picture cannot satisfy the configured default either,
+        degrading it was the right answer all along -- the launch proceeds
+        without the effort, exactly as it would have with no probe at all.
+        """
+        request, probe = self._build_against_cache(
+            cached_supported=["low"],
+            effort="xhigh",
+            version_drifted=False,
+            effort_from_config=True,
+        )
+        probe.assert_called_once()
+        self.assertNotIn("model_reasoning_effort", " ".join(request.argv))
+        self.assertTrue(
+            [note for note in request.warnings if "defaultReasoningEffort" in note],
+            f"the dropped default should still be reported: {request.warnings}",
+        )
 
     def test_a_probe_finding_no_drift_leaves_the_refusal_standing(self):
         """A current cache that refuses is a real answer, not a stale one."""

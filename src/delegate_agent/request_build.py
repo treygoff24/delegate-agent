@@ -727,6 +727,24 @@ def _model_context_kwargs(
     }
 
 
+def _config_default_ignored_warning(engine: str, message: str) -> str:
+    """Phrase the warning that says a configured default effort was dropped.
+
+    ``build_request`` matches this prefix to notice that a capability record
+    cost a run its configured reasoning effort. That path degrades instead of
+    raising by design -- a preference must not brick every launch of an engine
+    -- so the refusal that normally triggers an upgrade probe never surfaces,
+    and without a marker the repair would reach explicit ``--reasoning-effort``
+    runs only. A configured default is the case most likely to go unnoticed:
+    it is set once and then never typed again.
+    """
+    return f"ignoring {engine}.defaultReasoningEffort: {message}"
+
+
+def _config_default_was_ignored(warnings: tuple[str, ...], engine: str) -> bool:
+    return any(note.startswith(_config_default_ignored_warning(engine, "")) for note in warnings)
+
+
 def _discovery_has_engine_record(discovery: JsonObject | None, engine: str) -> bool:
     """Report whether a snapshot still carries ``engine``'s capability record.
 
@@ -757,13 +775,12 @@ def _runtime_discovery_for_engine(
     ``probe_version`` gates the expensive half: one bounded ``--version`` call
     against the real binary, measured at 26-668ms and worst on precisely the
     Node and Bun harnesses that are already slow to start. It is false on the
-    ordinary path. A stale record is only capable of harming a run that asks for
-    something the record does not list, so ``build_request`` pays for the probe
-    exactly once a cached record has already refused the run, rather than
-    charging every launch for a rarity. A dry run never probes at all, under any
-    circumstances: it promises never to launch a child runtime, and a stale
-    record showing up in the planned argv is a dry run's job to report rather
-    than to prevent.
+    ordinary path. ``build_request`` turns it on only where a cached record has
+    already cost the run something -- a refused ``--reasoning-effort`` or a
+    silently dropped configured default -- rather than charging every launch for
+    a rarity. A dry run never probes at all, under any circumstances: it promises
+    never to launch a child runtime, and a stale record showing up in the planned
+    argv is a dry run's job to report rather than to prevent.
 
     The cost of that trade is that a binary swapped for a different harness is
     no longer caught before every launch -- only when a capability rejection
@@ -1854,18 +1871,14 @@ def build_request(
             model_override=model_override,
         )
 
-    # A stale capability record can only ever refuse a run that a current record
-    # would have allowed -- it lists the levels the harness advertised when it
-    # was probed, so an in-place upgrade leaves it short, never long. That makes
-    # the refusal itself the cheapest possible trigger for re-probing: the happy
-    # path pays nothing, and the one case that a probe repairs is exactly the
-    # case that just failed. Rebuilding is safe because request assembly writes
-    # nothing -- no run directory, no worktree, no registry entry.
-    try:
-        return attempt(discovery, ())
-    except DelegateError as exc:
-        if dry_run or exc.error != "unsupported_reasoning_effort":
-            raise
+    def reprobed() -> tuple[JsonObject | None, tuple[str, ...]] | None:
+        """Re-probe the harness; return a refreshed snapshot, or None if unchanged.
+
+        None covers every case where retrying would be pointless: the engine had
+        no record to invalidate, or the probe kept the one it has -- because the
+        version matched, or because it failed open on an error, a timeout, or an
+        unrecognized banner.
+        """
         probed, probe_warnings = _runtime_discovery_for_engine(
             config,
             engine,
@@ -1873,11 +1886,49 @@ def build_request(
             profile_resolution,
             probe_version=True,
         )
-        if not _discovery_has_engine_record(discovery, engine) or _discovery_has_engine_record(
-            probed, engine
-        ):
+        if not _discovery_has_engine_record(discovery, engine):
+            return None
+        if _discovery_has_engine_record(probed, engine):
+            return None
+        return probed, probe_warnings
+
+    # An in-place upgrade leaves a cached record listing less than the harness now
+    # supports, and the run notices in one of two ways: an explicit
+    # --reasoning-effort is refused outright, or a configured default is quietly
+    # dropped, because a preference degrades to a warning rather than bricking
+    # every launch. Both are cheap triggers for re-probing -- the ordinary launch
+    # pays nothing, and the probe runs only where it can repair something.
+    # Rebuilding is free of side effects: request assembly writes nothing, no run
+    # directory, no worktree, no registry entry.
+    #
+    # The reverse drift is deliberately not covered. A harness that REMOVES a
+    # capability leaves the record listing more than it should, which produces no
+    # refusal here and so no probe: the child rejects the effort it was handed,
+    # which is loud, and only Cursor's route table can quietly aim a run at a
+    # superseded model id. Catching that would cost a probe on every launch,
+    # which is the trade this whole path exists to refuse.
+    try:
+        request = attempt(discovery, ())
+    except DelegateError as exc:
+        if dry_run or exc.error not in ("unsupported_reasoning_effort", "invalid_reasoning_config"):
             raise
-        return attempt(probed, probe_warnings)
+        refreshed = reprobed()
+        if refreshed is None:
+            raise
+        return attempt(*refreshed)
+
+    if dry_run or not _config_default_was_ignored(request.warnings, engine):
+        return request
+    refreshed = reprobed()
+    if refreshed is None:
+        return request
+    try:
+        return attempt(*refreshed)
+    except DelegateError:
+        # The refreshed picture cannot satisfy the configured default either, so
+        # dropping it was the right answer all along. A probe must never turn a
+        # run that succeeded into one that fails.
+        return request
 
 
 def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
@@ -1955,7 +2006,7 @@ def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
             )
             if build.effort_source != "config":
                 raise error
-            warnings.append(f"ignoring cursor.defaultReasoningEffort: {error.message}")
+            warnings.append(_config_default_ignored_warning("cursor", error.message))
             model = base_model
             capability_model_source = "explicit" if pinned is not None else "config"
         else:
@@ -1996,7 +2047,7 @@ def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         )
         if build.effort_source != "config":
             raise error
-        warnings.append(f"ignoring cursor.defaultReasoningEffort: {error.message}")
+        warnings.append(_config_default_ignored_warning("cursor", error.message))
         model = base_model
         capability_model_source = "config"
     else:
@@ -2870,11 +2921,11 @@ def _capability_with_config_fallback(
     except reasoning.ReasoningCapabilityError as exc:
         if effort_source != "config":
             raise DelegateError(exc.error, exc.message) from exc
-        return None, (f"ignoring {engine}.defaultReasoningEffort: {exc.message}",)
+        return None, (_config_default_ignored_warning(engine, exc.message),)
     except DelegateError as exc:
         if effort_source != "config":
             raise
-        return None, (f"ignoring {engine}.defaultReasoningEffort: {exc.message}",)
+        return None, (_config_default_ignored_warning(engine, exc.message),)
 
 
 def resolve_cursor_reasoning_capability(

@@ -807,12 +807,21 @@ Cached reads never run `--version` merely to test staleness, and neither does an
 ordinary launch: a cached record can only be short of what the harness now
 supports, never claim more, so one that satisfies the run is used as-is.
 
-A launch re-probes `--version` for its own harness in exactly one case — the
-cached record just refused the run, by rejecting a requested reasoning effort.
-An in-place upgrade behind an unchanged selector is the reason that refusal can
-be wrong, so the probe compares the live banner against the version stored in
-the record, and a mismatch drops the record and rebuilds the run against config
-and bundled capabilities. The result carries a warning naming
+A launch re-probes `--version` for its own harness only when the cached record
+has already cost the run something: it refused an explicit `--reasoning-effort`,
+or it silently dropped a configured `defaultReasoningEffort` (a configured
+default degrades to a warning instead of failing the launch, so nothing else
+would signal it). An in-place upgrade behind an unchanged selector is the reason
+either can be wrong, so the probe compares the live banner against the version
+stored in the record, and a mismatch drops the record and rebuilds the run
+against config and bundled capabilities. If the refreshed picture cannot satisfy
+a configured default either, the run proceeds as it already had — a probe never
+turns a launch that succeeded into one that fails.
+
+The reverse case is not covered: a harness that *removes* a capability leaves
+its record listing more than the harness now supports, which produces no refusal
+and therefore no probe. Run `capabilities refresh` after an upgrade that narrows
+what a harness accepts. The result carries a warning naming
 `capabilities refresh <engine>`, because the superseded record stays on disk
 until a refresh rewrites it. The probe fails open — an error, a timeout, or an
 unrecognized banner leaves the original refusal standing — except when the
