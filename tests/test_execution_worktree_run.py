@@ -45,7 +45,7 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
     def test_worktree_pool_guardrail_below_threshold_emits_no_warning(self):
         with tempfile.TemporaryDirectory() as fake_home:
             pool = Path(fake_home) / "pool"
-            worktree = pool / "fingerprint" / "old-worktree"
+            worktree = pool / "abc123def456" / "old-worktree"
             worktree.mkdir(parents=True)
             config = dict(self.delegate.DEFAULT_CONFIG)
             config["worktrees"] = {
@@ -63,7 +63,7 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
         with tempfile.TemporaryDirectory() as fake_home:
             pool = Path(fake_home) / "pool"
             for name in ("old-worktree", "new-worktree"):
-                (pool / "fingerprint" / name).mkdir(parents=True)
+                (pool / "abc123def456" / name).mkdir(parents=True)
             config = dict(self.delegate.DEFAULT_CONFIG)
             config["worktrees"] = {
                 **config["worktrees"],
@@ -82,6 +82,25 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             self.assertIn("delegate worktree remove", warning)
             self.assertIn("delegate worktree prune", warning)
             self.assertNotIn("gc --all", warning)
+
+    def test_worktree_pool_guardrail_counts_only_delegate_fingerprint_dirs(self):
+        """The count describes Delegate's pool, not whatever else shares the root."""
+        with tempfile.TemporaryDirectory() as fake_home:
+            pool = Path(fake_home) / "pool"
+            for parent in ("abc123def456", "some-other-directory"):
+                (pool / parent / "cursor-1").mkdir(parents=True)
+
+            self.assertEqual(self.delegate.worktree_execution._worktree_pool_count(pool), 1)
+
+    def test_worktree_pool_guardrail_survives_an_unreadable_pool_root(self):
+        """An advisory count must never block a launch."""
+        with tempfile.TemporaryDirectory() as fake_home:
+            self.assertEqual(
+                self.delegate.worktree_execution._worktree_pool_count(
+                    Path(fake_home) / "never-created"
+                ),
+                0,
+            )
 
     # -- Persistent worktree: cursor work runs in isolated worktree -----------
 

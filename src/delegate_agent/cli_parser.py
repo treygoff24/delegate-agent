@@ -2013,6 +2013,8 @@ WORKTREE_OPTION_SPECS: dict[str, dict[str, WorktreeOptionSpec]] = {
     },
     "gc": {
         "--dry-run": ("flag", "dry_run"),
+        "--all": ("flag", "all_pools"),
+        "--pool": ("str", "pool"),
     },
 }
 
@@ -2090,6 +2092,8 @@ def parse_worktree(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedC
         raise DelegateError(
             "unexpected_argument", f"worktree {action} does not accept positional arguments."
         )
+    if action == "gc" and options.get("pool") == "":
+        raise DelegateError("invalid_option_value", "worktree gc --pool requires a path.")
     if action == "show":
         if options.get("latest_harness") is not None:
             if positional:

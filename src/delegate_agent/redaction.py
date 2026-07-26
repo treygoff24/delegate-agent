@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
 from delegate_agent.json_types import JsonValue
 
@@ -199,6 +199,38 @@ def redact_mapping_value(key: str, value: JsonValue) -> JsonValue:
 
 def redact_env_map(mapping: Mapping[str, str]) -> dict[str, JsonValue]:
     return {key: redact_mapping_value(key, value) for key, value in mapping.items()}
+
+
+def redact_argv(argv: Sequence[str]) -> tuple[str, ...]:
+    """Scrub credentials out of a command line that a diagnostic will show.
+
+    Argv leaks secrets in two shapes. An inline assignment carried by a wrapper
+    (``env API_TOKEN=... agent``) lives inside one element, which redact_string
+    already handles. A value passed after a credential-named flag
+    (``wrapper --api-key ...``) lives in the *next* element, which no
+    single-string pass can see, so the key check that guards mappings is applied
+    to the preceding element instead.
+
+    Everything else survives -- the wrapper name, its paths, its ordinary flags
+    -- because a command line the user cannot recognize is not a usable clue
+    about which configuration to fix.
+
+    A credential flag whose value is missing (``--api-key --verbose``) must not
+    swallow the following flag, so the value is skipped when it looks like one.
+    That test is ``--`` rather than ``-``: a secret is free to begin with a dash,
+    and masking a short flag that followed a credential flag costs one unreadable
+    token in a diagnostic, while not masking it costs the secret.
+    """
+    scrubbed: list[str] = []
+    mask_next = False
+    for element in argv:
+        if mask_next and not element.startswith("--"):
+            scrubbed.append("***")
+            mask_next = False
+            continue
+        mask_next = "=" not in element and key_looks_secret(element)
+        scrubbed.append(redact_string(element))
+    return tuple(scrubbed)
 
 
 def redact_value(value: JsonValue) -> JsonValue:

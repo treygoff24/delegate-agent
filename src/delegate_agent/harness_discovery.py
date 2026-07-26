@@ -13,12 +13,13 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
-from collections.abc import Collection, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, TextIO
 
 from delegate_agent import config as delegate_config
 from delegate_agent import private_io, profiles, redaction
@@ -33,29 +34,76 @@ EVIDENCE_LEVELS = frozenset({"exact", "harness", "inferred-route", "unknown"})
 # resolves while the harness binary is still on PATH, so callers can tell a
 # stale config apart from an uninstalled harness.
 CONFIGURED_SELECTOR_MISSING = "configured_selector_missing"
+# Emitted once when an on-disk cache carries a newer schema than this build
+# understands: the newer file is preserved and this run stays cache-less.
+FUTURE_SCHEMA_CACHE_WARNING = (
+    "discovery cache was written by a newer delegate; probing without reading or replacing it"
+)
+
+
+class FutureCacheSchemaError(ValueError):
+    """Raised rather than replacing a cache a newer delegate wrote."""
+
+
+class HarnessIdentityMismatchError(ValueError):
+    """Raised when a selector's own banner names a different known harness.
+
+    Carries everything a caller needs to name the mistake back to the user:
+    the harness the configuration claims, the harness the binary says it is,
+    and the selector that resolved to it.
+
+    ``selector`` is credential-scrubbed at construction, and so is this error's
+    own message. Every consumer is a user-facing diagnostic -- a message, a JSON
+    error payload, a suggested next command -- and a selector is arbitrary user
+    configuration (``cursor.argvPrefix`` is a documented opaque wrapper contract
+    that can legitimately carry ``env API_TOKEN=...``). Scrubbing here rather
+    than at each surface means no future surface can forget.
+    """
+
+    def __init__(self, harness: str, identified: str, selector: tuple[str, ...]) -> None:
+        scrubbed = redaction.redact_argv(selector)
+        super().__init__(
+            f"configured {harness} selector {' '.join(scrubbed)!r} identifies itself as {identified}"
+        )
+        self.harness = harness
+        self.identified = identified
+        self.selector = scrubbed
+
 
 _PATH_CANDIDATES: dict[str, tuple[str, ...]] = {
     "cursor": ("agent", "cursor-agent"),
     **{engine: (engine,) for engine in KNOWN_ENGINES if engine != "cursor"},
 }
-_CANONICAL_VERSION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("grok", re.compile(r"^grok\s+[0-9][0-9A-Za-z.+-]*", re.IGNORECASE | re.MULTILINE)),
-    ("codex", re.compile(r"^codex-cli\s+[0-9][0-9A-Za-z.+-]*", re.IGNORECASE | re.MULTILINE)),
-    (
-        "claude",
-        re.compile(
-            r"^[0-9][0-9A-Za-z.+-]*\s+\(Claude Code\)$",
-            re.IGNORECASE | re.MULTILINE,
-        ),
+_CANONICAL_VERSION_PATTERNS: dict[str, re.Pattern[str]] = {
+    "grok": re.compile(r"^grok\s+[0-9][0-9A-Za-z.+-]*", re.IGNORECASE | re.MULTILINE),
+    "codex": re.compile(r"^codex-cli\s+[0-9][0-9A-Za-z.+-]*", re.IGNORECASE | re.MULTILINE),
+    "claude": re.compile(
+        r"^[0-9][0-9A-Za-z.+-]*\s+\(Claude Code\)$",
+        re.IGNORECASE | re.MULTILINE,
     ),
-    ("devin", re.compile(r"^devin\s+[0-9][0-9A-Za-z.+-]*", re.IGNORECASE | re.MULTILINE)),
-    ("omp", re.compile(r"^omp/[0-9][0-9A-Za-z.+-]*", re.IGNORECASE | re.MULTILINE)),
-    (
-        "cursor",
-        re.compile(r"^\d{4}\.\d{2}\.\d{2}-[0-9a-f]+$", re.IGNORECASE | re.MULTILINE),
-    ),
+    "devin": re.compile(r"^devin\s+[0-9][0-9A-Za-z.+-]*", re.IGNORECASE | re.MULTILINE),
+    "omp": re.compile(r"^omp/[0-9][0-9A-Za-z.+-]*", re.IGNORECASE | re.MULTILINE),
+    "cursor": re.compile(r"^\d{4}\.\d{2}\.\d{2}-[0-9a-f]+$", re.IGNORECASE | re.MULTILINE),
+}
+# Cursor's banner is a bare `YYYY.MM.DD-<hash>` build ID that names no tool, so
+# any wrapper shim, vendored binary, or unrelated program is free to print the
+# same shape. It reads Cursor's own version, but it is not evidence that some
+# other harness's selector "is Cursor".
+_UNBRANDED_VERSION_HARNESSES = frozenset({"cursor"})
+# The only banners allowed to identify a harness other than the one asked for:
+# each names its tool outright, so a match is a positive identification rather
+# than a shape coincidence.
+_BRANDED_VERSION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
+    (harness, pattern)
+    for harness, pattern in _CANONICAL_VERSION_PATTERNS.items()
+    if harness not in _UNBRANDED_VERSION_HARNESSES
 )
 _GENERIC_VERSION = re.compile(r"^\d+(?:\.\d+)+(?:[-+][0-9A-Za-z.-]+)?$")
+# Outcomes of reading a --version banner: it identifies the harness asked for,
+# it identifies a different known harness, or it identifies nothing at all.
+_VERSION_EXPECTED = "expected"
+_VERSION_KNOWN_OTHER = "known-other"
+_VERSION_UNRECOGNIZED = "unrecognized"
 _AMBIGUOUS_VERSION_BASENAMES = frozenset({"agent"})
 _DIAGNOSTIC_LIMIT = 8_000
 METADATA_PROBE_TIMEOUT_SEC = 15
@@ -288,6 +336,19 @@ class SelectorResolution:
     warnings: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class VersionIdentity:
+    """What a ``--version`` banner proves about the program that printed it.
+
+    ``identified`` is always set when ``status`` is ``known-other``: that
+    status exists precisely to name the harness the banner belongs to.
+    """
+
+    status: str
+    version: str | None = None
+    identified: str | None = None
+
+
 def run_metadata_probe(
     argv: list[str],
     *,
@@ -437,19 +498,61 @@ def _normalize_selector(
     return (str(Path(binary).absolute()), *selector[1:])
 
 
-def _canonical_version(harness: str, selector: tuple[str, ...], output: str) -> str | None:
-    for identified_harness, pattern in _CANONICAL_VERSION_PATTERNS:
-        match = pattern.search(output)
+def _identify_version(harness: str, selector: tuple[str, ...], output: str) -> VersionIdentity:
+    """Classify a ``--version`` banner as this harness, another one, or unreadable.
+
+    The middle case has to stay separate from the last one. A banner that names
+    another harness outright is positive evidence that the selector now resolves
+    to a different program; a banner nothing recognizes is only an absence of
+    evidence, and callers weigh the two differently.
+
+    Escape sequences are stripped first: every canonical pattern is line
+    anchored, so a harness that colorizes its banner would otherwise be
+    unrecognizable forever.
+
+    Two rules keep the ``known-other`` verdict from firing on a healthy setup,
+    because that verdict refuses a launch and a wrong refusal costs the user
+    their work now, while a wrong ``unrecognized`` costs only a stale record
+    until the next refresh:
+
+    * Everything the expected harness could plausibly be is tried first -- its
+      own banner, then the bare-version fallback. A banner is free to mention
+      several tools (an update notice, a bundled runtime), and a foreign match
+      must not outrank the harness that was actually asked for.
+    * Only a *branded* banner may identify a foreign harness. An unbranded shape
+      such as a bare date-and-hash build ID proves nothing about who printed it,
+      and wrapper shims -- a documented, opaque part of ``cursor.argvPrefix`` --
+      routinely print their own build IDs.
+    """
+    text = _ANSI_RE.sub("", output)
+    expected = _expected_version(harness, selector, text)
+    if expected is not None:
+        return VersionIdentity(_VERSION_EXPECTED, expected, harness)
+    for identified_harness, pattern in _BRANDED_VERSION_PATTERNS:
+        if identified_harness != harness and pattern.search(text) is not None:
+            return VersionIdentity(_VERSION_KNOWN_OTHER, None, identified_harness)
+    return VersionIdentity(_VERSION_UNRECOGNIZED)
+
+
+def _expected_version(harness: str, selector: tuple[str, ...], text: str) -> str | None:
+    """Read ``harness``'s own version out of a banner, or return None."""
+    pattern = _CANONICAL_VERSION_PATTERNS.get(harness)
+    if pattern is not None:
+        match = pattern.search(text)
         if match is not None:
-            return match.group(0) if identified_harness == harness else None
+            return match.group(0)
     binary_name = Path(selector[0]).name
     if binary_name not in _PATH_CANDIDATES[harness] or binary_name in _AMBIGUOUS_VERSION_BASENAMES:
         return None
-    for line in output.splitlines():
+    for line in text.splitlines():
         candidate = line.strip()
         if _GENERIC_VERSION.fullmatch(candidate):
             return candidate
     return None
+
+
+def _canonical_version(harness: str, selector: tuple[str, ...], output: str) -> str | None:
+    return _identify_version(harness, selector, output).version
 
 
 def _fragment(
@@ -1261,21 +1364,39 @@ def probe_harness(
         )
 
 
+def stderr_probe_progress(stream: TextIO | None = None) -> Callable[[str], None]:
+    """Return a progress callback that names each harness as probing starts.
+
+    Every probe is bounded by ``METADATA_PROBE_TIMEOUT_SEC``, so a wedged
+    harness stalls a refresh for seconds with nothing on screen. Naming the
+    harness before spawning it is what makes the culprit identifiable.
+    """
+    target = sys.stderr if stream is None else stream
+
+    def report(harness: str) -> None:
+        print(f"discovery: probing {harness}", file=target, flush=True)
+
+    return report
+
+
 def probe_all_harnesses(
     config: JsonObject,
     *,
     env: Mapping[str, str],
     factory_settings_path: Path | None = None,
+    progress: Callable[[str], None] | None = None,
 ) -> JsonObject:
-    return {
-        harness: probe_harness(
+    records: JsonObject = {}
+    for harness in KNOWN_ENGINES:
+        if progress is not None:
+            progress(harness)
+        records[harness] = probe_harness(
             config,
             harness,
             env=env,
             factory_settings_path=factory_settings_path,
         )
-        for harness in KNOWN_ENGINES
-    }
+    return records
 
 
 def _normalized_profile_name(profile_name: str | None) -> str:
@@ -1295,6 +1416,25 @@ def discovery_cache_path(profile_name: str | None, *, home: Path | None = None) 
     normalized = _normalized_profile_name(profile_name)
     digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
     return root / f"profile-{digest}.json"
+
+
+def cache_schema_is_future(profile_name: str | None, *, home: Path | None = None) -> bool:
+    """Report whether the on-disk cache was written by a newer delegate.
+
+    ``validate_snapshot`` rejects any schema but its own, so a newer cache is
+    indistinguishable from a corrupt one at load time -- and the next refresh
+    would replace it. Reading the raw schema first keeps the newer file intact
+    for the delegate that wrote it while this build carries on cache-less.
+    """
+    path = discovery_cache_path(profile_name, home=home)
+    try:
+        raw = private_io.read_json_object(path)
+    except private_io.RegistryJsonError:
+        return False
+    if raw is None:
+        return False
+    schema = raw.get("schema")
+    return not isinstance(schema, bool) and isinstance(schema, int) and schema > DISCOVERY_SCHEMA
 
 
 def load_discovery_cache(
@@ -1336,11 +1476,26 @@ def write_discovery_cache(
     """Atomically replace one whole validated profile snapshot.
 
     Same-profile concurrent refreshes intentionally remain whole-snapshot
-    last-writer-wins. Different profiles never share a writable file.
+    last-writer-wins. Different profiles never share a writable file. A cache
+    carrying a newer schema is never among the writes: callers are expected to
+    skip persistence via ``cache_schema_is_future``, and this raise is the
+    backstop that keeps any path they miss from destroying it.
+
+    The schema is re-read immediately before the replacement rather than up
+    front, which is as tight as the POSIX filesystem primitives get: there is
+    no compare-and-swap for ``os.replace``, and a lock file would only bind
+    delegate builds that already know to take it -- never the older ones this
+    contract exists to constrain. A newer delegate that publishes inside the
+    remaining microseconds is still overwritten.
     """
     validate_snapshot(snapshot, expected_profile=_normalized_profile_name(profile_name))
     path = discovery_cache_path(profile_name, home=home)
-    private_io.write_json_atomic(path, snapshot)
+
+    def refuse_to_replace_a_newer_cache() -> None:
+        if cache_schema_is_future(profile_name, home=home):
+            raise FutureCacheSchemaError(FUTURE_SCHEMA_CACHE_WARNING)
+
+    private_io.write_json_atomic(path, snapshot, before_replace=refuse_to_replace_a_newer_cache)
     return path
 
 
@@ -1361,6 +1516,20 @@ def _effective_configured_selectors(
     )
 
 
+def _selector_binary_is_gone(selector: tuple[str, ...]) -> bool:
+    """Report whether an absolute cached selector's executable no longer exists.
+
+    Harnesses that resolve through per-session shims under ``TMPDIR`` leave a
+    cached selector pointing at a directory that vanishes with the session, so
+    a record can name a live-looking path that nothing can execute. One stat
+    catches it; a relative head is left alone because every persisted record
+    stores the absolute path ``_normalize_selector`` resolved, which means a
+    bare name is a fixture shape the configured-selector comparison rejects on
+    its own.
+    """
+    return os.path.isabs(selector[0]) and not os.path.exists(selector[0])
+
+
 def selector_has_drifted(
     config: JsonObject,
     harness: str,
@@ -1372,7 +1541,58 @@ def selector_has_drifted(
     cached = cached_record.get("selector")
     if not _string_list(cached, allow_empty=False):
         return True
+    if _selector_binary_is_gone(tuple(cached)):
+        return True
     return tuple(cached) not in _effective_configured_selectors(config, harness, profile=profile)
+
+
+def cached_version_has_drifted(
+    harness: str,
+    cached_record: JsonObject,
+    *,
+    profile: profiles.ProfileResolution,
+) -> bool:
+    """Re-ask one harness for its version and compare it to the cached string.
+
+    An in-place upgrade keeps the selector byte-identical while the catalog,
+    default model, and reasoning levels behind it all move, so the selector
+    comparison alone cannot see it. Asking the harness is the only signal that
+    holds across every install topology on a real machine -- versioned realpath
+    directories, stable-path binaries, and ephemeral session shims alike.
+
+    Fails open by design: a probe that errors, times out, exceeds its output
+    bound, or prints a banner nothing recognizes keeps the cached record, so a
+    broken version probe can never make a launch impossible.
+
+    Raises ``HarnessIdentityMismatchError`` when the banner positively names a
+    *different* known harness. That is contrary evidence about what the binary
+    is, not uncertainty about its version, and no cache decision can repair it:
+    dropping the record still leaves the caller building this harness's argv,
+    sandbox flags, and approval policy for someone else's program against the
+    very same path. The configuration is wrong and the caller has to say so.
+    """
+    cached_version = cached_record.get("version")
+    selector = cached_record.get("selector")
+    if not _nonempty_string(cached_version) or not _string_list(selector, allow_empty=False):
+        return False
+    env = profiles.child_environment(overrides=profile.env)
+    try:
+        probe = run_metadata_probe(
+            [*selector, "--version"],
+            env=env,
+            timeout_sec=METADATA_PROBE_TIMEOUT_SEC,
+        )
+    except (OSError, ValueError):
+        return False
+    if probe.error is not None:
+        return False
+    output = "\n".join(part for part in (probe.stdout, probe.stderr) if part)
+    identity = _identify_version(harness, tuple(selector), output)
+    if identity.status == _VERSION_KNOWN_OTHER:
+        raise HarnessIdentityMismatchError(harness, identity.identified, tuple(selector))
+    if identity.version is None:
+        return False
+    return identity.version != cached_version
 
 
 def refresh_discovery(
@@ -1383,6 +1603,7 @@ def refresh_discovery(
     home: Path | None = None,
     factory_settings_path: Path | None = None,
     persist: bool = True,
+    progress: Callable[[str], None] | None = None,
 ) -> JsonObject:
     """Probe harnesses, optionally persisting successful last-known-good records."""
     if isinstance(engines, str):
@@ -1393,7 +1614,8 @@ def refresh_discovery(
         raise ValueError(f"unknown discovery harness: {unknown[0]}")
 
     profile_name = _normalized_profile_name(profile.name)
-    existing = load_discovery_cache(profile.name, home=home)
+    future_schema = cache_schema_is_future(profile.name, home=home)
+    existing = None if future_schema else load_discovery_cache(profile.name, home=home)
     snapshot = existing if existing is not None else empty_snapshot(profile=profile_name)
     attempts: JsonObject = {}
     updated: list[str] = []
@@ -1401,6 +1623,8 @@ def refresh_discovery(
     env = profiles.child_environment(overrides=profile.env)
 
     for harness in selected:
+        if progress is not None:
+            progress(harness)
         try:
             record = probe_harness(
                 config,
@@ -1432,13 +1656,24 @@ def refresh_discovery(
             stale.append(harness)
 
     cache_path = discovery_cache_path(profile.name, home=home)
-    if persist and updated:
-        write_discovery_cache(profile.name, snapshot, home=home)
-    return {
+    wrote = persist and bool(updated) and not future_schema
+    if wrote:
+        try:
+            write_discovery_cache(profile.name, snapshot, home=home)
+        except FutureCacheSchemaError:
+            # A newer delegate published while these probes ran. Its cache
+            # wins; the probe results are still valid for this run, so only
+            # persistence is skipped and the caller degrades rather than fails.
+            future_schema = True
+            wrote = False
+    result: JsonObject = {
         "snapshot": snapshot,
         "attempts": attempts,
         "updatedHarnesses": updated,
         "staleHarnesses": stale,
         "cachePath": str(cache_path),
-        "wrote": persist and bool(updated),
+        "wrote": wrote,
     }
+    if future_schema:
+        result["futureSchemaCache"] = True
+    return result

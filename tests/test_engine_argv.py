@@ -3,12 +3,14 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from tests.delegate_commands_test_base import CommandTestBase, make_git_repo
+from tests.discovery_fakes import write_version_harness
 
 
 class EngineArgvTests(CommandTestBase):
@@ -157,6 +159,464 @@ class EngineArgvTests(CommandTestBase):
             )
         drifted.assert_called_once()
         probe.assert_not_called()
+
+    # A model the bundled capability table already knows. Declaration lookup runs
+    # config, then discovery, then the legacy cache, then bundled -- so a stale
+    # discovery record can only refuse a run that config is silent about, and
+    # dropping it falls through to bundled. Naming a model bundled data covers is
+    # what makes the repair reachable; an invented model id would be refused
+    # identically before and after the probe and prove nothing.
+    _BUNDLED_CODEX_MODEL = "gpt-5.6-sol"
+
+    def _upgraded_codex_discovery(self, supported: list[str] | None = None) -> dict:
+        return {
+            "harnesses": {
+                "codex": {
+                    "installed": True,
+                    "selector": ["/live/codex"],
+                    "version": "codex-cli 1.0.0",
+                    "defaultModel": self._BUNDLED_CODEX_MODEL,
+                    "models": {
+                        self._BUNDLED_CODEX_MODEL: {
+                            "reasoning": {
+                                "supported": supported if supported is not None else ["max"],
+                                "evidence": "exact",
+                            }
+                        }
+                    },
+                }
+            }
+        }
+
+    def _build_against_cache(
+        self,
+        *,
+        cached_supported: list[str],
+        effort: str | None,
+        dry_run: bool = False,
+        selector_drifted: bool = False,
+        version_drifted: bool = False,
+        effort_from_config: bool = False,
+    ):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        # The model has to be named by config, not only by the discovery record.
+        # Invalidating the record drops its `defaultModel` along with its stale
+        # reasoning declaration, and a run with no model at all falls to codex's
+        # harness-default path instead of resolving the upgraded capability --
+        # which would make every repair look like a failure for the wrong reason.
+        config["codex"]["defaultModel"] = self._BUNDLED_CODEX_MODEL
+        if effort_from_config:
+            config["codex"]["defaultReasoningEffort"] = effort
+            effort = None
+        with (
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "load_discovery_cache",
+                return_value=self._upgraded_codex_discovery(cached_supported),
+            ),
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "selector_has_drifted",
+                return_value=selector_drifted,
+            ),
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "cached_version_has_drifted",
+                return_value=version_drifted,
+            ) as probe,
+        ):
+            request = self.build_git_request(
+                "codex",
+                "safe",
+                None,
+                "/repo",
+                "review",
+                config,
+                dry_run,
+                reasoning_effort=effort,
+            )
+        return request, probe
+
+    def test_a_cache_that_satisfies_the_run_is_never_probed(self):
+        """The ordinary launch pays nothing at all for upgrade detection.
+
+        An upgrade that adds capabilities leaves the record short of what the
+        harness now supports, so a record that already answers the request is
+        not hiding an addition this run could use. Re-verifying it would spend a
+        subprocess -- up to two thirds of a second on the Node and Bun harnesses
+        -- to learn nothing. (A harness that REMOVES a capability leaves the
+        record long instead, which this path deliberately does not catch; see
+        the note in ``build_request``.)
+        """
+        request, probe = self._build_against_cache(cached_supported=["max"], effort="max")
+        probe.assert_not_called()
+        self.assertEqual(request.reasoning_capability_source, "discovery")
+        # Not probing must not mean not trusting: the unverified record is still
+        # what authorizes the effort this run was built with.
+        self.assertEqual(request.capability_model, self._BUNDLED_CODEX_MODEL)
+        self.assertEqual(request.reasoning_capability_evidence, "exact")
+
+    def test_a_cached_refusal_probes_for_an_upgrade_before_it_stands(self):
+        """An in-place upgrade is caught by the run it would have broken.
+
+        The stale record is the only thing rejecting this effort, so the probe
+        is charged exactly once the cache has already refused -- and the record
+        it invalidates is the one that produced the refusal.
+        """
+        request, probe = self._build_against_cache(
+            cached_supported=["low"], effort="max", version_drifted=True
+        )
+        probe.assert_called_once()
+        self.assertEqual(probe.call_args.args[0], "codex")
+        # The stale record is gone, so resolution reaches the bundled table that
+        # the record had been shadowing -- which is what repairs the run.
+        self.assertEqual(request.reasoning_capability_source, "bundled")
+        # A repair that does not reach argv is not a repair: the run has to
+        # actually launch at the effort the stale record refused.
+        self.assertIn('model_reasoning_effort="max"', " ".join(request.argv))
+
+    def test_a_dropped_config_default_effort_also_probes_for_an_upgrade(self):
+        """A configured default never raises, so a refusal alone misses it.
+
+        `codex.defaultReasoningEffort` is set once and then never typed again,
+        which makes it the likeliest way to lose an effort to a stale record
+        without noticing. Capability resolution degrades it to a warning instead
+        of failing the launch, so the run "succeeds" quieter than configured and
+        nothing signals that a probe would have repaired it.
+        """
+        request, probe = self._build_against_cache(
+            cached_supported=["low"],
+            effort="max",
+            version_drifted=True,
+            effort_from_config=True,
+        )
+        probe.assert_called_once()
+        self.assertIn('model_reasoning_effort="max"', " ".join(request.argv))
+        self.assertEqual(
+            [note for note in request.warnings if "defaultReasoningEffort" in note],
+            [],
+            "the repaired run should not still be reporting a dropped default",
+        )
+
+    def test_a_config_default_no_probe_can_repair_still_launches(self):
+        """A probe must never turn a run that succeeded into one that fails.
+
+        When the refreshed picture cannot satisfy the configured default either,
+        degrading it was the right answer all along -- the launch proceeds
+        without the effort, exactly as it would have with no probe at all.
+        """
+        request, probe = self._build_against_cache(
+            cached_supported=["low"],
+            effort="xhigh",
+            version_drifted=False,
+            effort_from_config=True,
+        )
+        probe.assert_called_once()
+        self.assertNotIn("model_reasoning_effort", " ".join(request.argv))
+        self.assertTrue(
+            [note for note in request.warnings if "defaultReasoningEffort" in note],
+            f"the dropped default should still be reported: {request.warnings}",
+        )
+
+    def test_a_probe_finding_no_drift_leaves_the_refusal_standing(self):
+        """A current cache that refuses is a real answer, not a stale one."""
+        with self.assertRaises(self.delegate.DelegateError) as caught:
+            self._build_against_cache(cached_supported=["low"], effort="max", version_drifted=False)
+        self.assertEqual(caught.exception.error, "unsupported_reasoning_effort")
+
+    def test_version_drift_tells_the_user_which_command_repairs_the_cache(self):
+        """The drop fixes this run only; the stale record outlives it.
+
+        Without a warning the repair is invisible: every later run needing a
+        newly discovered capability silently pays for the same probe.
+        """
+        request, _ = self._build_against_cache(
+            cached_supported=["low"], effort="max", version_drifted=True
+        )
+        drift = [note for note in request.warnings if "capabilities refresh codex" in note]
+        self.assertEqual(len(drift), 1, f"expected one refresh hint, got {request.warnings}")
+        # Naming the command is only half of it: a warning that does not say the
+        # harness moved leaves the user unable to tell a repair from a ritual.
+        self.assertIn("different version", drift[0])
+
+    def test_selector_drift_alone_does_not_emit_the_version_drift_warning(self):
+        """Selector drift already reports itself; a second voice would be noise.
+
+        It also drops the record for free, so the refusal that would trigger a
+        probe never happens and nothing is spent confirming it.
+        """
+        request, probe = self._build_against_cache(
+            cached_supported=["low"], effort="max", selector_drifted=True
+        )
+        probe.assert_not_called()
+        self.assertEqual([note for note in request.warnings if "capabilities refresh" in note], [])
+
+    def test_a_foreign_version_banner_refuses_the_launch(self):
+        """A configured codex path answering as grok must never reach a runner.
+
+        Dropping the cached record is not enough: the argv builder and the
+        safety policy behind it are still codex's, aimed at the same binary.
+        """
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["codex"]["defaultModel"] = self._BUNDLED_CODEX_MODEL
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        binary = write_version_harness(Path(temp.name) / "codex", "grok 2.4.0")
+        discovery = self._upgraded_codex_discovery(["low"])
+        discovery["harnesses"]["codex"]["selector"] = [str(binary)]
+        real_run = subprocess.run
+        spawned: list[tuple[str, ...]] = []
+
+        def record(argv, *args, **kwargs):
+            spawned.append(tuple(argv) if isinstance(argv, list | tuple) else (str(argv),))
+            return real_run(argv, *args, **kwargs)
+
+        with (
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "load_discovery_cache",
+                return_value=discovery,
+            ),
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "selector_has_drifted",
+                return_value=False,
+            ),
+            mock.patch.object(subprocess, "run", side_effect=record),
+            mock.patch.multiple(
+                self.delegate.delegate_runner,
+                execute_tracked=mock.DEFAULT,
+                execute_call=mock.DEFAULT,
+                execute_passthrough=mock.DEFAULT,
+            ) as runners,
+            self.assertRaises(self.delegate.DelegateError) as caught,
+        ):
+            self.build_git_request(
+                "codex", "safe", None, "/repo", "review", config, False, reasoning_effort="max"
+            )
+
+        for name, runner in runners.items():
+            self.assertEqual(runner.call_count, 0, f"{name} ran for a misidentified harness")
+        error = caught.exception
+        self.assertEqual(error.error, "harness_identity_mismatch")
+        self.assertEqual(error.exit_code, 2)
+        cache_path = self.delegate.harness_discovery.discovery_cache_path(
+            None, home=Path(self._config_env["HOME"])
+        )
+        self.assertEqual(
+            error.diagnostics,
+            {
+                "engine": "codex",
+                "identifiedHarness": "grok",
+                "selector": [str(binary)],
+                "configKey": "codex.binary",
+                "cachePath": str(cache_path),
+            },
+        )
+        # `capabilities refresh` keeps the last-known-good record, so a wrong
+        # identification would refuse forever if the refusal did not say which
+        # file holds it.
+        self.assertTrue(
+            any(str(cache_path) in action for action in error.next_actions),
+            f"no next action names the cache: {error.next_actions}",
+        )
+        for expected in ("codex", "grok", str(binary), "Refusing to launch"):
+            self.assertIn(expected, error.message)
+        # The refusal came from a real probe of the real binary, and that
+        # probe was the only thing the configured path was ever asked to do.
+        self.assertEqual(
+            [argv for argv in spawned if str(binary) in argv], [(str(binary), "--version")]
+        )
+
+    def test_identity_mismatch_redacts_credentials_carried_by_a_wrapper_selector(self):
+        """The refusal must not print the secrets the selector carries.
+
+        A selector is not always a bare path. Wrapper prefixes take arbitrary
+        argv, so a working configuration can carry a credential inline or after
+        a flag, and this error renders the selector into both a human message
+        and machine diagnostics. A safety check that leaks the token every time
+        it fires is worse than the misconfiguration it reports.
+        """
+        inline_secret = "sk-live-INLINESECRET"
+        flagged_secret = "sk-live-FLAGGEDSECRET"
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["codex"]["defaultModel"] = self._BUNDLED_CODEX_MODEL
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        binary = write_version_harness(Path(temp.name) / "codex", "grok 2.4.0")
+        discovery = self._upgraded_codex_discovery(["low"])
+        discovery["harnesses"]["codex"]["selector"] = [
+            "/usr/bin/env",
+            f"API_TOKEN={inline_secret}",
+            "--api-key",
+            flagged_secret,
+            str(binary),
+        ]
+
+        with (
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "load_discovery_cache",
+                return_value=discovery,
+            ),
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "selector_has_drifted",
+                return_value=False,
+            ),
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "cached_version_has_drifted",
+                side_effect=self.delegate.harness_discovery.HarnessIdentityMismatchError(
+                    "codex", "grok", tuple(discovery["harnesses"]["codex"]["selector"])
+                ),
+            ),
+            self.assertRaises(self.delegate.DelegateError) as caught,
+        ):
+            self.build_git_request(
+                "codex", "safe", None, "/repo", "review", config, False, reasoning_effort="max"
+            )
+
+        error = caught.exception
+        self.assertEqual(error.error, "harness_identity_mismatch")
+        rendered = json.dumps(
+            {"message": error.message, "diagnostics": error.diagnostics}, sort_keys=True
+        )
+        for secret in (inline_secret, flagged_secret):
+            self.assertNotIn(secret, rendered, "identity mismatch leaked a selector credential")
+        # Redaction must not hollow out the report: the operator still has to be
+        # able to tell which configuration produced this.
+        self.assertEqual(error.diagnostics["engine"], "codex")
+        self.assertEqual(error.diagnostics["identifiedHarness"], "grok")
+        self.assertIn(str(binary), rendered)
+
+    def test_the_refusal_names_the_active_profiles_cache_not_the_default(self):
+        """Each profile caches separately, so the wrong path is a dead end.
+
+        Deleting ``default.json`` on a machine running under a named profile
+        clears nothing and the next launch refuses again -- the same loop the
+        path was added to break.
+        """
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["codex"]["defaultModel"] = self._BUNDLED_CODEX_MODEL
+        discovery = self._upgraded_codex_discovery(["low"])
+        selector = tuple(discovery["harnesses"]["codex"]["selector"])
+        resolution = self.delegate.profiles.ProfileResolution(name="work", source="flag")
+
+        with (
+            mock.patch.object(
+                self.delegate.profiles,
+                "resolve_active_profile",
+                return_value=resolution,
+            ),
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "load_discovery_cache",
+                return_value=discovery,
+            ),
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "selector_has_drifted",
+                return_value=False,
+            ),
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "cached_version_has_drifted",
+                side_effect=self.delegate.harness_discovery.HarnessIdentityMismatchError(
+                    "codex", "grok", selector
+                ),
+            ),
+            self.assertRaises(self.delegate.DelegateError) as caught,
+        ):
+            self.build_git_request(
+                "codex", "safe", None, "/repo", "review", config, False, reasoning_effort="max"
+            )
+
+        home = Path(self._config_env["HOME"])
+        expected = self.delegate.harness_discovery.discovery_cache_path("work", home=home)
+        default = self.delegate.harness_discovery.discovery_cache_path(None, home=home)
+        error = caught.exception
+        self.assertEqual(error.diagnostics["cachePath"], str(expected))
+        self.assertNotEqual(str(expected), str(default))
+        self.assertTrue(
+            any(str(expected) in action for action in error.next_actions),
+            f"no next action names the profile cache: {error.next_actions}",
+        )
+
+    def test_dry_run_never_executes_the_harness_binary(self):
+        """Dry run promises no child runtime, and a version probe is one."""
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["codex"]["defaultModel"] = None
+        real_run = subprocess.run
+        spawned: list[tuple[str, ...]] = []
+
+        def record(argv, *args, **kwargs):
+            spawned.append(tuple(argv) if isinstance(argv, list | tuple) else (str(argv),))
+            return real_run(argv, *args, **kwargs)
+
+        with (
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "load_discovery_cache",
+                return_value=self._upgraded_codex_discovery(),
+            ),
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "selector_has_drifted",
+                return_value=False,
+            ),
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "run_metadata_probe",
+                side_effect=AssertionError("dry run must not probe the harness"),
+            ),
+            mock.patch.object(subprocess, "run", side_effect=record),
+        ):
+            request = self.build_git_request(
+                "codex",
+                "safe",
+                None,
+                "/repo",
+                "review",
+                config,
+                True,
+                reasoning_effort="max",
+            )
+        self.assertTrue(request.dry_run)
+        self.assertEqual(request.capability_model, self._BUNDLED_CODEX_MODEL)
+        self.assertEqual([argv for argv in spawned if "/live/codex" in argv], [])
+
+    def test_a_drifted_selector_short_circuits_before_the_version_probe(self):
+        """The free comparison decides first; a dead selector never spawns."""
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        with (
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "load_discovery_cache",
+                return_value=self._upgraded_codex_discovery(),
+            ),
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "selector_has_drifted",
+                return_value=True,
+            ),
+            mock.patch.object(
+                self.delegate.harness_discovery,
+                "cached_version_has_drifted",
+                side_effect=AssertionError("a drifted selector must not spawn a version probe"),
+            ),
+            self.assertRaises(self.delegate.DelegateError),
+        ):
+            self.build_git_request(
+                "codex",
+                "safe",
+                None,
+                "/repo",
+                "review",
+                config,
+                False,
+                reasoning_effort="max",
+            )
 
     def test_optional_embedded_models_do_not_emit_model_flags(self):
         for engine in ("kimi", "devin"):
@@ -1340,7 +1800,7 @@ class EngineArgvTests(CommandTestBase):
             stdout = io.StringIO()
             stderr = io.StringIO()
 
-            def refresh(_config, *, profile, engines=None):
+            def refresh(_config, *, profile, engines=None, progress=None):
                 marker.write_text(profile.env["CODEX_HOME"], encoding="utf-8")
                 return self._successful_discovery_refresh("/user/discovery/profile-work.json")
 

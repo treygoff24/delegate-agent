@@ -15,11 +15,15 @@ Cross-cutting seams monkeypatched on the ``worktree_mgmt`` module
 
 from __future__ import annotations
 
+import os
+import stat
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import NamedTuple
 
-from delegate_agent import run_registry
+from delegate_agent import isolation, run_registry
 from delegate_agent.json_types import JsonObject, is_non_negative_int
 from delegate_agent.worktree_records import (
     SCHEMA_GC,
@@ -225,6 +229,15 @@ def _gc_missing_entry(
     }
 
 
+ORPHAN_SAFE_ACTIONS = {
+    "source_root_missing": "restore_source_root_or_inspect_path_before_manual_cleanup",
+    "worktree_metadata_missing": "inspect_path_before_manual_cleanup",
+    "branch_missing": "inspect_branch_metadata_before_manual_cleanup",
+    "detached_backlink": "inspect_path_before_manual_cleanup",
+    "worktree_list_failed": "retry_after_git_worktree_list_succeeds",
+}
+
+
 def _gc_orphan_entry(
     record: PersistentWorktreeRecord,
     execution: str,
@@ -240,15 +253,8 @@ def _gc_orphan_entry(
     }
     if message:
         entry["message"] = message
-    safe_actions = {
-        "source_root_missing": "restore_source_root_or_inspect_path_before_manual_cleanup",
-        "worktree_metadata_missing": "inspect_path_before_manual_cleanup",
-        "branch_missing": "inspect_branch_metadata_before_manual_cleanup",
-        "detached_backlink": "inspect_path_before_manual_cleanup",
-        "worktree_list_failed": "retry_after_git_worktree_list_succeeds",
-    }
-    if reason in safe_actions:
-        entry["safeAction"] = safe_actions[reason]
+    if reason in ORPHAN_SAFE_ACTIONS:
+        entry["safeAction"] = ORPHAN_SAFE_ACTIONS[reason]
     return entry
 
 
@@ -441,8 +447,548 @@ def _gc_reconcile_missing_branch(
     return True
 
 
-def gc_worktrees(registry_root: Path, *, dry_run: bool = False) -> JsonObject:
-    records = load_persistent_records(registry_root)
+WORKTREE_BACKLINK_MARKER = "/.git/worktrees/"
+
+
+def _gc_mode(dry_run: bool, registry_root: Path | None) -> str:
+    if dry_run:
+        return "dry-run"
+    return "report-pool" if registry_root is None else "reconcile-registry"
+
+
+# A real backlink file is one short line. Anything larger is not one, and the
+# walk crosses paths it does not control, so the read is bounded rather than
+# trusting the entry to be small.
+BACKLINK_MAX_BYTES = 4096
+
+
+# Opening a file inside a directory Delegate does not own is only safe with both
+# flags: without O_NOFOLLOW the read follows a symlink out of the pool, and
+# without O_NONBLOCK opening a FIFO blocks before the regular-file check can
+# reject it. Degrading to a plain open would trade a report for those risks, so
+# a platform missing either flag gets no read at all.
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", None)
+_NONBLOCK = getattr(os, "O_NONBLOCK", None)
+BACKLINK_OPEN_FLAGS: int | None = (
+    None if _NOFOLLOW is None or _NONBLOCK is None else os.O_RDONLY | _NOFOLLOW | _NONBLOCK
+)
+
+
+class BacklinkRead(NamedTuple):
+    """One attempt to read a Git pointer file, kept deliberately tri-state.
+
+    ``raw`` holds the bytes when the read succeeded. ``unverifiable`` describes,
+    for a human, a read that established nothing — refused, failed, or capped —
+    and is what separates those from a file that is definitely not there. Only a
+    settled absence may feed an orphan report: a false orphan invites someone to
+    delete real work by hand, while a false live merely under-reports.
+    """
+
+    raw: bytes | None = None
+    unverifiable: str | None = None
+
+
+def _read_backlink_file(path: Path) -> BacklinkRead:
+    """Read a Git pointer file without following it anywhere.
+
+    Oversized content is rejected rather than truncated, since half a path is
+    worse than no path — but rejected as unverifiable, not as absence.
+    """
+    flags = BACKLINK_OPEN_FLAGS
+    if flags is None:
+        return BacklinkRead(unverifiable="cannot be opened safely on this platform")
+    try:
+        handle = os.open(path, flags)
+    except (FileNotFoundError, NotADirectoryError):
+        return BacklinkRead()
+    except OSError as error:
+        return BacklinkRead(unverifiable=f"could not be opened ({error.strerror})")
+    try:
+        if not stat.S_ISREG(os.fstat(handle).st_mode):
+            return BacklinkRead(unverifiable="is not a regular file")
+        raw = os.read(handle, BACKLINK_MAX_BYTES + 1)
+    except OSError as error:
+        return BacklinkRead(unverifiable=f"could not be read ({error.strerror})")
+    finally:
+        os.close(handle)
+    if len(raw) > BACKLINK_MAX_BYTES:
+        return BacklinkRead(unverifiable=f"is larger than {BACKLINK_MAX_BYTES} bytes")
+    return BacklinkRead(raw=raw)
+
+
+def _decode_path_bytes(raw: bytes) -> str:
+    """Decode filesystem bytes losslessly, matching how paths round-trip in Python."""
+    return raw.decode("utf-8", errors="surrogateescape")
+
+
+class Backlink(NamedTuple):
+    """Where a worktree's ``.git`` file points, or why that could not be settled.
+
+    ``gitdir`` set means a usable target was read. Both fields unset means the
+    backlink is definitely gone or definitely unusable — the only state that may
+    become an orphan. ``unverifiable`` set means the file exists in some form
+    that could not be read, which is reported as a warning and treated as live.
+    """
+
+    gitdir: str | None = None
+    unverifiable: str | None = None
+
+
+def _parse_worktree_backlink(worktree: Path) -> Backlink:
+    """Return the ``gitdir:`` target recorded in ``<worktree>/.git``.
+
+    Read as plain text on purpose. Inside an orphaned worktree every ``git``
+    invocation hard-fails (``fatal: not a git repository``, exit 128), so the
+    git-shelling classifiers cannot see this population at all.
+    """
+    read = _read_backlink_file(worktree / ".git")
+    if read.unverifiable is not None:
+        return Backlink(unverifiable=read.unverifiable)
+    if read.raw is None:
+        return Backlink()
+    for line in _decode_path_bytes(read.raw).splitlines():
+        stripped = line.strip()
+        if stripped.startswith("gitdir:"):
+            target = stripped.removeprefix("gitdir:").strip()
+            return Backlink(gitdir=target) if target else Backlink()
+    return Backlink()
+
+
+def _resolve_backlink_target(worktree: Path, gitdir: str) -> Path:
+    """Resolve a ``gitdir:`` value the way Git does: relative to the worktree.
+
+    Git writes absolute backlinks by default but supports relative ones
+    (``worktree.useRelativePaths``). Resolving those against the process CWD
+    would report a live worktree as an orphan.
+    """
+    target = Path(gitdir)
+    return target if target.is_absolute() else worktree / target
+
+
+def _source_root_from_backlink(gitdir: str) -> str | None:
+    """Recover the source checkout from a worktree backlink, for reporting only.
+
+    Exact for the standard ``<source>/.git/worktrees/<name>`` layout; returns
+    None under ``--separate-git-dir`` or a bare repo rather than guessing.
+    """
+    marker = gitdir.rfind(WORKTREE_BACKLINK_MARKER)
+    return gitdir[:marker] if marker > 0 else None
+
+
+def _paths_match(left: Path, right: Path) -> bool | None:
+    """Do two paths name the same place? None when that cannot be established.
+
+    ``samefile`` decides it, because string comparison of two spellings is wrong
+    in the dangerous direction here: a case-insensitive, bind-mounted, or network
+    filesystem can spell one file two ways, and a spurious mismatch makes a
+    healthy worktree look orphaned.
+
+    Only two answers are definite. Identical spellings match, and a ``samefile``
+    that completed answers on inode identity — including its refusal when one
+    side is simply not there, which is a real mismatch rather than a failure to
+    look. Every other outcome is a comparison that could not be performed: on the
+    filesystems where two spellings do name one file, ``samefile`` is the only
+    thing that can tell, so its failure leaves realpath equality able to confirm
+    a match but never to deny one.
+    """
+    if os.path.normpath(str(left)) == os.path.normpath(str(right)):
+        return True
+    try:
+        return os.path.samefile(left, right)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        pass
+    try:
+        if os.path.realpath(left) == os.path.realpath(right):
+            return True
+    except OSError:
+        pass
+    return None
+
+
+def _admin_dir_serves_worktree(admin_dir: Path, worktree: Path) -> bool | None:
+    """Is ``admin_dir`` the Git admin directory for ``worktree``?
+
+    A live worktree's admin directory holds a ``gitdir`` backfile naming that
+    worktree's ``.git`` file. Requiring the round trip is what stops a stale or
+    half-built admin directory — or a backlink pointing at something that merely
+    exists, like ``/`` — from masking a real orphan.
+
+    Returns None when the answer cannot be established (unreadable metadata):
+    callers must treat that as live, because a wrong "orphan" invites someone to
+    delete work by hand while a wrong "live" only under-reports.
+
+    ``os.stat`` rather than ``Path.is_dir``: the latter reports an inaccessible
+    path as a missing one, which is exactly the ambiguity this must not collapse.
+    """
+    backfile = admin_dir / "gitdir"
+    for path, kind in ((admin_dir, stat.S_ISDIR), (backfile, stat.S_ISREG)):
+        try:
+            info = os.stat(path)
+        except (FileNotFoundError, NotADirectoryError):
+            return False
+        except OSError:
+            return None
+        if not kind(info.st_mode):
+            return False
+    read = _read_backlink_file(backfile)
+    if read.unverifiable is not None:
+        return None
+    if read.raw is None:
+        return False
+    recorded = _decode_path_bytes(read.raw).strip()
+    if not recorded:
+        return False
+    target = Path(recorded)
+    if not target.is_absolute():
+        target = admin_dir / target
+    # Either spelling Git may have recorded proves the round trip. Short of a
+    # match, a comparison that could not be performed leaves the question open
+    # rather than answering it against the worktree.
+    pointer_match = _paths_match(target, worktree / ".git")
+    if pointer_match is True:
+        return True
+    directory_match = _paths_match(target, worktree)
+    if directory_match is True:
+        return True
+    return None if None in (pointer_match, directory_match) else False
+
+
+class PoolVerdict(NamedTuple):
+    """The outcome of classifying one pooled worktree: at most one field is set.
+
+    Both unset means the worktree is live and needs no mention.
+    """
+
+    orphan: JsonObject | None = None
+    warning: JsonObject | None = None
+
+
+def _pool_orphan_entry(
+    worktree: Path, gitdir: str | None, source_root: str | None, reason: str
+) -> JsonObject:
+    return {
+        "worktreePath": str(worktree),
+        "fingerprint": worktree.parent.name,
+        "sourceGitRoot": source_root,
+        "gitdir": gitdir,
+        "reason": reason,
+        "safeAction": ORPHAN_SAFE_ACTIONS[reason],
+    }
+
+
+def _pool_warning(path: Path, reason: str, message: str) -> JsonObject:
+    return {"path": str(path), "reason": reason, "message": message}
+
+
+POOL_UNRECOGNIZED_SAMPLE = 5
+
+
+def _unrecognized_dirs_warning(data_home: Path, names: list[str]) -> JsonObject:
+    """Summarize every non-fingerprint directory in one warning, not one apiece.
+
+    A root that is not a pool at all — ``--pool ~`` — has hundreds of children,
+    and a line for each would bury whatever the report actually found.
+    """
+    sample = ", ".join(names[:POOL_UNRECOGNIZED_SAMPLE])
+    remaining = len(names) - POOL_UNRECOGNIZED_SAMPLE
+    if remaining > 0:
+        sample = f"{sample}, and {remaining} more"
+    noun = "directory" if len(names) == 1 else "directories"
+    return _pool_warning(
+        data_home,
+        "not_a_pool_fingerprint_dir",
+        (
+            f"Skipped {len(names)} {noun} under {data_home} whose names are not Delegate "
+            f"repository fingerprints, so nothing under them was examined ({sample})."
+        ),
+    )
+
+
+def _unverifiable_worktree_warning(worktree: Path, detail: str) -> JsonObject:
+    return _pool_warning(
+        worktree,
+        "worktree_metadata_unverifiable",
+        f"{worktree}: {detail}. Treated as live and not reported as an orphan.",
+    )
+
+
+# Creating a persistent worktree is not one atomic act. Delegate makes the pool
+# parent, then `git worktree add` creates the worktree directory, writes its
+# `.git` pointer, and writes the admin directory's backfile as separate steps.
+# A pool walk that lands inside that window sees a directory whose metadata is
+# not there yet, which in a single observation is indistinguishable from one
+# whose repository was deleted months ago. The walk crosses every repository on
+# the machine, so it can neither see the creating process nor take a lock
+# against it; elapsed time is the only evidence it has.
+#
+# A worktree being born is seconds old, while a real orphan's absence is
+# permanent, so anything younger than this window is reported as unsettled
+# rather than classified. The margin is far wider than any checkout needs on
+# purpose: waiting defers a report until the next run, whereas judging too early
+# invites an operator to delete a live workspace by hand.
+POOL_SETTLE_SECONDS = 15 * 60
+
+
+def _unsettled_detail(path: Path) -> str | None:
+    """Why ``path`` is too recently changed to classify, or None once it settled.
+
+    Modification time is the signal because it is what creation moves: the
+    directory is stamped when it appears and again as each top-level entry lands
+    in it. Later writes only push it forward, which errs toward silence. A stat
+    that fails, or a timestamp ahead of the clock, establishes no elapsed time at
+    all and is treated the same as freshly changed.
+    """
+    try:
+        modified = os.stat(path).st_mtime
+    except OSError as error:
+        return f"its age could not be read ({error.strerror})"
+    age = time.time() - modified
+    if age >= POOL_SETTLE_SECONDS:
+        return None
+    if age < 0:
+        return "it was last modified in the future, so no age can be established"
+    return f"it was last modified {int(age)} seconds ago and may still be under construction"
+
+
+def _unsettled_warning(path: Path, reason: str, detail: str) -> JsonObject:
+    return _pool_warning(
+        path,
+        reason,
+        (
+            f"{path}: {detail}, so it is not classified yet "
+            f"(a pool entry must be unchanged for {POOL_SETTLE_SECONDS} seconds "
+            "to rule out a worktree still being created). Re-run the scan later."
+        ),
+    )
+
+
+def _judge_pool_worktree(worktree: Path) -> PoolVerdict:
+    """Read one pooled worktree's metadata and say what it shows.
+
+    The orphan predicate is "this worktree's Git admin directory no longer
+    serves it". It is safe to apply across repositories because git refuses to
+    operate in a worktree whose backlink is broken — a live worktree necessarily
+    has a live backlink, so this walk can never misjudge a worktree another
+    repo's run is currently using.
+
+    Every step that cannot reach an answer becomes a warning instead. Silence
+    would be defensible for the walk itself, but the report is what an operator
+    reads before deleting directories by hand, and a worktree Delegate could not
+    inspect must not simply vanish from it.
+    """
+    backlink = _parse_worktree_backlink(worktree)
+    if backlink.unverifiable is not None:
+        return PoolVerdict(
+            warning=_unverifiable_worktree_warning(
+                worktree, f"its .git entry {backlink.unverifiable}"
+            )
+        )
+    if backlink.gitdir is None:
+        return PoolVerdict(
+            orphan=_pool_orphan_entry(worktree, None, None, "worktree_metadata_missing")
+        )
+    admin_dir = _resolve_backlink_target(worktree, backlink.gitdir)
+    serves = _admin_dir_serves_worktree(admin_dir, worktree)
+    if serves is None:
+        return PoolVerdict(
+            warning=_unverifiable_worktree_warning(
+                worktree, f"its Git admin directory ({admin_dir}) could not be inspected"
+            )
+        )
+    if serves:
+        return PoolVerdict()
+    source_root = _source_root_from_backlink(os.path.normpath(str(admin_dir)))
+    reason = (
+        "worktree_metadata_missing"
+        if source_root is not None and Path(source_root).exists()
+        else "source_root_missing"
+    )
+    return PoolVerdict(orphan=_pool_orphan_entry(worktree, backlink.gitdir, source_root, reason))
+
+
+def _classify_pool_worktree(worktree: Path) -> PoolVerdict:
+    """Classify one pooled worktree, refusing to judge one that may be mid-creation.
+
+    Every orphan verdict rests on metadata being absent, and absence only counts
+    once it has settled: the same reading taken seconds into ``git worktree add``
+    describes a worktree that becomes healthy moments later. The age check runs
+    only against a verdict that would accuse, since a worktree whose metadata
+    reads back healthy is healthy however new it is.
+    """
+    verdict = _judge_pool_worktree(worktree)
+    if verdict.orphan is None:
+        return verdict
+    unsettled = _unsettled_detail(worktree)
+    if unsettled is None:
+        return verdict
+    return PoolVerdict(warning=_unsettled_warning(worktree, "worktree_unsettled", unsettled))
+
+
+POOL_ROOT_PROBLEM_MESSAGES = {
+    "missing": "Worktree pool root does not exist: {path}",
+    "not_a_directory": "Worktree pool root is not a directory: {path}",
+    "unreadable": "Worktree pool root could not be read: {path}",
+}
+
+
+def _pool_root_problem_payload(data_home: Path, problem: str) -> JsonObject:
+    return {
+        "path": str(data_home),
+        "reason": f"pool_root_{problem}",
+        "message": POOL_ROOT_PROBLEM_MESSAGES[problem].format(path=data_home),
+    }
+
+
+def _invalid_pool_root_error(data_home: Path, detail: JsonObject) -> wm.WorktreeManagementError:
+    return wm.WorktreeManagementError(
+        {
+            "ok": False,
+            "code": "invalid_pool_root",
+            "message": str(detail["message"]),
+            "poolRoot": str(data_home),
+            "reason": detail["reason"],
+            "nextActions": ["pass --pool with an existing, readable pool directory"],
+            "retrySafe": False,
+        }
+    )
+
+
+def _empty_pool_result(data_home: Path, warnings: list[JsonObject]) -> JsonObject:
+    return {
+        "dataHome": str(data_home),
+        "scannedWorktrees": 0,
+        "orphans": [],
+        "emptyFingerprintDirs": [],
+        "warnings": warnings,
+    }
+
+
+def scan_worktree_pool(data_home: Path, *, required: bool = False) -> JsonObject:
+    """Report pooled worktrees whose backing repository is gone, machine-wide.
+
+    Report-only, in full: this walk removes nothing at all, not even the empty
+    fingerprint directories it reports. An orphan's dirtiness is structurally
+    unknowable (``git status`` cannot run there), so nothing can distinguish
+    committed from uncommitted work, and a walk that crosses every repository on
+    the machine has no business holding a delete. Emptiness is reported so the
+    directories can be cleared by hand, and means the directory holds nothing at
+    all — a fingerprint directory with loose files in it is not empty.
+
+    Only first-level directories named like a repository fingerprint are treated
+    as Delegate's; the root may be any path the caller passed, and a report that
+    an operator acts on by hand must never describe a stranger's directory.
+
+    Nothing changed within the last ``POOL_SETTLE_SECONDS`` is called an orphan
+    or an empty directory, because worktree creation writes the directory before
+    its metadata and this walk runs in a different process from the one creating
+    it. Those entries are reported as unsettled warnings and judged on a later
+    run instead.
+
+    ``required`` marks a root the caller named explicitly, where an unusable
+    path is a mistake worth failing on — including one that becomes unusable
+    between the check and the walk. The configured root is not required: it
+    simply does not exist until the first persistent worktree, so a problem
+    there is reported as a warning instead of a silent empty scan.
+    """
+    problem = isolation.pool_root_problem(data_home)
+    if problem is not None:
+        detail = _pool_root_problem_payload(data_home, problem)
+        if required:
+            raise _invalid_pool_root_error(data_home, detail)
+        return _empty_pool_result(data_home, [detail])
+    orphans: list[JsonObject] = []
+    empty_dirs: list[JsonObject] = []
+    warnings: list[JsonObject] = []
+    unrecognized: list[str] = []
+    scanned = 0
+    try:
+        for fingerprint in isolation.iter_pool_fingerprints(data_home):
+            if fingerprint.unrecognized:
+                unrecognized.append(fingerprint.path.name)
+                continue
+            if fingerprint.unreadable:
+                warnings.append(
+                    _pool_warning(
+                        fingerprint.path,
+                        "fingerprint_dir_unreadable",
+                        (
+                            f"Could not list {fingerprint.path}; "
+                            "any worktrees under it were not scanned."
+                        ),
+                    )
+                )
+                continue
+            if not fingerprint.worktrees:
+                if fingerprint.other_entries:
+                    warnings.append(
+                        _pool_warning(
+                            fingerprint.path,
+                            "fingerprint_dir_not_empty",
+                            (
+                                f"{fingerprint.path} holds no worktree directories but is "
+                                "not empty, so it is not reported as an empty directory."
+                            ),
+                        )
+                    )
+                else:
+                    # Delegate makes this directory before `git worktree add`
+                    # fills it, so a brand-new empty one is the first half of a
+                    # worktree, not a leftover.
+                    unsettled = _unsettled_detail(fingerprint.path)
+                    if unsettled is not None:
+                        warnings.append(
+                            _unsettled_warning(
+                                fingerprint.path, "fingerprint_dir_unsettled", unsettled
+                            )
+                        )
+                    else:
+                        empty_dirs.append(
+                            {"fingerprint": fingerprint.path.name, "path": str(fingerprint.path)}
+                        )
+                continue
+            for worktree in fingerprint.worktrees:
+                scanned += 1
+                verdict = _classify_pool_worktree(worktree)
+                if verdict.orphan is not None:
+                    orphans.append(verdict.orphan)
+                elif verdict.warning is not None:
+                    warnings.append(verdict.warning)
+    except isolation.PoolRootUnreadable as error:
+        # Only the root listing raises, and it happens before the first yield,
+        # so nothing collected above is discarded here.
+        detail = _pool_root_problem_payload(data_home, error.reason)
+        if required:
+            raise _invalid_pool_root_error(data_home, detail) from error
+        return _empty_pool_result(data_home, [detail])
+    if unrecognized:
+        warnings.append(_unrecognized_dirs_warning(data_home, unrecognized))
+    return {
+        "dataHome": str(data_home),
+        "scannedWorktrees": scanned,
+        "orphans": orphans,
+        "emptyFingerprintDirs": empty_dirs,
+        "warnings": warnings,
+    }
+
+
+def gc_worktrees(
+    registry_root: Path | None,
+    *,
+    dry_run: bool = False,
+    pool_data_home: Path | None = None,
+    pool_required: bool = False,
+) -> JsonObject:
+    # Scanned before the registry pass so an unusable --pool fails without
+    # having written anything. The pool walk is read-only and the registry pass
+    # never deletes worktree paths, so neither ordering changes the result.
+    pool = (
+        wm.scan_worktree_pool(pool_data_home, required=pool_required)
+        if pool_data_home is not None
+        else None
+    )
+    records = load_persistent_records(registry_root) if registry_root is not None else []
     paths_by_root: dict[str, set[str] | None] = {}
     prune_roots: set[str] = set()
     reconciled: list[JsonObject] = []
@@ -514,13 +1060,13 @@ def gc_worktrees(registry_root: Path, *, dry_run: bool = False) -> JsonObject:
     if not dry_run:
         for source in prune_roots:
             wm._run_git(source, ["worktree", "prune"])
-    return {
+    payload: JsonObject = {
         "schema": SCHEMA_GC,
         "ok": True,
         "dryRun": dry_run,
-        "mode": "dry-run" if dry_run else "reconcile-registry",
+        "mode": _gc_mode(dry_run, registry_root),
         "effects": {
-            "registryWrites": not dry_run,
+            "registryWrites": not dry_run and registry_root is not None,
             "deletesWorktreePaths": False,
             "runsGitWorktreePrune": (not dry_run and bool(prune_roots)),
         },
@@ -531,6 +1077,12 @@ def gc_worktrees(registry_root: Path, *, dry_run: bool = False) -> JsonObject:
         "orphans": orphans,
         "warnings": warnings,
     }
+    if pool is not None:
+        # Kept out of the registry-shaped top-level ``orphans`` list: pool
+        # entries are keyed by path, not by alias/runId, and existing consumers
+        # read ``orphans`` expecting registry records.
+        payload["pool"] = pool
+    return payload
 
 
 def maybe_auto_prune(

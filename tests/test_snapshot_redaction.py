@@ -156,6 +156,20 @@ class SnapshotRedactionTests(SnapshotCommandTestBase):
             "***PRIVATE KEY REDACTED***",
         )
 
+    def test_redact_argv_masks_a_flagged_secret_that_begins_with_a_dash(self):
+        # A credential flag's value is skipped only when it looks like another
+        # flag, and nothing stops a token from starting with a dash.
+        secret = "-" + "AbC123XyZ789tok"
+        scrubbed = self.redaction.redact_argv(["wrapper", "--api-key", secret, "agent"])
+        self.assertNotIn(secret, scrubbed)
+        self.assertEqual(scrubbed, ("wrapper", "--api-key", "***", "agent"))
+
+    def test_redact_argv_does_not_swallow_the_flag_after_a_valueless_credential(self):
+        self.assertEqual(
+            self.redaction.redact_argv(["wrapper", "--api-key", "--verbose", "agent"]),
+            ("wrapper", "--api-key", "--verbose", "agent"),
+        )
+
     def test_snapshot_redacts_secrets_by_default(self):
         _, alias = self.write_run(  # pragma: allowlist secret
             assistant_text="export API_KEY=sk-abcdefghijklmnopqrstuvwxyz"

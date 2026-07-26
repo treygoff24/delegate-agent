@@ -663,6 +663,33 @@ class SetupCommandTests(unittest.TestCase):
             self.assertEqual(cache_path.read_bytes(), cache_before)
             self.assertNotIn("do-not-print", stdout)
 
+    def test_a_newer_cache_published_mid_setup_is_reported_rather_than_fatal(self):
+        """Setup reconciled the config and probed successfully; only the write is lost."""
+        with tempfile.TemporaryDirectory() as raw_home:
+            home = Path(raw_home).resolve()
+            cache_path, cache_before = self._seed_cache(home)
+            codex = self._binary(home, "codex")
+
+            with mock.patch.object(
+                harness_discovery,
+                "write_discovery_cache",
+                side_effect=harness_discovery.FutureCacheSchemaError(
+                    harness_discovery.FUTURE_SCHEMA_CACHE_WARNING
+                ),
+            ) as write:
+                code, stdout, stderr, _ = self._run(
+                    ["--json", "setup"], home=home, attempts=self._attempts(codex=codex)
+                )
+            write.assert_called_once()
+            payload = json.loads(stdout)
+
+            self.assertEqual(code, cli.EXIT_OK, stderr)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["cacheState"], "unchanged")
+            self.assertIn("newer delegate", payload["cacheWriteSkipped"])
+            self.assertTrue(Path(payload["configPath"]).exists())
+            self.assertEqual(cache_path.read_bytes(), cache_before)
+
     def test_missing_ai_profile_overlay_is_blocked_before_probing(self):
         with tempfile.TemporaryDirectory() as raw_home:
             home = Path(raw_home).resolve()

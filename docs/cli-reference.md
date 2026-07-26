@@ -803,7 +803,31 @@ records independently. If one current probe fails, its last-known-good record
 is retained and the refresh response lists that harness in `staleHarnesses`.
 If the configured executable selector changes, cached reads mark that harness
 stale and ordinary launches ignore only that harness's record until refresh.
-Cached reads never run `--version` merely to test staleness.
+Cached reads never run `--version` merely to test staleness, and neither does an
+ordinary launch: a cached record can only be short of what the harness now
+supports, never claim more, so one that satisfies the run is used as-is.
+
+A launch re-probes `--version` for its own harness only when the cached record
+has already cost the run something: it refused an explicit `--reasoning-effort`,
+or it silently dropped a configured `defaultReasoningEffort` (a configured
+default degrades to a warning instead of failing the launch, so nothing else
+would signal it). An in-place upgrade behind an unchanged selector is the reason
+either can be wrong, so the probe compares the live banner against the version
+stored in the record, and a mismatch drops the record and rebuilds the run
+against config and bundled capabilities. If the refreshed picture cannot satisfy
+a configured default either, the run proceeds as it already had — a probe never
+turns a launch that succeeded into one that fails.
+
+The reverse case is not covered: a harness that *removes* a capability leaves
+its record listing more than the harness now supports, which produces no refusal
+and therefore no probe. Run `capabilities refresh` after an upgrade that narrows
+what a harness accepts. The result carries a warning naming
+`capabilities refresh <engine>`, because the superseded record stays on disk
+until a refresh rewrites it. The probe fails open — an error, a timeout, or an
+unrecognized banner leaves the original refusal standing — except when the
+banner positively names a *different* known harness, which fails the run with
+`harness_identity_mismatch` rather than handing one harness's argv and sandbox
+policy to another. Dry runs never probe at all.
 
 All automatic probes run with `shell=False`, stdin closed, a neutral temporary
 working directory, bounded output, and a timeout. They pass the active profile
@@ -1079,10 +1103,12 @@ delegate worktree show <handle>
 delegate worktree show --latest HARNESS
 delegate worktree remove <handle|--group NAME> [--discard-uncommitted] [--force-branch] [--force] [--keep-branch]
 delegate worktree prune [--merged] [--older-than DAYS] [--harness HARNESS] [--group NAME] [--include-detached] [--dry-run] [--discard-uncommitted] [--force-branch] [--force]
-delegate worktree gc [--dry-run]
+delegate worktree gc [--dry-run] [--all] [--pool PATH]
 ```
 
 `worktree show --latest HARNESS` selects the latest persistent worktree for the harness, not merely the latest run overall. `worktree list` JSON includes a `summary` with status counts, registry drift counts, warning counts, `autoPruneMode`, and whether the returned operation was read-only; `summary.totalPersistentWorktrees` is always registry-wide, while `allStatusCounts` is scoped to the `--harness` / `--group` filters (pre-status-filter) and `statusCounts` to the visible entries. `worktree remove --group NAME` removes all matching persistent worktrees with the same safety checks as single-handle removal. `worktree prune --group NAME` limits prune candidates to the group. `worktree gc --dry-run` reports `wouldPruneSourceRoots` and structured orphan reasons; `worktree gc` JSON also includes `mode`, `effects`, per-entry `action`, and orphan `safeAction` fields. `gc` never deletes worktree directories.
+
+`worktree gc --all` additionally scans the machine-wide worktree pool (`worktrees.dataHome`, default `~/.delegate/worktrees`) and adds a `pool` object with `dataHome`, `scannedWorktrees`, `orphans`, `emptyFingerprintDirs`, and `warnings`. A pool orphan is a pooled worktree whose Git admin directory no longer serves it, classified `source_root_missing` or `worktree_metadata_missing` with the same `safeAction` vocabulary as registry orphans, plus `worktreePath`, `fingerprint`, `sourceGitRoot`, and `gitdir` (null when the backlink is absent). This is the only way to see worktrees whose source repository was deleted along with its `.delegate/` registry, so `--all` is accepted outside a Delegate registry. The pool scan removes nothing at all: orphans are reported because uncommitted work in them is undetectable once the source repository is gone, and empty fingerprint directories are reported for the same hand-clearing rather than reclaimed. Only a settled absence produces an orphan — metadata that could not be read (a symlinked, non-regular, oversized, or unreadable `.git` entry, or an admin directory that could not be inspected) is treated as live and reported in `pool.warnings`, and so is any pool entry modified within the last 15 minutes, since worktree creation writes the directory before its metadata and a concurrent scan would otherwise call a worktree being born an orphan (`worktree_unsettled`, `fingerprint_dir_unsettled`). `pool.warnings` also covers first-level directories whose names are not repository fingerprints, fingerprint directories that hold loose files rather than being empty, and unlistable fingerprint directories. `--pool PATH` scans a specific pool root instead of the configured one, which finds pools left behind by an earlier `worktrees.dataHome`; an explicit `--pool` path that is missing, not a directory, or unreadable is an `invalid_pool_root` error.
 
 List/show entry fields include `branchMergedIntoSource` (branch graph only), `mergedIntoSource` (backward-compatible branch graph state), `fullyIntegrated` (branch merged and worktree clean), `hasUncommittedChanges`, `integrationStatus`, and `uncommittedChangesIntegrated`. `workSummary` is included on `worktree show` and run completion payloads when Delegate can inspect the worktree; `worktree list` omits the deep summary for responsiveness. Consumers that need safe retirement should require `fullyIntegrated: true` or inspect `integrationStatus`. When `integrationStatus` is `branch-merged-worktree-dirty`, merge/cherry-pick suggestions are suppressed because commit integration is already complete and only uncommitted edits remain.
 

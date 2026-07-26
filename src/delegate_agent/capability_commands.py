@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
@@ -138,9 +139,12 @@ def _refresh_payload(
     *,
     profile: profiles.ProfileResolution,
     engines: tuple[str, ...] | None = None,
+    progress: Callable[[str], None] | None = None,
 ) -> JsonObject:
     try:
-        result = harness_discovery.refresh_discovery(config, profile=profile, engines=engines)
+        result = harness_discovery.refresh_discovery(
+            config, profile=profile, engines=engines, progress=progress
+        )
     except OSError as exc:
         raise CapabilitiesError(
             "capability_refresh_failed",
@@ -215,6 +219,8 @@ def _refresh_payload(
     }
     if drifted_harnesses:
         payload["driftedHarnesses"] = drifted_harnesses
+    if result.get("futureSchemaCache") is True:
+        payload["cacheWriteSkipped"] = harness_discovery.FUTURE_SCHEMA_CACHE_WARNING
     _add_legacy_cache_fields(payload, legacy_path, reasoning_payload)
     return redaction.scrub_public_projection(payload)
 
@@ -229,6 +235,7 @@ def emit(
     profile: profiles.ProfileResolution | None = None,
     discovery: JsonObject | None = None,
     stdout: TextIO,
+    stderr: TextIO | None = None,
 ) -> int:
     active_profile = profile or profiles.resolve_active_profile(
         config,
@@ -236,8 +243,16 @@ def emit(
         cli_override=auth_profile_override,
     )
     if command.refresh:
+        # JSON callers get a clean stdout document and a quiet stderr; the
+        # per-harness line exists for a human watching a cold refresh.
         payload = _refresh_payload(
-            config, workspace, profile=active_profile, engines=command.engines
+            config,
+            workspace,
+            profile=active_profile,
+            engines=command.engines,
+            progress=(
+                None if command.json_mode else harness_discovery.stderr_probe_progress(stderr)
+            ),
         )
     else:
         payload = capabilities_payload(
@@ -252,6 +267,9 @@ def emit(
         delegate_rendering.print_json(payload, stdout)
     else:
         print(f"reasoning capabilities: {payload['cachePath']}", file=stdout)
+        skipped = payload.get("cacheWriteSkipped")
+        if isinstance(skipped, str):
+            print(skipped, file=stdout)
         drifted = payload.get("driftedHarnesses")
         if isinstance(drifted, list) and drifted:
             print(

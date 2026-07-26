@@ -216,6 +216,28 @@ delegate worktree gc
 
 In dry-run mode, `gc` reports `wouldPruneSourceRoots` and classifies un-prunable worktrees with reasons such as `source_root_missing`, `worktree_metadata_missing`, `branch_missing`, and `detached_backlink`. Without `--dry-run`, it may update Delegate registry status (for example, marking missing paths as `missing` or inconsistent metadata as `unknown`) and may run `git worktree prune` to clean Git administrative metadata for already-missing paths, but it does not delete worktree directories. JSON output includes an `effects` object that makes those mutation boundaries explicit.
 
+## Find pooled worktrees whose repository is gone
+
+```bash
+delegate worktree gc --all
+delegate worktree gc --all --dry-run
+delegate worktree gc --pool ~/.delegate/worktrees
+```
+
+Persistent worktrees live in a machine-global pool under `worktrees.dataHome` (default `~/.delegate/worktrees`), but they are tracked in a run registry inside the source repository. Delete the source repository and its registry goes with it, leaving a pooled worktree that no per-repository `gc` can reach. `--all` finds these by walking the pool directly and reading each worktree's `.git` backlink file as text — the ordinary Git-based checks cannot classify them, because every `git` command fails inside a worktree whose repository is gone. Because a live worktree always has a live backlink, the walk is safe to run across every repository on the machine at once. `--all` works outside a Delegate registry for the same reason.
+
+The scan adds a `pool` object to the JSON with `dataHome`, `scannedWorktrees`, `orphans`, `emptyFingerprintDirs`, and `warnings`. Each orphan carries `worktreePath`, `fingerprint`, the recovered `sourceGitRoot` (null when the layout does not reveal it), `gitdir` (null when the worktree has no `.git` backlink), a `reason`, and a `safeAction`.
+
+A worktree counts as an orphan only when two things are settled. Its `.git` backlink must be definitely gone or definitely unusable — absent, or readable and holding no usable `gitdir:` line. And its Git admin directory must no longer serve it: the admin directory must exist and hold a `gitdir` backfile naming this worktree. Anything that merely *could not be checked* — a `.git` entry that is a symlink, a directory, a FIFO, oversized, or unreadable; an admin directory that could not be inspected — is reported as live and surfaced in `warnings` with reason `worktree_metadata_unverifiable`. A false orphan invites someone to delete real work by hand, while a false live only under-reports, so every unresolved case resolves toward live.
+
+Absence also has to have lasted. Creating a persistent worktree is several steps — Delegate makes the fingerprint directory, then `git worktree add` creates the worktree directory, its `.git` pointer, and the admin directory's backfile — and a scan that lands inside that window sees exactly what a deleted repository leaves behind. Since the scan runs in a different process from the one creating the worktree, and often for a different repository, it has nothing to wait on and judges by age instead: a pool entry modified within the last 15 minutes is reported in `warnings` (`worktree_unsettled`, or `fingerprint_dir_unsettled` for an empty directory) and classified on a later run. An entry whose age cannot be read at all is treated the same way. This delays reporting a genuine orphan by one run at most, since a real orphan's metadata never comes back.
+
+Only first-level directories named like a repository fingerprint (12 lowercase hex characters, as written by `plan_worktree_path`) are treated as Delegate's. The root is whatever you passed, so anything else is skipped without being descended, and is summarized in `warnings` with reason `not_a_pool_fingerprint_dir` — pointing `--pool` at an ordinary directory yields warnings, never orphans or cleanup candidates.
+
+The pool scan removes nothing. With the source repository gone there is no way to tell whether an orphan holds uncommitted work, so removal is a deliberate manual decision — inspect the reported path, rescue anything you need, then delete it yourself. Empty fingerprint directories, left behind when a fingerprint's last worktree was removed, are reported in `emptyFingerprintDirs` for the same hand-clearing; `gc` does not remove those either. "Empty" means the directory holds nothing at all: a fingerprint directory with loose files in it is reported in `warnings` (`fingerprint_dir_not_empty`) instead. Fingerprint directories that could not be listed also appear in `warnings` rather than being reported as empty.
+
+Use `--pool PATH` to scan a pool root that is no longer the configured `dataHome`. An explicitly named `--pool` path must exist and be a readable directory; anything else is an `invalid_pool_root` error rather than a successful scan of nothing, including a root that becomes unreadable between validation and the walk. A configured `dataHome` that does not exist yet is not an error — it just means no pool has been created — and is reported in `pool.warnings`.
+
 ## Security boundary
 
 Worktree isolation is source-checkout isolation, not a full sandbox. The child process may still use credentials, network access, external tools, and absolute paths according to its runtime and host permissions. See [Security model](security-model.md).

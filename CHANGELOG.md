@@ -5,6 +5,123 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.0] - 2026-07-26
+
+### Added
+
+- Added `delegate worktree gc --all`, which scans the machine-wide worktree
+  pool for worktrees whose source repository no longer exists. Such worktrees
+  were previously unreachable by any `gc` invocation, because reaping is driven
+  by the run registry inside each source repository and that registry dies with
+  the repository. The scan adds no catalog or persistent state: it reads each
+  worktree's Git backlink directly, and treats a backlink whose target is gone
+  as the sole orphan signal. The scan removes nothing at all, at any depth: a
+  missing source repository makes a worktree's uncommitted state impossible to
+  inspect, so orphans and empty pool directories alike are reported for
+  deliberate manual cleanup. Because that output invites manual deletion, every
+  uncertainty resolves away from an orphan verdict: a pointer file that cannot
+  be read, a path comparison the filesystem cannot answer, an entry too recently
+  modified to have settled, and a directory whose name does not match the pool's
+  own fingerprint contract are all reported as warnings rather than orphans.
+  That last rule is what keeps a scan of an arbitrary root from labelling
+  somebody else's directories. `--pool PATH` scans a different pool root, which
+  reaches pools stranded by an earlier `worktrees.dataHome`.
+- `capabilities refresh` and `setup` now name each harness on stderr as it is
+  probed, so a harness that hangs is identifiable rather than anonymous
+  silence. Progress output is suppressed under `--json`.
+
+### Changed
+
+- A launch now fails instead of proceeding when the configured binary for a
+  harness identifies itself as a *different* known harness. Delegate re-probes
+  `--version` when a cached capability record has refused a run, and during
+  `capabilities refresh` and `setup` (see Fixed); when that banner positively
+  names another harness — a Codex path replaced in place by Grok, say — the run
+  stops with `harness_identity_mismatch` and exit code 2, naming the configured
+  harness, the harness that answered, and the selector path.
+  Previously the launch continued against that same binary with the same Codex
+  argv, sandbox flags, and approval policy, and only the cached capability
+  metadata was discarded. This fires solely on a banner that NAMES another known
+  harness, never on uncertainty: a probe that errors, times out, exceeds its
+  output bound, or prints an unbranded banner still fails open and launches on
+  the cached record. An unbranded shape — a bare date-and-hash build ID is the
+  clearest case — is deliberately not identification, because wrapper prefixes
+  are a supported configuration and refusing a legitimate launch costs more than
+  carrying a stale record until the next refresh. The selector is scrubbed of
+  credentials before it reaches the message or the diagnostics, since a wrapper
+  prefix can carry a token inline or after a flag. Dry runs do not probe and are
+  unaffected. The refusal also names the discovery cache file for the active
+  auth profile, in its `cachePath` diagnostic and in a next action, because
+  `capabilities refresh` cannot clear this state: a refresh keeps the
+  last-known-good record whenever a probe fails, which is correct for a flaky
+  probe and wrong here, where the record itself is the problem. Without the
+  path, a wrong identification would refuse every launch with no documented way
+  out short of editing configuration.
+- A run whose cached capability record is discarded for version drift now says
+  so, naming `delegate capabilities refresh <engine>`. The record is dropped for
+  that run only and the superseded copy stays on disk, so every later launch
+  repeats the drop and loses the same discovery-sourced models and reasoning
+  levels — previously with no indication that a stale cache was the cause.
+  Selector drift stays silent, since `capabilities` already reports it under
+  `driftedHarnesses`.
+
+### Fixed
+
+- Discovery now detects a harness that was upgraded in place. Cached capability
+  records were invalidated only by comparing the configured selector, so an
+  upgrade behind an unchanged selector left stale capabilities cached
+  indefinitely and a newly supported reasoning level was rejected until a manual
+  `capabilities refresh`. Delegate now re-probes `--version` for the single
+  harness it is about to use and compares it against the version already stored
+  in the record, then rebuilds the run against the refreshed picture. The probe
+  runs only once the cached record has already cost the run something, never on
+  the ordinary path, which therefore spawns no extra process at all — and that
+  matters because the probe costs 26-668ms, worst on the Node and Bun harnesses
+  that are already slow to start. Two things trigger it: an explicit
+  `--reasoning-effort` the record refuses, and a `defaultReasoningEffort` the
+  record silently drops. The second is the one most likely to go unnoticed,
+  since a configured default degrades to a warning rather than failing the
+  launch, and it is set once and then never typed again. A probe that cannot
+  repair the default leaves the run exactly as it was: a launch that succeeded
+  is never turned into a failure. The check fails open — a probe that errors,
+  times out, or prints a banner nothing recognizes keeps the cached record, so a
+  failing probe can never prevent a launch. A banner that positively identifies
+  a *different* known harness is the exception, and it aborts the launch rather
+  than merely invalidating the record — see Changed. Each banner is matched
+  against the expected harness's own pattern before anyone else's, so a banner
+  mentioning more than one tool is read as the harness that was asked for
+  instead of whichever pattern happens to be declared earlier. Banners are read
+  with escape sequences stripped, so a colorized version line no longer freezes
+  a record permanently. A cached selector whose binary no longer exists is also
+  treated as drift.
+- Not covered, deliberately: a harness that *removes* a capability leaves its
+  cached record listing more than the harness now supports, which produces no
+  refusal and so no probe. The child rejects the effort it was handed, which is
+  loud; the one quiet case is Cursor's route table aiming a run at a superseded
+  model id. Catching either would cost a probe on every launch, which is the
+  trade this path exists to refuse. `capabilities refresh` remains the cure.
+- A dry run never probes the harness for its version. Dry run documents that it
+  neither launches a child runtime nor requires the real child binary, and the
+  drift probe is a child runtime; it now runs only on a real launch, leaving dry
+  run with the two filesystem-local checks.
+- A discovery cache carrying a newer schema than the running build is no longer
+  discarded and overwritten. It is left intact while the run degrades to
+  probing without persisting, so an older Delegate can no longer destroy a newer
+  cache. Losing that race mid-probe degrades the same way rather than failing the
+  command: `capabilities refresh` and `setup` both report `cacheWriteSkipped`,
+  `setup` additionally leaving `cacheState` at `unchanged`, and each exits
+  successfully, since only persistence was lost. The
+  schema is re-read immediately before the atomic replacement rather than before
+  the snapshot is serialized, which narrows the window in which a newer cache
+  could be published and then overwritten down to the `os.replace` call itself.
+  POSIX offers no compare-and-swap for a rename, so that last window remains.
+- The test suite no longer writes into the developer's real
+  `~/.delegate/worktrees`. Tests exercising persistent-worktree runs created
+  real pooled worktrees over temporary source repositories and orphaned them
+  permanently, because `worktrees_data_home` falls through to the user's home
+  directory with no seam a test could redirect. `HOME` is now redirected at test
+  collection time, which reaches every such resolver at once.
+
 ## [0.20.0] - 2026-07-25
 
 ### Added
@@ -631,6 +748,7 @@ Usage-audit fix wave: 82 sessions and 1,241 delegate invocations from one week o
 
 - Releases before 0.1.3 predate this changelog.
 
+[0.21.0]: https://github.com/treygoff24/delegate-agent/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/treygoff24/delegate-agent/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/treygoff24/delegate-agent/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/treygoff24/delegate-agent/compare/v0.17.0...v0.18.0

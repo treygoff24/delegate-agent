@@ -745,7 +745,11 @@ def _worktree_list_paths_with_warning(source_git_root: str) -> tuple[set[str] | 
 # functions (which read their cross-module seams back through this module).
 # Re-export the prune/gc pipelines for the same reason.
 from delegate_agent.worktree_gc import (  # noqa: E402, F401  # re-exported
+    BACKLINK_MAX_BYTES,
+    POOL_SETTLE_SECONDS,
     GcFreshAction,
+    _admin_dir_serves_worktree,
+    _classify_pool_worktree,
     _entry_ref,
     _gc_missing_entry,
     _gc_orphan_entry,
@@ -754,11 +758,15 @@ from delegate_agent.worktree_gc import (  # noqa: E402, F401  # re-exported
     _gc_reconcile_missing_metadata,
     _gc_reconcile_missing_path,
     _older_than,
+    _parse_worktree_backlink,
+    _paths_match,
     _reload_gc_candidate,
+    _source_root_from_backlink,
     _with_locked_fresh_gc_candidate,
     gc_worktrees,
     maybe_auto_prune,
     prune_worktrees,
+    scan_worktree_pool,
 )
 from delegate_agent.worktree_remove import (  # noqa: E402, F401  # re-exported
     BranchRemovalResult,
