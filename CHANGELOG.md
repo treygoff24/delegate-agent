@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.21.0] - 2026-07-26
 
 ### Added
 
@@ -85,21 +85,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   repair the default leaves the run exactly as it was: a launch that succeeded
   is never turned into a failure. The check fails open — a probe that errors,
   times out, or prints a banner nothing recognizes keeps the cached record, so a
-  failing probe can never prevent a launch.
+  failing probe can never prevent a launch. A banner that positively identifies
+  a *different* known harness is the exception, and it aborts the launch rather
+  than merely invalidating the record — see Changed. Each banner is matched
+  against the expected harness's own pattern before anyone else's, so a banner
+  mentioning more than one tool is read as the harness that was asked for
+  instead of whichever pattern happens to be declared earlier. Banners are read
+  with escape sequences stripped, so a colorized version line no longer freezes
+  a record permanently. A cached selector whose binary no longer exists is also
+  treated as drift.
 - Not covered, deliberately: a harness that *removes* a capability leaves its
   cached record listing more than the harness now supports, which produces no
   refusal and so no probe. The child rejects the effort it was handed, which is
   loud; the one quiet case is Cursor's route table aiming a run at a superseded
   model id. Catching either would cost a probe on every launch, which is the
-  trade this path exists to refuse. `capabilities refresh` remains the cure. A banner that positively identifies a *different*
-  known harness is the exception, and it aborts the launch rather than merely
-  invalidating the record — see Changed. Each banner is matched against the
-  expected harness's own pattern before anyone else's, so a banner mentioning
-  more than one tool is read as the harness that was asked for instead of
-  whichever pattern happens to be declared earlier. Banners are read with escape
-  sequences stripped, so a colorized version line no longer freezes a record
-  permanently. A cached selector whose binary no longer exists is also treated
-  as drift.
+  trade this path exists to refuse. `capabilities refresh` remains the cure.
 - A dry run never probes the harness for its version. Dry run documents that it
   neither launches a child runtime nor requires the real child binary, and the
   drift probe is a child runtime; it now runs only on a real launch, leaving dry
@@ -748,6 +748,7 @@ Usage-audit fix wave: 82 sessions and 1,241 delegate invocations from one week o
 
 - Releases before 0.1.3 predate this changelog.
 
+[0.21.0]: https://github.com/treygoff24/delegate-agent/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/treygoff24/delegate-agent/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/treygoff24/delegate-agent/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/treygoff24/delegate-agent/compare/v0.17.0...v0.18.0
