@@ -32,12 +32,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- A real launch now fails instead of proceeding when the configured binary for
-  a harness identifies itself as a *different* known harness. Delegate
-  re-probes `--version` before a real launch (see Fixed); when that banner
-  positively names another harness — a Codex path replaced in place by Grok,
-  say — the run stops with `harness_identity_mismatch` and exit code 2, naming
-  the configured harness, the harness that answered, and the selector path.
+- A launch now fails instead of proceeding when the configured binary for a
+  harness identifies itself as a *different* known harness. Delegate re-probes
+  `--version` when a cached capability record has refused a run, and during
+  `capabilities refresh` and `setup` (see Fixed); when that banner positively
+  names another harness — a Codex path replaced in place by Grok, say — the run
+  stops with `harness_identity_mismatch` and exit code 2, naming the configured
+  harness, the harness that answered, and the selector path.
   Previously the launch continued against that same binary with the same Codex
   argv, sandbox flags, and approval policy, and only the cached capability
   metadata was discarded. This fires solely on a banner that NAMES another known
@@ -70,11 +71,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   records were invalidated only by comparing the configured selector, so an
   upgrade behind an unchanged selector left stale capabilities cached
   indefinitely and a newly supported reasoning level was rejected until a manual
-  `capabilities refresh`. The launch path now re-probes `--version` for the
-  single harness it is about to use and compares it against the version already
-  stored in the record. The check fails open: a probe that errors, times out, or
-  prints a banner nothing recognizes keeps the cached record, so a failing probe
-  can never prevent a launch. A banner that positively identifies a *different*
+  `capabilities refresh`. Delegate now re-probes `--version` for the single
+  harness it is about to use and compares it against the version already stored
+  in the record, then rebuilds the run against the refreshed picture. The probe
+  runs only once the cached record has already refused the launch, never on the
+  ordinary path: a stale record can only be short of what the harness now
+  supports, never claim more, so a record that satisfies the request cannot be
+  hiding an upgrade that this run would notice. An ordinary launch therefore
+  spawns no extra process at all, which matters because the probe costs 26-668ms
+  and is slowest on the Node and Bun harnesses that are already slow to start.
+  The check fails open: a probe that errors, times out, or prints a banner
+  nothing recognizes keeps the cached record, so a failing probe can never
+  prevent a launch. A banner that positively identifies a *different*
   known harness is the exception, and it aborts the launch rather than merely
   invalidating the record — see Changed. Each banner is matched against the
   expected harness's own pattern before anyone else's, so a banner mentioning

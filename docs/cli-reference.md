@@ -803,7 +803,22 @@ records independently. If one current probe fails, its last-known-good record
 is retained and the refresh response lists that harness in `staleHarnesses`.
 If the configured executable selector changes, cached reads mark that harness
 stale and ordinary launches ignore only that harness's record until refresh.
-Cached reads never run `--version` merely to test staleness.
+Cached reads never run `--version` merely to test staleness, and neither does an
+ordinary launch: a cached record can only be short of what the harness now
+supports, never claim more, so one that satisfies the run is used as-is.
+
+A launch re-probes `--version` for its own harness in exactly one case — the
+cached record just refused the run, by rejecting a requested reasoning effort.
+An in-place upgrade behind an unchanged selector is the reason that refusal can
+be wrong, so the probe compares the live banner against the version stored in
+the record, and a mismatch drops the record and rebuilds the run against config
+and bundled capabilities. The result carries a warning naming
+`capabilities refresh <engine>`, because the superseded record stays on disk
+until a refresh rewrites it. The probe fails open — an error, a timeout, or an
+unrecognized banner leaves the original refusal standing — except when the
+banner positively names a *different* known harness, which fails the run with
+`harness_identity_mismatch` rather than handing one harness's argv and sandbox
+policy to another. Dry runs never probe at all.
 
 All automatic probes run with `shell=False`, stdin closed, a neutral temporary
 working directory, bounded output, and a timeout. They pass the active profile

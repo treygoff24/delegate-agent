@@ -727,6 +727,20 @@ def _model_context_kwargs(
     }
 
 
+def _discovery_has_engine_record(discovery: JsonObject | None, engine: str) -> bool:
+    """Report whether a snapshot still carries ``engine``'s capability record.
+
+    The retry in ``build_request`` needs to distinguish a probe that invalidated
+    the record from one that left it standing, and comparing snapshot identity
+    would silently start returning the wrong answer the day
+    ``_runtime_discovery_for_engine`` returns a copy on the unchanged path.
+    """
+    if not isinstance(discovery, dict):
+        return False
+    harnesses = discovery.get("harnesses")
+    return isinstance(harnesses, dict) and engine in harnesses
+
+
 def _runtime_discovery_for_engine(
     config: JsonObject,
     engine: str,
@@ -738,26 +752,35 @@ def _runtime_discovery_for_engine(
     """Drop the engine record when its selector drifted or its harness moved on.
 
     Only the engine this launch is about to spawn is checked. The selector
-    comparison is free and runs first; the version probe costs one bounded
-    ``--version`` call against a run that is about to occupy a harness for
-    minutes, and fails open, so the launch proceeds on the cached record
-    whenever the probe cannot answer.
+    comparison is two filesystem-local checks and is free, so it always runs.
 
-    ``probe_version`` is false for a dry run, which promises never to launch a
-    child runtime and never to require the real child binary. Only the two
-    filesystem-local checks run there; a stale record shows up in the planned
-    argv, which is a dry run's job to report rather than to prevent.
+    ``probe_version`` gates the expensive half: one bounded ``--version`` call
+    against the real binary, measured at 26-668ms and worst on precisely the
+    Node and Bun harnesses that are already slow to start. It is false on the
+    ordinary path. A stale record is only capable of harming a run that asks for
+    something the record does not list, so ``build_request`` pays for the probe
+    exactly once a cached record has already refused the run, rather than
+    charging every launch for a rarity. A dry run never probes at all, under any
+    circumstances: it promises never to launch a child runtime, and a stale
+    record showing up in the planned argv is a dry run's job to report rather
+    than to prevent.
 
-    A probe that identifies the selector as a *different* harness aborts the
-    launch instead of returning a trimmed snapshot. See
+    The cost of that trade is that a binary swapped for a different harness is
+    no longer caught before every launch -- only when a capability rejection
+    forces a probe, and at ``capabilities refresh``/``setup``, which probe every
+    harness anyway. Handing one harness's argv to another produces a child that
+    rejects the flags it was given, so the failure is loud either way; paying
+    half a second on every run to make that message nicer was the worse deal.
+    When the probe does run and identifies the selector as a *different*
+    harness, it aborts the launch instead of returning a trimmed snapshot. See
     ``_harness_identity_mismatch_error``.
 
     Version drift returns a warning alongside the trimmed snapshot, because the
     drop repairs this run and nothing else: the superseded record stays on disk,
-    so every later launch discards it again and silently loses the same
-    discovered models and reasoning levels until a refresh rewrites it. Selector
-    drift stays quiet -- ``delegate capabilities`` already reports it as
-    ``driftedHarnesses``, and a second voice for one event is noise.
+    so the next run needing a newly discovered capability probes again until a
+    refresh rewrites it. Selector drift stays quiet -- ``delegate capabilities``
+    already reports it as ``driftedHarnesses``, and a second voice for one event
+    is noise.
     """
     if not isinstance(discovery, dict):
         return None, ()
@@ -786,9 +809,10 @@ def _runtime_discovery_for_engine(
             return discovery, ()
         warnings = (
             f"ignoring the cached {engine} capabilities: {engine} reports a different "
-            f"version than the cache recorded. Run `delegate capabilities refresh {engine}` "
-            f"to update it; until then every launch discards the record and loses its "
-            f"discovered models and reasoning levels.",
+            f"version than the cache recorded, so this run re-read its capabilities from "
+            f"the harness. Run `delegate capabilities refresh {engine}` to persist them; "
+            f"until then every run that needs a newly discovered model or reasoning level "
+            f"pays for the same probe.",
         )
     return {
         **discovery,
@@ -1792,42 +1816,68 @@ def build_request(
         engine,
         discovery,
         profile_resolution,
-        probe_version=not dry_run,
+        probe_version=False,
     )
     warnings = (*warnings, *drift_warnings)
 
-    return _build_request_for_workspace(
-        engine,
-        mode,
-        model_alias,
-        workspace,
-        prompt,
-        config,
-        dry_run,
-        stream_capture=stream_capture,
-        isolation_context=isolation_context,
-        requested_effort=requested_effort,
-        effort_source=effort_source,
-        fast=fast,
-        progress=progress,
-        progress_initial_delay_sec=progress_initial_delay_sec,
-        progress_interval_sec=progress_interval_sec,
-        forbid_commit=forbid_commit,
-        include_dirty=include_dirty,
-        profile_resolution=profile_resolution,
-        discovery=discovery,
-        output_schema=output_schema,
-        warnings=warnings,
-        cleanup_workspace=cleanup_workspace,
-        call_read_only=call_read_only,
-        pure=pure,
-        timeout=timeout,
-        group=group,
-        workflow_agent_key=workflow_agent_key,
-        prompt_instruction_mode=prompt_instruction_mode,
-        agent=agent,
-        model_override=model_override,
-    )
+    def attempt(snapshot: JsonObject | None, extra_warnings: tuple[str, ...]) -> Request:
+        return _build_request_for_workspace(
+            engine,
+            mode,
+            model_alias,
+            workspace,
+            prompt,
+            config,
+            dry_run,
+            stream_capture=stream_capture,
+            isolation_context=isolation_context,
+            requested_effort=requested_effort,
+            effort_source=effort_source,
+            fast=fast,
+            progress=progress,
+            progress_initial_delay_sec=progress_initial_delay_sec,
+            progress_interval_sec=progress_interval_sec,
+            forbid_commit=forbid_commit,
+            include_dirty=include_dirty,
+            profile_resolution=profile_resolution,
+            discovery=snapshot,
+            output_schema=output_schema,
+            warnings=(*warnings, *extra_warnings),
+            cleanup_workspace=cleanup_workspace,
+            call_read_only=call_read_only,
+            pure=pure,
+            timeout=timeout,
+            group=group,
+            workflow_agent_key=workflow_agent_key,
+            prompt_instruction_mode=prompt_instruction_mode,
+            agent=agent,
+            model_override=model_override,
+        )
+
+    # A stale capability record can only ever refuse a run that a current record
+    # would have allowed -- it lists the levels the harness advertised when it
+    # was probed, so an in-place upgrade leaves it short, never long. That makes
+    # the refusal itself the cheapest possible trigger for re-probing: the happy
+    # path pays nothing, and the one case that a probe repairs is exactly the
+    # case that just failed. Rebuilding is safe because request assembly writes
+    # nothing -- no run directory, no worktree, no registry entry.
+    try:
+        return attempt(discovery, ())
+    except DelegateError as exc:
+        if dry_run or exc.error != "unsupported_reasoning_effort":
+            raise
+        probed, probe_warnings = _runtime_discovery_for_engine(
+            config,
+            engine,
+            discovery,
+            profile_resolution,
+            probe_version=True,
+        )
+        if not _discovery_has_engine_record(discovery, engine) or _discovery_has_engine_record(
+            probed, engine
+        ):
+            raise
+        return attempt(probed, probe_warnings)
 
 
 def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
