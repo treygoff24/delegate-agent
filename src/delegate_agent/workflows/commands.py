@@ -8,11 +8,11 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TextIO
+from typing import TextIO
 
 from delegate_agent import rendering, run_registry
 from delegate_agent.errors import EXIT_OK, DelegateError
-from delegate_agent.json_types import JsonObject
+from delegate_agent.json_types import JsonObject, JsonValue
 from delegate_agent.workflows import registry, runtime
 from delegate_agent.workflows import script as workflow_script
 
@@ -141,22 +141,22 @@ def emit_run(
                 previous_result_exists = True
             except FileNotFoundError:
                 pass
-            gate_key = status.get("gateKey") if isinstance(status, dict) else None
+            gate_key = status.get("gateKey")
             if status.get("status") == "paused" and isinstance(gate_key, str):
                 registry.write_json(
                     root / registry.APPROVAL_FILE, {"approved": True, "gateKey": gate_key}
                 )
             script_path = root / registry.SCRIPT_FILE
-            args_value = status.get("args") if isinstance(status, dict) else None
+            args_value = status.get("args")
             budget_total = command.budget
             if budget_total is None:
-                budget_payload = status.get("budget") if isinstance(status, dict) else None
+                budget_payload = status.get("budget")
                 if isinstance(budget_payload, dict) and isinstance(
                     budget_payload.get("total"), int
                 ):
                     budget_total = budget_payload["total"]
             else:
-                budget_payload = status.get("budget") if isinstance(status, dict) else None
+                budget_payload = status.get("budget")
                 spent = budget_payload.get("spent") if isinstance(budget_payload, dict) else 0
                 spent = spent if isinstance(spent, int) and spent >= 0 else 0
                 status["budget"] = {
@@ -278,7 +278,7 @@ def emit_dry_run(
     script_path: Path,
     workspace: Path,
     config: JsonObject,
-    args_value: Any,
+    args_value: JsonValue,
     budget_total: int | None,
     json_mode: bool,
     warnings: list[str],
@@ -355,7 +355,7 @@ def emit_events(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) ->
 def emit_watch(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) -> int:
     root = _workflow_dir_for_command(command, workspace)
     since = command.since
-    collected: list[dict[str, Any]] = []
+    collected: list[JsonObject] = []
     stalled = False
     while True:
         events = [
@@ -519,7 +519,7 @@ def emit_kill(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) -> i
     _append_command_event(root, "workflow_killed", cancelled=cancelled)
     # Re-read after supervisor exit so we merge against the final snapshot.
     status = registry.read_json(root / registry.STATUS_FILE) or status
-    merged = dict(status) if isinstance(status, dict) else {}
+    merged = dict(status)
     merged.update(
         {
             "ok": False,
@@ -654,7 +654,7 @@ def _resolve_wait_or_result(
     return root, root.name, "latest"
 
 
-def _parse_args(raw: str | None) -> Any:
+def _parse_args(raw: str | None) -> JsonValue:
     if raw is None:
         return None
     try:
@@ -663,7 +663,7 @@ def _parse_args(raw: str | None) -> Any:
         raise DelegateError("invalid_workflow_args", "workflow --args must be valid JSON.") from exc
 
 
-def _append_command_event(root: Path, event_type: str, **payload: Any) -> None:
+def _append_command_event(root: Path, event_type: str, **payload: JsonValue) -> None:
     sequence = 0
     for event in registry.iter_journal(root / registry.JOURNAL_FILE):
         seq = event.get("seq")
@@ -717,7 +717,7 @@ def _saved_workflow_path(name: str) -> Path:
         raise DelegateError("invalid_workflow_name", str(exc)) from exc
 
 
-def _run_tree(entries: list[dict[str, Any]]) -> JsonObject:
+def _run_tree(entries: list[JsonObject]) -> JsonObject:
     counts: dict[str, int] = {}
     phases: dict[str, int] = {}
     for entry in entries:

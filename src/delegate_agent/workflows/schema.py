@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+
+from delegate_agent.json_types import JsonObject, JsonValue
 
 SUPPORTED_KEYS = {
     "type",
@@ -67,7 +68,7 @@ def validate_schema_subset(schema: object, *, path: str = "schema") -> None:
             raise SchemaError(f"{path}.{keyword} only applies to {applicable_type} values.")
 
 
-def validate_value(value: object, schema: dict[str, Any], *, path: str = "value") -> None:
+def validate_value(value: object, schema: JsonObject, *, path: str = "value") -> None:
     validate_schema_subset(schema)
     if "enum" in schema and value not in schema["enum"]:
         raise SchemaError(f"{path} must be one of {schema['enum']!r}.")
@@ -119,7 +120,7 @@ def _matches_type(value: object, schema_type: object) -> bool:
     return False
 
 
-def parse_json_tolerant(text: str) -> object:
+def parse_json_tolerant(text: str) -> JsonValue:
     stripped = text.strip()
     if stripped.startswith("```"):
         lines = stripped.splitlines()
@@ -143,7 +144,7 @@ def parse_json_tolerant(text: str) -> object:
         return value
 
 
-def placeholder(schema: dict[str, Any]) -> object:
+def placeholder(schema: JsonObject) -> JsonValue:
     schema_type = schema.get("type")
     if isinstance(schema_type, list):
         schema_type = schema_type[0] if schema_type else None

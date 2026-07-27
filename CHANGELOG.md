@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.0] - 2026-07-26
+
+### Changed
+
+- Consolidated pure-call validation in `constants.validate_pure_call`, collapsed repeated `attempt`/`call` invocations in `runner.py` into local closures, eliminated `typing.Any` from `src`, and removed defensive `getattr`/`isinstance` hedges where the contract guarantees the type.
+
+### Removed
+
+- Removed the write-only `ReasoningCapability.supported_efforts` field and unused `STATUS_FILTER_ACTIVE`/`STATUS_FILTER_RECENT` constants.
+- Removed dead back-compat re-exports from `delegate_agent.cli`: `build_kimi_argv`, `build_opencode_argv`, `build_pi_argv`, `prefix_droid_safe_prompt`, `redacted_prompt_argv`, `KIMI_PROMPT_REDACTION`, `_grok_harness_bypass_enabled`, `_resolve_default_model`, and `block_external_symlinks`. These had no known consumers; the supported import surface is the CLI and `delegate --json` contracts.
+
 ## [0.21.0] - 2026-07-26
 
 ### Added
@@ -748,6 +759,7 @@ Usage-audit fix wave: 82 sessions and 1,241 delegate invocations from one week o
 
 - Releases before 0.1.3 predate this changelog.
 
+[0.22.0]: https://github.com/treygoff24/delegate-agent/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/treygoff24/delegate-agent/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/treygoff24/delegate-agent/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/treygoff24/delegate-agent/compare/v0.18.0...v0.19.0

@@ -19,12 +19,16 @@ from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import BinaryIO, TextIO
+from typing import BinaryIO, TextIO, TypeAlias
 
 from delegate_agent import config as delegate_config
 from delegate_agent import private_io, profiles, redaction
 from delegate_agent.constants import KNOWN_ENGINES
 from delegate_agent.json_types import JsonObject
+
+# A refresh-progress callback: called with each harness name before its probe
+# spawns. Shared by every caller that threads a progress hook into discovery.
+ProgressCallback: TypeAlias = Callable[[str], None]
 
 DISCOVERY_SCHEMA = 1
 PROBE_STATUSES = frozenset({"ok", "partial", "missing", "error"})
@@ -1364,7 +1368,7 @@ def probe_harness(
         )
 
 
-def stderr_probe_progress(stream: TextIO | None = None) -> Callable[[str], None]:
+def stderr_probe_progress(stream: TextIO | None = None) -> ProgressCallback:
     """Return a progress callback that names each harness as probing starts.
 
     Every probe is bounded by ``METADATA_PROBE_TIMEOUT_SEC``, so a wedged
@@ -1384,7 +1388,7 @@ def probe_all_harnesses(
     *,
     env: Mapping[str, str],
     factory_settings_path: Path | None = None,
-    progress: Callable[[str], None] | None = None,
+    progress: ProgressCallback | None = None,
 ) -> JsonObject:
     records: JsonObject = {}
     for harness in KNOWN_ENGINES:
@@ -1603,7 +1607,7 @@ def refresh_discovery(
     home: Path | None = None,
     factory_settings_path: Path | None = None,
     persist: bool = True,
-    progress: Callable[[str], None] | None = None,
+    progress: ProgressCallback | None = None,
 ) -> JsonObject:
     """Probe harnesses, optionally persisting successful last-known-good records."""
     if isinstance(engines, str):

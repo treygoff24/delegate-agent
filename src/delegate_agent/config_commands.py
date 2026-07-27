@@ -23,10 +23,14 @@ class ConfigCommand:
 PROFILE_CONFIG_NAMES = delegate_config.PROFILE_CONFIG_NAMES
 
 
-def _target_path() -> Path:
+def target_config_path() -> Path:
+    """Resolve the config path, rejecting Windows-style paths under WSL."""
     raw = delegate_config.config_path()
     if wsl.should_reject_windows_path(str(raw)):
-        raise DelegateError("windows_path", wsl.windows_path_message("DELEGATE_CONFIG", str(raw)))
+        raise DelegateError(
+            "windows_path",
+            wsl.windows_path_message(delegate_config.CONFIG_ENV, str(raw)),
+        )
     return raw
 
 
@@ -94,7 +98,7 @@ def _validated_effective_config(config: JsonObject) -> JsonObject:
 def emit(command: ConfigCommand, stdout: TextIO) -> int:
     if command.action not in {"init", "sync-profiles"}:
         raise DelegateError("invalid_config_command", f"Unknown config action: {command.action}")
-    path = _target_path()
+    path = target_config_path()
     if command.action == "sync-profiles":
         if not path.exists():
             raise DelegateError(

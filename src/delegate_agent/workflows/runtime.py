@@ -16,7 +16,6 @@ import traceback
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 from delegate_agent import run_registry, wait_cancel_commands
 from delegate_agent.constants import (
@@ -27,7 +26,7 @@ from delegate_agent.constants import (
     PROMPT_INSTRUCTION_MODE_SLASH,
     PROMPT_INSTRUCTION_MODE_WRAPPED,
 )
-from delegate_agent.json_types import JsonObject
+from delegate_agent.json_types import JsonObject, JsonValue
 from delegate_agent.workflows import registry
 from delegate_agent.workflows import schema as workflow_schema
 from delegate_agent.workflows import script as workflow_script
@@ -41,7 +40,15 @@ ENGINE_ARGV_TRANSPORT = {"cursor", "kimi"}
 WORKFLOW_LOCK_FD_ENV = "DELEGATE_WORKFLOW_LOCK_FD"
 KILL_SUPERVISOR_WAIT_SECONDS = 5.0
 KILL_SUPERVISOR_FORCE_WAIT_SECONDS = 2.0
-_MISSING = object()
+
+
+class _MissingType:
+    """Sentinel type: an adopted-run lookup found nothing definitive."""
+
+    __slots__ = ()
+
+
+_MISSING = _MissingType()
 
 
 class BudgetExceeded(RuntimeError):
@@ -89,12 +96,12 @@ class WorkflowState:
     script_path: Path
     config: JsonObject
     cli_argv: list[str]
-    args: Any
+    args: JsonValue
     budget: Budget
     dry_run: bool = False
     depth: int = 0
     namespace: str = "root"
-    replay: dict[str, Any] = field(default_factory=dict)
+    replay: dict[str, JsonValue] = field(default_factory=dict)
     replay_keys: set[str] = field(default_factory=set)
     started_without_result: set[str] = field(default_factory=set)
     claimed_keys: set[str] = field(default_factory=set)
@@ -103,14 +110,13 @@ class WorkflowState:
     scope_lock: threading.Lock = field(default_factory=threading.Lock)
     lifetime_lock: threading.Lock = field(default_factory=threading.Lock)
     lifetime_counter: list[int] = field(default_factory=lambda: [0])
-    gate_lock: threading.Lock = field(default_factory=threading.Lock)
-    gate_state: dict[str, Any] = field(
+    gate_state: dict[str, bool | int] = field(
         default_factory=lambda: {"stop_admitting": False, "in_flight_agents": 0}
     )
     gate_condition: threading.Condition = field(
         default_factory=lambda: threading.Condition(threading.Lock())
     )
-    dry_runs: list[dict[str, Any]] = field(default_factory=list)
+    dry_runs: list[JsonObject] = field(default_factory=list)
     dry_run_budget_spent: int = 0
     supervisor_token: str = field(default_factory=lambda: os.urandom(8).hex())
 
@@ -147,7 +153,7 @@ class WorkflowState:
         # the journal, never lead it.
         self.budget.reconcile_spent(len(self.claimed_keys))
 
-    def append_event(self, event_type: str, **payload: Any) -> dict[str, Any]:
+    def append_event(self, event_type: str, **payload: JsonValue) -> JsonObject:
         with self.journal_lock:
             status = registry.read_json(self.status_path)
             last_seq = status.get("lastSeq") if isinstance(status, dict) else None
@@ -168,7 +174,7 @@ class WorkflowState:
         self,
         *,
         status: str,
-        last_event: dict[str, Any] | None = None,
+        last_event: JsonObject | None = None,
         extra: JsonObject | None = None,
     ) -> None:
         effective_status = "dry_run" if self.dry_run else status
@@ -197,7 +203,7 @@ class WorkflowState:
             payload.update(extra)
         registry.write_status(self.root, payload)
 
-    def write_status(self, status: str, **extra: Any) -> None:
+    def write_status(self, status: str, **extra: JsonValue) -> None:
         with self.journal_lock:
             self._write_status_locked(status=status, extra=extra)
 
@@ -293,7 +299,7 @@ def _global_agent_cap() -> int:
     return min(16, max(2, cpus - 2))
 
 
-def _workflow_config(config: JsonObject) -> dict[str, Any]:
+def _workflow_config(config: JsonObject) -> JsonObject:
     value = config.get("workflows")
     return value if isinstance(value, dict) else {}
 
@@ -330,12 +336,12 @@ def _structured_retries(config: JsonObject) -> int:
     return DEFAULT_STRUCTURED_RETRIES
 
 
-def execute_workflow(state: WorkflowState) -> Any:
+def execute_workflow(state: WorkflowState) -> object:
     source = state.script_path.read_text(encoding="utf-8")
     code = workflow_script.compile_workflow(source, filename=str(state.script_path))
     meta = workflow_script.parse_meta(source, filename=str(state.script_path))
     dsl = WorkflowDsl(state, meta)
-    globals_dict: dict[str, Any] = {
+    globals_dict: dict[str, object] = {
         "agent": dsl.agent,
         "pipeline": dsl.pipeline,
         "parallel": dsl.parallel,
@@ -351,7 +357,7 @@ def execute_workflow(state: WorkflowState) -> Any:
 
 
 class WorkflowDsl:
-    def __init__(self, state: WorkflowState, meta: dict[str, Any]) -> None:
+    def __init__(self, state: WorkflowState, meta: workflow_script.WorkflowMeta) -> None:
         self.state = state
         self.meta = meta
         defaults = meta.get("defaults")
@@ -365,7 +371,9 @@ class WorkflowDsl:
     def log(self, message: object) -> None:
         self.state.append_event("log", message=str(message))
 
-    def pipeline(self, items: list[Any], *stages: Callable[[Any, Any, int], Any]) -> list[Any]:
+    def pipeline(
+        self, items: list[object], *stages: Callable[[object, object, int], object]
+    ) -> list[object]:
         if not isinstance(items, list):
             raise TypeError("pipeline() expects an array")
         if len(items) > workflow_script.ITEM_LIMIT:
@@ -373,12 +381,12 @@ class WorkflowDsl:
         if any(not callable(stage) for stage in stages):
             raise TypeError("pipeline() stages must be functions")
         base_scope = self.state.next_child_scope("pipeline")
-        results: list[Any] = [None] * len(items)
+        results: list[object] = [None] * len(items)
         threads: list[threading.Thread] = []
         bypass_item_cap = self.state.inside_item_thread()
         gate_errors: list[GateExit] = []
 
-        def run_item(index: int, item: Any, pre_acquired: bool) -> None:
+        def run_item(index: int, item: object, pre_acquired: bool) -> None:
             # Nested primitives bypass the item-thread cap so an outer callback
             # cannot hold every slot while waiting for its child item threads.
             with self.state.item_slot(bypass=bypass_item_cap, pre_acquired=pre_acquired):
@@ -439,7 +447,7 @@ class WorkflowDsl:
             raise GateExit("workflow gate is closed to new agent calls")
         return results
 
-    def parallel(self, thunks: list[Callable[[], Any]]) -> list[Any]:
+    def parallel(self, thunks: list[Callable[[], object]]) -> list[object]:
         if not isinstance(thunks, list):
             raise TypeError("parallel() expects an array")
         if len(thunks) > workflow_script.ITEM_LIMIT:
@@ -447,12 +455,12 @@ class WorkflowDsl:
         if any(not callable(thunk) for thunk in thunks):
             raise TypeError("parallel() items must be functions")
         base_scope = self.state.next_child_scope("parallel")
-        results: list[Any] = [None] * len(thunks)
+        results: list[object] = [None] * len(thunks)
         threads: list[threading.Thread] = []
         bypass_item_cap = self.state.inside_item_thread()
         gate_errors: list[GateExit] = []
 
-        def run_thunk(index: int, thunk: Callable[[], Any], pre_acquired: bool) -> None:
+        def run_thunk(index: int, thunk: Callable[[], object], pre_acquired: bool) -> None:
             with (
                 self.state.item_slot(bypass=bypass_item_cap, pre_acquired=pre_acquired),
                 self.state.scope(f"{base_scope}/thunk#{index}"),
@@ -503,9 +511,9 @@ class WorkflowDsl:
     def judges(
         self,
         prompt: str,
-        schema: dict[str, Any],
-        engines: list[Any] | None = None,
-    ) -> list[Any]:
+        schema: JsonObject,
+        engines: list[str | JsonObject] | None = None,
+    ) -> list[object]:
         selected = engines or ["codex"]
         thunks = []
         for item in selected:
@@ -522,7 +530,9 @@ class WorkflowDsl:
             )
         return self.parallel(thunks)
 
-    def workflow(self, name_or_path: str, args: Any = None, gate: bool | str = False) -> Any:
+    def workflow(
+        self, name_or_path: str, args: JsonValue = None, gate: bool | str = False
+    ) -> object:
         if self.state.depth >= 3:
             raise RuntimeError("workflow nesting depth exceeded 3")
         child_path = resolve_workflow_reference(name_or_path, self.state.script_path.parent)
@@ -588,7 +598,7 @@ class WorkflowDsl:
         mode: str | None = None,
         model: str | None = None,
         effort: str | None = None,
-        schema: dict[str, Any] | None = None,
+        schema: JsonObject | None = None,
         label: str | None = None,
         phase: str | None = None,
         isolation: str | None = None,
@@ -596,7 +606,7 @@ class WorkflowDsl:
         timeout: int | float | None = None,
         retries: int | None = None,
         fast: bool | None = None,
-    ) -> Any:
+    ) -> JsonValue:
         if not isinstance(prompt, str):
             prompt = str(prompt)
         engines = _engine_chain(engine or self.defaults.get("engine") or DEFAULT_ENGINE)
@@ -788,10 +798,10 @@ class WorkflowDsl:
         scope: str,
         label: str | None,
         phase: str | None,
-        schema: dict[str, Any] | None,
+        schema: JsonObject | None,
         prefer_assistant: bool,
         timeout: int | float | None,
-    ) -> Any:
+    ) -> JsonValue | _MissingType:
         run_id = _find_workflow_agent_run(self.state.workspace, self.state.wf_id, key)
         if run_id is None:
             return _MISSING
@@ -813,7 +823,7 @@ class WorkflowDsl:
             # Failed/cancelled/unparseable children are not definitive — respawn.
             return _MISSING
         if schema is None:
-            result: Any = text
+            result: JsonValue = text
         else:
             try:
                 value = workflow_schema.parse_json_tolerant(text)
@@ -851,12 +861,12 @@ class WorkflowDsl:
         model: str | None,
         effort: str | None,
         fast: bool | None,
-        schema: dict[str, Any] | None,
+        schema: JsonObject | None,
         isolation: str | None,
         passthrough: bool,
         timeout: int | float | None,
         retries: int | None,
-    ) -> Any:
+    ) -> JsonValue:
         if engine not in KNOWN_ENGINES:
             raise ValueError(f"engine must be one of {', '.join(KNOWN_ENGINES)}")
         if mode == MODE_SAFE and passthrough and engine in PROMPT_ENFORCED_SAFE_ENGINES:
@@ -911,13 +921,13 @@ class WorkflowDsl:
         model: str | None,
         effort: str | None,
         fast: bool | None,
-        schema: dict[str, Any] | None,
+        schema: JsonObject | None,
         isolation: str | None,
         passthrough: bool,
         timeout: int | float | None,
         retries: int | None,
         key: str,
-    ) -> Any:
+    ) -> JsonValue:
         if schema is None:
             return self._run_delegate(
                 engine,
@@ -1123,9 +1133,7 @@ def _terminate_process_group(process: subprocess.Popen[bytes], sig: signal.Signa
         os.killpg(os.getpgid(process.pid), sig)
 
 
-def _structured_prompt(
-    prompt: str, schema: dict[str, Any], prior_output: str, prior_error: str
-) -> str:
+def _structured_prompt(prompt: str, schema: JsonObject, prior_output: str, prior_error: str) -> str:
     parts = [
         prompt,
         "",
@@ -1162,7 +1170,7 @@ def _correction_prompt(prompt: str, prior_output: str, prior_error: str) -> str:
     )
 
 
-def _parse_engine_spec(value: Any) -> tuple[str, str | None]:
+def _parse_engine_spec(value: object) -> tuple[str, str | None]:
     if isinstance(value, dict):
         return str(value.get("engine", DEFAULT_ENGINE)), value.get("model")
     if isinstance(value, str):
@@ -1181,7 +1189,7 @@ def _engine_chain(value: object) -> list[str]:
     return [DEFAULT_ENGINE]
 
 
-def _agent_key(scope_path: str, prompt: str, opts: dict[str, Any]) -> str:
+def _agent_key(scope_path: str, prompt: str, opts: JsonObject) -> str:
     canonical_opts = _canonical_json(opts)
     return _stable_hash(f"v1:{scope_path}{prompt}{canonical_opts}")
 
@@ -1190,11 +1198,11 @@ def _stable_hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def _canonical_json(value: Any) -> str:
+def _canonical_json(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
 
-def _gate_failed(result: Any) -> bool:
+def _gate_failed(result: object) -> bool:
     return result is None or (isinstance(result, dict) and result.get("ok") is False)
 
 
@@ -1235,7 +1243,7 @@ def resolve_workflow_reference(name_or_path: str, parent_script_dir: Path) -> Pa
     )
 
 
-def load_args(root: Path) -> Any:
+def load_args(root: Path) -> JsonValue:
     payload = registry.read_json(root / registry.ARGS_FILE)
     if not isinstance(payload, dict):
         return None
@@ -1360,14 +1368,14 @@ def _workflow_agent_run_result(
     return ""
 
 
-def _live_child_completion_report(result: dict[str, Any], workspace: Path) -> str | None:
+def _live_child_completion_report(result: JsonObject, workspace: Path) -> str | None:
     if result.get("completionReportSource") != "child":
         return None
     report_path = result.get("completionReportPath")
     return _read_completion_report(report_path, workspace)
 
 
-def _snapshot_child_completion_report(snapshot: dict[str, Any], workspace: Path) -> str | None:
+def _snapshot_child_completion_report(snapshot: JsonObject, workspace: Path) -> str | None:
     if snapshot.get("completionReportSource") != "child":
         return None
     completion = snapshot.get("completionReport")
@@ -1422,7 +1430,7 @@ def run_supervisor(
         status = registry.read_json(root / registry.STATUS_FILE) or {}
         script_path = root / registry.SCRIPT_FILE
         args = load_args(root)
-        budget_payload = status.get("budget") if isinstance(status, dict) else None
+        budget_payload = status.get("budget")
         total = budget_payload.get("total") if isinstance(budget_payload, dict) else None
         spent = budget_payload.get("spent") if isinstance(budget_payload, dict) else None
         total_budget = total if isinstance(total, int) else None

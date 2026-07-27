@@ -835,13 +835,9 @@ def safe_isolated_request(request: Request) -> Iterator[Request]:
     """
     ctx = request.isolation_context
     effective = ctx.effective_isolation if ctx is not None else None
-
-    # No isolation needed.
     if effective != "worktree":
         yield request
         return
-
-    # Isolation is worktree — create temp workspace.
     isolation_mode = ctx.isolation_mode if ctx is not None else "auto"
     source_git_root = request.workspace if request.workspace_kind == "git" else None
     cleanup_git_root: str | None = None

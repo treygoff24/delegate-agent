@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import copy
-from typing import Any
+
+from delegate_agent.json_types import JsonObject
 
 
 class SchemaPreflightError(ValueError):
     pass
 
 
-def normalize_codex_schema(schema: object) -> tuple[dict[str, Any], tuple[str, ...]]:
+def normalize_codex_schema(schema: object) -> tuple[JsonObject, tuple[str, ...]]:
     if not isinstance(schema, dict):
         raise SchemaPreflightError("schema must be a JSON object.")
     # Codex strict output requires an object-typed root; catch the explicit
@@ -26,7 +27,7 @@ def normalize_codex_schema(schema: object) -> tuple[dict[str, Any], tuple[str, .
     return normalized, tuple(injected)
 
 
-def _is_object_node(schema: dict[str, Any]) -> bool:
+def _is_object_node(schema: JsonObject) -> bool:
     schema_type = schema.get("type")
     return (
         schema_type == "object"
@@ -36,7 +37,7 @@ def _is_object_node(schema: dict[str, Any]) -> bool:
     )
 
 
-def _resolve_local_ref(root: dict[str, Any], ref: object, path: str) -> tuple[dict[str, Any], str]:
+def _resolve_local_ref(root: JsonObject, ref: object, path: str) -> tuple[JsonObject, str]:
     if not isinstance(ref, str) or not ref.startswith("#"):
         raise SchemaPreflightError(
             f"{path} external $ref values are unsupported by Codex strict output."
@@ -63,16 +64,16 @@ def _resolve_local_ref(root: dict[str, Any], ref: object, path: str) -> tuple[di
 
 
 def _normalize_node(
-    schema: dict[str, Any],
+    schema: JsonObject,
     path: str,
     injected: list[str],
-    root: dict[str, Any],
+    root: JsonObject,
     seen: set[int],
 ) -> None:
     if id(schema) in seen:
         return
     seen.add(id(schema))
-    ref_target: tuple[dict[str, Any], str] | None = None
+    ref_target: tuple[JsonObject, str] | None = None
     if "$ref" in schema:
         ref_target = _resolve_local_ref(root, schema["$ref"], f"{path}.$ref")
     if "patternProperties" in schema:

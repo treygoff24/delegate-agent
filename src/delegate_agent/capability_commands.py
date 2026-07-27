@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
@@ -139,7 +138,7 @@ def _refresh_payload(
     *,
     profile: profiles.ProfileResolution,
     engines: tuple[str, ...] | None = None,
-    progress: Callable[[str], None] | None = None,
+    progress: harness_discovery.ProgressCallback | None = None,
 ) -> JsonObject:
     try:
         result = harness_discovery.refresh_discovery(

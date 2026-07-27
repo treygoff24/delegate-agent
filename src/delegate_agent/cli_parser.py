@@ -32,10 +32,9 @@ from delegate_agent.constants import (
     ENGINES_PROSE,
     KNOWN_ENGINES,
     MODELESS_ENGINES,
-    PURE_CALL_ENGINES,
     VALID_MODES,
-    pure_call_supported,
     validate_mode,
+    validate_pure_call,
 )
 from delegate_agent.errors import DelegateError
 from delegate_agent.request_models import (
@@ -645,10 +644,6 @@ def corrected_global_argv(argv: list[str]) -> list[str]:
         rest.append(token)
         i += 1
     return [*globals_out, *rest]
-
-
-def corrected_global_command(argv: list[str]) -> str:
-    return _shell_command(corrected_global_argv(argv))
 
 
 def raise_misplaced_global_option(message: str, argv: list[str] | None = None) -> NoReturn:
@@ -1320,22 +1315,7 @@ def _validate_pure_options(
         return
     if mode != "call":
         raise DelegateError("unsupported_pure_call", "--pure only applies to call mode.")
-    if group is not None:
-        raise DelegateError(
-            "pure_conflicts_group",
-            "--pure cannot be combined with --group; pure call is a stateless one-hop completion.",
-        )
-    if read_only:
-        raise DelegateError(
-            "pure_conflicts_read_only", "--pure cannot be combined with --read-only."
-        )
-    if not pure_call_supported(engine):
-        supported = ", ".join(PURE_CALL_ENGINES)
-        raise DelegateError(
-            "unsupported_pure_call",
-            f"{engine} does not support pure call mode.",
-            next_actions=[f"Use --pure with one of: {supported}."],
-        )
+    validate_pure_call(engine, pure=pure, read_only=read_only, group=group)
 
 
 def parse_snapshot(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
@@ -1982,6 +1962,10 @@ def _require_option_value(rest: list[str], index: int, option: str) -> str:
 
 WorktreeOptionSpec = tuple[str, str]
 
+# Parsed worktree option values: flags store True, "str"/"group"/"status" kinds
+# store the validated string, and the int kinds store a parsed int.
+WorktreeOptionValue = str | int | bool
+
 WORKTREE_OPTION_SPECS: dict[str, dict[str, WorktreeOptionSpec]] = {
     "list": {
         "--harness": ("str", "harness"),
@@ -2020,7 +2004,7 @@ WORKTREE_OPTION_SPECS: dict[str, dict[str, WorktreeOptionSpec]] = {
 
 
 def _apply_worktree_option(
-    options: dict[str, object],
+    options: dict[str, WorktreeOptionValue],
     args: list[str],
     index: int,
     option: str,
@@ -2069,7 +2053,7 @@ def parse_worktree(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedC
         return help_command(json_mode, topic)
     if action not in WORKTREE_OPTION_SPECS:
         raise DelegateError("unknown_worktree_action", f"Unknown worktree action: {action}")
-    options: dict[str, object] = {}
+    options: dict[str, WorktreeOptionValue] = {}
     positional: list[str] = []
     i = 0
     action_specs = WORKTREE_OPTION_SPECS[action]

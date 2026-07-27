@@ -40,20 +40,14 @@ from delegate_agent import runner as delegate_runner
 from delegate_agent.argv_builders import (  # noqa: F401  # re-exported for tests / back-compat
     SAFE_REVIEW_PREFIX_BY_ENGINE,
     _claude_harness_bypass_enabled,
-    _grok_harness_bypass_enabled,
     build_claude_argv,
     build_codex_argv,
     build_cursor_argv,
     build_devin_argv,
     build_droid_argv,
     build_grok_argv,
-    build_kimi_argv,
     build_omp_argv,
-    build_opencode_argv,
-    build_pi_argv,
     prefix_cursor_safe_prompt,
-    prefix_droid_safe_prompt,
-    redacted_prompt_argv,
 )
 from delegate_agent.argv_utils import public_argv
 from delegate_agent.cli_parser import (  # noqa: F401  # re-exported for tests / back-compat
@@ -98,7 +92,6 @@ from delegate_agent.prompt_transport import (  # noqa: F401  # CURSOR_PROMPT_RED
     DEVIN_AGENT_CONFIG_DISPLAY,
     DROID_PROMPT_FILE_ARG_PLACEHOLDER,
     DROID_PROMPT_FILE_DISPLAY,
-    KIMI_PROMPT_REDACTION,
     PROMPT_FILE_ARG_PLACEHOLDER,
     PROMPT_FILE_DISPLAY,
     PROMPT_TRANSPORT_ARGV,
@@ -109,7 +102,6 @@ from delegate_agent.request_build import (  # noqa: F401  # re-exported for test
     CALL_TEMP_CWD_PLACEHOLDER,
     RUN_INPUT_KEYS,
     _load_input_json_object,
-    _resolve_default_model,
     build_request,
     effective_prompt,
     load_config,
@@ -136,7 +128,6 @@ from delegate_agent.safe_workspace import (  # noqa: F401  # re-exported for tes
     SAFE_BLOCKED_SYMLINK_PLACEHOLDER,
     SAFE_EXTERNAL_SYMLINK_WARNING_PREFIX,
     SAFE_UNBORN_GIT_WARNING,
-    block_external_symlinks,
     cleanup_safe_isolated_workspace,
     create_directory_safe_workspace,
     create_git_safe_workspace,
@@ -332,7 +323,6 @@ def dry_run_payload(request: Request) -> JsonObject:
     if request.profile_resolution.name is not None:
         payload["profileEnv"] = redaction.redact_env_map(request.profile_resolution.env)
 
-    # Structured isolation fields from the isolation context.
     if request.isolation_context is not None:
         ctx = request.isolation_context
 
@@ -515,7 +505,6 @@ def make_run_context(
         if request.isolation_context is not None
         else False
     )
-    # Extract isolation metadata from the isolation context.
     iso_ctx = request.isolation_context
     if iso_ctx is not None:
         isolation_mode = iso_ctx.isolation_mode
@@ -860,7 +849,7 @@ def execute_request(
         profiles.preflight_codex_request(request, config.get("codex", {}))
     ctx = request.isolation_context
 
-    # --- Persistent worktree path (work + worktree) ---
+    # Persistent worktree runs (work + worktree) hand off to worktree_execution.
     if ctx is not None and ctx.isolation_lifecycle == "persistent":
         try:
             return worktree_execution.execute_persistent_worktree(
@@ -1022,7 +1011,6 @@ def pre_read_run_json_for_config(
     if json_cwd is not None and not isinstance(json_cwd, str):
         raise DelegateError("invalid_cwd", "cwd must be a string.")
 
-    # Reject explicit null isolation in the JSON pre-read.
     if "isolation" in raw and raw["isolation"] is None:
         raise DelegateError(
             "invalid_isolation",
@@ -1280,8 +1268,8 @@ def main(
             DelegateError(
                 exc.error,
                 exc.message,
-                diagnostics=getattr(exc, "diagnostics", None),
-                next_actions=getattr(exc, "next_actions", None),
+                diagnostics=exc.diagnostics,
+                next_actions=exc.next_actions,
             ),
             json_mode,
             stdout,

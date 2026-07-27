@@ -6,7 +6,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-JsonObject = dict[str, Any]
+from delegate_agent.json_types import JsonObject
+
 GitRunner = Callable[..., subprocess.CompletedProcess[str]]
 
 

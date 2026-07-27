@@ -59,10 +59,9 @@ from delegate_agent.constants import (
     PROMPT_ENFORCED_SAFE_ENGINES,
     PROMPT_INSTRUCTION_MODE_SLASH,
     PROMPT_INSTRUCTION_MODE_WRAPPED,
-    PURE_CALL_ENGINES,
     SAFE_REVIEW_PREFIX_INJECTED_HERE_ENGINES,
-    pure_call_supported,
     validate_mode,
+    validate_pure_call,
 )
 from delegate_agent.errors import DelegateError
 from delegate_agent.git_utils import GIT_QUICK_TIMEOUT_SECONDS, capture_git_metadata
@@ -70,21 +69,18 @@ from delegate_agent.git_utils import run_git as _run_git
 from delegate_agent.isolation import IsolationContext, build_isolation_context
 from delegate_agent.json_types import JsonObject, JsonValue
 from delegate_agent.prompt_transport import (
-    DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
-    DEVIN_AGENT_CONFIG_DISPLAY,
-    DROID_PROMPT_FILE_ARG_PLACEHOLDER,
-    DROID_PROMPT_FILE_DISPLAY,
     KIMI_PROMPT_REDACTION,
     OMP_PROMPT_REDACTION,
-    PROMPT_FILE_ARG_PLACEHOLDER,
-    PROMPT_FILE_DISPLAY,
     PROMPT_TRANSPORT_ARGV,
     PROMPT_TRANSPORT_FILE,
     PROMPT_TRANSPORT_STDIN,
+    devin_display_argv,
+    prompt_file_display_argv,
 )
 from delegate_agent.request_models import (
     EngineBuildInput,
     EngineRequestParts,
+    GlobalOptions,
     LaunchOptions,
     ParsedCommand,
     Request,
@@ -656,7 +652,7 @@ def _apply_forbid_commit_isolation_implication(
     return json_isolation, None, False
 
 
-def _droid_models_map(config: JsonObject) -> dict:
+def _droid_models_map(config: JsonObject) -> JsonObject:
     # config validation treats a null/absent models map as empty for every
     # engine; mirror that here so droid never crashes on `"models": null`.
     models = config["droid"].get("models")
@@ -1103,17 +1099,17 @@ def _call_workspace(dry_run: bool) -> tuple[ResolvedWorkspace, bool]:
     return ResolvedWorkspace(temp_dir, "directory"), True
 
 
-def _validate_call_cli_options(global_options: object, launch: object) -> None:
-    cwd = getattr(global_options, "cwd", None)
-    isolation = getattr(global_options, "isolation", None)
-    pass_through = getattr(global_options, "pass_through", False)
-    completion_report = getattr(global_options, "completion_report", None)
-    progress_intent = getattr(launch, "progress_intent", None)
-    forbid_commit = getattr(launch, "forbid_commit", False)
-    include_dirty = getattr(launch, "include_dirty", False)
-    pure = getattr(launch, "pure", False)
-    read_only = getattr(launch, "read_only", False)
-    group = getattr(global_options, "group", None)
+def _validate_call_cli_options(global_options: GlobalOptions, launch: LaunchOptions) -> None:
+    cwd = global_options.cwd
+    isolation = global_options.isolation
+    pass_through = global_options.pass_through
+    completion_report = global_options.completion_report
+    progress_intent = launch.progress_intent
+    forbid_commit = launch.forbid_commit
+    include_dirty = launch.include_dirty
+    pure = launch.pure
+    read_only = launch.read_only
+    group = global_options.group
     # Grouped call runs may take --cwd so the run registers in the invocation
     # workspace registry; ungrouped call still rejects --cwd.
     if cwd is not None and group is None:
@@ -1144,59 +1140,33 @@ def _validate_call_cli_options(global_options: object, launch: object) -> None:
             "invalid_option_combination",
             "--include-dirty requires work mode with persistent worktree isolation.",
         )
-    _validate_pure_call(
-        getattr(launch, "engine", ""),
+    validate_pure_call(
+        launch.engine,
         pure=pure,
         read_only=read_only,
         group=group,
     )
 
 
-def _validate_pure_call(
-    engine: str, *, pure: bool, read_only: bool, group: str | None = None
-) -> None:
-    if not pure:
-        return
-    if group is not None:
-        raise DelegateError(
-            "pure_conflicts_group",
-            "--pure cannot be combined with --group; pure call is a stateless one-hop completion.",
-        )
-    if read_only:
-        raise DelegateError(
-            "pure_conflicts_read_only", "--pure cannot be combined with --read-only."
-        )
-    if not pure_call_supported(engine):
-        supported = ", ".join(PURE_CALL_ENGINES)
-        raise DelegateError(
-            "unsupported_pure_call",
-            f"{engine} does not support pure call mode.",
-            next_actions=[f"Use --pure with one of: {supported}."],
-        )
-
-
 def _validate_call_input_json_options(
-    global_options: object,
+    global_options: GlobalOptions,
     raw: JsonObject,
     *,
     raw_progress_intent: ProgressIntent,
     raw_forbid_commit: bool,
     raw_include_dirty: bool,
 ) -> None:
-    group = getattr(global_options, "group", None)
-    if getattr(global_options, "cwd", None) is not None and group is None:
+    group = global_options.group
+    if global_options.cwd is not None and group is None:
         raise DelegateError("invalid_option_combination", "call mode does not use --cwd.")
-    if getattr(global_options, "isolation", None) is not None:
+    if global_options.isolation is not None:
         raise DelegateError("invalid_option_combination", "call mode does not use --isolation.")
-    if getattr(global_options, "pass_through", False):
+    if global_options.pass_through:
         raise DelegateError(
             "invalid_option_combination",
             "--pass-through is not supported with call mode; call already returns synchronously.",
         )
-    if (
-        getattr(global_options, "completion_report", None)
-        == delegate_config.COMPLETION_REPORT_MODE_MARKDOWN
-    ):
+    if global_options.completion_report == delegate_config.COMPLETION_REPORT_MODE_MARKDOWN:
         raise DelegateError(
             "invalid_option_combination",
             "--completion-report is not supported with call mode.",
@@ -1259,8 +1229,8 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
     _validate_agent_option(launch.engine, launch.agent)
     if launch.mode == MODE_CALL:
         _validate_call_cli_options(global_options, launch)
-        read_only = getattr(launch, "read_only", False)
-        pure = getattr(launch, "pure", False)
+        read_only = launch.read_only
+        pure = launch.pure
         if launch.engine == "droid":
             _reject_droid_model_conflict(launch.model_alias, launch.model)
             if launch.model_alias is not None:
@@ -1306,12 +1276,12 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
             if cleanup_workspace:
                 shutil.rmtree(workspace.path, ignore_errors=True)
             raise
-    if getattr(launch, "read_only", False):
+    if launch.read_only:
         raise DelegateError(
             "invalid_option_combination",
             "--read-only only applies to call mode.",
         )
-    if getattr(launch, "pure", False):
+    if launch.pure:
         raise DelegateError("unsupported_pure_call", "--pure only applies to call mode.")
     effective_progress = resolve_effective_progress(launch.progress_intent, config)
     if effective_progress and global_options.pass_through:
@@ -1330,7 +1300,6 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         workspace.path
     )
 
-    # Resolve effective isolation and build isolation context.
     try:
         effective_isolation = delegate_config.resolve_isolation(
             cli_value=global_options.isolation,
@@ -1348,7 +1317,7 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
             effective=effective_isolation,
         )
     )
-    if getattr(launch, "forbid_commit_implied_isolation", False):
+    if launch.forbid_commit_implied_isolation:
         isolation_warnings.append(_forbid_commit_implied_isolation_note())
 
     isolation_context = build_isolation_context(
@@ -1816,7 +1785,7 @@ def build_request(
     if pure:
         if mode != MODE_CALL:
             raise DelegateError("unsupported_pure_call", "--pure only applies to call mode.")
-        _validate_pure_call(engine, pure=True, read_only=call_read_only, group=group)
+        validate_pure_call(engine, pure=True, read_only=call_read_only, group=group)
     if timeout is not None and timeout <= 0:
         raise DelegateError("invalid_timeout", "timeout must be a positive integer.")
 
@@ -2020,7 +1989,6 @@ def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
                 harness="cursor",
                 model=model,
                 effort=build.requested_effort,
-                supported_efforts=tuple(sorted(discovered_routes)),
                 default_effort=None,
                 transport=reasoning.TRANSPORT_CURSOR_MODEL_SELECTION,
                 source="discovery",
@@ -2142,10 +2110,7 @@ def _droid_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         call_read_only=build.call_read_only,
         pure=build.pure,
     )
-    display_argv = [
-        DROID_PROMPT_FILE_DISPLAY if item == DROID_PROMPT_FILE_ARG_PLACEHOLDER else item
-        for item in argv
-    ]
+    display_argv = prompt_file_display_argv(argv)
     return EngineRequestParts(
         model=model,
         argv=argv,
@@ -2187,7 +2152,6 @@ def _codex_request_parts(build: EngineBuildInput) -> EngineRequestParts:
             harness="codex",
             model="",
             effort=effort,
-            supported_efforts=CODEX_HARNESS_DEFAULT_REASONING_EFFORTS,
             default_effort=None,
             transport=reasoning.TRANSPORT_BY_HARNESS["codex"],
             source="harness-default",
@@ -2332,9 +2296,7 @@ def _grok_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         call_read_only=build.call_read_only,
         pure=build.pure,
     )
-    display_argv = [
-        PROMPT_FILE_DISPLAY if item == PROMPT_FILE_ARG_PLACEHOLDER else item for item in argv
-    ]
+    display_argv = prompt_file_display_argv(argv)
     return EngineRequestParts(
         model=model,
         argv=argv,
@@ -2372,14 +2334,7 @@ def _devin_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         call_read_only=build.call_read_only,
         pure=build.pure,
     )
-    display_argv = [
-        DEVIN_AGENT_CONFIG_DISPLAY
-        if item == DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER
-        else PROMPT_FILE_DISPLAY
-        if item == PROMPT_FILE_ARG_PLACEHOLDER
-        else item
-        for item in argv
-    ]
+    display_argv = devin_display_argv(argv)
     read_only = build.mode == MODE_SAFE or (build.mode == MODE_CALL and build.call_read_only)
     return EngineRequestParts(
         model=model,
@@ -2449,7 +2404,6 @@ def _opencode_request_parts(build: EngineBuildInput) -> EngineRequestParts:
             harness="opencode",
             model=capability_model or "",
             effort=variant,
-            supported_efforts=(variant,),
             default_effort=None,
             transport=reasoning.TRANSPORT_OPENCODE_VARIANT_FLAG,
             source="alias",
@@ -2529,7 +2483,6 @@ def _pi_request_parts(build: EngineBuildInput) -> EngineRequestParts:
             harness="pi",
             model=capability_model or "",
             effort=thinking,
-            supported_efforts=reasoning.PI_THINKING_LEVELS,
             default_effort=None,
             transport=reasoning.TRANSPORT_PI_THINKING_FLAG,
             source="alias",
@@ -2600,7 +2553,6 @@ def _omp_request_parts(build: EngineBuildInput) -> EngineRequestParts:
             harness="omp",
             model=capability_model or "",
             effort=thinking,
-            supported_efforts=reasoning.PI_THINKING_LEVELS,
             default_effort=None,
             transport=reasoning.TRANSPORT_PI_THINKING_FLAG,
             source="alias",
@@ -2970,7 +2922,6 @@ def resolve_cursor_reasoning_capability(
         harness="cursor",
         model=model,
         effort=requested_effort,
-        supported_efforts=(requested_effort,),
         default_effort=None,
         transport=reasoning.TRANSPORT_BY_HARNESS["cursor"],
         source="config",

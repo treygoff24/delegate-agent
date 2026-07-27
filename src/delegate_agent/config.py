@@ -821,11 +821,9 @@ def _reject_opencode_flag_like_value(
 def _reject_pi_family_flag_like_value(value: JsonValue, *, path: str, error: str) -> None:
     if value is None:
         return
-    if not isinstance(value, str) or not value.strip() or value.startswith("-"):
-        raise ConfigError(
-            error,
-            f"{path} must be a non-empty string that does not start with '-'.",
-        )
+    _reject_opencode_flag_like_value(value, path=path, error=error)
+    if not isinstance(value, str):
+        return
     if ":" in value:
         raise ConfigError(
             error,

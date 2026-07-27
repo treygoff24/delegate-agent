@@ -811,8 +811,6 @@ from delegate_agent.run_status import (  # noqa: E402, F401  # re-exported
     LARGE_LOG_WARN_MIB,
     STATUS_CANCELLED,
     STATUS_FAILED,
-    STATUS_FILTER_ACTIVE,
-    STATUS_FILTER_RECENT,
     STATUS_FILTER_RUNNING,
     STATUS_FILTER_STALE,
     STATUS_RUNNING,

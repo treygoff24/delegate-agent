@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping, Sequence
 
-from delegate_agent.json_types import JsonValue
+from delegate_agent.json_types import JsonObject, JsonValue
 
 SLACK_WEBHOOK_SCHEME = "https"
 URL_SCHEME_SEPARATOR = "://"
@@ -197,7 +197,7 @@ def redact_mapping_value(key: str, value: JsonValue) -> JsonValue:
     return redact_value(value)
 
 
-def redact_env_map(mapping: Mapping[str, str]) -> dict[str, JsonValue]:
+def redact_env_map(mapping: Mapping[str, str]) -> JsonObject:
     return {key: redact_mapping_value(key, value) for key, value in mapping.items()}
 
 
@@ -243,7 +243,7 @@ def redact_value(value: JsonValue) -> JsonValue:
     return value
 
 
-def scrub_public_projection(value: dict[str, JsonValue]) -> dict[str, JsonValue]:
+def scrub_public_projection(value: JsonObject) -> JsonObject:
     """Redact untrusted JSON keys and values without losing key collisions."""
     scrubbed = _scrub_public_value(value, preserve_paths=False)
     return scrubbed if isinstance(scrubbed, dict) else {}
@@ -251,7 +251,7 @@ def scrub_public_projection(value: dict[str, JsonValue]) -> dict[str, JsonValue]
 
 def _scrub_public_value(value: object, *, preserve_paths: bool) -> JsonValue:
     if isinstance(value, dict):
-        scrubbed: dict[str, JsonValue] = {}
+        scrubbed: JsonObject = {}
         for key, child in value.items():
             if not isinstance(key, str):
                 continue
@@ -276,7 +276,7 @@ def _scrub_public_value(value: object, *, preserve_paths: bool) -> JsonValue:
     return None
 
 
-def _collision_safe_key(projected: dict[str, JsonValue], key: str) -> str:
+def _collision_safe_key(projected: JsonObject, key: str) -> str:
     if key not in projected:
         return key
     collision = 2

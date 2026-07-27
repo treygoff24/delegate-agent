@@ -5,7 +5,6 @@ import textwrap
 from dataclasses import dataclass
 from pathlib import Path
 from types import CodeType
-from typing import Any
 
 from delegate_agent.constants import (
     KNOWN_ENGINES,
@@ -16,6 +15,11 @@ from delegate_agent.constants import (
 )
 from delegate_agent.workflows import schema as workflow_schema
 
+# Workflow ``meta`` blocks are user-authored dict literals parsed with
+# ast.literal_eval, so values are arbitrary Python literals; ``object`` keeps
+# consumers honest (they must isinstance-narrow before use).
+WorkflowMeta = dict[str, object]
+
 SCRIPT_SIZE_LIMIT = 512 * 1024
 ITEM_LIMIT = 4096
 LIFETIME_AGENT_LIMIT = 1000
@@ -23,7 +27,7 @@ LIFETIME_AGENT_LIMIT = 1000
 
 @dataclass(frozen=True)
 class CheckResult:
-    meta: dict[str, Any]
+    meta: WorkflowMeta
     warnings: tuple[str, ...]
 
 
@@ -62,7 +66,7 @@ def _workflow_body(tree: ast.Module) -> list[ast.stmt]:
     return list(function.body)
 
 
-def parse_meta(source: str, *, filename: str = "<workflow>") -> dict[str, Any]:
+def parse_meta(source: str, *, filename: str = "<workflow>") -> WorkflowMeta:
     tree = wrapped_tree(source, filename=filename)
     for stmt in _workflow_body(tree):
         value_node: ast.AST | None = None
@@ -169,7 +173,7 @@ def _validate_literal_schemas(tree: ast.AST) -> None:
                 raise WorkflowScriptError(f"invalid schema literal: {exc}") from exc
 
 
-def _validate_literal_agent_modes(tree: ast.AST, meta: dict[str, Any]) -> None:
+def _validate_literal_agent_modes(tree: ast.AST, meta: WorkflowMeta) -> None:
     defaults = meta.get("defaults") if isinstance(meta.get("defaults"), dict) else {}
     default_engine = defaults.get("engine") if isinstance(defaults, dict) else None
     default_mode = defaults.get("mode") if isinstance(defaults, dict) else None

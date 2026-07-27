@@ -459,10 +459,8 @@ class RetentionTests(unittest.TestCase):
             zero_day_config = {"tracking": {"retention": {"enabled": True, "rawLogDays": 0}}}
             result = self.retention.run_retention_pass(self.registry_root, zero_day_config)
 
-            # Assert raw logs were archived.
             self.assertEqual(result["archived"], 1)
 
-            # Assert the worktree directory under fake ~/.delegate/worktrees/ still exists.
             self.assertTrue(
                 worktree_root.exists(),
                 "Worktree directory should be preserved after retention pass",
@@ -472,7 +470,6 @@ class RetentionTests(unittest.TestCase):
                 "worktree content\n",
             )
 
-            # Assert the registry entry still has worktreeStatus: present.
             state_after = json.loads((run_path / "state.json").read_text(encoding="utf-8"))
             self.assertEqual(state_after.get("worktreeStatus"), "present")
 

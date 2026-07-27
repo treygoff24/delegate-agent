@@ -178,7 +178,6 @@ class ReasoningCapability:
     harness: str
     model: str
     effort: str
-    supported_efforts: tuple[str, ...]
     default_effort: str | None
     transport: str
     source: str
@@ -486,7 +485,6 @@ def resolve_reasoning_capability(
         harness=harness,
         model=model,
         effort=effort,
-        supported_efforts=supported,
         default_effort=_default_effort(declaration, supported),
         transport=TRANSPORT_BY_HARNESS[harness],
         source=source,
@@ -553,7 +551,6 @@ def _capability_from_declaration(
         harness=harness,
         model=model,
         effort=effort,
-        supported_efforts=supported,
         default_effort=_default_effort(declaration, supported),
         transport=transport,
         source=source,
@@ -682,7 +679,6 @@ def resolve_discovered_model_capability(
                     harness=harness,
                     model=model or "",
                     effort=effort,
-                    supported_efforts=(effort,),
                     default_effort=None,
                     transport=TRANSPORT_OPENCODE_VARIANT_FLAG,
                     source="pass-through",
@@ -759,7 +755,7 @@ def add_reasoning_payload_fields(payload: JsonObject, carrier: ReasoningPayloadC
     unsatisfied config-sourced default with a warning.
     """
     effort = carrier.reasoning_effort
-    requested = getattr(carrier, "requested_reasoning_effort", None)
+    requested = carrier.requested_reasoning_effort
     if requested is not None:
         payload["requestedReasoningEffort"] = requested
     elif effort is not None:
@@ -770,7 +766,7 @@ def add_reasoning_payload_fields(payload: JsonObject, carrier: ReasoningPayloadC
         payload["reasoningEffortSource"] = carrier.reasoning_effort_source
     if carrier.reasoning_capability_source is not None:
         payload["reasoningCapabilitySource"] = carrier.reasoning_capability_source
-    evidence = getattr(carrier, "reasoning_capability_evidence", None)
+    evidence = carrier.reasoning_capability_evidence
     if evidence is not None:
         payload["reasoningCapabilityEvidence"] = evidence
     if carrier.reasoning_transport is not None:
@@ -1497,31 +1493,6 @@ def parse_codex_models_payload(raw: JsonObject) -> JsonObject:
         target[slug] = declaration
     validate_cache_payload(parsed)
     return parsed
-
-
-def merge_reasoning_capability_cache(
-    existing: JsonObject | None,
-    refreshed: JsonObject,
-) -> JsonObject:
-    """Overlay refreshed harness declarations on the existing cache.
-
-    Inputs are already validated at their boundaries (parse_codex_models_payload
-    for refreshed data, load_reasoning_capability_cache for the existing file),
-    and write_reasoning_capability_cache validates the merged result.
-    """
-    harnesses: JsonObject = {}
-    if existing is not None:
-        existing_harnesses = existing.get("harnesses")
-        if isinstance(existing_harnesses, dict):
-            harnesses.update(existing_harnesses)
-    refreshed_harnesses = refreshed["harnesses"]
-    if not isinstance(refreshed_harnesses, dict):
-        raise ReasoningCapabilityError(
-            "capability_refresh_failed",
-            "refreshed reasoning cache must contain a harnesses object.",
-        )
-    harnesses.update(refreshed_harnesses)
-    return {"schema": 1, "harnesses": harnesses}
 
 
 def write_reasoning_capability_cache(workspace: str | Path, cache: JsonObject) -> Path:

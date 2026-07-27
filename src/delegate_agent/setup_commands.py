@@ -4,8 +4,9 @@ from pathlib import Path
 from typing import TextIO
 
 from delegate_agent import config as delegate_config
-from delegate_agent import harness_discovery, private_io, profiles, redaction, wsl
+from delegate_agent import harness_discovery, private_io, profiles, redaction
 from delegate_agent import rendering as delegate_rendering
+from delegate_agent.config_commands import target_config_path
 from delegate_agent.constants import BINARY_CONFIG_ENGINES, KNOWN_ENGINES, engine_modes
 from delegate_agent.describe_payload import models_summary_payload
 from delegate_agent.errors import EXIT_MISSING_BINARY, EXIT_OK, DelegateError
@@ -16,16 +17,6 @@ PUBLIC_VERSION_LIMIT = 256
 
 def _config_error(exc: delegate_config.ConfigError) -> DelegateError:
     return DelegateError(exc.error, exc.message)
-
-
-def _target_path() -> Path:
-    path = delegate_config.config_path()
-    if wsl.should_reject_windows_path(str(path)):
-        raise DelegateError(
-            "windows_path",
-            wsl.windows_path_message(delegate_config.CONFIG_ENV, str(path)),
-        )
-    return path
 
 
 def _load_existing_config(path: Path) -> JsonObject:
@@ -302,7 +293,7 @@ def emit(
     stdout: TextIO,
     stderr: TextIO | None = None,
 ) -> int:
-    path = _target_path()
+    path = target_config_path()
     existed = path.exists()
     original_config_bytes = _read_config_bytes(path) if existed else None
     config = _load_existing_config(path) if existed else _embedded_config()

@@ -275,13 +275,8 @@ def preflight_codex_home(codex_home: str, *, codex: JsonObject) -> None:
             )
 
 
-def _request_resolution(request: object) -> ProfileResolution:
-    resolution = getattr(request, "profile_resolution", None)
-    return resolution if resolution is not None else empty_profile_resolution()
-
-
 def preflight_codex_request(request: object, codex_config: JsonObject) -> None:
-    resolution = _request_resolution(request)
+    resolution: ProfileResolution = request.profile_resolution  # type: ignore[attr-defined]
     if resolution.name is not None and resolution.codex_home is None:
         raise DelegateError(
             "profile_missing_codex_home",
