@@ -350,7 +350,7 @@ def execute_workflow(state: WorkflowState) -> Any:
 
 
 class WorkflowDsl:
-    def __init__(self, state: WorkflowState, meta: dict[str, Any]) -> None:
+    def __init__(self, state: WorkflowState, meta: workflow_script.WorkflowMeta) -> None:
         self.state = state
         self.meta = meta
         defaults = meta.get("defaults")

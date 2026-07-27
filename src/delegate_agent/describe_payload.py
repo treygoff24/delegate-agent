@@ -48,14 +48,12 @@ from delegate_agent.constants import (
 from delegate_agent.errors import EXIT_OK, DelegateError
 from delegate_agent.json_types import JsonObject
 from delegate_agent.prompt_transport import (
-    DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
-    DEVIN_AGENT_CONFIG_DISPLAY,
     DROID_PROMPT_FILE_DISPLAY,
-    PROMPT_FILE_ARG_PLACEHOLDER,
-    PROMPT_FILE_DISPLAY,
     PROMPT_TRANSPORT_ARGV,
     PROMPT_TRANSPORT_FILE,
     PROMPT_TRANSPORT_STDIN,
+    devin_display_argv,
+    prompt_file_display_argv,
 )
 from delegate_agent.request_build import OPENCODE_SAFE_AGENT, _resolve_default_model
 
@@ -718,7 +716,7 @@ def _grok_describe_argv(
         policy,
         allow_bypass_permissions=_grok_harness_bypass_enabled(config, mode),
     )
-    return [PROMPT_FILE_DISPLAY if item == PROMPT_FILE_ARG_PLACEHOLDER else item for item in argv]
+    return prompt_file_display_argv(argv)
 
 
 def _devin_describe_argv(
@@ -730,14 +728,7 @@ def _devin_describe_argv(
         _resolve_default_model(devin),
         call_read_only=call_read_only,
     )
-    return [
-        DEVIN_AGENT_CONFIG_DISPLAY
-        if item == DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER
-        else PROMPT_FILE_DISPLAY
-        if item == PROMPT_FILE_ARG_PLACEHOLDER
-        else item
-        for item in argv
-    ]
+    return devin_display_argv(argv)
 
 
 def _kimi_describe_argv(kimi: JsonObject, *, mode: str) -> list[str]:
@@ -774,7 +765,7 @@ def _opencode_describe_argv(
         if isinstance(opencode.get("defaultReasoningEffort"), str)
         else None,
     )
-    return [PROMPT_FILE_DISPLAY if item == PROMPT_FILE_ARG_PLACEHOLDER else item for item in argv]
+    return prompt_file_display_argv(argv)
 
 
 def _pi_family_describe_argv(section: JsonObject, engine: str, *, mode: str) -> list[str]:

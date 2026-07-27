@@ -69,17 +69,13 @@ from delegate_agent.git_utils import run_git as _run_git
 from delegate_agent.isolation import IsolationContext, build_isolation_context
 from delegate_agent.json_types import JsonObject, JsonValue
 from delegate_agent.prompt_transport import (
-    DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
-    DEVIN_AGENT_CONFIG_DISPLAY,
-    DROID_PROMPT_FILE_ARG_PLACEHOLDER,
-    DROID_PROMPT_FILE_DISPLAY,
     KIMI_PROMPT_REDACTION,
     OMP_PROMPT_REDACTION,
-    PROMPT_FILE_ARG_PLACEHOLDER,
-    PROMPT_FILE_DISPLAY,
     PROMPT_TRANSPORT_ARGV,
     PROMPT_TRANSPORT_FILE,
     PROMPT_TRANSPORT_STDIN,
+    devin_display_argv,
+    prompt_file_display_argv,
 )
 from delegate_agent.request_models import (
     EngineBuildInput,
@@ -2115,10 +2111,7 @@ def _droid_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         call_read_only=build.call_read_only,
         pure=build.pure,
     )
-    display_argv = [
-        DROID_PROMPT_FILE_DISPLAY if item == DROID_PROMPT_FILE_ARG_PLACEHOLDER else item
-        for item in argv
-    ]
+    display_argv = prompt_file_display_argv(argv)
     return EngineRequestParts(
         model=model,
         argv=argv,
@@ -2305,9 +2298,7 @@ def _grok_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         call_read_only=build.call_read_only,
         pure=build.pure,
     )
-    display_argv = [
-        PROMPT_FILE_DISPLAY if item == PROMPT_FILE_ARG_PLACEHOLDER else item for item in argv
-    ]
+    display_argv = prompt_file_display_argv(argv)
     return EngineRequestParts(
         model=model,
         argv=argv,
@@ -2345,14 +2336,7 @@ def _devin_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         call_read_only=build.call_read_only,
         pure=build.pure,
     )
-    display_argv = [
-        DEVIN_AGENT_CONFIG_DISPLAY
-        if item == DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER
-        else PROMPT_FILE_DISPLAY
-        if item == PROMPT_FILE_ARG_PLACEHOLDER
-        else item
-        for item in argv
-    ]
+    display_argv = devin_display_argv(argv)
     read_only = build.mode == MODE_SAFE or (build.mode == MODE_CALL and build.call_read_only)
     return EngineRequestParts(
         model=model,

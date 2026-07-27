@@ -383,8 +383,6 @@ def build_snapshot(
     run_metadata.add_model_payload_fields(snapshot, ctx)
     reasoning.add_reasoning_payload_fields(snapshot, ctx)
     run_metadata.add_speed_payload_fields(snapshot, ctx)
-
-    # Worktree cleanup commands for persistent worktrees.
     cleanup = _worktree_cleanup_commands(ctx)
     if cleanup is not None:
         snapshot["worktreeCleanupCommands"] = cleanup
@@ -895,8 +893,6 @@ def completion_json_payload(
     run_metadata.add_speed_payload_fields(payload, ctx)
     if assistant_meta is not None:
         payload.update(assistant_meta)
-
-    # Worktree cleanup commands for persistent worktrees.
     cleanup = _worktree_cleanup_commands(ctx)
     if cleanup is not None:
         payload["worktreeCleanupCommands"] = cleanup

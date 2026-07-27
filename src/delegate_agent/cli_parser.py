@@ -1962,6 +1962,10 @@ def _require_option_value(rest: list[str], index: int, option: str) -> str:
 
 WorktreeOptionSpec = tuple[str, str]
 
+# Parsed worktree option values: flags store True, "str"/"group"/"status" kinds
+# store the validated string, and the int kinds store a parsed int.
+WorktreeOptionValue = str | int | bool
+
 WORKTREE_OPTION_SPECS: dict[str, dict[str, WorktreeOptionSpec]] = {
     "list": {
         "--harness": ("str", "harness"),
@@ -2000,7 +2004,7 @@ WORKTREE_OPTION_SPECS: dict[str, dict[str, WorktreeOptionSpec]] = {
 
 
 def _apply_worktree_option(
-    options: dict[str, object],
+    options: dict[str, WorktreeOptionValue],
     args: list[str],
     index: int,
     option: str,
@@ -2049,7 +2053,7 @@ def parse_worktree(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedC
         return help_command(json_mode, topic)
     if action not in WORKTREE_OPTION_SPECS:
         raise DelegateError("unknown_worktree_action", f"Unknown worktree action: {action}")
-    options: dict[str, object] = {}
+    options: dict[str, WorktreeOptionValue] = {}
     positional: list[str] = []
     i = 0
     action_specs = WORKTREE_OPTION_SPECS[action]

@@ -10,7 +10,6 @@ constants without an import cycle.
 from __future__ import annotations
 
 import shlex
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypedDict
 
@@ -54,8 +53,7 @@ class PersistentWorktreeRecord(TypedDict, total=False):
     registryWorktreeStatus: str | None
 
 
-def _utc_now_iso() -> str:
-    return datetime.now(UTC).strftime(run_registry.UTC_TIMESTAMP_FORMAT)
+_utc_now_iso = run_registry.utc_now_iso
 
 
 def _shell(args: list[str]) -> str:
