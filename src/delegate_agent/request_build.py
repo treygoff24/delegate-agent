@@ -59,10 +59,9 @@ from delegate_agent.constants import (
     PROMPT_ENFORCED_SAFE_ENGINES,
     PROMPT_INSTRUCTION_MODE_SLASH,
     PROMPT_INSTRUCTION_MODE_WRAPPED,
-    PURE_CALL_ENGINES,
     SAFE_REVIEW_PREFIX_INJECTED_HERE_ENGINES,
-    pure_call_supported,
     validate_mode,
+    validate_pure_call,
 )
 from delegate_agent.errors import DelegateError
 from delegate_agent.git_utils import GIT_QUICK_TIMEOUT_SECONDS, capture_git_metadata
@@ -1144,35 +1143,12 @@ def _validate_call_cli_options(global_options: object, launch: object) -> None:
             "invalid_option_combination",
             "--include-dirty requires work mode with persistent worktree isolation.",
         )
-    _validate_pure_call(
+    validate_pure_call(
         getattr(launch, "engine", ""),
         pure=pure,
         read_only=read_only,
         group=group,
     )
-
-
-def _validate_pure_call(
-    engine: str, *, pure: bool, read_only: bool, group: str | None = None
-) -> None:
-    if not pure:
-        return
-    if group is not None:
-        raise DelegateError(
-            "pure_conflicts_group",
-            "--pure cannot be combined with --group; pure call is a stateless one-hop completion.",
-        )
-    if read_only:
-        raise DelegateError(
-            "pure_conflicts_read_only", "--pure cannot be combined with --read-only."
-        )
-    if not pure_call_supported(engine):
-        supported = ", ".join(PURE_CALL_ENGINES)
-        raise DelegateError(
-            "unsupported_pure_call",
-            f"{engine} does not support pure call mode.",
-            next_actions=[f"Use --pure with one of: {supported}."],
-        )
 
 
 def _validate_call_input_json_options(
@@ -1816,7 +1792,7 @@ def build_request(
     if pure:
         if mode != MODE_CALL:
             raise DelegateError("unsupported_pure_call", "--pure only applies to call mode.")
-        _validate_pure_call(engine, pure=True, read_only=call_read_only, group=group)
+        validate_pure_call(engine, pure=True, read_only=call_read_only, group=group)
     if timeout is not None and timeout <= 0:
         raise DelegateError("invalid_timeout", "timeout must be a positive integer.")
 

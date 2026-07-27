@@ -53,6 +53,30 @@ def pure_call_supported(engine: str) -> bool:
     return engine == "claude"
 
 
+def validate_pure_call(
+    engine: str, *, pure: bool, read_only: bool, group: str | None = None
+) -> None:
+    """Reject --pure combinations that conflict with its stateless one-hop contract."""
+    if not pure:
+        return
+    if group is not None:
+        raise DelegateError(
+            "pure_conflicts_group",
+            "--pure cannot be combined with --group; pure call is a stateless one-hop completion.",
+        )
+    if read_only:
+        raise DelegateError(
+            "pure_conflicts_read_only", "--pure cannot be combined with --read-only."
+        )
+    if not pure_call_supported(engine):
+        supported = ", ".join(PURE_CALL_ENGINES)
+        raise DelegateError(
+            "unsupported_pure_call",
+            f"{engine} does not support pure call mode.",
+            next_actions=[f"Use --pure with one of: {supported}."],
+        )
+
+
 # Public harness capability contract. Request validation and describe output both
 # derive from this map so enabling a capability cannot drift between the two.
 ENGINE_CAPABILITIES = {
