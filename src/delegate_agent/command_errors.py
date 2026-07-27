@@ -10,6 +10,8 @@ class CommandError(Exception):
         super().__init__(message)
         self.error = error
         self.message = message
+        self.diagnostics: dict | None = None
+        self.next_actions: list[str] | None = None
 
 
 def resolve_run_target(

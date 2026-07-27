@@ -759,7 +759,7 @@ def add_reasoning_payload_fields(payload: JsonObject, carrier: ReasoningPayloadC
     unsatisfied config-sourced default with a warning.
     """
     effort = carrier.reasoning_effort
-    requested = getattr(carrier, "requested_reasoning_effort", None)
+    requested = carrier.requested_reasoning_effort
     if requested is not None:
         payload["requestedReasoningEffort"] = requested
     elif effort is not None:
@@ -770,7 +770,7 @@ def add_reasoning_payload_fields(payload: JsonObject, carrier: ReasoningPayloadC
         payload["reasoningEffortSource"] = carrier.reasoning_effort_source
     if carrier.reasoning_capability_source is not None:
         payload["reasoningCapabilitySource"] = carrier.reasoning_capability_source
-    evidence = getattr(carrier, "reasoning_capability_evidence", None)
+    evidence = carrier.reasoning_capability_evidence
     if evidence is not None:
         payload["reasoningCapabilityEvidence"] = evidence
     if carrier.reasoning_transport is not None:

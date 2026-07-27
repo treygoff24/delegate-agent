@@ -1278,8 +1278,8 @@ def main(
             DelegateError(
                 exc.error,
                 exc.message,
-                diagnostics=getattr(exc, "diagnostics", None),
-                next_actions=getattr(exc, "next_actions", None),
+                diagnostics=exc.diagnostics,
+                next_actions=exc.next_actions,
             ),
             json_mode,
             stdout,
