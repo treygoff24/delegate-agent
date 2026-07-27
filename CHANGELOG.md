@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Consolidated pure-call validation in `constants.validate_pure_call`, collapsed repeated `attempt`/`call` invocations in `runner.py` into local closures, eliminated `typing.Any` from `src`, and removed defensive `getattr`/`isinstance` hedges where the contract guarantees the type.
+
+### Removed
+
+- Removed the write-only `ReasoningCapability.supported_efforts` field and unused `STATUS_FILTER_ACTIVE`/`STATUS_FILTER_RECENT` constants.
+- Removed dead back-compat re-exports from `delegate_agent.cli`: `build_kimi_argv`, `build_opencode_argv`, `build_pi_argv`, `prefix_droid_safe_prompt`, `redacted_prompt_argv`, `KIMI_PROMPT_REDACTION`, `_grok_harness_bypass_enabled`, `_resolve_default_model`, and `block_external_symlinks`. These had no known consumers; the supported import surface is the CLI and `delegate --json` contracts.
+
 ## [0.21.0] - 2026-07-26
 
 ### Added
