@@ -1499,31 +1499,6 @@ def parse_codex_models_payload(raw: JsonObject) -> JsonObject:
     return parsed
 
 
-def merge_reasoning_capability_cache(
-    existing: JsonObject | None,
-    refreshed: JsonObject,
-) -> JsonObject:
-    """Overlay refreshed harness declarations on the existing cache.
-
-    Inputs are already validated at their boundaries (parse_codex_models_payload
-    for refreshed data, load_reasoning_capability_cache for the existing file),
-    and write_reasoning_capability_cache validates the merged result.
-    """
-    harnesses: JsonObject = {}
-    if existing is not None:
-        existing_harnesses = existing.get("harnesses")
-        if isinstance(existing_harnesses, dict):
-            harnesses.update(existing_harnesses)
-    refreshed_harnesses = refreshed["harnesses"]
-    if not isinstance(refreshed_harnesses, dict):
-        raise ReasoningCapabilityError(
-            "capability_refresh_failed",
-            "refreshed reasoning cache must contain a harnesses object.",
-        )
-    harnesses.update(refreshed_harnesses)
-    return {"schema": 1, "harnesses": harnesses}
-
-
 def write_reasoning_capability_cache(workspace: str | Path, cache: JsonObject) -> Path:
     validate_cache_payload(cache)
     path = reasoning_capability_cache_path(workspace)

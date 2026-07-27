@@ -103,7 +103,6 @@ class WorkflowState:
     scope_lock: threading.Lock = field(default_factory=threading.Lock)
     lifetime_lock: threading.Lock = field(default_factory=threading.Lock)
     lifetime_counter: list[int] = field(default_factory=lambda: [0])
-    gate_lock: threading.Lock = field(default_factory=threading.Lock)
     gate_state: dict[str, Any] = field(
         default_factory=lambda: {"stop_admitting": False, "in_flight_agents": 0}
     )

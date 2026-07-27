@@ -646,10 +646,6 @@ def corrected_global_argv(argv: list[str]) -> list[str]:
     return [*globals_out, *rest]
 
 
-def corrected_global_command(argv: list[str]) -> str:
-    return _shell_command(corrected_global_argv(argv))
-
-
 def raise_misplaced_global_option(message: str, argv: list[str] | None = None) -> NoReturn:
     guidance = (
         "Move global options before the subcommand "
