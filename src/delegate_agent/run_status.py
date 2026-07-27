@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 
 from delegate_agent import archived_logs
-from delegate_agent.json_types import JsonObject
+from delegate_agent.json_types import JsonObject, first_string
 
 LARGE_LOG_WARN_MIB = 50
 # 1 << 20 == 1 MiB == run_registry.BYTES_PER_MIB. Inlined so this module needs no
@@ -20,8 +20,6 @@ STATUS_CANCELLED = "cancelled"
 STATUS_STALE = "stale"
 STATUS_UNKNOWN = "unknown"
 TERMINAL_STATUSES = frozenset({STATUS_SUCCEEDED, STATUS_FAILED, STATUS_CANCELLED})
-STATUS_FILTER_ACTIVE = "active"
-STATUS_FILTER_RECENT = "recent"
 STATUS_FILTER_RUNNING = "running"
 STATUS_FILTER_STALE = "stale"
 
@@ -253,13 +251,11 @@ def _source_workspace(
     state: JsonObject | None,
     manifest: JsonObject | None,
 ) -> str:
-    for source in (manifest, state, index_entry):
-        if not source:
-            continue
-        cwd = source.get("cwd")
-        if isinstance(cwd, str) and cwd:
-            return cwd
-    return str(registry_root.parent)
+    return first_string(
+        manifest.get("cwd") if manifest else None,
+        state.get("cwd") if state else None,
+        index_entry.get("cwd") if index_entry else None,
+    ) or str(registry_root.parent)
 
 
 def list_run_summaries(
