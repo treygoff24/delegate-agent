@@ -8,7 +8,6 @@ import os
 import secrets
 import warnings
 from pathlib import Path
-from typing import Any
 
 from delegate_agent import run_registry
 from delegate_agent.json_types import JsonObject
@@ -209,7 +208,7 @@ def latest_workflow_dir(
     return max(legacy)[3] if legacy else None
 
 
-def append_jsonl(path: Path, event: dict[str, Any]) -> None:
+def append_jsonl(path: Path, event: JsonObject) -> None:
     fd = run_registry.open_private_file(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY)
     with os.fdopen(fd, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(event, sort_keys=True) + "\n")
@@ -218,10 +217,10 @@ def append_jsonl(path: Path, event: dict[str, Any]) -> None:
             os.fsync(handle.fileno())
 
 
-def iter_journal(path: Path) -> list[dict[str, Any]]:
+def iter_journal(path: Path) -> list[JsonObject]:
     if not path.exists():
         return []
-    events: list[dict[str, Any]] = []
+    events: list[JsonObject] = []
     text = path.read_text(encoding="utf-8")
     lines = text.splitlines()
     final_line_complete = text.endswith("\n")

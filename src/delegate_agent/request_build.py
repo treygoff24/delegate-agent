@@ -1304,7 +1304,6 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         workspace.path
     )
 
-    # Resolve effective isolation and build isolation context.
     try:
         effective_isolation = delegate_config.resolve_isolation(
             cli_value=global_options.isolation,

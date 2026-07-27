@@ -332,7 +332,6 @@ def dry_run_payload(request: Request) -> JsonObject:
     if request.profile_resolution.name is not None:
         payload["profileEnv"] = redaction.redact_env_map(request.profile_resolution.env)
 
-    # Structured isolation fields from the isolation context.
     if request.isolation_context is not None:
         ctx = request.isolation_context
 
@@ -515,7 +514,6 @@ def make_run_context(
         if request.isolation_context is not None
         else False
     )
-    # Extract isolation metadata from the isolation context.
     iso_ctx = request.isolation_context
     if iso_ctx is not None:
         isolation_mode = iso_ctx.isolation_mode
@@ -860,7 +858,7 @@ def execute_request(
         profiles.preflight_codex_request(request, config.get("codex", {}))
     ctx = request.isolation_context
 
-    # --- Persistent worktree path (work + worktree) ---
+    # Persistent worktree runs (work + worktree) hand off to worktree_execution.
     if ctx is not None and ctx.isolation_lifecycle == "persistent":
         try:
             return worktree_execution.execute_persistent_worktree(

@@ -5,7 +5,7 @@ from typing import TypedDict, cast
 
 from delegate_agent import retention as delegate_retention
 from delegate_agent import run_metadata, run_registry
-from delegate_agent.json_types import JsonObject, JsonValue, first_string
+from delegate_agent.json_types import JsonObject, first_string
 from delegate_agent.redaction import redact_value
 
 
@@ -225,4 +225,4 @@ def merge_snapshot_view(
 
 
 def snapshot_json_payload(view: SnapshotView) -> JsonObject:
-    return cast(dict[str, JsonValue], view)
+    return cast(JsonObject, view)
