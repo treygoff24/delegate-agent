@@ -84,6 +84,7 @@ from delegate_agent.prompt_transport import (
 from delegate_agent.request_models import (
     EngineBuildInput,
     EngineRequestParts,
+    GlobalOptions,
     LaunchOptions,
     ParsedCommand,
     Request,
@@ -1102,17 +1103,17 @@ def _call_workspace(dry_run: bool) -> tuple[ResolvedWorkspace, bool]:
     return ResolvedWorkspace(temp_dir, "directory"), True
 
 
-def _validate_call_cli_options(global_options: object, launch: object) -> None:
-    cwd = getattr(global_options, "cwd", None)
-    isolation = getattr(global_options, "isolation", None)
-    pass_through = getattr(global_options, "pass_through", False)
-    completion_report = getattr(global_options, "completion_report", None)
-    progress_intent = getattr(launch, "progress_intent", None)
-    forbid_commit = getattr(launch, "forbid_commit", False)
-    include_dirty = getattr(launch, "include_dirty", False)
-    pure = getattr(launch, "pure", False)
-    read_only = getattr(launch, "read_only", False)
-    group = getattr(global_options, "group", None)
+def _validate_call_cli_options(global_options: GlobalOptions, launch: LaunchOptions) -> None:
+    cwd = global_options.cwd
+    isolation = global_options.isolation
+    pass_through = global_options.pass_through
+    completion_report = global_options.completion_report
+    progress_intent = launch.progress_intent
+    forbid_commit = launch.forbid_commit
+    include_dirty = launch.include_dirty
+    pure = launch.pure
+    read_only = launch.read_only
+    group = global_options.group
     # Grouped call runs may take --cwd so the run registers in the invocation
     # workspace registry; ungrouped call still rejects --cwd.
     if cwd is not None and group is None:
@@ -1144,7 +1145,7 @@ def _validate_call_cli_options(global_options: object, launch: object) -> None:
             "--include-dirty requires work mode with persistent worktree isolation.",
         )
     validate_pure_call(
-        getattr(launch, "engine", ""),
+        launch.engine,
         pure=pure,
         read_only=read_only,
         group=group,
@@ -1152,27 +1153,24 @@ def _validate_call_cli_options(global_options: object, launch: object) -> None:
 
 
 def _validate_call_input_json_options(
-    global_options: object,
+    global_options: GlobalOptions,
     raw: JsonObject,
     *,
     raw_progress_intent: ProgressIntent,
     raw_forbid_commit: bool,
     raw_include_dirty: bool,
 ) -> None:
-    group = getattr(global_options, "group", None)
-    if getattr(global_options, "cwd", None) is not None and group is None:
+    group = global_options.group
+    if global_options.cwd is not None and group is None:
         raise DelegateError("invalid_option_combination", "call mode does not use --cwd.")
-    if getattr(global_options, "isolation", None) is not None:
+    if global_options.isolation is not None:
         raise DelegateError("invalid_option_combination", "call mode does not use --isolation.")
-    if getattr(global_options, "pass_through", False):
+    if global_options.pass_through:
         raise DelegateError(
             "invalid_option_combination",
             "--pass-through is not supported with call mode; call already returns synchronously.",
         )
-    if (
-        getattr(global_options, "completion_report", None)
-        == delegate_config.COMPLETION_REPORT_MODE_MARKDOWN
-    ):
+    if global_options.completion_report == delegate_config.COMPLETION_REPORT_MODE_MARKDOWN:
         raise DelegateError(
             "invalid_option_combination",
             "--completion-report is not supported with call mode.",
@@ -1235,8 +1233,8 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
     _validate_agent_option(launch.engine, launch.agent)
     if launch.mode == MODE_CALL:
         _validate_call_cli_options(global_options, launch)
-        read_only = getattr(launch, "read_only", False)
-        pure = getattr(launch, "pure", False)
+        read_only = launch.read_only
+        pure = launch.pure
         if launch.engine == "droid":
             _reject_droid_model_conflict(launch.model_alias, launch.model)
             if launch.model_alias is not None:
@@ -1282,12 +1280,12 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
             if cleanup_workspace:
                 shutil.rmtree(workspace.path, ignore_errors=True)
             raise
-    if getattr(launch, "read_only", False):
+    if launch.read_only:
         raise DelegateError(
             "invalid_option_combination",
             "--read-only only applies to call mode.",
         )
-    if getattr(launch, "pure", False):
+    if launch.pure:
         raise DelegateError("unsupported_pure_call", "--pure only applies to call mode.")
     effective_progress = resolve_effective_progress(launch.progress_intent, config)
     if effective_progress and global_options.pass_through:
@@ -1324,7 +1322,7 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
             effective=effective_isolation,
         )
     )
-    if getattr(launch, "forbid_commit_implied_isolation", False):
+    if launch.forbid_commit_implied_isolation:
         isolation_warnings.append(_forbid_commit_implied_isolation_note())
 
     isolation_context = build_isolation_context(
