@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from delegate_agent.json_types import JsonObject
+from delegate_agent.json_types import JsonObject, JsonValue
 
 SUPPORTED_KEYS = {
     "type",
@@ -120,7 +120,7 @@ def _matches_type(value: object, schema_type: object) -> bool:
     return False
 
 
-def parse_json_tolerant(text: str) -> object:
+def parse_json_tolerant(text: str) -> JsonValue:
     stripped = text.strip()
     if stripped.startswith("```"):
         lines = stripped.splitlines()
@@ -144,7 +144,7 @@ def parse_json_tolerant(text: str) -> object:
         return value
 
 
-def placeholder(schema: JsonObject) -> object:
+def placeholder(schema: JsonObject) -> JsonValue:
     schema_type = schema.get("type")
     if isinstance(schema_type, list):
         schema_type = schema_type[0] if schema_type else None

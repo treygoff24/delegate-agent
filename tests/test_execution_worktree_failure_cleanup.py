@@ -92,7 +92,6 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
                 self.assertEqual(snapshot_code, 0)
                 snapshot_payload = json.loads(snapshot_stdout.getvalue())
 
-                # Assert snapshot contains the expected pre-launch failure fields.
                 self.assertEqual(snapshot_payload.get("status"), "failed")
                 self.assertIn("error", snapshot_payload)
                 self.assertIn("message", snapshot_payload)
@@ -151,7 +150,6 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
                     )
                 self.assertEqual(ctx.exception.error, "worktree_create_failed")
 
-                # Load the failed snapshot directly.
                 registry_root = Path(repo.name) / ".delegate"
                 runs_dir = registry_root / "runs"
                 run_dirs = list(runs_dir.glob("del_*"))
@@ -387,7 +385,6 @@ class ExecutionWorktreeFailureCleanupTests(ExecutionTestBase):
                 # while preserving the worktree.
                 self.assertNotEqual(code, 0)
 
-            # Assert worktree directory is still present.
             worktree_root = Path(fake_home) / ".delegate" / "worktrees"
             worktrees_before = list(worktree_root.glob("*/*")) if worktree_root.exists() else []
             self.assertTrue(

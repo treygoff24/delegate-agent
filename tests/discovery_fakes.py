@@ -7,7 +7,6 @@ import json
 import stat
 import sys
 from pathlib import Path
-from typing import Any
 
 FIXTURES = Path(__file__).parent / "fixtures" / "discovery"
 
@@ -42,7 +41,7 @@ def _write_dispatch_harness(
 
 def materialize_minimum_harnesses(target: Path, *, fixtures: Path = FIXTURES) -> dict[str, Path]:
     """Materialize version and metadata responses from sanitized fixtures."""
-    provenance: dict[str, Any] = json.loads(
+    provenance: dict[str, object] = json.loads(
         (fixtures / "provenance.json").read_text(encoding="utf-8")
     )
     responses: dict[str, dict[tuple[str, ...], tuple[str, str, int]]] = {}

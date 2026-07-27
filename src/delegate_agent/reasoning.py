@@ -178,7 +178,6 @@ class ReasoningCapability:
     harness: str
     model: str
     effort: str
-    supported_efforts: tuple[str, ...]
     default_effort: str | None
     transport: str
     source: str
@@ -486,7 +485,6 @@ def resolve_reasoning_capability(
         harness=harness,
         model=model,
         effort=effort,
-        supported_efforts=supported,
         default_effort=_default_effort(declaration, supported),
         transport=TRANSPORT_BY_HARNESS[harness],
         source=source,
@@ -553,7 +551,6 @@ def _capability_from_declaration(
         harness=harness,
         model=model,
         effort=effort,
-        supported_efforts=supported,
         default_effort=_default_effort(declaration, supported),
         transport=transport,
         source=source,
@@ -682,7 +679,6 @@ def resolve_discovered_model_capability(
                     harness=harness,
                     model=model or "",
                     effort=effort,
-                    supported_efforts=(effort,),
                     default_effort=None,
                     transport=TRANSPORT_OPENCODE_VARIANT_FLAG,
                     source="pass-through",
