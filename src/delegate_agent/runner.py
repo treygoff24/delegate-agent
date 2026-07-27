@@ -2144,22 +2144,35 @@ def execute_tracked(
     retry_prompt_temp_dir: str | None = None
     attempt_env = ctx.env_overrides or None
     capture: TrackedCaptureResult | None = None
-    try:
-        capture = _run_single_tracked_attempt(
-            launch_argv,
+
+    def run_attempt(
+        attempt_argv: list[str],
+        *,
+        env_overrides: dict[str, str] | None,
+        attempt_stdin_text: str | None = stdin_text,
+        attempt_label: str | None = None,
+        prior_capture: TrackedCaptureResult | None = None,
+    ) -> TrackedCaptureResult:
+        return _run_single_tracked_attempt(
+            attempt_argv,
             cwd,
             files,
             ctx,
             started=started,
             deadline=deadline,
-            stdin_text=stdin_text,
-            env_overrides=ctx.env_overrides or None,
+            stdin_text=attempt_stdin_text,
+            env_overrides=env_overrides,
             scratch_dir=files.scratch_dir,
             progress=progress,
             progress_stderr=stderr if progress else None,
             progress_initial_delay_sec=progress_initial_delay_sec,
             progress_interval_sec=progress_interval_sec,
+            attempt_label=attempt_label,
+            prior_capture=prior_capture,
         )
+
+    try:
+        capture = run_attempt(launch_argv, env_overrides=ctx.env_overrides or None)
         if (
             ctx.engine == "codex"
             and not _cancel_requested_or_cancelled(ctx)
@@ -2173,20 +2186,9 @@ def execute_tracked(
             )
         ):
             _prepend_attempt_delimiter(files.stderr_log, label="primary")
-            retry_capture = _run_single_tracked_attempt(
+            retry_capture = run_attempt(
                 launch_argv,
-                cwd,
-                files,
-                ctx,
-                started=started,
-                deadline=deadline,
-                stdin_text=stdin_text,
                 env_overrides=ctx.env_overrides or None,
-                scratch_dir=files.scratch_dir,
-                progress=progress,
-                progress_stderr=stderr if progress else None,
-                progress_initial_delay_sec=progress_initial_delay_sec,
-                progress_interval_sec=progress_interval_sec,
                 attempt_label="thread-retry",
                 prior_capture=capture,
             )
@@ -2217,20 +2219,9 @@ def execute_tracked(
                     "codex_thread_fallback",
                     "Codex thread lookup failed twice; engaging ephemeral ignore-user-config fallback.",
                 )
-                fallback_capture = _run_single_tracked_attempt(
+                fallback_capture = run_attempt(
                     _codex_ephemeral_fallback_argv(launch_argv),
-                    cwd,
-                    files,
-                    ctx,
-                    started=started,
-                    deadline=deadline,
-                    stdin_text=stdin_text,
                     env_overrides=ctx.env_overrides or None,
-                    scratch_dir=files.scratch_dir,
-                    progress=progress,
-                    progress_stderr=stderr if progress else None,
-                    progress_initial_delay_sec=progress_initial_delay_sec,
-                    progress_interval_sec=progress_interval_sec,
                     attempt_label="thread-ephemeral-fallback",
                     prior_capture=capture,
                 )
@@ -2278,20 +2269,9 @@ def execute_tracked(
             primary_exit_code = capture.exit_code
             primary_stderr_tail = profiles.read_bounded_stderr_tail(files.stderr_log)
             _prepend_attempt_delimiter(files.stderr_log, label="primary")
-            fallback_capture = _run_single_tracked_attempt(
+            fallback_capture = run_attempt(
                 launch_argv,
-                cwd,
-                files,
-                ctx,
-                started=started,
-                deadline=deadline,
-                stdin_text=stdin_text,
                 env_overrides=ctx.fallback_env_overrides,
-                scratch_dir=files.scratch_dir,
-                progress=progress,
-                progress_stderr=stderr if progress else None,
-                progress_initial_delay_sec=progress_initial_delay_sec,
-                progress_interval_sec=progress_interval_sec,
                 attempt_label="fallback",
                 prior_capture=capture,
             )
@@ -2334,20 +2314,10 @@ def execute_tracked(
                     agent_config_dir=files.run_path,
                 )
                 _prepend_attempt_delimiter(files.stderr_log, label="primary")
-                retry_capture = _run_single_tracked_attempt(
+                retry_capture = run_attempt(
                     retry_argv,
-                    cwd,
-                    files,
-                    ctx,
-                    started=started,
-                    deadline=deadline,
-                    stdin_text=retry_stdin,
+                    attempt_stdin_text=retry_stdin,
                     env_overrides=attempt_env,
-                    scratch_dir=files.scratch_dir,
-                    progress=progress,
-                    progress_stderr=stderr if progress else None,
-                    progress_initial_delay_sec=progress_initial_delay_sec,
-                    progress_interval_sec=progress_interval_sec,
                     attempt_label="empty-success-retry",
                     prior_capture=capture,
                 )
@@ -2991,30 +2961,19 @@ def execute_call(
     sensitive_texts: tuple[str, ...] = (),
 ) -> CallResult:
     deadline = None if timeout is None else time.monotonic() + timeout
-    result = _execute_call_once(
-        argv,
-        cwd,
-        harness=harness,
-        stdin_text=stdin_text,
-        prompt_file_text=prompt_file_text,
-        prompt_file_placeholder=prompt_file_placeholder,
-        agent_config_text=agent_config_text,
-        agent_config_placeholder=agent_config_placeholder,
-        output_schema_text=output_schema_text,
-        output_schema_path=output_schema_path,
-        env_overrides=env_overrides,
-        pure=pure,
-        timeout=None if deadline is None else max(deadline - time.monotonic(), 0),
-        structured_output=structured_output,
-        sensitive_texts=sensitive_texts,
-    )
-    if read_only and harness == "codex" and result.error == "codex_thread_lost":
-        retry = _execute_call_once(
-            argv,
+
+    def call_once(
+        call_argv: list[str],
+        *,
+        call_stdin_text: str | None = stdin_text,
+        call_prompt_file_text: str | None = prompt_file_text,
+    ) -> CallResult:
+        return _execute_call_once(
+            call_argv,
             cwd,
             harness=harness,
-            stdin_text=stdin_text,
-            prompt_file_text=prompt_file_text,
+            stdin_text=call_stdin_text,
+            prompt_file_text=call_prompt_file_text,
             prompt_file_placeholder=prompt_file_placeholder,
             agent_config_text=agent_config_text,
             agent_config_placeholder=agent_config_placeholder,
@@ -3026,6 +2985,10 @@ def execute_call(
             structured_output=structured_output,
             sensitive_texts=sensitive_texts,
         )
+
+    result = call_once(argv)
+    if read_only and harness == "codex" and result.error == "codex_thread_lost":
+        retry = call_once(argv)
         result = _merge_call_attempts(result, retry, "codex thread retry")
         metadata: JsonObject = {
             "retryAttempted": True,
@@ -3033,23 +2996,7 @@ def execute_call(
             "resolved": retry.exit_code == 0,
         }
         if retry.error == "codex_thread_lost":
-            fallback = _execute_call_once(
-                _codex_ephemeral_fallback_argv(argv),
-                cwd,
-                harness=harness,
-                stdin_text=stdin_text,
-                prompt_file_text=prompt_file_text,
-                prompt_file_placeholder=prompt_file_placeholder,
-                agent_config_text=agent_config_text,
-                agent_config_placeholder=agent_config_placeholder,
-                output_schema_text=output_schema_text,
-                output_schema_path=output_schema_path,
-                env_overrides=env_overrides,
-                pure=pure,
-                timeout=None if deadline is None else max(deadline - time.monotonic(), 0),
-                structured_output=structured_output,
-                sensitive_texts=sensitive_texts,
-            )
+            fallback = call_once(_codex_ephemeral_fallback_argv(argv))
             result = _merge_call_attempts(result, fallback, "codex ephemeral fallback")
             warnings = list(result.warnings)
             _append_unique(
@@ -3080,22 +3027,10 @@ def execute_call(
     elif retry_argv:
         retry_argv[-1] = _append_empty_retry_instruction(retry_argv[-1])
 
-    retry = _execute_call_once(
+    retry = call_once(
         retry_argv,
-        cwd,
-        harness=harness,
-        stdin_text=retry_stdin,
-        prompt_file_text=retry_prompt_file,
-        prompt_file_placeholder=prompt_file_placeholder,
-        agent_config_text=agent_config_text,
-        agent_config_placeholder=agent_config_placeholder,
-        output_schema_text=output_schema_text,
-        output_schema_path=output_schema_path,
-        env_overrides=env_overrides,
-        pure=pure,
-        timeout=None if deadline is None else max(deadline - time.monotonic(), 0),
-        structured_output=structured_output,
-        sensitive_texts=sensitive_texts,
+        call_stdin_text=retry_stdin,
+        call_prompt_file_text=retry_prompt_file,
     )
     warnings = list(result.warnings)
     for warning in retry.warnings:
