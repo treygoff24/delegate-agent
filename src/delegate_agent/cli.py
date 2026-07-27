@@ -1011,7 +1011,6 @@ def pre_read_run_json_for_config(
     if json_cwd is not None and not isinstance(json_cwd, str):
         raise DelegateError("invalid_cwd", "cwd must be a string.")
 
-    # Reject explicit null isolation in the JSON pre-read.
     if "isolation" in raw and raw["isolation"] is None:
         raise DelegateError(
             "invalid_isolation",

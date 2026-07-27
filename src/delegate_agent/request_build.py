@@ -652,7 +652,7 @@ def _apply_forbid_commit_isolation_implication(
     return json_isolation, None, False
 
 
-def _droid_models_map(config: JsonObject) -> dict:
+def _droid_models_map(config: JsonObject) -> JsonObject:
     # config validation treats a null/absent models map as empty for every
     # engine; mirror that here so droid never crashes on `"models": null`.
     models = config["droid"].get("models")
