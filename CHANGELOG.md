@@ -5,15 +5,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.23.0] - 2026-07-30
 
 ### Added
 
-- Added `delegate runs prune` with a 30-day default age threshold, an explicit
-  `--older-than` override, and `--dry-run` preview output. It prunes terminal
-  Run records and their associated Registry artifacts without touching genuinely
-  running Runs, and skips Runs with a registered present persistent worktree so
-  those worktrees remain manageable.
+- Added `delegate runs prune` with a 30-day default age threshold, an explicit `--older-than` override, and `--dry-run` preview output. It prunes terminal Run records and their associated Registry artifacts (per-Run directory, logs, Completion Report, retained raw-log archive) without touching genuinely running Runs. Persistent-worktree Runs are skipped unless their worktree is recorded as removed or missing — unknown or unrecorded worktree status is treated as possibly present, mirroring `worktree gc` — so live worktrees never lose their Registry records. The ambient retention pass is bypassed on the prune command path so a dry run never mutates state.
+
+### Fixed
+
+- Focused unittest invocations (`python3 -m unittest tests.<module>`) no longer fail on the src layout import: `tests/__init__.py` now puts `src` on `sys.path` before any test module import runs.
 
 ## [0.22.0] - 2026-07-26
 
@@ -769,6 +769,7 @@ Usage-audit fix wave: 82 sessions and 1,241 delegate invocations from one week o
 
 - Releases before 0.1.3 predate this changelog.
 
+[0.23.0]: https://github.com/treygoff24/delegate-agent/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/treygoff24/delegate-agent/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/treygoff24/delegate-agent/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/treygoff24/delegate-agent/compare/v0.19.0...v0.20.0
