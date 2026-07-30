@@ -931,6 +931,7 @@ Tracked runs return bounded parent-facing output and store local metadata under 
 
 ```bash
 delegate runs [--active|--running|--stale|--recent] [--harness HARNESS] [--group NAME] [--limit N]
+delegate runs prune [--older-than DAYS] [--dry-run]
 delegate ps [--harness HARNESS] [--group NAME] [--limit N]
 delegate snapshot [--latest HARNESS] [--no-redact] <handle>
 delegate run-output [--latest HARNESS] <handle> [--completion-report] [--stdout] [--stderr] [--tail N] [--max-chars N] [--raw] [--no-redact]
@@ -941,6 +942,8 @@ delegate cancel <handle>...
 `delegate runs` defaults to recent runs. `--active` preserves the legacy active view and includes both live `running` runs and `stale` runs. Use `--running` for only live tracked processes and `--stale` for runs recorded as running whose PID is missing or dead. `--active`, `--running`, `--stale`, and `--recent` are mutually exclusive. `--group NAME` filters by launch group and the runs table shows a `group` column when any visible run has one.
 `delegate ps` is the shorter first-class form of `delegate runs --active` and
 accepts the same harness, group, and limit selectors.
+
+`delegate runs prune` removes old terminal Run records from the workspace Registry so they stop accumulating forever. Only runs whose effective status is terminal (`succeeded`, `failed`, `cancelled`, or `stale` from a dead child) and whose last Registry activity is older than the threshold (default 30 days; override with `--older-than DAYS`) are eligible. Effectively running runs are always skipped, and persistent-worktree runs are skipped unless their worktree is recorded as removed or missing — pruning the record of a live worktree would orphan it from `worktree list`/`show`/`remove`. Pruning deletes the per-Run directory (Snapshot, Manifest, logs, events, Completion Report) and the retained raw-log archive; worktree paths on disk are never touched. `--dry-run` reports what would be removed without changing anything. JSON output uses schema `delegate.runs-prune.v1` with `planned`, `removed`, `skipped` (each entry carries a `reason`), and `errors` sections.
 
 Run-scoped handles (`snapshot`, `run-output`, `wait`, and `cancel`)
 resolve exact run IDs and numbered aliases first. A bare harness name such as

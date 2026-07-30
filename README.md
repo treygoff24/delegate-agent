@@ -299,6 +299,7 @@ delegate runs --recent
 delegate ps                   # active and stale tracked runs
 delegate snapshot <alias-or-runId>
 delegate run-output <alias-or-runId>
+delegate runs prune --dry-run # preview GC of terminal run records older than 30 days
 ```
 
 Aliases are always numbered (`codex-1`, `cursor-2`); a **bare harness name
