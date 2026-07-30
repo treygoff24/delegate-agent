@@ -27,7 +27,17 @@ later.
 import atexit
 import os
 import shutil
+import sys
 import tempfile
+from pathlib import Path
+
+# Make the src layout importable for focused invocations
+# (`python3 -m unittest tests.test_x`), which otherwise fail before per-module
+# sys.path shims run because `tests.delegate_fixtures` imports delegate_agent
+# at import time. This package always loads first, so the shim lands in time.
+_SRC = str(Path(__file__).resolve().parent.parent / "src")
+if _SRC not in sys.path:
+    sys.path.insert(0, _SRC)
 
 os.environ.pop("AI_PROFILE", None)
 os.environ.pop("DELEGATE_CONFIG", None)
