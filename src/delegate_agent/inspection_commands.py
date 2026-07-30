@@ -19,12 +19,15 @@ class SnapshotCommand:
 
 @dataclass(frozen=True)
 class RunsCommand:
+    action: str | None = None
     active: bool = False
     running: bool = False
     stale: bool = False
     harness: str | None = None
     group: str | None = None
     limit: int | None = None
+    older_than_days: int | None = None
+    dry_run: bool = False
     json_mode: bool = False
 
 
@@ -64,6 +67,34 @@ def emit_snapshot(command: SnapshotCommand, *, workspace_path: str, stdout: Text
 
 def emit_runs(command: RunsCommand, *, workspace_path: str, stdout: TextIO) -> int:
     registry_root = run_registry.registry_root_if_exists(Path(workspace_path))
+    if command.action == "prune":
+        older_than_days = (
+            command.older_than_days
+            if command.older_than_days is not None
+            else run_registry.DEFAULT_RUN_PRUNE_DAYS
+        )
+        payload = (
+            run_registry.prune_runs(
+                registry_root,
+                older_than_days=older_than_days,
+                dry_run=command.dry_run,
+            )
+            if registry_root is not None
+            else run_registry.empty_run_prune_payload(
+                older_than_days=older_than_days,
+                dry_run=command.dry_run,
+            )
+        )
+        if command.json_mode:
+            delegate_rendering.print_json(payload, stdout)
+        else:
+            delegate_rendering.render_runs_prune_text(payload, stdout)
+        if payload.get("ok") is False:
+            exit_code = payload.get("exitCode")
+            return exit_code if isinstance(exit_code, int) else 1
+        return 0
+    if command.action is not None:
+        raise InspectionError("unknown_runs_action", f"Unknown runs action: {command.action}")
     limit = command.limit or run_registry.DEFAULT_RUNS_LIMIT
     if command.running:
         mode = "running"

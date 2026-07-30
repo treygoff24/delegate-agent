@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from delegate_agent import VERSION
 from delegate_agent.constants import ENGINES_PROSE
 from delegate_agent.json_types import JsonObject
+from delegate_agent.run_registry import DEFAULT_RUN_PRUNE_DAYS
 
 
 @dataclass(frozen=True)
@@ -818,7 +819,34 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "delegate runs --group wave4",
         ),
         notes=("--active, --running, --stale, and --recent are mutually exclusive.",),
-        see_also=("ps", "snapshot", "run-output"),
+        see_also=("ps", "runs prune", "snapshot", "run-output"),
+        unsupported_global_options=("--auth-profile",),
+    ),
+    "runs prune": CommandSpec(
+        name="runs prune",
+        summary="Prune old terminal Run records from the workspace Registry.",
+        usage=("delegate [--cwd PATH] [--json] runs prune [--older-than DAYS] [--dry-run]",),
+        options=(
+            OptionSpec(
+                "--older-than",
+                "DAYS",
+                f"Prune Runs older than DAYS by Registry activity time (defaults to {DEFAULT_RUN_PRUNE_DAYS}; non-negative integer).",
+            ),
+            OptionSpec(
+                "--dry-run",
+                None,
+                "Report planned removals without changing the Registry, logs, or artifacts.",
+            ),
+        ),
+        examples=(
+            "delegate runs prune --dry-run",
+            "delegate runs prune --older-than 14",
+        ),
+        notes=(
+            "Only terminal effective statuses are eligible: succeeded, failed, cancelled, and stale from a dead child; effective running Runs are always skipped.",
+            "Runs with a registered present persistent worktree are skipped, so their worktree remains manageable. Pruning removes the per-Run directory, including its Snapshot, Manifest, logs, events, and Completion Report, plus the retained raw-log archive.",
+        ),
+        see_also=("runs", "snapshot", "run-output"),
         unsupported_global_options=("--auth-profile",),
     ),
     "ps": CommandSpec(
@@ -1745,6 +1773,7 @@ def render_overview_text() -> str:
         "delegate [--cwd PATH] [--json] snapshot [--latest HARNESS] [--no-redact] <handle>",
         "delegate [--cwd PATH] [--json] runs "
         "[--active|--running|--stale|--recent] [--harness HARNESS] [--limit N]",
+        "delegate [--cwd PATH] [--json] runs prune [--older-than DAYS] [--dry-run]",
         "delegate [--cwd PATH] [--json] ps [--harness HARNESS] [--group NAME] [--limit N]",
         "delegate [--cwd PATH] [--json] run-output <handle> "
         "[--completion-report] [--stdout] [--stderr] [--tail N] [--max-chars N] "

@@ -1180,7 +1180,12 @@ def main(
             "workflow",
         }:
             existing_registry = run_registry.registry_root_if_exists(Path(workspace.path))
-            if existing_registry is not None:
+            pruning_runs = (
+                parsed.subcommand == "runs"
+                and parsed.runs is not None
+                and parsed.runs.action == "prune"
+            )
+            if existing_registry is not None and not pruning_runs:
                 maybe_run_retention_pass(existing_registry, config)
         if parsed.subcommand == "snapshot":
             return emit_snapshot(parsed, workspace, stdout)

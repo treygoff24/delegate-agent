@@ -6,16 +6,17 @@ import os
 import re
 import secrets
 import shlex
+import shutil
 import subprocess
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from delegate_agent import private_io
-from delegate_agent.json_types import JsonObject
+from delegate_agent import archived_logs, private_io
+from delegate_agent.json_types import JsonObject, is_non_negative_int
 from delegate_agent.private_io import (  # noqa: F401  # re-exported
     RegistryJsonError,
     ensure_private_dir,
@@ -47,6 +48,9 @@ STATE_SCHEMA = "delegate.state.v1"
 SNAPSHOT_SCHEMA = "delegate.snapshot.v1"
 RUNS_SCHEMA = "delegate.runs.v1"
 RUN_OUTPUT_SCHEMA = "delegate.run-output.v1"
+RUNS_PRUNE_SCHEMA = "delegate.runs-prune.v1"
+DEFAULT_RUN_PRUNE_DAYS = 30
+RUN_PRUNE_ERROR_EXIT_CODE = 1
 REGISTRY_LOCK_NAME = ".registry.lock"
 REGISTRY_LOCK_TIMEOUT_SECONDS = 30.0
 REGISTRY_LOCK_POLL_SECONDS = 0.05
@@ -832,3 +836,151 @@ from delegate_agent.run_status import (  # noqa: E402, F401  # re-exported
     stale_next_actions,
     status_fields,
 )
+
+
+def _run_prune_ref(
+    index: JsonObject,
+    run_id: str,
+    status: str,
+    *,
+    reason: str | None = None,
+) -> JsonObject:
+    entry: JsonObject = {
+        "alias": alias_for_run(index, run_id),
+        "runId": run_id,
+        "effectiveStatus": status,
+    }
+    if reason is not None:
+        entry["reason"] = reason
+    return entry
+
+
+def _remove_run_record_artifacts(registry_root: Path, run_id: str) -> None:
+    run_path = run_directory(registry_root, run_id)
+    if run_path.is_symlink():
+        raise OSError(f"refusing to prune symlinked run directory: {run_path}")
+    if run_path.exists():
+        shutil.rmtree(run_path)
+    archived_logs.archive_path(registry_root, run_id).unlink(missing_ok=True)
+
+
+def empty_run_prune_payload(*, older_than_days: int, dry_run: bool) -> JsonObject:
+    return {
+        "schema": RUNS_PRUNE_SCHEMA,
+        "ok": True,
+        "olderThanDays": older_than_days,
+        "dryRun": dry_run,
+        "planned": [],
+        "removed": [],
+        "skipped": [],
+        "errors": [],
+    }
+
+
+def prune_runs(
+    registry_root: Path,
+    *,
+    older_than_days: int = DEFAULT_RUN_PRUNE_DAYS,
+    dry_run: bool = False,
+    now: datetime | None = None,
+) -> JsonObject:
+    """Prune old terminal Run records and their per-Run artifacts."""
+    if not is_non_negative_int(older_than_days):
+        raise ValueError("older_than_days must be a non-negative integer")
+    # worktree_records imports this module, so keep this dependency local.
+    from delegate_agent import worktree_records
+
+    cutoff = (now or datetime.now(UTC)) - timedelta(days=older_than_days)
+    planned: list[JsonObject] = []
+    removed: list[JsonObject] = []
+    skipped: list[JsonObject] = []
+    errors: list[JsonObject] = []
+    index_changed = False
+
+    with registry_lock(registry_root):
+        index = load_index(registry_root)
+        # Like worktree gc, treat unknown/unrecorded status as possibly present:
+        # only records whose worktree is affirmatively gone are prunable.
+        present_persistent_worktree_run_ids = {
+            record["runId"]
+            for record in worktree_records.load_persistent_records(registry_root)
+            if record.get("registryWorktreeStatus")
+            not in (worktree_records.STATUS_REMOVED, worktree_records.STATUS_MISSING)
+        }
+        for run_id, index_entry in list(index.get("runs", {}).items()):
+            if not isinstance(run_id, str) or not isinstance(index_entry, dict):
+                continue
+            if not RUN_ID_RE.fullmatch(run_id):
+                skipped.append(
+                    _run_prune_ref(
+                        index, run_id, run_status.STATUS_UNKNOWN, reason="invalid_run_id"
+                    )
+                )
+                continue
+            state = load_run_state_or_none(registry_root, run_id)
+            effective_status = run_status.effective_status(state)
+            if run_id in present_persistent_worktree_run_ids:
+                skipped.append(
+                    _run_prune_ref(
+                        index,
+                        run_id,
+                        effective_status,
+                        reason="persistent_worktree",
+                    )
+                )
+                continue
+            if effective_status == run_status.STATUS_RUNNING:
+                skipped.append(_run_prune_ref(index, run_id, effective_status, reason="running"))
+                continue
+            if effective_status not in run_status.TERMINAL_STATUSES | {run_status.STATUS_STALE}:
+                skipped.append(
+                    _run_prune_ref(index, run_id, effective_status, reason="non_terminal")
+                )
+                continue
+            manifest = load_run_manifest_or_none(registry_root, run_id)
+            activity = run_status.activity_datetime(state, manifest, run_id)
+            if activity is None:
+                skipped.append(
+                    _run_prune_ref(index, run_id, effective_status, reason="invalid_activity")
+                )
+                continue
+            if activity >= cutoff:
+                skipped.append(
+                    _run_prune_ref(index, run_id, effective_status, reason="not_yet_old_enough")
+                )
+                continue
+            candidate = _run_prune_ref(index, run_id, effective_status)
+            candidate["activityAt"] = run_status.activity_timestamp(state, manifest, run_id)
+            planned.append(candidate)
+            if dry_run:
+                continue
+            try:
+                _remove_run_record_artifacts(registry_root, run_id)
+            except OSError as exc:
+                errors.append({**candidate, "code": "record_remove_failed", "message": str(exc)})
+                continue
+            for alias, target_run_id in list(index.get("aliases", {}).items()):
+                if target_run_id != run_id:
+                    continue
+                index["aliases"].pop(alias, None)
+                if isinstance(alias, str) and alias and alias not in {".", ".."}:
+                    claim_path = aliases_dir(registry_root) / alias
+                    if Path(alias).name == alias and (
+                        claim_path.is_file() or claim_path.is_symlink()
+                    ):
+                        claim_path.unlink(missing_ok=True)
+            index["runs"].pop(run_id, None)
+            removed.append(candidate)
+            index_changed = True
+        if index_changed:
+            save_index(registry_root, index)
+
+    payload = empty_run_prune_payload(older_than_days=older_than_days, dry_run=dry_run)
+    payload["planned"] = planned
+    payload["removed"] = removed
+    payload["skipped"] = skipped
+    payload["errors"] = errors
+    if errors:
+        payload["ok"] = False
+        payload["exitCode"] = RUN_PRUNE_ERROR_EXIT_CODE
+    return payload

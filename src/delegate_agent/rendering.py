@@ -554,6 +554,24 @@ def render_worktree_prune_text(payload: JsonObject, stdout: TextIO) -> None:
                     print(f"  - {label} {detail}", file=stdout)
 
 
+def render_runs_prune_text(payload: JsonObject, stdout: TextIO) -> None:
+    print(f"older than: {payload.get('olderThanDays', '?')} days", file=stdout)
+    if payload.get("dryRun") is True:
+        print("dry run: Registry, logs, and artifacts unchanged", file=stdout)
+    for section in ("planned", "removed", "skipped", "errors"):
+        items = payload.get(section)
+        count = len(items) if isinstance(items, list) else 0
+        print(f"{section}: {count}", file=stdout)
+        if isinstance(items, list):
+            for item in items[:20]:
+                if isinstance(item, dict):
+                    label = item.get("alias") or item.get("runId") or "?"
+                    detail = (
+                        item.get("reason") or item.get("code") or item.get("effectiveStatus") or ""
+                    )
+                    print(f"  - {label} {detail}", file=stdout)
+
+
 def render_worktree_gc_text(payload: JsonObject, stdout: TextIO) -> None:
     print(f"reconciled: {payload.get('reconciled', 0)}", file=stdout)
     if payload.get("dryRun") is True:

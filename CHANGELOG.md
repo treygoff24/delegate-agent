@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Added `delegate runs prune` with a 30-day default age threshold, an explicit
+  `--older-than` override, and `--dry-run` preview output. It prunes terminal
+  Run records and their associated Registry artifacts without touching genuinely
+  running Runs, and skips Runs with a registered present persistent worktree so
+  those worktrees remain manageable.
+
 ## [0.22.0] - 2026-07-26
 
 ### Changed

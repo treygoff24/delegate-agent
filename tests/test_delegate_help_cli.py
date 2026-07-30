@@ -101,6 +101,7 @@ class MultiLevelHelpTests(HelpCliTestBase):
         (["dry-run", "droid", "--help"], "dry-run"),
         (["worktree", "remove", "--help"], "worktree remove"),
         (["worktree", "prune", "--help"], "worktree prune"),
+        (["runs", "prune", "--help"], "runs prune"),
         (["worktree", "list", "--help"], "worktree list"),
         (["worktree", "show", "--help"], "worktree show"),
         (["worktree", "gc", "--help"], "worktree gc"),

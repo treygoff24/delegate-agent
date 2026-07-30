@@ -134,7 +134,7 @@ def seed_persistent_worktree_run(
     execution_cwd: str | None = None,
     worktree_status: str = "present",
     creation_oid: str | None = None,
-    source_head_ref: str | None | object = object(),
+    source_head_ref: str | object | None = object(),
     last_activity_at: str | None = None,
 ) -> tuple[str, str]:
     registry_root = delegate.run_registry.ensure_registry(Path(repo_path), workspace_kind="git")

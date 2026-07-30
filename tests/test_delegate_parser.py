@@ -1100,6 +1100,30 @@ class ParserTests(unittest.TestCase):
             self.delegate.parse_cli(["runs", "--limit", "0"])
         self.assertEqual(ctx.exception.error, "invalid_limit")
 
+    def test_runs_prune_parses_age_override_and_dry_run(self):
+        parsed = self.delegate.parse_cli(
+            [
+                "--json",
+                "--cwd",
+                "/tmp/repo",
+                "runs",
+                "prune",
+                "--older-than",
+                "14",
+                "--dry-run",
+            ]
+        )
+        self.assertEqual(parsed.subcommand, "runs")
+        self.assertEqual(parsed.runs.action, "prune")
+        self.assertEqual(parsed.runs.older_than_days, 14)
+        self.assertTrue(parsed.runs.dry_run)
+        self.assertTrue(parsed.runs.json_mode)
+
+    def test_runs_prune_rejects_negative_age(self):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(["runs", "prune", "--older-than", "-1"])
+        self.assertEqual(ctx.exception.error, "missing_option_value")
+
     def test_has_misplaced_global_option_detects_exact_tokens(self):
         self.assertFalse(self.delegate.has_misplaced_global_option([]))
         self.assertFalse(self.delegate.has_misplaced_global_option(["--jsonish"]))
