@@ -1,10 +1,12 @@
 # Delegate Agent repository instructions
 
-This repository contains the development copy of the `delegate` CLI.
+Development copy of the `delegate` CLI. `CONTRIBUTING.md` covers contributor
+setup, supported platforms, packaging, and issue reporting; this file is the
+agent-facing subset.
 
 ## Development entry point
 
-Use the repo-local entry point while working in this checkout:
+Validate through the repo-local entry point, never an installed shim:
 
 ```bash
 python3 bin/delegate.py --json describe
@@ -14,10 +16,9 @@ Do not overwrite an installed `delegate` shim or a user's live `~/.delegate`
 runtime/config unless the operator explicitly asks you to install or promote a
 repository change.
 
-## Validation
+## Validation gate
 
-Before proposing or shipping code changes, run the narrowest relevant check and
-then the full local unit suite when practical:
+Narrowest relevant check first, then the four commands CI runs:
 
 ```bash
 python3 -m unittest discover -s tests
@@ -26,35 +27,21 @@ ruff check .
 ruff format --check .
 ```
 
-Lint and format use `ruff`, declared in the `dev` optional-dependencies group
-(`python3 -m pip install -e ".[dev]"`). Run `ruff format .` to apply formatting.
-
-Packaging changes should also build and install a wheel in a clean virtual
-environment:
-
-```bash
-python3 -m build --sdist --wheel
-twine check dist/*
-```
+`ruff` comes from the `dev` extra (`python3 -m pip install -e ".[dev]"`);
+`ruff format .` applies formatting.
 
 ## Runtime boundaries
 
-- `safe` mode is for review/investigation and should not edit files.
-- `work` mode is edit-capable.
+- `safe` mode is for review/investigation and must not edit files; `work` mode
+  is edit-capable.
 - Temporary safe isolation protects the source checkout from ordinary
   relative-path edits, but it is not a complete host security sandbox.
-- Persistent worktree runs are orchestrator-managed. Do not delete or move
-  Delegate-created worktrees by hand; use `delegate worktree ...` commands.
+- Persistent worktree runs are orchestrator-managed: use `delegate worktree ...`,
+  never delete or move a Delegate-created worktree by hand.
 
 ## Public-repo hygiene
 
-Do not commit:
-
-- `.delegate/` run logs or local runtime state.
-- `.env` files, credentials, API keys, private model IDs, or local config.
-- Machine-specific absolute paths.
-- Private planning notes or local agent/plugin folders.
-
-Keep examples provider-neutral and placeholder-only. Real model IDs belong in a
-private config file such as `~/.delegate/config.json` or a path referenced by
-`DELEGATE_CONFIG`.
+Never commit local runtime state (`.delegate/`), credentials, `.env` files,
+private model IDs, machine-specific absolute paths, or private planning notes.
+Keep examples provider-neutral and placeholder-only — real model IDs belong in
+`~/.delegate/config.json` or a path referenced by `DELEGATE_CONFIG`.
