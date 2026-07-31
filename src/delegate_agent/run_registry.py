@@ -912,14 +912,14 @@ def prune_runs(
         # A worktree owner whose path has a live attached resume run must keep
         # its record even if its own worktree status is stale: pruning it would
         # orphan the attachment lease derivation mid-run.
-        live_attached_owner_ids = {
-            record["runId"]
-            for record in persistent_records
-            if isinstance(record.get("executionCwd"), str)
-            and worktree_records.live_attachments_for_path(
-                registry_root, str(record["executionCwd"])
-            )
-        }
+        live_attachments_by_owner_id: dict[str, list[JsonObject]] = {}
+        for record in persistent_records:
+            execution_cwd = record.get("executionCwd")
+            if not isinstance(execution_cwd, str):
+                continue
+            attached_runs = worktree_records.live_attachments_for_path(registry_root, execution_cwd)
+            if attached_runs:
+                live_attachments_by_owner_id[record["runId"]] = attached_runs
         for run_id, index_entry in list(index.get("runs", {}).items()):
             if not isinstance(run_id, str) or not isinstance(index_entry, dict):
                 continue
@@ -932,15 +932,16 @@ def prune_runs(
                 continue
             state = load_run_state_or_none(registry_root, run_id)
             effective_status = run_status.effective_status(state)
-            if run_id in live_attached_owner_ids:
-                skipped.append(
-                    _run_prune_ref(
-                        index,
-                        run_id,
-                        effective_status,
-                        reason="live_attachment",
-                    )
+            attached_runs = live_attachments_by_owner_id.get(run_id)
+            if attached_runs:
+                skipped_entry = _run_prune_ref(
+                    index,
+                    run_id,
+                    effective_status,
+                    reason="live_attachment",
                 )
+                skipped_entry["attachedRuns"] = attached_runs
+                skipped.append(skipped_entry)
                 continue
             if run_id in present_persistent_worktree_run_ids:
                 skipped.append(

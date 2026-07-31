@@ -686,11 +686,11 @@ def _execute_attached_worktree(
         )
 
     execution_request = worktree_execution._request_for_execution_workspace(request, worktree_path)
-    # Re-check the argv-transport size guard now that the worktree note (and
-    # any forbid-commit note) has been prepended.
+    # Re-check the actual argv payload now that the worktree note (and any
+    # forbid-commit note) has been prepended.
     resume_command.enforce_resume_prompt_size(
         request.engine,
-        worktree_execution._persistent_prompt(request.prompt, forbid_commit=request.forbid_commit),
+        execution_request.argv[-1],
     )
     ensure_binary(
         execution_request.argv,

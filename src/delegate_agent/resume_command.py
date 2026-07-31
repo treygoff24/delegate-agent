@@ -516,7 +516,13 @@ def build_resume_plan(
     source_effort = _manifest_str(manifest, "requestedReasoningEffort") or _manifest_str(
         manifest, "resolvedReasoningEffort"
     )
-    if reasoning_effort is None and not cross_engine and source_effort is not None:
+    source_effort_source = _manifest_str(manifest, "reasoningEffortSource")
+    if (
+        reasoning_effort is None
+        and not cross_engine
+        and source_effort is not None
+        and source_effort_source in {"cli", "input-json"}
+    ):
         reasoning_effort = source_effort
     elif reasoning_effort is None and cross_engine:
         if source_effort is not None:
@@ -524,7 +530,7 @@ def build_resume_plan(
                 f"reasoning effort dropped for cross-engine resume to {engine}; "
                 "pass --reasoning-effort to set one."
             )
-    elif reasoning_effort is None:
+    elif reasoning_effort is None and source_effort is None:
         notes.append(
             f"reasoning effort absent from the source manifest; using {engine} configuration default."
         )
@@ -587,7 +593,7 @@ def build_resume_plan(
             "--include-dirty cannot be used when resume attaches to a persistent "
             "worktree; dirty-file sync is creation-only.",
         )
-    if opts.include_dirty:
+    if opts.include_dirty or (not persistent_source and manifest.get("includeDirty") is True):
         notes.append(
             "includeDirty is creation-only and was dropped: resume does not create a new worktree."
         )
@@ -715,7 +721,10 @@ def apply_resume_to_request(request: Request, plan: ResumePlan) -> Request:
                 },
             ),
         )
-    # Final-prompt size guard: request.prompt already carries skill/safe/dirty
-    # framing; the attach executor re-checks after the worktree note is added.
-    enforce_resume_prompt_size(updated.engine, updated.prompt)
+    # The built argv, not Request.prompt, is the materialized transport payload
+    # after skill/safe/dirty framing. Retain the Request fallback for direct
+    # callers that have not yet built an argv. The attach executor re-checks
+    # after its worktree framing is added.
+    prompt_text = updated.argv[-1] if len(updated.argv) > 1 else updated.prompt
+    enforce_resume_prompt_size(updated.engine, prompt_text)
     return updated

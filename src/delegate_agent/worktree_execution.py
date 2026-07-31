@@ -617,6 +617,10 @@ def _launch_child_in_persistent_worktree(
             request,
             registration.worktree_path,
         )
+        if request.resumed_from is not None:
+            from delegate_agent.resume_command import enforce_resume_prompt_size
+
+            enforce_resume_prompt_size(request.engine, execution_request.argv[-1])
         execution.binary_validator(execution_request.argv, request.engine)
 
         exec_ctx = _build_persistent_worktree_run_context(
