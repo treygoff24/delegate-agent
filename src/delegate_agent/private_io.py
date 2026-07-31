@@ -21,6 +21,62 @@ class RegistryJsonError(ValueError):
     """Raised when an existing registry JSON file cannot be trusted."""
 
 
+class BoundedReadError(ValueError):
+    """A record file could not be read within the bounded-trust contract.
+
+    ``reason`` is one of: ``not_found``, ``not_regular``, ``too_large``,
+    ``undecodable``, ``unreadable``. Callers map these onto their own
+    user-facing error codes.
+    """
+
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
+def read_private_text_bounded(path: Path, *, max_bytes: int) -> str:
+    """Read a registry-owned text file through one bounded, no-follow reader.
+
+    Registry record content is potentially child-tampered after write (work
+    children run in the workspace that owns ``.delegate``), so every parent
+    read of record text refuses symlinks, non-regular files, oversized
+    content, and invalid UTF-8 instead of trusting the path.
+    """
+    try:
+        fd = open_private_file(path, os.O_RDONLY)
+    except FileNotFoundError:
+        raise BoundedReadError("not_found", f"record file not found: {path}") from None
+    except OSError as exc:
+        raise BoundedReadError("unreadable", f"could not open record file {path}: {exc}") from exc
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise BoundedReadError("not_regular", f"record file is not a regular file: {path}")
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise BoundedReadError(
+                    "too_large",
+                    f"record file {path} exceeds the {max_bytes}-byte read bound",
+                )
+            chunks.append(chunk)
+    except OSError as exc:
+        raise BoundedReadError("unreadable", f"could not read record file {path}: {exc}") from exc
+    finally:
+        os.close(fd)
+    try:
+        return b"".join(chunks).decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise BoundedReadError(
+            "undecodable", f"record file {path} is not valid UTF-8: {exc}"
+        ) from exc
+
+
 def supports_private_modes() -> bool:
     """Return whether chmod-style private mode hardening is available."""
     return os.name == "posix"

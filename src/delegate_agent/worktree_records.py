@@ -130,6 +130,15 @@ def _is_persistent_worktree_run(
     manifest: JsonObject | None,
     snapshot: JsonObject | None,
 ) -> bool:
+    # Attached resume runs execute inside another run's worktree without owning
+    # it; they must never derive a second worktree record for the same path.
+    for source in (state, manifest, snapshot):
+        if not isinstance(source, dict):
+            continue
+        if isinstance(source.get("worktreeAttachment"), dict):
+            return False
+        if source.get("isolationLifecycle") == "attached":
+            return False
     for source in (state, manifest, snapshot):
         if not isinstance(source, dict):
             continue
@@ -187,6 +196,40 @@ def _record_for_run(
         "creationContext": creation,
         "registryWorktreeStatus": _registry_worktree_status(state, manifest, snapshot),
     }
+
+
+def _canonical_path(path: str) -> str:
+    try:
+        return str(Path(path).resolve(strict=False))
+    except (OSError, RuntimeError, ValueError):
+        return path
+
+
+def live_attachments_for_path(registry_root: Path, execution_cwd: str) -> list[JsonObject]:
+    """Return {runId, alias} for effectively-running resume runs attached to a path.
+
+    The attachment lease is derived from run records (the manifest's
+    ``worktreeAttachment`` plus live status) rather than a separate state store,
+    matching how worktree records themselves are derived. Removal paths refuse
+    while this list is non-empty.
+    """
+    canonical = _canonical_path(execution_cwd)
+    index = run_registry.load_index(registry_root)
+    live: list[JsonObject] = []
+    for run_id, entry in index.get("runs", {}).items():
+        if not isinstance(run_id, str) or not isinstance(entry, dict):
+            continue
+        manifest = run_registry.load_run_manifest_or_none(registry_root, run_id)
+        attachment = manifest.get("worktreeAttachment") if isinstance(manifest, dict) else None
+        if not isinstance(attachment, dict):
+            continue
+        attached_path = attachment.get("path")
+        if not isinstance(attached_path, str) or _canonical_path(attached_path) != canonical:
+            continue
+        state = run_registry.load_run_state_or_none(registry_root, run_id)
+        if run_registry.effective_status(state) == run_registry.STATUS_RUNNING:
+            live.append({"runId": run_id, "alias": _get_str(entry, "alias")})
+    return live
 
 
 def load_persistent_records(registry_root: Path) -> list[PersistentWorktreeRecord]:

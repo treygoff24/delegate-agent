@@ -312,6 +312,12 @@ def _build_persistent_worktree_run_context(
         call_read_only=request.call_read_only or request.pure,
         pure=request.pure,
         prompt_instruction_mode=request.prompt_instruction_mode,
+        source_prompt=request.source_prompt,
+        progress_requested=request.progress_requested,
+        timeout_seconds=request.timeout,
+        output_schema_text=request.output_schema_record_text,
+        agent=request.agent,
+        resumed_from=request.resumed_from,
     )
 
 
@@ -377,6 +383,12 @@ def _register_persistent_worktree_run(
         run_path,
         delegate_runner.build_manifest(pre_ctx, public_argv(request)),
     )
+    if pre_ctx.source_prompt is not None:
+        # Written here as well as in _prepare_tracked_run so a worktree-creation
+        # failure still leaves a resumable prompt record.
+        run_registry.write_private_text(
+            run_path / run_registry.PROMPT_TXT_FILE, pre_ctx.source_prompt
+        )
 
     delegate_runner.write_state(
         run_path,

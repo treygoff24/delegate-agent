@@ -42,6 +42,7 @@ from delegate_agent.request_models import (
     InspectionOptions,
     LaunchOptions,
     ParsedCommand,
+    ResumeOptions,
     RunJsonOptions,
 )
 from delegate_agent.run_output_commands import RUN_OUTPUT_DEFAULT_TAIL_LINES
@@ -65,10 +66,10 @@ VALUE_GLOBAL_OPTIONS = frozenset(
 )
 
 AUTH_PROFILE_SUBCOMMANDS = frozenset(KNOWN_ENGINES) | frozenset(
-    {"dry-run", "run", "profiles", "models", "capabilities", "setup"}
+    {"dry-run", "run", "profiles", "models", "capabilities", "setup", "resume"}
 )
 GROUP_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
-GROUP_SUBCOMMANDS = frozenset(KNOWN_ENGINES) | frozenset({"dry-run", "run"})
+GROUP_SUBCOMMANDS = frozenset(KNOWN_ENGINES) | frozenset({"dry-run", "run", "resume"})
 
 
 def validate_group(value: str, *, option: str = "--group") -> str:
@@ -543,6 +544,22 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
         return parse_dry_run(
             rest, json_mode, cwd, pass_through, completion_report, isolation, auth_profile, group
         )
+    if subcommand == "resume":
+        if isolation is not None:
+            raise DelegateError(
+                "invalid_option_combination",
+                "--isolation is not supported with delegate resume; "
+                "isolation is inherited from the source run.",
+            )
+        return parse_resume(
+            rest,
+            json_mode,
+            cwd,
+            pass_through=pass_through,
+            completion_report=completion_report,
+            auth_profile=auth_profile,
+            group=group,
+        )
     if subcommand == "snapshot":
         return parse_snapshot(rest, json_mode, cwd)
     if subcommand == "runs":
@@ -1013,6 +1030,152 @@ def parse_dry_run(
     raise DelegateError(
         "invalid_engine",
         f"dry-run engine must be {ENGINES_PROSE}.",
+    )
+
+
+def parse_resume(
+    rest: list[str],
+    json_mode: bool,
+    cwd: str | None,
+    *,
+    pass_through: bool,
+    completion_report: str | None,
+    auth_profile: str | None,
+    group: str | None,
+) -> ParsedCommand:
+    """Parse ``resume [resume-options] <alias|runId> ["extra instructions"...]``.
+
+    Parser law: launch flags must appear BEFORE the handle — once positional
+    text starts, remaining tokens are prompt material.
+    """
+    if rest and command_help.is_help_token(rest[0]):
+        return help_command(json_mode, "resume")
+    engine: str | None = None
+    model: str | None = None
+    reasoning_effort: str | None = None
+    fast: bool | None = None
+    progress_intent: str | None = None
+    timeout: int | None = None
+    output_schema: str | None = None
+    drop_output_schema = False
+    dry_run = False
+    handle: str | None = None
+    extra_parts: list[str] = []
+    i = 0
+    while i < len(rest):
+        token = rest[i]
+        if handle is None:
+            if token == "--json":
+                json_mode = True
+                i += 1
+                continue
+            if command_help.is_help_token(token):
+                return help_command(json_mode, "resume")
+            if token == "--engine":
+                if i + 1 >= len(rest):
+                    raise DelegateError("invalid_engine", "--engine requires a value.")
+                engine = rest[i + 1]
+                if engine not in KNOWN_ENGINES:
+                    raise DelegateError("invalid_engine", f"engine must be {ENGINES_PROSE}.")
+                i += 2
+                continue
+            if token == "--model":
+                if i + 1 >= len(rest) or not rest[i + 1].strip() or rest[i + 1].startswith("-"):
+                    raise DelegateError("missing_model", "--model requires a non-empty value.")
+                model = rest[i + 1]
+                i += 2
+                continue
+            if token == "--reasoning-effort":
+                if i + 1 >= len(rest) or rest[i + 1].startswith("-"):
+                    raise DelegateError(
+                        "missing_reasoning_effort", "--reasoning-effort requires a value."
+                    )
+                try:
+                    reasoning_effort = reasoning.normalize_effort(rest[i + 1])
+                except reasoning.ReasoningCapabilityError as exc:
+                    raise DelegateError(exc.error, exc.message) from exc
+                i += 2
+                continue
+            if token == "--fast":
+                fast = True
+                i += 1
+                continue
+            if token == "--no-fast":
+                fast = False
+                i += 1
+                continue
+            if token == "--progress":
+                progress_intent = "on"
+                i += 1
+                continue
+            if token == "--no-progress":
+                progress_intent = "off"
+                i += 1
+                continue
+            if token == "--timeout":
+                timeout, i = parse_required_positive_int_option(
+                    rest,
+                    i,
+                    option_label="--timeout",
+                    missing_error="missing_timeout",
+                    invalid_error="invalid_timeout",
+                )
+                continue
+            if token == "--output-schema":
+                if i + 1 >= len(rest):
+                    raise DelegateError("missing_output_schema", "--output-schema requires a path.")
+                output_schema = rest[i + 1]
+                i += 2
+                continue
+            if token == "--no-output-schema":
+                drop_output_schema = True
+                i += 1
+                continue
+            if token == "--dry-run":
+                dry_run = True
+                i += 1
+                continue
+            if token in MISPLACED_GLOBAL_OPTIONS:
+                raise_misplaced_global_option("Global options must appear before the subcommand.")
+            if token.startswith("-"):
+                raise DelegateError("unknown_option", unknown_option_message("resume", token))
+            handle = token
+            i += 1
+            continue
+        extra_parts = rest[i:]
+        break
+    if handle is None:
+        raise DelegateError(
+            "missing_handle", "resume requires a run handle (alias or run id)."
+        )
+    if output_schema is not None and drop_output_schema:
+        raise DelegateError(
+            "invalid_option_combination",
+            "--output-schema and --no-output-schema cannot be combined.",
+        )
+    return ParsedCommand(
+        "resume",
+        global_options=GlobalOptions(
+            json_mode=json_mode,
+            cwd=cwd,
+            pass_through=pass_through,
+            completion_report=completion_report,
+            auth_profile=auth_profile,
+            group=group,
+        ),
+        resume=ResumeOptions(
+            handle=handle,
+            extra_parts=list(extra_parts),
+            engine=engine,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            fast=fast,
+            progress_intent=progress_intent,
+            timeout=timeout,
+            output_schema=output_schema,
+            drop_output_schema=drop_output_schema,
+            dry_run=dry_run,
+        ),
     )
 
 

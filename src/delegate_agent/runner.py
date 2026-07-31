@@ -41,6 +41,7 @@ MANIFEST_FILE = run_registry.MANIFEST_FILE
 STATE_FILE = run_registry.STATE_FILE
 SNAPSHOT_FILE = run_registry.SNAPSHOT_FILE
 COMPLETION_REPORT_FILE = run_registry.COMPLETION_REPORT_FILE
+PROMPT_TXT_FILE = run_registry.PROMPT_TXT_FILE
 
 PROGRESS_PERSIST_LINE_INTERVAL = 10
 PROGRESS_PERSIST_TIME_INTERVAL_SEC = 0.5
@@ -145,6 +146,13 @@ class RunContext:
     call_read_only: bool = False
     pure: bool = False
     prompt_instruction_mode: str = PROMPT_INSTRUCTION_MODE_WRAPPED
+    source_prompt: str | None = None
+    progress_requested: str | None = None
+    timeout_seconds: int | None = None
+    output_schema_text: str | None = None
+    agent: str | None = None
+    resumed_from: JsonObject | None = None
+    worktree_attachment: JsonObject | None = None
 
 
 def write_manifest(run_path: Path, manifest: JsonObject) -> None:
@@ -260,6 +268,20 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
     if ctx.include_dirty:
         payload["includeDirty"] = True
         payload["syncedFiles"] = ctx.synced_files
+    if ctx.source_prompt is not None:
+        payload["promptFile"] = PROMPT_TXT_FILE
+    if ctx.progress_requested is not None:
+        payload["progressRequested"] = ctx.progress_requested
+    if ctx.timeout_seconds is not None:
+        payload["timeoutSeconds"] = ctx.timeout_seconds
+    if ctx.output_schema_text is not None:
+        payload["outputSchema"] = ctx.output_schema_text
+    if ctx.agent is not None:
+        payload["agent"] = ctx.agent
+    if ctx.resumed_from is not None:
+        payload["resumedFrom"] = ctx.resumed_from
+    if ctx.worktree_attachment is not None:
+        payload["worktreeAttachment"] = ctx.worktree_attachment
     return payload
 
 
@@ -1090,7 +1112,10 @@ class TrackedFinalization:
 
 
 def _persistent_work_summary(ctx: RunContext) -> JsonObject | None:
-    if ctx.isolation_lifecycle != "persistent":
+    # Attached resume runs share the owner's worktree; their commit accounting
+    # keys on the attachment-start HEAD (recorded in creation_context by the
+    # attach executor), not the owner's creation base.
+    if ctx.isolation_lifecycle not in ("persistent", "attached"):
         return None
     return worktree_summary.build_work_summary(
         source_git_root=ctx.source_git_root,
@@ -1122,8 +1147,12 @@ def _final_extra(ctx: RunContext, capture_exit_code: int) -> tuple[int, JsonObje
         extra["warnings"] = [
             "Child command created commits; review the persistent worktree before integration."
         ]
+        # Attached resume runs have no worktree record of their own; point
+        # inspection commands at the owning run's alias.
+        attachment = ctx.worktree_attachment or {}
+        show_handle = attachment.get("sourceAlias") if ctx.isolation_lifecycle == "attached" else None
         extra["nextActions"] = [
-            f"delegate worktree show {ctx.alias}",
+            f"delegate worktree show {show_handle or ctx.alias}",
             f"git -C {shlex.quote(ctx.execution_cwd)} log --oneline --decorate --max-count=5 HEAD",
         ]
         extra["commitsCreatedByChild"] = True
@@ -1224,6 +1253,11 @@ def _prepare_tracked_run(
         scratch_dir = run_path / "scratch"
         run_registry.ensure_private_dir(scratch_dir)
     write_manifest(run_path, build_manifest(ctx, manifest_argv or argv))
+    if ctx.source_prompt is not None:
+        # The user prompt exactly as resolved, before instruction framing, so
+        # `delegate resume` can rebuild the original task text. Verbatim by
+        # design; deleted only by `runs prune` (never archived).
+        run_registry.write_private_text(run_path / PROMPT_TXT_FILE, ctx.source_prompt)
 
     stdout_log = run_path / STDOUT_LOG
     stderr_log = run_path / STDERR_LOG

@@ -201,7 +201,14 @@ def build_run_summary(
         "activityAt": activity_timestamp(state, manifest),
     }
     if manifest:
-        for key in ("modelAlias", "modelResolved", "terminalEvent", "terminalStatus"):
+        for key in (
+            "modelAlias",
+            "modelResolved",
+            "terminalEvent",
+            "terminalStatus",
+            "resumedFrom",
+            "worktreeAttachment",
+        ):
             value = manifest.get(key)
             if value is not None:
                 summary[key] = value

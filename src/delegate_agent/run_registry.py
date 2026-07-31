@@ -42,6 +42,7 @@ MANIFEST_FILE = "manifest.json"
 STATE_FILE = "state.json"
 SNAPSHOT_FILE = "snapshot.json"
 COMPLETION_REPORT_FILE = "completion-report.md"
+PROMPT_TXT_FILE = "prompt.txt"
 INDEX_VERSION = 1
 MANIFEST_SCHEMA = "delegate.manifest.v1"
 STATE_SCHEMA = "delegate.state.v1"
@@ -901,11 +902,24 @@ def prune_runs(
         index = load_index(registry_root)
         # Like worktree gc, treat unknown/unrecorded status as possibly present:
         # only records whose worktree is affirmatively gone are prunable.
+        persistent_records = worktree_records.load_persistent_records(registry_root)
         present_persistent_worktree_run_ids = {
             record["runId"]
-            for record in worktree_records.load_persistent_records(registry_root)
+            for record in persistent_records
             if record.get("registryWorktreeStatus")
             not in (worktree_records.STATUS_REMOVED, worktree_records.STATUS_MISSING)
+        }
+        # A worktree owner whose path has a live attached resume run must keep
+        # its record even if its own worktree status is stale: pruning it would
+        # orphan the attachment lease derivation mid-run.
+        live_attached_owner_ids = {
+            record["runId"]
+            for record in persistent_records
+            if record["runId"] not in present_persistent_worktree_run_ids
+            and isinstance(record.get("executionCwd"), str)
+            and worktree_records.live_attachments_for_path(
+                registry_root, str(record["executionCwd"])
+            )
         }
         for run_id, index_entry in list(index.get("runs", {}).items()):
             if not isinstance(run_id, str) or not isinstance(index_entry, dict):
@@ -926,6 +940,16 @@ def prune_runs(
                         run_id,
                         effective_status,
                         reason="persistent_worktree",
+                    )
+                )
+                continue
+            if run_id in live_attached_owner_ids:
+                skipped.append(
+                    _run_prune_ref(
+                        index,
+                        run_id,
+                        effective_status,
+                        reason="live_attachment",
                     )
                 )
                 continue

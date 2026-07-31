@@ -1271,6 +1271,7 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
                 group=global_options.group,
                 agent=launch.agent,
                 model_override=cli_model_override,
+                source_prompt=raw_prompt,
             )
         except BaseException:
             if cleanup_workspace:
@@ -1294,6 +1295,7 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
     output_schema = resolve_output_schema(launch.engine, launch.output_schema)
     workspace = resolve_workspace(global_options.cwd)
     prompt = resolve_prompt(launch.prompt_parts, launch.prompt_file, stdin)
+    source_prompt = prompt
 
     # Capture git metadata for isolation planning (read-only, safe in dry-run too).
     git_root, git_common_dir, git_head_oid, git_head_ref, git_branch = capture_git_metadata(
@@ -1395,6 +1397,8 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         prompt_instruction_mode=instruction_mode,
         agent=launch.agent,
         model_override=cli_model_override,
+        source_prompt=source_prompt,
+        progress_requested=launch.progress_intent,
     )
 
 
@@ -1594,6 +1598,7 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
                 ),
                 agent=json_agent,
                 model_override=json_model_override,
+                source_prompt=call_prompt,
             )
         except BaseException:
             if cleanup_workspace:
@@ -1689,6 +1694,7 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         output_schema,
     )
     prompt = validate_prompt(prompt)
+    source_prompt = prompt
     instruction_mode = resolve_input_json_prompt_instruction_mode(
         raw_instruction_mode,
         prompt,
@@ -1731,6 +1737,8 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         model_override=json_model_override,
         pure=raw_pure,
         timeout=raw_timeout,
+        source_prompt=source_prompt,
+        progress_requested=raw_progress_intent,
     )
 
 
@@ -1765,6 +1773,8 @@ def build_request(
     prompt_instruction_mode: str = PROMPT_INSTRUCTION_MODE_WRAPPED,
     agent: str | None = None,
     model_override: str | None = None,
+    source_prompt: str | None = None,
+    progress_requested: str | None = None,
 ) -> Request:
     _validate_agent_option(engine, agent)
     if not isinstance(workspace, ResolvedWorkspace):
@@ -1838,6 +1848,8 @@ def build_request(
             prompt_instruction_mode=prompt_instruction_mode,
             agent=agent,
             model_override=model_override,
+            source_prompt=source_prompt,
+            progress_requested=progress_requested,
         )
 
     def reprobed() -> tuple[JsonObject | None, tuple[str, ...]] | None:
@@ -2685,8 +2697,18 @@ def _build_request_for_workspace(
     prompt_instruction_mode: str = PROMPT_INSTRUCTION_MODE_WRAPPED,
     agent: str | None = None,
     model_override: str | None = None,
+    source_prompt: str | None = None,
+    progress_requested: str | None = None,
 ) -> Request:
     output_schema_text, schema_warnings = _preflight_codex_output_schema(engine, output_schema)
+    output_schema_record_text = output_schema_text
+    if output_schema is not None and output_schema_record_text is None:
+        # Record the schema text in the manifest (codex stores its normalized
+        # preflight form above); resume re-materializes it to a file at launch.
+        try:
+            output_schema_record_text = Path(output_schema).read_text(encoding="utf-8")
+        except OSError:
+            output_schema_record_text = None
     warnings = (*warnings, *schema_warnings)
     if prompt_instruction_mode != PROMPT_INSTRUCTION_MODE_SLASH:
         prompt = _append_safe_dirty_tree_note(prompt, resolved, mode, isolation_context)
@@ -2768,6 +2790,10 @@ def _build_request_for_workspace(
             group=group,
             workflow_agent_key=workflow_agent_key,
             prompt_instruction_mode=prompt_instruction_mode,
+            source_prompt=source_prompt,
+            progress_requested=progress_requested,
+            output_schema_record_text=output_schema_record_text,
+            agent=agent,
         ),
         config,
         resolution=profile_resolution,

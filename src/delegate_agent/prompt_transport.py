@@ -31,3 +31,9 @@ def devin_display_argv(argv: list[str]) -> list[str]:
 PROMPT_TRANSPORT_ARGV = "argv"
 PROMPT_TRANSPORT_FILE = "file"
 PROMPT_TRANSPORT_STDIN = "stdin"
+
+# Engines whose prompt rides child argv and is therefore subject to ARG_MAX.
+# Shared by the workflow interpolation guard and the resume final-prompt guard
+# so the covered-engine set cannot drift between the two.
+ARGV_PROMPT_TRANSPORT_ENGINES = ("cursor", "kimi", "omp")
+ARGV_PROMPT_GUARD_BYTES = 100 * 1024
