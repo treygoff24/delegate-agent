@@ -757,9 +757,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
     ),
     "resume": CommandSpec(
         name="resume",
-        summary=(
-            "Relaunch a terminal Run as a NEW Run with a synthesized continuation prompt."
-        ),
+        summary=("Relaunch a terminal Run as a NEW Run with a synthesized continuation prompt."),
         usage=(
             'delegate [--json] [--cwd PATH] resume [resume-options] <alias|runId> ["extra instructions"...]',
         ),
@@ -786,11 +784,18 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             OptionSpec("--timeout", "SEC", "Override the inherited run timeout."),
             OptionSpec("--output-schema", "FILE", "Override the inherited output schema."),
             OptionSpec("--no-output-schema", None, "Drop the inherited output schema."),
-            OptionSpec("--dry-run", None, "Show the resolved continuation launch without executing."),
+            OptionSpec(
+                "--include-dirty",
+                None,
+                "Creation-only; rejected when resume attaches to a persistent worktree.",
+            ),
+            OptionSpec(
+                "--dry-run", None, "Show the resolved continuation launch without executing."
+            ),
         ),
         examples=(
-            "delegate resume codex-3 \"the tests now pass; finish the docs\"",
-            "delegate --json resume --engine claude grok-2 \"continue where grok stopped\"",
+            'delegate resume codex-3 "the tests now pass; finish the docs"',
+            'delegate --json resume --engine claude grok-2 "continue where grok stopped"',
             "delegate resume --dry-run cursor-1",
         ),
         notes=(
@@ -806,6 +811,8 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "to that worktree; worktree remove/prune refuse while an attached "
             "resume run is live. Distinct from `workflow run --resume` (workflow "
             "replay).",
+            "Resume options must appear before the handle; tokens after the handle "
+            "are continuation instructions, including flag-like text.",
         ),
         see_also=("runs", "snapshot", "run-output", "worktree show"),
     ),

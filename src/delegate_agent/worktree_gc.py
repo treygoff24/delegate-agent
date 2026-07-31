@@ -36,6 +36,7 @@ from delegate_agent.worktree_records import (
     PersistentWorktreeRecord,
     _registered_worktree_path_matches,
     _reload_record,
+    live_attachments_for_path,
     load_persistent_records,
 )
 
@@ -90,6 +91,12 @@ def prune_worktrees(
         if group is not None and record.get("group") != group:
             skipped.append(_entry_ref(record, reason="group_filter"))
             continue
+        execution_cwd = record.get("executionCwd")
+        if isinstance(execution_cwd, str):
+            attachments = live_attachments_for_path(registry_root, execution_cwd)
+            if attachments:
+                skipped.append(_entry_ref(record, reason="live_attachment"))
+                continue
         status, _warnings = wm.detect_worktree_status(record)
         if status in (STATUS_REMOVED, STATUS_UNKNOWN):
             # Not candidates — filter silently (spec L678).
@@ -1003,6 +1010,18 @@ def gc_worktrees(
         execution = record.get("executionCwd")
         branch = record.get("branch")
         if not isinstance(source, str) or not isinstance(execution, str):
+            continue
+        attachments = live_attachments_for_path(registry_root, execution)
+        if attachments:
+            warnings.append(
+                {
+                    "alias": record.get("alias"),
+                    "runId": record.get("runId"),
+                    "executionCwd": execution,
+                    "reason": "live_attachment",
+                    "attachedRuns": attachments,
+                }
+            )
             continue
         if source not in paths_by_root:
             listed, warning = wm._worktree_list_paths_with_warning(source)

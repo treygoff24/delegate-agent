@@ -915,8 +915,7 @@ def prune_runs(
         live_attached_owner_ids = {
             record["runId"]
             for record in persistent_records
-            if record["runId"] not in present_persistent_worktree_run_ids
-            and isinstance(record.get("executionCwd"), str)
+            if isinstance(record.get("executionCwd"), str)
             and worktree_records.live_attachments_for_path(
                 registry_root, str(record["executionCwd"])
             )
@@ -933,16 +932,6 @@ def prune_runs(
                 continue
             state = load_run_state_or_none(registry_root, run_id)
             effective_status = run_status.effective_status(state)
-            if run_id in present_persistent_worktree_run_ids:
-                skipped.append(
-                    _run_prune_ref(
-                        index,
-                        run_id,
-                        effective_status,
-                        reason="persistent_worktree",
-                    )
-                )
-                continue
             if run_id in live_attached_owner_ids:
                 skipped.append(
                     _run_prune_ref(
@@ -950,6 +939,16 @@ def prune_runs(
                         run_id,
                         effective_status,
                         reason="live_attachment",
+                    )
+                )
+                continue
+            if run_id in present_persistent_worktree_run_ids:
+                skipped.append(
+                    _run_prune_ref(
+                        index,
+                        run_id,
+                        effective_status,
+                        reason="persistent_worktree",
                     )
                 )
                 continue

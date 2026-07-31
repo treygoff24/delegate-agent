@@ -97,8 +97,15 @@ def _read_record_text(path: Path, *, prompt: bool = False) -> str:
         raise _record_invalid(str(exc)) from exc
 
 
-def _read_record_json(path: Path) -> JsonObject:
-    text = _read_record_text(path)
+def _read_record_json(path: Path, *, allow_missing: bool = False) -> JsonObject | None:
+    try:
+        text = _read_record_text(path)
+    except BoundedReadError as exc:
+        if allow_missing and exc.reason == "not_found":
+            return None
+        if exc.reason == "not_found":
+            raise _record_invalid(f"required record file is missing: {path.name}") from exc
+        raise
     try:
         data = json.loads(text)
     except json.JSONDecodeError as exc:
@@ -113,7 +120,9 @@ def _manifest_str(manifest: JsonObject, key: str) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _snapshot_digest(snapshot: JsonObject) -> str:
+def _snapshot_digest(snapshot: JsonObject | None) -> str:
+    if snapshot is None:
+        return "(no prior-run output was captured in the snapshot)"
     parts: list[str] = []
     assistant = snapshot.get("assistantText")
     if isinstance(assistant, str) and assistant.strip():
@@ -221,7 +230,10 @@ def _load_history(
     """
     run_path = run_registry.run_directory(registry_root, run_id)
     with run_registry.registry_lock(registry_root):
-        state = run_registry.load_run_state_or_none(registry_root, run_id)
+        state = _read_record_json(
+            run_path / run_registry.STATE_FILE,
+            allow_missing=True,
+        )
         effective = run_registry.effective_status(state)
         if effective == run_registry.STATUS_RUNNING:
             raise DelegateError(
@@ -239,9 +251,12 @@ def _load_history(
             except BoundedReadError:
                 pass  # No report captured; fall through to the snapshot digest.
         try:
-            snapshot = _read_record_json(run_path / run_registry.SNAPSHOT_FILE)
+            snapshot = _read_record_json(
+                run_path / run_registry.SNAPSHOT_FILE,
+                allow_missing=True,
+            )
         except BoundedReadError:
-            snapshot = {}
+            snapshot = None
         return effective, "digest", _snapshot_digest(snapshot)
 
 
@@ -249,9 +264,18 @@ def _validate_attach_target(
     registry_root: Path,
     run_id: str,
     manifest: JsonObject,
+    state: JsonObject | None,
+    snapshot: JsonObject | None,
 ) -> JsonObject:
     """Validate re-entry into the source run's persistent worktree."""
-    record = worktree_records._reload_record(registry_root, run_id)
+    record = worktree_records._record_from_parts(
+        registry_root,
+        run_id,
+        {},
+        state,
+        manifest,
+        snapshot,
+    )
     if record is None:
         raise _record_invalid(
             "The source run is a persistent-worktree run but no worktree record "
@@ -270,8 +294,18 @@ def _validate_attach_target(
     if not isinstance(execution_cwd, str) or not execution_cwd:
         raise _record_invalid("The source run's worktree record has no executionCwd.")
     path = Path(execution_cwd)
-    if path.is_symlink():
-        raise _record_invalid("The source run's worktree path is a symlink; refusing to attach.")
+    absolute_path = Path(os.path.abspath(execution_cwd))
+    try:
+        if path.is_symlink() or path.resolve(strict=False) != absolute_path:
+            raise DelegateError(
+                "worktree_path_changed",
+                "The source run's worktree path resolves through a symlink alias; refusing to attach.",
+            )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise DelegateError(
+            "worktree_path_changed",
+            "The source run's worktree path could not be canonically resolved.",
+        ) from exc
     if not path.is_dir():
         raise DelegateError(
             "worktree_missing",
@@ -279,6 +313,35 @@ def _validate_attach_target(
         )
     if not isinstance(branch, str) or not branch:
         raise _record_invalid("The source run's worktree record has no branch.")
+    manifest_execution_cwd = _manifest_str(manifest, "executionCwd")
+    if manifest_execution_cwd is not None and worktree_records._canonical_path(
+        manifest_execution_cwd
+    ) != worktree_records._canonical_path(execution_cwd):
+        raise DelegateError(
+            "worktree_path_changed",
+            "The source run's worktree path metadata disagrees across records.",
+        )
+    status_warnings = _warnings
+    if status_warnings:
+        if any("not registered" in warning for warning in status_warnings):
+            raise DelegateError(
+                "worktree_unregistered",
+                "The source run's worktree is no longer registered with Git.",
+            )
+        raise DelegateError(
+            "worktree_missing",
+            "The source run's worktree metadata is inconsistent; refusing to attach.",
+        )
+    branch_probe = run_git(
+        execution_cwd,
+        ["branch", "--show-current"],
+        timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
+    )
+    if branch_probe.returncode != 0 or branch_probe.stdout.strip() != branch:
+        raise DelegateError(
+            "worktree_branch_mismatch",
+            f"The source worktree is on branch {branch_probe.stdout.strip()!r}, not {branch!r}.",
+        )
     if isinstance(source_git_root, str) and source_git_root:
         probe = run_git(
             source_git_root,
@@ -329,12 +392,15 @@ def _inherit_model(
 ) -> tuple[str | None, str | None]:
     """Return (launch.model_alias, launch.model) for the synthetic launch."""
     if opts.model is not None:
-        if engine == "droid":
-            return None, opts.model
         return None, opts.model
     if engine != source_engine:
-        dropped = _manifest_str(manifest, "modelAlias") or _manifest_str(
-            manifest, "modelRequested"
+        dropped = next(
+            (
+                _manifest_str(manifest, key)
+                for key in ("modelAlias", "modelRequested", "modelResolved", "model")
+                if _manifest_str(manifest, key) is not None
+            ),
+            None,
         )
         if dropped:
             notes.append(
@@ -342,12 +408,18 @@ def _inherit_model(
                 f"not {engine}. Pass --model to pin one."
             )
         return None, None
-    alias = _manifest_str(manifest, "modelAlias")
-    if alias is not None:
-        return alias, None
-    requested = _manifest_str(manifest, "modelRequested")
-    if requested is not None:
-        return None, requested
+    for key, as_alias in (
+        ("modelAlias", True),
+        ("modelRequested", False),
+        ("modelResolved", False),
+        ("model", False),
+    ):
+        value = _manifest_str(manifest, key)
+        if value is not None:
+            return (value, None) if as_alias else (None, value)
+    notes.append(
+        f"model selection absent from the source manifest; using {engine} configuration default."
+    )
     return None, None
 
 
@@ -373,9 +445,7 @@ def build_resume_plan(
             f"No delegate run registry exists in {workspace.path}; nothing to resume. "
             "Pass --cwd for the workspace where the run was launched.",
         )
-    target = run_registry.resolve_run_target(
-        registry_root, handle=opts.handle, latest_harness=None
-    )
+    target = run_registry.resolve_run_target(registry_root, handle=opts.handle, latest_harness=None)
     if isinstance(target, run_registry.RunTargetLookupError):
         raise DelegateError(target.error, target.message)
     run_id = target.run_id
@@ -383,12 +453,27 @@ def build_resume_plan(
     run_path = run_registry.run_directory(registry_root, run_id)
 
     manifest = _read_record_json(run_path / run_registry.MANIFEST_FILE)
+    if manifest is None:
+        raise _record_invalid("The source run has no manifest.json record.")
+    manifest_cwd = _manifest_str(manifest, "cwd")
+    if manifest_cwd is not None and worktree_records._canonical_path(
+        manifest_cwd
+    ) != worktree_records._canonical_path(workspace.path):
+        raise _record_invalid(
+            "The source run's cwd does not match the workspace containing its Registry."
+        )
+    source_state = _read_record_json(
+        run_path / run_registry.STATE_FILE,
+        allow_missing=True,
+    )
+    source_snapshot = _read_record_json(
+        run_path / run_registry.SNAPSHOT_FILE,
+        allow_missing=True,
+    )
     source_engine = _manifest_str(manifest, "engine") or _manifest_str(manifest, "harness")
     mode = _manifest_str(manifest, "mode")
     if source_engine not in KNOWN_ENGINES or mode not in VALID_MODES:
-        raise _record_invalid(
-            "The source run's manifest does not name a known engine and mode."
-        )
+        raise _record_invalid("The source run's manifest does not name a known engine and mode.")
     if mode == MODE_CALL:
         raise DelegateError(
             "resume_call_source",
@@ -413,9 +498,7 @@ def build_resume_plan(
 
     # Original prompt (legacy records predate prompt.txt).
     try:
-        source_prompt = _read_record_text(
-            run_path / run_registry.PROMPT_TXT_FILE, prompt=True
-        )
+        source_prompt = _read_record_text(run_path / run_registry.PROMPT_TXT_FILE, prompt=True)
     except BoundedReadError as exc:
         raise DelegateError(
             "resume_prompt_unavailable",
@@ -430,17 +513,21 @@ def build_resume_plan(
     model_alias, model = _inherit_model(opts, manifest, engine, source_engine, notes)
 
     reasoning_effort = opts.reasoning_effort
-    if reasoning_effort is None and not cross_engine:
-        source_effort = _manifest_str(manifest, "requestedReasoningEffort")
-        effort_source = _manifest_str(manifest, "reasoningEffortSource")
-        if source_effort is not None and effort_source in ("cli", "input-json"):
-            reasoning_effort = source_effort
-    elif opts.reasoning_effort is None and cross_engine:
-        if _manifest_str(manifest, "requestedReasoningEffort"):
+    source_effort = _manifest_str(manifest, "requestedReasoningEffort") or _manifest_str(
+        manifest, "resolvedReasoningEffort"
+    )
+    if reasoning_effort is None and not cross_engine and source_effort is not None:
+        reasoning_effort = source_effort
+    elif reasoning_effort is None and cross_engine:
+        if source_effort is not None:
             notes.append(
                 f"reasoning effort dropped for cross-engine resume to {engine}; "
                 "pass --reasoning-effort to set one."
             )
+    elif reasoning_effort is None:
+        notes.append(
+            f"reasoning effort absent from the source manifest; using {engine} configuration default."
+        )
 
     fast = opts.fast
     if fast is None and engine == "codex" and not cross_engine:
@@ -459,12 +546,18 @@ def build_resume_plan(
         manifest_timeout = manifest.get("timeoutSeconds")
         if isinstance(manifest_timeout, int) and not isinstance(manifest_timeout, bool):
             timeout = manifest_timeout
+        elif "timeoutSeconds" not in manifest:
+            notes.append("timeout absent from the source manifest; using the target default.")
 
     progress_intent = opts.progress_intent
     if progress_intent is None:
         manifest_progress = manifest.get("progressRequested")
         if manifest_progress in ("on", "off"):
             progress_intent = manifest_progress
+        elif "progressRequested" not in manifest:
+            notes.append(
+                "progress intent absent from the source manifest; using target progress configuration."
+            )
 
     forbid_commit = False
     commit_policy = manifest.get("commitPolicy")
@@ -473,12 +566,39 @@ def build_resume_plan(
 
     group = global_options.group or _manifest_str(manifest, "group")
     auth_profile = global_options.auth_profile or _manifest_str(manifest, "authProfile")
+    if group is None and "group" not in manifest:
+        notes.append("group absent from the source manifest; using the ungrouped target default.")
+    if auth_profile is None and "authProfile" not in manifest:
+        notes.append(
+            "auth profile absent from the source manifest; using target profile detection/default."
+        )
 
     # Worktree applicability branches on the source lifecycle.
     attach: JsonObject | None = None
     isolation: str | None = None
-    if _manifest_str(manifest, "isolationLifecycle") == "persistent":
-        attach = _validate_attach_target(registry_root, run_id, manifest)
+    persistent_source = worktree_records._is_persistent_worktree_run(
+        source_state,
+        manifest,
+        source_snapshot,
+    )
+    if opts.include_dirty and persistent_source:
+        raise DelegateError(
+            "invalid_option_combination",
+            "--include-dirty cannot be used when resume attaches to a persistent "
+            "worktree; dirty-file sync is creation-only.",
+        )
+    if opts.include_dirty:
+        notes.append(
+            "includeDirty is creation-only and was dropped: resume does not create a new worktree."
+        )
+    if persistent_source:
+        attach = _validate_attach_target(
+            registry_root,
+            run_id,
+            manifest,
+            source_state,
+            source_snapshot,
+        )
         isolation = "none"  # the attach executor supplies the execution workspace
         if manifest.get("includeDirty") is True:
             notes.append(
@@ -489,6 +609,10 @@ def build_resume_plan(
         isolation_mode = _manifest_str(manifest, "isolationMode")
         if isolation_mode in ("auto", "none", "worktree"):
             isolation = isolation_mode
+        elif "isolationMode" not in manifest:
+            notes.append(
+                "isolation absent from the source manifest; using target isolation configuration."
+            )
 
     # Output schema: inherit inline text, override path, or drop.
     schema_temp_path: str | None = None
@@ -527,7 +651,7 @@ def build_resume_plan(
     launch = LaunchOptions(
         engine=engine,
         mode=mode,
-        model_alias=model_alias if engine == "droid" else model_alias,
+        model_alias=model_alias,
         prompt_parts=[continuation],
         output_schema=output_schema,
         reasoning_effort=reasoning_effort,
@@ -557,7 +681,7 @@ def build_resume_plan(
 
     return ResumePlan(
         parsed=synthetic,
-        resumed_from={"runId": run_id, "alias": target.alias},
+        resumed_from={"runId": run_id, "alias": alias},
         attach=attach,
         forbid_commit=forbid_commit,
         schema_temp_path=schema_temp_path,

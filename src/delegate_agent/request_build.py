@@ -599,7 +599,10 @@ def _validate_forbid_commit(
             "available here. Omit --forbid-commit (the child may commit), or run "
             "from a Git workspace.",
         )
-    if isolation_context is None or isolation_context.isolation_lifecycle != "persistent":
+    if isolation_context is None or isolation_context.isolation_lifecycle not in (
+        "persistent",
+        "attached",
+    ):
         raise DelegateError(
             "invalid_option_combination",
             "--forbid-commit requires --isolation worktree so Delegate can enforce "

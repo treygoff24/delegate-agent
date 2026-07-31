@@ -378,7 +378,7 @@ def _register_persistent_worktree_run(
         creation_context=creation_context,
     )
     run_path = run_registry.run_directory(preflight.registry_root, run_id)
-    run_path.mkdir(parents=True, exist_ok=True)
+    run_registry.ensure_private_dir(run_path)
     delegate_runner.write_manifest(
         run_path,
         delegate_runner.build_manifest(pre_ctx, public_argv(request)),

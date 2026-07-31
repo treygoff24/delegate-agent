@@ -77,6 +77,7 @@ class ResumeOptions:
     timeout: int | None = None
     output_schema: str | None = None
     drop_output_schema: bool = False
+    include_dirty: bool = False
     dry_run: bool = False
 
 

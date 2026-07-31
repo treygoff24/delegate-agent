@@ -200,6 +200,16 @@ Persistent worktree isolation is not a security sandbox. It does not prevent:
 - Writes to absolute paths outside the worktree.
 - Actions taken through authenticated tools, MCP servers, browser sessions, or external CLIs.
 
+`delegate resume` preserves the source Run's recorded prompt in a private
+`prompt.txt` file and reads source records under the Registry lock with bounded,
+no-follow file checks. Completion Reports are used only when the source Run is
+terminal under that lock; otherwise resume falls back to an atomic Snapshot
+digest. Prompt and report text are untrusted data, not Delegate instructions,
+and are disclosed to the target Harness as part of the continuation. A
+persistent-worktree resume attaches to the existing path by deriving and
+validating its Registry record; it does not weaken safe/worktree path checks or
+create a replacement worktree when the original has moved.
+
 ## Config and secret hygiene
 
 - Keep real config in `~/.delegate/config.json` or a private `DELEGATE_CONFIG` path. Repository-local `.delegate/config.json` is not loaded implicitly.

@@ -535,9 +535,7 @@ def remove_worktree(
 
         execution_cwd = record.get("executionCwd")
         if status in (STATUS_PRESENT, STATUS_UNKNOWN) and isinstance(execution_cwd, str):
-            attachments = worktree_records.live_attachments_for_path(
-                registry_root, execution_cwd
-            )
+            attachments = worktree_records.live_attachments_for_path(registry_root, execution_cwd)
             if attachments:
                 attached = ", ".join(
                     str(item.get("alias") or item.get("runId")) for item in attachments

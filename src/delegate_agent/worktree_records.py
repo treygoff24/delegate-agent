@@ -149,14 +149,14 @@ def _is_persistent_worktree_run(
     return _registry_worktree_status(state, manifest, snapshot) is not None
 
 
-def _record_for_run(
+def _record_from_parts(
     registry_root: Path,
     run_id: str,
     index_entry: JsonObject | None,
+    state: JsonObject | None,
+    manifest: JsonObject | None,
+    snapshot: JsonObject | None,
 ) -> PersistentWorktreeRecord | None:
-    state = run_registry.load_run_state_or_none(registry_root, run_id)
-    manifest = run_registry.load_run_manifest_or_none(registry_root, run_id)
-    snapshot = run_registry.load_run_snapshot_or_none(registry_root, run_id)
     if not _is_persistent_worktree_run(state, manifest, snapshot):
         return None
     entry = index_entry if isinstance(index_entry, dict) else {}
@@ -198,6 +198,17 @@ def _record_for_run(
     }
 
 
+def _record_for_run(
+    registry_root: Path,
+    run_id: str,
+    index_entry: JsonObject | None,
+) -> PersistentWorktreeRecord | None:
+    state = run_registry.load_run_state_or_none(registry_root, run_id)
+    manifest = run_registry.load_run_manifest_or_none(registry_root, run_id)
+    snapshot = run_registry.load_run_snapshot_or_none(registry_root, run_id)
+    return _record_from_parts(registry_root, run_id, index_entry, state, manifest, snapshot)
+
+
 def _canonical_path(path: str) -> str:
     try:
         return str(Path(path).resolve(strict=False))
@@ -222,12 +233,17 @@ def live_attachments_for_path(registry_root: Path, execution_cwd: str) -> list[J
         manifest = run_registry.load_run_manifest_or_none(registry_root, run_id)
         attachment = manifest.get("worktreeAttachment") if isinstance(manifest, dict) else None
         if not isinstance(attachment, dict):
+            attachment = entry.get("worktreeAttachment")
+        if not isinstance(attachment, dict):
             continue
         attached_path = attachment.get("path")
         if not isinstance(attached_path, str) or _canonical_path(attached_path) != canonical:
             continue
         state = run_registry.load_run_state_or_none(registry_root, run_id)
-        if run_registry.effective_status(state) == run_registry.STATUS_RUNNING:
+        if run_registry.effective_status(state) in {
+            run_registry.STATUS_RUNNING,
+            run_registry.STATUS_UNKNOWN,
+        }:
             live.append({"runId": run_id, "alias": _get_str(entry, "alias")})
     return live
 

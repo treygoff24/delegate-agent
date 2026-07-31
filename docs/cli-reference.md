@@ -935,9 +935,30 @@ delegate runs prune [--older-than DAYS] [--dry-run]
 delegate ps [--harness HARNESS] [--group NAME] [--limit N]
 delegate snapshot [--latest HARNESS] [--no-redact] <handle>
 delegate run-output [--latest HARNESS] <handle> [--completion-report] [--stdout] [--stderr] [--tail N] [--max-chars N] [--raw] [--no-redact]
+delegate resume [--engine ENGINE] [--model MODEL] [--reasoning-effort LEVEL] [--timeout SEC] [--dry-run] <handle> [extra instructions...]
 delegate wait <handle>... [--latest HARNESS] [--group NAME] [--timeout SEC] [--interval SEC] [--completion-report]
 delegate cancel <handle>...
 ```
+
+`delegate resume` relaunches a terminal Run as a new Run. It accepts
+`succeeded`, `failed`, `cancelled`, and stale Runs; an effectively running Run
+is refused. A successful source requires extra instructions. The continuation
+contains the original prompt, then a bounded prior-run Completion Report (or a
+Snapshot digest), then the new instructions last. Prior-run content is framed
+as untrusted data and is disclosed to the target Harness, including on a
+cross-engine resume. Resume options must appear before the handle; trailing
+tokens are continuation instructions.
+
+The new Run inherits the source Run's mode (never overridden), model selection,
+reasoning effort, timeout, progress intent, group, auth profile, and commit
+policy unless an explicit resume/global override applies. A persistent-worktree
+source is resumed by attaching to its existing worktree rather than creating a
+second one. The attachment is a live lease: `worktree remove`, `worktree prune`,
+and `worktree gc` refuse or skip the worktree while the attached Run may still
+be active. `--include-dirty` is dropped for ordinary resume and rejected when
+the source requires attachment because dirty-file sync is a worktree-creation
+operation. `--dry-run` resolves the continuation without
+creating a Run or writing a prompt record.
 
 `delegate runs` defaults to recent runs. `--active` preserves the legacy active view and includes both live `running` runs and `stale` runs. Use `--running` for only live tracked processes and `--stale` for runs recorded as running whose PID is missing or dead. `--active`, `--running`, `--stale`, and `--recent` are mutually exclusive. `--group NAME` filters by launch group and the runs table shows a `group` column when any visible run has one.
 `delegate ps` is the shorter first-class form of `delegate runs --active` and

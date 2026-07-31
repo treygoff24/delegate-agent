@@ -1039,14 +1039,20 @@ def _materialize_output_schema_argv(
     *,
     output_schema_text: str | None,
     output_schema_path: str | None,
+    destination_dir: Path | None = None,
 ) -> tuple[list[str], Path | None]:
     if output_schema_text is None:
         return list(argv), None
     if output_schema_path is None or output_schema_path not in argv:
         raise ValueError("output_schema_path must be present in argv")
-    temp_dir = Path(tempfile.mkdtemp(prefix="delegate-schema-"))
-    os.chmod(temp_dir, run_registry.PRIVATE_DIR_MODE)
-    schema_path = temp_dir / "schema.json"
+    temp_dir: Path | None = None
+    if destination_dir is None:
+        temp_dir = Path(tempfile.mkdtemp(prefix="delegate-schema-"))
+        os.chmod(temp_dir, run_registry.PRIVATE_DIR_MODE)
+        schema_path = temp_dir / "schema.json"
+    else:
+        run_registry.ensure_private_dir(destination_dir)
+        schema_path = destination_dir / "output-schema.json"
     try:
         run_registry.write_private_text(schema_path, output_schema_text)
     except BaseException:
@@ -1150,7 +1156,9 @@ def _final_extra(ctx: RunContext, capture_exit_code: int) -> tuple[int, JsonObje
         # Attached resume runs have no worktree record of their own; point
         # inspection commands at the owning run's alias.
         attachment = ctx.worktree_attachment or {}
-        show_handle = attachment.get("sourceAlias") if ctx.isolation_lifecycle == "attached" else None
+        show_handle = (
+            attachment.get("sourceAlias") if ctx.isolation_lifecycle == "attached" else None
+        )
         extra["nextActions"] = [
             f"delegate worktree show {show_handle or ctx.alias}",
             f"git -C {shlex.quote(ctx.execution_cwd)} log --oneline --decorate --max-count=5 HEAD",
@@ -2164,6 +2172,7 @@ def execute_tracked(
         launch_argv,
         output_schema_text=output_schema_text,
         output_schema_path=output_schema_path,
+        destination_dir=files.run_path if ctx.resumed_from is not None else None,
     )
     retry_workspace = ctx.execution_cwd if ctx.isolated_workspace else cwd
     workspace_baseline = (

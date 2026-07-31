@@ -1058,6 +1058,7 @@ def parse_resume(
     timeout: int | None = None
     output_schema: str | None = None
     drop_output_schema = False
+    include_dirty = False
     dry_run = False
     handle: str | None = None
     extra_parts: list[str] = []
@@ -1131,6 +1132,14 @@ def parse_resume(
                 drop_output_schema = True
                 i += 1
                 continue
+            if token == "--include-dirty":
+                if include_dirty:
+                    raise DelegateError(
+                        "invalid_option_combination", "Only one --include-dirty flag is allowed."
+                    )
+                include_dirty = True
+                i += 1
+                continue
             if token == "--dry-run":
                 dry_run = True
                 i += 1
@@ -1145,9 +1154,7 @@ def parse_resume(
         extra_parts = rest[i:]
         break
     if handle is None:
-        raise DelegateError(
-            "missing_handle", "resume requires a run handle (alias or run id)."
-        )
+        raise DelegateError("missing_handle", "resume requires a run handle (alias or run id).")
     if output_schema is not None and drop_output_schema:
         raise DelegateError(
             "invalid_option_combination",
@@ -1174,6 +1181,7 @@ def parse_resume(
             timeout=timeout,
             output_schema=output_schema,
             drop_output_schema=drop_output_schema,
+            include_dirty=include_dirty,
             dry_run=dry_run,
         ),
     )

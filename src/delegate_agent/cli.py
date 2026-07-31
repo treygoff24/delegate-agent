@@ -80,7 +80,7 @@ from delegate_agent.errors import (
     EXIT_USAGE,
     DelegateError,
 )
-from delegate_agent.git_utils import capture_git_metadata  # noqa: F401  # re-exported for tests
+from delegate_agent.git_utils import capture_git_metadata  # re-exported for tests
 from delegate_agent.isolation import (  # noqa: F401  # re-exported for tests
     IsolationContext,
     build_isolation_context,
@@ -311,12 +311,16 @@ def dry_run_payload(request: Request) -> JsonObject:
         payload["warnings"] = list(request.warnings)
     if request.progress:
         payload["progressRequested"] = True
+    if request.timeout is not None:
+        payload["timeoutSeconds"] = request.timeout
     if request.forbid_commit:
         payload["commitPolicy"] = {"forbidCommit": True}
     if request.include_dirty:
         payload["includeDirty"] = True
     if request.group is not None:
         payload["group"] = request.group
+    if request.agent is not None:
+        payload["agent"] = request.agent
     if request.resumed_from is not None:
         payload["resumedFrom"] = request.resumed_from
     if request.auth_profile is not None:
@@ -681,16 +685,12 @@ def _execute_attached_worktree(
             f"Could not resolve HEAD in the attached worktree: {worktree_path}",
         )
 
-    execution_request = worktree_execution._request_for_execution_workspace(
-        request, worktree_path
-    )
+    execution_request = worktree_execution._request_for_execution_workspace(request, worktree_path)
     # Re-check the argv-transport size guard now that the worktree note (and
     # any forbid-commit note) has been prepended.
     resume_command.enforce_resume_prompt_size(
         request.engine,
-        worktree_execution._persistent_prompt(
-            request.prompt, forbid_commit=request.forbid_commit
-        ),
+        worktree_execution._persistent_prompt(request.prompt, forbid_commit=request.forbid_commit),
     )
     ensure_binary(
         execution_request.argv,
@@ -717,6 +717,10 @@ def _execute_attached_worktree(
             "group": request.group,
             "workflowAgentKey": request.workflow_agent_key,
             "cwd": source_workspace.path,
+            "worktreeAttachment": {
+                **(iso.attachment or {}),
+                "startHeadOid": start_head_oid,
+            },
         },
     )
     ctx_runner = make_run_context(
@@ -1377,9 +1381,7 @@ def main(
 
         resume_plan: resume_command.ResumePlan | None = None
         if parsed.subcommand == "resume":
-            resume_plan = resume_command.build_resume_plan(
-                parsed, workspace, config, stderr=stderr
-            )
+            resume_plan = resume_command.build_resume_plan(parsed, workspace, config, stderr=stderr)
             # The plan is a fully ordinary launch; from here on the resume flows
             # through the normal request build and execution path.
             parsed = resume_plan.parsed
