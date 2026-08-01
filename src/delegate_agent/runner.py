@@ -1123,6 +1123,7 @@ class TrackedCaptureResult:
     stdin_failures: tuple[str, ...]
     pid: int
     pgid: int | None
+    mail_push_failure_reason: str | None = None
     error: str | None = None
     message: str | None = None
 
@@ -1451,6 +1452,15 @@ def _capture_tracked_process(
     lines_since_persist = 0
     last_persist_at = time.monotonic()
     progress_dirty = False
+    mail_push_failure_reason: str | None = None
+    mail_push_nonce: str | None = None
+    if ctx.mail_push:
+        try:
+            from delegate_agent import mail
+
+            mail_push_nonce = mail.read_hook_failure_nonce(ctx.registry_root, ctx.run_id)
+        except (OSError, ValueError):
+            mail_push_nonce = None
 
     def maybe_persist_running() -> None:
         nonlocal lines_since_persist, last_persist_at, progress_dirty
@@ -1496,6 +1506,16 @@ def _capture_tracked_process(
                     events_handle.flush()
                     maybe_persist_running()
 
+        def handle_stderr_line(chunk_text: str) -> None:
+            nonlocal mail_push_failure_reason
+            if mail_push_failure_reason is not None or not ctx.mail_push:
+                return
+            from delegate_agent import mail
+
+            mail_push_failure_reason = mail.hook_failure_reason_from_stderr(
+                chunk_text, nonce=mail_push_nonce
+            )
+
         stdout_thread = threading.Thread(
             target=_drain_stream,
             args=(process.stdout, files.stdout_log, stdout_bytes_counter),
@@ -1505,7 +1525,7 @@ def _capture_tracked_process(
         stderr_thread = threading.Thread(
             target=_drain_stream,
             args=(process.stderr, files.stderr_log, stderr_bytes_counter),
-            kwargs={"on_line": None},
+            kwargs={"on_line": handle_stderr_line},
             daemon=True,
         )
         stdout_thread.start()
@@ -1601,6 +1621,7 @@ def _capture_tracked_process(
         stdin_failures=tuple(stdin_failures),
         pid=process.pid,
         pgid=pgid,
+        mail_push_failure_reason=mail_push_failure_reason,
         error="call_timeout" if timed_out else None,
         message="Child command exceeded the configured timeout." if timed_out else None,
     )
@@ -1653,6 +1674,7 @@ def _completion_report_source(
 
 MAIL_PUSH_EVENT_KIND = "mail_push_degraded"
 MAIL_PUSH_WARNING_PREFIX = "mail push degraded to pull"
+MAIL_PUSH_CLEANUP_WARNING = "mail push private-home cleanup failed"
 
 
 def _mail_push_warnings(ctx: RunContext) -> list[str]:
@@ -1661,6 +1683,18 @@ def _mail_push_warnings(ctx: RunContext) -> list[str]:
         for warning in ctx.warnings
         if isinstance(warning, str) and warning.startswith(MAIL_PUSH_WARNING_PREFIX)
     ]
+
+
+def _cleanup_mail_push_private_homes(ctx: RunContext) -> str | None:
+    if not ctx.mail_push:
+        return None
+    try:
+        from delegate_agent import mail
+
+        mail.cleanup_mail_push_private_homes(ctx.registry_root, ctx.run_id)
+    except OSError:
+        return MAIL_PUSH_CLEANUP_WARNING
+    return None
 
 
 def record_mail_push_degradation(
@@ -1713,13 +1747,13 @@ def record_mail_push_degradation(
     return warning
 
 
-def _mail_push_failure_marker(ctx: RunContext, stderr_text: str) -> str | None:
+def _mail_push_failure_marker(ctx: RunContext, sentinel_reason: str | None = None) -> str | None:
+    if not ctx.mail_push:
+        return None
     try:
         from delegate_agent import mail
 
-        return mail.read_hook_failure_marker(
-            ctx.registry_root, ctx.run_id
-        ) or mail.hook_failure_reason_from_stderr(stderr_text)
+        return mail.read_hook_failure_marker(ctx.registry_root, ctx.run_id) or sentinel_reason
     except (DelegateError, OSError, ValueError):
         return "hook failure marker could not be read"
 
@@ -1744,8 +1778,11 @@ def _finalize_tracked_run(
     extra: JsonObject | None = None,
 ) -> TrackedFinalization:
     mail_warnings = _mail_push_warnings(ctx)
+    cleanup_warning = _cleanup_mail_push_private_homes(ctx)
+    if cleanup_warning is not None:
+        mail_warnings.append(cleanup_warning)
     stderr_tail = profiles.read_bounded_stderr_tail(files.stderr_log)
-    marker_reason = _mail_push_failure_marker(ctx, stderr_tail)
+    marker_reason = _mail_push_failure_marker(ctx, capture.mail_push_failure_reason)
     if marker_reason is not None:
         try:
             mail_warnings.append(
@@ -1904,12 +1941,6 @@ def _finalize_tracked_run(
     # reports success, so normalize exit_code to 1, status to cancelled, and
     # the failure reason to cancelled_by_user. This keeps the CLI envelope
     # (ok/status/exitCode), the process exit code, and state.json in lockstep.
-    try:
-        from delegate_agent import mail
-
-        mail.cleanup_mail_push_private_homes(ctx.registry_root, ctx.run_id)
-    except OSError:
-        pass
     if persisted_status == run_registry.STATUS_CANCELLED:
         return TrackedFinalization(
             status=run_registry.STATUS_CANCELLED,
@@ -2210,6 +2241,9 @@ def _merge_tracked_attempt_captures(
         stderr_bytes=prior_capture.stderr_bytes + current_capture.stderr_bytes,
         stdin_failures=tuple(
             dict.fromkeys([*prior_capture.stdin_failures, *current_capture.stdin_failures])
+        ),
+        mail_push_failure_reason=(
+            current_capture.mail_push_failure_reason or prior_capture.mail_push_failure_reason
         ),
     )
 
@@ -2569,6 +2603,16 @@ def execute_tracked(
                     "warnings": [EMPTY_RETRY_SKIPPED_WRITE_CAPABLE_WARNING],
                 }
     except RunnerLaunchError:
+        if capture is None:
+            cleanup_warning = _cleanup_mail_push_private_homes(ctx)
+            if cleanup_warning is not None:
+                with contextlib.suppress(DelegateError, OSError):
+                    record_mail_push_degradation(
+                        ctx.registry_root,
+                        ctx.run_id,
+                        engine=ctx.engine,
+                        reason=cleanup_warning,
+                    )
         if capture is None or not _cancel_requested_or_cancelled(ctx):
             raise
         # A retry launch lost the race to cancellation. Its locked launch-

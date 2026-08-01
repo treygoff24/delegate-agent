@@ -77,9 +77,11 @@ controlled by a strict object with one key:
 the pull-mail instruction suffix to wrapped work launches. `--mail-push` and
 input JSON `mailPush: true` also require `mail.enabled: true`, and are limited
 to wrapped work-mode launches. Push is opt-in: enabling mail does not install
-hooks. Claude and Codex receive launch-scoped settings under `.delegate/mail`
-only; all other harnesses remain pull-only until their stop-hook output is
-verified and degrade with a recorded warning rather than guessing.
+hooks. Claude receives launch-scoped settings and both adapters keep cursors
+and markers under `.delegate/mail`; Codex private homes are created under
+`.delegate/runs/<runId>/` and cleaned at terminal finalization or terminal
+launch failure. All other harnesses remain pull-only until their stop-hook
+output is verified and degrade with a recorded warning rather than guessing.
 
 ## Discovery cache and precedence
 

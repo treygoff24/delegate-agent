@@ -16,6 +16,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -56,6 +57,7 @@ MAIL_PUSH_MAX_BYTES = 512 * 1024
 MAIL_PUSH_CURSOR_FILE_NAME = "hook-cursor.json"
 MAIL_PUSH_PENDING_FILE_NAME = "hook-pending.json"
 MAIL_PUSH_FAILURE_FILE_NAME = "hook-degraded.json"
+MAIL_PUSH_NONCE_FILE_NAME = "mail-hook-nonce"
 MAIL_PUSH_SETTINGS_FILE_NAME = "settings.json"
 MAIL_PUSH_CODEX_HOME_NAME = "codex-home"
 MAIL_PUSH_FALLBACK_CODEX_HOME_NAME = "codex-home-fallback"
@@ -164,12 +166,16 @@ class Recipient:
     reason: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass
 class MailPushProvision:
     argv: list[str]
     display_argv: list[str] | None
     codex_home: str | None = None
     warning: str | None = None
+    original_argv: list[str] | None = None
+    original_display_argv: list[str] | None = None
+    env: dict[str, str] | None = None
+    original_env: dict[str, str] | None = None
 
 
 def _error(code: str, message: str) -> MailError:
@@ -511,20 +517,31 @@ def _remove_directory(path: Path) -> None:
         shutil.rmtree(path)
 
 
-def _remove_legacy_codex_homes(registry_root: Path) -> None:
+def _legacy_codex_homes(registry_root: Path) -> list[Path]:
     boxes = boxes_root(registry_root)
     if not boxes.is_dir() or boxes.is_symlink():
-        return
+        return []
+    homes: list[Path] = []
     for box in boxes.iterdir():
         if not box.is_dir() or box.is_symlink():
             continue
         legacy_home = box / MAIL_PUSH_CODEX_HOME_NAME
         if legacy_home.exists() or legacy_home.is_symlink():
-            _remove_directory(legacy_home)
+            homes.append(legacy_home)
+    return homes
+
+
+def _remove_legacy_codex_homes(registry_root: Path) -> None:
+    for legacy_home in _legacy_codex_homes(registry_root):
+        _remove_directory(legacy_home)
 
 
 def _private_codex_home_path(registry_root: Path, run_id: str, name: str) -> Path:
     return run_registry.run_directory(registry_root, run_id) / name
+
+
+def _hook_nonce_path(registry_root: Path, run_id: str) -> Path:
+    return run_registry.run_directory(registry_root, run_id) / MAIL_PUSH_NONCE_FILE_NAME
 
 
 def _codex_home_for_mail_push(
@@ -568,12 +585,26 @@ def mail_push_fallback_env_overrides(
     fallback = dict(fallback_env_overrides)
     if provision is None or provision.codex_home is None or not fallback:
         return fallback
-    fallback_home = _codex_home_for_mail_push(
-        registry_root,
-        run_id,
-        fallback,
-        name=MAIL_PUSH_FALLBACK_CODEX_HOME_NAME,
-    )
+    try:
+        fallback_home = _codex_home_for_mail_push(
+            registry_root,
+            run_id,
+            fallback,
+            name=MAIL_PUSH_FALLBACK_CODEX_HOME_NAME,
+        )
+    except Exception:
+        with suppress(OSError):
+            cleanup_mail_push_private_homes(registry_root, run_id)
+        if provision.env is not None and provision.original_env is not None:
+            provision.env.clear()
+            provision.env.update(provision.original_env)
+        if provision.original_argv is not None:
+            provision.argv[:] = provision.original_argv
+        if provision.display_argv is not None and provision.original_display_argv is not None:
+            provision.display_argv[:] = provision.original_display_argv
+        provision.codex_home = None
+        provision.warning = mail_push_warning("codex", "launch-scoped hook provisioning failed")
+        return fallback
     fallback["CODEX_HOME"] = str(fallback_home.resolve(strict=False))
     return fallback
 
@@ -620,7 +651,10 @@ def provision_mail_push(
             {"schema": MAIL_PUSH_SCHEMA, "lastSeq": 0},
         )
         private_io.write_json_atomic(box / MAIL_PUSH_SETTINGS_FILE_NAME, _hook_settings())
+        nonce = secrets.token_urlsafe(24)
+        private_io.write_private_text_atomic(_hook_nonce_path(registry_root, run_id), nonce)
         env["DELEGATE_MAIL_HOOK_HARNESS"] = engine
+        env["DELEGATE_MAIL_HOOK_NONCE"] = nonce
         updated = list(argv)
         updated_display = None if display_argv is None else list(display_argv)
         codex_home: str | None = None
@@ -643,10 +677,21 @@ def provision_mail_push(
                 if "--dangerously-bypass-hook-trust" not in target:
                     flags.append("--dangerously-bypass-hook-trust")
                 target[insert_at:insert_at] = flags
-        return MailPushProvision(updated, updated_display, codex_home=codex_home)
+        return MailPushProvision(
+            updated,
+            updated_display,
+            codex_home=codex_home,
+            original_argv=list(argv),
+            original_display_argv=None if display_argv is None else list(display_argv),
+            env=env,
+            original_env=original_env,
+        )
     except Exception:
         env.clear()
         env.update(original_env)
+        with suppress(OSError):
+            cleanup_mail_push_private_homes(registry_root, run_id)
+            _hook_nonce_path(registry_root, run_id).unlink(missing_ok=True)
         return MailPushProvision(
             list(argv),
             None if display_argv is None else list(display_argv),
@@ -714,16 +759,30 @@ def _record_hook_failure(
         return False
 
 
-def hook_failure_sentinel(reason: str) -> str:
-    return f"{MAIL_PUSH_FAILURE_SENTINEL}{reason[:200]}"
+def hook_failure_sentinel(nonce: str, reason: str) -> str:
+    return f"{MAIL_PUSH_FAILURE_SENTINEL}{nonce}:{reason[:200]}"
 
 
-def hook_failure_reason_from_stderr(stderr_text: str) -> str | None:
+def hook_failure_reason_from_stderr(stderr_text: str, *, nonce: str | None) -> str | None:
+    if not nonce:
+        return None
+    prefix = f"{MAIL_PUSH_FAILURE_SENTINEL}{nonce}:"
     for line in stderr_text.splitlines():
-        if line.startswith(MAIL_PUSH_FAILURE_SENTINEL):
-            reason = line.removeprefix(MAIL_PUSH_FAILURE_SENTINEL).strip()
+        if line.startswith(prefix):
+            reason = line.removeprefix(prefix).strip()
             return reason or "hook failure could not be recorded"
     return None
+
+
+def read_hook_failure_nonce(registry_root: Path, run_id: str) -> str | None:
+    try:
+        nonce = private_io.read_private_text_bounded(
+            _hook_nonce_path(registry_root, run_id), max_bytes=128
+        )
+    except private_io.BoundedReadError:
+        return None
+    nonce = nonce.strip()
+    return nonce or None
 
 
 def read_hook_failure_marker(registry_root: Path, run_id: str) -> str | None:
@@ -751,6 +810,7 @@ def _hook_pending(registry_root: Path, run_id: str) -> JsonObject | None:
         return None
     last_seq = pending.get("lastSeq")
     message_ids = pending.get("messageIds")
+    marker_run_id = pending.get("runId")
     if (
         not isinstance(last_seq, int)
         or isinstance(last_seq, bool)
@@ -758,6 +818,7 @@ def _hook_pending(registry_root: Path, run_id: str) -> JsonObject | None:
         or not isinstance(message_ids, list)
         or not message_ids
         or any(not isinstance(value, str) for value in message_ids)
+        or marker_run_id != run_id
     ):
         raise _error("mail_push_pending_invalid", "The mail push pending marker is invalid.")
     return pending
@@ -812,16 +873,24 @@ def _pending_messages(
     message_ids = pending["messageIds"]
     assert isinstance(last_seq, int)
     assert isinstance(message_ids, list)
+    messages_by_id: dict[str, tuple[Path, JsonObject, str]] = {}
+    for directory in ("inbox", "read"):
+        for item in _iter_box_messages(registry_root, run_id, directory, limit=None):
+            sequence = item[1].get("seq")
+            message_id = item[1].get("msgId")
+            if (
+                isinstance(sequence, int)
+                and not isinstance(sequence, bool)
+                and cursor < sequence <= last_seq
+                and isinstance(message_id, str)
+            ):
+                messages_by_id[message_id] = item
     messages = [
-        item
-        for item in _iter_box_messages(registry_root, run_id, limit=None)
-        if isinstance(item[1].get("seq"), int)
-        and not isinstance(item[1].get("seq"), bool)
-        and cursor < item[1]["seq"] <= last_seq
+        messages_by_id[message_id] for message_id in message_ids if message_id in messages_by_id
     ]
-    if [item[1].get("msgId") for item in messages] != message_ids:
+    if len(messages) != len(message_ids):
         raise _error(
-            "mail_push_pending_missing", "The pending mail push batch is no longer intact."
+            "mail_push_pending_unavailable", "The pending mail push batch is no longer available."
         )
     return messages
 
@@ -841,10 +910,29 @@ def _write_hook_pending(
         _hook_pending_path(registry_root, run_id),
         {
             "schema": MAIL_PUSH_SCHEMA,
+            "runId": run_id,
             "lastSeq": last_seq,
             "messageIds": message_ids,
+            "emitted": False,
         },
     )
+
+
+def _mark_hook_pending_emitted(registry_root: Path, run_id: str, pending: JsonObject) -> None:
+    private_io.write_json_atomic(
+        _hook_pending_path(registry_root, run_id),
+        {**pending, "emitted": True},
+    )
+
+
+def _promote_emitted_hook_pending(registry_root: Path, run_id: str, pending: JsonObject) -> None:
+    last_seq = pending["lastSeq"]
+    assert isinstance(last_seq, int)
+    private_io.write_json_atomic(
+        _hook_cursor_path(registry_root, run_id),
+        {"schema": MAIL_PUSH_SCHEMA, "lastSeq": last_seq},
+    )
+    _hook_pending_path(registry_root, run_id).unlink(missing_ok=True)
 
 
 def _write_hook_response(stdout: TextIO, payload: bytes) -> None:
@@ -865,13 +953,16 @@ def hook_pump(
     environ = os.environ if env is None else env
     run_id = environ.get("DELEGATE_RUN_ID")
     harness = environ.get("DELEGATE_MAIL_HOOK_HARNESS") or "unknown"
-    response_started = False
+    response_emitted = False
     try:
         identity = _identity(registry_root, env=environ)
         if identity.is_coordinator or run_id is None:
             raise _error("hook_requires_lane", "mail hook-pump requires a bound work lane.")
         pending = _hook_pending(registry_root, run_id)
-        replaying_pending = pending is not None
+        if pending is not None and pending.get("emitted") is True:
+            _promote_emitted_hook_pending(registry_root, run_id, pending)
+            _write_hook_response(stdout, b"{}")
+            return 0
         if pending is None:
             messages, _cursor = _bounded_hook_messages(registry_root, run_id)
         else:
@@ -879,8 +970,10 @@ def hook_pump(
         if not messages:
             _write_hook_response(stdout, b"{}")
             return 0
-        if not replaying_pending:
+        if pending is None:
             _write_hook_pending(registry_root, run_id, messages)
+            pending = _hook_pending(registry_root, run_id)
+        assert pending is not None
         payload = _hook_payload(messages)
         response_key = "reason" if harness == "claude" else "additionalContext"
         response = json.dumps(
@@ -888,19 +981,16 @@ def hook_pump(
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
-        response_started = True
         _write_hook_response(stdout, response)
-        last_seq = messages[-1][1].get("seq")
-        if not isinstance(last_seq, int) or isinstance(last_seq, bool):
-            raise _error("mail_unreadable", "Injected mail has an invalid sequence number.")
-        if replaying_pending:
-            private_io.write_json_atomic(
-                _hook_cursor_path(registry_root, run_id),
-                {"schema": MAIL_PUSH_SCHEMA, "lastSeq": last_seq},
-            )
-            _hook_pending_path(registry_root, run_id).unlink(missing_ok=True)
+        response_emitted = True
+        try:
+            _mark_hook_pending_emitted(registry_root, run_id, pending)
+        except (MailError, OSError, ValueError):
+            return 1
         return 0
     except (MailError, OSError, ValueError) as exc:
+        if response_emitted:
+            return 1
         recorded = _record_hook_failure(
             registry_root,
             run_id,
@@ -908,9 +998,9 @@ def hook_pump(
             reason=f"{getattr(exc, 'error', 'hook_runtime_failed')}: {exc}",
         )
         if not recorded:
-            print(hook_failure_sentinel(str(exc)), file=stderr or sys.stderr)
-        if response_started:
-            return 1
+            nonce = environ.get("DELEGATE_MAIL_HOOK_NONCE")
+            if nonce:
+                print(hook_failure_sentinel(nonce, str(exc)), file=stderr or sys.stderr)
         try:
             _write_hook_response(stdout, b"{}")
         except (OSError, ValueError):
@@ -1613,8 +1703,14 @@ def prune(
     skipped: list[JsonObject] = []
     errors: list[JsonObject] = []
     with run_registry.registry_lock(registry_root):
-        _ensure_mail_tree(registry_root)
-        _remove_legacy_codex_homes(registry_root)
+        if not command.dry_run:
+            _ensure_mail_tree(registry_root)
+        for legacy_home in _legacy_codex_homes(registry_root):
+            item: JsonObject = {"path": str(legacy_home), "kind": "legacy_codex_home"}
+            planned.append(item)
+            if not command.dry_run:
+                _remove_directory(legacy_home)
+                removed.append(item)
         index = run_registry.load_index(registry_root)
         boxes = boxes_root(registry_root)
         if boxes.is_dir() and not boxes.is_symlink():

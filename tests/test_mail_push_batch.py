@@ -71,6 +71,7 @@ class MailPushBatchTests(unittest.TestCase):
             self.cursor_path,
             {"schema": mail.MAIL_PUSH_SCHEMA, "lastSeq": 0},
         )
+        (self.cursor_path.parent / mail.MAIL_PUSH_PENDING_FILE_NAME).unlink(missing_ok=True)
 
     def test_count_bound_is_exact_and_defers_only_the_overage(self) -> None:
         messages = [
@@ -90,8 +91,7 @@ class MailPushBatchTests(unittest.TestCase):
         )
 
         response, _payload = self._pump()
-        injected = json.loads(response["reason"])["messages"]
-        self.assertEqual(len(injected), mail.MAIL_PUSH_MAX_MESSAGES)
+        self.assertEqual(response, {})
         self.assertEqual(
             json.loads(self.cursor_path.read_text(encoding="utf-8"))["lastSeq"],
             messages[mail.MAIL_PUSH_MAX_MESSAGES - 1]["seq"],
@@ -100,6 +100,7 @@ class MailPushBatchTests(unittest.TestCase):
         response, _payload = self._pump()
         injected = json.loads(response["reason"])["messages"]
         self.assertEqual([row["message"]["msgId"] for row in injected], [messages[-1]["msgId"]])
+        self.assertEqual(self._pump()[0], {})
 
     def test_byte_bound_accepts_exact_payload_and_defers_one_byte_overage(self) -> None:
         first = self._send("first byte-boundary message")

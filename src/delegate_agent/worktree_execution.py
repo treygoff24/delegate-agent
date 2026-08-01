@@ -709,13 +709,25 @@ def _launch_child_in_persistent_worktree(
         if provision is not None:
             exec_ctx = replace(
                 exec_ctx,
+                env_overrides=(
+                    dict(provision.env)
+                    if provision.warning is not None and provision.env is not None
+                    else exec_ctx.env_overrides
+                ),
                 fallback_env_overrides=mail.mail_push_fallback_env_overrides(
                     provision,
                     exec_ctx.fallback_env_overrides,
                     preflight.registry_root,
                     registration.run_id,
                 ),
+                warnings=tuple(
+                    dict.fromkeys(
+                        (*exec_ctx.warnings, *((provision.warning,) if provision.warning else ()))
+                    )
+                ),
             )
+            if provision.warning is not None and provision.env is not None:
+                exec_ctx = replace(exec_ctx, env_overrides=dict(provision.env))
         if exec_ctx.persona_text is not None:
             run_registry.write_private_text(
                 registration.run_path / run_registry.PERSONA_TXT_FILE,

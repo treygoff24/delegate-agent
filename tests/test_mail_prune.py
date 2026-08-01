@@ -72,6 +72,18 @@ class MailPruneTests(unittest.TestCase):
             {"schema", "ok", "olderThanDays", "dryRun", "planned", "removed", "skipped", "errors"},
         )
 
+    def test_empty_dry_run_does_not_create_a_mail_tree(self):
+        self.assertFalse(mail.mail_root(self.registry_root).exists())
+
+        payload = mail.prune(
+            self.registry_root,
+            mail.MailCommand(action="prune", older_than_days=30, dry_run=True),
+            now=self.NOW,
+        )
+
+        self.assertEqual(payload["planned"], [])
+        self.assertFalse(mail.mail_root(self.registry_root).exists())
+
         runs_payload = run_registry.prune_runs(
             self.registry_root, older_than_days=30, dry_run=True, now=self.NOW
         )
@@ -150,6 +162,27 @@ class MailPruneTests(unittest.TestCase):
         self.assertEqual(actual["planned"], dry["planned"])
         self.assertEqual(actual["removed"], dry["planned"])
         self.assertFalse(any(path.exists() for path in before))
+
+    def test_dry_run_reports_legacy_home_without_removing_it(self):
+        legacy_home = (
+            mail.boxes_root(self.registry_root)
+            / "del_20260101T000000Z_abcdef"
+            / mail.MAIL_PUSH_CODEX_HOME_NAME
+        )
+        legacy_home.mkdir(parents=True)
+        canary = legacy_home / "auth.json"
+        canary.write_text('{"token":"canary"}', encoding="utf-8")
+        before = canary.read_bytes()
+
+        dry = mail.prune(
+            self.registry_root,
+            mail.MailCommand(action="prune", older_than_days=30, dry_run=True),
+            now=self.NOW,
+        )
+
+        self.assertTrue(legacy_home.is_dir())
+        self.assertEqual(canary.read_bytes(), before)
+        self.assertIn({"path": str(legacy_home), "kind": "legacy_codex_home"}, dry["planned"])
 
     def test_mail_prune_leaves_runs_prune_payload_bytes_untouched(self):
         run_id, _alias = run_registry.register_run(

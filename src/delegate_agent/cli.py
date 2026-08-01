@@ -825,10 +825,22 @@ def _execute_attached_worktree(
     if provision is not None:
         ctx_runner = dc_replace(
             ctx_runner,
+            env_overrides=(
+                dict(provision.env)
+                if provision.warning is not None and provision.env is not None
+                else ctx_runner.env_overrides
+            ),
             fallback_env_overrides=mail.mail_push_fallback_env_overrides(
                 provision, ctx_runner.fallback_env_overrides, registry_root, run_id
             ),
+            warnings=tuple(
+                dict.fromkeys(
+                    (*ctx_runner.warnings, *((provision.warning,) if provision.warning else ()))
+                )
+            ),
         )
+        if provision.warning is not None and provision.env is not None:
+            ctx_runner = dc_replace(ctx_runner, env_overrides=dict(provision.env))
     attachment = {
         **(iso.attachment or {}),
         "startHeadOid": start_head_oid,
@@ -893,6 +905,14 @@ def _execute_attached_worktree(
             ),
             registry_root,
             run_id,
+        ),
+        warnings=tuple(
+            dict.fromkeys(
+                (
+                    *ctx_runner.warnings,
+                    *((provision.warning,) if provision and provision.warning else ()),
+                )
+            )
         ),
     )
     try:
@@ -1295,10 +1315,22 @@ def execute_request(
         if provision is not None:
             ctx_runner = dc_replace(
                 ctx_runner,
+                env_overrides=(
+                    dict(provision.env)
+                    if provision.warning is not None and provision.env is not None
+                    else ctx_runner.env_overrides
+                ),
                 fallback_env_overrides=mail.mail_push_fallback_env_overrides(
                     provision, ctx_runner.fallback_env_overrides, registry_root, run_id
                 ),
+                warnings=tuple(
+                    dict.fromkeys(
+                        (*ctx_runner.warnings, *((provision.warning,) if provision.warning else ()))
+                    )
+                ),
             )
+            if provision.warning is not None and provision.env is not None:
+                ctx_runner = dc_replace(ctx_runner, env_overrides=dict(provision.env))
         try:
             return delegate_runner.execute_tracked(
                 isolated_request.argv,

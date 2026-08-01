@@ -78,7 +78,7 @@ class MailPushTests(unittest.TestCase):
 
         replay = io.StringIO()
         self.assertEqual(mail.hook_pump(self.registry_root, stdout=replay, env=self.env), 0)
-        self.assertEqual(json.loads(replay.getvalue())["reason"], response["reason"])
+        self.assertEqual(json.loads(replay.getvalue()), {})
         self.assertEqual(
             json.loads(
                 (
@@ -231,7 +231,40 @@ class MailPushTests(unittest.TestCase):
             )
         )
 
+    def test_fallback_home_failure_reverts_to_pull_without_aborting_launch(self):
+        source = self.workspace / "source-codex-home"
+        source.mkdir()
+        (source / "auth.json").write_text('{"token":"primary"}', encoding="utf-8")
+        env = {"CODEX_HOME": str(source)}
+        original_argv = ["codex", "exec", "prompt"]
+        provision = mail.provision_mail_push(
+            "codex", original_argv, None, self.registry_root, self.run_id, env
+        )
+
+        with mock.patch.object(
+            mail,
+            "_codex_home_for_mail_push",
+            side_effect=OSError("fallback home unavailable"),
+        ):
+            fallback = mail.mail_push_fallback_env_overrides(
+                provision,
+                {"CODEX_HOME": str(source)},
+                self.registry_root,
+                self.run_id,
+            )
+
+        self.assertEqual(fallback, {"CODEX_HOME": str(source)})
+        self.assertEqual(provision.argv, original_argv)
+        self.assertEqual(env, {"CODEX_HOME": str(source)})
+        self.assertIsNotNone(provision.warning)
+        self.assertFalse(
+            (run_registry.run_directory(self.registry_root, self.run_id) / "codex-home").exists()
+        )
+
     def test_unrecordable_hook_failure_emits_parent_observable_sentinel(self):
+        mail.provision_mail_push(
+            "claude", ["claude", "prompt"], None, self.registry_root, self.run_id, self.env
+        )
         stderr = io.StringIO()
         with mock.patch.object(
             mail.private_io, "write_json_atomic_if_absent", side_effect=OSError("box unavailable")
@@ -245,7 +278,9 @@ class MailPushTests(unittest.TestCase):
                 ),
                 1,
             )
-        reason = mail.hook_failure_reason_from_stderr(stderr.getvalue())
+        reason = mail.hook_failure_reason_from_stderr(
+            stderr.getvalue(), nonce=self.env["DELEGATE_MAIL_HOOK_NONCE"]
+        )
         self.assertEqual(reason, "simulated hook output failure")
         context = runner.RunContext(
             registry_root=self.registry_root,
@@ -260,8 +295,9 @@ class MailPushTests(unittest.TestCase):
             workspace_kind="directory",
             isolated_workspace=False,
             started_at=run_registry.utc_now_iso(),
+            mail_push=True,
         )
-        self.assertEqual(runner._mail_push_failure_marker(context, stderr.getvalue()), reason)
+        self.assertEqual(runner._mail_push_failure_marker(context, reason), reason)
         run_path = run_registry.run_directory(self.registry_root, self.run_id)
         runner.write_snapshot(run_path, {"recentEvents": [], "eventsTotal": 0, "warnings": []})
         runner.record_mail_push_degradation(
@@ -272,6 +308,20 @@ class MailPushTests(unittest.TestCase):
         )
         snapshot = run_registry.load_run_snapshot(self.registry_root, self.run_id)
         self.assertEqual(snapshot["eventsTotal"], 1)
+
+    def test_sentinel_requires_the_run_nonce_and_survives_later_stderr(self):
+        mail.provision_mail_push(
+            "claude", ["claude", "prompt"], None, self.registry_root, self.run_id, self.env
+        )
+        nonce = self.env["DELEGATE_MAIL_HOOK_NONCE"]
+        forged = f"{mail.MAIL_PUSH_FAILURE_SENTINEL}wrong:forged\n"
+        real = mail.hook_failure_sentinel(nonce, "recording unavailable")
+
+        self.assertIsNone(mail.hook_failure_reason_from_stderr(forged, nonce=nonce))
+        self.assertEqual(
+            mail.hook_failure_reason_from_stderr(real + "\n" + ("x" * (100 * 1024)), nonce=nonce),
+            "recording unavailable",
+        )
 
     def test_degradation_is_recorded_once_in_state_events_and_snapshot(self):
         run_path = run_registry.run_directory(self.registry_root, self.run_id)
