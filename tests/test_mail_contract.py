@@ -236,6 +236,20 @@ class MailContractTests(CommandTestBase):
             {"schema": mail.MAIL_WATCH_SCHEMA, "timeout": 600, "type": "timeout"},
         )
 
+    def test_watch_once_sleeps_only_until_its_deadline(self):
+        output = io.StringIO()
+        with (
+            mock.patch.object(mail.time, "monotonic", side_effect=[0.0, 0.0, 0.25]),
+            mock.patch.object(mail.time, "sleep") as sleep,
+        ):
+            code = mail.watch(
+                self.registry_root,
+                mail.MailCommand(action="watch", once=True, timeout=0.25, interval_ms=1000),
+                stdout=output,
+            )
+        self.assertEqual(code, 124)
+        sleep.assert_called_once_with(0.25)
+
     def test_standard_error_envelope_is_sorted_and_exact(self):
         code, stdout, stderr = self.run_main(
             ["--json", "--cwd", str(self.workspace), "mail", "send", "--to", "missing", "body"]

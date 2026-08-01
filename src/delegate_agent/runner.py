@@ -20,6 +20,7 @@ from typing import BinaryIO, TextIO
 from delegate_agent import (
     child_failures,
     harness_events,
+    mail,
     profiles,
     prompt_instructions,
     reasoning,
@@ -1672,8 +1673,8 @@ def _completion_report_source(
     return ""
 
 
-MAIL_PUSH_EVENT_KIND = "mail_push_degraded"
-MAIL_PUSH_WARNING_PREFIX = "mail push degraded to pull"
+MAIL_PUSH_EVENT_KIND = mail.MAIL_PUSH_EVENT_KIND
+MAIL_PUSH_WARNING_PREFIX = mail.MAIL_PUSH_WARNING_PREFIX
 MAIL_PUSH_CLEANUP_WARNING = "mail push private-home cleanup failed"
 
 
@@ -2051,14 +2052,9 @@ def _accumulator_failure_signal_text(accumulator: harness_events.StreamAccumulat
 
 
 def _attempt_log_tail(path: Path, byte_count: int) -> str:
-    if byte_count <= 0 or not path.exists():
-        return ""
-    limit = min(byte_count, profiles.STDERR_TAIL_LIMIT)
-    with path.open("rb") as handle:
-        handle.seek(0, os.SEEK_END)
-        handle.seek(max(handle.tell() - limit, 0), os.SEEK_SET)
-        text = handle.read(limit).decode("utf-8", errors="replace")
-    return redaction.redact_string(text)
+    return profiles.read_bounded_stderr_tail(
+        path, limit=min(byte_count, profiles.STDERR_TAIL_LIMIT)
+    )
 
 
 def _capture_failure(
@@ -2453,7 +2449,11 @@ def _execute_tracked(
     workspace_baseline = (
         profiles.capture_workspace_baseline(
             retry_workspace,
-            allow_directory=ctx.mode == "work" and ctx.workspace_kind == "directory",
+            allow_directory=(
+                ctx.mode == "work"
+                and ctx.workspace_kind == "directory"
+                and bool(ctx.fallback_env_overrides)
+            ),
         )
         if ctx.engine == "codex"
         and (

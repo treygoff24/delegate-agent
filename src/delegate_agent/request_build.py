@@ -714,18 +714,6 @@ def _safe_dirty_tree_note(
     )
 
 
-def _append_safe_dirty_tree_note(
-    prompt: str,
-    resolved: ResolvedWorkspace,
-    mode: str,
-    isolation_context: IsolationContext | None,
-) -> str:
-    note = _safe_dirty_tree_note(resolved, mode, isolation_context)
-    if note is None:
-        return prompt
-    return f"{prompt}\n\n{note}"
-
-
 def _validate_forbid_commit(
     *,
     forbid_commit: bool,
@@ -1394,10 +1382,12 @@ def request_from_parsed(
     config: JsonObject,
     stdin: TextIO,
     stderr: TextIO | None = None,
+    *,
+    workspace: ResolvedWorkspace | None = None,
 ) -> Request:
     validate_config(config)
     if parsed.subcommand == "run":
-        return request_from_input_json(parsed, config, stderr=stderr)
+        return request_from_input_json(parsed, config, stderr=stderr, workspace=workspace)
     launch = parsed.launch
     global_options = parsed.global_options
     if launch is None or launch.engine not in KNOWN_ENGINES:
@@ -1497,7 +1487,7 @@ def request_from_parsed(
         if launch.output_schema_text is not None
         else resolve_output_schema(launch.engine, launch.output_schema)
     )
-    workspace = resolve_workspace(global_options.cwd)
+    workspace = workspace or resolve_workspace(global_options.cwd)
     prompt = resolve_prompt(launch.prompt_parts, launch.prompt_file, stdin)
     source_prompt = prompt
 
@@ -1623,7 +1613,11 @@ def _load_input_json_object(path: Path) -> JsonObject:
 
 
 def request_from_input_json(
-    parsed: ParsedCommand, config: JsonObject, *, stderr: TextIO | None = None
+    parsed: ParsedCommand,
+    config: JsonObject,
+    *,
+    stderr: TextIO | None = None,
+    workspace: ResolvedWorkspace | None = None,
 ) -> Request:
     run_json = parsed.run_json
     if run_json is None:
@@ -1881,7 +1875,7 @@ def request_from_input_json(
             json_isolation=json_isolation,
         )
 
-    workspace = resolve_workspace(global_options.cwd, json_cwd)
+    workspace = workspace or resolve_workspace(global_options.cwd, json_cwd)
     git_root, git_common_dir, git_head_oid, git_head_ref, git_branch = capture_git_metadata(
         workspace.path
     )
@@ -3184,7 +3178,6 @@ def _build_request_for_workspace(
             persona_digest=persona_resolution.digest if persona_resolution is not None else None,
             persona_transport=persona_transport,
             persona_env_overrides=persona_env,
-            prompt_framed=frame_prompt,
         ),
     )
     return _apply_profile_resolution(

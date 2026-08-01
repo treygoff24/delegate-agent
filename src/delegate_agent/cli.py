@@ -783,7 +783,7 @@ def _execute_attached_worktree(
         workspace_kind=source_workspace.kind,
     )
     maybe_run_retention_pass(registry_root, config)
-    if request.mode == MODE_WORK:
+    if request.mode == MODE_WORK and delegate_config.mail_enabled(config):
         mail.prepare_mail_storage(registry_root)
     mail.sanitize_inherited_mail_identity(request.env_overrides)
     run_id, alias = run_registry.register_run(
@@ -808,7 +808,7 @@ def _execute_attached_worktree(
         mail.bind_mail_identity(child_env, run_id, alias)
     request.env_overrides = child_env
     provision: mail.MailPushProvision | None = None
-    if request.mode == MODE_WORK:
+    if request.mode == MODE_WORK and delegate_config.mail_enabled(config):
         wired_argv, wired_display_argv = mail.wire_work_mail_launch(
             request.engine,
             execution_request.argv,
@@ -1303,7 +1303,7 @@ def execute_request(
             workspace_kind=source_workspace.kind,
         )
         maybe_run_retention_pass(registry_root, config)
-        if isolated_request.mode == MODE_WORK:
+        if isolated_request.mode == MODE_WORK and delegate_config.mail_enabled(config):
             mail.prepare_mail_storage(registry_root)
         mail.sanitize_inherited_mail_identity(isolated_request.env_overrides)
         run_id, alias = run_registry.register_run(
@@ -1330,7 +1330,7 @@ def execute_request(
         provision: mail.MailPushProvision | None = None
         mail_push_cleanup_transferred = False
         try:
-            if isolated_request.mode == MODE_WORK:
+            if isolated_request.mode == MODE_WORK and delegate_config.mail_enabled(config):
                 isolated_request.argv, isolated_request.display_argv = mail.wire_work_mail_launch(
                     isolated_request.engine,
                     isolated_request.argv,
@@ -1543,6 +1543,7 @@ def main(
     try:
         parsed = parse_cli(argv)
         global_options = parsed.global_options
+        workspace: ResolvedWorkspace | None = None
         json_mode = global_options.json_mode
         profile_guard.enforce_profile_guard(parsed, stderr=stderr)
         if parsed.subcommand == "help":
@@ -1581,16 +1582,18 @@ def main(
                         "call mode does not use --cwd.",
                     )
                 if global_options.group is not None:
-                    config_workspace = workspace_path_for_config(global_options.cwd)
+                    workspace = resolve_workspace(global_options.cwd)
+                    config_workspace = Path(workspace.path)
                 else:
                     config_workspace = None
             else:
-                config_workspace = workspace_path_for_config(global_options.cwd)
+                workspace = resolve_workspace(global_options.cwd)
+                config_workspace = Path(workspace.path)
             config, source = load_config(workspace=config_workspace)
             validate_config(config)
 
         if parsed.subcommand == "personas":
-            workspace = resolve_workspace(global_options.cwd)
+            workspace = workspace or resolve_workspace(global_options.cwd)
             return emit_personas(workspace, json_mode=global_options.json_mode, stdout=stdout)
 
         discovery_profile: profiles.ProfileResolution | None = None
@@ -1641,7 +1644,7 @@ def main(
                 mail_workspace = mail.resolve_mail_workspace(global_options.cwd)
                 workspace = resolve_workspace(str(mail_workspace))
             else:
-                workspace = resolve_workspace(global_options.cwd)
+                workspace = workspace or resolve_workspace(global_options.cwd)
 
         if parsed.subcommand == "capabilities":
             command = parsed.capabilities
@@ -1714,7 +1717,7 @@ def main(
             # through the normal request build and execution path.
             parsed = resume_plan.parsed
             global_options = parsed.global_options
-        request = request_from_parsed(parsed, config, stdin, stderr)
+        request = request_from_parsed(parsed, config, stdin, stderr, workspace=workspace)
         if resume_plan is not None:
             request = resume_command.apply_resume_to_request(request, resume_plan)
         if request.dry_run:

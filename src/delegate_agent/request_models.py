@@ -299,4 +299,3 @@ class EngineBuildInput:
     persona_digest: str | None = None
     persona_transport: str | None = None
     persona_env_overrides: dict[str, str] | None = None
-    prompt_framed: bool = False

@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TextIO
 
+from delegate_agent import config as delegate_config
 from delegate_agent import harness_events, mail, profiles, retention, run_registry, safe_workspace
 from delegate_agent import runner as delegate_runner
 from delegate_agent.argv_utils import public_argv, replace_workspace_arg_in_argv
@@ -337,7 +338,7 @@ def _register_persistent_worktree_run(
 ) -> PersistentWorktreeRegistration:
     request = execution.request
     label = branch_label(request.engine, request.model_alias)
-    if request.mode == "work":
+    if request.mode == "work" and delegate_config.mail_enabled(execution.config):
         mail.prepare_mail_storage(preflight.registry_root)
     mail.sanitize_inherited_mail_identity(request.env_overrides)
 
@@ -662,7 +663,7 @@ def _launch_child_in_persistent_worktree(
             registration.worktree_path,
         )
         provision: mail.MailPushProvision | None = None
-        if request.mode == "work":
+        if request.mode == "work" and delegate_config.mail_enabled(execution.config):
             wired_argv, wired_display_argv = mail.wire_work_mail_launch(
                 request.engine,
                 execution_request.argv,

@@ -23,7 +23,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TextIO
 
-from delegate_agent import private_io, run_registry, run_status
+from delegate_agent import private_io, profiles, run_registry, run_status
 from delegate_agent.constants import KNOWN_ENGINES
 from delegate_agent.errors import EXIT_USAGE, DelegateError
 from delegate_agent.json_types import JsonObject
@@ -63,6 +63,7 @@ MAIL_PUSH_SETTINGS_FILE_NAME = "settings.json"
 MAIL_PUSH_CODEX_HOME_NAME = "codex-home"
 MAIL_PUSH_FALLBACK_CODEX_HOME_NAME = "codex-home-fallback"
 MAIL_PUSH_WARNING_PREFIX = "mail push degraded to pull"
+MAIL_PUSH_EVENT_KIND = "mail_push_degraded"
 MAIL_PUSH_FAILURE_SENTINEL = "DELEGATE_MAIL_HOOK_FAILURE:"
 MESSAGE_SEPARATOR = b"\n---\n"
 MESSAGE_ID_RE = re.compile(r"\d{8}-\d{6}-[0-9a-f]{6}\Z")
@@ -85,9 +86,8 @@ MAIL_SANDBOX_ROWS: dict[str, str] = {
 }
 if set(MAIL_SANDBOX_ROWS) != set(KNOWN_ENGINES):
     raise RuntimeError("Every known engine needs an explicit mail sandbox row.")
-# Stop-hook context injection is deliberately narrower than mailbox access.
-# These are the only adapters with launch-scoped, model-visible stop-hook
-# evidence from the audit that preceded Wave 2.
+# Stop-hook injection is verified only for Claude and Codex. Promote another
+# adapter only after launch-scoped, model-visible hook evidence is recorded.
 MAIL_PUSH_ADAPTER_ROWS: dict[str, str] = {
     engine: "verified" if engine in {"claude", "codex"} else "unverified"
     for engine in KNOWN_ENGINES
@@ -322,9 +322,7 @@ def bind_mail_identity(env: dict[str, str], run_id: str, alias: str) -> dict[str
 
 def sanitize_inherited_mail_identity(env: dict[str, str] | None) -> None:
     """Remove ambient/profile mail identity before a launch receives a fresh binding."""
-    if env is not None:
-        env.pop("DELEGATE_RUN_ID", None)
-        env.pop("DELEGATE_MAIL_SELF", None)
+    profiles.strip_mail_identity(env)
 
 
 def wire_work_mail_argv(
@@ -1147,10 +1145,6 @@ def _expand_group(
     return recipients
 
 
-def _recipient_key(recipient: Recipient) -> str:
-    return recipient.name if recipient.run_id is None else recipient.run_id
-
-
 def _match_message_id(
     registry_root: Path, value: str, *, sent_only: bool = False
 ) -> tuple[str, Path, JsonObject]:
@@ -1716,7 +1710,8 @@ def watch(
         if not command.once:
             time.sleep(command.interval_ms / 1000)
             continue
-        if time.monotonic() >= deadline:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
             print(
                 json.dumps(
                     {
@@ -1731,7 +1726,7 @@ def watch(
                 flush=True,
             )
             return 124
-        time.sleep(command.interval_ms / 1000)
+        time.sleep(min(command.interval_ms / 1000, remaining))
 
 
 def _iter_mail_files(root: Path) -> list[Path]:

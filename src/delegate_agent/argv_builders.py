@@ -15,7 +15,6 @@ from delegate_agent import reasoning
 from delegate_agent.constants import MODE_CALL, MODE_SAFE, MODE_WORK, validate_mode
 from delegate_agent.errors import DelegateError
 from delegate_agent.json_types import JsonObject
-from delegate_agent.prompt_instructions import SKILL_REVIEW_PREFIX
 from delegate_agent.prompt_transport import (
     CURSOR_PROMPT_REDACTION,
     DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
@@ -106,23 +105,6 @@ def _prefix_safe_prompt(prompt: str, engine: str) -> str:
 
 def prefix_cursor_safe_prompt(prompt: str) -> str:
     return _prefix_safe_prompt(prompt, "cursor")
-
-
-def prefix_kimi_safe_prompt(prompt: str) -> str:
-    return _prefix_safe_prompt(prompt, "kimi")
-
-
-def prefix_droid_safe_prompt(prompt: str) -> str:
-    safe_prefix = SAFE_REVIEW_PREFIX_BY_ENGINE["droid"]
-    if prompt.startswith(safe_prefix):
-        return prompt
-    skill_prefix = SKILL_REVIEW_PREFIX
-    if prompt.startswith(skill_prefix):
-        insert_at = len(skill_prefix)
-        if prompt[insert_at:].startswith(safe_prefix):
-            return prompt
-        return prompt[:insert_at] + safe_prefix + prompt[insert_at:]
-    return f"{safe_prefix}{prompt}"
 
 
 def _harness_bypass_enabled(config: JsonObject, mode: str, engine: str) -> bool:
