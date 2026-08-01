@@ -245,6 +245,42 @@ class ResumeTrustTests(unittest.TestCase):
             )
             self.assertEqual(by_id.resumed_from["runId"], run_id)
 
+    def test_tampered_run_entry_alias_cannot_escape_alias_claim_directory(self):
+        for kind in ("absolute", "traversal"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                workspace = Path(tmp)
+                root, run_id, alias, _run_path = self._seed_record(workspace)
+                canary = workspace / "outside-alias-claim"
+                canary.write_text(run_id + "\n", encoding="utf-8")
+                index = run_registry.load_index(root)
+                index["runs"][run_id]["alias"] = (
+                    str(canary) if kind == "absolute" else "../../outside-alias-claim"
+                )
+                run_registry.save_index(root, index)
+                reads: list[Path] = []
+                original_read = resume_command._read_record_text
+
+                def read(
+                    path: Path,
+                    *,
+                    prompt: bool = False,
+                    reads: list[Path] = reads,
+                    original_read=original_read,
+                ) -> str:
+                    reads.append(path)
+                    return original_read(path, prompt=prompt)
+
+                with mock.patch.object(resume_command, "_read_record_text", side_effect=read):
+                    plan = resume_command.build_resume_plan(
+                        cli.parse_cli(["resume", alias]),
+                        ResolvedWorkspace(str(workspace), "directory"),
+                        cli.DEFAULT_CONFIG,
+                        stderr=io.StringIO(),
+                    )
+
+                self.assertEqual(plan.resumed_from, {"runId": run_id, "alias": alias})
+                self.assertNotIn(canary.resolve(), {path.resolve() for path in reads})
+
     def test_unknown_handle_suggestions_read_no_record_bodies(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)

@@ -949,16 +949,32 @@ as untrusted data and is disclosed to the target Harness, including on a
 cross-engine resume. Resume options must appear before the handle; trailing
 tokens are continuation instructions.
 
-The new Run inherits the source Run's mode (never overridden), model selection,
-reasoning effort, timeout, progress intent, group, auth profile, and commit
-policy unless an explicit resume/global override applies. A persistent-worktree
-source is resumed by attaching to its existing worktree rather than creating a
-second one. The attachment is a live lease: `worktree remove`, `worktree prune`,
-and `worktree gc` refuse or skip the worktree while the attached Run may still
-be active. `--include-dirty` is dropped for ordinary resume and rejected when
-the source requires attachment because dirty-file sync is a worktree-creation
-operation. `--dry-run` resolves the continuation without
+The new Run inherits source settings according to this table. `--engine` and
+the listed resume flags must precede the handle; `--group` and
+`--auth-profile` are global flags and therefore precede `resume`. A persistent
+worktree source is resumed by attaching to its existing worktree rather than
+creating a second one. The attachment is a live lease: `worktree remove`,
+`worktree prune`, and `worktree gc` refuse or skip the worktree while the
+attached Run may still be active. `--dry-run` resolves the continuation without
 creating a Run or writing a prompt record.
+
+| Field | Source manifest key | Override flag | Absent or legacy behavior | Cross-engine rule |
+| --- | --- | --- | --- | --- |
+| Engine | `engine`, falling back to `harness` | `--engine` | A missing or unknown source engine refuses resume. | The selected engine becomes the target; engine-scoped fields below may drop. |
+| Mode | `mode` | None; v1 does not override mode. | A missing or invalid mode refuses resume. | Retained unchanged. |
+| Model selection | `modelAlias`, then `modelRequested`, `modelResolved`, then `model` | `--model` | No usable key uses the target engine configuration default and emits a note. | Source model selection drops; pass `--model` to pin a target model. |
+| Reasoning effort | `requestedReasoningEffort`, then `resolvedReasoningEffort`, together with `reasoningEffortSource` | `--reasoning-effort` | Missing effort uses the target default and emits a note. A source value from configuration is re-resolved through target capability/configuration; only `cli` and `input-json` source intent is inherited directly. | Source effort drops with a note; an explicit override remains valid. |
+| Fast tier | `requestedFast` | `--fast` or `--no-fast` | Omitted leaves fast unspecified. | Inherited only for a same-engine Codex resume. Other targets drop it; non-Codex targets emit a drop note when a source value is present. |
+| Progress intent | `progressRequested` (`on`, `off`, or omitted) | `--progress` or `--no-progress` | Omitted uses target progress configuration and emits a note; only `on` and `off` are inherited. | Retained; progress intent is not engine-specific. |
+| Timeout | `timeoutSeconds` | `--timeout` | Omitted uses the target timeout default and emits a note. A present value must be a positive integer (an integral JSON float is accepted). | Retained. |
+| Output schema | Inline `outputSchema` text | `--output-schema PATH` or `--no-output-schema` | Omitted means no schema. Stored text is re-materialized privately only during normal launch. | Only Codex inherits inline schema text. Other engines soft-drop it with a note before output-schema validation. |
+| OpenCode agent | `agent` | None | Omitted means no agent selection. | Inherited only for a same-engine OpenCode resume; otherwise dropped with a note. |
+| Workspace cwd / execution cwd | `cwd`; persistent records also derive `executionCwd`, branch, and source Git root | None (`--cwd` selects the registry workspace and must match recorded `cwd`) | Missing `cwd` falls back to the selected registry workspace; missing persistent-worktree metadata causes attachment validation to refuse. | Retained as workspace context; an attach uses the validated existing worktree rather than copying `executionCwd` into a new worktree. |
+| Isolation / lifecycle | `isolationMode`; persistent detection also reads `isolationLifecycle`, `preservedWorkspace`, `worktreeStatus`, and `worktreeAttachment` | None; `--isolation` is rejected for resume. | Missing ordinary `isolationMode` uses target isolation configuration and emits a note. | Retained. Persistent or attached sources become an `attached` execution lifecycle. |
+| Group | `group` | Global `--group` | Omitted uses the ungrouped target default and emits a note. | Retained. |
+| Auth profile | `authProfile` | Global `--auth-profile` | Omitted uses target profile detection/default and emits a note. | Retained. |
+| Forbid commit | `commitPolicy.forbidCommit` when exactly `true` | None | Omitted or any other value leaves commit prohibition off. | Retained. |
+| Include dirty | `includeDirty` | `--include-dirty` | Source and explicit values are creation-only and are dropped for ordinary resume with a note. | Retained only as a drop decision; on a persistent/attached source, explicit `--include-dirty` is rejected because attachment does not create or sync a worktree. |
 
 `delegate runs` defaults to recent runs. `--active` preserves the legacy active view and includes both live `running` runs and `stale` runs. Use `--running` for only live tracked processes and `--stale` for runs recorded as running whose PID is missing or dead. `--active`, `--running`, `--stale`, and `--recent` are mutually exclusive. `--group NAME` filters by launch group and the runs table shows a `group` column when any visible run has one.
 `delegate ps` is the shorter first-class form of `delegate runs --active` and

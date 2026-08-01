@@ -11,7 +11,7 @@ import stat
 import subprocess
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -312,15 +312,21 @@ def register_run(
             **(metadata or {}),
             "registrationOrdinal": next_ordinal,
         }
-        index["aliases"][alias] = run_id
-        index["runs"][run_id] = entry
+        claim_path = aliases_dir(registry_root) / alias
+        run_path = run_directory(registry_root, run_id)
+        run_directory_existed = run_path.exists()
         try:
+            bind_alias_claim(registry_root, alias, run_id)
+            ensure_private_dir(run_path)
+            index["aliases"][alias] = run_id
+            index["runs"][run_id] = entry
             save_index(registry_root, index)
-        except RegistryJsonError:
-            (aliases_dir(registry_root) / alias).unlink(missing_ok=True)
+        except Exception:
+            claim_path.unlink(missing_ok=True)
+            if not run_directory_existed:
+                with suppress(OSError):
+                    run_path.rmdir()
             raise
-        bind_alias_claim(registry_root, alias, run_id)
-        ensure_private_dir(runs_dir(registry_root) / run_id)
     return run_id, alias
 
 
@@ -610,13 +616,7 @@ def resolve_handle(
     run_id = lookup_run_id(index, handle)
     if run_id is None:
         return ResolveResult(None, None, tuple(suggest_handles(index, handle)))
-    alias = index.get("runs", {}).get(run_id, {}).get("alias")
-    if not isinstance(alias, str):
-        alias = None
-        for candidate, candidate_id in index.get("aliases", {}).items():
-            if candidate_id == run_id:
-                alias = candidate
-                break
+    alias = alias_for_run(index, run_id)
     return ResolveResult(run_id, alias, (), handle, alias or run_id, "literal")
 
 
