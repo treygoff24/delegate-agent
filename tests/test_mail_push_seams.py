@@ -36,10 +36,17 @@ class MailPushSeamTests(CommandTestBase):
         fake.write_text(
             "#!/usr/bin/env python3\n"
             "import json, os, sys\n"
+            "from pathlib import Path\n"
+            "codex_home = Path(os.environ['CODEX_HOME']).resolve() if os.environ.get('CODEX_HOME') else None\n"
             "observation = {\n"
             "    'argv': sys.argv[1:],\n"
             "    'env': {key: value for key, value in os.environ.items()\n"
             "            if key.startswith('DELEGATE_') or key == 'CODEX_HOME'},\n"
+            "    'codexHome': str(codex_home) if codex_home is not None else None,\n"
+            "    'codexHomeHooksPresent': (codex_home / 'hooks.json').is_file()\n"
+            "        if codex_home is not None else False,\n"
+            "    'codexHomeAuth': (codex_home / 'auth.json').read_text(encoding='utf-8')\n"
+            "        if codex_home is not None and (codex_home / 'auth.json').is_file() else None,\n"
             "}\n"
             "with open(os.environ['FAKE_OBSERVATIONS'], 'a', encoding='utf-8') as handle:\n"
             "    handle.write(json.dumps(observation) + '\\n')\n"
@@ -205,7 +212,9 @@ class MailPushSeamTests(CommandTestBase):
             private_home = Path(child["env"]["CODEX_HOME"]).resolve()
             self.assertTrue(private_home.is_relative_to(run_path.resolve()))
             self.assertFalse(private_home.is_relative_to(mail.mail_root(workspace / ".delegate")))
-            self.assertTrue((private_home / "hooks.json").is_file())
+            self.assertEqual(child["codexHome"], str(private_home))
+            self.assertTrue(child["codexHomeHooksPresent"])
+            self.assertFalse(private_home.exists())
             self.assertIn("-c", child["argv"])
             self.assertIn("hooks=true", child["argv"])
             self.assertIn("--dangerously-bypass-hook-trust", child["argv"])
@@ -375,9 +384,14 @@ class MailPushSeamTests(CommandTestBase):
             self.assertEqual(primary_home.name, mail.MAIL_PUSH_CODEX_HOME_NAME)
             self.assertEqual(fallback_home.name, mail.MAIL_PUSH_FALLBACK_CODEX_HOME_NAME)
             self.assertNotEqual(primary_home, fallback_home)
-            self.assertTrue(fallback_home.is_relative_to(run_path))
-            self.assertTrue((fallback_home / "hooks.json").is_file())
-            self.assertEqual((fallback_home / "auth.json").read_bytes(), b"fallback-auth")
+            self.assertTrue(fallback_home.is_relative_to(run_path.resolve()))
+            self.assertEqual(observed[0]["codexHome"], str(primary_home.resolve()))
+            self.assertTrue(observed[0]["codexHomeHooksPresent"])
+            self.assertEqual(observed[1]["codexHome"], str(fallback_home.resolve()))
+            self.assertTrue(observed[1]["codexHomeHooksPresent"])
+            self.assertEqual(observed[1]["codexHomeAuth"], "fallback-auth")
+            self.assertFalse(primary_home.exists())
+            self.assertFalse(fallback_home.exists())
             self.assertEqual(manifest["argv"][1:], observed[1]["argv"])
 
     def test_codex_mail_push_without_fallback_creates_only_one_private_home(self):
@@ -408,6 +422,7 @@ class MailPushSeamTests(CommandTestBase):
                 mail.MAIL_PUSH_CODEX_HOME_NAME,
             )
             self.assertFalse((run_path / mail.MAIL_PUSH_FALLBACK_CODEX_HOME_NAME).exists())
+            self.assertFalse((run_path / mail.MAIL_PUSH_CODEX_HOME_NAME).exists())
 
     def test_grok_mail_push_tracked_work_degrades_to_pull_once_without_artifacts(self):
         with tempfile.TemporaryDirectory(prefix="delegate-mail-push-grok-") as tmp:

@@ -17,6 +17,7 @@ from delegate_agent.harness_events import StreamAccumulator
 from delegate_agent.json_types import JsonObject
 
 STDERR_TAIL_LIMIT = 8_000
+DIRECTORY_BASELINE_MAX_ENTRIES = 10_000
 PURE_ENV_ALLOWLIST = frozenset(
     {"PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TERM"}
 )
@@ -398,23 +399,49 @@ def capture_head_oid(cwd: str) -> str | None:
 
 @dataclass(frozen=True)
 class WorkspaceBaseline:
-    porcelain: str
-    head: str
+    porcelain: str | None = None
+    head: str | None = None
+    directory_entries: tuple[tuple[str, int, int, int], ...] | None = None
+
+
+def _capture_directory_baseline(cwd: str) -> WorkspaceBaseline | None:
+    root = Path(cwd)
+    entries: list[tuple[str, int, int, int]] = []
+    try:
+        for current_root, directories, files in os.walk(root, followlinks=False):
+            current = Path(current_root)
+            if current == root:
+                directories[:] = [name for name in directories if name != ".delegate"]
+            for name in (*directories, *files):
+                path = current / name
+                stat = path.lstat()
+                entries.append(
+                    (
+                        str(path.relative_to(root)),
+                        stat.st_mode,
+                        stat.st_size,
+                        stat.st_mtime_ns,
+                    )
+                )
+                if len(entries) > DIRECTORY_BASELINE_MAX_ENTRIES:
+                    return None
+    except OSError:
+        return None
+    return WorkspaceBaseline(directory_entries=tuple(sorted(entries)))
 
 
 def capture_workspace_baseline(cwd: str) -> WorkspaceBaseline | None:
     try:
         porcelain = capture_workspace_porcelain(cwd)
-        if porcelain is None:
-            return None
-        head = capture_head_oid(cwd)
-        if head is None:
-            return None
+        if porcelain is not None:
+            head = capture_head_oid(cwd)
+            if head is not None:
+                return WorkspaceBaseline(porcelain=porcelain, head=head)
     except (OSError, subprocess.SubprocessError, ValueError):
         # No baseline means retry stays disabled — safe degradation, but only
         # for environment failures; programming errors should still surface.
         return None
-    return WorkspaceBaseline(porcelain=porcelain, head=head)
+    return _capture_directory_baseline(cwd)
 
 
 def workspace_is_clean(porcelain: str | None) -> bool:
@@ -426,6 +453,9 @@ def workspace_is_clean(porcelain: str | None) -> bool:
 def workspace_baseline_unchanged(cwd: str, baseline: WorkspaceBaseline | None) -> bool:
     if baseline is None:
         return False
+    if baseline.directory_entries is not None:
+        current = _capture_directory_baseline(cwd)
+        return current is not None and current.directory_entries == baseline.directory_entries
     current = capture_workspace_baseline(cwd)
     if current is None:
         return False
@@ -435,6 +465,8 @@ def workspace_baseline_unchanged(cwd: str, baseline: WorkspaceBaseline | None) -
 def work_mode_safe_for_codex_fallback(cwd: str, baseline: WorkspaceBaseline | None) -> bool:
     if baseline is None:
         return False
+    if baseline.directory_entries is not None:
+        return workspace_baseline_unchanged(cwd, baseline)
     if not workspace_is_clean(baseline.porcelain):
         return False
     return workspace_baseline_unchanged(cwd, baseline)

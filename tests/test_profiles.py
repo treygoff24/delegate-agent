@@ -813,6 +813,15 @@ class CodexProfileExecutionTests(unittest.TestCase):
         )
         return exit_code, payload
 
+    def test_directory_baseline_detects_workspace_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            baseline = self.profiles.capture_workspace_baseline(tmp)
+
+            self.assertIsNotNone(baseline)
+            self.assertTrue(self.profiles.work_mode_safe_for_codex_fallback(tmp, baseline))
+            Path(tmp, "changed.txt").write_text("changed\n", encoding="utf-8")
+            self.assertFalse(self.profiles.work_mode_safe_for_codex_fallback(tmp, baseline))
+
     def test_work_mode_clean_unchanged_baseline_retries_with_fallback(self):
         repo = make_git_repo()
         self.addCleanup(repo.cleanup)
