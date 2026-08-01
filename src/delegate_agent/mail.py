@@ -614,6 +614,19 @@ def _recipient_envelope_matches_ledger(path: Path, ledger: JsonObject) -> bool:
         envelope, _body = _envelope_from_message(path)
     except MailError:
         return False
+    string_fields = ("msgId", "from", "sent")
+    if any(
+        not isinstance(envelope.get(key), str) or not isinstance(ledger.get(key), str)
+        for key in string_fields
+    ):
+        return False
+    if (
+        "fromRunId" not in envelope
+        or "fromRunId" not in ledger
+        or not isinstance(envelope["fromRunId"], (str, type(None)))
+        or not isinstance(ledger["fromRunId"], (str, type(None)))
+    ):
+        return False
     return all(
         envelope.get(key) == ledger.get(key) for key in ("msgId", "from", "fromRunId", "sent")
     )

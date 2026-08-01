@@ -122,6 +122,58 @@ class MailDeliveryTests(unittest.TestCase):
                 )
                 self.assertEqual(result["message"]["recipients"][0]["outcome"], "failed")
 
+    def test_recipient_envelope_match_requires_complete_typed_sender_identity(self):
+        _sender_id, _sender, sender_env = self.lane()
+        _recipient_id, recipient, _recipient_env = self.lane()
+        message = mail.send(
+            self.registry_root,
+            mail.MailCommand(action="send", to=recipient, body="hello"),
+            env=sender_env,
+        )["message"]
+        path = mail.boxes_root(self.registry_root) / message["recipients"][0]["box"] / "inbox"
+        path = path / f"{message['msgId']}.mail"
+        original = path.read_bytes()
+        envelope, body = mail._envelope_from_message(path)
+        ledger = json.loads(
+            (mail.sent_root(self.registry_root) / f"{message['msgId']}.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+        self.assertTrue(mail._recipient_envelope_matches_ledger(path, ledger))
+        try:
+            for key in ("msgId", "from", "fromRunId", "sent"):
+                with self.subTest(key=key):
+                    candidate_envelope = dict(envelope)
+                    candidate_ledger = dict(ledger)
+                    candidate_envelope.pop(key)
+                    candidate_ledger.pop(key)
+                    path.write_bytes(
+                        json.dumps(
+                            candidate_envelope, sort_keys=True, separators=(",", ":")
+                        ).encode("utf-8")
+                        + mail.MESSAGE_SEPARATOR
+                        + body.encode("utf-8")
+                    )
+                    self.assertFalse(
+                        mail._recipient_envelope_matches_ledger(path, candidate_ledger)
+                    )
+
+            candidate_envelope = dict(envelope)
+            candidate_ledger = dict(ledger)
+            candidate_envelope["fromRunId"] = 1
+            candidate_ledger["fromRunId"] = 1
+            path.write_bytes(
+                json.dumps(candidate_envelope, sort_keys=True, separators=(",", ":")).encode(
+                    "utf-8"
+                )
+                + mail.MESSAGE_SEPARATOR
+                + body.encode("utf-8")
+            )
+            self.assertFalse(mail._recipient_envelope_matches_ledger(path, candidate_ledger))
+        finally:
+            path.write_bytes(original)
+
     def test_ledger_records_all_outcomes_and_status_probes_pruned_delivery(self):
         _sender_id, _sender, sender_env = self.lane(group="other")
         _delivered_id, delivered, _delivered_env = self.lane(group="crew")

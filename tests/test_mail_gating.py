@@ -423,8 +423,20 @@ class MailGatingTests(CommandTestBase):
                     observed_argv = json.loads(args_path.read_text(encoding="utf-8"))
                     observed_env = json.loads(env_path.read_text(encoding="utf-8"))
                     if name == "tracked work":
-                        self.assertTrue(observed_env["DELEGATE_RUN_ID"].startswith("del_"))
-                        self.assertTrue(observed_env["DELEGATE_MAIL_SELF"].startswith("cursor-"))
+                        # The prefixes alone would also match the profile-planted
+                        # spoof values, so require the FRESH bind: equality with
+                        # this run's manifest and inequality with the plant.
+                        run_manifests = list(
+                            (workspace / ".delegate" / "runs").glob("*/manifest.json")
+                        )
+                        self.assertEqual(len(run_manifests), 1)
+                        run_manifest = json.loads(run_manifests[0].read_text(encoding="utf-8"))
+                        self.assertEqual(observed_env["DELEGATE_RUN_ID"], run_manifest["runId"])
+                        self.assertEqual(observed_env["DELEGATE_MAIL_SELF"], run_manifest["alias"])
+                        self.assertNotEqual(
+                            observed_env["DELEGATE_RUN_ID"], "del_20260801T120000Z_abcdef"
+                        )
+                        self.assertNotEqual(observed_env["DELEGATE_MAIL_SELF"], "cursor-99")
                     else:
                         self.assertNotIn("DELEGATE_RUN_ID", observed_env)
                         self.assertNotIn("DELEGATE_MAIL_SELF", observed_env)

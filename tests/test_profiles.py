@@ -847,6 +847,68 @@ class CodexProfileExecutionTests(unittest.TestCase):
             self.assertIn("codexAuthFallback", payload)
             self.assertEqual(attempts.read_text(encoding="utf-8").splitlines(), [personal, work])
 
+    def test_tracked_work_fallback_reuses_registered_mail_identity(self):
+        repo = make_git_repo()
+        self.addCleanup(repo.cleanup)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            personal = write_codex_home(root, "personal")
+            work = write_codex_home(root, "work")
+            observations = root / "child-identities.tsv"
+            fake_bin = root / "codex"
+            fake_bin.write_text(
+                "#!/usr/bin/env bash\n"
+                'printf "%s\\t%s\\t%s\\n" "${CODEX_HOME:-}" "${DELEGATE_RUN_ID:-}" '
+                f'"${{DELEGATE_MAIL_SELF:-}}" >> "{observations}"\n'
+                f'if [ "${{CODEX_HOME}}" = "{work}" ]; then\n'
+                '  printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}\'\n'
+                "  exit 0\n"
+                "fi\n"
+                'echo "You exceeded your current quota usage limit" >&2\n'
+                "exit 1\n",
+                encoding="utf-8",
+            )
+            fake_bin.chmod(0o755)
+            config = base_config(personal=personal, work=work)
+            config["codex"] = dict(config["codex"], binary=str(fake_bin), fallbackProfile="work")
+            config["profiles"]["default"] = "personal"
+            config["profiles"]["detectFrom"] = []
+            config["profiles"]["definitions"]["personal"]["env"].update(
+                {
+                    "DELEGATE_RUN_ID": "del_20260801T120000Z_abcdef",
+                    "DELEGATE_MAIL_SELF": "codex-99",
+                }
+            )
+            workspace = self.delegate.ResolvedWorkspace(repo.name, "git")
+            request = self.delegate.build_request(
+                "codex", "work", None, workspace, "task", config, dry_run=False
+            )
+
+            exit_code, payload = self.delegate.execute_request(
+                request,
+                json_mode=True,
+                config=config,
+                pass_through=False,
+                completion_report_mode="none",
+                source_workspace=workspace,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+
+            self.assertEqual(exit_code, 0)
+            self.assertIn("codexAuthFallback", payload or {})
+            manifests = list((Path(repo.name) / ".delegate" / "runs").glob("*/manifest.json"))
+            self.assertEqual(len(manifests), 1)
+            manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
+            observed = [
+                line.split("\t") for line in observations.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual([row[0] for row in observed], [personal, work])
+            self.assertEqual([row[1] for row in observed], [manifest["runId"], manifest["runId"]])
+            self.assertEqual([row[2] for row in observed], [manifest["alias"], manifest["alias"]])
+            self.assertNotEqual(manifest["runId"], "del_20260801T120000Z_abcdef")
+            self.assertNotEqual(manifest["alias"], "codex-99")
+
     def test_work_mode_dirty_baseline_skips_fallback_retry(self):
         repo = make_git_repo()
         self.addCleanup(repo.cleanup)
