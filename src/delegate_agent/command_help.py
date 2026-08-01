@@ -50,6 +50,7 @@ class CommandSpec:
     notes: tuple[str, ...] = field(default_factory=tuple)
     see_also: tuple[str, ...] = field(default_factory=tuple)
     unsupported_global_options: tuple[str, ...] = field(default_factory=tuple)
+    internal: bool = False
 
 
 SAFE_WORKSPACE_SYNC_NOTE = (
@@ -202,7 +203,7 @@ _INCLUDE_DIRTY_OPTION = OptionSpec(
 _MAIL_PUSH_OPTION = OptionSpec(
     "--mail-push",
     None,
-    "Enable the opt-in mail push seam (requires mail.enabled=true; Wave 1 records the choice only).",
+    "Enable opt-in stop-hook mail push (requires mail.enabled=true; unverified harnesses degrade to pull).",
 )
 _READ_ONLY_OPTION = OptionSpec(
     "--read-only",
@@ -933,7 +934,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
     ),
     "mail": CommandSpec(
         name="mail",
-        summary="Send and retrieve workspace-local pull mail for tracked runs.",
+        summary="Send, retrieve, and internally pump workspace-local mail for tracked runs.",
         usage=("delegate [--cwd PATH] [--json] mail {send,inbox,read,status,watch,prune} ...",),
         arguments=(
             ArgSpec("action", True, "Mail action: send, inbox, read, status, watch, or prune."),
@@ -947,6 +948,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "Mail is a pull mailbox under .delegate/mail; commands work even when mail.enabled is false.",
             "The command-local mail send --group selector is distinct from launch --group.",
             "Mail identity is workspace trust, not authentication; framing is cooperative-agent UX, not a privilege boundary.",
+            "The internal `mail hook-pump` command is invoked only by a verified launch-scoped stop-hook adapter.",
         ),
         see_also=("runs", "snapshot", "wait"),
         unsupported_global_options=(
@@ -956,6 +958,16 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "--auth-profile",
             "--group",
         ),
+    ),
+    "mail hook-pump": CommandSpec(
+        name="mail hook-pump",
+        summary="Internally emit one bounded stop-hook mail batch.",
+        usage=("delegate mail hook-pump",),
+        notes=(
+            "Internal command: provisioned Claude and Codex hooks invoke it; it is not a user-facing mail command.",
+            "The hook reads unread mail without consuming it and advances a per-run cursor only after response output succeeds.",
+        ),
+        internal=True,
     ),
     "mail send": CommandSpec(
         name="mail send",
@@ -1863,6 +1875,7 @@ for _persona_command in (
         notes=_spec.notes,
         see_also=_spec.see_also,
         unsupported_global_options=_spec.unsupported_global_options,
+        internal=_spec.internal,
     )
 
 for _mail_command in (
@@ -1893,6 +1906,7 @@ for _mail_command in (
         notes=_spec.notes,
         see_also=_spec.see_also,
         unsupported_global_options=_spec.unsupported_global_options,
+        internal=_spec.internal,
     )
 
 
@@ -2198,7 +2212,9 @@ def help_index_payload() -> JsonObject:
     return {
         "ok": True,
         "commands": [
-            {"command": spec.name, "summary": spec.summary} for spec in COMMAND_SPECS.values()
+            {"command": spec.name, "summary": spec.summary}
+            for spec in COMMAND_SPECS.values()
+            if not spec.internal
         ],
         "globalOptions": [_option_payload(opt) for opt in GLOBAL_OPTIONS],
     }

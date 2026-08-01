@@ -1651,6 +1651,88 @@ def _completion_report_source(
     return ""
 
 
+MAIL_PUSH_EVENT_KIND = "mail_push_degraded"
+MAIL_PUSH_WARNING_PREFIX = "mail push degraded to pull"
+
+
+def _mail_push_warnings(ctx: RunContext) -> list[str]:
+    return [
+        warning
+        for warning in ctx.warnings
+        if isinstance(warning, str) and warning.startswith(MAIL_PUSH_WARNING_PREFIX)
+    ]
+
+
+def record_mail_push_degradation(
+    registry_root: Path,
+    run_id: str,
+    *,
+    engine: str,
+    reason: str,
+) -> str:
+    """Persist one hook degradation event and project it into the snapshot."""
+    warning = f"{MAIL_PUSH_WARNING_PREFIX} for {engine}: {reason[:200]}."
+    run_path = run_registry.run_directory(registry_root, run_id)
+    with run_registry.registry_lock(registry_root):
+        state = run_registry.load_run_state_or_none(registry_root, run_id) or {}
+        if state.get("mailPushDegraded") is True:
+            existing = state.get("mailPushWarning")
+            return existing if isinstance(existing, str) else warning
+        state = dict(state)
+        state["mailPushDegraded"] = True
+        state["mailPushWarning"] = warning
+        warnings = [item for item in state.get("warnings", []) if isinstance(item, str)]
+        if warning not in warnings:
+            warnings.append(warning)
+        state["warnings"] = warnings
+        run_registry.write_json_atomic(run_path / STATE_FILE, state)
+        event = {"kind": MAIL_PUSH_EVENT_KIND, "message": warning}
+        with open_events_log(run_path) as handle:
+            append_event(handle, event)
+            handle.flush()
+        snapshot = run_registry.load_run_snapshot_or_none(registry_root, run_id)
+        if isinstance(snapshot, dict):
+            snapshot = dict(snapshot)
+            snapshot_warnings = [
+                item for item in snapshot.get("warnings", []) if isinstance(item, str)
+            ]
+            if warning not in snapshot_warnings:
+                snapshot_warnings.append(warning)
+            snapshot["warnings"] = snapshot_warnings
+            recent_events = snapshot.get("recentEvents")
+            if not isinstance(recent_events, list):
+                recent_events = []
+            recent_events = [item for item in recent_events if isinstance(item, dict)]
+            total = snapshot.get("eventsTotal")
+            recent_events.append(event)
+            snapshot["recentEvents"] = recent_events[-harness_events.EVENT_LIMIT :]
+            snapshot["eventsTotal"] = total + 1 if isinstance(total, int) else len(recent_events)
+            snapshot["eventsTruncated"] = snapshot["eventsTotal"] > harness_events.EVENT_LIMIT
+            snapshot["eventsLimit"] = harness_events.EVENT_LIMIT
+            run_registry.write_snapshot(run_path, snapshot)
+    return warning
+
+
+def _mail_push_failure_marker(ctx: RunContext) -> str | None:
+    try:
+        from delegate_agent import mail
+
+        return mail.read_hook_failure_marker(ctx.registry_root, ctx.run_id)
+    except (DelegateError, OSError, ValueError):
+        return "hook failure marker could not be read"
+
+
+def _append_mail_push_event(accumulator: harness_events.StreamAccumulator, warning: str) -> None:
+    if any(
+        event.kind == MAIL_PUSH_EVENT_KIND and event.message == warning
+        for event in accumulator.events
+    ):
+        return
+    accumulator.events.append(
+        harness_events.NormalizedEvent(kind=MAIL_PUSH_EVENT_KIND, message=warning)
+    )
+
+
 def _finalize_tracked_run(
     files: TrackedRunFiles,
     ctx: RunContext,
@@ -1659,9 +1741,34 @@ def _finalize_tracked_run(
     completion_report_mode: str,
     extra: JsonObject | None = None,
 ) -> TrackedFinalization:
+    mail_warnings = _mail_push_warnings(ctx)
+    marker_reason = _mail_push_failure_marker(ctx)
+    if marker_reason is not None:
+        try:
+            mail_warnings.append(
+                record_mail_push_degradation(
+                    ctx.registry_root,
+                    ctx.run_id,
+                    engine=ctx.engine,
+                    reason=marker_reason,
+                )
+            )
+        except (OSError, DelegateError):
+            mail_warnings.append(
+                f"{MAIL_PUSH_WARNING_PREFIX} for {ctx.engine}: event recording failed."
+            )
+    for warning in dict.fromkeys(mail_warnings):
+        _append_mail_push_event(capture.accumulator, warning)
     exit_code, merged_extra = _final_extra(ctx, capture.exit_code)
     if extra:
         merged_extra = {**merged_extra, **extra}
+    if mail_warnings:
+        warnings = list(merged_extra.get("warnings") or [])
+        for warning in mail_warnings:
+            _append_unique(warnings, warning)
+        merged_extra["warnings"] = warnings
+        merged_extra["mailPushDegraded"] = True
+        merged_extra["mailPushWarning"] = mail_warnings[0]
     merged_extra = {**merged_extra, "pid": capture.pid}
     if capture.pgid is not None:
         merged_extra["pgid"] = capture.pgid
@@ -2197,6 +2304,8 @@ def execute_tracked(
     if stdin_text is not None and prompt_file_text is not None:
         raise ValueError("stdin_text and prompt_file_text are mutually exclusive")
     files = _prepare_tracked_run(argv, ctx, manifest_argv=manifest_argv)
+    for warning in _mail_push_warnings(ctx):
+        _append_runtime_event(files, MAIL_PUSH_EVENT_KIND, warning)
     started = time.monotonic()
     deadline = None if timeout is None else started + timeout
     run_argv = _codex_argv_with_scratch(argv, files.scratch_dir) if ctx.engine == "codex" else argv

@@ -661,6 +661,7 @@ def _launch_child_in_persistent_worktree(
             request,
             registration.worktree_path,
         )
+        provision: mail.MailPushProvision | None = None
         if request.mode == "work":
             wired_argv, wired_display_argv = mail.wire_work_mail_launch(
                 request.engine,
@@ -675,6 +676,21 @@ def _launch_child_in_persistent_worktree(
             execution_request = replace(
                 execution_request, argv=wired_argv, display_argv=wired_display_argv
             )
+            if request.mail_push:
+                provision = mail.provision_mail_push(
+                    request.engine,
+                    execution_request.argv,
+                    execution_request.display_argv,
+                    preflight.registry_root,
+                    registration.run_id,
+                    request.env_overrides or {},
+                )
+                if provision.warning is not None:
+                    request.warnings = (*request.warnings, provision.warning)
+                    print(f"delegate mail: WARNING: {provision.warning}", file=execution.stderr)
+                execution_request = replace(
+                    execution_request, argv=provision.argv, display_argv=provision.display_argv
+                )
         if request.resumed_from is not None:
             from delegate_agent.resume_command import enforce_resume_prompt_size
 
@@ -690,6 +706,14 @@ def _launch_child_in_persistent_worktree(
             worktree_path=registration.worktree_path,
             creation_context=registration.creation_context,
         )
+        if provision is not None and provision.codex_home is not None:
+            exec_ctx = replace(
+                exec_ctx,
+                fallback_env_overrides={
+                    **exec_ctx.fallback_env_overrides,
+                    "CODEX_HOME": provision.codex_home,
+                },
+            )
         if exec_ctx.persona_text is not None:
             run_registry.write_private_text(
                 registration.run_path / run_registry.PERSONA_TXT_FILE,

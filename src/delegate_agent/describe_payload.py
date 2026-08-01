@@ -101,6 +101,7 @@ def _commands_catalog() -> list[JsonObject]:
             "launchOptions": [option.flag for option in spec.options],
         }
         for spec in command_help.COMMAND_SPECS.values()
+        if not spec.internal
     ]
 
 

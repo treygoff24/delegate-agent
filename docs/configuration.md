@@ -76,8 +76,10 @@ controlled by a strict object with one key:
 `mail.enabled` must be a boolean; unknown keys are rejected. Enabling it adds
 the pull-mail instruction suffix to wrapped work launches. `--mail-push` and
 input JSON `mailPush: true` also require `mail.enabled: true`, and are limited
-to wrapped work-mode launches. Wave 1 records this setting in dry-run and run
-manifest metadata but does not implement stop-hook push delivery.
+to wrapped work-mode launches. Push is opt-in: enabling mail does not install
+hooks. Claude and Codex receive launch-scoped settings under `.delegate/mail`
+only; all other harnesses remain pull-only until their stop-hook output is
+verified and degrade with a recorded warning rather than guessing.
 
 ## Discovery cache and precedence
 

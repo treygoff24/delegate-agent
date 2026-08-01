@@ -6,6 +6,7 @@ import os
 import shlex
 import shutil
 import sys
+from dataclasses import replace as dc_replace
 from pathlib import Path
 from typing import TextIO
 
@@ -330,6 +331,13 @@ def dry_run_payload(request: Request) -> JsonObject:
     }
     if request.mail_push:
         payload["mailPush"] = True
+        payload["mailPushAdapter"] = {
+            "harness": request.engine,
+            "status": mail.mail_push_adapter(request.engine),
+            "hookCommand": mail.MAIL_PUSH_HOOK_COMMAND,
+        }
+        if mail.mail_push_adapter(request.engine) != "verified":
+            payload.setdefault("warnings", []).append(mail.mail_push_warning(request.engine))
     run_metadata.add_model_payload_fields(payload, request)
     reasoning.add_reasoning_payload_fields(payload, request)
     run_metadata.add_speed_payload_fields(payload, request)
@@ -340,7 +348,11 @@ def dry_run_payload(request: Request) -> JsonObject:
             for value in payload["argv"]
         ]
     if request.warnings:
-        payload["warnings"] = list(request.warnings)
+        warnings = list(payload.get("warnings") or [])
+        for warning in request.warnings:
+            if warning not in warnings:
+                warnings.append(warning)
+        payload["warnings"] = warnings
     if request.progress:
         payload["progressRequested"] = True
     if request.timeout is not None:
@@ -708,8 +720,6 @@ def _execute_attached_worktree(
     (``worktreeAttachment``) and removal paths refuse while the run is
     effectively running. No worktree record is derived for attached runs.
     """
-    from dataclasses import replace as dc_replace
-
     iso = request.isolation_context
     assert iso is not None and iso.isolation_lifecycle == "attached"
     worktree_path = iso.planned_execution_cwd
@@ -775,6 +785,7 @@ def _execute_attached_worktree(
     if request.mode == MODE_WORK:
         mail.bind_mail_identity(child_env, run_id, alias)
     request.env_overrides = child_env
+    provision: mail.MailPushProvision | None = None
     if request.mode == MODE_WORK:
         wired_argv, wired_display_argv = mail.wire_work_mail_launch(
             request.engine,
@@ -789,6 +800,21 @@ def _execute_attached_worktree(
         execution_request = dc_replace(
             execution_request, argv=wired_argv, display_argv=wired_display_argv
         )
+        if request.mail_push:
+            provision = mail.provision_mail_push(
+                request.engine,
+                execution_request.argv,
+                execution_request.display_argv,
+                registry_root,
+                run_id,
+                request.env_overrides or {},
+            )
+            if provision.warning is not None:
+                request.warnings = (*request.warnings, provision.warning)
+                print(f"delegate mail: WARNING: {provision.warning}", file=stderr)
+            execution_request = dc_replace(
+                execution_request, argv=provision.argv, display_argv=provision.display_argv
+            )
     ctx_runner = make_run_context(
         registry_root,
         request,
@@ -796,6 +822,14 @@ def _execute_attached_worktree(
         alias=alias,
         source_workspace=source_workspace,
     )
+    if provision is not None and provision.codex_home is not None:
+        ctx_runner = dc_replace(
+            ctx_runner,
+            fallback_env_overrides={
+                **ctx_runner.fallback_env_overrides,
+                "CODEX_HOME": provision.codex_home,
+            },
+        )
     attachment = {
         **(iso.attachment or {}),
         "startHeadOid": start_head_oid,
@@ -1215,6 +1249,7 @@ def execute_request(
         if isolated_request.mode == MODE_WORK:
             mail.bind_mail_identity(child_env, run_id, alias)
         isolated_request.env_overrides = child_env
+        provision: mail.MailPushProvision | None = None
         if isolated_request.mode == MODE_WORK:
             isolated_request.argv, isolated_request.display_argv = mail.wire_work_mail_launch(
                 isolated_request.engine,
@@ -1230,6 +1265,22 @@ def execute_request(
                     in ("temporary", "persistent", "attached")
                 ),
             )
+            if isolated_request.mail_push:
+                provision = mail.provision_mail_push(
+                    isolated_request.engine,
+                    isolated_request.argv,
+                    isolated_request.display_argv,
+                    registry_root,
+                    run_id,
+                    isolated_request.env_overrides or {},
+                )
+                if provision.warning is not None:
+                    isolated_request.warnings = (*isolated_request.warnings, provision.warning)
+                    print(f"delegate mail: WARNING: {provision.warning}", file=stderr)
+                isolated_request.argv, isolated_request.display_argv = (
+                    provision.argv,
+                    provision.display_argv,
+                )
         ctx_runner = make_run_context(
             registry_root,
             isolated_request,
@@ -1237,6 +1288,14 @@ def execute_request(
             alias=alias,
             source_workspace=source_workspace,
         )
+        if provision is not None and provision.codex_home is not None:
+            ctx_runner = dc_replace(
+                ctx_runner,
+                fallback_env_overrides={
+                    **ctx_runner.fallback_env_overrides,
+                    "CODEX_HOME": provision.codex_home,
+                },
+            )
         try:
             return delegate_runner.execute_tracked(
                 isolated_request.argv,

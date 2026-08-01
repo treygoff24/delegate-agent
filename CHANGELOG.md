@@ -14,7 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mail-only prune with versioned JSON contracts.
 - Added strict `mail.enabled` configuration, work-run identity binding, the
   opt-in `mailPush` plumbing seam, and audited harness-specific scoped or
-  workspace-writable mail behavior. Wave 2 stop-hook push remains unimplemented.
+  workspace-writable mail behavior.
+- Added opt-in Wave 2 stop-hook push for audited Claude and Codex launches with
+  bounded Tier-2-framed batches, per-run cursors, launch-scoped settings, and
+  one-time pull-degradation events. Unverified harnesses remain pull-only.
 
 ### Fixed
 

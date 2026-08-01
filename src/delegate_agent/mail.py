@@ -38,6 +38,7 @@ MAIL_STATUS_SCHEMA = "delegate.mail-status.v1"
 MAIL_WATCH_SCHEMA = "delegate.mail-watch.v1"
 MAIL_PRUNE_SCHEMA = "delegate.mail-prune.v1"
 MAIL_META_SCHEMA = "delegate.mail-meta.v1"
+MAIL_PUSH_SCHEMA = "delegate.mail-push.v1"
 MAIL_WATCH_DEFAULT_INTERVAL_MS = 1000
 MAIL_WATCH_MIN_INTERVAL_MS = 100
 MAIL_WATCH_MAX_INTERVAL_MS = 60000
@@ -48,6 +49,14 @@ MAIL_MAX_RULES_BYTES = 64 * 1024
 MAIL_MAX_RULES = 500
 MAIL_MAX_INBOX_ITEMS = 1000
 MAIL_MAX_WATCH_ITEMS = 1000
+MAIL_PUSH_MAX_MESSAGES = 50
+MAIL_PUSH_MAX_BYTES = 512 * 1024
+MAIL_PUSH_CURSOR_FILE_NAME = "hook-cursor.json"
+MAIL_PUSH_FAILURE_FILE_NAME = "hook-degraded.json"
+MAIL_PUSH_SETTINGS_FILE_NAME = "settings.json"
+MAIL_PUSH_CODEX_HOME_NAME = "codex-home"
+MAIL_PUSH_HOOK_COMMAND = "delegate mail hook-pump"
+MAIL_PUSH_WARNING_PREFIX = "mail push degraded to pull"
 MESSAGE_SEPARATOR = b"\n---\n"
 MESSAGE_ID_RE = re.compile(r"\d{8}-\d{6}-[0-9a-f]{6}\Z")
 
@@ -69,6 +78,15 @@ MAIL_SANDBOX_ROWS: dict[str, str] = {
 }
 if set(MAIL_SANDBOX_ROWS) != set(KNOWN_ENGINES):
     raise RuntimeError("Every known engine needs an explicit mail sandbox row.")
+# Stop-hook context injection is deliberately narrower than mailbox access.
+# These are the only adapters with launch-scoped, model-visible stop-hook
+# evidence from the audit that preceded Wave 2.
+MAIL_PUSH_ADAPTER_ROWS: dict[str, str] = {
+    engine: "verified" if engine in {"claude", "codex"} else "unverified"
+    for engine in KNOWN_ENGINES
+}
+if set(MAIL_PUSH_ADAPTER_ROWS) != set(KNOWN_ENGINES):
+    raise RuntimeError("Every known engine needs an explicit mail push adapter row.")
 MAIL_PROMPT_SUFFIX = (
     "## Delegate mail\n\n"
     "This work run has a pull mailbox. At a natural boundary, use `delegate mail inbox` "
@@ -139,6 +157,14 @@ class Recipient:
     state: str | None
     eligible: bool
     reason: str | None = None
+
+
+@dataclass(frozen=True)
+class MailPushProvision:
+    argv: list[str]
+    display_argv: list[str] | None
+    codex_home: str | None = None
+    warning: str | None = None
 
 
 def _error(code: str, message: str) -> MailError:
@@ -444,6 +470,124 @@ def _ensure_box(registry_root: Path, recipient: Recipient | str) -> Path:
     return box
 
 
+def mail_push_adapter(engine: str) -> str:
+    return MAIL_PUSH_ADAPTER_ROWS.get(engine, "unverified")
+
+
+def mail_push_warning(engine: str, reason: str | None = None) -> str:
+    detail = reason or "the stop-hook adapter is not verified; pull mailbox remains active"
+    return f"{MAIL_PUSH_WARNING_PREFIX} for {engine}: {detail}."
+
+
+def _hook_settings() -> JsonObject:
+    hook = {"type": "command", "command": MAIL_PUSH_HOOK_COMMAND}
+    return {
+        "hooks": {
+            "Stop": [{"hooks": [hook]}],
+        }
+    }
+
+
+def _copy_private_file(source: Path, destination: Path) -> None:
+    source_name = source.name
+    try:
+        source = source.resolve(strict=True)
+    except OSError:
+        raise OSError(f"required Codex file is unavailable: {source_name}") from None
+    if not source.is_file():
+        raise OSError(f"required Codex file is unavailable: {source.name}")
+    private_io.write_private_bytes(destination, source.read_bytes())
+
+
+def _codex_home_for_mail_push(registry_root: Path, run_id: str, env: dict[str, str]) -> Path:
+    box = _ensure_box(registry_root, run_id)
+    codex_home = box / MAIL_PUSH_CODEX_HOME_NAME
+    private_io.ensure_private_dir(codex_home)
+    source_home = Path(
+        os.path.expanduser(
+            env.get("CODEX_HOME") or os.environ.get("CODEX_HOME") or str(Path.home() / ".codex")
+        )
+    ).resolve(strict=False)
+    auth_json = source_home / "auth.json"
+    if auth_json.is_file() and not auth_json.is_symlink():
+        _copy_private_file(auth_json, codex_home / "auth.json")
+    config_toml = source_home / "config.toml"
+    if config_toml.is_file() and not config_toml.is_symlink():
+        _copy_private_file(config_toml, codex_home / "config.toml")
+    private_io.write_json_atomic(codex_home / "hooks.json", _hook_settings())
+    return codex_home
+
+
+def _set_claude_settings(argv: list[str], settings_path: str) -> None:
+    try:
+        index = argv.index("--settings")
+    except ValueError:
+        argv.extend(["--settings", settings_path])
+        return
+    if index + 1 >= len(argv):
+        argv.append(settings_path)
+    else:
+        argv[index + 1] = settings_path
+
+
+def provision_mail_push(
+    engine: str,
+    argv: list[str],
+    display_argv: list[str] | None,
+    registry_root: Path,
+    run_id: str,
+    env: dict[str, str],
+) -> MailPushProvision:
+    """Provision an audited stop hook using only run-scoped mail storage."""
+    if mail_push_adapter(engine) != "verified":
+        return MailPushProvision(
+            list(argv),
+            None if display_argv is None else list(display_argv),
+            warning=mail_push_warning(engine),
+        )
+
+    original_env = dict(env)
+    try:
+        box = _ensure_box(registry_root, run_id)
+        private_io.write_json_atomic(
+            box / MAIL_PUSH_CURSOR_FILE_NAME,
+            {"schema": MAIL_PUSH_SCHEMA, "lastSeq": 0},
+        )
+        private_io.write_json_atomic(box / MAIL_PUSH_SETTINGS_FILE_NAME, _hook_settings())
+        env["DELEGATE_MAIL_HOOK_HARNESS"] = engine
+        updated = list(argv)
+        updated_display = None if display_argv is None else list(display_argv)
+        codex_home: str | None = None
+        if engine == "claude":
+            settings_path = str((box / MAIL_PUSH_SETTINGS_FILE_NAME).resolve(strict=False))
+            _set_claude_settings(updated, settings_path)
+            if updated_display is not None:
+                _set_claude_settings(updated_display, settings_path)
+        else:
+            codex_home_path = _codex_home_for_mail_push(registry_root, run_id, env)
+            codex_home = str(codex_home_path.resolve(strict=False))
+            env["CODEX_HOME"] = codex_home
+            for target in (updated, updated_display):
+                if target is None:
+                    continue
+                insert_at = max(len(target) - 1, 0)
+                flags: list[str] = []
+                if "hooks=true" not in target:
+                    flags.extend(["-c", "hooks=true"])
+                if "--dangerously-bypass-hook-trust" not in target:
+                    flags.append("--dangerously-bypass-hook-trust")
+                target[insert_at:insert_at] = flags
+        return MailPushProvision(updated, updated_display, codex_home=codex_home)
+    except Exception:
+        env.clear()
+        env.update(original_env)
+        return MailPushProvision(
+            list(argv),
+            None if display_argv is None else list(display_argv),
+            warning=mail_push_warning(engine, "launch-scoped hook provisioning failed"),
+        )
+
+
 def _read_json(
     path: Path, *, max_bytes: int = private_io.PRIVATE_RECORD_READ_MAX_BYTES
 ) -> JsonObject | None:
@@ -464,6 +608,156 @@ def _read_json(
     if not isinstance(value, dict):
         raise _error("mail_unreadable", f"Mail JSON must be an object: {path}")
     return value
+
+
+def _hook_cursor_path(registry_root: Path, run_id: str) -> Path:
+    return _box_dir(registry_root, run_id) / MAIL_PUSH_CURSOR_FILE_NAME
+
+
+def _hook_failure_path(registry_root: Path, run_id: str) -> Path:
+    return _box_dir(registry_root, run_id) / MAIL_PUSH_FAILURE_FILE_NAME
+
+
+def _record_hook_failure(
+    registry_root: Path,
+    run_id: str | None,
+    *,
+    harness: str,
+    reason: str,
+) -> None:
+    if run_id is None or not run_registry.RUN_ID_RE.fullmatch(run_id):
+        return
+    try:
+        _ensure_box(registry_root, run_id)
+        private_io.write_json_atomic_if_absent(
+            _hook_failure_path(registry_root, run_id),
+            {
+                "schema": MAIL_PUSH_SCHEMA,
+                "runId": run_id,
+                "harness": harness,
+                "reason": reason[:200],
+                "recordedAt": run_registry.utc_now_iso(),
+            },
+        )
+    except (OSError, MailError):
+        # A hook cannot repair its own failure if the mailbox is unreachable.
+        # The parent still has the pull suffix and the next boundary can retry.
+        return
+
+
+def read_hook_failure_marker(registry_root: Path, run_id: str) -> str | None:
+    try:
+        marker = _read_json(_hook_failure_path(registry_root, run_id))
+    except MailError:
+        return "hook failure marker was unreadable"
+    reason = marker.get("reason") if marker is not None else None
+    return reason if isinstance(reason, str) and reason else None
+
+
+def _hook_cursor(registry_root: Path, run_id: str) -> int:
+    cursor = _read_json(_hook_cursor_path(registry_root, run_id))
+    if cursor is None:
+        return 0
+    value = cursor.get("lastSeq")
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise _error("mail_push_cursor_invalid", "The mail push cursor is invalid.")
+    return value
+
+
+def _hook_payload(messages: list[tuple[Path, JsonObject, str]]) -> bytes:
+    rows = [
+        {
+            "framing": dict(LANE_FRAMING),
+            "message": _message_view(envelope, body),
+        }
+        for _path, envelope, body in messages
+    ]
+    payload: JsonObject = {
+        "schema": MAIL_PUSH_SCHEMA,
+        "framing": dict(LANE_FRAMING),
+        "messages": rows,
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _bounded_hook_messages(
+    registry_root: Path, run_id: str
+) -> tuple[list[tuple[Path, JsonObject, str]], int]:
+    cursor = _hook_cursor(registry_root, run_id)
+    unread = []
+    for item in _iter_box_messages(registry_root, run_id):
+        sequence = item[1].get("seq")
+        if not isinstance(sequence, int) or isinstance(sequence, bool):
+            raise _error("mail_unreadable", "Unread mail has an invalid sequence number.")
+        if sequence > cursor:
+            unread.append(item)
+    selected: list[tuple[Path, JsonObject, str]] = []
+    for item in unread[:MAIL_PUSH_MAX_MESSAGES]:
+        candidate = [*selected, item]
+        if len(_hook_payload(candidate)) > MAIL_PUSH_MAX_BYTES:
+            if not selected:
+                raise _error(
+                    "mail_push_batch_too_large",
+                    f"The next mail push batch exceeds {MAIL_PUSH_MAX_BYTES} bytes.",
+                )
+            break
+        selected.append(item)
+    return selected, cursor
+
+
+def _write_hook_response(stdout: TextIO, payload: bytes) -> None:
+    text = payload.decode("utf-8") + "\n"
+    if stdout.write(text) != len(text):
+        raise OSError("hook response was only partially written")
+    stdout.flush()
+
+
+def hook_pump(
+    registry_root: Path,
+    *,
+    stdout: TextIO,
+    env: Mapping[str, str | None] | None = None,
+) -> int:
+    """Emit one bounded stop-hook batch, then advance its cursor atomically."""
+    environ = os.environ if env is None else env
+    run_id = environ.get("DELEGATE_RUN_ID")
+    harness = environ.get("DELEGATE_MAIL_HOOK_HARNESS") or "unknown"
+    try:
+        identity = _identity(registry_root, env=environ)
+        if identity.is_coordinator or run_id is None:
+            raise _error("hook_requires_lane", "mail hook-pump requires a bound work lane.")
+        messages, _cursor = _bounded_hook_messages(registry_root, run_id)
+        if not messages:
+            _write_hook_response(stdout, b"{}")
+            return 0
+        payload = _hook_payload(messages)
+        response_key = "reason" if harness == "claude" else "additionalContext"
+        response = json.dumps(
+            {"decision": "block", response_key: payload.decode("utf-8")},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        _write_hook_response(stdout, response)
+        last_seq = messages[-1][1].get("seq")
+        if not isinstance(last_seq, int) or isinstance(last_seq, bool):
+            raise _error("mail_unreadable", "Injected mail has an invalid sequence number.")
+        private_io.write_json_atomic(
+            _hook_cursor_path(registry_root, run_id),
+            {"schema": MAIL_PUSH_SCHEMA, "lastSeq": last_seq},
+        )
+        return 0
+    except (MailError, OSError, ValueError) as exc:
+        _record_hook_failure(
+            registry_root,
+            run_id,
+            harness=harness,
+            reason=f"{getattr(exc, 'error', 'hook_runtime_failed')}: {exc}",
+        )
+        try:
+            _write_hook_response(stdout, b"{}")
+        except (OSError, ValueError):
+            return 0
+        return 0
 
 
 def _load_rules(registry_root: Path) -> list[JsonObject]:
@@ -1231,12 +1525,14 @@ def emit(
     stdin: TextIO | None = None,
 ) -> int:
     action = command.action
-    mutates = action in {"send", "prune"} or (action == "read" and not command.peek)
+    mutates = action in {"send", "prune", "hook-pump"} or (action == "read" and not command.peek)
     registry_root = (
         _registry_for_workspace(workspace) if mutates else run_registry.registry_root(workspace)
     )
     if action == "send":
         payload = send(registry_root, command, stdin=stdin)
+    elif action == "hook-pump":
+        return hook_pump(registry_root, stdout=stdout)
     elif action == "inbox":
         payload = inbox(registry_root, command)
     elif action == "read":

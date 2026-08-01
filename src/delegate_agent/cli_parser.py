@@ -647,7 +647,7 @@ def parse_mail(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedComma
     if not rest or command_help.is_help_token(rest[0]):
         return help_command(json_mode, "mail")
     action = rest[0]
-    if action not in {"send", "inbox", "read", "status", "watch", "prune"}:
+    if action not in {"send", "inbox", "read", "status", "watch", "prune", "hook-pump"}:
         raise DelegateError("unknown_mail_action", f"Unknown mail action: {action}.")
     args = rest[1:]
     if any(command_help.is_help_token(token) for token in args):
@@ -697,6 +697,7 @@ def parse_mail(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedComma
         "status": set(),
         "watch": {"--once", "--from", "--reply-to", "--timeout", "--interval-ms"},
         "prune": {"--older-than", "--dry-run"},
+        "hook-pump": set(),
     }[action]
     unsupported = sorted(set(values) - allowed)
     if unsupported:
@@ -705,7 +706,14 @@ def parse_mail(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedComma
             f"mail {action} does not support option: {unsupported[0]}",
         )
 
-    if action == "send":
+    if action == "hook-pump":
+        if positional:
+            raise DelegateError(
+                "unexpected_argument",
+                "mail hook-pump is an internal command and takes no arguments.",
+            )
+        command = mail.MailCommand(action=action, json_mode=json_mode)
+    elif action == "send":
         to = values.get("--to")
         group = values.get("--group")
         if (to is None) == (group is None):
