@@ -1617,6 +1617,42 @@ def cached_version_has_drifted(
     return identity.version != cached_version
 
 
+def cached_version_freshness(
+    harness: str,
+    cached_record: JsonObject,
+    *,
+    profile: profiles.ProfileResolution,
+) -> str:
+    """Return whether a cached harness version is current, drifted, or unknown.
+
+    This is intentionally stricter than ``cached_version_has_drifted``: callers
+    that need argv compatibility must not treat a failed identity probe as
+    evidence that a cached capability remains safe to use.
+    """
+    cached_version = cached_record.get("version")
+    selector = cached_record.get("selector")
+    if not _nonempty_string(cached_version) or not _string_list(selector, allow_empty=False):
+        return "indeterminate"
+    env = profiles.child_environment(overrides=profile.env)
+    try:
+        probe = run_metadata_probe(
+            [*selector, "--version"],
+            env=env,
+            timeout_sec=METADATA_PROBE_TIMEOUT_SEC,
+        )
+    except (OSError, ValueError):
+        return "indeterminate"
+    if probe.error is not None:
+        return "indeterminate"
+    output = "\n".join(part for part in (probe.stdout, probe.stderr) if part)
+    identity = _identify_version(harness, tuple(selector), output)
+    if identity.status == _VERSION_KNOWN_OTHER:
+        raise HarnessIdentityMismatchError(harness, identity.identified, tuple(selector))
+    if identity.version is None:
+        return "indeterminate"
+    return "current" if identity.version == cached_version else "drifted"
+
+
 def refresh_discovery(
     config: JsonObject,
     *,

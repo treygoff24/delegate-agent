@@ -912,6 +912,7 @@ def _runtime_discovery_for_engine(
     profile_resolution: profiles.ProfileResolution,
     *,
     probe_version: bool,
+    require_current_version: bool = False,
 ) -> tuple[JsonObject | None, tuple[str, ...]]:
     """Drop the engine record when its selector drifted or its harness moved on.
 
@@ -963,20 +964,36 @@ def _runtime_discovery_for_engine(
         if not probe_version:
             return discovery, ()
         try:
-            version_drifted = harness_discovery.cached_version_has_drifted(
-                engine, record, profile=profile_resolution
+            freshness = (
+                harness_discovery.cached_version_freshness(
+                    engine, record, profile=profile_resolution
+                )
+                if require_current_version
+                else (
+                    "drifted"
+                    if harness_discovery.cached_version_has_drifted(
+                        engine, record, profile=profile_resolution
+                    )
+                    else "current"
+                )
             )
         except harness_discovery.HarnessIdentityMismatchError as exc:
             raise _harness_identity_mismatch_error(exc, profile_resolution) from exc
-        if not version_drifted:
+        if freshness == "current":
             return discovery, ()
-        warnings = (
-            f"ignoring the cached {engine} capabilities: {engine} reports a different "
-            f"version than the cache recorded, so this run re-read its capabilities from "
-            f"the harness. Run `delegate capabilities refresh {engine}` to persist them; "
-            f"until then every run that needs a newly discovered model or reasoning level "
-            f"pays for the same probe.",
-        )
+        if freshness == "drifted":
+            warnings = (
+                f"ignoring the cached {engine} capabilities: {engine} reports a different "
+                f"version than the cache recorded, so this run re-read its capabilities from "
+                f"the harness. Run `delegate capabilities refresh {engine}` to persist them; "
+                f"until then every run that needs a newly discovered model or reasoning level "
+                f"pays for the same probe.",
+            )
+        else:
+            warnings = (
+                f"ignoring the cached {engine} capabilities: its version could not be "
+                "positively confirmed, so this run re-read its capabilities from the harness.",
+            )
     return {
         **discovery,
         "harnesses": {harness: value for harness, value in harnesses.items() if harness != engine},
@@ -2080,6 +2097,13 @@ def build_request(
             and persona is not None
             and _cached_native_persona_transport(discovery)
         ),
+        require_current_version=(
+            engine == "claude"
+            and mode == MODE_WORK
+            and not dry_run
+            and persona is not None
+            and _cached_native_persona_transport(discovery)
+        ),
     )
     warnings = (*warnings, *drift_warnings)
     persona_resolution = None
@@ -3022,6 +3046,7 @@ def _build_request_for_workspace(
     skip_skill_preamble: bool = False,
     frame_prompt: bool = True,
 ) -> Request:
+    source_prompt = prompt if source_prompt is None else source_prompt
     materialized_schema_text, schema_warnings = _preflight_codex_output_schema(
         engine, output_schema, schema_text=output_schema_text
     )
@@ -3184,6 +3209,8 @@ def _build_request_for_workspace(
             persona_text=persona_resolution.text if persona_resolution is not None else None,
             allow_repo_persona=allow_repo_persona,
             persona_env_overrides=parts.persona_env_overrides or persona_env,
+            completion_report_mode=completion_report_mode,
+            persistent_worktree_notes_framed=frame_prompt and worktree_note is not None,
         ),
         config,
         resolution=profile_resolution,

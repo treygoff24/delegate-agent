@@ -81,8 +81,15 @@ class ResumeSizeGuardTests(unittest.TestCase):
                     self.assertEqual(framed_ctx.exception.error, "prompt_too_large")
 
                     attached_prompt = worktree_execution._persistent_prompt(
+                        Request(
+                            engine=engine,
+                            mode="work",
+                            workspace="/workspace",
+                            prompt="x" * limit,
+                            argv=[engine],
+                            model=None,
+                        ),
                         "x" * limit,
-                        forbid_commit=False,
                     )
                     with self.assertRaises(DelegateError) as attached_ctx:
                         resume_command.enforce_resume_prompt_size(engine, attached_prompt)

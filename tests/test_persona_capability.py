@@ -57,6 +57,18 @@ class PersonaCapabilityTests(CommandTestBase):
             }
         }
 
+    def _production_request_with_probe(self, probe):
+        probe_patch = (
+            {"side_effect": probe} if isinstance(probe, BaseException) else {"return_value": probe}
+        )
+        with (
+            mock.patch.object(
+                self.delegate.harness_discovery, "selector_has_drifted", return_value=False
+            ),
+            mock.patch.object(self.delegate.harness_discovery, "run_metadata_probe", **probe_patch),
+        ):
+            return self._request(self._production_discovery(True))
+
     def test_present_and_true_capability_selects_native_file(self):
         request = self._request(self._discovery({"native-file": True}))
 
@@ -126,7 +138,7 @@ class PersonaCapabilityTests(CommandTestBase):
                 self.delegate.harness_discovery, "selector_has_drifted", return_value=False
             ),
             mock.patch.object(
-                self.delegate.harness_discovery, "cached_version_has_drifted", return_value=True
+                self.delegate.harness_discovery, "cached_version_freshness", return_value="drifted"
             ),
         ):
             request = self._request(self._production_discovery(True))
@@ -141,7 +153,7 @@ class PersonaCapabilityTests(CommandTestBase):
                 self.delegate.harness_discovery, "selector_has_drifted", return_value=False
             ),
             mock.patch.object(
-                self.delegate.harness_discovery, "cached_version_has_drifted"
+                self.delegate.harness_discovery, "cached_version_freshness"
             ) as version_probe,
         ):
             request = self._request(self._production_discovery(True), dry_run=True)
@@ -153,6 +165,47 @@ class PersonaCapabilityTests(CommandTestBase):
             self.delegate.harness_discovery, "selector_has_drifted", return_value=False
         ):
             request = self._request(self._production_discovery(False))
+        self.assertEqual(request.persona_transport, "prepend")
+        self.assertNotIn("--append-system-prompt-file", request.argv)
+
+    def test_native_file_requires_a_positive_cached_identity_probe(self):
+        current = self.delegate.harness_discovery.ProbeResult((), 0, "2.1.220", "", None)
+        request = self._production_request_with_probe(current)
+
+        self.assertEqual(request.persona_transport, "native-file")
+        self.assertIn("--append-system-prompt-file", request.argv)
+
+    def test_native_file_falls_back_when_cached_identity_is_indeterminate(self):
+        cases = {
+            "probe_os_error": OSError("spawn refused"),
+            "probe_timeout": self.delegate.harness_discovery.ProbeResult(
+                (), None, "", "", "probe_timeout"
+            ),
+            "unrecognized_banner": self.delegate.harness_discovery.ProbeResult(
+                (), 0, "unrecognized version banner", "", None
+            ),
+        }
+        for name, probe in cases.items():
+            with self.subTest(name=name):
+                request = self._production_request_with_probe(probe)
+                self.assertEqual(request.persona_transport, "prepend")
+                self.assertNotIn("--append-system-prompt-file", request.argv)
+
+    def test_native_file_falls_back_when_cached_record_has_no_version(self):
+        discovery = self._production_discovery(True)
+        discovery["harnesses"]["claude"]["version"] = None
+        with mock.patch.object(
+            self.delegate.harness_discovery, "selector_has_drifted", return_value=False
+        ):
+            request = self._request(discovery)
+
+        self.assertEqual(request.persona_transport, "prepend")
+        self.assertNotIn("--append-system-prompt-file", request.argv)
+
+    def test_native_file_falls_back_when_cached_identity_has_drifted(self):
+        drifted = self.delegate.harness_discovery.ProbeResult((), 0, "2.1.221", "", None)
+        request = self._production_request_with_probe(drifted)
+
         self.assertEqual(request.persona_transport, "prepend")
         self.assertNotIn("--append-system-prompt-file", request.argv)
 

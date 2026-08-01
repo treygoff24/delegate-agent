@@ -1017,7 +1017,7 @@ def describe_payload(
                         "agent(prompt, engine=None, mode=None, model=None, effort=None, "
                         "schema=None, label=None, phase=None, isolation=None, "
                         "passthrough=False, timeout=None, retries=None, "
-                        "persona=None, allow_repo_persona=False, fast=None)"
+                        "fast=None, persona=None, allow_repo_persona=False)"
                     ),
                     "returns": "parent-facing output string, schema object, or None",
                     "notes": [

@@ -221,7 +221,7 @@ class PersonaWorkflowTests(unittest.TestCase):
             signature,
             "agent(prompt, engine=None, mode=None, model=None, effort=None, "
             "schema=None, label=None, phase=None, isolation=None, passthrough=False, "
-            "timeout=None, retries=None, persona=None, allow_repo_persona=False, fast=None)",
+            "timeout=None, retries=None, fast=None, persona=None, allow_repo_persona=False)",
         )
         self.assertIn("persona=None", signature)
         self.assertIn("allow_repo_persona=False", signature)
@@ -333,10 +333,17 @@ class PersonaWorkflowTests(unittest.TestCase):
             payload = json.loads(input_path.read_text(encoding="utf-8"))
             calls.append(payload)
             (self.workspace / ".delegate" / "personas" / "editor.md").unlink()
+            with self.assertRaises(DelegateError) as caught:
+                request_from_parsed(
+                    parse_cli(["run", "--input-json", str(input_path)]),
+                    config.embedded_default_config(),
+                    mock.MagicMock(),
+                )
+            self.assertEqual(caught.exception.error, "persona_not_found")
             return CompletedProcess(
                 argv,
                 2,
-                json.dumps({"ok": False, "error": "persona_not_found"}).encode(),
+                json.dumps({"ok": False, "error": caught.exception.error}).encode(),
                 b"",
             )
 
@@ -390,10 +397,17 @@ class PersonaWorkflowTests(unittest.TestCase):
             input_path = Path(argv[argv.index("--input-json") + 1])
             calls.append(json.loads(input_path.read_text(encoding="utf-8")))
             workspace_persona.write_text("shadow", encoding="utf-8")
+            with self.assertRaises(DelegateError) as caught:
+                request_from_parsed(
+                    parse_cli(["run", "--input-json", str(input_path)]),
+                    config.embedded_default_config(),
+                    mock.MagicMock(),
+                )
+            self.assertEqual(caught.exception.error, "workspace_persona_refused")
             return CompletedProcess(
                 argv,
                 2,
-                json.dumps({"ok": False, "error": "workspace_persona_refused"}).encode(),
+                json.dumps({"ok": False, "error": caught.exception.error}).encode(),
                 b"",
             )
 

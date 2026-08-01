@@ -28,7 +28,6 @@ from delegate_agent.isolation import (
     iter_pool_fingerprints,
     plan_branch_name,
     plan_worktree_path,
-    prepend_persistent_worktree_context,
     require_valid_head,
     short_run_id,
     target_contains_source_root,
@@ -585,29 +584,23 @@ def _request_for_execution_workspace(
         if request.prompt_transport not in (PROMPT_TRANSPORT_STDIN, PROMPT_TRANSPORT_FILE)
         else request.prompt
     )
-    if request.isolation_context is not None and request.isolation_context.isolation_lifecycle in (
-        "persistent",
-        "attached",
-    ):
-        # Central-framed requests already contain these segments. Keep this
-        # idempotent seam for manually-created Request objects and legacy
-        # resumed records.
-        execution_prompt = _persistent_prompt(
-            execution_prompt,
-            forbid_commit=request.forbid_commit,
-            persona_text=request.persona_text,
+    if (
+        request.isolation_context is not None
+        and request.isolation_context.isolation_lifecycle
+        in (
+            "persistent",
+            "attached",
         )
+        and not request.persistent_worktree_notes_framed
+    ):
+        execution_prompt = _persistent_prompt(request, execution_prompt)
         if request.prompt_transport == PROMPT_TRANSPORT_STDIN:
             execution_stdin_text = _persistent_prompt(
-                execution_stdin_text or execution_prompt,
-                forbid_commit=request.forbid_commit,
-                persona_text=request.persona_text,
+                request, execution_stdin_text or execution_prompt
             )
         elif request.prompt_transport == PROMPT_TRANSPORT_FILE:
             execution_prompt_file_text = _persistent_prompt(
-                execution_prompt_file_text or execution_prompt,
-                forbid_commit=request.forbid_commit,
-                persona_text=request.persona_text,
+                request, execution_prompt_file_text or execution_prompt
             )
     if request.prompt_transport == PROMPT_TRANSPORT_STDIN:
         execution_stdin_text = execution_stdin_text or request.prompt
@@ -632,21 +625,22 @@ def _request_for_execution_workspace(
     )
 
 
-def _persistent_prompt(prompt: str, *, forbid_commit: bool, persona_text: str | None = None) -> str:
-    if PERSISTENT_WORKTREE_CONTEXT_NOTE.strip() not in prompt:
-        if persona_text is not None and (persona_at := prompt.find(persona_text)) >= 0:
-            insert_at = persona_at + len(persona_text)
-            prompt = (
-                prompt[:insert_at] + "\n\n" + PERSISTENT_WORKTREE_CONTEXT_NOTE + prompt[insert_at:]
-            )
-        else:
-            prompt = prepend_persistent_worktree_context(prompt)
-    if forbid_commit and PERSISTENT_WORKTREE_COMMIT_NOTE not in prompt:
-        context_at = prompt.find(PERSISTENT_WORKTREE_CONTEXT_NOTE)
-        prompt = (
-            prompt[:context_at] + PERSISTENT_WORKTREE_COMMIT_NOTE + "\n\n" + prompt[context_at:]
-        )
-    return prompt
+def _persistent_prompt(request: Request, prompt: str) -> str:
+    """Structurally frame a legacy request missing persistent-worktree notes."""
+    from delegate_agent.request_build import effective_prompt
+
+    worktree_note = PERSISTENT_WORKTREE_CONTEXT_NOTE
+    if request.forbid_commit:
+        worktree_note = f"{PERSISTENT_WORKTREE_COMMIT_NOTE}\n\n{worktree_note}"
+    return effective_prompt(
+        request.source_prompt if request.source_prompt is not None else prompt,
+        engine=request.engine,
+        mode=request.mode,
+        completion_report_mode=request.completion_report_mode,
+        instruction_mode=request.prompt_instruction_mode,
+        persona_text=(request.persona_text if request.persona_transport == "prepend" else None),
+        worktree_note=worktree_note,
+    )
 
 
 def _launch_child_in_persistent_worktree(

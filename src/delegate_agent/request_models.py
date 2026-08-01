@@ -236,6 +236,10 @@ class Request:
     persona_text: str | None = None
     allow_repo_persona: bool = False
     persona_env_overrides: dict[str, str] | None = None
+    completion_report_mode: str = "markdown"
+    # True only when the central framer placed the persistent-worktree notes.
+    # Execution uses this structural state rather than inspecting prompt bytes.
+    persistent_worktree_notes_framed: bool = False
 
 
 @dataclass(frozen=True)

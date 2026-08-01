@@ -1443,7 +1443,9 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertEqual(describe.returncode, 0, describe.stderr)
         payload = json.loads(describe.stdout)
         self.assertIn("workflows", payload)
-        self.assertTrue(payload["workflows"]["dsl"]["agent"]["signature"].endswith("fast=None)"))
+        self.assertTrue(
+            payload["workflows"]["dsl"]["agent"]["signature"].endswith("allow_repo_persona=False)")
+        )
         help_result = self.run_delegate(["--json", "help", "workflow"])
         self.assertEqual(help_result.returncode, 0, help_result.stderr)
         self.assertEqual(json.loads(help_result.stdout)["command"], "workflow")

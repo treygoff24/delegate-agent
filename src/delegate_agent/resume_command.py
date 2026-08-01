@@ -888,7 +888,7 @@ def apply_resume_to_request(request: Request, plan: ResumePlan) -> Request:
     """Stamp resume metadata and the attach execution context onto the Request."""
     updated = replace(request, resumed_from=plan.resumed_from)
     if plan.forbid_commit:
-        updated = replace(updated, forbid_commit=True)
+        updated = replace(updated, forbid_commit=True, persistent_worktree_notes_framed=False)
     if plan.attach is not None:
         attach = plan.attach
         source_git_root = attach.get("sourceGitRoot")
@@ -909,6 +909,7 @@ def apply_resume_to_request(request: Request, plan: ResumePlan) -> Request:
                     "path": attach.get("path"),
                 },
             ),
+            persistent_worktree_notes_framed=False,
         )
     # The built argv, not Request.prompt, is the materialized transport payload
     # after skill/safe/dirty framing. Retain the Request fallback for direct

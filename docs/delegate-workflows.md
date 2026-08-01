@@ -211,9 +211,10 @@ python3 bin/delegate.py --json workflow run review.py \
 ```
 
 The preview's `runTree.calls` records each call's resolved `model`, `effort`,
-`fast`, `isolation`, and UTF-8 `promptBytes` (the raw prompt plus resolved
-persona text). Cursor and Kimi calls whose pre-resolution prompt exceeds 102400
-bytes carry a warning; the final materialized prompt is checked again before exec.
+`fast`, `isolation`, and UTF-8 `promptBytes` (the raw user prompt plus resolved
+persona text). Cursor, Kimi, and OMP calls whose user-plus-resolved-persona input
+exceeds 102400 bytes carry a warning; the final materialized prompt is checked
+again before exec.
 
 ## CLI
 
