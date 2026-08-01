@@ -783,6 +783,7 @@ Usage-audit fix wave: 82 sessions and 1,241 delegate invocations from one week o
 
 - Releases before 0.1.3 predate this changelog.
 
+[0.24.0]: https://github.com/treygoff24/delegate-agent/compare/v0.23.0...v0.24.0
 [0.23.0]: https://github.com/treygoff24/delegate-agent/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/treygoff24/delegate-agent/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/treygoff24/delegate-agent/compare/v0.20.0...v0.21.0
