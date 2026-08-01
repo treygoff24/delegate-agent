@@ -468,6 +468,62 @@ class MailPushSeamTests(CommandTestBase):
         self.assertEqual(len(child_runs), 1)
         self._assert_no_private_credentials(workspace, child_runs[0])
 
+    def test_codex_mail_push_attached_revalidation_timeout_cleans_credentials_and_records_warning(
+        self,
+    ):
+        _root, workspace, observations, _primary = self._run_verified_persistent("codex")
+        _owner_run_path, owner_manifest = self._only_run(workspace)
+        observations.unlink()
+        original_cleanup = mail.cleanup_mail_push_private_homes
+        original_provision = mail.provision_mail_push
+        provision_calls = 0
+
+        def cleanup_then_fail(registry_root: Path, run_id: str) -> None:
+            original_cleanup(registry_root, run_id)
+            raise OSError("injected cleanup failure")
+
+        def provision_then_continue(*args, **kwargs):
+            nonlocal provision_calls
+            provision_calls += 1
+            return original_provision(*args, **kwargs)
+
+        with (
+            mock.patch.object(
+                self.delegate.resume_command,
+                "revalidate_attached_target",
+                side_effect=TimeoutError("injected registry lock timeout"),
+            ),
+            mock.patch.object(mail, "provision_mail_push", side_effect=provision_then_continue),
+            mock.patch.object(
+                mail, "cleanup_mail_push_private_homes", side_effect=cleanup_then_fail
+            ),
+            self.assertRaises(TimeoutError),
+        ):
+            self._run_launch(
+                [
+                    "--cwd",
+                    str(workspace),
+                    "resume",
+                    "--mail-push",
+                    owner_manifest["alias"],
+                    "continue",
+                ],
+                observations=observations,
+            )
+
+        self.assertEqual(provision_calls, 1)
+        child_runs = [
+            path
+            for path in (workspace / ".delegate" / "runs").iterdir()
+            if path.name != owner_manifest["runId"]
+        ]
+        self.assertEqual(len(child_runs), 1, child_runs)
+        self._assert_no_private_credentials(workspace, child_runs[0])
+        state = json.loads((child_runs[0] / "state.json").read_text(encoding="utf-8"))
+        self.assertTrue(
+            any(runner.MAIL_PUSH_CLEANUP_WARNING in warning for warning in state["warnings"])
+        )
+
     def test_codex_mail_push_fallback_uses_second_private_home_and_fallback_auth(self):
         with tempfile.TemporaryDirectory(prefix="delegate-mail-push-fallback-") as tmp:
             root = Path(tmp)

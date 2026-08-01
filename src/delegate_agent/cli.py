@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import contextlib
 import json  # noqa: F401  # re-exported for tests (delegate.json)
 import os
 import shlex
@@ -703,6 +704,27 @@ def _preserve_call_artifacts(
         )
 
 
+def _cleanup_untransferred_mail_push_private_homes(
+    registry_root: Path,
+    run_id: str,
+    *,
+    engine: str,
+    stderr: TextIO,
+) -> None:
+    try:
+        mail.cleanup_mail_push_private_homes(registry_root, run_id)
+    except OSError:
+        warning = delegate_runner.MAIL_PUSH_CLEANUP_WARNING
+        print(f"delegate mail: WARNING: {warning}", file=stderr)
+        with contextlib.suppress(DelegateError, OSError):
+            delegate_runner.record_mail_push_degradation(
+                registry_root,
+                run_id,
+                engine=engine,
+                reason=warning,
+            )
+
+
 def _execute_attached_worktree(
     request: Request,
     json_mode: bool,
@@ -857,10 +879,12 @@ def _execute_attached_worktree(
         creation_context={"sourceHeadOid": start_head_oid},
         worktree_attachment=attachment,
     )
+    revalidated = False
     try:
         resume_command.revalidate_attached_target(
             registry_root, attachment, expected_branch=iso.planned_branch
         )
+        revalidated = True
     except DelegateError as exc:
         if provision is not None:
             try:
@@ -899,6 +923,14 @@ def _execute_attached_worktree(
             ),
         )
         raise DelegateError("worktree_missing", exc.message) from exc
+    finally:
+        if provision is not None and not revalidated:
+            _cleanup_untransferred_mail_push_private_homes(
+                registry_root,
+                run_id,
+                engine=request.engine,
+                stderr=stderr,
+            )
     execution_root = str(Path(worktree_path).resolve(strict=False))
     source_root = str(Path(source_workspace.path).resolve(strict=False))
     child_env = {

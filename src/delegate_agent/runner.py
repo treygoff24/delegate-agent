@@ -1697,6 +1697,19 @@ def _cleanup_mail_push_private_homes(ctx: RunContext) -> str | None:
     return None
 
 
+def _cleanup_unfinished_mail_push_private_homes(ctx: RunContext) -> None:
+    """Release runner-owned credentials when setup never reaches finalization."""
+    cleanup_warning = _cleanup_mail_push_private_homes(ctx)
+    if cleanup_warning is not None:
+        with contextlib.suppress(DelegateError, OSError):
+            record_mail_push_degradation(
+                ctx.registry_root,
+                ctx.run_id,
+                engine=ctx.engine,
+                reason=cleanup_warning,
+            )
+
+
 def record_mail_push_degradation(
     registry_root: Path,
     run_id: str,
@@ -2349,6 +2362,62 @@ def execute_tracked(
     progress_interval_sec: float = PROGRESS_HEARTBEAT_INTERVAL_SEC,
     timeout: int | None = None,
 ) -> tuple[int, JsonObject | None]:
+    completed = False
+    try:
+        result = _execute_tracked(
+            argv,
+            cwd,
+            ctx,
+            json_mode=json_mode,
+            stdout=stdout,
+            stderr=stderr,
+            completion_report_mode=completion_report_mode,
+            stdin_text=stdin_text,
+            prompt_file_text=prompt_file_text,
+            prompt_file_placeholder=prompt_file_placeholder,
+            agent_config_text=agent_config_text,
+            agent_config_placeholder=agent_config_placeholder,
+            persona_file_text=persona_file_text,
+            persona_file_placeholder=persona_file_placeholder,
+            output_schema_text=output_schema_text,
+            output_schema_path=output_schema_path,
+            manifest_argv=manifest_argv,
+            progress=progress,
+            progress_initial_delay_sec=progress_initial_delay_sec,
+            progress_interval_sec=progress_interval_sec,
+            timeout=timeout,
+        )
+        completed = True
+        return result
+    finally:
+        if not completed:
+            _cleanup_unfinished_mail_push_private_homes(ctx)
+
+
+def _execute_tracked(
+    argv: list[str],
+    cwd: str,
+    ctx: RunContext,
+    *,
+    json_mode: bool,
+    stdout: TextIO,
+    stderr: TextIO,
+    completion_report_mode: str = delegate_config.COMPLETION_REPORT_MODE_MARKDOWN,
+    stdin_text: str | None = None,
+    prompt_file_text: str | None = None,
+    prompt_file_placeholder: str | None = None,
+    agent_config_text: str | None = None,
+    agent_config_placeholder: str | None = None,
+    persona_file_text: str | None = None,
+    persona_file_placeholder: str | None = None,
+    output_schema_text: str | None = None,
+    output_schema_path: str | None = None,
+    manifest_argv: list[str] | None = None,
+    progress: bool = False,
+    progress_initial_delay_sec: float = PROGRESS_INITIAL_DELAY_SEC,
+    progress_interval_sec: float = PROGRESS_HEARTBEAT_INTERVAL_SEC,
+    timeout: int | None = None,
+) -> tuple[int, JsonObject | None]:
     if stdin_text is not None and prompt_file_text is not None:
         raise ValueError("stdin_text and prompt_file_text are mutually exclusive")
     files = _prepare_tracked_run(argv, ctx, manifest_argv=manifest_argv)
@@ -2616,15 +2685,7 @@ def execute_tracked(
                 }
     except RunnerLaunchError:
         if capture is None:
-            cleanup_warning = _cleanup_mail_push_private_homes(ctx)
-            if cleanup_warning is not None:
-                with contextlib.suppress(DelegateError, OSError):
-                    record_mail_push_degradation(
-                        ctx.registry_root,
-                        ctx.run_id,
-                        engine=ctx.engine,
-                        reason=cleanup_warning,
-                    )
+            _cleanup_unfinished_mail_push_private_homes(ctx)
         if capture is None or not _cancel_requested_or_cancelled(ctx):
             raise
         # A retry launch lost the race to cancellation. Its locked launch-

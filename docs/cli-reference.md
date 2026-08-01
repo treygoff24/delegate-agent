@@ -35,6 +35,9 @@ delegate mail prune [--older-than DAYS] [--dry-run]
 delivered mailbox file is gone. `watch --once` emits metadata-only NDJSON and
 returns exit code 124 on timeout. Read-only profile guards allow inbox,
 status, watch, and `read --peek`; mutating mail operations remain protected.
+`mail prune --dry-run` is byte-preserving and best-effort; under concurrent
+mail activity its report may be stale or internally inconsistent and is not
+an exact later mutation plan.
 
 Work launches may opt into stop-hook push with `--mail-push` (or input JSON
 `mailPush: true`). It is never enabled by `mail.enabled` alone and is refused
