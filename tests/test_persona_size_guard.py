@@ -143,7 +143,9 @@ class PersonaSizeGuardTests(unittest.TestCase):
         self.assertIn("warnings", over_entry)
         self.assertEqual(workflow_runtime.PROMPT_ARGV_GUARD_BYTES, limit)
 
-    def test_workflow_guard_rejects_full_framed_prompt_over_limit(self) -> None:
+    def test_workflow_guard_defers_full_framed_prompt_overflow_to_final_materialization(
+        self,
+    ) -> None:
         limit = prompt_transport.ARGV_PROMPT_GUARD_BYTES
         overhead = (
             len(
@@ -159,8 +161,8 @@ class PersonaSizeGuardTests(unittest.TestCase):
         )
         over = "x" * (limit - overhead + 1)
         entry = self._workflow_dry_run(over)
-        self.assertIn("warnings", entry)
-        self.assertIn("exceeding", entry["warnings"][0])
+        self.assertLess(entry["promptBytes"], limit)
+        self.assertNotIn("warnings", entry)
 
 
 if __name__ == "__main__":

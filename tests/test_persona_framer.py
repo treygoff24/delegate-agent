@@ -94,7 +94,6 @@ class PersonaFramerTests(CommandTestBase):
                     prompt,
                     [
                         prompt_instructions.SKILL_REVIEW_PREFIX.strip(),
-                        argv_builders.SAFE_REVIEW_PREFIX_BY_ENGINE[engine].strip(),
                         self._PERSONA,
                         PERSISTENT_WORKTREE_CONTEXT_NOTE.strip(),
                         self._USER,

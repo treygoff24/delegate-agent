@@ -646,6 +646,11 @@ def _launch_child_in_persistent_worktree(
             worktree_path=registration.worktree_path,
             creation_context=registration.creation_context,
         )
+        if exec_ctx.persona_text is not None:
+            run_registry.write_private_text(
+                registration.run_path / run_registry.PERSONA_TXT_FILE,
+                exec_ctx.persona_text,
+            )
         delegate_runner.write_manifest(
             registration.run_path,
             delegate_runner.build_manifest(exec_ctx, execution_request.display_argv),
