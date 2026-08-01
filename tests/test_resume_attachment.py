@@ -527,6 +527,10 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
                 mock.patch.object(
                     self.delegate.delegate_runner, "execute_tracked"
                 ) as execute_tracked,
+                # The race under test happens after binary resolution; without this
+                # patch the test silently depends on a real cursor binary on PATH
+                # (present on dev machines, absent on CI -> missing_binary exit 3).
+                mock.patch.object(self.delegate, "ensure_binary"),
             ):
                 code, payload, _stderr = self._resume(repo_path, fake_home, owner_alias, "continue")
             self.assertEqual(code, self.delegate.EXIT_USAGE)
