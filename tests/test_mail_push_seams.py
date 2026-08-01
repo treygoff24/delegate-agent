@@ -139,6 +139,14 @@ class MailPushSeamTests(CommandTestBase):
     def _observations(path: Path) -> list[dict]:
         return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
 
+    def _assert_no_private_credentials(self, workspace: Path, run_path: Path) -> None:
+        credential_files = [
+            path
+            for root in (run_path, mail.mail_root(workspace / ".delegate"))
+            for path in root.rglob("auth.json")
+        ]
+        self.assertEqual(credential_files, [])
+
     @staticmethod
     def _file_snapshot(root: Path) -> dict[Path, bytes | str]:
         snapshot: dict[Path, bytes | str] = {}
@@ -351,6 +359,114 @@ class MailPushSeamTests(CommandTestBase):
             run_id=run_id,
         )
         self.assertEqual(manifest["isolationLifecycle"], "attached")
+
+    def test_codex_mail_push_persistent_pre_child_failure_cleans_credentials_and_records_cleanup_warning(
+        self,
+    ):
+        with tempfile.TemporaryDirectory(prefix="delegate-mail-push-pre-child-") as tmp:
+            root = Path(tmp)
+            workspace = self._make_git_workspace(root)
+            observations = root / "observations.jsonl"
+            primary = self._write_codex_home(root, "primary-codex", self.credential_canary)
+            fake = self._write_fake_harness(root)
+            Path(self._config_env["DELEGATE_CONFIG"]).write_text(
+                json.dumps(self._config("codex", fake, observations, primary_home=primary)),
+                encoding="utf-8",
+            )
+            original_cleanup = mail.cleanup_mail_push_private_homes
+            original_binary_validator = self.delegate.ensure_binary
+            binary_validation_calls = 0
+
+            def cleanup_then_fail(registry_root: Path, run_id: str) -> None:
+                original_cleanup(registry_root, run_id)
+                raise OSError("injected cleanup failure")
+
+            def fail_after_provision(*args, **kwargs) -> None:
+                nonlocal binary_validation_calls
+                binary_validation_calls += 1
+                if binary_validation_calls == 2:
+                    raise self.delegate.DelegateError(
+                        "injected_pre_child_failure", "injected binary validation failure"
+                    )
+                original_binary_validator(*args, **kwargs)
+
+            with (
+                mock.patch.object(
+                    self.delegate,
+                    "ensure_binary",
+                    side_effect=fail_after_provision,
+                ),
+                mock.patch.object(
+                    mail, "cleanup_mail_push_private_homes", side_effect=cleanup_then_fail
+                ),
+            ):
+                code, stdout, stderr = self._run_launch(
+                    [
+                        "--json",
+                        "--cwd",
+                        str(workspace),
+                        "--isolation",
+                        "worktree",
+                        "codex",
+                        "work",
+                        "--mail-push",
+                        "launch",
+                    ],
+                    observations=observations,
+                )
+            self.assertEqual(code, self.delegate.EXIT_USAGE)
+            self.assertEqual(json.loads(stdout)["error"], "injected_pre_child_failure")
+            self.assertEqual(binary_validation_calls, 2)
+            self.assertIn(runner.MAIL_PUSH_CLEANUP_WARNING, stderr)
+            self.assertFalse(observations.exists())
+            run_path, _manifest = self._only_run(workspace)
+            self._assert_no_private_credentials(workspace, run_path)
+            state = json.loads((run_path / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["status"], "failed")
+            snapshot = json.loads((run_path / runner.SNAPSHOT_FILE).read_text(encoding="utf-8"))
+            self.assertIn(runner.MAIL_PUSH_CLEANUP_WARNING, snapshot["warnings"])
+
+    def test_codex_mail_push_attached_revalidation_failure_cleans_credentials(self):
+        _root, workspace, observations, _primary = self._run_verified_persistent("codex")
+        _owner_run_path, owner_manifest = self._only_run(workspace)
+        observations.unlink()
+        worktree_path = owner_manifest["executionCwd"]
+        original_register = self.delegate.run_registry.register_run
+
+        def register_then_remove(*args, **kwargs):
+            result = original_register(*args, **kwargs)
+            subprocess.run(
+                ["git", "worktree", "remove", "--force", worktree_path],
+                cwd=workspace,
+                check=True,
+                capture_output=True,
+            )
+            return result
+
+        with mock.patch.object(
+            self.delegate.run_registry, "register_run", side_effect=register_then_remove
+        ):
+            code, stdout, _stderr = self._run_launch(
+                [
+                    "--json",
+                    "--cwd",
+                    str(workspace),
+                    "resume",
+                    "--mail-push",
+                    owner_manifest["alias"],
+                    "continue",
+                ],
+                observations=observations,
+            )
+        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        self.assertEqual(json.loads(stdout)["error"], "worktree_missing")
+        self.assertFalse(observations.exists())
+        manifests = list((workspace / ".delegate" / "runs").glob("*/manifest.json"))
+        child_runs = [
+            path.parent for path in manifests if path.parent.name != owner_manifest["runId"]
+        ]
+        self.assertEqual(len(child_runs), 1)
+        self._assert_no_private_credentials(workspace, child_runs[0])
 
     def test_codex_mail_push_fallback_uses_second_private_home_and_fallback_auth(self):
         with tempfile.TemporaryDirectory(prefix="delegate-mail-push-fallback-") as tmp:
