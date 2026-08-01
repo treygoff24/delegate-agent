@@ -279,9 +279,12 @@ def resolve_mail_workspace(
     source_root = environ.get("DELEGATE_SOURCE_ROOT")
     if run_id:
         if not source_root:
-            raise _error(
-                "unknown_sender", "DELEGATE_RUN_ID is set but no source workspace is bound."
-            )
+            if explicit_cwd is None:
+                raise _error(
+                    "unknown_sender",
+                    "DELEGATE_RUN_ID is set but no source workspace is bound.",
+                )
+            source_root = explicit_cwd
         source = _workspace_root(source_root)
         if explicit_cwd is not None and _workspace_root(explicit_cwd) != source:
             raise _error(
@@ -508,11 +511,13 @@ def _delegate_hook_entry_script() -> Path:
     raise OSError("could not resolve the launching delegate entry script")
 
 
-def _hook_command(nonce: str) -> str:
+def _hook_command(nonce: str, source_root: Path) -> str:
     pump = " ".join(
         (
             shlex.quote(sys.executable),
             shlex.quote(str(_delegate_hook_entry_script())),
+            "--cwd",
+            shlex.quote(str(source_root.resolve(strict=False))),
             "mail",
             "hook-pump",
         )
@@ -666,7 +671,7 @@ def provision_mail_push(
         )
         nonce = secrets.token_urlsafe(24)
         private_io.write_private_text_atomic(_hook_nonce_path(registry_root, run_id), nonce)
-        hook_command = _hook_command(nonce)
+        hook_command = _hook_command(nonce, registry_root.parent)
         private_io.write_json_atomic(
             box / MAIL_PUSH_SETTINGS_FILE_NAME, _hook_settings(hook_command)
         )
@@ -1043,21 +1048,14 @@ def hook_pump(
     except (MailError, OSError, ValueError) as exc:
         if response_emitted or response_emission_attempted:
             return 1
-        recorded = _record_hook_failure(
+        _record_hook_failure(
             registry_root,
             run_id,
             harness=harness,
             reason=f"{getattr(exc, 'error', 'hook_runtime_failed')}: {exc}",
         )
-        if not recorded:
-            nonce = environ.get("DELEGATE_MAIL_HOOK_NONCE")
-            if nonce:
-                print(hook_failure_sentinel(nonce, str(exc)), file=stderr or sys.stderr)
-        try:
-            emit_response(b"{}")
-        except (OSError, ValueError):
-            return 1
-        return 0
+        print(f"{getattr(exc, 'error', 'hook_runtime_failed')}: {exc}", file=stderr or sys.stderr)
+        return 1
 
 
 def _load_rules(registry_root: Path) -> list[JsonObject]:

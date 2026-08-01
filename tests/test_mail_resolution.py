@@ -77,6 +77,14 @@ class MailResolutionTests(unittest.TestCase):
             self.workspace.resolve(),
         )
 
+    def test_validated_lane_accepts_hook_pinned_cwd_without_source_environment(self) -> None:
+        run_id, _alias = self._run()
+
+        self.assertEqual(
+            mail.resolve_mail_workspace(str(self.workspace), env={"DELEGATE_RUN_ID": run_id}),
+            self.workspace.resolve(),
+        )
+
     def test_mail_resolution_does_not_change_global_workspace_resolution(self) -> None:
         explicit = self.workspace / "explicit"
         explicit.mkdir()

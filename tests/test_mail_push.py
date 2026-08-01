@@ -11,7 +11,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from delegate_agent import mail, run_registry, run_status, runner
+from delegate_agent import cli, mail, run_registry, run_status, runner
+from delegate_agent import config as delegate_config
 
 
 class _FailingWriter(io.StringIO):
@@ -172,10 +173,11 @@ class MailPushTests(unittest.TestCase):
         nonce = "test-nonce"
         dev_entry = Path(__file__).resolve().parents[1] / "bin" / "delegate.py"
         with mock.patch.object(sys, "argv", [str(dev_entry)]):
-            dev_command = mail._hook_command(nonce)
+            dev_command = mail._hook_command(nonce, self.workspace)
         self.assertTrue(
             dev_command.startswith(
-                f"{shlex.quote(sys.executable)} {shlex.quote(str(dev_entry.resolve()))} mail hook-pump"
+                f"{shlex.quote(sys.executable)} {shlex.quote(str(dev_entry.resolve()))} "
+                f"--cwd {shlex.quote(str(self.workspace))} mail hook-pump"
             )
         )
 
@@ -183,11 +185,12 @@ class MailPushTests(unittest.TestCase):
         installed_entry.parent.mkdir()
         installed_entry.write_text("#!/bin/sh\n", encoding="utf-8")
         with mock.patch.object(sys, "argv", [str(installed_entry)]):
-            installed_command = mail._hook_command(nonce)
+            installed_command = mail._hook_command(nonce, self.workspace)
         self.assertTrue(
             installed_command.startswith(
                 f"{shlex.quote(sys.executable)} "
-                f"{shlex.quote(str(installed_entry.resolve()))} mail hook-pump"
+                f"{shlex.quote(str(installed_entry.resolve()))} "
+                f"--cwd {shlex.quote(str(self.workspace))} mail hook-pump"
             )
         )
         self.assertNotIn("delegate mail hook-pump", installed_command)
@@ -197,7 +200,7 @@ class MailPushTests(unittest.TestCase):
         entry.write_text("raise SystemExit(9)\n", encoding="utf-8")
         nonce = "unreachable-nonce"
         with mock.patch.object(sys, "argv", [str(entry)]):
-            command = mail._hook_command(nonce)
+            command = mail._hook_command(nonce, self.workspace)
 
         result = subprocess.run(command, shell=True, capture_output=True, text=True, check=False)
 
@@ -207,6 +210,23 @@ class MailPushTests(unittest.TestCase):
             result.stderr,
             f"{mail.hook_failure_sentinel(nonce, 'hook_pump_unreachable')}\n",
         )
+
+    def test_unbound_hook_pump_fails_without_protocol_output(self):
+        config_path = self.workspace / "config.json"
+        config_path.write_text(
+            json.dumps(delegate_config.embedded_default_config()), encoding="utf-8"
+        )
+        output = io.StringIO()
+        stderr = io.StringIO()
+
+        with mock.patch.dict(
+            os.environ,
+            {"DELEGATE_CONFIG": str(config_path), "DELEGATE_RUN_ID": self.run_id},
+            clear=True,
+        ):
+            self.assertEqual(cli.main(["mail", "hook-pump"], stdout=output, stderr=stderr), 2)
+        self.assertEqual(output.getvalue(), "")
+        self.assertIn("unknown_sender", stderr.getvalue())
 
     def test_codex_credentials_never_enter_mail_and_legacy_homes_are_swept(self):
         source = self.workspace / "source-codex-home"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import tempfile
 import unittest
 from pathlib import Path
@@ -228,6 +229,10 @@ class MailPushGatingTests(CommandTestBase):
                 "hooks"
             ][0]["command"]
             self.assertNotIn("delegate mail hook-pump", command)
+            self.assertIn(
+                f"--cwd {shlex.quote(str(workspace.resolve()))} mail hook-pump",
+                command,
+            )
             self.assertIn(f"{env['DELEGATE_MAIL_HOOK_NONCE']}:hook_pump_unreachable", command)
             self.assertEqual(
                 global_settings.read_text(encoding="utf-8"), '{"canary":"untouched"}\n'

@@ -116,6 +116,10 @@ class MailPushAdapterTests(CommandTestBase):
                     ),
                     command,
                 )
+                self.assertIn(
+                    f"--cwd {shlex.quote(str(self.workspace.resolve()))} mail hook-pump",
+                    command,
+                )
                 self.assertIn(f"{env['DELEGATE_MAIL_HOOK_NONCE']}:hook_pump_unreachable", command)
                 self.assertEqual(json.loads(cursor_path.read_text(encoding="utf-8"))["lastSeq"], 0)
                 if engine == "claude":

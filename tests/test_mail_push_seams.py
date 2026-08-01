@@ -216,6 +216,10 @@ class MailPushSeamTests(CommandTestBase):
             hook_command,
         )
         self.assertIn(
+            f"--cwd {shlex.quote(str(workspace.resolve()))} mail hook-pump",
+            hook_command,
+        )
+        self.assertIn(
             f"{child['env']['DELEGATE_MAIL_HOOK_NONCE']}:hook_pump_unreachable", hook_command
         )
         for path in mail.mail_root(workspace / ".delegate").rglob("*"):
