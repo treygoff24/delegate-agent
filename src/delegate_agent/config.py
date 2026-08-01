@@ -66,6 +66,9 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
             "rawLogDays": 7,
         },
     },
+    "personas": {
+        "forceTransport": None,
+    },
     "cursor": {
         "argvPrefix": ["agent"],
         "defaultModel": "composer-2.5",
@@ -479,6 +482,19 @@ def _validate_workflows_section(workflows: JsonValue) -> None:
                 "invalid_workflows_config",
                 f"workflows.{key} must be a non-negative integer.",
             )
+
+
+def _validate_personas_section(personas: JsonValue) -> None:
+    if personas is None:
+        return
+    if not isinstance(personas, dict):
+        raise ConfigError("invalid_personas_config", "personas config must be an object.")
+    forced = personas.get("forceTransport")
+    if forced is not None and forced not in {"prepend", "native-file", "agent-config"}:
+        raise ConfigError(
+            "invalid_personas_config",
+            "personas.forceTransport must be null, prepend, native-file, or agent-config.",
+        )
 
 
 def _profiles_definitions(profiles: JsonValue) -> dict[str, JsonObject]:
@@ -1368,6 +1384,7 @@ def validate_config(config: JsonObject) -> None:
     _validate_worktrees_section(config.get("worktrees"))
     _validate_progress_section(config.get("progress"))
     _validate_workflows_section(config.get("workflows"))
+    _validate_personas_section(config.get("personas"))
 
 
 def completion_report_default_mode(config: JsonObject) -> str:

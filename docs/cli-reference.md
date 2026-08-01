@@ -15,6 +15,44 @@ Use `delegate --help` for the exact command list from the installed version. Glo
 --group NAME                  Tag a launch/run-input request with a lightweight group ([A-Za-z0-9._-]{1,64}).
 ```
 
+## Personas
+
+Named personas are UTF-8 Markdown files resolved from the source workspace:
+`.delegate/personas/<name>.md` shadows `~/.delegate/personas/<name>.md`. Names
+must match `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`; files are regular, non-symlink
+files no larger than 64 KiB and are rejected on invalid UTF-8 or disallowed C0
+controls. The workspace-local directory is not VCS-shared by default; teams
+that intentionally version a persona must force-add that individual file.
+
+```bash
+delegate personas
+delegate --json personas
+delegate claude work --persona editor "Review chapter 3"
+delegate codex safe --persona editor --allow-repo-persona "Review the diff"
+delegate resume --persona editor <handle> "Continue with the requested fixes"
+delegate resume --no-persona <handle> "Continue without the recorded persona"
+```
+
+`--persona NAME`, `--no-persona`, and `--allow-repo-persona` are shared launch
+options. A workspace-local persona is refused in safe mode unless explicitly
+allowed. Resolution logs `persona: NAME (workspace|global)` to stderr. Personas
+are not accepted for call, read-only call, `--pass-through`, or slash-passthrough
+prompts. Input JSON uses `persona` (string or null) and `allowRepoPersona`
+(boolean).
+
+`delegate --json personas` returns schema `delegate.personas.v1` with sorted rows
+containing `name`, `source`, `sizeBytes`, and an escaped bounded `preview`.
+Invalid files remain visible with an `invalid` reason; a workspace row that
+shadows a global row also includes `shadowsGlobal: true`.
+
+Work-mode transport is prepend for most engines, Claude native-file only when
+the discovery cache proves `--append-system-prompt-file` (otherwise prepend
+with a warning), and OpenCode agent-config merge. OpenCode preserves existing
+root keys, agent keys, and prompts, appending the persona after an existing
+agent prompt. Safe mode always prepends. The persona body is never placed in
+argv, dry-run JSON, or the manifest; tracked runs retain it only in the private
+`persona.txt` artifact.
+
 ## Commands
 
 ### Direct runtime commands

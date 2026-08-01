@@ -5,6 +5,14 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Added named persona resolution, `delegate personas`, shared persona launch
+  options, capability-gated transport, workflow digest pinning, and private
+  `persona.txt` run artifacts for the v0.25.0 personas feature.
+
 ## [0.24.0] - 2026-07-31
 
 ### Added

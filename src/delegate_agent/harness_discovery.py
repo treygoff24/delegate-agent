@@ -131,6 +131,7 @@ _HARNESS_FIELDS = frozenset(
         "defaultModel",
         "models",
         "harnessReasoning",
+        "personaTransports",
         "warnings",
     }
 )
@@ -241,6 +242,19 @@ def _validate_harness_record(harness: str, record: JsonObject) -> None:
                 f"discovery harness {harness}.harnessReasoning must be an object or null"
             )
         _validate_reasoning(harness, "harnessReasoning", harness_reasoning)
+    persona_transports = record.get("personaTransports")
+    if persona_transports is not None:
+        if not isinstance(persona_transports, dict):
+            raise ValueError(f"discovery harness {harness}.personaTransports must be an object")
+        _reject_extra_fields(
+            persona_transports,
+            frozenset({"native-file"}),
+            f"discovery harness {harness}.personaTransports",
+        )
+        if not isinstance(persona_transports.get("native-file"), bool):
+            raise ValueError(
+                f"discovery harness {harness}.personaTransports.native-file must be boolean"
+            )
     if not _string_list(record.get("warnings")):
         raise ValueError(f"discovery harness {harness}.warnings must be a string array")
 
@@ -1261,7 +1275,11 @@ def _probe_claude(selector: tuple[str, ...], env: Mapping[str, str], _: Path | N
     if result.error not in {None, "probe_failed"}:
         raise ValueError(f"Claude effort discovery failed: {result.error}")
     combined = f"{result.stdout}\n{result.stderr}"
-    return parse_claude_efforts(combined)
+    fragment = parse_claude_efforts(combined)
+    fragment["personaTransports"] = {
+        "native-file": "--append-system-prompt-file" in combined,
+    }
+    return fragment
 
 
 def _probe_grok(selector: tuple[str, ...], env: Mapping[str, str], _: Path | None) -> JsonObject:

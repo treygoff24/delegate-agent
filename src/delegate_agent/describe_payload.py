@@ -903,12 +903,35 @@ def describe_payload(
             "pi": PROMPT_TRANSPORT_STDIN,
             "omp": PROMPT_TRANSPORT_ARGV,
         },
+        "personaTransports": {
+            "safe": {engine: "prepend" for engine in KNOWN_ENGINES},
+            "work": {
+                **{
+                    engine: "prepend"
+                    for engine in KNOWN_ENGINES
+                    if engine not in {"claude", "opencode"}
+                },
+                "claude": "native-file when discovery proves --append-system-prompt-file; otherwise prepend",
+                "opencode": "agent-config merge (existing config and prompt preserved)",
+            },
+            "notes": [
+                "Native channels are work-mode only; safe mode always prepends persona text.",
+                "Claude native-file is capability-cache gated and falls back to prepend with a warning.",
+                "personas.forceTransport may explicitly pin prepend, native-file, or agent-config.",
+            ],
+        },
         "globalOptions": _global_options(),
         "launchOptions": _launch_options(),
         "completionReportModes": list(delegate_config.COMPLETION_REPORT_MODES),
         "promptTransforms": [
             "Prepends mandatory skill review instructions before the operator prompt "
             "(suppressed under slash-passthrough).",
+            "Resolves one named persona from the source workspace, with workspace-local "
+            "files shadowing global files; persona text is prepended in safe mode and "
+            "uses the documented work-mode transport when available.",
+            "Final framed order is work: skill, safe, persona, worktree note, user, "
+            "completion suffix, dirty note; safe: skill, persona, safe, worktree note, "
+            "user, completion suffix, dirty note.",
             "Optionally appends completion-report instructions unless disabled.",
         ],
         "promptInstructionModes": {
@@ -993,7 +1016,8 @@ def describe_payload(
                     "signature": (
                         "agent(prompt, engine=None, mode=None, model=None, effort=None, "
                         "schema=None, label=None, phase=None, isolation=None, "
-                        "passthrough=False, timeout=None, retries=None, fast=None)"
+                        "passthrough=False, timeout=None, retries=None, "
+                        "persona=None, allow_repo_persona=False, fast=None)"
                     ),
                     "returns": "parent-facing output string, schema object, or None",
                     "notes": [

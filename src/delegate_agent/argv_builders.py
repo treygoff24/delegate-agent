@@ -20,6 +20,7 @@ from delegate_agent.prompt_transport import (
     CURSOR_PROMPT_REDACTION,
     DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
     DROID_PROMPT_FILE_ARG_PLACEHOLDER,
+    PERSONA_FILE_ARG_PLACEHOLDER,
     PROMPT_FILE_ARG_PLACEHOLDER,
     PROMPT_TRANSPORT_ARGV,
     PROMPT_TRANSPORT_FILE,
@@ -171,13 +172,14 @@ def build_cursor_argv(
     stream_capture: bool = True,
     call_read_only: bool = False,
     pure: bool = False,
+    prompt_framed: bool = False,
 ) -> list[str]:
     _reject_pure("cursor", mode, pure)
+    if mode == MODE_SAFE and not prompt_framed:
+        prompt = prefix_cursor_safe_prompt(prompt)
     argv = [*prefix, "--workspace", workspace, "-p", "--trust"]
     if mode == MODE_WORK:
         argv.extend(["--approve-mcps", "--force"])
-    elif mode == MODE_SAFE:
-        prompt = prefix_cursor_safe_prompt(prompt)
     elif mode == MODE_CALL:
         # Call defaults to work-level capability ("work minus a repo"); --read-only
         # drops the write flags for the stateless judge/completion contract.
@@ -204,13 +206,14 @@ def build_droid_argv(
     prompt_transport: str = PROMPT_TRANSPORT_ARGV,
     call_read_only: bool = False,
     pure: bool = False,
+    prompt_framed: bool = False,
 ) -> list[str]:
     _reject_pure("droid", mode, pure)
+    if mode == MODE_SAFE and not prompt_framed:
+        prompt = prefix_droid_safe_prompt(prompt)
     argv = [binary, "exec", "--cwd", workspace]
     if mode == MODE_WORK:
         argv.append("--skip-permissions-unsafe")
-    elif mode == MODE_SAFE:
-        prompt = prefix_droid_safe_prompt(prompt)
     elif mode == MODE_CALL:
         if not call_read_only:
             argv.append("--skip-permissions-unsafe")
@@ -243,12 +246,13 @@ def build_kimi_argv(
     *,
     stream_capture: bool = True,
     pure: bool = False,
+    prompt_framed: bool = False,
 ) -> list[str]:
     _reject_pure("kimi", mode, pure)
-    argv = [str(kimi["binary"])]
-    if mode == MODE_SAFE:
+    if mode == MODE_SAFE and not prompt_framed:
         prompt = prefix_kimi_safe_prompt(prompt)
-    elif mode not in (MODE_WORK, MODE_CALL):
+    argv = [str(kimi["binary"])]
+    if mode not in (MODE_SAFE, MODE_WORK, MODE_CALL):
         validate_mode(mode)
     if model:
         argv.extend(["--model", model])
@@ -270,6 +274,7 @@ def build_claude_argv(
     call_read_only: bool = False,
     pure: bool = False,
     output_schema: str | None = None,
+    persona_file: bool = False,
 ) -> list[str]:
     _reject_pure("claude", mode, pure, supported=True)
     if pure or output_schema is not None:
@@ -342,6 +347,8 @@ def build_claude_argv(
         argv.extend(["--model", model])
     if reasoning_effort is not None:
         argv.extend(["--effort", reasoning_effort])
+    if persona_file:
+        argv.extend(["--append-system-prompt-file", PERSONA_FILE_ARG_PLACEHOLDER])
     return argv
 
 

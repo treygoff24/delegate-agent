@@ -103,7 +103,19 @@ BINARY_CONFIG_ENGINES = tuple(engine for engine in KNOWN_ENGINES if engine != "c
 SAFE_REVIEW_PREFIX_INJECTED_HERE_ENGINES = tuple(
     engine
     for engine in KNOWN_ENGINES
-    if engine in {"codex", "droid", "claude", "grok", "devin", "opencode", "pi", "omp"}
+    if engine
+    in {
+        "cursor",
+        "codex",
+        "claude",
+        "grok",
+        "devin",
+        "opencode",
+        "pi",
+        "omp",
+        "droid",
+        "kimi",
+    }
 )
 # Stable public summary order; membership is still derived from the modeless engine set.
 MODEL_SUMMARY_ENGINES = tuple(

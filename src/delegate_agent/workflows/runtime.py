@@ -17,7 +17,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from delegate_agent import run_registry, wait_cancel_commands
+from delegate_agent import personas, run_registry, wait_cancel_commands
 from delegate_agent.constants import (
     KNOWN_ENGINES,
     MODE_CALL,
@@ -610,6 +610,8 @@ class WorkflowDsl:
         timeout: int | float | None = None,
         retries: int | None = None,
         fast: bool | None = None,
+        persona: str | None = None,
+        allow_repo_persona: bool = False,
     ) -> JsonValue:
         if not isinstance(prompt, str):
             prompt = str(prompt)
@@ -625,6 +627,20 @@ class WorkflowDsl:
         resolved_model = model or self.defaults.get("model")
         resolved_effort = effort or self.defaults.get("effort")
         resolved_fast = fast if fast is not None else self.defaults.get("fast")
+        if persona is not None and (not isinstance(persona, str) or not persona.strip()):
+            raise ValueError("persona must be a non-empty string or None")
+        persona_resolution = None
+        if persona is not None:
+            if resolved_mode == MODE_CALL:
+                raise ValueError("personas are not supported for call mode")
+            if passthrough:
+                raise ValueError("personas are not supported with passthrough=True")
+            persona_resolution = personas.resolve_persona(
+                self.state.workspace,
+                persona,
+                mode=resolved_mode,
+                allow_repo_persona=allow_repo_persona,
+            )
         if resolved_fast is not None and not isinstance(resolved_fast, bool):
             raise ValueError("fast must be true, false, or None")
         if timeout is not None and (
@@ -644,6 +660,7 @@ class WorkflowDsl:
             "fast": resolved_fast,
             "schema": schema,
             "isolation": resolved_isolation,
+            "personaDigest": persona_resolution.digest if persona_resolution is not None else None,
         }
         path = self.state.next_agent_path()
         key = _agent_key(path, prompt, opts)
@@ -703,7 +720,8 @@ class WorkflowDsl:
                 simulated=True,
             )
             placeholder = workflow_schema.placeholder(schema) if schema else ""
-            prompt_bytes = len(prompt.encode("utf-8"))
+            persona_bytes = persona_resolution.size_bytes if persona_resolution is not None else 0
+            prompt_bytes = len(prompt.encode("utf-8")) + persona_bytes
             dry_run_entry = {
                 "scope": path,
                 "engine": engines,
@@ -717,6 +735,13 @@ class WorkflowDsl:
                 "label": label,
                 "schema": bool(schema),
             }
+            if persona_resolution is not None:
+                dry_run_entry.update(
+                    persona=persona_resolution.name,
+                    personaSource=persona_resolution.source,
+                    personaDigest=persona_resolution.digest,
+                    personaBytes=persona_resolution.size_bytes,
+                )
             constrained = [item for item in engines if item in ENGINE_ARGV_TRANSPORT]
             if constrained and prompt_bytes > PROMPT_ARGV_GUARD_BYTES:
                 dry_run_entry["warnings"] = [
@@ -726,7 +751,13 @@ class WorkflowDsl:
                     "codex/claude/droid/opencode"
                 ]
             self.state.dry_runs.append(dry_run_entry)
-            self.state.append_event("agent_started", key=key, scope=path, dryRun=True)
+            self.state.append_event(
+                "agent_started",
+                key=key,
+                scope=path,
+                dryRun=True,
+                personaDigest=persona_resolution.digest if persona_resolution is not None else None,
+            )
             self.state.append_event("agent_finished", key=key, scope=path, result=placeholder)
             return placeholder
         if already_claimed:
@@ -751,6 +782,7 @@ class WorkflowDsl:
                 phase=resolved_phase,
                 engine=engines,
                 mode=resolved_mode,
+                personaDigest=persona_resolution.digest if persona_resolution is not None else None,
             )
             for candidate in engines:
                 try:
@@ -767,6 +799,8 @@ class WorkflowDsl:
                         passthrough=passthrough,
                         timeout=timeout,
                         retries=retries,
+                        persona=persona_resolution,
+                        allow_repo_persona=allow_repo_persona,
                     )
                 except Exception as exc:
                     self.state.append_event(
@@ -870,6 +904,8 @@ class WorkflowDsl:
         passthrough: bool,
         timeout: int | float | None,
         retries: int | None,
+        persona: personas.PersonaResolution | None = None,
+        allow_repo_persona: bool = False,
     ) -> JsonValue:
         if engine not in KNOWN_ENGINES:
             raise ValueError(f"engine must be one of {', '.join(KNOWN_ENGINES)}")
@@ -877,7 +913,8 @@ class WorkflowDsl:
             raise ValueError("passthrough=True is not supported for prompt-enforced safe engines")
         if (
             engine in ENGINE_ARGV_TRANSPORT
-            and len(prompt.encode("utf-8")) > PROMPT_ARGV_GUARD_BYTES
+            and len(prompt.encode("utf-8")) + (persona.size_bytes if persona is not None else 0)
+            > PROMPT_ARGV_GUARD_BYTES
         ):
             raise ValueError(
                 "stage output too large for cursor/kimi argv transport; "
@@ -899,6 +936,8 @@ class WorkflowDsl:
                     timeout=timeout,
                     retries=retries,
                     key=key,
+                    persona=persona,
+                    allow_repo_persona=allow_repo_persona,
                 )
             with engine_sem:
                 return self._run_structured_or_text(
@@ -914,6 +953,8 @@ class WorkflowDsl:
                     timeout=timeout,
                     retries=retries,
                     key=key,
+                    persona=persona,
+                    allow_repo_persona=allow_repo_persona,
                 )
 
     def _run_structured_or_text(
@@ -931,6 +972,8 @@ class WorkflowDsl:
         timeout: int | float | None,
         retries: int | None,
         key: str,
+        persona: personas.PersonaResolution | None = None,
+        allow_repo_persona: bool = False,
     ) -> JsonValue:
         if schema is None:
             return self._run_delegate(
@@ -946,6 +989,8 @@ class WorkflowDsl:
                 output_schema=None,
                 prefer_assistant=False,
                 workflow_agent_key=key,
+                persona=persona,
+                allow_repo_persona=allow_repo_persona,
             )
         workflow_schema.validate_schema_subset(schema)
         attempts = retries if retries is not None else _structured_retries(self.state.config)
@@ -973,6 +1018,8 @@ class WorkflowDsl:
                         output_schema=schema_path,
                         prefer_assistant=True,
                         workflow_agent_key=key,
+                        persona=persona,
+                        allow_repo_persona=allow_repo_persona,
                     )
                 finally:
                     Path(schema_path).unlink(missing_ok=True)
@@ -991,6 +1038,8 @@ class WorkflowDsl:
                     output_schema=None,
                     prefer_assistant=True,
                     workflow_agent_key=key,
+                    persona=persona,
+                    allow_repo_persona=allow_repo_persona,
                 )
             try:
                 value = workflow_schema.parse_json_tolerant(text or "")
@@ -1023,6 +1072,8 @@ class WorkflowDsl:
         output_schema: str | None,
         prefer_assistant: bool,
         workflow_agent_key: str,
+        persona: personas.PersonaResolution | None = None,
+        allow_repo_persona: bool = False,
     ) -> str | None:
         payload: JsonObject = {
             "engine": engine,
@@ -1041,6 +1092,9 @@ class WorkflowDsl:
             payload["isolation"] = isolation
         if output_schema is not None:
             payload["outputSchema"] = output_schema
+        if persona is not None:
+            payload["persona"] = persona.name
+            payload["allowRepoPersona"] = allow_repo_persona
         payload["workflowAgentKey"] = workflow_agent_key
         payload["promptInstructionMode"] = (
             PROMPT_INSTRUCTION_MODE_SLASH if passthrough else PROMPT_INSTRUCTION_MODE_WRAPPED

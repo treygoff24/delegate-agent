@@ -17,6 +17,7 @@ docs/security-model.md.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from dataclasses import dataclass, field, replace
@@ -620,6 +621,30 @@ def build_resume_plan(
 
     notes: list[str] = []
 
+    persona_name = _manifest_str(manifest, "personaName")
+    persona_record_text: str | None = None
+    persona_record_source: str | None = None
+    persona_record_digest: str | None = None
+    persona_record_path: str | None = None
+    if opts.persona is not None:
+        persona_name = opts.persona
+    elif opts.no_persona:
+        persona_name = None
+    elif persona_name is not None:
+        persona_file = _manifest_str(manifest, "personaFile") or run_registry.PERSONA_TXT_FILE
+        try:
+            persona_record_text = _read_record_text(run_path / persona_file, prompt=True)
+        except BoundedReadError as exc:
+            raise _record_invalid(
+                f"source run persona artifact {persona_file!r} is unavailable"
+            ) from exc
+        persona_record_source = _manifest_str(manifest, "personaSource") or "global"
+        persona_record_digest = _manifest_str(manifest, "personaDigest")
+        actual_digest = hashlib.sha256(persona_record_text.encode("utf-8")).hexdigest()
+        if persona_record_digest is not None and persona_record_digest != actual_digest:
+            raise _record_invalid("source run persona.txt digest does not match its manifest")
+        persona_record_path = str(run_path / persona_file)
+
     # Inheritance table (see docs/cli-reference.md): per-field source key,
     # override flag, legacy-absent semantics, and cross-engine drop rule.
     model_alias, model = _inherit_model(opts, manifest, engine, source_engine, notes)
@@ -799,6 +824,13 @@ def build_resume_plan(
         dry_run=opts.dry_run,
         model=model,
         agent=agent,
+        persona=persona_name,
+        no_persona=opts.no_persona,
+        allow_repo_persona=opts.allow_repo_persona,
+        persona_record_text=persona_record_text,
+        persona_record_source=persona_record_source,
+        persona_record_digest=persona_record_digest,
+        persona_record_path=persona_record_path,
     )
     synthetic = ParsedCommand(
         engine if engine != "droid" else "droid",

@@ -44,6 +44,7 @@ STATE_FILE = run_registry.STATE_FILE
 SNAPSHOT_FILE = run_registry.SNAPSHOT_FILE
 COMPLETION_REPORT_FILE = run_registry.COMPLETION_REPORT_FILE
 PROMPT_TXT_FILE = run_registry.PROMPT_TXT_FILE
+PERSONA_TXT_FILE = run_registry.PERSONA_TXT_FILE
 
 PROGRESS_PERSIST_LINE_INTERVAL = 10
 PROGRESS_PERSIST_TIME_INTERVAL_SEC = 0.5
@@ -155,6 +156,12 @@ class RunContext:
     agent: str | None = None
     resumed_from: JsonObject | None = None
     worktree_attachment: JsonObject | None = None
+    persona_name: str | None = None
+    persona_source: str | None = None
+    persona_transport: str | None = None
+    persona_digest: str | None = None
+    persona_file: str | None = None
+    persona_text: str | None = None
 
 
 def write_manifest(run_path: Path, manifest: JsonObject) -> None:
@@ -280,6 +287,12 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
         payload["outputSchema"] = ctx.output_schema_text
     if ctx.agent is not None:
         payload["agent"] = ctx.agent
+    if ctx.persona_name is not None:
+        payload["personaName"] = ctx.persona_name
+        payload["personaSource"] = ctx.persona_source
+        payload["personaTransport"] = ctx.persona_transport
+        payload["personaDigest"] = ctx.persona_digest
+        payload["personaFile"] = ctx.persona_file or PERSONA_TXT_FILE
     if ctx.resumed_from is not None:
         payload["resumedFrom"] = ctx.resumed_from
     if ctx.worktree_attachment is not None:
@@ -995,9 +1008,11 @@ def _materialize_prompt_file_argv(
     prompt_file_placeholder: str | None,
     agent_config_text: str | None = None,
     agent_config_placeholder: str | None = None,
+    persona_file_text: str | None = None,
+    persona_file_placeholder: str | None = None,
     agent_config_dir: Path | None = None,
 ) -> tuple[list[str], Path | None]:
-    if prompt_file_text is None and agent_config_text is None:
+    if prompt_file_text is None and agent_config_text is None and persona_file_text is None:
         return list(argv), None
     temp_dir: Path | None = None
     replacements: dict[str, str] = {}
@@ -1033,6 +1048,19 @@ def _materialize_prompt_file_argv(
             handle.write(agent_config_text)
         os.chmod(path, run_registry.PRIVATE_FILE_MODE)
         replacements[agent_config_placeholder] = str(path)
+    if persona_file_text is not None:
+        if persona_file_placeholder is None or persona_file_placeholder not in argv:
+            raise ValueError("persona_file_placeholder must be present in argv")
+        if agent_config_dir is None:
+            if temp_dir is None:
+                temp_dir = Path(tempfile.mkdtemp(prefix="delegate-prompt-"))
+                os.chmod(temp_dir, run_registry.PRIVATE_DIR_MODE)
+            persona_path = temp_dir / PERSONA_TXT_FILE
+        else:
+            run_registry.ensure_private_dir(agent_config_dir)
+            persona_path = agent_config_dir / PERSONA_TXT_FILE
+        run_registry.write_private_text(persona_path, persona_file_text)
+        replacements[persona_file_placeholder] = str(persona_path)
     return [replacements.get(item, item) for item in argv], temp_dir
 
 
@@ -1267,6 +1295,8 @@ def _prepare_tracked_run(
         # `delegate resume` can rebuild the original task text. Verbatim by
         # design; deleted only by `runs prune` (never archived).
         run_registry.write_private_text(run_path / PROMPT_TXT_FILE, ctx.source_prompt)
+    if ctx.persona_text is not None:
+        run_registry.write_private_text(run_path / PERSONA_TXT_FILE, ctx.persona_text)
     write_manifest(run_path, build_manifest(ctx, manifest_argv or argv))
 
     stdout_log = run_path / STDOUT_LOG
@@ -2108,6 +2138,8 @@ def _materialize_empty_retry(
     agent_config_text: str | None,
     agent_config_placeholder: str | None,
     agent_config_dir: Path | None = None,
+    persona_file_text: str | None = None,
+    persona_file_placeholder: str | None = None,
 ) -> tuple[list[str], str | None, str | None]:
     if stdin_text is not None:
         return list(argv), _append_empty_retry_instruction(stdin_text), None
@@ -2119,6 +2151,8 @@ def _materialize_empty_retry(
             agent_config_text=agent_config_text,
             agent_config_placeholder=agent_config_placeholder,
             agent_config_dir=agent_config_dir,
+            persona_file_text=persona_file_text,
+            persona_file_placeholder=persona_file_placeholder,
         )
         return retry_argv, None, retry_dir
     retry_argv = list(argv)
@@ -2141,6 +2175,8 @@ def execute_tracked(
     prompt_file_placeholder: str | None = None,
     agent_config_text: str | None = None,
     agent_config_placeholder: str | None = None,
+    persona_file_text: str | None = None,
+    persona_file_placeholder: str | None = None,
     output_schema_text: str | None = None,
     output_schema_path: str | None = None,
     manifest_argv: list[str] | None = None,
@@ -2168,6 +2204,8 @@ def execute_tracked(
         prompt_file_placeholder=prompt_file_placeholder,
         agent_config_text=agent_config_text,
         agent_config_placeholder=agent_config_placeholder,
+        persona_file_text=persona_file_text,
+        persona_file_placeholder=persona_file_placeholder,
         agent_config_dir=files.run_path,
     )
     launch_argv, schema_temp_dir = _materialize_output_schema_argv(
@@ -2357,6 +2395,8 @@ def execute_tracked(
                     agent_config_text=agent_config_text,
                     agent_config_placeholder=agent_config_placeholder,
                     agent_config_dir=files.run_path,
+                    persona_file_text=persona_file_text,
+                    persona_file_placeholder=persona_file_placeholder,
                 )
                 if (
                     ctx.resumed_from is not None

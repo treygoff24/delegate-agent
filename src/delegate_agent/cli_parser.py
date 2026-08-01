@@ -160,7 +160,7 @@ def parse_help_subcommand(rest: list[str], json_mode: bool) -> ParsedCommand:
     return help_command(json_mode, topic)
 
 
-SIMPLE_INSPECTION_SUBCOMMANDS = frozenset({"models", "describe", "agent-help"})
+SIMPLE_INSPECTION_SUBCOMMANDS = frozenset({"models", "describe", "agent-help", "personas"})
 INSPECTION_OPTION_SUBCOMMANDS = frozenset({"models", "describe"})
 
 
@@ -791,6 +791,9 @@ def parse_modeless_engine(
         include_dirty,
         model,
         agent,
+        persona,
+        no_persona,
+        allow_repo_persona,
     ) = parse_prompt_tail(rest[1:], json_mode, isolation, command_prefix=[engine, mode])
     if agent is not None and engine != "opencode":
         raise DelegateError("unsupported_agent", "--agent is only supported by opencode.")
@@ -844,6 +847,9 @@ def parse_modeless_engine(
             dry_run=dry_run,
             model=model,
             agent=agent,
+            persona=persona,
+            no_persona=no_persona,
+            allow_repo_persona=allow_repo_persona,
         ),
     )
 
@@ -918,6 +924,9 @@ def parse_droid(
         include_dirty,
         model,
         agent,
+        persona,
+        no_persona,
+        allow_repo_persona,
     ) = parse_prompt_tail(tail, json_mode, isolation, command_prefix=command_prefix)
     if agent is not None:
         raise DelegateError("unsupported_agent", "--agent is only supported by opencode.")
@@ -973,6 +982,9 @@ def parse_droid(
             dry_run=dry_run,
             model=model,
             agent=agent,
+            persona=persona,
+            no_persona=no_persona,
+            allow_repo_persona=allow_repo_persona,
         ),
     )
 
@@ -1060,6 +1072,9 @@ def parse_resume(
     drop_output_schema = False
     include_dirty = False
     dry_run = False
+    persona: str | None = None
+    no_persona = False
+    allow_repo_persona = False
     handle: str | None = None
     extra_parts: list[str] = []
     i = 0
@@ -1140,6 +1155,38 @@ def parse_resume(
                 include_dirty = True
                 i += 1
                 continue
+            if token == "--persona":
+                if i + 1 >= len(rest):
+                    raise DelegateError("missing_persona", "--persona requires a non-empty name.")
+                value = rest[i + 1]
+                if not value.strip() or value.startswith("-") or command_help.is_help_token(value):
+                    raise DelegateError("missing_persona", "--persona requires a non-empty name.")
+                if persona is not None or no_persona:
+                    raise DelegateError(
+                        "invalid_option_combination",
+                        "--persona and --no-persona cannot be combined.",
+                    )
+                persona = value
+                i += 2
+                continue
+            if token == "--no-persona":
+                if persona is not None or no_persona:
+                    raise DelegateError(
+                        "invalid_option_combination",
+                        "--persona and --no-persona cannot be combined.",
+                    )
+                no_persona = True
+                i += 1
+                continue
+            if token == "--allow-repo-persona":
+                if allow_repo_persona:
+                    raise DelegateError(
+                        "invalid_option_combination",
+                        "Only one --allow-repo-persona flag is allowed.",
+                    )
+                allow_repo_persona = True
+                i += 1
+                continue
             if token == "--dry-run":
                 dry_run = True
                 i += 1
@@ -1183,6 +1230,9 @@ def parse_resume(
             drop_output_schema=drop_output_schema,
             include_dirty=include_dirty,
             dry_run=dry_run,
+            persona=persona,
+            no_persona=no_persona,
+            allow_repo_persona=allow_repo_persona,
         ),
     )
 
@@ -1209,6 +1259,9 @@ def parse_prompt_tail(
     bool,
     str | None,
     str | None,
+    str | None,
+    bool,
+    bool,
 ]:
     prompt_file: str | None = None
     output_schema: str | None = None
@@ -1222,6 +1275,9 @@ def parse_prompt_tail(
     timeout: int | None = None
     model: str | None = None
     agent: str | None = None
+    persona: str | None = None
+    no_persona = False
+    allow_repo_persona = False
     prompt_parts: list[str] = []
     i = 0
     while i < len(rest):
@@ -1354,6 +1410,49 @@ def parse_prompt_tail(
             agent = value
             i += 2
             continue
+        if token == "--persona":
+            if prompt_parts:
+                raise DelegateError(
+                    "ambiguous_persona_source", "--persona must appear before direct prompt text."
+                )
+            if i + 1 >= len(rest):
+                raise DelegateError("missing_persona", "--persona requires a non-empty name.")
+            value = rest[i + 1]
+            if not value.strip() or value.startswith("-") or command_help.is_help_token(value):
+                raise DelegateError("missing_persona", "--persona requires a non-empty name.")
+            if persona is not None or no_persona:
+                raise DelegateError(
+                    "invalid_option_combination", "--persona and --no-persona cannot be combined."
+                )
+            persona = value
+            i += 2
+            continue
+        if token == "--no-persona":
+            if prompt_parts:
+                raise DelegateError(
+                    "ambiguous_persona_source",
+                    "--no-persona must appear before direct prompt text.",
+                )
+            if persona is not None or no_persona:
+                raise DelegateError(
+                    "invalid_option_combination", "--persona and --no-persona cannot be combined."
+                )
+            no_persona = True
+            i += 1
+            continue
+        if token == "--allow-repo-persona":
+            if prompt_parts:
+                raise DelegateError(
+                    "ambiguous_persona_source",
+                    "--allow-repo-persona must appear before direct prompt text.",
+                )
+            if allow_repo_persona:
+                raise DelegateError(
+                    "invalid_option_combination", "Only one --allow-repo-persona flag is allowed."
+                )
+            allow_repo_persona = True
+            i += 1
+            continue
         if token == "--progress":
             if progress_intent == "on":
                 raise DelegateError(
@@ -1476,6 +1575,9 @@ def parse_prompt_tail(
         include_dirty,
         model,
         agent,
+        persona,
+        no_persona,
+        allow_repo_persona,
     )
 
 

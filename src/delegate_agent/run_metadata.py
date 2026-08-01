@@ -41,6 +41,13 @@ MODEL_METADATA_KEYS: MetadataKeyGroup = (
 SPEED_METADATA_KEYS: MetadataKeyGroup = ("requestedFast",)
 
 RESUME_METADATA_KEYS: MetadataKeyGroup = ("resumedFrom", "worktreeAttachment")
+PERSONA_METADATA_KEYS: MetadataKeyGroup = (
+    "personaName",
+    "personaSource",
+    "personaTransport",
+    "personaDigest",
+    "personaFile",
+)
 
 SNAPSHOT_STATE_FALLBACK_KEYS: MetadataKeyGroup = (
     "worktreeStatus",
@@ -55,6 +62,7 @@ SNAPSHOT_MANIFEST_FALLBACK_KEYS: MetadataKeyGroup = (
     *REASONING_METADATA_KEYS,
     *SPEED_METADATA_KEYS,
     *RESUME_METADATA_KEYS,
+    *PERSONA_METADATA_KEYS,
 )
 
 

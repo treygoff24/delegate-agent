@@ -9,6 +9,8 @@ DROID_PROMPT_FILE_ARG_PLACEHOLDER = PROMPT_FILE_ARG_PLACEHOLDER
 DROID_PROMPT_FILE_DISPLAY = PROMPT_FILE_DISPLAY
 DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER = "<delegate-devin-agent-config>"
 DEVIN_AGENT_CONFIG_DISPLAY = "<devin agent config>"
+PERSONA_FILE_ARG_PLACEHOLDER = "<delegate-persona-file>"
+PERSONA_FILE_DISPLAY = "<persona file>"
 
 
 def prompt_file_display_argv(argv: list[str]) -> list[str]:
@@ -26,6 +28,10 @@ def devin_display_argv(argv: list[str]) -> list[str]:
         else item
         for item in argv
     ]
+
+
+def persona_display_argv(argv: list[str]) -> list[str]:
+    return [PERSONA_FILE_DISPLAY if item == PERSONA_FILE_ARG_PLACEHOLDER else item for item in argv]
 
 
 PROMPT_TRANSPORT_ARGV = "argv"

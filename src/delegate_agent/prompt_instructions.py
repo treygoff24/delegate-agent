@@ -2,6 +2,13 @@ from __future__ import annotations
 
 import re
 
+
+def contains_c0_control(text: str) -> bool:
+    """Return whether text contains a C0 control other than line whitespace."""
+
+    return any(ord(char) < 0x20 and char not in "\t\n\r" for char in text)
+
+
 # Leading harness slash command: `/goal fix tests` matches; `/tmp/foo.py is
 # broken` does not (a second slash in the first token means path, not command).
 SLASH_COMMAND_RE = re.compile(r"^/[A-Za-z][A-Za-z0-9_-]*(\s|$)")

@@ -18,6 +18,7 @@ from delegate_agent import (
     config_commands,
     harness_discovery,
     inspection_commands,
+    personas,
     profile_commands,
     profile_guard,
     profiles,
@@ -93,6 +94,7 @@ from delegate_agent.prompt_transport import (  # noqa: F401  # CURSOR_PROMPT_RED
     DEVIN_AGENT_CONFIG_DISPLAY,
     DROID_PROMPT_FILE_ARG_PLACEHOLDER,
     DROID_PROMPT_FILE_DISPLAY,
+    PERSONA_FILE_ARG_PLACEHOLDER,
     PROMPT_FILE_ARG_PLACEHOLDER,
     PROMPT_FILE_DISPLAY,
     PROMPT_TRANSPORT_ARGV,
@@ -291,6 +293,25 @@ def emit_config_command(parsed: ParsedCommand, stdout: TextIO) -> int:
     return config_commands.emit(command, stdout)
 
 
+def emit_personas(workspace: ResolvedWorkspace, *, json_mode: bool, stdout: TextIO) -> int:
+    rows = personas.list_personas(workspace.path)
+    if json_mode:
+        delegate_rendering.print_json({"schema": "delegate.personas.v1", "personas": rows}, stdout)
+        return EXIT_OK
+    if not rows:
+        print("No personas found.", file=stdout)
+        return EXIT_OK
+    for row in rows:
+        name = row.get("name", "")
+        source = row.get("source", "")
+        if "invalid" in row:
+            print(f"{name} ({source}): invalid: {row['invalid']}", file=stdout)
+            continue
+        shadow = " [shadows global]" if row.get("shadowsGlobal") else ""
+        print(f"{name} ({source}, {row.get('sizeBytes', 0)} bytes){shadow}", file=stdout)
+    return EXIT_OK
+
+
 def dry_run_payload(request: Request) -> JsonObject:
     payload: JsonObject = {
         "ok": True,
@@ -328,6 +349,12 @@ def dry_run_payload(request: Request) -> JsonObject:
         payload["group"] = request.group
     if request.agent is not None:
         payload["agent"] = request.agent
+    if request.persona_name is not None:
+        payload["personaName"] = request.persona_name
+        payload["personaSource"] = request.persona_source
+        payload["personaTransport"] = request.persona_transport
+        payload["personaDigest"] = request.persona_digest
+        payload["personaFile"] = request.persona_file
     if request.resumed_from is not None:
         payload["resumedFrom"] = request.resumed_from
     if request.auth_profile is not None:
@@ -602,6 +629,12 @@ def make_run_context(
         output_schema_text=request.output_schema_record_text,
         agent=request.agent,
         resumed_from=request.resumed_from,
+        persona_name=request.persona_name,
+        persona_source=request.persona_source,
+        persona_transport=request.persona_transport,
+        persona_digest=request.persona_digest,
+        persona_file=request.persona_file,
+        persona_text=request.persona_text,
     )
 
 
@@ -760,6 +793,10 @@ def _execute_attached_worktree(
             run_registry.write_private_text(
                 run_path / run_registry.PROMPT_TXT_FILE, ctx_runner.source_prompt
             )
+        if ctx_runner.persona_text is not None:
+            run_registry.write_private_text(
+                run_path / run_registry.PERSONA_TXT_FILE, ctx_runner.persona_text
+            )
         delegate_runner.write_manifest(
             run_path,
             delegate_runner.build_manifest(ctx_runner, execution_request.display_argv),
@@ -808,6 +845,8 @@ def _execute_attached_worktree(
             prompt_file_placeholder=PROMPT_FILE_ARG_PLACEHOLDER,
             agent_config_text=execution_request.agent_config_text,
             agent_config_placeholder=DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
+            persona_file_text=execution_request.persona_file_text,
+            persona_file_placeholder=PERSONA_FILE_ARG_PLACEHOLDER,
             output_schema_text=request.output_schema_text,
             output_schema_path=request.output_schema,
             manifest_argv=execution_request.display_argv,
@@ -894,6 +933,12 @@ def execute_request(
                         prompt_file_placeholder=PROMPT_FILE_ARG_PLACEHOLDER,
                         agent_config_text=request.agent_config_text,
                         agent_config_placeholder=DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
+                        persona_file_text=(
+                            request.persona_text
+                            if request.persona_transport == "native-file"
+                            else None
+                        ),
+                        persona_file_placeholder=PERSONA_FILE_ARG_PLACEHOLDER,
                         output_schema_text=request.output_schema_text,
                         output_schema_path=request.output_schema,
                         manifest_argv=public_argv(request),
@@ -1157,6 +1202,12 @@ def execute_request(
                 prompt_file_placeholder=PROMPT_FILE_ARG_PLACEHOLDER,
                 agent_config_text=isolated_request.agent_config_text,
                 agent_config_placeholder=DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
+                persona_file_text=(
+                    isolated_request.persona_text
+                    if isolated_request.persona_transport == "native-file"
+                    else None
+                ),
+                persona_file_placeholder=PERSONA_FILE_ARG_PLACEHOLDER,
                 output_schema_text=isolated_request.output_schema_text,
                 output_schema_path=isolated_request.output_schema,
                 manifest_argv=public_argv(isolated_request),
@@ -1320,6 +1371,10 @@ def main(
             config, source = load_config(workspace=config_workspace)
             validate_config(config)
 
+        if parsed.subcommand == "personas":
+            workspace = resolve_workspace(global_options.cwd)
+            return emit_personas(workspace, json_mode=global_options.json_mode, stdout=stdout)
+
         discovery_profile: profiles.ProfileResolution | None = None
         discovery_snapshot: JsonObject | None = None
         if parsed.subcommand in {"models", "capabilities"}:
@@ -1425,7 +1480,7 @@ def main(
             # through the normal request build and execution path.
             parsed = resume_plan.parsed
             global_options = parsed.global_options
-        request = request_from_parsed(parsed, config, stdin)
+        request = request_from_parsed(parsed, config, stdin, stderr)
         if resume_plan is not None:
             request = resume_command.apply_resume_to_request(request, resume_plan)
         if request.dry_run:

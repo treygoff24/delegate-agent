@@ -130,6 +130,21 @@ _PROMPT_FILE_OPTION = OptionSpec(
     "PATH",
     "Read the prompt from PATH instead of trailing prompt text.",
 )
+PERSONA_OPTIONS: tuple[OptionSpec, ...] = (
+    OptionSpec(
+        "--persona",
+        "NAME",
+        "Inject the named Markdown persona from the workspace-local or global persona directory.",
+    ),
+    OptionSpec(
+        "--no-persona", None, "Disable persona injection when composing a launch or resume."
+    ),
+    OptionSpec(
+        "--allow-repo-persona",
+        None,
+        "Allow a workspace-local persona in safe mode (refused by default).",
+    ),
+)
 _REASONING_EFFORT_OPTION = OptionSpec(
     "--reasoning-effort",
     "LEVEL",
@@ -750,7 +765,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         examples=("delegate run --input-json task.json",),
         notes=(
             "Accepted JSON keys: engine, mode, model, cwd, prompt, isolation, "
-            "reasoningEffort, fast, outputSchema, progress, forbidCommit.",
+            "reasoningEffort, fast, outputSchema, progress, forbidCommit, persona, allowRepoPersona.",
             "Use this for long prompts or programmatic invocation.",
         ),
         see_also=("cursor", "codex", "droid", "claude", "grok", "agent-help"),
@@ -789,6 +804,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
                 None,
                 "Creation-only; rejected when resume attaches to a persistent worktree.",
             ),
+            *PERSONA_OPTIONS,
             OptionSpec(
                 "--dry-run", None, "Show the resolved continuation launch without executing."
             ),
@@ -1615,6 +1631,23 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         see_also=("describe", "help"),
         unsupported_global_options=("--auth-profile",),
     ),
+    "personas": CommandSpec(
+        name="personas",
+        summary="List workspace-local and global named personas.",
+        usage=("delegate [--cwd PATH] [--json] personas",),
+        examples=("delegate personas", "delegate --json personas"),
+        notes=(
+            "Workspace-local .delegate/personas/*.md files shadow global ~/.delegate/personas/*.md files.",
+            "Invalid files are reported as rows with an invalid reason; previews are bounded and escaped.",
+        ),
+        see_also=("cursor", "claude", "dry-run", "describe"),
+        unsupported_global_options=(
+            "--isolation",
+            "--pass-through",
+            "--completion-report",
+            "--auth-profile",
+        ),
+    ),
     "help": CommandSpec(
         name="help",
         summary="Show the overview, or focused help for a command path.",
@@ -1643,6 +1676,34 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         unsupported_global_options=("--auth-profile",),
     ),
 }
+
+# Keep the persona option spelling and descriptions identical for every engine
+# and dry-run surface. Focused call specs are derived from these base specs.
+for _persona_command in (
+    "cursor",
+    "kimi",
+    "codex",
+    "claude",
+    "grok",
+    "devin",
+    "opencode",
+    "pi",
+    "omp",
+    "droid",
+    "dry-run",
+):
+    _spec = COMMAND_SPECS[_persona_command]
+    COMMAND_SPECS[_persona_command] = CommandSpec(
+        name=_spec.name,
+        summary=_spec.summary,
+        usage=_spec.usage,
+        arguments=_spec.arguments,
+        options=(*_spec.options, *PERSONA_OPTIONS),
+        examples=_spec.examples,
+        notes=_spec.notes,
+        see_also=_spec.see_also,
+        unsupported_global_options=_spec.unsupported_global_options,
+    )
 
 
 _CALL_HIDDEN_OPTION_FLAGS = frozenset(
@@ -1865,6 +1926,7 @@ def render_overview_text() -> str:
         "delegate [--json] [--auth-profile NAME] models <engine> [--live]",
         "delegate [--json] [--auth-profile NAME] capabilities [refresh [<engine> ...]]",
         "delegate [--json] describe [--summary]",
+        "delegate [--cwd PATH] [--json] personas",
         "delegate agent-help",
         "delegate help [<command> [<subcommand>]]",
     ]

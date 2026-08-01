@@ -64,7 +64,7 @@ workflow result in `result.json`. Injected globals are `agent`, `pipeline`,
 
 ## Core DSL
 
-- `agent(prompt, engine=None, mode=None, model=None, effort=None, schema=None, label=None, phase=None, isolation=None, passthrough=False, timeout=None, retries=None, fast=None)` launches a real Delegate child run and returns parent-facing output, a validated schema object, or `None`. `fast=True` requests Codex Fast, `fast=False` requests Standard, and `None` inherits; non-Codex fallback candidates ignore this Codex-only preference. `fast` is appended to preserve positional compatibility with existing workflow scripts.
+- `agent(prompt, engine=None, mode=None, model=None, effort=None, schema=None, label=None, phase=None, isolation=None, passthrough=False, timeout=None, retries=None, fast=None, persona=None, allow_repo_persona=False)` launches a real Delegate child run and returns parent-facing output, a validated schema object, or `None`. `fast=True` requests Codex Fast, `fast=False` requests Standard, and `None` inherits; non-Codex fallback candidates ignore this Codex-only preference. `persona` resolves one named persona from the source workspace; `allow_repo_persona=True` opts into workspace-local personas in safe mode.
 - `pipeline(items, stage1, ...)` runs per-item stage chains with no inter-stage barrier. A throwing stage drops that item to `None` and skips later stages for that item.
 - `parallel([lambda: ...])` is a barrier and preserves order. Ordinary item failures become `None` slots; gate checkpoints propagate to the supervisor.
 - `phase(title)` emits a progress event.
@@ -75,6 +75,17 @@ workflow result in `result.json`. Injected globals are `agent`, `pipeline`,
 Workflow `engine` values and `workflows.engineCaps` keys accept `cursor`,
 `droid`, `codex`, `claude`, `grok`, `devin`, `opencode`, `pi`, `omp`, and
 `kimi`.
+
+### Persona digest pinning
+
+When `agent(persona="editor")` first resolves `editor.md`, the workflow
+structural key and `agent_started` journal event include the resolved bytes'
+SHA-256 digest. Replay therefore returns the result only for the same persona
+version: editing the file creates a cache miss instead of mixing two versions
+under the same name. Dry-runs expose persona name/source/digest/byte count but
+never write the persona body. Child input JSON carries `persona` and
+`allowRepoPersona`; the normal run manifest and inspection projections expose
+non-sensitive persona metadata only.
 
 ## Gates and resume
 

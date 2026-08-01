@@ -208,6 +208,11 @@ def build_run_summary(
             "terminalStatus",
             "resumedFrom",
             "worktreeAttachment",
+            "personaName",
+            "personaSource",
+            "personaTransport",
+            "personaDigest",
+            "personaFile",
         ):
             value = manifest.get(key)
             if value is not None:
