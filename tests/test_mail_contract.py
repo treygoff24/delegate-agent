@@ -186,15 +186,73 @@ class MailContractTests(CommandTestBase):
         self.assertNotIn("body", record["message"])
 
     def test_human_inbox_prints_framing_before_message_bodies(self):
-        code, _stdout, stderr = self.run_main(
-            ["--cwd", str(self.workspace), "mail", "send", "--to", "coordinator", "hello"]
+        code, send_stdout, stderr = self.run_main(
+            [
+                "--cwd",
+                str(self.workspace),
+                "mail",
+                "send",
+                "--to",
+                "coordinator",
+                "--subject",
+                "inbox summary",
+                "hello from the inbox",
+            ]
         )
         self.assertEqual(code, 0, stderr)
+        self.assertIn("sent ", send_stdout)
+        self.assertIn(" seq=1", send_stdout)
+        self.assertIn("  coordinator: delivered", send_stdout)
         code, stdout, stderr = self.run_main(["--cwd", str(self.workspace), "mail", "inbox"])
         self.assertEqual(code, 0, stderr)
         lines = stdout.splitlines()
-        self.assertEqual(json.loads(lines[0])["framing"], mail.COORDINATOR_FRAMING)
-        self.assertEqual(json.loads(lines[1])["body"], "hello")
+        self.assertEqual(
+            lines[0],
+            "mail framing (coordinator, tier 1): " + mail.COORDINATOR_FRAMING["text"],
+        )
+        self.assertIn("from coordinator sent ", lines[1])
+        self.assertIn("subject 'inbox summary': hello from the inbox", lines[1])
+        self.assertNotIn('{"framing"', stdout)
+        self.assertNotIn('{"body"', stdout)
+
+    def test_human_read_and_status_render_prose(self):
+        body = "first line\nsecond line"
+        with mock.patch.object(mail, "_next_message_id", return_value=self._MESSAGE_ID):
+            code, _stdout, stderr = self.run_main(
+                [
+                    "--cwd",
+                    str(self.workspace),
+                    "mail",
+                    "send",
+                    "--to",
+                    "coordinator",
+                    "--subject",
+                    "human message",
+                    body,
+                ]
+            )
+        self.assertEqual(code, 0, stderr)
+
+        code, stdout, stderr = self.run_main(
+            ["--cwd", str(self.workspace), "mail", "read", self._MESSAGE_ID]
+        )
+        self.assertEqual(code, 0, stderr)
+        self.assertIn("mail framing (coordinator, tier 1):", stdout)
+        self.assertIn(f"message: {self._MESSAGE_ID}", stdout)
+        self.assertIn("from: coordinator", stdout)
+        self.assertIn("subject: human message", stdout)
+        self.assertIn("body:\nfirst line\nsecond line", stdout)
+        self.assertNotIn('{"framing"', stdout)
+        self.assertNotIn('{"message"', stdout)
+
+        code, stdout, stderr = self.run_main(
+            ["--cwd", str(self.workspace), "mail", "status", self._MESSAGE_ID]
+        )
+        self.assertEqual(code, 0, stderr)
+        self.assertIn(f"message {self._MESSAGE_ID} seq=1", stdout)
+        self.assertIn("  coordinator: delivered (read)", stdout)
+        self.assertNotIn('{"framing"', stdout)
+        self.assertNotIn('{"message"', stdout)
 
     def test_watch_emits_an_unreadable_ndjson_record(self):
         malformed = (
@@ -235,6 +293,20 @@ class MailContractTests(CommandTestBase):
             json.loads(output.getvalue()),
             {"schema": mail.MAIL_WATCH_SCHEMA, "timeout": 600, "type": "timeout"},
         )
+
+    def test_watch_once_sleeps_only_until_its_deadline(self):
+        output = io.StringIO()
+        with (
+            mock.patch.object(mail.time, "monotonic", side_effect=[0.0, 0.0, 0.25]),
+            mock.patch.object(mail.time, "sleep") as sleep,
+        ):
+            code = mail.watch(
+                self.registry_root,
+                mail.MailCommand(action="watch", once=True, timeout=0.25, interval_ms=1000),
+                stdout=output,
+            )
+        self.assertEqual(code, 124)
+        sleep.assert_called_once_with(0.25)
 
     def test_standard_error_envelope_is_sorted_and_exact(self):
         code, stdout, stderr = self.run_main(

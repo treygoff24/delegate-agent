@@ -11,10 +11,8 @@ from pathlib import Path
 from delegate_agent import cli, mail, profile_guard, run_registry
 from tests.delegate_commands_test_base import CommandTestBase
 
-# The plan's five-harness list is the planning-time CANDIDATE set; the wave-2
-# audit (adjudicated 2026-08-01, recorded in the plan) verified only claude and
-# codex — grok/cursor/droid lack evidenced Stop-hook injection and degrade to
-# pull. Promoting a row requires new audit evidence, not just editing this set.
+# Stop-hook injection is verified only for Claude and Codex. Promote another
+# adapter only after launch-scoped, model-visible hook evidence is recorded.
 WAVE_2_VERIFIED = {"claude", "codex"}
 WAVE_2_CANDIDATES_DEGRADED = {"grok", "cursor", "droid"}
 

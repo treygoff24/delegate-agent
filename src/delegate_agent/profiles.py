@@ -231,10 +231,7 @@ def child_environment(
         env.pop("DELEGATE_SOURCE_ROOT", None)
         env.pop("DELEGATE_EXECUTION_ROOT", None)
         env.pop("WORKSPACE_ROOT", None)
-        # A nested child must not inherit its parent's mail authority. The
-        # parent rebinds a fresh identity immediately after registration.
-        env.pop("DELEGATE_RUN_ID", None)
-        env.pop("DELEGATE_MAIL_SELF", None)
+        strip_mail_identity(env)
     if base:
         env.update(base)
     if overrides:
@@ -247,7 +244,7 @@ def child_environment(
 
 
 def strip_mail_identity(env: dict[str, str] | None) -> None:
-    """Prevent every dispatched child from inheriting a mail identity."""
+    """Prevent a dispatched child from inheriting a mail identity."""
     if env is not None:
         env.pop("DELEGATE_RUN_ID", None)
         env.pop("DELEGATE_MAIL_SELF", None)

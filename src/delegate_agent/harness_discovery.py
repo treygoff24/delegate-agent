@@ -7,6 +7,7 @@ are deliberately layered on later.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -43,6 +44,7 @@ CONFIGURED_SELECTOR_MISSING = "configured_selector_missing"
 FUTURE_SCHEMA_CACHE_WARNING = (
     "discovery cache was written by a newer delegate; probing without reading or replacing it"
 )
+_DISCOVERY_CACHE_MEMO: dict[tuple[Path, int, int], JsonObject | None] = {}
 
 
 class FutureCacheSchemaError(ValueError):
@@ -1445,6 +1447,25 @@ def discovery_cache_path(profile_name: str | None, *, home: Path | None = None) 
     return root / f"profile-{digest}.json"
 
 
+def _clear_discovery_cache_memo(path: Path) -> None:
+    for key in tuple(_DISCOVERY_CACHE_MEMO):
+        if key[0] == path:
+            del _DISCOVERY_CACHE_MEMO[key]
+
+
+def _discovery_cache_memo_key(path: Path) -> tuple[Path, int, int] | None:
+    try:
+        stat_result = path.stat()
+    except OSError:
+        _clear_discovery_cache_memo(path)
+        return None
+    key = (path, stat_result.st_mtime_ns, stat_result.st_size)
+    for cached_key in tuple(_DISCOVERY_CACHE_MEMO):
+        if cached_key[0] == path and cached_key != key:
+            del _DISCOVERY_CACHE_MEMO[cached_key]
+    return key
+
+
 def cache_schema_is_future(profile_name: str | None, *, home: Path | None = None) -> bool:
     """Report whether the on-disk cache was written by a newer delegate.
 
@@ -1471,9 +1492,15 @@ def load_discovery_cache(
 ) -> JsonObject | None:
     """Load a valid profile snapshot; malformed data is treated as absent."""
     path = discovery_cache_path(profile_name, home=home)
+    memo_key = _discovery_cache_memo_key(path)
+    if memo_key is None:
+        return None
+    if memo_key in _DISCOVERY_CACHE_MEMO:
+        return copy.deepcopy(_DISCOVERY_CACHE_MEMO[memo_key])
     try:
         snapshot = private_io.read_json_object(path)
         if snapshot is None:
+            _DISCOVERY_CACHE_MEMO[memo_key] = None
             return None
         validate_snapshot(
             snapshot,
@@ -1481,16 +1508,19 @@ def load_discovery_cache(
             allow_unknown_harnesses=True,
         )
     except (private_io.RegistryJsonError, ValueError):
+        _DISCOVERY_CACHE_MEMO[memo_key] = None
         return None
 
     harnesses = snapshot["harnesses"]
     if not isinstance(harnesses, dict):  # validate_snapshot already enforces this.
+        _DISCOVERY_CACHE_MEMO[memo_key] = None
         return None
     if any(harness not in KNOWN_ENGINES for harness in harnesses):
         snapshot = dict(snapshot)
         snapshot["harnesses"] = {
             harness: record for harness, record in harnesses.items() if harness in KNOWN_ENGINES
         }
+    _DISCOVERY_CACHE_MEMO[memo_key] = copy.deepcopy(snapshot)
     return snapshot
 
 
@@ -1523,6 +1553,7 @@ def write_discovery_cache(
             raise FutureCacheSchemaError(FUTURE_SCHEMA_CACHE_WARNING)
 
     private_io.write_json_atomic(path, snapshot, before_replace=refuse_to_replace_a_newer_cache)
+    _clear_discovery_cache_memo(path)
     return path
 
 

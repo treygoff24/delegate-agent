@@ -304,6 +304,9 @@ class MailGatingTests(CommandTestBase):
     def test_mail_storage_failure_refuses_work_launch_before_run_or_alias_claim(self):
         with tempfile.TemporaryDirectory(prefix="delegate-mail-storage-") as tmp:
             workspace = Path(tmp)
+            Path(self._config_env["DELEGATE_CONFIG"]).write_text(
+                json.dumps(self._config(True)), encoding="utf-8"
+            )
             # Cursor's default argvPrefix is ["agent"], so the fake must be
             # named exactly that — any other name makes this test depend on the
             # host's real cursor install (green locally, exit 3 on CI).
@@ -322,6 +325,63 @@ class MailGatingTests(CommandTestBase):
             index = run_registry.load_index(registry_root)
             self.assertEqual(index["runs"], {})
             self.assertEqual(list((registry_root / "aliases").iterdir()), [])
+
+    def test_mail_disabled_launch_defers_storage_and_wiring_but_keeps_lane_identity(self):
+        with tempfile.TemporaryDirectory(prefix="delegate-mail-disabled-launch-") as tmp:
+            root = Path(tmp)
+            workspace = (root / "workspace").resolve()
+            workspace.mkdir()
+            env_path = root / "child-env.json"
+            fake = root / "fake-agent"
+            fake.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, os\n"
+                "from pathlib import Path\n"
+                "Path(os.environ['FAKE_ENV_LOG']).write_text(\n"
+                "    json.dumps({key: value for key, value in os.environ.items() "
+                "if key.startswith('DELEGATE_')}), encoding='utf-8'\n"
+                ")\n"
+                "print(json.dumps([{'type': 'result', 'result': 'ok', 'permission_denials': []}]))\n",
+                encoding="utf-8",
+            )
+            fake.chmod(0o755)
+            config = self._config(False)
+            config["cursor"] = {**config["cursor"], "argvPrefix": [str(fake)]}
+            config["profiles"] = {
+                **config["profiles"],
+                "default": "test",
+                "definitions": {"test": {"env": {"FAKE_ENV_LOG": str(env_path)}}},
+            }
+            Path(self._config_env["DELEGATE_CONFIG"]).write_text(
+                json.dumps(config), encoding="utf-8"
+            )
+
+            with (
+                mock.patch.object(mail, "prepare_mail_storage") as prepare_storage,
+                mock.patch.object(mail, "wire_work_mail_launch") as wire_launch,
+            ):
+                code, _stdout, stderr = self.run_main(
+                    ["--cwd", str(workspace), "cursor", "work", "prompt"]
+                )
+
+            self.assertEqual(code, 0, stderr)
+            prepare_storage.assert_not_called()
+            wire_launch.assert_not_called()
+            registry_root = workspace / ".delegate"
+            self.assertFalse(mail.mail_root(registry_root).exists())
+            manifest_path = next((registry_root / "runs").glob("*/manifest.json"))
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            lane_env = json.loads(env_path.read_text(encoding="utf-8"))
+            self.assertEqual(lane_env["DELEGATE_RUN_ID"], manifest["runId"])
+            self.assertEqual(lane_env["DELEGATE_MAIL_SELF"], manifest["alias"])
+
+            sent = mail.send(
+                registry_root,
+                mail.MailCommand(action="send", to="coordinator", body="lane report"),
+                env=lane_env,
+            )
+            self.assertTrue(sent["ok"])
+            self.assertTrue(mail.mail_root(registry_root).is_dir())
 
     def test_work_pass_through_strips_profile_supplied_mail_identity(self):
         with tempfile.TemporaryDirectory(prefix="delegate-mail-pass-through-") as tmp:

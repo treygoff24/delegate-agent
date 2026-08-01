@@ -196,6 +196,8 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
             tempfile.TemporaryDirectory() as fake_home,
             self._fake_agent(binary="claude") as fake_agent,
         ):
+            config_path = Path(fake_home) / "config.json"
+            config_path.write_text('{"mail":{"enabled":true}}', encoding="utf-8")
             args_path = Path(fake_home) / "args"
             env_path = Path(fake_home) / "env"
             owner_id, owner_alias, _worktree_path, _branch = self._owner(
@@ -207,6 +209,7 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
                     "PATH": fake_agent + os.pathsep + os.environ.get("PATH", ""),
                     "FAKE_CAPTURE_ARGS": str(args_path),
                     "FAKE_CAPTURE_ENV": str(env_path),
+                    "DELEGATE_CONFIG": str(config_path),
                 },
             ):
                 code, payload, stderr = self._resume(repo_path, fake_home, owner_alias, "continue")

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "delegate-agent-cli"
-version = "0.26.0"
+version = "0.27.0"
 description = "A tiny CLI for delegating bounded agent tasks across coding-agent runtimes."
 readme = "README.md"
 requires-python = ">=3.11"

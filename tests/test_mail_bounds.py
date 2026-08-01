@@ -6,6 +6,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from delegate_agent import mail, private_io, run_registry
 from delegate_agent.errors import DelegateError
@@ -64,6 +65,32 @@ class MailBoundsTests(unittest.TestCase):
             ),
             "message_too_large",
         )
+
+    def test_file_body_stops_at_the_bound_before_rejecting_it(self):
+        class TrackingFile:
+            def __init__(self):
+                self.read_sizes: list[int] = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, size: int) -> bytes:
+                self.read_sizes.append(size)
+                return b"x" * size
+
+        handle = TrackingFile()
+        with mock.patch("delegate_agent.mail_core.Path.open", return_value=handle):
+            self.assert_mail_error(
+                lambda: mail.send(
+                    self.registry_root,
+                    mail.MailCommand(action="send", to=mail.COORDINATOR_BOX, file="large"),
+                ),
+                "message_too_large",
+            )
+        self.assertEqual(handle.read_sizes, [mail.MAIL_MAX_BODY_BYTES + 1])
 
     def test_subject_boundary_accepts_200_chars_and_rejects_one_more(self):
         result = mail.send(
@@ -156,6 +183,45 @@ class MailBoundsTests(unittest.TestCase):
                 lines = output.getvalue().splitlines()
                 self.assertEqual(len(lines), mail.MAIL_MAX_WATCH_ITEMS)
                 self.assertTrue(all(json.loads(line)["type"] == "mail" for line in lines))
+
+    def test_non_once_watch_emits_static_mail_only_once(self):
+        self.write_inbox_messages(1)
+        output = io.StringIO()
+        with (
+            mock.patch.object(mail.time, "sleep", side_effect=StopIteration),
+            self.assertRaises(StopIteration),
+        ):
+            mail.watch(
+                self.registry_root,
+                mail.MailCommand(action="watch", interval_ms=1),
+                stdout=output,
+            )
+        self.assertEqual(len(output.getvalue().splitlines()), 1)
+
+    def test_non_once_watch_emits_a_new_arrival_mid_watch(self):
+        self.write_inbox_messages(1)
+        output = io.StringIO()
+
+        sleep_calls = 0
+
+        def add_message_then_stop(_delay: float) -> None:
+            nonlocal sleep_calls
+            sleep_calls += 1
+            if sleep_calls == 1:
+                self.write_inbox_messages(2)
+                return
+            raise StopIteration
+
+        with (
+            mock.patch.object(mail.time, "sleep", side_effect=add_message_then_stop),
+            self.assertRaises(StopIteration),
+        ):
+            mail.watch(
+                self.registry_root,
+                mail.MailCommand(action="watch", interval_ms=1),
+                stdout=output,
+            )
+        self.assertEqual(len(output.getvalue().splitlines()), 2)
 
 
 if __name__ == "__main__":

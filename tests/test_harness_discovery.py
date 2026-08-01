@@ -745,6 +745,24 @@ class DiscoveryCacheTests(unittest.TestCase):
             self.assertIsNone(self.discovery.load_discovery_cache("work", home=home))
             self.assertTrue(path.exists())
 
+    def test_discovery_cache_load_memo_invalidates_on_stat_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            snapshot = self._snapshot("work")
+            path = self.discovery.write_discovery_cache("work", snapshot, home=home)
+            with mock.patch.object(
+                self.discovery.private_io,
+                "read_json_object",
+                wraps=self.discovery.private_io.read_json_object,
+            ) as read_json:
+                self.assertEqual(self.discovery.load_discovery_cache("work", home=home), snapshot)
+                self.assertEqual(self.discovery.load_discovery_cache("work", home=home), snapshot)
+                self.assertEqual(read_json.call_count, 1)
+
+                path.write_text(json.dumps(snapshot) + "\n", encoding="utf-8")
+                self.assertEqual(self.discovery.load_discovery_cache("work", home=home), snapshot)
+                self.assertEqual(read_json.call_count, 2)
+
     def test_implicit_and_literal_default_profiles_use_independent_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)

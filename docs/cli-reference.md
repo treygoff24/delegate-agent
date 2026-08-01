@@ -1013,7 +1013,7 @@ delegate runs prune [--older-than DAYS] [--dry-run]
 delegate ps [--harness HARNESS] [--group NAME] [--limit N]
 delegate snapshot [--latest HARNESS] [--no-redact] <handle>
 delegate run-output [--latest HARNESS] <handle> [--completion-report] [--stdout] [--stderr] [--tail N] [--max-chars N] [--raw] [--no-redact]
-delegate resume [--engine ENGINE] [--model MODEL] [--reasoning-effort LEVEL] [--timeout SEC] [--dry-run] <handle> [extra instructions...]
+delegate resume [--engine ENGINE] [--model MODEL] [--reasoning-effort LEVEL] [--fast|--no-fast] [--progress|--no-progress] [--timeout SEC] [--output-schema PATH|--no-output-schema] [--include-dirty] [--persona NAME|--no-persona] [--allow-repo-persona] [--mail-push] [--dry-run] <handle> [extra instructions...]
 delegate wait <handle>... [--latest HARNESS] [--group NAME] [--timeout SEC] [--interval SEC] [--completion-report]
 delegate cancel <handle>...
 ```

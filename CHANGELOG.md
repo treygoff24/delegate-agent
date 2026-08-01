@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-08-01
+
+### Changed
+
+- Split the mail module into `mail_core` (mailbox) and `mail_push` (hook
+  protocol) behind a stable `mail` facade; extracted the runner's mail
+  sentinel capture and push finalization; unified the three launch seams'
+  mail preparation in one helper with ownership transfer kept at the seams;
+  `parse_prompt_tail` returns a named, tuple-compatible `PromptTail`.
+- Mail-disabled launches no longer touch the filesystem for mail (lanes keep
+  their identity and storage materializes lazily on first send); workspace
+  resolution runs once per launch; the discovery cache is memoized per
+  process; the directory retry baseline is captured only when a codex
+  fallback profile is configured; watch sleeps are bounded by the remaining
+  deadline; non-once watches dedupe emitted messages and skip unchanged
+  inboxes; mail bodies stream with a bounded read.
+- All mail subcommands render prose in human mode (watch keeps its
+  documented NDJSON contract); JSON output is byte-unchanged.
+
+### Removed
+
+- Dead code from the framer migration and mail rounds: unused safe-prefix
+  helpers, the write-only `prompt_framed` field, and unreferenced mail
+  helpers; development-history comments replaced with durable behavior
+  statements.
+
 ## [0.26.0] - 2026-08-01
 
 ### Added
@@ -862,6 +888,7 @@ Usage-audit fix wave: 82 sessions and 1,241 delegate invocations from one week o
 
 - Releases before 0.1.3 predate this changelog.
 
+[0.27.0]: https://github.com/treygoff24/delegate-agent/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/treygoff24/delegate-agent/compare/v0.25.0...v0.26.0
 [0.25.0]: https://github.com/treygoff24/delegate-agent/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/treygoff24/delegate-agent/compare/v0.23.0...v0.24.0
