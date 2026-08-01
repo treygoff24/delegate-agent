@@ -172,11 +172,8 @@ def build_cursor_argv(
     stream_capture: bool = True,
     call_read_only: bool = False,
     pure: bool = False,
-    prompt_framed: bool = False,
 ) -> list[str]:
     _reject_pure("cursor", mode, pure)
-    if mode == MODE_SAFE and not prompt_framed:
-        prompt = prefix_cursor_safe_prompt(prompt)
     argv = [*prefix, "--workspace", workspace, "-p", "--trust"]
     if mode == MODE_WORK:
         argv.extend(["--approve-mcps", "--force"])
@@ -206,11 +203,8 @@ def build_droid_argv(
     prompt_transport: str = PROMPT_TRANSPORT_ARGV,
     call_read_only: bool = False,
     pure: bool = False,
-    prompt_framed: bool = False,
 ) -> list[str]:
     _reject_pure("droid", mode, pure)
-    if mode == MODE_SAFE and not prompt_framed:
-        prompt = prefix_droid_safe_prompt(prompt)
     argv = [binary, "exec", "--cwd", workspace]
     if mode == MODE_WORK:
         argv.append("--skip-permissions-unsafe")
@@ -246,11 +240,8 @@ def build_kimi_argv(
     *,
     stream_capture: bool = True,
     pure: bool = False,
-    prompt_framed: bool = False,
 ) -> list[str]:
     _reject_pure("kimi", mode, pure)
-    if mode == MODE_SAFE and not prompt_framed:
-        prompt = prefix_kimi_safe_prompt(prompt)
     argv = [str(kimi["binary"])]
     if mode not in (MODE_SAFE, MODE_WORK, MODE_CALL):
         validate_mode(mode)

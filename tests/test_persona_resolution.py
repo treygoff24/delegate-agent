@@ -41,6 +41,27 @@ class PersonaResolutionTests(unittest.TestCase):
             self.assertEqual(resolved.source, "workspace")
             self.assertEqual(resolved.text, "workspace persona")
 
+    def test_symlinked_persona_root_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "source"
+            target = Path(tmp) / "target"
+            target.mkdir(parents=True)
+            (target / "editor.md").write_text("persona", encoding="utf-8")
+            (source / ".delegate").mkdir(parents=True)
+            os.symlink(target, source / ".delegate" / "personas")
+
+            with self.assertRaises(DelegateError) as caught:
+                request_build.personas.resolve_persona(source, "editor")
+            self.assertEqual(caught.exception.error, "invalid_persona")
+
+    def test_persona_leaf_validation_uses_the_opened_descriptor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp)
+            self._persona(source, "editor", "descriptor checked")
+            with mock.patch.object(Path, "read_bytes", side_effect=AssertionError("path read")):
+                resolved = request_build.personas.resolve_persona(source, "editor")
+            self.assertEqual(resolved.text, "descriptor checked")
+
     def test_resolution_uses_source_workspace_under_each_isolation_mode(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

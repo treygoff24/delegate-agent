@@ -63,30 +63,22 @@ class ResumeSizeGuardTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as workspace:
             for engine in ("cursor", "kimi", "omp"):
                 with self.subTest(engine=engine):
-                    request = request_build.build_request(
-                        engine,
-                        "safe",
-                        None,
-                        ResolvedWorkspace(workspace, "directory"),
-                        "x" * limit,
-                        config.embedded_default_config(),
-                        False,
-                    )
-                    final_prompt = request.argv[-1]
-                    final_bytes = len(final_prompt.encode("utf-8"))
-                    if final_bytes > limit:
-                        with self.assertRaises(DelegateError) as safe_ctx:
-                            resume_command.apply_resume_to_request(
-                                request,
-                                resume_command.ResumePlan(
-                                    parsed=ParsedCommand("resume"),
-                                    resumed_from={"runId": "del_source"},
-                                ),
-                            )
-                        self.assertEqual(safe_ctx.exception.error, "resume_prompt_too_large")
-                    else:
-                        self.assertEqual(engine, "omp")
-                        resume_command.enforce_resume_prompt_size(engine, final_prompt)
+                    # The framer is the sole composer: production builds pass
+                    # frame_prompt=True, and the framed-size guard must see the
+                    # skill/safe framing bytes, so a raw prompt at the argv
+                    # limit is refused at build time before any resume logic.
+                    with self.assertRaises(DelegateError) as framed_ctx:
+                        request_build.build_request(
+                            engine,
+                            "safe",
+                            None,
+                            ResolvedWorkspace(workspace, "directory"),
+                            "x" * limit,
+                            config.embedded_default_config(),
+                            False,
+                            frame_prompt=True,
+                        )
+                    self.assertEqual(framed_ctx.exception.error, "prompt_too_large")
 
                     attached_prompt = worktree_execution._persistent_prompt(
                         "x" * limit,

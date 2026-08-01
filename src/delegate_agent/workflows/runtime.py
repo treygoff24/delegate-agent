@@ -55,6 +55,10 @@ class _MissingType:
 _MISSING = _MissingType()
 
 
+class PersonaDigestMismatch(RuntimeError):
+    """A workflow child resolved different persona bytes than its parent pinned."""
+
+
 class BudgetExceeded(RuntimeError):
     pass
 
@@ -757,6 +761,7 @@ class WorkflowDsl:
                 scope=path,
                 dryRun=True,
                 personaDigest=persona_resolution.digest if persona_resolution is not None else None,
+                personaSource=persona_resolution.source if persona_resolution is not None else None,
             )
             self.state.append_event("agent_finished", key=key, scope=path, result=placeholder)
             return placeholder
@@ -783,6 +788,7 @@ class WorkflowDsl:
                 engine=engines,
                 mode=resolved_mode,
                 personaDigest=persona_resolution.digest if persona_resolution is not None else None,
+                personaSource=persona_resolution.source if persona_resolution is not None else None,
             )
             for candidate in engines:
                 try:
@@ -802,6 +808,8 @@ class WorkflowDsl:
                         persona=persona_resolution,
                         allow_repo_persona=allow_repo_persona,
                     )
+                except PersonaDigestMismatch:
+                    raise
                 except Exception as exc:
                     self.state.append_event(
                         "agent_failed",
@@ -991,6 +999,7 @@ class WorkflowDsl:
                 workflow_agent_key=key,
                 persona=persona,
                 allow_repo_persona=allow_repo_persona,
+                expected_persona_digest=persona.digest if persona is not None else None,
             )
         workflow_schema.validate_schema_subset(schema)
         attempts = retries if retries is not None else _structured_retries(self.state.config)
@@ -1020,6 +1029,7 @@ class WorkflowDsl:
                         workflow_agent_key=key,
                         persona=persona,
                         allow_repo_persona=allow_repo_persona,
+                        expected_persona_digest=persona.digest if persona is not None else None,
                     )
                 finally:
                     Path(schema_path).unlink(missing_ok=True)
@@ -1040,11 +1050,14 @@ class WorkflowDsl:
                     workflow_agent_key=key,
                     persona=persona,
                     allow_repo_persona=allow_repo_persona,
+                    expected_persona_digest=persona.digest if persona is not None else None,
                 )
             try:
                 value = workflow_schema.parse_json_tolerant(text or "")
                 workflow_schema.validate_value(value, schema)
                 return value
+            except PersonaDigestMismatch:
+                raise
             # Child output is untrusted; parse/validation blowups must not kill the supervisor.
             except Exception as exc:
                 prior_output = text or ""
@@ -1074,6 +1087,7 @@ class WorkflowDsl:
         workflow_agent_key: str,
         persona: personas.PersonaResolution | None = None,
         allow_repo_persona: bool = False,
+        expected_persona_digest: str | None = None,
     ) -> str | None:
         payload: JsonObject = {
             "engine": engine,
@@ -1095,6 +1109,8 @@ class WorkflowDsl:
         if persona is not None:
             payload["persona"] = persona.name
             payload["allowRepoPersona"] = allow_repo_persona
+        if expected_persona_digest is not None:
+            payload["expectedPersonaDigest"] = expected_persona_digest
         payload["workflowAgentKey"] = workflow_agent_key
         payload["promptInstructionMode"] = (
             PROMPT_INSTRUCTION_MODE_SLASH if passthrough else PROMPT_INSTRUCTION_MODE_WRAPPED
@@ -1124,6 +1140,8 @@ class WorkflowDsl:
         text = completed.stdout.decode("utf-8", errors="replace")
         if completed.returncode != 0:
             stderr = completed.stderr.decode("utf-8", errors="replace")[-2000:]
+            if expected_persona_digest is not None and "workflow_persona_digest_mismatch" in text:
+                raise PersonaDigestMismatch("workflow child rejected changed persona bytes")
             raise RuntimeError(
                 stderr or text or f"delegate child failed with {completed.returncode}"
             )
@@ -1133,6 +1151,13 @@ class WorkflowDsl:
             raise RuntimeError(f"delegate child returned invalid JSON: {text[:500]}") from exc
         if not isinstance(result, dict) or not result.get("ok", False):
             return None
+        if (
+            expected_persona_digest is not None
+            and result.get("personaDigest") != expected_persona_digest
+        ):
+            raise PersonaDigestMismatch(
+                "workflow child did not report the parent-pinned persona digest"
+            )
         run_id = result.get("runId")
         if isinstance(run_id, str):
             self.state.append_event("agent_child", engine=engine, runId=run_id)

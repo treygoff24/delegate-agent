@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import tempfile
 import unittest
 from datetime import UTC, datetime
@@ -22,6 +23,7 @@ from delegate_agent import (
 )
 from delegate_agent.cli import main, parse_cli, request_from_parsed
 from delegate_agent.constants import MODE_WORK
+from delegate_agent.errors import DelegateError
 from delegate_agent.isolation import IsolationContext
 from delegate_agent.request_models import Request, ResolvedWorkspace
 
@@ -30,13 +32,26 @@ class PersonaRecordTests(unittest.TestCase):
     persona_text = "Recorded persona bytes: é🌍\n"
 
     def setUp(self) -> None:
+        self.real_persona_path = Path.home() / ".delegate" / "personas" / "editor.md"
+        self.real_persona_bytes = (
+            self.real_persona_path.read_bytes() if self.real_persona_path.exists() else None
+        )
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
+        self.home_patch = mock.patch.dict(os.environ, {"HOME": self.temp.name})
+        self.home_patch.start()
+        self.addCleanup(self.home_patch.stop)
         self.workspace = Path(self.temp.name)
         self.root = run_registry.ensure_registry(self.workspace, workspace_kind="directory")
         persona_dir = Path.home() / ".delegate" / "personas"
         persona_dir.mkdir(parents=True, exist_ok=True)
         (persona_dir / "editor.md").write_text(self.persona_text, encoding="utf-8")
+
+    def tearDown(self) -> None:
+        current = self.real_persona_path.read_bytes() if self.real_persona_path.exists() else None
+        self.assertEqual(
+            current, self.real_persona_bytes, "tests must not alter the real HOME persona"
+        )
 
     def _context(self, run_id: str, alias: str, *, persona: bool = True) -> runner.RunContext:
         return runner.RunContext(
@@ -429,6 +444,72 @@ class PersonaRecordTests(unittest.TestCase):
         self.assertNotIn(old_text, drop_request.prompt)
         self.assertNotIn(new_text, drop_request.prompt)
 
+    def test_resume_refuses_manifest_persona_file_traversal_without_reading_canary(self) -> None:
+        alias, run_path = self._seed_resume_run()
+        canary = self.workspace / "canary.txt"
+        canary.write_text("must not reach a prompt", encoding="utf-8")
+        for persona_file in (str(canary), "../../canary.txt"):
+            with self.subTest(persona_file=persona_file):
+                manifest = run_registry.read_json_object(run_path / run_registry.MANIFEST_FILE)
+                manifest["personaFile"] = persona_file
+                run_registry.write_json_atomic(run_path / run_registry.MANIFEST_FILE, manifest)
+                original_reader = resume_command.read_private_text_bounded
+                reads: list[Path] = []
+
+                def observe(
+                    path: Path,
+                    *,
+                    max_bytes: int,
+                    _reads: list[Path] = reads,
+                    _reader=original_reader,
+                ) -> str:
+                    _reads.append(path)
+                    return _reader(path, max_bytes=max_bytes)
+
+                with (
+                    mock.patch.object(
+                        resume_command, "read_private_text_bounded", side_effect=observe
+                    ),
+                    self.assertRaises(DelegateError) as caught,
+                ):
+                    resume_command.build_resume_plan(
+                        parse_cli(["resume", alias]),
+                        ResolvedWorkspace(str(self.workspace), "directory"),
+                        config.embedded_default_config(),
+                        stderr=io.StringIO(),
+                    )
+                self.assertEqual(caught.exception.error, "resume_record_invalid")
+                self.assertNotIn(canary, reads)
+                self.assertEqual(canary.read_text(encoding="utf-8"), "must not reach a prompt")
+
+    def test_resume_refuses_persona_digest_mismatch_and_oversize_artifact(self) -> None:
+        alias, run_path = self._seed_resume_run()
+        manifest = run_registry.read_json_object(run_path / run_registry.MANIFEST_FILE)
+        manifest["personaDigest"] = "0" * 64
+        run_registry.write_json_atomic(run_path / run_registry.MANIFEST_FILE, manifest)
+        with self.assertRaises(DelegateError) as caught:
+            resume_command.build_resume_plan(
+                parse_cli(["resume", alias]),
+                ResolvedWorkspace(str(self.workspace), "directory"),
+                config.embedded_default_config(),
+                stderr=io.StringIO(),
+            )
+        self.assertEqual(caught.exception.error, "resume_record_invalid")
+
+        alias, run_path = self._seed_resume_run()
+        run_registry.write_private_text(
+            run_path / run_registry.PERSONA_TXT_FILE,
+            "x" * (65 * 1024),
+        )
+        with self.assertRaises(DelegateError) as caught:
+            resume_command.build_resume_plan(
+                parse_cli(["resume", alias]),
+                ResolvedWorkspace(str(self.workspace), "directory"),
+                config.embedded_default_config(),
+                stderr=io.StringIO(),
+            )
+        self.assertEqual(caught.exception.error, "resume_record_invalid")
+
     def test_describe_persona_surface_is_allowlisted_and_exact(self) -> None:
         payload = describe_payload.describe_payload(
             config.embedded_default_config(), "embedded-default", self.workspace
@@ -484,7 +565,7 @@ class PersonaRecordTests(unittest.TestCase):
             payload["promptTransforms"][1:3],
             [
                 "Resolves one named persona from the source workspace, with workspace-local files shadowing global files; persona text is prepended in safe mode and uses the documented work-mode transport when available.",
-                "Final framed order is work: skill, safe, persona, worktree note, user, completion suffix, dirty note; safe: skill, persona, safe, worktree note, user, completion suffix, dirty note.",
+                "Final framed order is work: skill, persona, worktree note, user, completion suffix, dirty note; safe: skill, persona, safe, worktree note, user, completion suffix, dirty note.",
             ],
         )
 

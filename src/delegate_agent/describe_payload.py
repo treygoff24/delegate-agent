@@ -929,7 +929,7 @@ def describe_payload(
             "Resolves one named persona from the source workspace, with workspace-local "
             "files shadowing global files; persona text is prepended in safe mode and "
             "uses the documented work-mode transport when available.",
-            "Final framed order is work: skill, safe, persona, worktree note, user, "
+            "Final framed order is work: skill, persona, worktree note, user, "
             "completion suffix, dirty note; safe: skill, persona, safe, worktree note, "
             "user, completion suffix, dirty note.",
             "Optionally appends completion-report instructions unless disabled.",

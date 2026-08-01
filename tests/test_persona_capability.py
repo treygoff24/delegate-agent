@@ -42,6 +42,19 @@ class PersonaCapabilityTests(CommandTestBase):
             record["personaTransports"] = persona_transports
         return {"harnesses": {"claude": record}}
 
+    @staticmethod
+    def _production_discovery(native: bool):
+        return {
+            "harnesses": {
+                "claude": {
+                    "installed": True,
+                    "selector": ["/opt/delegate-test/claude"],
+                    "version": "2.1.220",
+                    "personaTransports": {"native-file": native},
+                }
+            }
+        }
+
     def test_present_and_true_capability_selects_native_file(self):
         request = self._request(self._discovery({"native-file": True}))
 
@@ -89,6 +102,44 @@ class PersonaCapabilityTests(CommandTestBase):
         self.assertEqual(request.argv[0], "old-claude-binary")
         self.assertNotIn("--append-system-prompt-file", request.argv)
         self.assertNotIn("<delegate-persona-file>", request.argv)
+
+    def test_selector_drift_drops_a_positive_native_capability(self):
+        with (
+            mock.patch.object(
+                self.delegate.harness_discovery, "selector_has_drifted", return_value=True
+            ),
+            mock.patch.object(
+                self.delegate.harness_discovery, "cached_version_has_drifted"
+            ) as version,
+        ):
+            request = self._request(self._production_discovery(True))
+        version.assert_not_called()
+        self.assertEqual(request.persona_transport, "prepend")
+        self.assertNotIn("--append-system-prompt-file", request.argv)
+        self.assertEqual(request.warnings, (self._FALLBACK_WARNING,))
+
+    def test_version_drift_drops_a_positive_native_capability(self):
+        with (
+            mock.patch.object(
+                self.delegate.harness_discovery, "selector_has_drifted", return_value=False
+            ),
+            mock.patch.object(
+                self.delegate.harness_discovery, "cached_version_has_drifted", return_value=True
+            ),
+        ):
+            request = self._request(self._production_discovery(True))
+        self.assertEqual(request.persona_transport, "prepend")
+        self.assertNotIn("--append-system-prompt-file", request.argv)
+        self.assertEqual(len(request.warnings), 2)
+        self.assertEqual(request.warnings[-1], self._FALLBACK_WARNING)
+
+    def test_production_shaped_false_capability_stays_prepend(self):
+        with mock.patch.object(
+            self.delegate.harness_discovery, "selector_has_drifted", return_value=False
+        ):
+            request = self._request(self._production_discovery(False))
+        self.assertEqual(request.persona_transport, "prepend")
+        self.assertNotIn("--append-system-prompt-file", request.argv)
 
 
 if __name__ == "__main__":

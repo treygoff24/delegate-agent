@@ -24,7 +24,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TextIO
 
-from delegate_agent import run_registry, worktree_mgmt, worktree_records
+from delegate_agent import personas, run_registry, worktree_mgmt, worktree_records
 from delegate_agent.constants import (
     KNOWN_ENGINES,
     MODE_CALL,
@@ -97,6 +97,38 @@ def _read_record_text(path: Path, *, prompt: bool = False) -> str:
                 f"Recorded prompt exceeds the {RESUME_RECORD_READ_MAX_BYTES}-byte resume bound.",
             ) from exc
         raise _record_invalid(str(exc)) from exc
+
+
+def _read_recorded_persona(run_path: Path, manifest: JsonObject) -> tuple[str, str, str, str, str]:
+    """Load one verified, fixed-name persona artifact from a prior run."""
+    name = _manifest_str(manifest, "personaName")
+    source = _manifest_str(manifest, "personaSource")
+    digest = _manifest_str(manifest, "personaDigest")
+    if (
+        name is None
+        or source not in {"workspace", "global"}
+        or digest is None
+        or _manifest_str(manifest, "personaFile") != run_registry.PERSONA_TXT_FILE
+    ):
+        raise _record_invalid("source run persona metadata is incomplete or invalid")
+    try:
+        personas.validate_persona_name(name)
+    except DelegateError as exc:
+        raise _record_invalid("source run personaName is invalid") from exc
+    if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+        raise _record_invalid("source run personaDigest is invalid")
+    try:
+        text = read_private_text_bounded(
+            run_path / run_registry.PERSONA_TXT_FILE,
+            max_bytes=personas.PERSONA_MAX_BYTES,
+        )
+    except BoundedReadError as exc:
+        raise _record_invalid("source run persona.txt artifact is unavailable") from exc
+    if personas.contains_c0_control(text):
+        raise _record_invalid("source run persona.txt contains a disallowed C0 control character")
+    if hashlib.sha256(text.encode("utf-8")).hexdigest() != digest:
+        raise _record_invalid("source run persona.txt digest does not match its manifest")
+    return name, text, source, digest, str(run_path / run_registry.PERSONA_TXT_FILE)
 
 
 def _read_record_json(path: Path, *, allow_missing: bool = False) -> JsonObject | None:
@@ -631,19 +663,13 @@ def build_resume_plan(
     elif opts.no_persona:
         persona_name = None
     elif persona_name is not None:
-        persona_file = _manifest_str(manifest, "personaFile") or run_registry.PERSONA_TXT_FILE
-        try:
-            persona_record_text = _read_record_text(run_path / persona_file, prompt=True)
-        except BoundedReadError as exc:
-            raise _record_invalid(
-                f"source run persona artifact {persona_file!r} is unavailable"
-            ) from exc
-        persona_record_source = _manifest_str(manifest, "personaSource") or "global"
-        persona_record_digest = _manifest_str(manifest, "personaDigest")
-        actual_digest = hashlib.sha256(persona_record_text.encode("utf-8")).hexdigest()
-        if persona_record_digest is not None and persona_record_digest != actual_digest:
-            raise _record_invalid("source run persona.txt digest does not match its manifest")
-        persona_record_path = str(run_path / persona_file)
+        (
+            persona_name,
+            persona_record_text,
+            persona_record_source,
+            persona_record_digest,
+            persona_record_path,
+        ) = _read_recorded_persona(run_path, manifest)
 
     # Inheritance table (see docs/cli-reference.md): per-field source key,
     # override flag, legacy-absent semantics, and cross-engine drop rule.

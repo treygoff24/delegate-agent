@@ -48,7 +48,6 @@ from delegate_agent.argv_builders import (
     build_omp_argv,
     build_opencode_argv,
     build_pi_argv,
-    prefix_droid_safe_prompt,
     redacted_prompt_argv,
 )
 from delegate_agent.constants import (
@@ -119,6 +118,7 @@ RUN_INPUT_KEYS = {
     "timeout",
     "persona",
     "allowRepoPersona",
+    "expectedPersonaDigest",
 }
 
 OUTPUT_SCHEMA_COMPLETION_REPORT_WARNING = (
@@ -199,7 +199,6 @@ def _prepare_persona_transport(
         configured = opencode.get("defaultAgent")
         if isinstance(configured, str) and configured.strip():
             selected_agent = configured
-    selected_agent = selected_agent or OPENCODE_PERSONA_AGENT
     effective_env = profiles.child_environment(overrides=profile_resolution.env)
     raw_config = effective_env.get("OPENCODE_CONFIG_CONTENT")
     merged: JsonObject
@@ -228,7 +227,8 @@ def _prepare_persona_transport(
             selected_agent,
             ("malformed OPENCODE_CONFIG_CONTENT agent section; using prepend persona transport.",),
         )
-    merged_agent = existing_agents.get(selected_agent)
+    materialized_agent = selected_agent or OPENCODE_PERSONA_AGENT
+    merged_agent = existing_agents.get(materialized_agent)
     if merged_agent is None:
         merged_agent = {}
     if not isinstance(merged_agent, dict):
@@ -253,13 +253,20 @@ def _prepare_persona_transport(
         else persona.text
     )
     merged["agent"] = dict(existing_agents)
-    merged["agent"][selected_agent] = merged_agent
+    merged["agent"][materialized_agent] = merged_agent
     return (
         "agent-config",
         {"OPENCODE_CONFIG_CONTENT": json.dumps(merged, separators=(",", ":"))},
-        selected_agent,
+        materialized_agent,
         (),
     )
+
+
+def _cached_native_persona_transport(discovery: JsonObject | None) -> bool:
+    harnesses = discovery.get("harnesses") if isinstance(discovery, dict) else None
+    record = harnesses.get("claude") if isinstance(harnesses, dict) else None
+    transports = record.get("personaTransports") if isinstance(record, dict) else None
+    return isinstance(transports, dict) and transports.get("native-file") is True
 
 
 # Read-only call is the stateless "judge/completion" contract: text in, text out,
@@ -671,7 +678,7 @@ def effective_prompt(
         segments.append(delegate_runner.COMPLETION_REPORT_SUFFIX.strip())
     if dirty_note is not None:
         segments.append(dirty_note)
-    return "\n\n".join(segment.strip("\n") for segment in segments if segment)
+    return "\n\n".join(segment for segment in segments if segment)
 
 
 def _safe_dirty_tree_note(
@@ -1734,6 +1741,21 @@ def request_from_input_json(
     raw_workflow_agent_key = raw.get("workflowAgentKey")
     if raw_workflow_agent_key is not None and not isinstance(raw_workflow_agent_key, str):
         raise DelegateError("invalid_workflow_agent_key", "workflowAgentKey must be a string.")
+    raw_expected_persona_digest = raw.get("expectedPersonaDigest")
+    if raw_expected_persona_digest is not None and (
+        not isinstance(raw_expected_persona_digest, str)
+        or len(raw_expected_persona_digest) != 64
+        or any(char not in "0123456789abcdef" for char in raw_expected_persona_digest)
+    ):
+        raise DelegateError(
+            "invalid_expected_persona_digest",
+            "expectedPersonaDigest must be a lowercase SHA-256 digest.",
+        )
+    if raw_expected_persona_digest is not None and json_persona is None:
+        raise DelegateError(
+            "invalid_expected_persona_digest",
+            "expectedPersonaDigest requires persona.",
+        )
 
     if mode == MODE_CALL:
         if json_persona is not None:
@@ -1927,6 +1949,7 @@ def request_from_input_json(
         completion_report_mode=completion_report_prompt_mode,
         persona=json_persona,
         allow_repo_persona=raw_allow_repo_persona,
+        expected_persona_digest=raw_expected_persona_digest,
         pass_through=global_options.pass_through,
         stderr=stderr,
         frame_prompt=True,
@@ -1976,6 +1999,7 @@ def build_request(
     persona_source_override: str | None = None,
     persona_digest_override: str | None = None,
     persona_path_override: str | None = None,
+    expected_persona_digest: str | None = None,
     frame_prompt: bool | None = None,
 ) -> Request:
     _validate_agent_option(engine, agent)
@@ -2046,7 +2070,15 @@ def build_request(
         engine,
         discovery,
         profile_resolution,
-        probe_version=False,
+        # Native persona transport is an argv-compatibility safety decision, so
+        # spend the existing lazy identity probe only when this request would
+        # otherwise trust its positive cached capability.
+        probe_version=(
+            engine == "claude"
+            and mode == MODE_WORK
+            and persona is not None
+            and _cached_native_persona_transport(discovery)
+        ),
     )
     warnings = (*warnings, *drift_warnings)
     persona_resolution = None
@@ -2068,6 +2100,14 @@ def build_request(
                 persona,
                 mode=mode,
                 allow_repo_persona=allow_repo_persona,
+            )
+        if (
+            expected_persona_digest is not None
+            and persona_resolution.digest != expected_persona_digest
+        ):
+            raise DelegateError(
+                "workflow_persona_digest_mismatch",
+                "workflow persona bytes changed after the parent pinned their digest.",
             )
         if stderr is not None:
             print(f"persona: {persona_resolution.name} ({persona_resolution.source})", file=stderr)
@@ -2305,7 +2345,6 @@ def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         stream_capture=build.stream_capture,
         call_read_only=build.call_read_only,
         pure=build.pure,
-        prompt_framed=build.prompt_framed,
     )
     reasoning_kwargs = reasoning_request_kwargs(capability, build.effort_source)
     return EngineRequestParts(
@@ -2381,11 +2420,8 @@ def _droid_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         prompt_transport=PROMPT_TRANSPORT_FILE,
         call_read_only=build.call_read_only,
         pure=build.pure,
-        prompt_framed=build.prompt_framed,
     )
     prompt_file_text = build.prompt
-    if build.mode == MODE_SAFE and not build.prompt_framed:
-        prompt_file_text = prefix_droid_safe_prompt(prompt_file_text)
     display_argv = prompt_file_display_argv(argv)
     return EngineRequestParts(
         model=model,
@@ -2903,7 +2939,6 @@ def _kimi_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         build.prompt,
         stream_capture=build.stream_capture,
         pure=build.pure,
-        prompt_framed=build.prompt_framed,
     )
     return EngineRequestParts(
         model=model,

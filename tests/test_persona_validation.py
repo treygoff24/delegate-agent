@@ -39,14 +39,6 @@ class PersonaValidationTests(unittest.TestCase):
                     personas.resolve_persona(root, name)
                 self.assertEqual(caught.exception.error, "invalid_persona_name")
 
-            persona_dir = root / ".delegate" / "personas"
-            persona_dir.mkdir(parents=True)
-            outside = root / "outside.md"
-            outside.write_text("outside", encoding="utf-8")
-            with self.assertRaises(DelegateError) as caught:
-                personas._contained_regular_file(outside, persona_dir, name="outside")
-            self.assertEqual(caught.exception.error, "invalid_persona_path")
-
     def test_symlink_and_non_regular_files_are_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

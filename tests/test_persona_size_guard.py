@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from delegate_agent import config, prompt_transport, request_build, run_registry
 from delegate_agent.cli import parse_cli, request_from_parsed
@@ -14,13 +16,27 @@ from delegate_agent.workflows import runtime as workflow_runtime
 
 class PersonaSizeGuardTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.real_persona_path = Path.home() / ".delegate" / "personas" / "editor.md"
+        self.real_persona_bytes = (
+            self.real_persona_path.read_bytes() if self.real_persona_path.exists() else None
+        )
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.workspace = Path(self.temp.name)
+        self.home_patch = mock.patch.dict(os.environ, {"HOME": str(Path(self.temp.name) / "home")})
+        self.home_patch.start()
+        self.addCleanup(self.home_patch.stop)
+        self.workspace = Path(self.temp.name) / "workspace"
+        self.workspace.mkdir()
         self.persona_text = "Use the reviewer voice. é🌍\n"
         persona_dir = Path.home() / ".delegate" / "personas"
         persona_dir.mkdir(parents=True, exist_ok=True)
         (persona_dir / "editor.md").write_text(self.persona_text, encoding="utf-8")
+
+    def tearDown(self) -> None:
+        current = self.real_persona_path.read_bytes() if self.real_persona_path.exists() else None
+        self.assertEqual(
+            current, self.real_persona_bytes, "tests must not alter the real HOME persona"
+        )
 
     def _framed_prompt_bytes(self, prompt: str) -> int:
         return len(

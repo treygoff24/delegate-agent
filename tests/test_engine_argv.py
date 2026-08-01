@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from delegate_agent import prompt_instructions
 from tests.delegate_commands_test_base import CommandTestBase, make_git_repo
 from tests.discovery_fakes import write_version_harness
 
@@ -42,7 +43,17 @@ class EngineArgvTests(CommandTestBase):
         }
 
     def test_cursor_safe_argv_agent_prefix(self):
-        argv = self.delegate.build_cursor_argv(["agent"], "safe", "/repo", "composer-2.5", "hello")
+        request = self.build_git_request(
+            "cursor",
+            "safe",
+            None,
+            "/repo",
+            "hello",
+            self.delegate.DEFAULT_CONFIG,
+            dry_run=True,
+            frame_prompt=True,
+        )
+        argv = request.argv
         self.assertEqual(argv[0], "agent")
         self.assertEqual(
             argv[1:10],
@@ -58,8 +69,9 @@ class EngineArgvTests(CommandTestBase):
                 "stream-json",
             ],
         )
-        self.assertTrue(argv[10].startswith(self.delegate.SAFE_REVIEW_PREFIX_BY_ENGINE["cursor"]))
-        self.assertTrue(argv[10].endswith("hello"))
+        self.assertTrue(argv[10].startswith(prompt_instructions.SKILL_REVIEW_PREFIX))
+        self.assertIn(self.delegate.SAFE_REVIEW_PREFIX_BY_ENGINE["cursor"], argv[10])
+        self.assertIn("hello", argv[10])
         self.assertNotIn("--mode=plan", argv)
         self.assertNotIn("--mode=ask", argv)
         self.assertNotIn("--force", argv)
@@ -844,8 +856,7 @@ class EngineArgvTests(CommandTestBase):
                 "stream-json",
             ],
         )
-        self.assertTrue(argv[-1].startswith(self.delegate.SAFE_REVIEW_PREFIX_BY_ENGINE["droid"]))
-        self.assertTrue(argv[-1].endswith("hello"))
+        self.assertEqual(argv[-1], "hello")
         self.assertNotIn("--auto", argv)
         self.assertNotIn("--use-spec", argv)
         self.assertNotIn("--skip-permissions-unsafe", argv)
@@ -1182,13 +1193,12 @@ class EngineArgvTests(CommandTestBase):
             secret_prompt,
             config,
             True,
+            frame_prompt=True,
         )
         self.assertEqual(droid.prompt_transport, "file")
         self.assertIsNone(droid.stdin_text)
         self.assertIsNotNone(droid.prompt_file_text)
-        self.assertTrue(
-            droid.prompt_file_text.startswith(self.delegate.SAFE_REVIEW_PREFIX_BY_ENGINE["droid"])
-        )
+        self.assertIn(self.delegate.SAFE_REVIEW_PREFIX_BY_ENGINE["droid"], droid.prompt_file_text)
         self.assertIn(secret_prompt, droid.prompt_file_text)
         self.assertIn("--file", droid.argv)
         self.assertIn(self.delegate.DROID_PROMPT_FILE_ARG_PLACEHOLDER, droid.argv)

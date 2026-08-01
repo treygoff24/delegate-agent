@@ -9,6 +9,8 @@ from subprocess import CompletedProcess
 from unittest import mock
 
 from delegate_agent import config, describe_payload, run_registry
+from delegate_agent.cli import parse_cli, request_from_parsed
+from delegate_agent.errors import DelegateError
 from delegate_agent.workflows import registry as workflow_registry
 from delegate_agent.workflows import runtime as workflow_runtime
 
@@ -56,7 +58,18 @@ class PersonaWorkflowTests(unittest.TestCase):
             input_path = Path(argv[argv.index("--input-json") + 1])
             payload = json.loads(input_path.read_text(encoding="utf-8"))
             calls.append(payload)
-            return CompletedProcess(argv, 0, b'{"ok": true, "text": "child result"}', b"")
+            return CompletedProcess(
+                argv,
+                0,
+                json.dumps(
+                    {
+                        "ok": True,
+                        "text": "child result",
+                        "personaDigest": payload.get("expectedPersonaDigest"),
+                    }
+                ).encode(),
+                b"",
+            )
 
         return run_child
 
@@ -92,6 +105,7 @@ class PersonaWorkflowTests(unittest.TestCase):
                 "isolation",
                 "persona",
                 "allowRepoPersona",
+                "expectedPersonaDigest",
                 "workflowAgentKey",
                 "promptInstructionMode",
             },
@@ -100,6 +114,9 @@ class PersonaWorkflowTests(unittest.TestCase):
         self.assertTrue(payload["allowRepoPersona"])
         self.assertEqual(payload["promptInstructionMode"], "wrapped")
         self.assertIsInstance(payload["workflowAgentKey"], str)
+        self.assertEqual(
+            payload["expectedPersonaDigest"], hashlib.sha256(self.old_text.encode()).hexdigest()
+        )
         self.assertNotIn(self.old_text, json.dumps(payload))
 
         live_events = workflow_registry.iter_journal(state.journal_path)
@@ -110,6 +127,7 @@ class PersonaWorkflowTests(unittest.TestCase):
         started = live_events[1]
         persona_digest = hashlib.sha256(self.old_text.encode("utf-8")).hexdigest()
         self.assertEqual(started["personaDigest"], persona_digest)
+        self.assertEqual(started["personaSource"], "workspace")
         self.assertEqual(started["workflowAgentKey"], payload["workflowAgentKey"])
 
         dry_state = self._state(dry_run=True, wf_id="wf_cccccccccccc")
@@ -150,6 +168,7 @@ class PersonaWorkflowTests(unittest.TestCase):
             ["budget", "agent_started", "agent_finished"],
         )
         self.assertEqual(dry_events[1]["personaDigest"], persona_digest)
+        self.assertEqual(dry_events[1]["personaSource"], "workspace")
 
         described = describe_payload.describe_payload(
             config.embedded_default_config(), "embedded-default", self.workspace
@@ -214,6 +233,53 @@ class PersonaWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(second_calls[0]["persona"], "editor")
         self.assertEqual(second_calls[0]["allowRepoPersona"], True)
+
+    def test_child_digest_mismatch_after_persona_mutation_fails_without_cache_entry(self) -> None:
+        state = self._state()
+        calls: list[dict[str, object]] = []
+
+        def mutate_before_child_resolution(argv, *, cwd, timeout):
+            input_path = Path(argv[argv.index("--input-json") + 1])
+            payload = json.loads(input_path.read_text(encoding="utf-8"))
+            calls.append(payload)
+            (self.workspace / ".delegate" / "personas" / "editor.md").write_text(
+                self.new_text, encoding="utf-8"
+            )
+            with self.assertRaises(DelegateError) as caught:
+                request_from_parsed(
+                    parse_cli(["run", "--input-json", str(input_path)]),
+                    config.embedded_default_config(),
+                    mock.MagicMock(),
+                )
+            self.assertEqual(caught.exception.error, "workflow_persona_digest_mismatch")
+            return CompletedProcess(
+                argv,
+                2,
+                json.dumps(
+                    {
+                        "ok": False,
+                        "error": "workflow_persona_digest_mismatch",
+                    }
+                ).encode(),
+                b"",
+            )
+
+        with (
+            self.assertRaises(workflow_runtime.PersonaDigestMismatch),
+            mock.patch.object(
+                workflow_runtime, "_run_child_command", side_effect=mutate_before_child_resolution
+            ),
+        ):
+            self._dsl(state).agent(
+                "same prompt",
+                engine="cursor",
+                mode="safe",
+                persona="editor",
+                allow_repo_persona=True,
+            )
+        key = calls[0]["workflowAgentKey"]
+        self.assertNotIn(key, state.replay)
+        self.assertNotIn(key, state.replay_keys)
 
 
 if __name__ == "__main__":

@@ -44,35 +44,38 @@ def _persona_dirs(workspace: str | Path) -> tuple[Path, Path]:
     return source / ".delegate" / PERSONA_DIR_NAME, Path.home() / ".delegate" / PERSONA_DIR_NAME
 
 
-def _contained_regular_file(path: Path, root: Path, *, name: str) -> Path:
+def _read_persona(root: Path, *, name: str) -> tuple[str, int, str, str]:
+    """Read the fixed persona leaf through an anchored, no-follow descriptor walk."""
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    leaf_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     try:
-        candidate = path.resolve(strict=True)
-        candidate.relative_to(root.resolve())
-    except (OSError, ValueError) as exc:
-        raise DelegateError(
-            "invalid_persona_path", f"persona {name!r} is outside its persona directory."
-        ) from exc
-    try:
-        metadata = path.lstat()
+        root_fd = os.open(root, directory_flags)
     except OSError as exc:
         raise DelegateError("invalid_persona", f"persona {name!r} is not readable.") from exc
-    if stat.S_ISLNK(metadata.st_mode):
-        raise DelegateError("invalid_persona", f"persona {name!r} may not be a symlink.")
-    if not stat.S_ISREG(metadata.st_mode):
-        raise DelegateError("invalid_persona", f"persona {name!r} must be a regular file.")
-    return candidate
-
-
-def _read_persona(path: Path, *, name: str) -> tuple[str, int, str, str]:
     try:
-        raw = path.read_bytes()
-    except OSError as exc:
-        raise DelegateError("invalid_persona", f"persona {name!r} is not readable.") from exc
-    size = len(raw)
-    if size > PERSONA_MAX_BYTES:
-        raise DelegateError(
-            "persona_too_large", f"persona {name!r} exceeds the {PERSONA_MAX_BYTES}-byte limit."
-        )
+        try:
+            fd = os.open(f"{name}{PERSONA_SUFFIX}", leaf_flags, dir_fd=root_fd)
+        except OSError as exc:
+            raise DelegateError("invalid_persona", f"persona {name!r} is not readable.") from exc
+        try:
+            metadata = os.fstat(fd)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise DelegateError("invalid_persona", f"persona {name!r} must be a regular file.")
+            chunks: list[bytes] = []
+            size = 0
+            while chunk := os.read(fd, 65536):
+                size += len(chunk)
+                if size > PERSONA_MAX_BYTES:
+                    raise DelegateError(
+                        "persona_too_large",
+                        f"persona {name!r} exceeds the {PERSONA_MAX_BYTES}-byte limit.",
+                    )
+                chunks.append(chunk)
+            raw = b"".join(chunks)
+        finally:
+            os.close(fd)
+    finally:
+        os.close(root_fd)
     try:
         text = raw.decode("utf-8", errors="strict")
     except UnicodeDecodeError as exc:
@@ -119,8 +122,7 @@ def resolve_persona(
         root = global_dir
     else:
         raise DelegateError("persona_not_found", f"persona {name!r} was not found.")
-    path = _contained_regular_file(path, root, name=name)
-    text, size, digest, preview = _read_persona(path, name=name)
+    text, size, digest, preview = _read_persona(root, name=name)
     return PersonaResolution(name, source, path, text, size, digest, preview)
 
 
@@ -155,10 +157,7 @@ def list_personas(workspace: str | Path) -> list[dict[str, object]]:
             row: dict[str, object] = {"name": name, "source": source}
             try:
                 validate_persona_name(name)
-                path = _contained_regular_file(
-                    directory / f"{name}{PERSONA_SUFFIX}", directory, name=name
-                )
-                _text, size, _digest, preview = _read_persona(path, name=name)
+                _text, size, _digest, preview = _read_persona(directory, name=name)
                 row.update({"sizeBytes": size, "preview": preview})
             except DelegateError as exc:
                 row["invalid"] = _invalid_reason(exc)

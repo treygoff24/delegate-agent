@@ -6,6 +6,8 @@ import os
 import unittest
 from unittest import mock
 
+from delegate_agent import request_build
+from delegate_agent.errors import DelegateError
 from tests.delegate_commands_test_base import CommandTestBase
 
 
@@ -65,10 +67,11 @@ class PersonaOpenCodeTests(CommandTestBase):
         malformed = "{not-json"
         config = copy.deepcopy(self.delegate.DEFAULT_CONFIG)
         with mock.patch.dict(os.environ, {"OPENCODE_CONFIG_CONTENT": malformed}, clear=False):
-            request = self._request(config, agent="reviewer")
+            request = self._request(config)
             ambient_config_after_build = os.environ["OPENCODE_CONFIG_CONTENT"]
 
         self.assertEqual(request.persona_transport, "prepend")
+        self.assertIsNone(request.agent)
         self.assertIn(self._PERSONA, request.stdin_text or "")
         self.assertEqual(
             request.warnings,
@@ -84,6 +87,36 @@ class PersonaOpenCodeTests(CommandTestBase):
         self.assertEqual(request.agent, "delegate-persona")
         merged = json.loads((request.env_overrides or {})["OPENCODE_CONFIG_CONTENT"])
         self.assertEqual(merged["agent"]["delegate-persona"]["prompt"], self._PERSONA)
+
+    def test_reserved_agent_collision_preserves_existing_entry_and_appends_persona(self):
+        original = {
+            "agent": {
+                "delegate-persona": {
+                    "mode": "primary",
+                    "prompt": "EXISTING RESERVED PROMPT",
+                    "permission": {"read": "allow"},
+                }
+            }
+        }
+        request = self._request(self._config_with_profile(json.dumps(original)))
+
+        self.assertEqual(request.persona_transport, "agent-config")
+        self.assertEqual(request.agent, "delegate-persona")
+        merged = json.loads((request.env_overrides or {})["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(merged["agent"]["delegate-persona"]["mode"], "primary")
+        self.assertEqual(merged["agent"]["delegate-persona"]["permission"], {"read": "allow"})
+        self.assertEqual(
+            merged["agent"]["delegate-persona"]["prompt"],
+            "EXISTING RESERVED PROMPT\n\n" + self._PERSONA,
+        )
+
+    def test_invalid_synthetic_agent_name_is_refused_before_launch(self):
+        with (
+            mock.patch.object(request_build, "OPENCODE_PERSONA_AGENT", "--invalid"),
+            self.assertRaises(DelegateError) as caught,
+        ):
+            self._request(self._config_with_profile("{}"))
+        self.assertEqual(caught.exception.error, "invalid_agent")
 
     def test_persona_merge_does_not_depend_on_opencode_permission_environment(self):
         original = {

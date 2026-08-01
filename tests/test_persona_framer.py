@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from delegate_agent import argv_builders, prompt_instructions, worktree_execution
+from delegate_agent.constants import SAFE_REVIEW_PREFIX_INJECTED_HERE_ENGINES
 from delegate_agent.isolation import PERSISTENT_WORKTREE_CONTEXT_NOTE, IsolationContext
 from delegate_agent.prompt_transport import (
     PROMPT_TRANSPORT_ARGV,
@@ -128,9 +129,7 @@ class PersonaFramerTests(CommandTestBase):
                 self.assertEqual(prompt.count("Note: "), 1)
 
     def test_prompt_enforced_builders_do_not_self_prefix_when_framer_marks_prompt_complete(self):
-        cursor = argv_builders.build_cursor_argv(
-            ["agent"], "safe", "/repo", "model", "RAW PROMPT", prompt_framed=True
-        )
+        cursor = argv_builders.build_cursor_argv(["agent"], "safe", "/repo", "model", "RAW PROMPT")
         droid = argv_builders.build_droid_argv(
             "droid",
             "safe",
@@ -138,15 +137,49 @@ class PersonaFramerTests(CommandTestBase):
             "model",
             "RAW PROMPT",
             prompt_transport=PROMPT_TRANSPORT_ARGV,
-            prompt_framed=True,
         )
         kimi = argv_builders.build_kimi_argv(
-            {"binary": "kimi"}, "safe", "/repo", None, "RAW PROMPT", prompt_framed=True
+            {"binary": "kimi"}, "safe", "/repo", None, "RAW PROMPT"
         )
 
         self.assertEqual(cursor[-1], "RAW PROMPT")
         self.assertEqual(droid[-1], "RAW PROMPT")
         self.assertEqual(kimi[-1], "RAW PROMPT")
+
+    def test_no_persona_preserves_user_prompt_bytes_for_every_framed_transport(self):
+        user = "\n\nleading\n\ninner blank\ntrailing\n\n"
+        repo = self._dirty_repo()
+        for engine in self._ENGINES:
+            for mode in ("safe", "work"):
+                if engine == "devin" and mode == "safe":
+                    continue
+                with self.subTest(engine=engine, mode=mode):
+                    request = self.build_git_request(
+                        engine,
+                        mode,
+                        None,
+                        str(repo),
+                        user,
+                        self._config(engine),
+                        False,
+                        frame_prompt=True,
+                    )
+                    safe = (
+                        argv_builders.SAFE_REVIEW_PREFIX_BY_ENGINE[engine].rstrip()
+                        if mode == "safe" and engine in SAFE_REVIEW_PREFIX_INJECTED_HERE_ENGINES
+                        else None
+                    )
+                    expected = "\n\n".join(
+                        segment
+                        for segment in (
+                            prompt_instructions.SKILL_REVIEW_PREFIX.rstrip(),
+                            safe,
+                            user,
+                            prompt_instructions.COMPLETION_REPORT_SUFFIX.strip(),
+                        )
+                        if segment is not None
+                    )
+                    self.assertEqual(self._final_prompt(request, str(repo / "exec")), expected)
 
     def test_adversarial_persona_cannot_follow_prompt_enforced_safe_policy(self):
         repo = self._dirty_repo()
