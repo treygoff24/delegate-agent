@@ -332,17 +332,41 @@ class ResumeInheritanceTests(ResumeFixture):
                 self.assertEqual(code, self.delegate.EXIT_USAGE)
                 self.assertEqual(json.loads(stdout)["error"], "resume_record_invalid")
 
-    def test_runs_prune_removes_legacy_crash_orphaned_resume_schema(self):
+    def test_runs_prune_removes_only_old_dead_legacy_resume_schema(self):
         self.write_config({})
         tmp = self.registry_root / "tmp"
         tmp.mkdir()
-        orphan = tmp / "resume-schema-crashed.json"
+        orphan = tmp / "resume-schema-999999-deadbeef.json"
         orphan.write_text('{"type":"object"}', encoding="utf-8")
+        old = (
+            orphan.stat().st_mtime
+            - self.delegate.run_registry.LEGACY_RESUME_SCHEMA_MIN_AGE_SECONDS
+            - 1
+        )
+        os.utime(orphan, (old, old))
+        unrelated = tmp / "resume-schema-crashed.json"
+        unrelated.write_text('{"type":"object"}', encoding="utf-8")
+        live = tmp / f"resume-schema-{os.getpid()}-deadbeef.json"
+        live.write_text('{"type":"object"}', encoding="utf-8")
+        os.utime(live, (old, old))
 
         payload = self.delegate.run_registry.prune_runs(self.registry_root, older_than_days=30)
 
         self.assertFalse(orphan.exists())
         self.assertEqual(payload["staleResumeSchemas"], [orphan.name])
+        self.assertTrue(unrelated.exists())
+        self.assertTrue(live.exists())
+
+    def test_inherited_inline_schema_is_redacted_from_dry_run_argv(self):
+        self.write_config({})
+        _run_id, alias, _run_path = self.seed_run(
+            manifest={"outputSchema": '{"type":"object"}', "isolationMode": "none"}
+        )
+
+        payload, _stderr = self.run_resume(["--dry-run", alias, "continue"])
+
+        self.assertTrue(payload["outputSchemaInline"])
+        self.assertNotIn(request_build.INLINE_OUTPUT_SCHEMA_PLACEHOLDER, json.dumps(payload))
 
     def test_opencode_agent_is_threaded_through_dry_run(self):
         self.write_config({"opencode": {"defaultModel": "open-model"}})

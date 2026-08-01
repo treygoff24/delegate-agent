@@ -25,6 +25,7 @@ from delegate_agent import (
     reasoning,
     redaction,
     rendering,
+    resume_command,
     run_metadata,
     run_registry,
     seatbelt,
@@ -32,6 +33,7 @@ from delegate_agent import (
 )
 from delegate_agent import config as delegate_config
 from delegate_agent.constants import PROMPT_INSTRUCTION_MODE_SLASH, PROMPT_INSTRUCTION_MODE_WRAPPED
+from delegate_agent.errors import DelegateError
 from delegate_agent.json_types import JsonObject
 
 STDOUT_LOG = run_registry.STDOUT_LOG
@@ -567,7 +569,7 @@ def write_completion_report(run_path: Path, text: str) -> bool:
     if not cleaned:
         return False
     path = run_path / COMPLETION_REPORT_FILE
-    run_registry.write_private_text(path, cleaned + "\n")
+    run_registry.write_private_text_atomic(path, cleaned + "\n")
     return True
 
 
@@ -2356,6 +2358,16 @@ def execute_tracked(
                     agent_config_placeholder=agent_config_placeholder,
                     agent_config_dir=files.run_path,
                 )
+                if (
+                    ctx.engine in resume_command.ARGV_PROMPT_TRANSPORT_ENGINES
+                    and retry_stdin is None
+                ):
+                    try:
+                        resume_command.enforce_resume_prompt_size(ctx.engine, retry_argv[-1])
+                    except DelegateError as exc:
+                        error = RunnerLaunchError(exc.error, exc.message)
+                        _record_tracked_launch_failure(files, ctx, error, prior_capture=capture)
+                        raise error from exc
                 _prepend_attempt_delimiter(files.stderr_log, label="primary")
                 retry_capture = run_attempt(
                     retry_argv,

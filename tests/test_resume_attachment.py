@@ -370,7 +370,7 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
 
     def test_attachment_race_after_registration_terminalizes_without_spawning_child(self):
         _repo, repo_path = self._make_repo()
-        with tempfile.TemporaryDirectory() as fake_home:
+        with tempfile.TemporaryDirectory() as fake_home, self._fake_agent() as fake_agent:
             owner_id, owner_alias, worktree_path, _branch = self._owner(repo_path, fake_home)
             original_register = self.delegate.run_registry.register_run
 
@@ -396,6 +396,67 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
             self.assertEqual(manifest["worktreeAttachment"]["sourceRunId"], owner_id)
             self.assertEqual(state["status"], "failed")
             self.assertEqual(state["failureReason"], "worktree_missing")
+            failed_prompt = (
+                self._registry_root(repo_path) / "runs" / child_id / "prompt.txt"
+            ).read_text()
+            self.assertEqual(manifest["promptFile"], "prompt.txt")
+            self.assertIn("=== BEGIN ORIGINAL PROMPT ===\noriginal task", failed_prompt)
+            self.assertIn("Continuation instructions from the operator", failed_prompt)
+            git("worktree", "add", worktree_path, "delegate/resume-owner", cwd=repo_path)
+            with mock.patch.dict(
+                os.environ, {"PATH": fake_agent + os.pathsep + os.environ.get("PATH", "")}
+            ):
+                code, _payload, stderr = self._resume(
+                    repo_path, fake_home, manifest["alias"], "retry"
+                )
+            self.assertEqual(code, 0, stderr)
+
+    def test_chain_owner_prefers_recorded_owner_over_corrupt_unrelated_run(self):
+        _repo, repo_path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home, self._fake_agent() as fake_agent:
+            owner_id, owner_alias, worktree_path, _branch = self._owner(repo_path, fake_home)
+            with mock.patch.dict(
+                os.environ, {"PATH": fake_agent + os.pathsep + os.environ.get("PATH", "")}
+            ):
+                code, _payload, stderr = self._resume(repo_path, fake_home, owner_alias, "first")
+                self.assertEqual(code, 0, stderr)
+                first_id, first_manifest, _state = self._child_manifest(repo_path, owner_id)
+                root = self._registry_root(repo_path)
+                bad_id, _bad_alias = self.delegate.run_registry.register_run(root, harness="cursor")
+                bad_path = self.delegate.run_registry.run_directory(root, bad_id)
+                outside = Path(fake_home) / "oversized-manifest"
+                outside.write_bytes(b"x" * (4 * 1024 * 1024 + 1))
+                os.link(outside, bad_path / "manifest.json")
+
+                code, _payload, stderr = self._resume(
+                    repo_path, fake_home, first_manifest["alias"], "second"
+                )
+            self.assertEqual(code, 0, stderr)
+            self.assertEqual(first_manifest["worktreeAttachment"]["sourceRunId"], owner_id)
+            self.assertEqual(first_manifest["worktreeAttachment"]["path"], worktree_path)
+            self.assertNotEqual(first_id, owner_id)
+
+    def test_chain_owner_falls_back_when_recorded_owner_is_stale(self):
+        _repo, repo_path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home, self._fake_agent() as fake_agent:
+            owner_id, owner_alias, _worktree_path, _branch = self._owner(repo_path, fake_home)
+            with mock.patch.dict(
+                os.environ, {"PATH": fake_agent + os.pathsep + os.environ.get("PATH", "")}
+            ):
+                code, _payload, stderr = self._resume(repo_path, fake_home, owner_alias, "first")
+                self.assertEqual(code, 0, stderr)
+                first_id, first_manifest, _state = self._child_manifest(repo_path, owner_id)
+                root = self._registry_root(repo_path)
+                first_path = self.delegate.run_registry.run_directory(root, first_id)
+                first_manifest["worktreeAttachment"]["sourceRunId"] = "del_20200101T000000Z_deadbe"
+                self.delegate.run_registry.write_json_atomic(
+                    first_path / "manifest.json", first_manifest
+                )
+
+                code, _payload, stderr = self._resume(
+                    repo_path, fake_home, first_manifest["alias"], "second"
+                )
+            self.assertEqual(code, 0, stderr)
 
 
 if __name__ == "__main__":

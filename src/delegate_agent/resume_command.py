@@ -257,6 +257,39 @@ def _load_history(
         return effective, "digest", _snapshot_digest(snapshot)
 
 
+def _resolve_resume_target(registry_root: Path, handle: str) -> tuple[str, str]:
+    """Resolve a resume source without inspecting arbitrary run records."""
+    index = run_registry.load_index(registry_root)
+    run_id = run_registry.lookup_run_id(index, handle)
+    if run_id is None and handle in run_registry.HARNESS_NAMES:
+        candidates = [
+            (entry.get("registrationOrdinal", 0), run_id)
+            for run_id, entry in index.get("runs", {}).items()
+            if isinstance(run_id, str)
+            and isinstance(entry, dict)
+            and entry.get("harness") == handle
+            and isinstance(entry.get("registrationOrdinal", 0), int)
+        ]
+        if candidates:
+            run_id = max(candidates)[1]
+    alias = run_registry.alias_for_run(index, run_id) if isinstance(run_id, str) else None
+    if not isinstance(run_id, str) or not isinstance(alias, str):
+        suggestions = ", ".join(run_registry.suggest_handles(index, handle)) or "(none)"
+        raise DelegateError(
+            "unknown_handle",
+            f"Unknown run handle: {handle}. Suggestions: {suggestions}. "
+            "Runs are recorded per-workspace under <workspace>/.delegate; "
+            "if this run was launched elsewhere, pass --cwd <that workspace>.",
+        )
+    try:
+        claim = _read_record_text(run_registry.aliases_dir(registry_root) / alias).strip()
+    except BoundedReadError as exc:
+        raise _record_invalid(f"The source run alias claim is unavailable: {alias}.") from exc
+    if claim != run_id:
+        raise _record_invalid(f"The source run alias claim does not match {alias}.")
+    return run_id, alias
+
+
 def _validate_attach_target(
     registry_root: Path,
     run_id: str,
@@ -373,76 +406,52 @@ def _attachment_owner_target(
         worktree_records._canonical_path(expected_path) if isinstance(expected_path, str) else None
     )
     index = run_registry.load_index(registry_root)
-    source_run_id = attachment.get("sourceRunId")
-    candidates: list[str] = [source_run_id] if isinstance(source_run_id, str) else []
 
-    if expected_canonical is not None:
-        for candidate_id in index.get("runs", {}):
-            if not isinstance(candidate_id, str) or candidate_id in candidates:
-                continue
-            candidate_manifest = _read_record_json(
-                run_registry.run_directory(registry_root, candidate_id)
-                / run_registry.MANIFEST_FILE,
-                allow_missing=True,
-            )
-            if candidate_manifest is None:
-                continue
-            candidate_state = _read_record_json(
-                run_registry.run_directory(registry_root, candidate_id) / run_registry.STATE_FILE,
-                allow_missing=True,
-            )
-            candidate_snapshot = _read_record_json(
-                run_registry.run_directory(registry_root, candidate_id)
-                / run_registry.SNAPSHOT_FILE,
-                allow_missing=True,
-            )
-            record = worktree_records._record_from_parts(
-                registry_root,
-                candidate_id,
-                {},
-                candidate_state,
-                candidate_manifest,
-                candidate_snapshot,
-            )
-            if (
-                record is not None
-                and record.get("executionCwd")
-                and (
-                    worktree_records._canonical_path(str(record["executionCwd"]))
-                    == expected_canonical
-                )
-            ):
-                candidates.append(candidate_id)
-
-    for candidate_id in candidates:
+    def candidate_target(candidate_id: str) -> JsonObject | None:
         if not isinstance(index.get("runs", {}).get(candidate_id), dict):
-            continue
+            return None
         owner_path = run_registry.run_directory(registry_root, candidate_id)
-        owner_manifest = _read_record_json(
-            owner_path / run_registry.MANIFEST_FILE, allow_missing=True
-        )
-        if owner_manifest is None:
-            continue
-        owner_state = _read_record_json(owner_path / run_registry.STATE_FILE, allow_missing=True)
-        owner_snapshot = _read_record_json(
-            owner_path / run_registry.SNAPSHOT_FILE, allow_missing=True
-        )
-        if not worktree_records._is_persistent_worktree_run(
-            owner_state, owner_manifest, owner_snapshot
-        ):
-            continue
-        target = _validate_attach_target(
-            registry_root, candidate_id, owner_manifest, owner_state, owner_snapshot
-        )
+        try:
+            owner_manifest = _read_record_json(
+                owner_path / run_registry.MANIFEST_FILE, allow_missing=True
+            )
+            if owner_manifest is None:
+                return None
+            owner_state = _read_record_json(
+                owner_path / run_registry.STATE_FILE, allow_missing=True
+            )
+            owner_snapshot = _read_record_json(
+                owner_path / run_registry.SNAPSHOT_FILE, allow_missing=True
+            )
+            if not worktree_records._is_persistent_worktree_run(
+                owner_state, owner_manifest, owner_snapshot
+            ):
+                return None
+            target = _validate_attach_target(
+                registry_root, candidate_id, owner_manifest, owner_state, owner_snapshot
+            )
+        except (BoundedReadError, DelegateError):
+            return None
         if (
             expected_canonical is not None
             and worktree_records._canonical_path(str(target["path"])) != expected_canonical
         ):
-            raise DelegateError(
-                "worktree_path_changed",
-                "The attached source no longer points at its persistent owner worktree.",
-            )
+            return None
         return target
+
+    source_run_id = attachment.get("sourceRunId")
+    if isinstance(source_run_id, str):
+        target = candidate_target(source_run_id)
+        if target is not None:
+            return target
+
+    if expected_canonical is not None:
+        for candidate_id in index.get("runs", {}):
+            if not isinstance(candidate_id, str) or candidate_id == source_run_id:
+                continue
+            target = candidate_target(candidate_id)
+            if target is not None:
+                return target
     raise DelegateError(
         "worktree_missing",
         "The attached source's persistent worktree owner is no longer available.",
@@ -547,11 +556,7 @@ def build_resume_plan(
             f"No delegate run registry exists in {workspace.path}; nothing to resume. "
             "Pass --cwd for the workspace where the run was launched.",
         )
-    target = run_registry.resolve_run_target(registry_root, handle=opts.handle, latest_harness=None)
-    if isinstance(target, run_registry.RunTargetLookupError):
-        raise DelegateError(target.error, target.message)
-    run_id = target.run_id
-    alias = target.alias or run_id
+    run_id, alias = _resolve_resume_target(registry_root, opts.handle)
     run_path = run_registry.run_directory(registry_root, run_id)
 
     manifest = _read_record_json(run_path / run_registry.MANIFEST_FILE)

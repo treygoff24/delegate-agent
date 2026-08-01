@@ -6,7 +6,9 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from delegate_agent import private_io
 from tests.delegate_commands_test_base import CommandTestBase
 
 
@@ -96,6 +98,28 @@ class ResumeStaleTests(CommandTestBase):
         self.assertIn("REPORT IS THE TERMINAL RECORD", continuation)
         self.assertNotIn("SNAPSHOT MUST NOT REPLACE REPORT", continuation)
         self.assertIn("BEGIN PRIOR RUN REPORT", continuation)
+
+    def test_post_terminal_report_rewrite_is_atomic(self):
+        _alias, run_path = self.seed_run(
+            status="failed",
+            report="OLD COMPLETE REPORT",
+            snapshot={"assistantText": "snapshot", "recentEvents": []},
+        )
+        observed: list[str] = []
+        real_replace = private_io.os.replace
+
+        def observe_replace(*args, **kwargs):
+            observed.append((run_path / "completion-report.md").read_text(encoding="utf-8"))
+            return real_replace(*args, **kwargs)
+
+        with mock.patch.object(private_io.os, "replace", side_effect=observe_replace):
+            self.delegate.delegate_runner.write_completion_report(run_path, "NEW COMPLETE REPORT")
+
+        self.assertEqual(observed, ["OLD COMPLETE REPORT"])
+        self.assertEqual(
+            (run_path / "completion-report.md").read_text(encoding="utf-8"),
+            "NEW COMPLETE REPORT\n",
+        )
 
     def test_blocked_truncate_then_write_finalizer_uses_snapshot_not_partial_report(self):
         alias, run_path = self.seed_run(

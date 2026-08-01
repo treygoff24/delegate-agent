@@ -4,8 +4,10 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from delegate_agent import cli, resume_command, run_registry
+from delegate_agent.errors import DelegateError
 from delegate_agent.request_models import ResolvedWorkspace
 
 
@@ -138,3 +140,43 @@ class ResumeTrustTests(unittest.TestCase):
                 stderr=io.StringIO(),
             )
             self.assertIn(tampered, plan.parsed.launch.prompt_parts[0])
+
+    def test_bare_handle_ignores_unrelated_hardlinked_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            root, _bad_id, _bad_alias, bad_path = self._seed_record(workspace)
+            unrelated = workspace / "unrelated-manifest"
+            unrelated.write_bytes(b"x" * (resume_command.RESUME_RECORD_READ_MAX_BYTES + 1))
+            (bad_path / run_registry.MANIFEST_FILE).unlink()
+            os.link(unrelated, bad_path / run_registry.MANIFEST_FILE)
+            _root, good_id, _good_alias, _good_path = self._seed_record(workspace)
+
+            parsed = cli.parse_cli(["resume", "cursor"])
+            plan = resume_command.build_resume_plan(
+                parsed,
+                ResolvedWorkspace(str(workspace), "directory"),
+                cli.DEFAULT_CONFIG,
+                stderr=io.StringIO(),
+            )
+
+            self.assertEqual(plan.resumed_from["runId"], good_id)
+            self.assertEqual(root, workspace / ".delegate")
+
+    def test_unknown_handle_suggestions_read_no_record_bodies(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            self._seed_record(workspace)
+            parsed = cli.parse_cli(["resume", "missing-handle"])
+            with (
+                mock.patch.object(
+                    resume_command, "_read_record_text", wraps=resume_command._read_record_text
+                ) as read,
+                self.assertRaisesRegex(DelegateError, "Unknown run handle"),
+            ):
+                resume_command.build_resume_plan(
+                    parsed,
+                    ResolvedWorkspace(str(workspace), "directory"),
+                    cli.DEFAULT_CONFIG,
+                    stderr=io.StringIO(),
+                )
+            read.assert_not_called()

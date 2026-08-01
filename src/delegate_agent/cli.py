@@ -101,6 +101,7 @@ from delegate_agent.prompt_transport import (  # noqa: F401  # CURSOR_PROMPT_RED
 )
 from delegate_agent.request_build import (  # noqa: F401  # re-exported for tests / back-compat
     CALL_TEMP_CWD_PLACEHOLDER,
+    INLINE_OUTPUT_SCHEMA_PLACEHOLDER,
     RUN_INPUT_KEYS,
     _load_input_json_object,
     build_request,
@@ -307,6 +308,12 @@ def dry_run_payload(request: Request) -> JsonObject:
     run_metadata.add_model_payload_fields(payload, request)
     reasoning.add_reasoning_payload_fields(payload, request)
     run_metadata.add_speed_payload_fields(payload, request)
+    if request.output_schema_text is not None:
+        payload["outputSchemaInline"] = True
+        payload["argv"] = [
+            "<inline output schema>" if value == INLINE_OUTPUT_SCHEMA_PLACEHOLDER else value
+            for value in payload["argv"]
+        ]
     if request.warnings:
         payload["warnings"] = list(request.warnings)
     if request.progress:
@@ -749,6 +756,10 @@ def _execute_attached_worktree(
         )
     except DelegateError as exc:
         run_path = run_registry.run_directory(registry_root, run_id)
+        if ctx_runner.source_prompt is not None:
+            run_registry.write_private_text(
+                run_path / run_registry.PROMPT_TXT_FILE, ctx_runner.source_prompt
+            )
         delegate_runner.write_manifest(
             run_path,
             delegate_runner.build_manifest(ctx_runner, execution_request.display_argv),

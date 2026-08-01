@@ -29,6 +29,7 @@ from delegate_agent.private_io import (  # noqa: F401  # re-exported
     write_json_atomic,
     write_private_bytes,
     write_private_text,
+    write_private_text_atomic,
     write_text_atomic,
 )
 
@@ -52,6 +53,8 @@ RUNS_SCHEMA = "delegate.runs.v1"
 RUN_OUTPUT_SCHEMA = "delegate.run-output.v1"
 RUNS_PRUNE_SCHEMA = "delegate.runs-prune.v1"
 DEFAULT_RUN_PRUNE_DAYS = 30
+LEGACY_RESUME_SCHEMA_MIN_AGE_SECONDS = 60 * 60
+LEGACY_RESUME_SCHEMA_RE = re.compile(r"^resume-schema-(?P<pid>[1-9][0-9]*)-[0-9a-f]{8,}\.json$")
 RUN_PRUNE_ERROR_EXIT_CODE = 1
 REGISTRY_LOCK_NAME = ".registry.lock"
 REGISTRY_LOCK_TIMEOUT_SECONDS = 30.0
@@ -904,10 +907,24 @@ def prune_runs(
     with registry_lock(registry_root):
         tmp_dir = registry_root / "tmp"
         if tmp_dir.is_dir() and not tmp_dir.is_symlink():
-            for path in tmp_dir.glob("resume-schema-*"):
+            for path in tmp_dir.iterdir():
                 try:
+                    match = LEGACY_RESUME_SCHEMA_RE.fullmatch(path.name)
+                    if match is None:
+                        continue
                     info = path.lstat()
                     if not (path.is_symlink() or stat.S_ISREG(info.st_mode)):
+                        continue
+                    pid = int(match.group("pid"))
+                    try:
+                        os.kill(pid, 0)
+                    except ProcessLookupError:
+                        pass
+                    except PermissionError:
+                        continue
+                    else:
+                        continue
+                    if time.time() - info.st_mtime < LEGACY_RESUME_SCHEMA_MIN_AGE_SECONDS:
                         continue
                     stale_resume_schemas.append(path.name)
                     if not dry_run:

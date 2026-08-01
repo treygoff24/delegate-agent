@@ -206,6 +206,37 @@ def write_private_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
         handle.write(text)
 
 
+def write_private_text_atomic(path: Path, text: str, *, encoding: str = "utf-8") -> None:
+    """Atomically replace an owner-only registry text file."""
+    parent_fd, name = _open_parent(path, create=True)
+    temp_name = f".{name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+    replaced = False
+    try:
+        existing = None
+        with suppress(FileNotFoundError):
+            existing = os.lstat(name, dir_fd=parent_fd)
+        if existing is not None and stat.S_ISLNK(existing.st_mode):
+            raise OSError(errno.ELOOP, "registry file is a symlink", str(path))
+        fd = os.open(
+            temp_name,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY | _NOFOLLOW_FLAGS,
+            PRIVATE_FILE_MODE,
+            dir_fd=parent_fd,
+        )
+        with os.fdopen(fd, "w", encoding=encoding) as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        replaced = True
+        os.fsync(parent_fd)
+    finally:
+        if not replaced:
+            with suppress(OSError):
+                os.unlink(temp_name, dir_fd=parent_fd)
+        os.close(parent_fd)
+
+
 def write_private_bytes(path: Path, payload: bytes) -> None:
     """Create/truncate a registry byte file with owner-only permissions."""
     fd = open_private_file(path, os.O_CREAT | os.O_TRUNC | os.O_WRONLY)
