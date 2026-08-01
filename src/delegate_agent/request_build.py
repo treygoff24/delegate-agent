@@ -643,9 +643,10 @@ def effective_prompt(
     dirty_note: str | None = None,
 ) -> str:
     if instruction_mode == PROMPT_INSTRUCTION_MODE_SLASH:
-        # Verbatim means verbatim: no skill preamble, no safe prefix, no
-        # completion-report suffix. Harness slash commands need position zero.
-        return prompt
+        # Verbatim means verbatim except for Delegate-owned persistent-worktree
+        # operational notes, which v0.24.0 placed ahead of slash prompts. The
+        # slash command keeps position zero within the user-controlled remainder.
+        return f"{worktree_note}\n\n{prompt}" if worktree_note is not None else prompt
     if mode == MODE_CALL:
         return prompt
     segments: list[str] = []
@@ -3089,6 +3090,7 @@ def _build_request_for_workspace(
     )
     if worktree_note is not None and forbid_commit:
         worktree_note = f"{PERSISTENT_WORKTREE_COMMIT_NOTE}\n\n{worktree_note}"
+    framed_worktree_note = worktree_note if frame_prompt else None
     if frame_prompt:
         prompt = effective_prompt(
             prompt,
@@ -3102,7 +3104,7 @@ def _build_request_for_workspace(
                 if persona_resolution is not None and persona_transport == "prepend"
                 else None
             ),
-            worktree_note=worktree_note,
+            worktree_note=framed_worktree_note,
             dirty_note=dirty_note,
         )
     if frame_prompt and engine in ARGV_PROMPT_TRANSPORT_ENGINES:
@@ -3210,7 +3212,7 @@ def _build_request_for_workspace(
             allow_repo_persona=allow_repo_persona,
             persona_env_overrides=parts.persona_env_overrides or persona_env,
             completion_report_mode=completion_report_mode,
-            persistent_worktree_notes_framed=frame_prompt and worktree_note is not None,
+            persistent_worktree_notes_framed=framed_worktree_note is not None,
         ),
         config,
         resolution=profile_resolution,

@@ -48,6 +48,7 @@ from delegate_agent.constants import (
 from delegate_agent.errors import EXIT_OK, DelegateError
 from delegate_agent.json_types import JsonObject
 from delegate_agent.prompt_transport import (
+    ARGV_PROMPT_TRANSPORT_ENGINES,
     DROID_PROMPT_FILE_DISPLAY,
     PROMPT_TRANSPORT_ARGV,
     PROMPT_TRANSPORT_FILE,
@@ -1024,7 +1025,7 @@ def describe_payload(
                         "engine may be a fallback list; child runs are tagged --group <wfId>.",
                         "fast is a Codex-only per-run service-tier preference; non-Codex fallbacks ignore it.",
                         "passthrough=True is explicit and mutually exclusive with schema= and mode='call'.",
-                        "cursor/kimi argv transport rejects prompts around 100KB; route large stages to codex/claude/droid/opencode/pi.",
+                        f"{'/'.join(ARGV_PROMPT_TRANSPORT_ENGINES)} argv transport rejects prompts around 100KB; route large stages to codex/claude/droid/opencode/pi.",
                     ],
                 },
                 "phase": "phase(title) emits a phase event for human-readable progress.",

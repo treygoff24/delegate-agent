@@ -460,7 +460,7 @@ delegate [--json] workflow save <script.py> --name NAME
 - `run` launches a detached supervisor; `--dry-run` renders planned stubs
   without launching child agents or consuming real budget. Each entry in
   `runTree.calls` includes the resolved `model`, `effort`, `fast`, `isolation`,
-  and UTF-8 `promptBytes`; Cursor/Kimi prompts over 102400 bytes add a warning
+  and UTF-8 `promptBytes`; Cursor/Kimi/OMP prompts over 102400 bytes add a warning
   before their argv transport limit can fail a real run.
 - `--resume` replays the journal, adopts matching child runs by workflow agent
   key, and continues from missing work.

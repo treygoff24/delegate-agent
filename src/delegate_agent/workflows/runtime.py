@@ -40,7 +40,7 @@ DEFAULT_ENGINE = "codex"
 DEFAULT_MODE = "safe"
 DEFAULT_STRUCTURED_RETRIES = 2
 DEFAULT_ITEM_THREADS = 64
-ENGINE_ARGV_TRANSPORT = frozenset(ARGV_PROMPT_TRANSPORT_ENGINES)
+ENGINE_ARGV_TRANSPORT = ARGV_PROMPT_TRANSPORT_ENGINES
 PERSONA_RESOLUTION_ERRORS = frozenset(
     {
         "persona_not_found",
@@ -761,7 +761,7 @@ class WorkflowDsl:
                 dry_run_entry["warnings"] = [
                     f"prompt is {prompt_bytes} UTF-8 bytes, exceeding the "
                     f"{PROMPT_ARGV_GUARD_BYTES}-byte argv transport limit for "
-                    f"{', '.join(constrained)}; route this stage to "
+                    f"{'/'.join(constrained)}; route this stage to "
                     "codex/claude/droid/opencode"
                 ]
             self.state.dry_runs.append(dry_run_entry)
@@ -935,7 +935,7 @@ class WorkflowDsl:
             > PROMPT_ARGV_GUARD_BYTES
         ):
             raise ValueError(
-                "stage output too large for cursor/kimi argv transport; "
+                f"stage output too large for {'/'.join(ENGINE_ARGV_TRANSPORT)} argv transport; "
                 "route this stage to codex/claude/droid/opencode"
             )
         engine_sem = self.state.engine_semaphores.get(engine)
