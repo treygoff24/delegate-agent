@@ -222,12 +222,13 @@ class MailPushGatingTests(CommandTestBase):
             args = json.loads(args_path.read_text(encoding="utf-8"))
             settings_path = Path(args[args.index("--settings") + 1]).resolve()
             self.assertEqual(settings_path, (box / mail.MAIL_PUSH_SETTINGS_FILE_NAME).resolve())
-            self.assertEqual(
-                json.loads(settings_path.read_text(encoding="utf-8")),
-                mail._hook_settings(),
-            )
             env = json.loads(env_path.read_text(encoding="utf-8"))
             self.assertEqual(env["DELEGATE_MAIL_HOOK_HARNESS"], "claude")
+            command = json.loads(settings_path.read_text(encoding="utf-8"))["hooks"]["Stop"][0][
+                "hooks"
+            ][0]["command"]
+            self.assertNotIn("delegate mail hook-pump", command)
+            self.assertIn(f"{env['DELEGATE_MAIL_HOOK_NONCE']}:hook_pump_unreachable", command)
             self.assertEqual(
                 global_settings.read_text(encoding="utf-8"), '{"canary":"untouched"}\n'
             )

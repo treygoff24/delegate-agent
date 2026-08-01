@@ -335,7 +335,7 @@ def dry_run_payload(request: Request) -> JsonObject:
         payload["mailPushAdapter"] = {
             "harness": request.engine,
             "status": mail.mail_push_adapter(request.engine),
-            "hookCommand": mail.MAIL_PUSH_HOOK_COMMAND,
+            "hookCommand": "<launch-pinned delegate> mail hook-pump with nonce fallback",
         }
         if mail.mail_push_adapter(request.engine) != "verified":
             payload.setdefault("warnings", []).append(mail.mail_push_warning(request.engine))

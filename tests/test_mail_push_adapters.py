@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -104,10 +106,17 @@ class MailPushAdapterTests(CommandTestBase):
                 self.assertTrue(settings_path.is_file())
                 self.assertTrue(cursor_path.is_file())
                 self.assertEqual(env["DELEGATE_MAIL_HOOK_HARNESS"], engine)
-                self.assertEqual(
-                    json.loads(settings_path.read_text(encoding="utf-8")),
-                    mail._hook_settings(),
+                settings = json.loads(settings_path.read_text(encoding="utf-8"))
+                command = settings["hooks"]["Stop"][0]["hooks"][0]["command"]
+                self.assertNotIn("delegate mail hook-pump", command)
+                self.assertIn(shlex.quote(sys.executable), command)
+                self.assertIn(
+                    shlex.quote(
+                        str(Path(mail.__file__).resolve().parents[2] / "bin" / "delegate.py")
+                    ),
+                    command,
                 )
+                self.assertIn(f"{env['DELEGATE_MAIL_HOOK_NONCE']}:hook_pump_unreachable", command)
                 self.assertEqual(json.loads(cursor_path.read_text(encoding="utf-8"))["lastSeq"], 0)
                 if engine == "claude":
                     self.assertIn("--settings", provision.argv)

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -204,6 +206,18 @@ class MailPushSeamTests(CommandTestBase):
             {"schema": mail.MAIL_PUSH_SCHEMA, "lastSeq": 0},
         )
         self.assertTrue((box / mail.MAIL_PUSH_SETTINGS_FILE_NAME).is_file())
+        hook_command = json.loads(
+            (box / mail.MAIL_PUSH_SETTINGS_FILE_NAME).read_text(encoding="utf-8")
+        )["hooks"]["Stop"][0]["hooks"][0]["command"]
+        self.assertNotIn("delegate mail hook-pump", hook_command)
+        self.assertIn(shlex.quote(sys.executable), hook_command)
+        self.assertIn(
+            shlex.quote(str(Path(mail.__file__).resolve().parents[2] / "bin" / "delegate.py")),
+            hook_command,
+        )
+        self.assertIn(
+            f"{child['env']['DELEGATE_MAIL_HOOK_NONCE']}:hook_pump_unreachable", hook_command
+        )
         for path in mail.mail_root(workspace / ".delegate").rglob("*"):
             if path.is_file() and not path.is_symlink() and credential_canary is not None:
                 self.assertNotIn(credential_canary, path.read_bytes(), path)

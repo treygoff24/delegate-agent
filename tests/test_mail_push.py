@@ -3,6 +3,9 @@ from __future__ import annotations
 import io
 import json
 import os
+import shlex
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -164,6 +167,46 @@ class MailPushTests(unittest.TestCase):
         )
         self.assertIsNotNone(unverified.warning)
         self.assertEqual(codex_env, before)
+
+    def test_hook_command_pins_dev_and_installed_launchers(self):
+        nonce = "test-nonce"
+        dev_entry = Path(__file__).resolve().parents[1] / "bin" / "delegate.py"
+        with mock.patch.object(sys, "argv", [str(dev_entry)]):
+            dev_command = mail._hook_command(nonce)
+        self.assertTrue(
+            dev_command.startswith(
+                f"{shlex.quote(sys.executable)} {shlex.quote(str(dev_entry.resolve()))} mail hook-pump"
+            )
+        )
+
+        installed_entry = self.workspace / "installed delegate" / "delegate"
+        installed_entry.parent.mkdir()
+        installed_entry.write_text("#!/bin/sh\n", encoding="utf-8")
+        with mock.patch.object(sys, "argv", [str(installed_entry)]):
+            installed_command = mail._hook_command(nonce)
+        self.assertTrue(
+            installed_command.startswith(
+                f"{shlex.quote(sys.executable)} "
+                f"{shlex.quote(str(installed_entry.resolve()))} mail hook-pump"
+            )
+        )
+        self.assertNotIn("delegate mail hook-pump", installed_command)
+
+    def test_hook_command_emits_nonce_sentinel_when_pump_cannot_launch(self):
+        entry = self.workspace / "delegate.py"
+        entry.write_text("raise SystemExit(9)\n", encoding="utf-8")
+        nonce = "unreachable-nonce"
+        with mock.patch.object(sys, "argv", [str(entry)]):
+            command = mail._hook_command(nonce)
+
+        result = subprocess.run(command, shell=True, capture_output=True, text=True, check=False)
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(
+            result.stderr,
+            f"{mail.hook_failure_sentinel(nonce, 'hook_pump_unreachable')}\n",
+        )
 
     def test_codex_credentials_never_enter_mail_and_legacy_homes_are_swept(self):
         source = self.workspace / "source-codex-home"

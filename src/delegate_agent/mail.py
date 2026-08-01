@@ -11,12 +11,13 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import subprocess
 import sys
 import time
 from collections.abc import Mapping
-from contextlib import nullcontext
+from contextlib import nullcontext, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -61,7 +62,6 @@ MAIL_PUSH_NONCE_FILE_NAME = "mail-hook-nonce"
 MAIL_PUSH_SETTINGS_FILE_NAME = "settings.json"
 MAIL_PUSH_CODEX_HOME_NAME = "codex-home"
 MAIL_PUSH_FALLBACK_CODEX_HOME_NAME = "codex-home-fallback"
-MAIL_PUSH_HOOK_COMMAND = "delegate mail hook-pump"
 MAIL_PUSH_WARNING_PREFIX = "mail push degraded to pull"
 MAIL_PUSH_FAILURE_SENTINEL = "DELEGATE_MAIL_HOOK_FAILURE:"
 MESSAGE_SEPARATOR = b"\n---\n"
@@ -491,8 +491,38 @@ def mail_push_warning(engine: str, reason: str | None = None) -> str:
     return f"{MAIL_PUSH_WARNING_PREFIX} for {engine}: {detail}."
 
 
-def _hook_settings() -> JsonObject:
-    hook = {"type": "command", "command": MAIL_PUSH_HOOK_COMMAND}
+def _delegate_hook_entry_script() -> Path:
+    launched_as = Path(sys.argv[0]).expanduser()
+    with suppress(OSError):
+        launched_as = launched_as.resolve(strict=True)
+    if launched_as.is_file() and launched_as.name in {"delegate", "delegate.py"}:
+        return launched_as
+
+    development_entry = Path(__file__).resolve().parents[2] / "bin" / "delegate.py"
+    if development_entry.is_file():
+        return development_entry
+
+    installed_entry = shutil.which("delegate")
+    if installed_entry:
+        return Path(installed_entry).resolve(strict=False)
+    raise OSError("could not resolve the launching delegate entry script")
+
+
+def _hook_command(nonce: str) -> str:
+    pump = " ".join(
+        (
+            shlex.quote(sys.executable),
+            shlex.quote(str(_delegate_hook_entry_script())),
+            "mail",
+            "hook-pump",
+        )
+    )
+    sentinel = shlex.quote(hook_failure_sentinel(nonce, "hook_pump_unreachable"))
+    return f"{pump} || printf '%s\\n' {sentinel} >&2"
+
+
+def _hook_settings(hook_command: str) -> JsonObject:
+    hook = {"type": "command", "command": hook_command}
     return {
         "hooks": {
             "Stop": [{"hooks": [hook]}],
@@ -549,6 +579,7 @@ def _codex_home_for_mail_push(
     registry_root: Path,
     run_id: str,
     env: Mapping[str, str],
+    hook_command: str,
     *,
     name: str = MAIL_PUSH_CODEX_HOME_NAME,
 ) -> Path:
@@ -572,7 +603,7 @@ def _codex_home_for_mail_push(
                 continue
             target = codex_home / source.name
             target.symlink_to(source, target_is_directory=source.is_dir())
-    private_io.write_json_atomic(codex_home / "hooks.json", _hook_settings())
+    private_io.write_json_atomic(codex_home / "hooks.json", _hook_settings(hook_command))
     return codex_home
 
 
@@ -633,9 +664,12 @@ def provision_mail_push(
             box / MAIL_PUSH_CURSOR_FILE_NAME,
             {"schema": MAIL_PUSH_SCHEMA, "lastSeq": 0},
         )
-        private_io.write_json_atomic(box / MAIL_PUSH_SETTINGS_FILE_NAME, _hook_settings())
         nonce = secrets.token_urlsafe(24)
         private_io.write_private_text_atomic(_hook_nonce_path(registry_root, run_id), nonce)
+        hook_command = _hook_command(nonce)
+        private_io.write_json_atomic(
+            box / MAIL_PUSH_SETTINGS_FILE_NAME, _hook_settings(hook_command)
+        )
         updated_env["DELEGATE_MAIL_HOOK_HARNESS"] = engine
         updated_env["DELEGATE_MAIL_HOOK_NONCE"] = nonce
         updated = list(argv)
@@ -647,7 +681,9 @@ def provision_mail_push(
             if updated_display is not None:
                 _set_claude_settings(updated_display, settings_path)
         else:
-            codex_home_path = _codex_home_for_mail_push(registry_root, run_id, updated_env)
+            codex_home_path = _codex_home_for_mail_push(
+                registry_root, run_id, updated_env, hook_command
+            )
             codex_home = str(codex_home_path.resolve(strict=False))
             updated_env["CODEX_HOME"] = codex_home
             if updated_fallback:
@@ -655,6 +691,7 @@ def provision_mail_push(
                     registry_root,
                     run_id,
                     updated_fallback,
+                    hook_command,
                     name=MAIL_PUSH_FALLBACK_CODEX_HOME_NAME,
                 )
                 updated_fallback["CODEX_HOME"] = str(fallback_home.resolve(strict=False))
