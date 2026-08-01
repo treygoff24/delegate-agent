@@ -7,11 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-08-01
+
 ### Added
 
-- Added named persona resolution, `delegate personas`, shared persona launch
-  options, capability-gated transport, workflow digest pinning, and private
-  `persona.txt` run artifacts for the v0.25.0 personas feature.
+- Named personas: `--persona` / `--no-persona` / `--allow-repo-persona` on
+  every engine's safe/work launch (and dry-run), input-json `persona` /
+  `allowRepoPersona` keys, and workflow `agent(persona=...)` with the resolved
+  persona digest pinned into the structural cache key so an edited persona is
+  a cache miss by design.
+- `delegate personas [--json]` listing (schema `delegate.personas.v1`) with
+  workspace-shadowing metadata and per-file invalid rows; read-only allowlisted
+  in both the profile guard and the shell shim.
+- Persona transports: claude work uses `--append-system-prompt-file` with a
+  private 0600 file when discovery positively proves current support (probe
+  recognizes both the long and the collapsed `--append-system-prompt[-file]`
+  help spellings); opencode merges a synthetic `delegate-persona` agent into
+  the effective config without clobbering profile keys; every other engine
+  prepends. Safe mode always prepends, with the persona placed before the
+  safe policy so the safety text keeps recency.
+- `persona.txt` as a private durable run artifact with manifest, snapshot,
+  and runs-summary projection; resume replays recorded persona bytes through
+  the target engine's transport, `--persona` re-resolves, `--no-persona`
+  drops.
+
+### Changed
+
+- The central framer is now the sole prompt composer: cursor/droid/kimi argv
+  builders no longer self-prefix safe policy text, user and persona bytes are
+  joined verbatim, and persistent/attached worktree notes are tracked
+  structurally on the request rather than inferred from prompt content.
+- Slash-passthrough prompts on persistent or attached worktree runs carry the
+  Delegate-owned worktree and forbid-commit notes ahead of the slash command,
+  matching v0.24.0 behavior; all other slash payloads remain byte-verbatim.
+
+### Security
+
+- Persona resolution walks `.delegate/personas` component-by-component over
+  `O_NOFOLLOW` descriptors anchored at the source workspace or home, refusing
+  symlinked parents and leaves; strict UTF-8, C0 refusal, and a 64 KiB cap.
+- Resume persona replay reads only the fixed `persona.txt` artifact with a
+  required, verified sha256 digest; manifest data cannot redirect the read.
+- The claude native persona gate fails closed: probe errors, timeouts, and
+  unrecognized banners fall back to prepend so an older binary never receives
+  an unknown flag. Dry-run never probes.
+- Workflow persona digests travel across the child seam and both sides fail
+  closed on mismatch without caching.
 
 ## [0.24.0] - 2026-07-31
 
@@ -791,6 +832,7 @@ Usage-audit fix wave: 82 sessions and 1,241 delegate invocations from one week o
 
 - Releases before 0.1.3 predate this changelog.
 
+[0.25.0]: https://github.com/treygoff24/delegate-agent/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/treygoff24/delegate-agent/compare/v0.23.0...v0.24.0
 [0.23.0]: https://github.com/treygoff24/delegate-agent/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/treygoff24/delegate-agent/compare/v0.21.0...v0.22.0
