@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import subprocess
 import time
@@ -19,6 +20,7 @@ from pathlib import Path
 from typing import TextIO
 
 from delegate_agent import private_io, run_registry, run_status
+from delegate_agent.constants import KNOWN_ENGINES
 from delegate_agent.errors import EXIT_USAGE, DelegateError
 from delegate_agent.json_types import JsonObject
 
@@ -47,8 +49,25 @@ MAIL_MAX_RULES = 500
 MAIL_MAX_INBOX_ITEMS = 1000
 MAIL_MAX_WATCH_ITEMS = 1000
 MESSAGE_SEPARATOR = b"\n---\n"
-MAIL_SCOPED_ARGV_ENGINES = {"codex", "claude", "cursor", "kimi", "omp"}
-MAIL_DEGRADED_ENGINES = {"grok", "opencode", "devin"}
+MESSAGE_ID_RE = re.compile(r"\d{8}-\d{6}-[0-9a-f]{6}\Z")
+
+# Codex 0.100.0 accepted this config override in the 2026-08-01 local probe.
+# `--add-dir` is intentionally not used: it does not add a writable root to a
+# read-only Codex sandbox. Direct source-workspace runs remain workspace-writable.
+MAIL_SANDBOX_ROWS: dict[str, str] = {
+    "cursor": "scoped",
+    "droid": "workspace-writable",
+    "codex": "scoped",
+    "kimi": "scoped",
+    "claude": "scoped",
+    "grok": "workspace-writable",
+    "devin": "workspace-writable",
+    "opencode": "workspace-writable",
+    "pi": "workspace-writable",
+    "omp": "scoped",
+}
+if set(MAIL_SANDBOX_ROWS) != set(KNOWN_ENGINES):
+    raise RuntimeError("Every known engine needs an explicit mail sandbox row.")
 MAIL_PROMPT_SUFFIX = (
     "## Delegate mail\n\n"
     "This work run has a pull mailbox. At a natural boundary, use `delegate mail inbox` "
@@ -148,6 +167,16 @@ def _safe_child(root: Path, name: str) -> Path:
     return path
 
 
+def _message_id(value: object) -> str:
+    if not isinstance(value, str) or not MESSAGE_ID_RE.fullmatch(value):
+        raise _error("invalid_message_id", f"Invalid mail message id: {value!r}.")
+    return value
+
+
+def _message_file(root: Path, message_id: object, suffix: str) -> Path:
+    return _safe_child(root, f"{_message_id(message_id)}{suffix}")
+
+
 def _ensure_mail_tree(registry_root: Path) -> Path:
     root = mail_root(registry_root)
     private_io.ensure_private_dir(root)
@@ -239,6 +268,13 @@ def bind_mail_identity(env: dict[str, str], run_id: str, alias: str) -> dict[str
     return env
 
 
+def sanitize_inherited_mail_identity(env: dict[str, str] | None) -> None:
+    """Remove ambient/profile mail identity before a launch receives a fresh binding."""
+    if env is not None:
+        env.pop("DELEGATE_RUN_ID", None)
+        env.pop("DELEGATE_MAIL_SELF", None)
+
+
 def wire_work_mail_argv(
     engine: str,
     argv: list[str],
@@ -247,21 +283,24 @@ def wire_work_mail_argv(
     prompt: str | None = None,
     prompt_transport: str = "argv",
     stderr: TextIO | None = None,
+    isolated_workspace: bool = False,
 ) -> list[str]:
     """Add the measured mail-root grant, or warn for a degraded harness."""
-    if engine not in MAIL_SCOPED_ARGV_ENGINES and engine not in MAIL_DEGRADED_ENGINES:
-        return argv
-    if engine in MAIL_DEGRADED_ENGINES:
+    _ensure_mail_tree(registry_root)
+    scope = MAIL_SANDBOX_ROWS[engine]
+    if engine == "codex" and not isolated_workspace:
+        scope = "workspace-writable"
+    if scope != "scoped":
         if stderr is not None:
             print(
-                f"delegate mail: WARNING: {engine} has no verified mail-only writable root; "
-                "this work launch is not filesystem-scoped to .delegate/mail.",
+                f"delegate mail: WARNING: {engine} work launch is {scope}; "
+                "it is not filesystem-scoped to .delegate/mail.",
                 file=stderr,
             )
         return argv
     root = str(mail_root(registry_root).resolve(strict=False))
     if engine == "codex":
-        flags = ["--add-dir", root]
+        flags = ["-c", f"sandbox_workspace_write.writable_roots=[{json.dumps(root)}]"]
     elif engine == "cursor":
         flags = ["--sandbox", "enabled", "--add-dir", root]
     elif engine == "omp":
@@ -269,7 +308,7 @@ def wire_work_mail_argv(
     else:
         flags = ["--add-dir", root]
     updated = list(argv)
-    if flags and all(flag not in updated for flag in flags if flag.startswith("--add-dir")):
+    if flags and not all(flag in updated for flag in flags):
         if engine == "kimi" and "--prompt" in updated:
             updated[updated.index("--prompt") : updated.index("--prompt")] = flags
         elif engine in {"codex", "cursor", "omp"} and prompt_transport == "argv" and updated:
@@ -455,6 +494,8 @@ def _match_message_id(
             if path.is_symlink():
                 continue
             message_id = path.stem
+            if not MESSAGE_ID_RE.fullmatch(message_id):
+                continue
             if message_id == value or message_id.startswith(value):
                 payload = _read_json(path)
                 if payload is not None:
@@ -547,9 +588,7 @@ def _reply_sender_allowed(ledger: JsonObject, identity: MailIdentity) -> bool:
             continue
         if identity.is_coordinator and row.get("recipient") == COORDINATOR_BOX:
             return True
-        if identity.run_id is not None and (
-            row.get("runId") == identity.run_id or row.get("recipient") == identity.alias
-        ):
+        if identity.run_id is not None and row.get("runId") == identity.run_id:
             return True
     return False
 
@@ -561,7 +600,8 @@ def _reply_watcher_allowed(ledger: JsonObject, identity: MailIdentity) -> bool:
 
 
 def _validate_reply(registry_root: Path, reply_to: str, identity: MailIdentity) -> JsonObject:
-    _message_id, _path, ledger = _match_message_id(registry_root, reply_to, sent_only=True)
+    _message_id(reply_to)
+    _matched_message_id, _path, ledger = _match_message_id(registry_root, reply_to, sent_only=True)
     if not _reply_sender_allowed(ledger, identity):
         raise _error(
             "reply_not_participant",
@@ -641,11 +681,12 @@ def send(
                 row["reason"] = reason
             rows.append(row)
         ledger["recipients"] = rows
-        sent_path = sent_root(registry_root) / f"{message_id}.json"
+        sent_path = _message_file(sent_root(registry_root), message_id, ".json")
         while not private_io.write_json_atomic_if_absent(sent_path, ledger):
             message_id = _next_message_id()
+            _message_id(message_id)
             ledger["msgId"] = message_id
-            sent_path = sent_root(registry_root) / f"{message_id}.json"
+            sent_path = _message_file(sent_root(registry_root), message_id, ".json")
         meta["nextSeq"] = seq + 1
         private_io.write_json_atomic(mail_root(registry_root) / META_FILE_NAME, meta)
         envelope: JsonObject = {
@@ -667,7 +708,7 @@ def send(
             if not recipient.eligible or row.get("outcome") == "blocked":
                 continue
             box = _ensure_box(registry_root, recipient)
-            path = box / "inbox" / f"{message_id}.mail"
+            path = _message_file(box / "inbox", message_id, ".mail")
             try:
                 published = private_io.write_bytes_atomic_if_absent(path, payload)
             except OSError as exc:
@@ -719,6 +760,10 @@ def _iter_box_messages(
             continue
         try:
             envelope, body = _envelope_from_message(path)
+            _message_id(envelope.get("msgId"))
+            reply_to = envelope.get("replyTo")
+            if reply_to is not None:
+                _message_id(reply_to)
         except MailError:
             raise
         messages.append((path, envelope, body))
@@ -800,11 +845,13 @@ def _status_rows(registry_root: Path, ledger: JsonObject) -> list[JsonObject]:
             continue
         row = dict(raw)
         box = raw.get("box")
-        message_id = ledger.get("msgId")
+        message_id = _message_id(ledger.get("msgId"))
         found = False
         if isinstance(box, str) and isinstance(message_id, str):
             for folder in ("inbox", "read"):
-                if (_box_dir(registry_root, box) / folder / f"{message_id}.mail").is_file():
+                if _message_file(
+                    _box_dir(registry_root, box) / folder, message_id, ".mail"
+                ).is_file():
                     found = True
                     row["pathState"] = folder
                     break
@@ -832,7 +879,7 @@ def status(
         raise _error("missing_message", "mail status requires a message id.")
     with run_registry.registry_lock(registry_root):
         _ensure_mail_tree(registry_root)
-        _message_id, _path, ledger = _match_message_id(
+        _matched_message_id, _path, ledger = _match_message_id(
             registry_root, command.message_id, sent_only=True
         )
         ledger = dict(ledger)
@@ -905,7 +952,8 @@ def watch(
     identity = _identity(registry_root, env=env)
     allowed: set[str] | None = None
     if command.reply_to:
-        _message_id, _path, ledger = _match_message_id(
+        _message_id(command.reply_to)
+        _matched_message_id, _path, ledger = _match_message_id(
             registry_root, command.reply_to, sent_only=True
         )
         if not _reply_watcher_allowed(ledger, identity):
@@ -919,13 +967,22 @@ def watch(
             if isinstance(row, dict) and row.get("outcome") == "delivered"
         }
     deadline = time.monotonic() + (command.timeout or MAIL_WATCH_DEFAULT_TIMEOUT_SECONDS)
-    found_non_reply = False
     while True:
         with run_registry.registry_lock(registry_root):
             lines, found = _watch_once(registry_root, command, identity)
         matching = False
         for line in lines:
             message = line.get("message")
+            if allowed is not None and line.get("type") != "mail":
+                print(
+                    json.dumps(line, sort_keys=True, separators=(",", ":")), file=stdout, flush=True
+                )
+                continue
+            if allowed is not None and not isinstance(message, dict):
+                print(
+                    json.dumps(line, sort_keys=True, separators=(",", ":")), file=stdout, flush=True
+                )
+                continue
             if isinstance(message, dict) and allowed is not None:
                 sender = str(message.get("fromRunId") or message.get("from"))
                 if sender not in allowed or message.get("replyTo") != command.reply_to:
@@ -934,7 +991,6 @@ def watch(
             matching = True
         if (matching or (found and allowed is None)) and command.once:
             return 0
-        found_non_reply = found_non_reply or (found and allowed is not None)
         if not command.once:
             time.sleep(command.interval_ms / 1000)
             continue
@@ -952,7 +1008,7 @@ def watch(
                 file=stdout,
                 flush=True,
             )
-            return 0 if found_non_reply else 124
+            return 124
         time.sleep(command.interval_ms / 1000)
 
 
@@ -1086,6 +1142,10 @@ def _render_human(action: str, payload: JsonObject, stdout: TextIO) -> None:
                 if isinstance(row, dict):
                     print(f"  {row.get('recipient')}: {row.get('outcome')}", file=stdout)
         return
+    if action == "inbox":
+        framing = payload.get("framing")
+        if isinstance(framing, dict):
+            print(json.dumps({"framing": framing}, sort_keys=True), file=stdout)
     if action in {"inbox", "watch"}:
         for row in payload.get("messages", []):
             if isinstance(row, dict):

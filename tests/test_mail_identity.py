@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 import json
 import os
 import tempfile
@@ -151,7 +150,7 @@ class MailIdentityTests(unittest.TestCase):
         )
         fallback = profiles.codex_fallback_child_env_overrides(
             resolution,
-            {"DELEGATE_RUN_ID": "del_parent", "DELEGATE_MAIL_SELF": "cursor-1"},
+            child,
         )
         self.assertNotIn("DELEGATE_RUN_ID", fallback)
         self.assertNotIn("DELEGATE_MAIL_SELF", fallback)
@@ -170,19 +169,37 @@ class MailIdentityTests(unittest.TestCase):
             self.assertNotIn("--from", option_flags, name)
             self.assertFalse(any("--from" in usage for usage in spec.usage), name)
 
-    def test_bind_mail_identity_follows_register_on_cli_tracked_path(self) -> None:
-        source = inspect.getsource(cli.execute_request)
-        self.assertLess(
-            source.index("run_registry.register_run("), source.index("mail.bind_mail_identity(")
+    def test_fresh_launch_identity_reaches_primary_and_fallback_but_not_nested_child(self) -> None:
+        resolution = profiles.ProfileResolution(
+            name="primary",
+            source="flag",
+            env={"CODEX_HOME": "/tmp/primary"},
+            codex_home="/tmp/primary",
+            codex_fallback_home="/tmp/fallback",
         )
+        run_id, alias = self._run()
+        primary = profiles.child_environment(base={"DELEGATE_SOURCE_ROOT": str(self.workspace)})
+        mail.bind_mail_identity(primary, run_id, alias)
+        fallback = profiles.codex_fallback_child_env_overrides(resolution, primary)
 
-    def test_bind_mail_identity_follows_register_on_worktree_path(self) -> None:
-        from delegate_agent import worktree_execution
+        for env in (primary, fallback):
+            self.assertEqual(env["DELEGATE_RUN_ID"], run_id)
+            self.assertEqual(env["DELEGATE_MAIL_SELF"], alias)
+            self.assertEqual(env["DELEGATE_SOURCE_ROOT"], str(self.workspace))
+        with mock.patch.dict(os.environ, primary, clear=False):
+            nested = profiles.child_environment()
+        self.assertNotIn("DELEGATE_RUN_ID", nested)
+        self.assertNotIn("DELEGATE_MAIL_SELF", nested)
 
-        source = inspect.getsource(worktree_execution._register_persistent_worktree_run)
-        self.assertLess(
-            source.index("run_registry.register_run("), source.index("mail.bind_mail_identity(")
-        )
+    def test_launch_sanitization_removes_profile_or_parent_identity_before_binding(self) -> None:
+        inherited = {"DELEGATE_RUN_ID": "del_parent", "DELEGATE_MAIL_SELF": "cursor-1"}
+        mail.sanitize_inherited_mail_identity(inherited)
+        self.assertNotIn("DELEGATE_RUN_ID", inherited)
+        self.assertNotIn("DELEGATE_MAIL_SELF", inherited)
+        run_id, alias = self._run()
+        mail.bind_mail_identity(inherited, run_id, alias)
+        self.assertEqual(inherited["DELEGATE_RUN_ID"], run_id)
+        self.assertEqual(inherited["DELEGATE_MAIL_SELF"], alias)
 
 
 if __name__ == "__main__":

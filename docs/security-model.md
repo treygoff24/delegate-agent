@@ -29,11 +29,11 @@ workspace state, not an authentication or authorization boundary.
 
 The intended sandbox grant is `.delegate/mail` only, never `.delegate/runs`.
 Where the installed harness exposes a measured additional writable-root
-mechanism, Delegate adds the mail root to the work launch. Grok, OpenCode, and
-Devin currently receive an explicit degraded-scope warning because no verified
-mail-only grant is wired for them. Direct source-workspace launches and
-harnesses without an OS filesystem boundary may still reach other paths; the
-warning is honest scope reporting, not a claim of confinement.
+mechanism, Delegate adds the mail root to the work launch. Codex receives its
+`sandbox_workspace_write.writable_roots` grant only for an isolated worktree;
+direct Codex launches, Droid, Grok, Devin, OpenCode, and Pi are labeled
+workspace-writable and receive an explicit warning. The warning is honest scope
+reporting, not a claim of confinement.
 
 ## What Delegate controls
 

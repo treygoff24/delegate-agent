@@ -337,6 +337,7 @@ def _register_persistent_worktree_run(
 ) -> PersistentWorktreeRegistration:
     request = execution.request
     label = branch_label(request.engine, request.model_alias)
+    mail.sanitize_inherited_mail_identity(request.env_overrides)
 
     run_id, alias = run_registry.register_run(
         preflight.registry_root,
@@ -351,7 +352,8 @@ def _register_persistent_worktree_run(
         },
     )
     child_env = request.env_overrides or {}
-    mail.bind_mail_identity(child_env, run_id, alias)
+    if request.mode == "work":
+        mail.bind_mail_identity(child_env, run_id, alias)
     request.env_overrides = child_env
     if request.mode == "work":
         request.argv = mail.wire_work_mail_argv(
@@ -361,6 +363,7 @@ def _register_persistent_worktree_run(
             prompt=request.prompt,
             prompt_transport=request.prompt_transport,
             stderr=execution.stderr,
+            isolated_workspace=True,
         )
         if request.display_argv is not None:
             request.display_argv = mail.wire_work_mail_argv(
@@ -369,6 +372,7 @@ def _register_persistent_worktree_run(
                 preflight.registry_root,
                 prompt=request.prompt,
                 prompt_transport=request.prompt_transport,
+                isolated_workspace=True,
             )
 
     short_id = short_run_id(run_id)

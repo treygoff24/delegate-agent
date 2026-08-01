@@ -185,6 +185,17 @@ class MailContractTests(CommandTestBase):
         )
         self.assertNotIn("body", record["message"])
 
+    def test_human_inbox_prints_framing_before_message_bodies(self):
+        code, _stdout, stderr = self.run_main(
+            ["--cwd", str(self.workspace), "mail", "send", "--to", "coordinator", "hello"]
+        )
+        self.assertEqual(code, 0, stderr)
+        code, stdout, stderr = self.run_main(["--cwd", str(self.workspace), "mail", "inbox"])
+        self.assertEqual(code, 0, stderr)
+        lines = stdout.splitlines()
+        self.assertEqual(json.loads(lines[0])["framing"], mail.COORDINATOR_FRAMING)
+        self.assertEqual(json.loads(lines[1])["body"], "hello")
+
     def test_watch_emits_an_unreadable_ndjson_record(self):
         mail.inbox(self.registry_root, mail.MailCommand(action="inbox"))
         malformed = mail.boxes_root(self.registry_root) / "coordinator" / "inbox" / "bad.mail"

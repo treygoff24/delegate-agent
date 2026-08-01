@@ -1478,6 +1478,7 @@ def parse_prompt_tail(
     str | None,
     bool,
     bool,
+    bool,
 ]:
     prompt_file: str | None = None
     output_schema: str | None = None

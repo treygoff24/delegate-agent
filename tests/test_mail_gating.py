@@ -8,7 +8,11 @@ from pathlib import Path
 
 from delegate_agent import config as delegate_config
 from delegate_agent import mail, request_build, run_registry, runner
-from delegate_agent.constants import PROMPT_INSTRUCTION_MODE_SLASH, PROMPT_INSTRUCTION_MODE_WRAPPED
+from delegate_agent.constants import (
+    KNOWN_ENGINES,
+    PROMPT_INSTRUCTION_MODE_SLASH,
+    PROMPT_INSTRUCTION_MODE_WRAPPED,
+)
 from delegate_agent.request_models import ResolvedWorkspace
 from tests.delegate_commands_test_base import CommandTestBase
 
@@ -159,13 +163,54 @@ class MailGatingTests(CommandTestBase):
     def test_degraded_harness_launch_warns_and_does_not_claim_scoping(self):
         stderr = io.StringIO()
         argv = ["grok", "work", "prompt"]
-        result = mail.wire_work_mail_argv("grok", argv, Path("/registry"), stderr=stderr)
-        self.assertEqual(result, argv)
+        with tempfile.TemporaryDirectory(prefix="delegate-mail-sandbox-") as tmp:
+            result = mail.wire_work_mail_argv("grok", argv, Path(tmp), stderr=stderr)
+            self.assertEqual(result, argv)
+            self.assertTrue((Path(tmp) / "mail").is_dir())
         self.assertEqual(
             stderr.getvalue(),
-            "delegate mail: WARNING: grok has no verified mail-only writable root; "
-            "this work launch is not filesystem-scoped to .delegate/mail.\n",
+            "delegate mail: WARNING: grok work launch is workspace-writable; "
+            "it is not filesystem-scoped to .delegate/mail.\n",
         )
+
+    def test_mail_sandbox_table_lists_every_known_engine(self):
+        self.assertEqual(set(mail.MAIL_SANDBOX_ROWS), set(KNOWN_ENGINES))
+
+    def test_scoped_harnesses_add_only_their_declared_mail_grant(self):
+        with tempfile.TemporaryDirectory(prefix="delegate-mail-sandbox-") as tmp:
+            root = Path(tmp)
+            mail_root = str((root / "mail").resolve())
+            cases = {
+                "codex": ["-c", f'sandbox_workspace_write.writable_roots=["{mail_root}"]'],
+                "cursor": ["--sandbox", "enabled", "--add-dir", mail_root],
+                "kimi": ["--add-dir", mail_root],
+                "claude": ["--add-dir", mail_root],
+                "omp": [f"--add-dir={mail_root}"],
+            }
+            for engine, expected in cases.items():
+                with self.subTest(engine=engine):
+                    argv = mail.wire_work_mail_argv(
+                        engine,
+                        [engine, "work", "prompt"],
+                        root,
+                        isolated_workspace=engine == "codex",
+                    )
+                    for flag in expected:
+                        self.assertIn(flag, argv)
+                    self.assertTrue((root / "mail").is_dir())
+
+    def test_workspace_writable_harnesses_warn(self):
+        with tempfile.TemporaryDirectory(prefix="delegate-mail-sandbox-") as tmp:
+            for engine in ("droid", "grok", "devin", "opencode", "pi"):
+                with self.subTest(engine=engine):
+                    stderr = io.StringIO()
+                    self.assertEqual(
+                        mail.wire_work_mail_argv(
+                            engine, [engine, "work"], Path(tmp), stderr=stderr
+                        ),
+                        [engine, "work"],
+                    )
+                    self.assertIn("workspace-writable", stderr.getvalue())
 
 
 if __name__ == "__main__":

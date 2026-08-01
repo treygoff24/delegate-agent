@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -96,8 +97,46 @@ class MailReplyTests(unittest.TestCase):
             stdout=stdout,
             env={},
         )
-        self.assertEqual(code, 0)
+        self.assertEqual(code, 124)
         self.assertEqual(json.loads(stdout.getvalue())["type"], "timeout")
+
+    def test_alias_reuse_does_not_make_a_new_run_an_old_reply_participant(self) -> None:
+        first_id, first_alias = self._run()
+        original = self._send(mail.MailCommand(action="send", to=first_alias, body="question"))
+
+        index = run_registry.load_index(self.root)
+        index["aliases"].pop(first_alias)
+        index["runs"].pop(first_id)
+        run_registry.save_index(self.root, index)
+        (run_registry.aliases_dir(self.root) / first_alias).unlink()
+        shutil.rmtree(run_registry.run_directory(self.root, first_id))
+        second_id, second_alias = self._run()
+        self.assertEqual(second_alias, first_alias)
+
+        with self.assertRaises(DelegateError) as caught:
+            self._send(
+                mail.MailCommand(
+                    action="send", to="coordinator", reply_to=original["msgId"], body="answer"
+                ),
+                {"DELEGATE_RUN_ID": second_id, "DELEGATE_MAIL_SELF": second_alias},
+            )
+        self.assertEqual(caught.exception.error, "reply_not_participant")
+
+    def test_reply_watch_emits_unreadable_but_times_out(self) -> None:
+        _replier_id, replier = self._run()
+        original = self._send(mail.MailCommand(action="send", to=replier, body="question"))
+        mailbox = mail._ensure_box(self.root, mail.COORDINATOR_BOX) / "inbox" / "corrupt.mail"
+        mailbox.write_text("not a mail envelope", encoding="utf-8")
+
+        stdout = io.StringIO()
+        code = mail.watch(
+            self.root,
+            mail.MailCommand(action="watch", once=True, reply_to=original["msgId"], timeout=1),
+            stdout=stdout,
+            env={},
+        )
+        self.assertEqual(code, 124)
+        self.assertEqual(json.loads(stdout.getvalue().splitlines()[0])["type"], "unreadable")
 
     def test_send_reply_to_requires_existing_exchange_and_participation(self) -> None:
         replier_id, replier = self._run()
@@ -107,7 +146,7 @@ class MailReplyTests(unittest.TestCase):
         with self.assertRaises(DelegateError) as missing:
             self._send(
                 mail.MailCommand(
-                    action="send", to="coordinator", reply_to="does-not-exist", body="x"
+                    action="send", to="coordinator", reply_to="20260801-120000-a1b2c3", body="x"
                 ),
                 {"DELEGATE_RUN_ID": replier_id, "DELEGATE_MAIL_SELF": replier},
             )

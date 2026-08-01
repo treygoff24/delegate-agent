@@ -134,6 +134,37 @@ class MailDeliveryTests(unittest.TestCase):
             ).exists()
         )
 
+    def test_status_refuses_hostile_ledger_message_id_without_path_probe(self):
+        _sender_id, _sender, sender_env = self.lane()
+        _recipient_id, recipient, _recipient_env = self.lane()
+        message_id = "20260801-120000-a1b2c3"
+        mail._ensure_mail_tree(self.registry_root)
+        private_io.write_json_atomic(
+            mail.sent_root(self.registry_root) / f"{message_id}.json",
+            {
+                "schema": mail.MAIL_MESSAGE_SCHEMA,
+                "msgId": "../outside-canary",
+                "recipients": [
+                    {
+                        "recipient": recipient,
+                        "runId": _recipient_id,
+                        "box": _recipient_id,
+                        "outcome": "delivered",
+                    }
+                ],
+            },
+        )
+        canary = self.registry_root.parent / "outside-canary.mail"
+        self.assertFalse(canary.exists())
+        with self.assertRaises(mail.MailError) as caught:
+            mail.status(
+                self.registry_root,
+                mail.MailCommand(action="status", message_id=message_id),
+                env=sender_env,
+            )
+        self.assertEqual(caught.exception.error, "invalid_message_id")
+        self.assertFalse(canary.exists())
+
     def test_publication_link_failure_records_failed_and_does_not_claim_inbox(self):
         _sender_id, _sender, sender_env = self.lane()
         _recipient_id, recipient, _recipient_env = self.lane()
@@ -170,7 +201,11 @@ class MailDeliveryTests(unittest.TestCase):
         with mock.patch.object(
             mail,
             "_next_message_id",
-            side_effect=["20260801-120000-fixed", "20260801-120000-fixed", "20260801-120000-next"],
+            side_effect=[
+                "20260801-120000-a1b2c3",
+                "20260801-120000-a1b2c3",
+                "20260801-120000-d4e5f6",
+            ],
         ):
             first = mail.send(
                 self.registry_root,

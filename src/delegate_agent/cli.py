@@ -751,6 +751,7 @@ def _execute_attached_worktree(
         workspace_kind=source_workspace.kind,
     )
     maybe_run_retention_pass(registry_root, config)
+    mail.sanitize_inherited_mail_identity(request.env_overrides)
     run_id, alias = run_registry.register_run(
         registry_root,
         harness=request.engine,
@@ -769,7 +770,8 @@ def _execute_attached_worktree(
         },
     )
     child_env = request.env_overrides or {}
-    mail.bind_mail_identity(child_env, run_id, alias)
+    if request.mode == MODE_WORK:
+        mail.bind_mail_identity(child_env, run_id, alias)
     request.env_overrides = child_env
     if request.mode == MODE_WORK:
         request.argv = mail.wire_work_mail_argv(
@@ -779,6 +781,7 @@ def _execute_attached_worktree(
             prompt=request.prompt,
             prompt_transport=request.prompt_transport,
             stderr=stderr,
+            isolated_workspace=True,
         )
         if request.display_argv is not None:
             request.display_argv = mail.wire_work_mail_argv(
@@ -787,6 +790,7 @@ def _execute_attached_worktree(
                 registry_root,
                 prompt=request.prompt,
                 prompt_transport=request.prompt_transport,
+                isolated_workspace=True,
             )
     ctx_runner = make_run_context(
         registry_root,
@@ -1189,6 +1193,7 @@ def execute_request(
             workspace_kind=source_workspace.kind,
         )
         maybe_run_retention_pass(registry_root, config)
+        mail.sanitize_inherited_mail_identity(isolated_request.env_overrides)
         run_id, alias = run_registry.register_run(
             registry_root,
             harness=isolated_request.engine,
@@ -1207,7 +1212,8 @@ def execute_request(
             },
         )
         child_env = isolated_request.env_overrides or {}
-        mail.bind_mail_identity(child_env, run_id, alias)
+        if isolated_request.mode == MODE_WORK:
+            mail.bind_mail_identity(child_env, run_id, alias)
         isolated_request.env_overrides = child_env
         if isolated_request.mode == MODE_WORK:
             isolated_request.argv = mail.wire_work_mail_argv(
@@ -1217,6 +1223,11 @@ def execute_request(
                 prompt=isolated_request.prompt,
                 prompt_transport=isolated_request.prompt_transport,
                 stderr=stderr,
+                isolated_workspace=bool(
+                    isolated_request.isolation_context
+                    and isolated_request.isolation_context.isolation_lifecycle
+                    in ("temporary", "persistent", "attached")
+                ),
             )
             if isolated_request.display_argv is not None:
                 isolated_request.display_argv = mail.wire_work_mail_argv(
@@ -1225,6 +1236,11 @@ def execute_request(
                     registry_root,
                     prompt=isolated_request.prompt,
                     prompt_transport=isolated_request.prompt_transport,
+                    isolated_workspace=bool(
+                        isolated_request.isolation_context
+                        and isolated_request.isolation_context.isolation_lifecycle
+                        in ("temporary", "persistent", "attached")
+                    ),
                 )
         ctx_runner = make_run_context(
             registry_root,
