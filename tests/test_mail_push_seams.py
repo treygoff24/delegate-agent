@@ -426,6 +426,57 @@ class MailPushSeamTests(CommandTestBase):
             snapshot = json.loads((run_path / runner.SNAPSHOT_FILE).read_text(encoding="utf-8"))
             self.assertIn(runner.MAIL_PUSH_CLEANUP_WARNING, snapshot["warnings"])
 
+    def test_codex_mail_push_direct_context_failure_cleans_credentials_and_warns(self):
+        with tempfile.TemporaryDirectory(prefix="delegate-mail-push-direct-context-") as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            observations = root / "observations.jsonl"
+            primary = self._write_codex_home(root, "primary-codex", self.credential_canary)
+            fake = self._write_fake_harness(root)
+            Path(self._config_env["DELEGATE_CONFIG"]).write_text(
+                json.dumps(self._config("codex", fake, observations, primary_home=primary)),
+                encoding="utf-8",
+            )
+            original_cleanup = mail.cleanup_mail_push_private_homes
+
+            def cleanup_then_fail(registry_root: Path, run_id: str) -> None:
+                original_cleanup(registry_root, run_id)
+                raise OSError("injected cleanup failure")
+
+            with (
+                mock.patch.object(
+                    self.delegate,
+                    "make_run_context",
+                    side_effect=self.delegate.DelegateError(
+                        "injected_context_failure", "injected context construction failure"
+                    ),
+                ),
+                mock.patch.object(
+                    mail, "cleanup_mail_push_private_homes", side_effect=cleanup_then_fail
+                ),
+            ):
+                code, stdout, stderr = self._run_launch(
+                    [
+                        "--json",
+                        "--cwd",
+                        str(workspace),
+                        "codex",
+                        "work",
+                        "--mail-push",
+                        "launch",
+                    ],
+                    observations=observations,
+                )
+
+            self.assertEqual(code, self.delegate.EXIT_USAGE)
+            self.assertEqual(json.loads(stdout)["error"], "injected_context_failure")
+            self.assertIn(runner.MAIL_PUSH_CLEANUP_WARNING, stderr)
+            self.assertFalse(observations.exists())
+            run_paths = list((workspace / ".delegate" / "runs").iterdir())
+            self.assertEqual(len(run_paths), 1, run_paths)
+            self._assert_no_private_credentials(workspace, run_paths[0])
+
     def test_codex_mail_push_attached_revalidation_failure_cleans_credentials(self):
         _root, workspace, observations, _primary = self._run_verified_persistent("codex")
         _owner_run_path, owner_manifest = self._only_run(workspace)
@@ -523,6 +574,70 @@ class MailPushSeamTests(CommandTestBase):
         self.assertTrue(
             any(runner.MAIL_PUSH_CLEANUP_WARNING in warning for warning in state["warnings"])
         )
+
+    def test_codex_mail_push_attached_path_resolution_failure_cleans_credentials_and_warns(self):
+        _root, workspace, observations, _primary = self._run_verified_persistent("codex")
+        _owner_run_path, owner_manifest = self._only_run(workspace)
+        observations.unlink()
+        worktree_path = owner_manifest["executionCwd"]
+        original_cleanup = mail.cleanup_mail_push_private_homes
+        original_revalidate = self.delegate.resume_command.revalidate_attached_target
+        original_resolve = Path.resolve
+        revalidated = False
+
+        def cleanup_then_fail(registry_root: Path, run_id: str) -> None:
+            original_cleanup(registry_root, run_id)
+            raise OSError("injected cleanup failure")
+
+        def revalidate_then_continue(*args, **kwargs) -> None:
+            nonlocal revalidated
+            result = original_revalidate(*args, **kwargs)
+            revalidated = True
+            return result
+
+        def fail_post_revalidation_path_resolution(path: Path, *args, **kwargs) -> Path:
+            if revalidated and path == Path(worktree_path):
+                raise self.delegate.DelegateError(
+                    "injected_path_resolution_failure", "injected post-revalidation path failure"
+                )
+            return original_resolve(path, *args, **kwargs)
+
+        with (
+            mock.patch.object(
+                self.delegate.resume_command,
+                "revalidate_attached_target",
+                side_effect=revalidate_then_continue,
+            ),
+            mock.patch.object(Path, "resolve", new=fail_post_revalidation_path_resolution),
+            mock.patch.object(
+                mail, "cleanup_mail_push_private_homes", side_effect=cleanup_then_fail
+            ),
+        ):
+            code, stdout, stderr = self._run_launch(
+                [
+                    "--json",
+                    "--cwd",
+                    str(workspace),
+                    "resume",
+                    "--mail-push",
+                    owner_manifest["alias"],
+                    "continue",
+                ],
+                observations=observations,
+            )
+
+        self.assertTrue(revalidated)
+        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        self.assertEqual(json.loads(stdout)["error"], "injected_path_resolution_failure")
+        self.assertIn(runner.MAIL_PUSH_CLEANUP_WARNING, stderr)
+        self.assertFalse(observations.exists())
+        child_runs = [
+            path
+            for path in (workspace / ".delegate" / "runs").iterdir()
+            if path.name != owner_manifest["runId"]
+        ]
+        self.assertEqual(len(child_runs), 1, child_runs)
+        self._assert_no_private_credentials(workspace, child_runs[0])
 
     def test_codex_mail_push_fallback_uses_second_private_home_and_fallback_auth(self):
         with tempfile.TemporaryDirectory(prefix="delegate-mail-push-fallback-") as tmp:
