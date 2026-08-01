@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import subprocess
 import sys
@@ -422,6 +423,62 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             self.assertNotEqual(manifest_cwd, repo.name)
             self.assertIn(self.delegate.PROMPT_FILE_DISPLAY, manifest_argv)
             self.assertNotIn(secret_prompt, manifest_argv)
+
+    def test_persistent_worktree_child_receives_registered_fresh_mail_identity(self):
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            mock.patch.dict(os.environ, {"HOME": fake_home}),
+        ):
+            repo, _git_cd = self._make_git_repo_with_commit()
+            observed_path = Path(fake_home) / "child-env.json"
+            fake = Path(fake_home) / "fake-agent"
+            fake.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, os\n"
+                "with open(os.environ['FAKE_ENV_LOG'], 'w', encoding='utf-8') as handle:\n"
+                "    json.dump({key: value for key, value in os.environ.items() "
+                "if key in ('DELEGATE_RUN_ID', 'DELEGATE_MAIL_SELF')}, handle)\n",
+                encoding="utf-8",
+            )
+            fake.chmod(0o755)
+            config = dict(self.delegate.DEFAULT_CONFIG)
+            config["cursor"] = {**config["cursor"], "argvPrefix": [str(fake)]}
+            config["profiles"] = {
+                **config["profiles"],
+                "default": "identity-profile",
+                "definitions": {
+                    "identity-profile": {
+                        "env": {
+                            "DELEGATE_RUN_ID": "del_20260801T120000Z_abcdef",
+                            "DELEGATE_MAIL_SELF": "cursor-99",
+                            "FAKE_ENV_LOG": str(observed_path),
+                        }
+                    }
+                },
+            }
+            workspace = self.delegate.resolve_workspace(repo.name)
+            request = self._make_persistent_worktree_request("cursor", "work", repo.name, config)
+
+            code, _payload = self.delegate.execute_request(
+                request,
+                json_mode=True,
+                config=config,
+                pass_through=False,
+                completion_report_mode="none",
+                source_workspace=workspace,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+
+            self.assertEqual(code, 0)
+            manifests = list((Path(repo.name) / ".delegate" / "runs").glob("*/manifest.json"))
+            self.assertEqual(len(manifests), 1)
+            manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
+            observed = json.loads(observed_path.read_text(encoding="utf-8"))
+            self.assertEqual(observed["DELEGATE_RUN_ID"], manifest["runId"])
+            self.assertEqual(observed["DELEGATE_MAIL_SELF"], manifest["alias"])
+            self.assertNotEqual(observed["DELEGATE_RUN_ID"], "del_20260801T120000Z_abcdef")
+            self.assertNotEqual(observed["DELEGATE_MAIL_SELF"], "cursor-99")
 
     # -- Safe + worktree passthrough allowed and cleans up --------------------
 

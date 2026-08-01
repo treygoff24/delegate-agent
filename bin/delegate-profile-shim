@@ -155,6 +155,39 @@ _delegate_is_readonly_request() {
       done
       return 0
       ;;
+    mail)
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --json)
+            shift
+            ;;
+          --)
+            return 1
+            ;;
+          -*)
+            return 1
+            ;;
+          *)
+            break
+            ;;
+        esac
+      done
+      case "${1:-}" in
+        inbox|status|watch)
+          return 0
+          ;;
+        read)
+          for _delegate_mail_arg in "$@"; do
+            [ "$_delegate_mail_arg" = "--" ] && break
+            [ "$_delegate_mail_arg" = "--peek" ] && return 0
+          done
+          return 1
+          ;;
+        *)
+          return 1
+          ;;
+      esac
+      ;;
     worktree)
       case "${1:-}" in
         show|list)

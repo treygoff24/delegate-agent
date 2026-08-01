@@ -26,6 +26,8 @@ RUN_OUTPUT_PATH = ROOT / "src" / "delegate_agent" / "run_output_commands.py"
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
+from delegate_agent import mail  # noqa: E402
+
 
 def load_module(path: Path, name: str):
     spec = importlib.util.spec_from_file_location(name, path)
@@ -238,6 +240,109 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertFalse(snapshot["ok"])
             self.assertEqual(snapshot["status"], "failed")
             self.assertEqual(snapshot["error"], "child_launch_failed")
+
+    def test_terminal_launch_failure_cleans_mail_push_private_home(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            source_home = Path(workspace) / "source-codex-home"
+            source_home.mkdir()
+            (source_home / "auth.json").write_text('{"token":"test"}', encoding="utf-8")
+            env = {"CODEX_HOME": str(source_home)}
+            provision = mail.provision_mail_push(
+                "codex", ["codex", "exec", "prompt"], None, root, run_id, env
+            )
+            private_home = Path(provision.codex_home or "")
+            self.assertTrue(private_home.is_dir())
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="work",
+                model="model-id",
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-05-20T21:42:33Z",
+                env_overrides=env,
+                mail_push=True,
+            )
+
+            with self.assertRaises(self.runner.RunnerLaunchError):
+                self.runner.execute_tracked(
+                    [str(Path(workspace) / "missing-agent")],
+                    workspace,
+                    ctx,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+
+            self.assertFalse(private_home.exists())
+
+    def test_prepare_failure_cleans_mail_push_private_home_and_records_cleanup_warning(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            source_home = Path(workspace) / "source-codex-home"
+            source_home.mkdir()
+            (source_home / "auth.json").write_text('{"token":"test"}', encoding="utf-8")
+            env = {"CODEX_HOME": str(source_home)}
+            provision = mail.provision_mail_push(
+                "codex", ["codex", "exec", "prompt"], None, root, run_id, env
+            )
+            private_home = Path(provision.codex_home or "")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="work",
+                model="model-id",
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-05-20T21:42:33Z",
+                env_overrides=env,
+                mail_push=True,
+            )
+            original_cleanup = mail.cleanup_mail_push_private_homes
+
+            def cleanup_then_fail(registry_root: Path, cleanup_run_id: str) -> None:
+                original_cleanup(registry_root, cleanup_run_id)
+                raise OSError("injected cleanup failure")
+
+            with (
+                mock.patch.object(
+                    self.runner, "_prepare_tracked_run", side_effect=OSError("injected")
+                ),
+                mock.patch.object(
+                    mail, "cleanup_mail_push_private_homes", side_effect=cleanup_then_fail
+                ),
+                self.assertRaises(OSError),
+            ):
+                self.runner.execute_tracked(
+                    ["codex", "exec", "prompt"],
+                    workspace,
+                    ctx,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+
+            self.assertFalse(private_home.exists())
+            state = json.loads((root / "runs" / run_id / "state.json").read_text(encoding="utf-8"))
+            self.assertTrue(
+                any(
+                    self.runner.MAIL_PUSH_CLEANUP_WARNING in warning
+                    for warning in state["warnings"]
+                )
+            )
 
     def test_passthrough_launch_error_uses_runner_error(self):
         with tempfile.TemporaryDirectory() as workspace:

@@ -813,6 +813,58 @@ class CodexProfileExecutionTests(unittest.TestCase):
         )
         return exit_code, payload
 
+    def test_directory_baseline_detects_workspace_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            baseline = self.profiles.capture_workspace_baseline(tmp)
+
+            self.assertIsNotNone(baseline)
+            self.assertTrue(self.profiles.work_mode_safe_for_codex_fallback(tmp, baseline))
+            Path(tmp, "changed.txt").write_text("changed\n", encoding="utf-8")
+            self.assertFalse(self.profiles.work_mode_safe_for_codex_fallback(tmp, baseline))
+
+    def test_directory_baseline_stops_scandir_before_exhausting_a_large_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            consumed = 0
+            limit = self.profiles.DIRECTORY_BASELINE_MAX_ENTRIES
+
+            class Entry:
+                def __init__(self, index: int) -> None:
+                    self.name = f"entry-{index}"
+                    self.path = str(root / self.name)
+
+                def stat(self, *, follow_symlinks: bool = False):
+                    return root.stat()
+
+                def is_dir(self, *, follow_symlinks: bool = False) -> bool:
+                    return False
+
+            class Directory:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_args):
+                    return False
+
+                def __iter__(self):
+                    nonlocal consumed
+                    for index in range(limit + 100):
+                        consumed += 1
+                        yield Entry(index)
+
+            with mock.patch.object(self.profiles.os, "scandir", return_value=Directory()):
+                self.assertIsNone(self.profiles._capture_directory_baseline(tmp))
+            self.assertEqual(consumed, limit + 1)
+
+    def test_unborn_head_git_workspace_fails_closed_instead_of_directory_baseline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            subprocess.run(["git", "init", "-q", tmp], check=True, capture_output=True, text=True)
+            Path(tmp, "staged.txt").write_text("dirty\n", encoding="utf-8")
+            # git repo, no commits: porcelain works, HEAD is unborn. The weaker
+            # directory baseline must not be used — no baseline, no retry.
+            self.assertIsNone(self.profiles.capture_workspace_baseline(tmp))
+            self.assertFalse(self.profiles.work_mode_safe_for_codex_fallback(tmp, None))
+
     def test_work_mode_clean_unchanged_baseline_retries_with_fallback(self):
         repo = make_git_repo()
         self.addCleanup(repo.cleanup)
@@ -846,6 +898,68 @@ class CodexProfileExecutionTests(unittest.TestCase):
             assert payload is not None
             self.assertIn("codexAuthFallback", payload)
             self.assertEqual(attempts.read_text(encoding="utf-8").splitlines(), [personal, work])
+
+    def test_tracked_work_fallback_reuses_registered_mail_identity(self):
+        repo = make_git_repo()
+        self.addCleanup(repo.cleanup)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            personal = write_codex_home(root, "personal")
+            work = write_codex_home(root, "work")
+            observations = root / "child-identities.tsv"
+            fake_bin = root / "codex"
+            fake_bin.write_text(
+                "#!/usr/bin/env bash\n"
+                'printf "%s\\t%s\\t%s\\n" "${CODEX_HOME:-}" "${DELEGATE_RUN_ID:-}" '
+                f'"${{DELEGATE_MAIL_SELF:-}}" >> "{observations}"\n'
+                f'if [ "${{CODEX_HOME}}" = "{work}" ]; then\n'
+                '  printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}\'\n'
+                "  exit 0\n"
+                "fi\n"
+                'echo "You exceeded your current quota usage limit" >&2\n'
+                "exit 1\n",
+                encoding="utf-8",
+            )
+            fake_bin.chmod(0o755)
+            config = base_config(personal=personal, work=work)
+            config["codex"] = dict(config["codex"], binary=str(fake_bin), fallbackProfile="work")
+            config["profiles"]["default"] = "personal"
+            config["profiles"]["detectFrom"] = []
+            config["profiles"]["definitions"]["personal"]["env"].update(
+                {
+                    "DELEGATE_RUN_ID": "del_20260801T120000Z_abcdef",
+                    "DELEGATE_MAIL_SELF": "codex-99",
+                }
+            )
+            workspace = self.delegate.ResolvedWorkspace(repo.name, "git")
+            request = self.delegate.build_request(
+                "codex", "work", None, workspace, "task", config, dry_run=False
+            )
+
+            exit_code, payload = self.delegate.execute_request(
+                request,
+                json_mode=True,
+                config=config,
+                pass_through=False,
+                completion_report_mode="none",
+                source_workspace=workspace,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+
+            self.assertEqual(exit_code, 0)
+            self.assertIn("codexAuthFallback", payload or {})
+            manifests = list((Path(repo.name) / ".delegate" / "runs").glob("*/manifest.json"))
+            self.assertEqual(len(manifests), 1)
+            manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
+            observed = [
+                line.split("\t") for line in observations.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual([row[0] for row in observed], [personal, work])
+            self.assertEqual([row[1] for row in observed], [manifest["runId"], manifest["runId"]])
+            self.assertEqual([row[2] for row in observed], [manifest["alias"], manifest["alias"]])
+            self.assertNotEqual(manifest["runId"], "del_20260801T120000Z_abcdef")
+            self.assertNotEqual(manifest["alias"], "codex-99")
 
     def test_work_mode_dirty_baseline_skips_fallback_retry(self):
         repo = make_git_repo()

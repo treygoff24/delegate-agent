@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TextIO
 
-from delegate_agent import harness_events, profiles, retention, run_registry, safe_workspace
+from delegate_agent import harness_events, mail, profiles, retention, run_registry, safe_workspace
 from delegate_agent import runner as delegate_runner
 from delegate_agent.argv_utils import public_argv, replace_workspace_arg_in_argv
 from delegate_agent.git_utils import (
@@ -311,6 +311,7 @@ def _build_persistent_worktree_run_context(
         fallback_auth_profile=request.fallback_auth_profile,
         include_dirty=bool(creation_context.get("includeDirty")),
         synced_files=int(creation_context.get("syncedFiles") or 0),
+        mail_push=request.mail_push,
         group=request.group,
         call_read_only=request.call_read_only or request.pure,
         pure=request.pure,
@@ -336,6 +337,9 @@ def _register_persistent_worktree_run(
 ) -> PersistentWorktreeRegistration:
     request = execution.request
     label = branch_label(request.engine, request.model_alias)
+    if request.mode == "work":
+        mail.prepare_mail_storage(preflight.registry_root)
+    mail.sanitize_inherited_mail_identity(request.env_overrides)
 
     run_id, alias = run_registry.register_run(
         preflight.registry_root,
@@ -349,7 +353,10 @@ def _register_persistent_worktree_run(
             "group": request.group,
         },
     )
-
+    child_env = request.env_overrides or {}
+    if request.mode == "work":
+        mail.bind_mail_identity(child_env, run_id, alias)
+    request.env_overrides = child_env
     short_id = short_run_id(run_id)
     branch = plan_branch_name(label, short_id)
     data_home = worktrees_data_home(execution.config)
@@ -654,6 +661,39 @@ def _launch_child_in_persistent_worktree(
             request,
             registration.worktree_path,
         )
+        provision: mail.MailPushProvision | None = None
+        if request.mode == "work":
+            wired_argv, wired_display_argv = mail.wire_work_mail_launch(
+                request.engine,
+                execution_request.argv,
+                execution_request.display_argv,
+                preflight.registry_root,
+                prompt=request.prompt,
+                prompt_transport=request.prompt_transport,
+                stderr=execution.stderr,
+                isolated_workspace=True,
+            )
+            execution_request = replace(
+                execution_request, argv=wired_argv, display_argv=wired_display_argv
+            )
+            if request.mail_push:
+                provision = mail.provision_mail_push(
+                    request.engine,
+                    execution_request.argv,
+                    execution_request.display_argv,
+                    preflight.registry_root,
+                    registration.run_id,
+                    request.env_overrides or {},
+                    profiles.codex_fallback_child_env_overrides(
+                        request.profile_resolution, request.env_overrides or {}
+                    ),
+                )
+                if provision.warning is not None:
+                    request.warnings = (*request.warnings, provision.warning)
+                    print(f"delegate mail: WARNING: {provision.warning}", file=execution.stderr)
+                execution_request = replace(
+                    execution_request, argv=provision.argv, display_argv=provision.display_argv
+                )
         if request.resumed_from is not None:
             from delegate_agent.resume_command import enforce_resume_prompt_size
 
@@ -669,6 +709,28 @@ def _launch_child_in_persistent_worktree(
             worktree_path=registration.worktree_path,
             creation_context=registration.creation_context,
         )
+        if provision is not None:
+            exec_ctx = replace(
+                exec_ctx,
+                env_overrides=(
+                    dict(provision.env)
+                    if provision.warning is not None and provision.env is not None
+                    else exec_ctx.env_overrides
+                ),
+                fallback_env_overrides=mail.mail_push_fallback_env_overrides(
+                    provision,
+                    exec_ctx.fallback_env_overrides,
+                    preflight.registry_root,
+                    registration.run_id,
+                ),
+                warnings=tuple(
+                    dict.fromkeys(
+                        (*exec_ctx.warnings, *((provision.warning,) if provision.warning else ()))
+                    )
+                ),
+            )
+            if provision.warning is not None and provision.env is not None:
+                exec_ctx = replace(exec_ctx, env_overrides=dict(provision.env))
         if exec_ctx.persona_text is not None:
             run_registry.write_private_text(
                 registration.run_path / run_registry.PERSONA_TXT_FILE,
@@ -700,6 +762,17 @@ def _launch_child_in_persistent_worktree(
             timeout=request.timeout,
         )
     except Exception as exc:
+        if provision is not None:
+            try:
+                mail.cleanup_mail_push_private_homes(preflight.registry_root, registration.run_id)
+            except OSError:
+                warning = delegate_runner.MAIL_PUSH_CLEANUP_WARNING
+                request.warnings = (*request.warnings, warning)
+                registration.pre_ctx = replace(
+                    registration.pre_ctx,
+                    warnings=(*registration.pre_ctx.warnings, warning),
+                )
+                print(f"delegate mail: WARNING: {warning}", file=execution.stderr)
         error_msg = str(exc)
         error_code = getattr(exc, "error", "execution_failed")
         state = run_registry.load_run_state_or_none(preflight.registry_root, registration.run_id)

@@ -13,10 +13,18 @@ from tests.worktree_mgmt_test_base import WorktreeMgmtTestBase, git
 
 
 class ResumeAttachmentTests(WorktreeMgmtTestBase):
-    def _fake_agent(self, *, commit: bool = False) -> tempfile.TemporaryDirectory:
+    def _fake_agent(
+        self, *, commit: bool = False, binary: str = "agent"
+    ) -> tempfile.TemporaryDirectory:
         temp = tempfile.TemporaryDirectory(prefix="delegate-resume-agent-")
-        agent = Path(temp.name) / "agent"
+        agent = Path(temp.name) / binary
         body = ["#!/bin/sh", "set -eu"]
+        body.extend(
+            [
+                'if [ -n "${FAKE_CAPTURE_ARGS:-}" ]; then printf "%s\\n" "$@" > "$FAKE_CAPTURE_ARGS"; fi',
+                'if [ -n "${FAKE_CAPTURE_ENV:-}" ]; then env | grep "^DELEGATE_" > "$FAKE_CAPTURE_ENV" || true; fi',
+            ]
+        )
         if commit:
             body.extend(
                 [
@@ -46,6 +54,7 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
         include_dirty: bool = False,
         forbid_commit: bool = False,
         alias: str = "cursor-owner",
+        harness: str = "cursor",
         execution_cwd: str | None = None,
     ) -> tuple[str, str, str, str]:
         branch = "delegate/resume-owner"
@@ -53,6 +62,7 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
         run_id, owner_alias = self._seed_persistent_run(
             repo_path,
             alias=alias,
+            harness=harness,
             branch=branch,
             execution_cwd=worktree_path,
         )
@@ -179,6 +189,40 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
             )
             records = worktree_records.load_persistent_records(self._registry_root(repo_path))
             self.assertEqual([record["runId"] for record in records], [owner_id])
+
+    def test_attached_claude_child_observes_mail_grant_identity_and_matching_manifest_argv(self):
+        _repo, repo_path = self._make_repo()
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            self._fake_agent(binary="claude") as fake_agent,
+        ):
+            args_path = Path(fake_home) / "args"
+            env_path = Path(fake_home) / "env"
+            owner_id, owner_alias, _worktree_path, _branch = self._owner(
+                repo_path, fake_home, alias="claude-owner", harness="claude"
+            )
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "PATH": fake_agent + os.pathsep + os.environ.get("PATH", ""),
+                    "FAKE_CAPTURE_ARGS": str(args_path),
+                    "FAKE_CAPTURE_ENV": str(env_path),
+                },
+            ):
+                code, payload, stderr = self._resume(repo_path, fake_home, owner_alias, "continue")
+            self.assertEqual(code, 0, stderr)
+            self.assertTrue(payload.get("ok", True))
+            child_id, manifest, _state = self._child_manifest(repo_path, owner_id)
+            mail_root = str((Path(repo_path) / ".delegate" / "mail").resolve())
+            observed_argv = args_path.read_text(encoding="utf-8").splitlines()
+            self.assertIn("--add-dir", observed_argv)
+            self.assertIn(mail_root, observed_argv)
+            self.assertIn("--add-dir", manifest["argv"])
+            self.assertIn(mail_root, manifest["argv"])
+            self.assertEqual(manifest["argv"][1:], observed_argv)
+            observed_env = env_path.read_text(encoding="utf-8")
+            self.assertIn(f"DELEGATE_RUN_ID={child_id}", observed_env)
+            self.assertIn("DELEGATE_MAIL_SELF=claude-", observed_env)
 
     def test_attached_runs_never_create_a_second_derived_worktree_record(self):
         _repo, repo_path = self._make_repo()

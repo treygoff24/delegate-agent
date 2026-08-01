@@ -19,6 +19,7 @@ from delegate_agent import (
     command_help,
     config_commands,
     inspection_commands,
+    mail,
     profile_commands,
     reasoning,
     run_output_commands,
@@ -491,6 +492,19 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             isolation=isolation,
             auth_profile=auth_profile,
         )
+    if subcommand == "mail":
+        if (
+            pass_through
+            or completion_report is not None
+            or isolation is not None
+            or auth_profile is not None
+        ):
+            raise DelegateError(
+                "invalid_option_combination",
+                "delegate mail does not use --pass-through, --isolation, completion-report, "
+                "or --auth-profile options.",
+            )
+        return parse_mail(rest, json_mode, cwd)
     if subcommand == "config":
         return parse_config_subcommand(
             rest,
@@ -626,6 +640,202 @@ def unknown_subcommand_message(subcommand: str) -> str:
     if len(top_level) <= 20:
         parts.append(f"Valid subcommands: {', '.join(top_level)}.")
     return " ".join(parts)
+
+
+def parse_mail(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
+    rest, json_mode = consume_json_option(rest, json_mode)
+    if not rest or command_help.is_help_token(rest[0]):
+        return help_command(json_mode, "mail")
+    action = rest[0]
+    if action not in {"send", "inbox", "read", "status", "watch", "prune", "hook-pump"}:
+        raise DelegateError("unknown_mail_action", f"Unknown mail action: {action}.")
+    args = rest[1:]
+    if any(command_help.is_help_token(token) for token in args):
+        return help_command(json_mode, f"mail {action}")
+    values: dict[str, object] = {}
+    positional: list[str] = []
+    i = 0
+    value_options = {
+        "--to",
+        "--group",
+        "--reply-to",
+        "--subject",
+        "--file",
+        "--from",
+        "--timeout",
+        "--interval-ms",
+        "--older-than",
+    }
+    flag_options = {"--peek", "--once", "--dry-run"}
+    while i < len(args):
+        token = args[i]
+        if token == "--":
+            positional.extend(args[i + 1 :])
+            break
+        if token in flag_options:
+            if token in values:
+                raise DelegateError("invalid_option_combination", f"Only one {token} is allowed.")
+            values[token] = True
+            i += 1
+            continue
+        if token in value_options:
+            value = _require_option_value(args, i, token)
+            if token in values:
+                raise DelegateError("invalid_option_combination", f"Only one {token} is allowed.")
+            values[token] = value
+            i += 2
+            continue
+        if token.startswith("-"):
+            raise DelegateError("unknown_option", f"mail {action} does not support option: {token}")
+        positional.append(token)
+        i += 1
+
+    allowed = {
+        "send": {"--to", "--group", "--reply-to", "--subject", "--file"},
+        "inbox": {"--from"},
+        "read": {"--peek"},
+        "status": set(),
+        "watch": {"--once", "--from", "--reply-to", "--timeout", "--interval-ms"},
+        "prune": {"--older-than", "--dry-run"},
+        "hook-pump": set(),
+    }[action]
+    unsupported = sorted(set(values) - allowed)
+    if unsupported:
+        raise DelegateError(
+            "unknown_option",
+            f"mail {action} does not support option: {unsupported[0]}",
+        )
+
+    if action == "hook-pump":
+        if positional:
+            raise DelegateError(
+                "unexpected_argument",
+                "mail hook-pump is an internal command and takes no arguments.",
+            )
+        command = mail.MailCommand(action=action, json_mode=json_mode)
+    elif action == "send":
+        to = values.get("--to")
+        group = values.get("--group")
+        if (to is None) == (group is None):
+            raise DelegateError(
+                "missing_recipient", "mail send requires exactly one of --to or --group."
+            )
+        if to is not None and not isinstance(to, str):
+            raise DelegateError("invalid_recipient", "--to requires an alias or coordinator.")
+        if group is not None:
+            group = validate_group(str(group), option="mail send --group")
+        body = " ".join(positional) if positional else None
+        file_value = values.get("--file")
+        if body is not None and file_value is not None:
+            raise DelegateError(
+                "ambiguous_body_source", "Use BODY, --file FILE, or '-' but not more than one."
+            )
+        if body is None and file_value is None:
+            body = "-"
+        command = mail.MailCommand(
+            action=action,
+            to=str(to) if to is not None else None,
+            group=str(group) if group is not None else None,
+            reply_to=values.get("--reply-to")
+            if isinstance(values.get("--reply-to"), str)
+            else None,
+            subject=str(values.get("--subject", "")),
+            body=body,
+            file=str(file_value) if isinstance(file_value, str) else None,
+            json_mode=json_mode,
+        )
+    elif action == "inbox":
+        if positional:
+            raise DelegateError(
+                "unexpected_argument", "mail inbox does not accept positional arguments."
+            )
+        command = mail.MailCommand(
+            action=action,
+            from_sender=values.get("--from") if isinstance(values.get("--from"), str) else None,
+            json_mode=json_mode,
+        )
+    elif action == "read":
+        if len(positional) != 1:
+            raise DelegateError("missing_message", "mail read requires one message id prefix.")
+        command = mail.MailCommand(
+            action=action,
+            message_id=positional[0],
+            peek=bool(values.get("--peek")),
+            json_mode=json_mode,
+        )
+    elif action == "status":
+        if len(positional) != 1:
+            raise DelegateError("missing_message", "mail status requires one message id.")
+        command = mail.MailCommand(action=action, message_id=positional[0], json_mode=json_mode)
+    elif action == "watch":
+        if positional:
+            raise DelegateError(
+                "unexpected_argument", "mail watch does not accept positional arguments."
+            )
+        interval_raw = values.get("--interval-ms", mail.MAIL_WATCH_DEFAULT_INTERVAL_MS)
+        try:
+            interval_ms = int(interval_raw)
+        except (TypeError, ValueError) as exc:
+            raise DelegateError(
+                "invalid_interval", "mail watch --interval-ms must be an integer."
+            ) from exc
+        if not mail.MAIL_WATCH_MIN_INTERVAL_MS <= interval_ms <= mail.MAIL_WATCH_MAX_INTERVAL_MS:
+            raise DelegateError(
+                "invalid_interval", "mail watch --interval-ms must be between 100 and 60000."
+            )
+        timeout = values.get("--timeout")
+        if timeout is None:
+            timeout_value = None
+        else:
+            try:
+                timeout_value = int(timeout)
+            except (TypeError, ValueError) as exc:
+                raise DelegateError(
+                    "invalid_timeout", "mail watch --timeout must be an integer."
+                ) from exc
+        if timeout_value is not None and timeout_value < 1:
+            raise DelegateError("invalid_timeout", "mail watch --timeout must be positive.")
+        command = mail.MailCommand(
+            action=action,
+            from_sender=values.get("--from") if isinstance(values.get("--from"), str) else None,
+            reply_to=values.get("--reply-to")
+            if isinstance(values.get("--reply-to"), str)
+            else None,
+            once=bool(values.get("--once")),
+            timeout=timeout_value,
+            interval_ms=interval_ms,
+            json_mode=json_mode,
+        )
+    else:
+        if positional:
+            raise DelegateError(
+                "unexpected_argument", "mail prune does not accept positional arguments."
+            )
+        older_than = values.get("--older-than")
+        if older_than is None:
+            older_than_value = None
+        else:
+            try:
+                older_than_value = int(older_than)
+            except (TypeError, ValueError) as exc:
+                raise DelegateError(
+                    "invalid_option_value", "mail prune --older-than must be an integer."
+                ) from exc
+        if older_than_value is not None and older_than_value < 0:
+            raise DelegateError(
+                "invalid_option_value", "mail prune --older-than must be non-negative."
+            )
+        command = mail.MailCommand(
+            action=action,
+            older_than_days=older_than_value,
+            dry_run=bool(values.get("--dry-run")),
+            json_mode=json_mode,
+        )
+    return ParsedCommand(
+        "mail",
+        global_options=GlobalOptions(json_mode=json_mode, cwd=cwd),
+        mail_command=command,
+    )
 
 
 def has_misplaced_global_option(tokens: list[str]) -> bool:
@@ -789,6 +999,7 @@ def parse_modeless_engine(
         pure,
         timeout,
         include_dirty,
+        mail_push,
         model,
         agent,
         persona,
@@ -841,6 +1052,7 @@ def parse_modeless_engine(
             forbid_commit=forbid_commit,
             forbid_commit_implied_isolation=forbid_commit_implied_isolation,
             include_dirty=include_dirty,
+            mail_push=mail_push,
             read_only=read_only,
             pure=pure,
             timeout=timeout,
@@ -922,6 +1134,7 @@ def parse_droid(
         pure,
         timeout,
         include_dirty,
+        mail_push,
         model,
         agent,
         persona,
@@ -976,6 +1189,7 @@ def parse_droid(
             forbid_commit=forbid_commit,
             forbid_commit_implied_isolation=forbid_commit_implied_isolation,
             include_dirty=include_dirty,
+            mail_push=mail_push,
             read_only=read_only,
             pure=pure,
             timeout=timeout,
@@ -1071,6 +1285,7 @@ def parse_resume(
     output_schema: str | None = None
     drop_output_schema = False
     include_dirty = False
+    mail_push = False
     dry_run = False
     persona: str | None = None
     no_persona = False
@@ -1155,6 +1370,14 @@ def parse_resume(
                 include_dirty = True
                 i += 1
                 continue
+            if token == "--mail-push":
+                if mail_push:
+                    raise DelegateError(
+                        "invalid_option_combination", "Only one --mail-push flag is allowed."
+                    )
+                mail_push = True
+                i += 1
+                continue
             if token == "--persona":
                 if i + 1 >= len(rest):
                     raise DelegateError("missing_persona", "--persona requires a non-empty name.")
@@ -1229,6 +1452,7 @@ def parse_resume(
             output_schema=output_schema,
             drop_output_schema=drop_output_schema,
             include_dirty=include_dirty,
+            mail_push=mail_push,
             dry_run=dry_run,
             persona=persona,
             no_persona=no_persona,
@@ -1262,6 +1486,7 @@ def parse_prompt_tail(
     str | None,
     bool,
     bool,
+    bool,
 ]:
     prompt_file: str | None = None
     output_schema: str | None = None
@@ -1270,6 +1495,7 @@ def parse_prompt_tail(
     progress_intent: str | None = None
     forbid_commit = False
     include_dirty = False
+    mail_push = False
     read_only = False
     pure = False
     timeout: int | None = None
@@ -1499,6 +1725,14 @@ def parse_prompt_tail(
             include_dirty = True
             i += 1
             continue
+        if token == "--mail-push":
+            if mail_push:
+                raise DelegateError(
+                    "invalid_option_combination", "Only one --mail-push flag is allowed."
+                )
+            mail_push = True
+            i += 1
+            continue
         if token == "--read-only":
             read_only = True
             i += 1
@@ -1573,6 +1807,7 @@ def parse_prompt_tail(
         pure,
         timeout,
         include_dirty,
+        mail_push,
         model,
         agent,
         persona,

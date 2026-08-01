@@ -162,6 +162,7 @@ class RunContext:
     persona_digest: str | None = None
     persona_file: str | None = None
     persona_text: str | None = None
+    mail_push: bool = False
 
 
 def write_manifest(run_path: Path, manifest: JsonObject) -> None:
@@ -284,6 +285,8 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
         payload["fallbackProfile"] = ctx.fallback_auth_profile
     if ctx.group is not None:
         payload["group"] = ctx.group
+    if ctx.mail_push:
+        payload["mailPush"] = True
     if ctx.include_dirty:
         payload["includeDirty"] = True
         payload["syncedFiles"] = ctx.synced_files
@@ -1120,6 +1123,7 @@ class TrackedCaptureResult:
     stdin_failures: tuple[str, ...]
     pid: int
     pgid: int | None
+    mail_push_failure_reason: str | None = None
     error: str | None = None
     message: str | None = None
 
@@ -1448,6 +1452,15 @@ def _capture_tracked_process(
     lines_since_persist = 0
     last_persist_at = time.monotonic()
     progress_dirty = False
+    mail_push_failure_reason: str | None = None
+    mail_push_nonce: str | None = None
+    if ctx.mail_push:
+        try:
+            from delegate_agent import mail
+
+            mail_push_nonce = mail.read_hook_failure_nonce(ctx.registry_root, ctx.run_id)
+        except (OSError, ValueError):
+            mail_push_nonce = None
 
     def maybe_persist_running() -> None:
         nonlocal lines_since_persist, last_persist_at, progress_dirty
@@ -1493,6 +1506,16 @@ def _capture_tracked_process(
                     events_handle.flush()
                     maybe_persist_running()
 
+        def handle_stderr_line(chunk_text: str) -> None:
+            nonlocal mail_push_failure_reason
+            if mail_push_failure_reason is not None or not ctx.mail_push:
+                return
+            from delegate_agent import mail
+
+            mail_push_failure_reason = mail.hook_failure_reason_from_stderr(
+                chunk_text, nonce=mail_push_nonce
+            )
+
         stdout_thread = threading.Thread(
             target=_drain_stream,
             args=(process.stdout, files.stdout_log, stdout_bytes_counter),
@@ -1502,7 +1525,7 @@ def _capture_tracked_process(
         stderr_thread = threading.Thread(
             target=_drain_stream,
             args=(process.stderr, files.stderr_log, stderr_bytes_counter),
-            kwargs={"on_line": None},
+            kwargs={"on_line": handle_stderr_line},
             daemon=True,
         )
         stdout_thread.start()
@@ -1598,6 +1621,7 @@ def _capture_tracked_process(
         stdin_failures=tuple(stdin_failures),
         pid=process.pid,
         pgid=pgid,
+        mail_push_failure_reason=mail_push_failure_reason,
         error="call_timeout" if timed_out else None,
         message="Child command exceeded the configured timeout." if timed_out else None,
     )
@@ -1648,6 +1672,116 @@ def _completion_report_source(
     return ""
 
 
+MAIL_PUSH_EVENT_KIND = "mail_push_degraded"
+MAIL_PUSH_WARNING_PREFIX = "mail push degraded to pull"
+MAIL_PUSH_CLEANUP_WARNING = "mail push private-home cleanup failed"
+
+
+def _mail_push_warnings(ctx: RunContext) -> list[str]:
+    return [
+        warning
+        for warning in ctx.warnings
+        if isinstance(warning, str) and warning.startswith(MAIL_PUSH_WARNING_PREFIX)
+    ]
+
+
+def _cleanup_mail_push_private_homes(ctx: RunContext) -> str | None:
+    if not ctx.mail_push:
+        return None
+    try:
+        from delegate_agent import mail
+
+        mail.cleanup_mail_push_private_homes(ctx.registry_root, ctx.run_id)
+    except OSError:
+        return MAIL_PUSH_CLEANUP_WARNING
+    return None
+
+
+def _cleanup_unfinished_mail_push_private_homes(ctx: RunContext) -> None:
+    """Release runner-owned credentials when setup never reaches finalization."""
+    cleanup_warning = _cleanup_mail_push_private_homes(ctx)
+    if cleanup_warning is not None:
+        with contextlib.suppress(DelegateError, OSError):
+            record_mail_push_degradation(
+                ctx.registry_root,
+                ctx.run_id,
+                engine=ctx.engine,
+                reason=cleanup_warning,
+            )
+
+
+def record_mail_push_degradation(
+    registry_root: Path,
+    run_id: str,
+    *,
+    engine: str,
+    reason: str,
+) -> str:
+    """Persist one hook degradation event and project it into the snapshot."""
+    warning = f"{MAIL_PUSH_WARNING_PREFIX} for {engine}: {reason[:200]}."
+    run_path = run_registry.run_directory(registry_root, run_id)
+    with run_registry.registry_lock(registry_root):
+        state = run_registry.load_run_state_or_none(registry_root, run_id) or {}
+        if state.get("mailPushDegraded") is True:
+            existing = state.get("mailPushWarning")
+            return existing if isinstance(existing, str) else warning
+        state = dict(state)
+        state["mailPushDegraded"] = True
+        state["mailPushWarning"] = warning
+        warnings = [item for item in state.get("warnings", []) if isinstance(item, str)]
+        if warning not in warnings:
+            warnings.append(warning)
+        state["warnings"] = warnings
+        run_registry.write_json_atomic(run_path / STATE_FILE, state)
+        event = {"kind": MAIL_PUSH_EVENT_KIND, "message": warning}
+        with open_events_log(run_path) as handle:
+            append_event(handle, event)
+            handle.flush()
+        snapshot = run_registry.load_run_snapshot_or_none(registry_root, run_id)
+        if isinstance(snapshot, dict):
+            snapshot = dict(snapshot)
+            snapshot_warnings = [
+                item for item in snapshot.get("warnings", []) if isinstance(item, str)
+            ]
+            if warning not in snapshot_warnings:
+                snapshot_warnings.append(warning)
+            snapshot["warnings"] = snapshot_warnings
+            recent_events = snapshot.get("recentEvents")
+            if not isinstance(recent_events, list):
+                recent_events = []
+            recent_events = [item for item in recent_events if isinstance(item, dict)]
+            total = snapshot.get("eventsTotal")
+            recent_events.append(event)
+            snapshot["recentEvents"] = recent_events[-harness_events.EVENT_LIMIT :]
+            snapshot["eventsTotal"] = total + 1 if isinstance(total, int) else len(recent_events)
+            snapshot["eventsTruncated"] = snapshot["eventsTotal"] > harness_events.EVENT_LIMIT
+            snapshot["eventsLimit"] = harness_events.EVENT_LIMIT
+            run_registry.write_snapshot(run_path, snapshot)
+    return warning
+
+
+def _mail_push_failure_marker(ctx: RunContext, sentinel_reason: str | None = None) -> str | None:
+    if not ctx.mail_push:
+        return None
+    try:
+        from delegate_agent import mail
+
+        return mail.read_hook_failure_marker(ctx.registry_root, ctx.run_id) or sentinel_reason
+    except (DelegateError, OSError, ValueError):
+        return "hook failure marker could not be read"
+
+
+def _append_mail_push_event(accumulator: harness_events.StreamAccumulator, warning: str) -> None:
+    if any(
+        event.kind == MAIL_PUSH_EVENT_KIND and event.message == warning
+        for event in accumulator.events
+    ):
+        return
+    accumulator.events.append(
+        harness_events.NormalizedEvent(kind=MAIL_PUSH_EVENT_KIND, message=warning)
+    )
+
+
 def _finalize_tracked_run(
     files: TrackedRunFiles,
     ctx: RunContext,
@@ -1656,9 +1790,38 @@ def _finalize_tracked_run(
     completion_report_mode: str,
     extra: JsonObject | None = None,
 ) -> TrackedFinalization:
+    mail_warnings = _mail_push_warnings(ctx)
+    cleanup_warning = _cleanup_mail_push_private_homes(ctx)
+    if cleanup_warning is not None:
+        mail_warnings.append(cleanup_warning)
+    stderr_tail = profiles.read_bounded_stderr_tail(files.stderr_log)
+    marker_reason = _mail_push_failure_marker(ctx, capture.mail_push_failure_reason)
+    if marker_reason is not None:
+        try:
+            mail_warnings.append(
+                record_mail_push_degradation(
+                    ctx.registry_root,
+                    ctx.run_id,
+                    engine=ctx.engine,
+                    reason=marker_reason,
+                )
+            )
+        except (OSError, DelegateError):
+            mail_warnings.append(
+                f"{MAIL_PUSH_WARNING_PREFIX} for {ctx.engine}: event recording failed."
+            )
+    for warning in dict.fromkeys(mail_warnings):
+        _append_mail_push_event(capture.accumulator, warning)
     exit_code, merged_extra = _final_extra(ctx, capture.exit_code)
     if extra:
         merged_extra = {**merged_extra, **extra}
+    if mail_warnings:
+        warnings = list(merged_extra.get("warnings") or [])
+        for warning in mail_warnings:
+            _append_unique(warnings, warning)
+        merged_extra["warnings"] = warnings
+        merged_extra["mailPushDegraded"] = True
+        merged_extra["mailPushWarning"] = mail_warnings[0]
     merged_extra = {**merged_extra, "pid": capture.pid}
     if capture.pgid is not None:
         merged_extra["pgid"] = capture.pgid
@@ -1690,7 +1853,6 @@ def _finalize_tracked_run(
     elif status == run_registry.STATUS_SUCCEEDED:
         for key in ("failureReason", "error", "message"):
             merged_extra.pop(key, None)
-    stderr_tail = profiles.read_bounded_stderr_tail(files.stderr_log)
     failure = _failure_details(
         status=status,
         signal_text="\n".join(
@@ -1974,9 +2136,15 @@ def _retry_is_safe(
         return ctx.call_read_only
     if ctx.mode == "work":
         return profiles.work_mode_safe_for_codex_fallback(cwd, workspace_baseline)
-    if ctx.mode == "safe" and ctx.isolated_workspace:
-        return profiles.workspace_baseline_unchanged(cwd, workspace_baseline)
-    return True
+    if ctx.mode == "safe":
+        if not ctx.isolated_workspace:
+            return True
+        return (
+            workspace_baseline is not None
+            and workspace_baseline.directory_entries is None
+            and profiles.workspace_baseline_unchanged(cwd, workspace_baseline)
+        )
+    return False
 
 
 def _cancel_requested_or_cancelled(ctx: RunContext) -> bool:
@@ -2093,6 +2261,9 @@ def _merge_tracked_attempt_captures(
         stdin_failures=tuple(
             dict.fromkeys([*prior_capture.stdin_failures, *current_capture.stdin_failures])
         ),
+        mail_push_failure_reason=(
+            current_capture.mail_push_failure_reason or prior_capture.mail_push_failure_reason
+        ),
     )
 
 
@@ -2191,9 +2362,67 @@ def execute_tracked(
     progress_interval_sec: float = PROGRESS_HEARTBEAT_INTERVAL_SEC,
     timeout: int | None = None,
 ) -> tuple[int, JsonObject | None]:
+    completed = False
+    try:
+        result = _execute_tracked(
+            argv,
+            cwd,
+            ctx,
+            json_mode=json_mode,
+            stdout=stdout,
+            stderr=stderr,
+            completion_report_mode=completion_report_mode,
+            stdin_text=stdin_text,
+            prompt_file_text=prompt_file_text,
+            prompt_file_placeholder=prompt_file_placeholder,
+            agent_config_text=agent_config_text,
+            agent_config_placeholder=agent_config_placeholder,
+            persona_file_text=persona_file_text,
+            persona_file_placeholder=persona_file_placeholder,
+            output_schema_text=output_schema_text,
+            output_schema_path=output_schema_path,
+            manifest_argv=manifest_argv,
+            progress=progress,
+            progress_initial_delay_sec=progress_initial_delay_sec,
+            progress_interval_sec=progress_interval_sec,
+            timeout=timeout,
+        )
+        completed = True
+        return result
+    finally:
+        if not completed:
+            _cleanup_unfinished_mail_push_private_homes(ctx)
+
+
+def _execute_tracked(
+    argv: list[str],
+    cwd: str,
+    ctx: RunContext,
+    *,
+    json_mode: bool,
+    stdout: TextIO,
+    stderr: TextIO,
+    completion_report_mode: str = delegate_config.COMPLETION_REPORT_MODE_MARKDOWN,
+    stdin_text: str | None = None,
+    prompt_file_text: str | None = None,
+    prompt_file_placeholder: str | None = None,
+    agent_config_text: str | None = None,
+    agent_config_placeholder: str | None = None,
+    persona_file_text: str | None = None,
+    persona_file_placeholder: str | None = None,
+    output_schema_text: str | None = None,
+    output_schema_path: str | None = None,
+    manifest_argv: list[str] | None = None,
+    progress: bool = False,
+    progress_initial_delay_sec: float = PROGRESS_INITIAL_DELAY_SEC,
+    progress_interval_sec: float = PROGRESS_HEARTBEAT_INTERVAL_SEC,
+    timeout: int | None = None,
+) -> tuple[int, JsonObject | None]:
     if stdin_text is not None and prompt_file_text is not None:
         raise ValueError("stdin_text and prompt_file_text are mutually exclusive")
     files = _prepare_tracked_run(argv, ctx, manifest_argv=manifest_argv)
+    for warning in _mail_push_warnings(ctx):
+        _append_runtime_event(files, MAIL_PUSH_EVENT_KIND, warning)
     started = time.monotonic()
     deadline = None if timeout is None else started + timeout
     run_argv = _codex_argv_with_scratch(argv, files.scratch_dir) if ctx.engine == "codex" else argv
@@ -2222,9 +2451,15 @@ def execute_tracked(
     )
     retry_workspace = ctx.execution_cwd if ctx.isolated_workspace else cwd
     workspace_baseline = (
-        profiles.capture_workspace_baseline(retry_workspace)
+        profiles.capture_workspace_baseline(
+            retry_workspace,
+            allow_directory=ctx.mode == "work" and ctx.workspace_kind == "directory",
+        )
         if ctx.engine == "codex"
-        and (ctx.mode == "work" or (ctx.mode == "safe" and ctx.isolated_workspace))
+        and (
+            ctx.mode == "work"
+            or (ctx.mode == "safe" and ctx.isolated_workspace and ctx.workspace_kind == "git")
+        )
         else None
     )
     fallback_extra: JsonObject | None = None
@@ -2449,6 +2684,8 @@ def execute_tracked(
                     "warnings": [EMPTY_RETRY_SKIPPED_WRITE_CAPABLE_WARNING],
                 }
     except RunnerLaunchError:
+        if capture is None:
+            _cleanup_unfinished_mail_push_private_homes(ctx)
         if capture is None or not _cancel_requested_or_cancelled(ctx):
             raise
         # A retry launch lost the race to cancellation. Its locked launch-

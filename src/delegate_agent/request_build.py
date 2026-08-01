@@ -26,6 +26,7 @@ from typing import TextIO
 from delegate_agent import config as delegate_config
 from delegate_agent import (
     harness_discovery,
+    mail,
     personas,
     profiles,
     reasoning,
@@ -119,6 +120,7 @@ RUN_INPUT_KEYS = {
     "persona",
     "allowRepoPersona",
     "expectedPersonaDigest",
+    "mailPush",
 }
 
 OUTPUT_SCHEMA_COMPLETION_REPORT_WARNING = (
@@ -641,6 +643,7 @@ def effective_prompt(
     persona_text: str | None = None,
     worktree_note: str | None = None,
     dirty_note: str | None = None,
+    mail_suffix: str | None = None,
 ) -> str:
     if instruction_mode == PROMPT_INSTRUCTION_MODE_SLASH:
         # Verbatim means verbatim except for Delegate-owned persistent-worktree
@@ -677,6 +680,8 @@ def effective_prompt(
     segments.append(prompt)
     if completion_report_mode == delegate_config.COMPLETION_REPORT_MODE_MARKDOWN:
         segments.append(delegate_runner.COMPLETION_REPORT_SUFFIX.strip())
+    if mail_suffix is not None:
+        segments.append(mail_suffix)
     if dirty_note is not None:
         segments.append(dirty_note)
     return "\n\n".join(segment for segment in segments if segment)
@@ -1463,6 +1468,7 @@ def request_from_parsed(
                 persona_source_override=launch.persona_record_source,
                 persona_digest_override=launch.persona_record_digest,
                 persona_path_override=launch.persona_record_path,
+                mail_push=launch.mail_push,
                 frame_prompt=True,
             )
         except BaseException:
@@ -1599,6 +1605,7 @@ def request_from_parsed(
         persona_source_override=launch.persona_record_source,
         persona_digest_override=launch.persona_record_digest,
         persona_path_override=launch.persona_record_path,
+        mail_push=launch.mail_push,
         frame_prompt=True,
     )
 
@@ -1710,6 +1717,9 @@ def request_from_input_json(
             "timeout is not supported with --pass-through; "
             "pass-through runs have no tracked deadline.",
         )
+    raw_mail_push = raw.get("mailPush", False)
+    if not isinstance(raw_mail_push, bool):
+        raise DelegateError("invalid_mail_push", "mailPush must be true or false.")
     json_model_alias: str | None = model_alias if isinstance(model_alias, str) else None
     json_model_override: str | None = None
     if engine == "droid":
@@ -1831,6 +1841,7 @@ def request_from_input_json(
                 allow_repo_persona=raw_allow_repo_persona,
                 pass_through=global_options.pass_through,
                 stderr=stderr,
+                mail_push=raw_mail_push,
                 frame_prompt=True,
             )
         except BaseException:
@@ -1970,6 +1981,7 @@ def request_from_input_json(
         expected_persona_digest=raw_expected_persona_digest,
         pass_through=global_options.pass_through,
         stderr=stderr,
+        mail_push=raw_mail_push,
         frame_prompt=True,
     )
 
@@ -2018,6 +2030,7 @@ def build_request(
     persona_digest_override: str | None = None,
     persona_path_override: str | None = None,
     expected_persona_digest: str | None = None,
+    mail_push: bool = False,
     frame_prompt: bool | None = None,
 ) -> Request:
     _validate_agent_option(engine, agent)
@@ -2049,6 +2062,20 @@ def build_request(
         validate_pure_call(engine, pure=True, read_only=call_read_only, group=group)
     if timeout is not None and timeout <= 0:
         raise DelegateError("invalid_timeout", "timeout must be a positive integer.")
+    if not isinstance(mail_push, bool):
+        raise DelegateError("invalid_mail_push", "mailPush must be a boolean.")
+    if mail_push and not delegate_config.mail_enabled(config):
+        raise DelegateError(
+            "mail_push_disabled",
+            "mailPush requires mail.enabled=true in the active configuration.",
+        )
+    if mail_push and (
+        mode != "work" or pass_through or prompt_instruction_mode == PROMPT_INSTRUCTION_MODE_SLASH
+    ):
+        raise DelegateError(
+            "mail_push_unsupported",
+            "mailPush is supported only for wrapped work-mode launches, not slash or pass-through runs.",
+        )
     if persona is not None:
         if mode == MODE_CALL:
             raise DelegateError("persona_call_refused", "personas are not supported for call mode.")
@@ -2174,6 +2201,7 @@ def build_request(
             source_prompt=source_prompt,
             progress_requested=progress_requested,
             completion_report_mode=completion_report_mode,
+            mail_push=mail_push,
             persona_resolution=persona_resolution,
             allow_repo_persona=allow_repo_persona,
             skip_skill_preamble=pass_through,
@@ -3045,6 +3073,7 @@ def _build_request_for_workspace(
     persona_resolution: personas.PersonaResolution | None = None,
     allow_repo_persona: bool = False,
     skip_skill_preamble: bool = False,
+    mail_push: bool = False,
     frame_prompt: bool = True,
 ) -> Request:
     source_prompt = prompt if source_prompt is None else source_prompt
@@ -3106,6 +3135,14 @@ def _build_request_for_workspace(
             ),
             worktree_note=framed_worktree_note,
             dirty_note=dirty_note,
+            mail_suffix=(
+                mail.MAIL_PROMPT_SUFFIX
+                if delegate_config.mail_enabled(config)
+                and mode == "work"
+                and prompt_instruction_mode != PROMPT_INSTRUCTION_MODE_SLASH
+                and not skip_skill_preamble
+                else None
+            ),
         )
     if frame_prompt and engine in ARGV_PROMPT_TRANSPORT_ENGINES:
         prompt_bytes = len(prompt.encode("utf-8"))
@@ -3213,6 +3250,7 @@ def _build_request_for_workspace(
             persona_env_overrides=parts.persona_env_overrides or persona_env,
             completion_report_mode=completion_report_mode,
             persistent_worktree_notes_framed=framed_worktree_note is not None,
+            mail_push=mail_push,
         ),
         config,
         resolution=profile_resolution,

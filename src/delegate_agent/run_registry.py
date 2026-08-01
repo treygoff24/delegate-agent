@@ -26,6 +26,7 @@ from delegate_agent.private_io import (  # noqa: F401  # re-exported
     read_json_object,
     read_json_object_or_none,
     supports_private_modes,
+    write_bytes_atomic_if_absent,
     write_json_atomic,
     write_private_bytes,
     write_private_text,

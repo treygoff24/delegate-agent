@@ -17,6 +17,7 @@ from delegate_agent.harness_events import StreamAccumulator
 from delegate_agent.json_types import JsonObject
 
 STDERR_TAIL_LIMIT = 8_000
+DIRECTORY_BASELINE_MAX_ENTRIES = 10_000
 PURE_ENV_ALLOWLIST = frozenset(
     {"PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TERM"}
 )
@@ -230,6 +231,10 @@ def child_environment(
         env.pop("DELEGATE_SOURCE_ROOT", None)
         env.pop("DELEGATE_EXECUTION_ROOT", None)
         env.pop("WORKSPACE_ROOT", None)
+        # A nested child must not inherit its parent's mail authority. The
+        # parent rebinds a fresh identity immediately after registration.
+        env.pop("DELEGATE_RUN_ID", None)
+        env.pop("DELEGATE_MAIL_SELF", None)
     if base:
         env.update(base)
     if overrides:
@@ -239,6 +244,13 @@ def child_environment(
         else:
             env.update(overrides)
     return env
+
+
+def strip_mail_identity(env: dict[str, str] | None) -> None:
+    """Prevent every dispatched child from inheriting a mail identity."""
+    if env is not None:
+        env.pop("DELEGATE_RUN_ID", None)
+        env.pop("DELEGATE_MAIL_SELF", None)
 
 
 def _auth_file_readable(path: Path) -> bool:
@@ -323,13 +335,16 @@ def codex_fallback_child_env_overrides(
     fallback = codex_fallback_env_overrides(resolution)
     if fallback is None:
         return {}
+    fallback_excluded = {
+        "DELEGATE_SOURCE_ROOT",
+        "DELEGATE_EXECUTION_ROOT",
+        "WORKSPACE_ROOT",
+        "DELEGATE_RUN_ID",
+        "DELEGATE_MAIL_SELF",
+    }
     return {
-        **(primary_overrides or {}),
-        **{
-            key: value
-            for key, value in fallback.items()
-            if key not in {"DELEGATE_SOURCE_ROOT", "DELEGATE_EXECUTION_ROOT", "WORKSPACE_ROOT"}
-        },
+        **{key: value for key, value in (primary_overrides or {}).items()},
+        **{key: value for key, value in fallback.items() if key not in fallback_excluded},
     }
 
 
@@ -384,23 +399,59 @@ def capture_head_oid(cwd: str) -> str | None:
 
 @dataclass(frozen=True)
 class WorkspaceBaseline:
-    porcelain: str
-    head: str
+    porcelain: str | None = None
+    head: str | None = None
+    directory_entries: tuple[tuple[str, int, int, int], ...] | None = None
 
 
-def capture_workspace_baseline(cwd: str) -> WorkspaceBaseline | None:
+def _capture_directory_baseline(cwd: str) -> WorkspaceBaseline | None:
+    root = Path(cwd)
+    entries: list[tuple[str, int, int, int]] = []
+    try:
+        pending = [root]
+        while pending:
+            current = pending.pop()
+            with os.scandir(current) as directory:
+                for entry in directory:
+                    if current == root and entry.name == ".delegate":
+                        continue
+                    stat = entry.stat(follow_symlinks=False)
+                    path = Path(entry.path)
+                    entries.append(
+                        (
+                            str(path.relative_to(root)),
+                            stat.st_mode,
+                            stat.st_size,
+                            stat.st_mtime_ns,
+                        )
+                    )
+                    if len(entries) > DIRECTORY_BASELINE_MAX_ENTRIES:
+                        return None
+                    if entry.is_dir(follow_symlinks=False):
+                        pending.append(path)
+    except OSError:
+        return None
+    return WorkspaceBaseline(directory_entries=tuple(sorted(entries)))
+
+
+def capture_workspace_baseline(
+    cwd: str, *, allow_directory: bool = True
+) -> WorkspaceBaseline | None:
     try:
         porcelain = capture_workspace_porcelain(cwd)
-        if porcelain is None:
-            return None
-        head = capture_head_oid(cwd)
-        if head is None:
+        if porcelain is not None:
+            head = capture_head_oid(cwd)
+            if head is not None:
+                return WorkspaceBaseline(porcelain=porcelain, head=head)
+            # A git workspace whose HEAD cannot be resolved (unborn/corrupt) must
+            # not fall through to the weaker directory baseline: that would skip
+            # the clean-porcelain gate git retries rely on. Fail closed instead.
             return None
     except (OSError, subprocess.SubprocessError, ValueError):
         # No baseline means retry stays disabled — safe degradation, but only
         # for environment failures; programming errors should still surface.
         return None
-    return WorkspaceBaseline(porcelain=porcelain, head=head)
+    return _capture_directory_baseline(cwd) if allow_directory else None
 
 
 def workspace_is_clean(porcelain: str | None) -> bool:
@@ -412,6 +463,9 @@ def workspace_is_clean(porcelain: str | None) -> bool:
 def workspace_baseline_unchanged(cwd: str, baseline: WorkspaceBaseline | None) -> bool:
     if baseline is None:
         return False
+    if baseline.directory_entries is not None:
+        current = _capture_directory_baseline(cwd)
+        return current is not None and current.directory_entries == baseline.directory_entries
     current = capture_workspace_baseline(cwd)
     if current is None:
         return False
@@ -421,6 +475,8 @@ def workspace_baseline_unchanged(cwd: str, baseline: WorkspaceBaseline | None) -
 def work_mode_safe_for_codex_fallback(cwd: str, baseline: WorkspaceBaseline | None) -> bool:
     if baseline is None:
         return False
+    if baseline.directory_entries is not None:
+        return workspace_baseline_unchanged(cwd, baseline)
     if not workspace_is_clean(baseline.porcelain):
         return False
     return workspace_baseline_unchanged(cwd, baseline)

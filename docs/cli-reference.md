@@ -15,6 +15,43 @@ Use `delegate --help` for the exact command list from the installed version. Glo
 --group NAME                  Tag a launch/run-input request with a lightweight group ([A-Za-z0-9._-]{1,64}).
 ```
 
+## Workspace mail
+
+Mail is a parent-owned pull mailbox under `.delegate/mail`; mail commands are
+available even when `mail.enabled` is false. Mail's `--group` is command-local
+and must not be confused with launch `--group`:
+
+```text
+delegate mail send (--to ALIAS|coordinator | --group NAME) [--reply-to ID] [--subject S] (BODY|--file FILE|-)
+delegate mail inbox [--from SENDER]
+delegate mail read ID_PREFIX [--peek]
+delegate mail status MESSAGE_ID
+delegate mail watch [--once] [--from SENDER] [--reply-to ID] [--timeout SEC] [--interval-ms N]
+delegate mail prune [--older-than DAYS] [--dry-run]
+```
+
+`send` records per-recipient outcomes (`delivered`, `failed`,
+`skipped_ineligible`, or `blocked`); `status` may report `pruned` when a
+delivered mailbox file is gone. `watch --once` emits metadata-only NDJSON and
+returns exit code 124 on timeout. Read-only profile guards allow inbox,
+status, watch, and `read --peek`; mutating mail operations remain protected.
+`mail prune --dry-run` is byte-preserving and best-effort; under concurrent
+mail activity its report may be stale or internally inconsistent and is not
+an exact later mutation plan.
+
+Work launches may opt into stop-hook push with `--mail-push` (or input JSON
+`mailPush: true`). It is never enabled by `mail.enabled` alone and is refused
+for slash-passthrough or `--pass-through` launches. Push reads unread mail
+without consuming it, injects at most 50 messages and 512 KiB per boundary,
+and advances a per-run cursor only after the hook response is written. Every
+injected lane message includes the Tier-2 data-not-prompt framing. Claude and
+Codex are the only audited verified adapters; Cursor, Droid, Grok, and other
+harnesses keep the pull suffix and record a one-time degraded-to-pull warning.
+
+`delegate mail hook-pump` is an internal command used only by those
+launch-scoped adapters. It is not a user-facing way to bypass the mailbox or
+launch prompt.
+
 ## Personas
 
 Named personas are UTF-8 Markdown files resolved from the source workspace:
@@ -599,6 +636,7 @@ delegate --json dry-run codex call "Summarize this prompt."
 delegate --json dry-run claude safe --reasoning-effort high "Review only."
 delegate --json dry-run grok safe --reasoning-effort high "Review only."
 delegate --json dry-run cursor work --prompt-file task.md
+delegate --json dry-run codex work --mail-push "Run with opt-in stop-hook mail push."
 delegate --json dry-run droid reviewer safe "Investigate only."  # needs a configured 'reviewer' alias
 ```
 
@@ -631,7 +669,7 @@ Typical dry-run JSON fields:
 }
 ```
 
-`isolation` is a human-readable summary combining `effectiveIsolation` and `isolationLifecycle` (e.g. `"worktree temporary"`, `"worktree persistent"`, `"none"`). Depend on the structured fields rather than parsing it.
+`isolation` is a human-readable summary combining `effectiveIsolation` and `isolationLifecycle` (e.g. `"worktree temporary"`, `"worktree persistent"`, `"none"`). Depend on the structured fields rather than parsing it. A push dry-run also includes `mailPushAdapter` with the audit status and the internal hook command; unverified harnesses include the pull-degradation warning.
 
 When a profile is active, dry-run and completion payloads add `authProfile` (the resolved profile name) and, when a Codex fallback profile is configured, `fallbackProfile`. Dry-run also adds `profileEnv` (the injected env map, with values redacted). These keys are omitted when no profile is active.
 

@@ -129,5 +129,8 @@
     "enabled": false,
     "initialDelaySec": 30,
     "intervalSec": 60
+  },
+  "mail": {
+    "enabled": false
   }
 }

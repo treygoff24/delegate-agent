@@ -50,6 +50,7 @@ class CommandSpec:
     notes: tuple[str, ...] = field(default_factory=tuple)
     see_also: tuple[str, ...] = field(default_factory=tuple)
     unsupported_global_options: tuple[str, ...] = field(default_factory=tuple)
+    internal: bool = False
 
 
 SAFE_WORKSPACE_SYNC_NOTE = (
@@ -198,6 +199,11 @@ _INCLUDE_DIRTY_OPTION = OptionSpec(
     "work + persistent worktree only: explicitly include tracked edits and untracked "
     "non-ignored files in the new worktree. Dirty source files are auto-included even "
     "without this flag.",
+)
+_MAIL_PUSH_OPTION = OptionSpec(
+    "--mail-push",
+    None,
+    "Enable opt-in stop-hook mail push (requires mail.enabled=true; unverified harnesses degrade to pull).",
 )
 _READ_ONLY_OPTION = OptionSpec(
     "--read-only",
@@ -925,6 +931,172 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         see_also=("runs", "snapshot", "run-output"),
         unsupported_global_options=("--auth-profile",),
+    ),
+    "mail": CommandSpec(
+        name="mail",
+        summary="Send, retrieve, and internally pump workspace-local mail for tracked runs.",
+        usage=("delegate [--cwd PATH] [--json] mail {send,inbox,read,status,watch,prune} ...",),
+        arguments=(
+            ArgSpec("action", True, "Mail action: send, inbox, read, status, watch, or prune."),
+        ),
+        examples=(
+            'delegate mail send --to cursor-1 "Please pick this up."',
+            "delegate mail inbox",
+            "delegate mail watch --once --timeout 10",
+        ),
+        notes=(
+            "Mail is a pull mailbox under .delegate/mail; commands work even when mail.enabled is false.",
+            "The command-local mail send --group selector is distinct from launch --group.",
+            "Mail identity is workspace trust, not authentication; framing is cooperative-agent UX, not a privilege boundary.",
+            "The internal `mail hook-pump` command is invoked only by a verified launch-scoped stop-hook adapter.",
+        ),
+        see_also=("runs", "snapshot", "wait"),
+        unsupported_global_options=(
+            "--isolation",
+            "--pass-through",
+            "--completion-report",
+            "--auth-profile",
+            "--group",
+        ),
+    ),
+    "mail hook-pump": CommandSpec(
+        name="mail hook-pump",
+        summary="Internally emit one bounded stop-hook mail batch.",
+        usage=("delegate mail hook-pump",),
+        notes=(
+            "Internal command: provisioned Claude and Codex hooks invoke it; it is not a user-facing mail command.",
+            "The hook reads unread mail without consuming it and advances a per-run cursor only after response output succeeds.",
+        ),
+        internal=True,
+    ),
+    "mail send": CommandSpec(
+        name="mail send",
+        summary="Publish one message to a coordinator, work run, or work-run group.",
+        usage=(
+            "delegate mail send (--to ALIAS|coordinator | --group NAME) [--reply-to ID] [--subject S] (BODY|--file FILE|-)",
+        ),
+        arguments=(ArgSpec("BODY", False, "UTF-8 message body, or '-' to read stdin."),),
+        options=(
+            OptionSpec("--to", "ALIAS|coordinator", "Direct recipient."),
+            OptionSpec(
+                "--group", "NAME", "Expand a registered launch group into concrete recipients."
+            ),
+            OptionSpec("--reply-to", "ID", "Reply within an existing exchange."),
+            OptionSpec("--subject", "TEXT", "Optional subject, capped at 200 characters."),
+            OptionSpec("--file", "FILE", "Read the UTF-8 body from a file."),
+        ),
+        examples=("delegate mail send --to coordinator --subject status 'The review is ready.'",),
+        notes=(
+            "Only effectively running work-mode recipients receive a publication; other registered recipients are ledgered as skipped_ineligible.",
+            "Rules are evaluated after group expansion and cannot be bypassed by group addressing.",
+            "Bodies are capped at 256 KiB and direct blocked routes refuse with the do-not-route-around explanation.",
+        ),
+        see_also=("mail inbox", "mail status", "mail watch"),
+        unsupported_global_options=(
+            "--isolation",
+            "--pass-through",
+            "--completion-report",
+            "--auth-profile",
+            "--group",
+        ),
+    ),
+    "mail inbox": CommandSpec(
+        name="mail inbox",
+        summary="List unread messages in the caller's mail box without consuming them.",
+        usage=("delegate mail inbox [--from SENDER]",),
+        options=(OptionSpec("--from", "SENDER", "Filter by sender alias."),),
+        examples=("delegate --json mail inbox",),
+        notes=("Each response carries one framing object; inbox reads do not change read state.",),
+        see_also=("mail read", "mail watch"),
+        unsupported_global_options=(
+            "--isolation",
+            "--pass-through",
+            "--completion-report",
+            "--auth-profile",
+            "--group",
+        ),
+    ),
+    "mail read": CommandSpec(
+        name="mail read",
+        summary="Read one message and move it from inbox to read state.",
+        usage=("delegate mail read ID_PREFIX [--peek]",),
+        arguments=(ArgSpec("ID_PREFIX", True, "Message id or unique prefix."),),
+        options=(OptionSpec("--peek", None, "Read without changing mailbox state."),),
+        examples=("delegate mail read 20260801-120000-a1b2c3",),
+        notes=(
+            "Read wraps the message with the tier framing object; --peek is the profile-guarded read-only form.",
+        ),
+        see_also=("mail inbox", "mail status"),
+        unsupported_global_options=(
+            "--isolation",
+            "--pass-through",
+            "--completion-report",
+            "--auth-profile",
+            "--group",
+        ),
+    ),
+    "mail status": CommandSpec(
+        name="mail status",
+        summary="Report ledger outcomes and current mailbox path state for a message.",
+        usage=("delegate mail status MESSAGE_ID",),
+        arguments=(ArgSpec("MESSAGE_ID", True, "Message id or unique prefix."),),
+        examples=("delegate --json mail status 20260801-120000-a1b2c3",),
+        notes=("Outcomes include delivered, failed, skipped_ineligible, blocked, and pruned.",),
+        see_also=("mail send", "mail prune"),
+        unsupported_global_options=(
+            "--isolation",
+            "--pass-through",
+            "--completion-report",
+            "--auth-profile",
+            "--group",
+        ),
+    ),
+    "mail watch": CommandSpec(
+        name="mail watch",
+        summary="Watch for unread mail and emit bounded metadata as NDJSON.",
+        usage=(
+            "delegate mail watch [--once] [--from SENDER] [--reply-to ID] [--timeout SEC] [--interval-ms N]",
+        ),
+        options=(
+            OptionSpec("--once", None, "Return after the first matching batch."),
+            OptionSpec("--from", "SENDER", "Filter by sender alias."),
+            OptionSpec("--reply-to", "ID", "Restrict replies to recipients of an exchange."),
+            OptionSpec("--timeout", "SEC", "Timeout for --once; exit 124 on timeout."),
+            OptionSpec("--interval-ms", "N", "Polling interval from 100 to 60000 milliseconds."),
+        ),
+        examples=("delegate mail watch --once --timeout 10",),
+        notes=(
+            "Output is NDJSON with mail, unreadable, or timeout records and never consumes mail.",
+        ),
+        see_also=("mail inbox", "mail read"),
+        unsupported_global_options=(
+            "--isolation",
+            "--pass-through",
+            "--completion-report",
+            "--auth-profile",
+            "--group",
+        ),
+    ),
+    "mail prune": CommandSpec(
+        name="mail prune",
+        summary="Prune old mail boxes, messages, and ledgers without changing runs prune.",
+        usage=("delegate mail prune [--older-than DAYS] [--dry-run]",),
+        options=(
+            OptionSpec("--older-than", "DAYS", "Age threshold based on message sent time."),
+            OptionSpec("--dry-run", None, "Report the same plan without changing mail state."),
+        ),
+        examples=("delegate mail prune --dry-run", "delegate mail prune --older-than 30"),
+        notes=(
+            "Mail prune has its own delegate.mail-prune.v1 schema; runs prune remains delegate.runs-prune.v1.",
+        ),
+        see_also=("mail status", "runs prune"),
+        unsupported_global_options=(
+            "--isolation",
+            "--pass-through",
+            "--completion-report",
+            "--auth-profile",
+            "--group",
+        ),
     ),
     "ps": CommandSpec(
         name="ps",
@@ -1703,11 +1875,43 @@ for _persona_command in (
         notes=_spec.notes,
         see_also=_spec.see_also,
         unsupported_global_options=_spec.unsupported_global_options,
+        internal=_spec.internal,
+    )
+
+for _mail_command in (
+    "cursor",
+    "kimi",
+    "codex",
+    "claude",
+    "grok",
+    "devin",
+    "opencode",
+    "pi",
+    "omp",
+    "droid",
+    "dry-run",
+):
+    _spec = COMMAND_SPECS[_mail_command]
+    COMMAND_SPECS[_mail_command] = CommandSpec(
+        name=_spec.name,
+        summary=_spec.summary,
+        usage=_spec.usage,
+        arguments=_spec.arguments,
+        options=(
+            *_spec.options[: -len(PERSONA_OPTIONS)],
+            _MAIL_PUSH_OPTION,
+            *_spec.options[-len(PERSONA_OPTIONS) :],
+        ),
+        examples=_spec.examples,
+        notes=_spec.notes,
+        see_also=_spec.see_also,
+        unsupported_global_options=_spec.unsupported_global_options,
+        internal=_spec.internal,
     )
 
 
 _CALL_HIDDEN_OPTION_FLAGS = frozenset(
-    {"--progress", "--no-progress", "--forbid-commit", "--include-dirty"}
+    {"--progress", "--no-progress", "--forbid-commit", "--include-dirty", "--mail-push"}
 )
 _CALL_UNSUPPORTED_GLOBAL_OPTIONS = (
     "--isolation",
@@ -1896,6 +2100,7 @@ def render_overview_text() -> str:
         "delegate [--cwd PATH] [--json] runs "
         "[--active|--running|--stale|--recent] [--harness HARNESS] [--limit N]",
         "delegate [--cwd PATH] [--json] runs prune [--older-than DAYS] [--dry-run]",
+        "delegate [--cwd PATH] [--json] mail {send,inbox,read,status,watch,prune} ...",
         "delegate [--cwd PATH] [--json] ps [--harness HARNESS] [--group NAME] [--limit N]",
         "delegate [--cwd PATH] [--json] run-output <handle> "
         "[--completion-report] [--stdout] [--stderr] [--tail N] [--max-chars N] "
@@ -2007,7 +2212,9 @@ def help_index_payload() -> JsonObject:
     return {
         "ok": True,
         "commands": [
-            {"command": spec.name, "summary": spec.summary} for spec in COMMAND_SPECS.values()
+            {"command": spec.name, "summary": spec.summary}
+            for spec in COMMAND_SPECS.values()
+            if not spec.internal
         ],
         "globalOptions": [_option_payload(opt) for opt in GLOBAL_OPTIONS],
     }

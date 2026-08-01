@@ -180,6 +180,9 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
         "itemThreads": 64,
         "structuredOutputRetries": 2,
     },
+    "mail": {
+        "enabled": False,
+    },
 }
 
 
@@ -451,6 +454,22 @@ def _validate_worktrees_section(worktrees: JsonValue) -> None:
                 path="worktrees.autoPrune.mergedOlderThanDays",
                 error="invalid_worktrees_config",
             )
+
+
+def _validate_mail_section(mail: JsonValue) -> None:
+    if mail is None:
+        return
+    if not isinstance(mail, dict):
+        raise ConfigError("invalid_mail_config", "mail config must be an object.")
+    unknown = set(mail) - {"enabled"}
+    if unknown:
+        raise ConfigError(
+            "invalid_mail_config",
+            f"mail has unknown keys: {', '.join(sorted(unknown))}.",
+        )
+    enabled = mail.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ConfigError("invalid_mail_config", "mail.enabled must be a boolean.")
 
 
 def _validate_workflows_section(workflows: JsonValue) -> None:
@@ -1385,6 +1404,12 @@ def validate_config(config: JsonObject) -> None:
     _validate_progress_section(config.get("progress"))
     _validate_workflows_section(config.get("workflows"))
     _validate_personas_section(config.get("personas"))
+    _validate_mail_section(config.get("mail"))
+
+
+def mail_enabled(config: JsonObject) -> bool:
+    section = config.get("mail")
+    return isinstance(section, dict) and section.get("enabled") is True
 
 
 def completion_report_default_mode(config: JsonObject) -> str:

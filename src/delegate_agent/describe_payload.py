@@ -101,11 +101,13 @@ def _commands_catalog() -> list[JsonObject]:
             "launchOptions": [option.flag for option in spec.options],
         }
         for spec in command_help.COMMAND_SPECS.values()
+        if not spec.internal
     ]
 
 
 def _launch_options() -> list[str]:
     flags: list[str] = []
+    deferred: list[str] = []
     for command in (
         "cursor",
         "droid",
@@ -120,8 +122,13 @@ def _launch_options() -> list[str]:
     ):
         spec = command_help.COMMAND_SPECS[command]
         for option in spec.options:
+            if option.flag == "--mail-push":
+                if option.flag not in deferred:
+                    deferred.append(option.flag)
+                continue
             if option.flag not in flags:
                 flags.append(option.flag)
+    flags.extend(flag for flag in deferred if flag not in flags)
     return flags
 
 

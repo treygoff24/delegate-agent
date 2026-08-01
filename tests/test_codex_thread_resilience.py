@@ -57,40 +57,42 @@ class CodexThreadResilienceTests(unittest.TestCase):
         mode: str = "work",
         isolated_workspace: bool = False,
         dirty_baseline: bool = False,
+        workspace_kind: str = "git",
     ):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         root_dir = Path(temp.name)
         workspace = root_dir / "repo"
         workspace.mkdir()
-        subprocess.run(
-            ["git", "-C", str(workspace), "init", "-q"],
-            check=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(workspace), "config", "user.email", "test@example.com"],
-            check=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(workspace), "config", "user.name", "Delegate Tests"],
-            check=True,
-        )
-        (workspace / "tracked.txt").write_text("baseline\n", encoding="utf-8")
-        subprocess.run(
-            ["git", "-C", str(workspace), "add", "tracked.txt"],
-            check=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(workspace), "commit", "-qm", "baseline"],
-            check=True,
-        )
+        if workspace_kind == "git":
+            subprocess.run(
+                ["git", "-C", str(workspace), "init", "-q"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(workspace), "config", "user.email", "test@example.com"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(workspace), "config", "user.name", "Delegate Tests"],
+                check=True,
+            )
+            (workspace / "tracked.txt").write_text("baseline\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "-C", str(workspace), "add", "tracked.txt"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(workspace), "commit", "-qm", "baseline"],
+                check=True,
+            )
         if dirty_baseline:
             (workspace / "uncommitted.txt").write_text("synced change\n", encoding="utf-8")
         script = root_dir / "codex"
         script.write_text("#!/usr/bin/env python3\n" + script_body, encoding="utf-8")
         script.chmod(0o755)
         attempts = root_dir / "attempts"
-        registry = run_registry.ensure_registry(workspace, workspace_kind="git")
+        registry = run_registry.ensure_registry(workspace, workspace_kind=workspace_kind)
         run_id, alias = run_registry.register_run(registry, harness="codex")
         ctx = runner.RunContext(
             registry_root=registry,
@@ -102,7 +104,7 @@ class CodexThreadResilienceTests(unittest.TestCase):
             model="synthetic-model",
             source_cwd=str(workspace),
             execution_cwd=str(workspace),
-            workspace_kind="git",
+            workspace_kind=workspace_kind,
             isolated_workspace=isolated_workspace,
             started_at="2026-07-21T12:00:00Z",
             env_overrides={"ATTEMPTS_FILE": str(attempts)},
@@ -283,7 +285,25 @@ raise SystemExit(1)
         self.assertEqual(payload["error"], "codex_thread_lost")
         self.assertNotIn("codexThreadFallback", payload)
 
-    def test_safe_isolated_unchanged_dirty_baseline_retries_once(self):
+    def test_safe_isolated_directory_thread_loss_does_not_retry(self):
+        _workspace, attempts, code, payload = self._run_work(
+            """import json, os, pathlib
+attempts = pathlib.Path(os.environ["ATTEMPTS_FILE"])
+attempts.write_text(str(int(attempts.read_text()) + 1 if attempts.exists() else 1))
+print(json.dumps({"type": "error", "message": "no thread with id: synthetic-thread"}))
+raise SystemExit(1)
+""",
+            mode="safe",
+            isolated_workspace=True,
+            workspace_kind="directory",
+        )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(attempts.read_text(), "1")
+        self.assertEqual(payload["error"], "codex_thread_lost")
+        self.assertNotIn("codexThreadFallback", payload)
+
+    def test_safe_isolated_unchanged_git_baseline_retries_once(self):
         _workspace, attempts, code, payload = self._run_work(
             """import json, os, pathlib
 attempts = pathlib.Path(os.environ["ATTEMPTS_FILE"])

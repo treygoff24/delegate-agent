@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-08-01
+
+### Added
+
+- Added workspace-local Wave 1 pull mail: storage outside run records,
+  lock-serialized per-recipient delivery ledgers, inbox/read/status/watch, and
+  mail-only prune with versioned JSON contracts.
+- Added strict `mail.enabled` configuration, work-run identity binding, the
+  opt-in `mailPush` plumbing seam, and audited harness-specific scoped or
+  workspace-writable mail behavior.
+- Added opt-in Wave 2 stop-hook push for audited Claude and Codex launches with
+  bounded Tier-2-framed batches, per-run cursors, launch-scoped settings, and
+  one-time pull-degradation events. Unverified harnesses remain pull-only.
+
+### Fixed
+
+- Mail launch wiring now applies to the actual child argv and matching manifest
+  argv after persistent or attached worktree rewriting. Isolated grants are
+  limited to evidenced harness mechanisms; Cursor no longer receives a new
+  sandbox, non-isolated work launches receive no redundant grant, and Codex
+  follows its effective sandbox policy. Read-only mail commands no longer
+  create a registry, mailbox, lock, or Git exclude entry; status reconciles a
+  published inbox envelope after a crash before its sender-ledger rewrite.
+- Mail sandbox reporting now derives Codex and Grok classification from the
+  emitted argv: unsandboxed policies are labelled honestly, constrained and
+  unknown isolated policies warn, and only Codex `workspace-write` receives
+  the scoped writable-root grant. Delivery reconciliation now validates the
+  no-follow recipient envelope against the ledger before treating a crash or
+  collision as delivered.
+
 ## [0.25.0] - 2026-08-01
 
 ### Added
@@ -832,6 +862,7 @@ Usage-audit fix wave: 82 sessions and 1,241 delegate invocations from one week o
 
 - Releases before 0.1.3 predate this changelog.
 
+[0.26.0]: https://github.com/treygoff24/delegate-agent/compare/v0.25.0...v0.26.0
 [0.25.0]: https://github.com/treygoff24/delegate-agent/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/treygoff24/delegate-agent/compare/v0.23.0...v0.24.0
 [0.23.0]: https://github.com/treygoff24/delegate-agent/compare/v0.22.0...v0.23.0
