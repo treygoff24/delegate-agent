@@ -540,11 +540,21 @@ def remove_worktree(
                 attached = ", ".join(
                     str(item.get("alias") or item.get("runId")) for item in attachments
                 )
+                corrupt = ", ".join(
+                    str(item.get("alias") or item.get("runId"))
+                    for item in attachments
+                    if item.get("warning") == "corrupt_attachment"
+                )
+                warning = (
+                    f" Warning: corrupt attachment record for {corrupt}; refusing removal."
+                    if corrupt
+                    else ""
+                )
                 raise wm.WorktreeManagementError(
                     wm._error_payload(
                         "worktree_attached",
                         f"Worktree is in use by attached resume run(s): {attached}. "
-                        "Wait for or cancel the attached run before removing.",
+                        f"Wait for or cancel the attached run before removing.{warning}",
                         record=record,
                         next_actions=[
                             f"delegate wait {attached.split(', ')[0]}",

@@ -763,7 +763,7 @@ def _cleanup_partial_worktree(
                     existing["manualCleanup"] = manual
                     if guarded:
                         existing["cleanupRefused"] = "source_root_guard"
-                    run_registry.write_json_atomic(snapshot_path, existing)
+                    run_registry.write_snapshot(run_path, existing)
             except (OSError, ValueError) as exc:
                 metadata_warning = (
                     "warning: partial worktree cleanup failed, and Delegate could not "

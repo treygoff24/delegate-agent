@@ -10,6 +10,7 @@ import threading
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = str(ROOT / "src")
@@ -278,6 +279,54 @@ class RunRegistryTests(unittest.TestCase):
             self.assertEqual(index["runs"][run_id]["harness"], "cursor")
             self.assertEqual(index["runs"][run_id]["mode"], "safe")
 
+    def test_registration_refuses_an_oversized_index_without_bricking_prune(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
+            run_id, _alias = self.registry.register_run(root, harness="cursor")
+            run_path = self.registry.run_directory(root, run_id)
+            self.registry.write_json_atomic(
+                run_path / "state.json",
+                {"status": "succeeded", "lastActivityAt": "2000-01-01T00:00:00Z"},
+            )
+            index = self.registry.load_index(root)
+            index["runs"][run_id]["padding"] = ""
+            padding = (
+                self.registry.PRIVATE_RECORD_READ_MAX_BYTES
+                - self.registry._serialized_json_size(index)
+            )
+            index["runs"][run_id]["padding"] = "x" * padding
+            self.assertEqual(
+                self.registry._serialized_json_size(index),
+                self.registry.PRIVATE_RECORD_READ_MAX_BYTES,
+            )
+            self.registry.write_json_atomic(self.registry.index_path(root), index)
+            original = self.registry.index_path(root).read_bytes()
+
+            with self.assertRaisesRegex(self.registry.RegistryJsonError, "delegate runs prune"):
+                self.registry.register_run(root, harness="cursor")
+
+            self.assertEqual(self.registry.index_path(root).read_bytes(), original)
+            self.assertEqual(self.registry.load_index(root)["runs"].keys(), {run_id})
+            pruned = self.registry.prune_runs(root, older_than_days=0)
+            self.assertTrue(pruned["ok"])
+            self.assertEqual([entry["runId"] for entry in pruned["removed"]], [run_id])
+
+    def test_snapshot_write_refuses_oversize_without_replacing_prior_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
+            run_id, _alias = self.registry.register_run(root, harness="cursor")
+            run_path = self.registry.run_directory(root, run_id)
+            self.registry.write_snapshot(run_path, {"status": "running"})
+            original = (run_path / "snapshot.json").read_bytes()
+
+            with self.assertRaisesRegex(self.registry.RegistryJsonError, "snapshot exceeds"):
+                self.registry.write_snapshot(
+                    run_path,
+                    {"assistantText": "x" * (self.registry.PRIVATE_RECORD_READ_MAX_BYTES + 1)},
+                )
+
+            self.assertEqual((run_path / "snapshot.json").read_bytes(), original)
+
     def test_allocate_alias_uses_exclusive_create(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = self.registry.delegate_root(Path(tmp))
@@ -522,6 +571,64 @@ class RunRegistryTests(unittest.TestCase):
 
             with self.assertRaises(self.registry.RegistryJsonError):
                 self.registry.load_run_state(root, run_id)
+
+    def test_worktree_status_refuses_unsafe_state_without_rewriting_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
+            run_id, _alias = self.registry.register_run(root, harness="cursor")
+            state_path = self.registry.run_directory(root, run_id) / "state.json"
+            self.registry.write_json_atomic(state_path, {"status": "succeeded"})
+            for kind in ("hardlink", "oversized"):
+                with self.subTest(kind=kind):
+                    if kind == "hardlink":
+                        outside = Path(tmp) / "outside-state.json"
+                        os.link(state_path, outside)
+                        state_path.unlink()
+                        os.link(outside, state_path)
+                        before = outside.read_bytes()
+                    else:
+                        state_path.unlink()
+                        state_path.write_bytes(
+                            b"x" * (self.registry.PRIVATE_RECORD_READ_MAX_BYTES + 1)
+                        )
+                        before = state_path.read_bytes()
+                    with self.assertRaises(self.registry.RegistryJsonError):
+                        self.registry.set_worktree_status(root, run_id, "removed")
+                    self.assertEqual(state_path.read_bytes(), before)
+                    if kind == "hardlink":
+                        outside.unlink()
+                        self.registry.write_json_atomic(state_path, {"status": "succeeded"})
+
+    def test_invalid_index_paths_are_skipped_by_scans_and_refused_directly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
+            outside = Path(tmp) / "outside"
+            outside.mkdir()
+            canary = str(outside.resolve())
+            index = self.registry.load_index(root)
+            index["runs"] = {
+                canary: {"alias": "cursor-1", "harness": "cursor"},
+                "../../outside": {"alias": "cursor-2", "harness": "cursor"},
+            }
+            index["aliases"] = {"../../outside": canary}
+            self.registry.write_json_atomic(self.registry.index_path(root), index)
+            loaded = self.registry.load_index(root)
+
+            with mock.patch.object(
+                self.registry, "load_run_state_or_none", wraps=self.registry.load_run_state_or_none
+            ) as load_state:
+                self.assertIsNone(self.registry.latest_run_id_for_harness(root, loaded, "cursor"))
+                self.assertEqual(self.registry.list_run_summaries(root, loaded), [])
+            load_state.assert_not_called()
+            with self.assertRaises(self.registry.RegistryJsonError):
+                self.registry.resolve_handle(loaded, canary, registry_root=root)
+            with self.assertRaises(self.registry.RegistryJsonError):
+                self.registry.resolve_handle(loaded, "../../outside", registry_root=root)
+            loaded["aliases"]["../../alias"] = "del_20260731T120000Z_abcdef"
+            with self.assertRaises(self.registry.RegistryJsonError):
+                self.registry.resolve_handle(loaded, "../../alias", registry_root=root)
+            with self.assertRaises(self.registry.RegistryJsonError):
+                self.registry.run_directory(root, "../../outside")
 
     def test_large_log_warnings_threshold(self):
         warnings = self.registry.large_log_warnings(self.registry.LARGE_LOG_WARN_BYTES + 1, 0)

@@ -406,6 +406,8 @@ def _attachment_owner_target(
     def candidate_target(
         candidate_id: str, *, refuse_path_conflict: bool = False
     ) -> JsonObject | None:
+        if not run_registry.RUN_ID_RE.fullmatch(candidate_id):
+            return None
         if not isinstance(index.get("runs", {}).get(candidate_id), dict):
             return None
         owner_path = run_registry.run_directory(registry_root, candidate_id)
@@ -449,8 +451,8 @@ def _attachment_owner_target(
             return target
 
     if expected_canonical is not None:
-        for candidate_id in index.get("runs", {}):
-            if not isinstance(candidate_id, str) or candidate_id == source_run_id:
+        for candidate_id, _entry in run_registry.index_run_entries(index):
+            if candidate_id == source_run_id:
                 continue
             target = candidate_target(candidate_id)
             if target is not None:

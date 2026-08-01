@@ -36,6 +36,7 @@ from delegate_agent.private_io import (  # noqa: F401  # re-exported
 DELEGATE_DIR_NAME = ".delegate"
 GIT_EXCLUDE_ENTRY = ".delegate/"
 RUN_ID_RE = re.compile(r"^del_\d{8}T\d{6}Z_[0-9a-f]{6}$")
+ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 STDOUT_LOG = "stdout.log"
 STDERR_LOG = "stderr.log"
@@ -61,6 +62,7 @@ REGISTRY_LOCK_TIMEOUT_SECONDS = 30.0
 REGISTRY_LOCK_POLL_SECONDS = 0.05
 PRIVATE_DIR_MODE = private_io.PRIVATE_DIR_MODE
 PRIVATE_FILE_MODE = private_io.PRIVATE_FILE_MODE
+PRIVATE_RECORD_READ_MAX_BYTES = private_io.PRIVATE_RECORD_READ_MAX_BYTES
 GIT_INFO_EXCLUDE_TIMEOUT_SECONDS = 5.0
 BYTES_PER_KIB = 1 << 10
 BYTES_PER_MIB = BYTES_PER_KIB * BYTES_PER_KIB
@@ -157,8 +159,31 @@ def load_index(registry_root: Path) -> JsonObject:
     }
 
 
+def _serialized_json_size(payload: JsonObject) -> int:
+    return len((json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8"))
+
+
+def _write_bounded_json(path: Path, payload: JsonObject, *, record_name: str) -> None:
+    size = _serialized_json_size(payload)
+    if size > PRIVATE_RECORD_READ_MAX_BYTES:
+        repair = (
+            " Run 'delegate runs prune' before registering another run."
+            if record_name == "index"
+            else ""
+        )
+        raise RegistryJsonError(
+            f"{record_name} exceeds the {PRIVATE_RECORD_READ_MAX_BYTES}-byte registry "
+            f"limit ({size} bytes).{repair}"
+        )
+    write_json_atomic(path, payload)
+
+
 def save_index(registry_root: Path, index: JsonObject) -> None:
-    write_json_atomic(index_path(registry_root), index)
+    _write_bounded_json(index_path(registry_root), index, record_name="index")
+
+
+def write_snapshot(run_path: Path, snapshot: JsonObject) -> None:
+    _write_bounded_json(run_path / SNAPSHOT_FILE, snapshot, record_name="snapshot")
 
 
 def ensure_git_delegate_exclude(git_root: Path) -> None:
@@ -262,9 +287,6 @@ def register_run(
         raise ValueError(f"run id does not match expected format: {run_id}")
     with registry_lock(registry_root):
         alias = allocate_alias(registry_root, harness)
-        bind_alias_claim(registry_root, alias, run_id)
-        run_dir = runs_dir(registry_root) / run_id
-        ensure_private_dir(run_dir)
         index = load_index(registry_root)
         # Stamp an explicit registration ordinal so the latest-run tiebreaker
         # survives the persisted round trip. save_index writes with
@@ -292,17 +314,41 @@ def register_run(
         }
         index["aliases"][alias] = run_id
         index["runs"][run_id] = entry
-        save_index(registry_root, index)
+        try:
+            save_index(registry_root, index)
+        except RegistryJsonError:
+            (aliases_dir(registry_root) / alias).unlink(missing_ok=True)
+            raise
+        bind_alias_claim(registry_root, alias, run_id)
+        ensure_private_dir(runs_dir(registry_root) / run_id)
     return run_id, alias
 
 
 def lookup_run_id(index: JsonObject, handle: str) -> str | None:
-    if handle in index.get("runs", {}):
+    runs = index.get("runs", {})
+    if handle in runs:
+        if not RUN_ID_RE.fullmatch(handle):
+            raise RegistryJsonError(f"invalid run id in registry: {handle!r}")
         return handle
     aliases = index.get("aliases", {})
     if handle in aliases:
-        return aliases[handle]
+        if not ALIAS_RE.fullmatch(handle):
+            raise RegistryJsonError(f"invalid alias in registry: {handle!r}")
+        run_id = aliases[handle]
+        if not isinstance(run_id, str) or not RUN_ID_RE.fullmatch(run_id):
+            raise RegistryJsonError(f"invalid run id for alias {handle!r} in registry")
+        return run_id
     return None
+
+
+def index_run_entries(index: JsonObject) -> Iterator[tuple[str, JsonObject]]:
+    """Yield usable index entries without deriving paths from corrupt keys."""
+    runs = index.get("runs", {})
+    if not isinstance(runs, dict):
+        return
+    for run_id, entry in runs.items():
+        if isinstance(run_id, str) and RUN_ID_RE.fullmatch(run_id) and isinstance(entry, dict):
+            yield run_id, entry
 
 
 UTC_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
@@ -350,8 +396,8 @@ def latest_handle_suggestions(
     harnesses = sorted(
         {
             entry.get("harness")
-            for entry in index.get("runs", {}).values()
-            if isinstance(entry, dict) and isinstance(entry.get("harness"), str)
+            for _run_id, entry in index_run_entries(index)
+            if isinstance(entry.get("harness"), str)
         }
     )
     for harness in harnesses:
@@ -501,11 +547,23 @@ def add_run_target_resolution(payload: JsonObject, target: RunTarget) -> None:
 
 
 def run_directory(registry_root: Path, run_id: str) -> Path:
-    return runs_dir(registry_root) / run_id
+    if not RUN_ID_RE.fullmatch(run_id):
+        raise RegistryJsonError(f"invalid run id for registry path: {run_id!r}")
+    root = runs_dir(registry_root).resolve(strict=False)
+    path = (root / run_id).resolve(strict=False)
+    try:
+        path.relative_to(root)
+    except ValueError:
+        raise RegistryJsonError(f"run path escapes registry: {run_id!r}") from None
+    return path
 
 
 def suggest_handles(index: JsonObject, handle: str, *, limit: int = 8) -> list[str]:
-    aliases = sorted(index.get("aliases", {}).keys())
+    aliases = sorted(
+        alias
+        for alias in index.get("aliases", {})
+        if isinstance(alias, str) and ALIAS_RE.fullmatch(alias)
+    )
     if not aliases:
         return []
     exact_ci = [alias for alias in aliases if alias.lower() == handle.lower()]
@@ -650,10 +708,10 @@ def alias_for_run(index: JsonObject, run_id: str) -> str | None:
     entry = index.get("runs", {}).get(run_id)
     if isinstance(entry, dict):
         alias = entry.get("alias")
-        if isinstance(alias, str):
+        if isinstance(alias, str) and ALIAS_RE.fullmatch(alias):
             return alias
     for candidate, candidate_id in index.get("aliases", {}).items():
-        if candidate_id == run_id and isinstance(candidate, str):
+        if candidate_id == run_id and isinstance(candidate, str) and ALIAS_RE.fullmatch(candidate):
             return candidate
     return None
 
@@ -679,9 +737,9 @@ def _write_worktree_status(
         raise ValueError(f"worktree status must be one of: {', '.join(sorted(valid_statuses))}")
     run_path = run_directory(registry_root, run_id)
     state_path = run_path / STATE_FILE
-    if not state_path.exists():
+    state = read_json_object(state_path)
+    if state is None:
         raise FileNotFoundError(f"State file not found for run {run_id}")
-    state: JsonObject = json.loads(state_path.read_text(encoding="utf-8"))
     state["worktreeStatus"] = status
     if removed_at is not None:
         state["worktreeRemovedAt"] = removed_at
@@ -778,8 +836,8 @@ def _latest_run_id_for_harness(
     # which is chronologically correct because new runs ARE later. Using the
     # run_id suffix here would be wrong because that suffix is random, so
     # lexicographic run_id order can rank an older run as latest.
-    for insertion_index, (run_id, entry) in enumerate(index.get("runs", {}).items()):
-        if not isinstance(entry, dict) or entry.get("harness") != harness:
+    for insertion_index, (run_id, entry) in enumerate(index_run_entries(index)):
+        if entry.get("harness") != harness:
             continue
         entry_model_alias = entry.get("modelAlias")
         if (

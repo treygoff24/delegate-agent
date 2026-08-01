@@ -108,7 +108,7 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
                 "mode": "work",
                 "cwd": repo_path,
                 "worktreeAttachment": {
-                    "sourceRunId": "del_owner",
+                    "sourceRunId": "del_20260731T120000Z_abcdef",
                     "sourceAlias": "cursor-owner",
                     "path": worktree_path,
                     "startHeadOid": git("rev-parse", "HEAD", cwd=worktree_path).stdout.strip(),
@@ -129,7 +129,7 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
                 "executionCwd": worktree_path,
                 "isolationLifecycle": "attached",
                 "worktreeAttachment": {
-                    "sourceRunId": "del_owner",
+                    "sourceRunId": "del_20260731T120000Z_abcdef",
                     "sourceAlias": "cursor-owner",
                     "path": worktree_path,
                     "startHeadOid": git("rev-parse", "HEAD", cwd=worktree_path).stdout.strip(),
@@ -257,6 +257,33 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
             self.assertIn(attached_alias, json.dumps(skipped))
             self.assertNotEqual(attached_id, owner_id)
 
+    def test_manifest_attachment_conflict_still_blocks_the_index_claim_path(self):
+        _repo, repo_path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            _owner_id, owner_alias, worktree_path, _branch = self._owner(repo_path, fake_home)
+            attached_id, attached_alias = self._write_live_attachment(repo_path, worktree_path)
+            root = self._registry_root(repo_path)
+            manifest = self.delegate.run_registry.load_run_manifest(root, attached_id)
+            manifest["worktreeAttachment"]["path"] = str(Path(fake_home) / "tampered")
+            self.delegate.run_registry.write_json_atomic(
+                self.delegate.run_registry.run_directory(root, attached_id) / "manifest.json",
+                manifest,
+            )
+
+            attachments = worktree_records.live_attachments_for_path(root, worktree_path)
+            self.assertEqual(attachments[0]["runId"], attached_id)
+            self.assertEqual(attachments[0]["warning"], "corrupt_attachment")
+            code, stdout, _stderr = self._run_cli(
+                ["--cwd", repo_path, "--json", "worktree", "remove", owner_alias, "--force"],
+                home=fake_home,
+            )
+            payload = json.loads(stdout)
+            self.assertEqual(code, self.delegate.EXIT_USAGE)
+            self.assertEqual(payload["error"], "worktree_attached")
+            self.assertIn(attached_alias, payload["message"])
+            self.assertIn("corrupt attachment record", payload["message"])
+            self.assertTrue(Path(worktree_path).exists())
+
     def test_live_attachment_scan_skips_hardlinked_and_oversized_unrelated_records(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = self.delegate.run_registry.ensure_registry(Path(tmp), workspace_kind="directory")
@@ -314,18 +341,20 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
         with tempfile.TemporaryDirectory() as tmp:
             root = self.delegate.run_registry.ensure_registry(Path(tmp), workspace_kind="directory")
             index = self.delegate.run_registry.load_index(root)
-            index["runs"] = {"owner-a": {}, "owner-b": {}}
+            owner_a = "del_20260731T120000Z_aaaaaa"
+            owner_b = "del_20260731T120001Z_bbbbbb"
+            index["runs"] = {owner_a: {}, owner_b: {}}
             self.delegate.run_registry.save_index(root, index)
             attachment = {
                 "worktreeAttachment": {
-                    "sourceRunId": "owner-a",
+                    "sourceRunId": owner_a,
                     "path": str(Path(tmp) / "worktree-b"),
                 }
             }
 
             def owner_target(_root, run_id, *_parts):
                 return {
-                    "path": str(Path(tmp) / ("worktree-a" if run_id == "owner-a" else "worktree-b"))
+                    "path": str(Path(tmp) / ("worktree-a" if run_id == owner_a else "worktree-b"))
                 }
 
             with (
@@ -341,16 +370,18 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
                 resume_command._attachment_owner_target(root, attachment)
 
             self.assertEqual(caught.exception.error, "worktree_path_changed")
-            self.assertEqual(validate.call_args.args[1], "owner-a")
+            self.assertEqual(validate.call_args.args[1], owner_a)
 
     def test_missing_attachment_owner_still_uses_matching_legacy_owner(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = self.delegate.run_registry.ensure_registry(Path(tmp), workspace_kind="directory")
             index = self.delegate.run_registry.load_index(root)
-            index["runs"] = {"owner-b": {}}
+            owner_a = "del_20260731T120000Z_aaaaaa"
+            owner_b = "del_20260731T120001Z_bbbbbb"
+            index["runs"] = {owner_b: {}}
             self.delegate.run_registry.save_index(root, index)
             expected_path = str(Path(tmp) / "worktree-b")
-            attachment = {"worktreeAttachment": {"sourceRunId": "owner-a", "path": expected_path}}
+            attachment = {"worktreeAttachment": {"sourceRunId": owner_a, "path": expected_path}}
 
             with (
                 mock.patch.object(resume_command, "_read_record_json", return_value={}),

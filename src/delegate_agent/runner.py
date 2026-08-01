@@ -166,7 +166,7 @@ def write_state(run_path: Path, state: JsonObject) -> None:
 
 
 def write_snapshot(run_path: Path, snapshot: JsonObject) -> None:
-    run_registry.write_json_atomic(run_path / SNAPSHOT_FILE, snapshot)
+    run_registry.write_snapshot(run_path, snapshot)
 
 
 def open_events_log(run_path: Path) -> TextIO:

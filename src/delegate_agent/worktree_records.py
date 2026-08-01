@@ -227,33 +227,45 @@ def live_attachments_for_path(registry_root: Path, execution_cwd: str) -> list[J
     canonical = _canonical_path(execution_cwd)
     index = run_registry.load_index(registry_root)
     live: list[JsonObject] = []
-    for run_id, entry in index.get("runs", {}).items():
-        if not isinstance(run_id, str) or not isinstance(entry, dict):
-            continue
+    for run_id, entry in run_registry.index_run_entries(index):
         manifest = run_registry.load_run_manifest_or_none(registry_root, run_id)
-        attachment = manifest.get("worktreeAttachment") if isinstance(manifest, dict) else None
-        if not isinstance(attachment, dict):
-            attachment = entry.get("worktreeAttachment")
-        if not isinstance(attachment, dict):
+        manifest_attachment = (
+            manifest.get("worktreeAttachment") if isinstance(manifest, dict) else None
+        )
+        index_attachment = entry.get("worktreeAttachment")
+        claims = [
+            attachment
+            for attachment in (manifest_attachment, index_attachment)
+            if isinstance(attachment, dict)
+        ]
+        if not claims:
             continue
-        attached_path = attachment.get("path")
-        if not isinstance(attached_path, str) or _canonical_path(attached_path) != canonical:
+        matching_claims = [
+            attachment
+            for attachment in claims
+            if isinstance(attachment.get("path"), str)
+            and _canonical_path(str(attachment["path"])) == canonical
+        ]
+        if not matching_claims:
             continue
         state = run_registry.load_run_state_or_none(registry_root, run_id)
         if run_registry.effective_status(state) in {
             run_registry.STATUS_RUNNING,
             run_registry.STATUS_UNKNOWN,
         }:
-            live.append({"runId": run_id, "alias": _get_str(entry, "alias")})
+            item: JsonObject = {"runId": run_id, "alias": _get_str(entry, "alias")}
+            if len(claims) == 2 and _canonical_path(
+                str(claims[0].get("path", ""))
+            ) != _canonical_path(str(claims[1].get("path", ""))):
+                item["warning"] = "corrupt_attachment"
+            live.append(item)
     return live
 
 
 def load_persistent_records(registry_root: Path) -> list[PersistentWorktreeRecord]:
     index = run_registry.load_index(registry_root)
     records: list[PersistentWorktreeRecord] = []
-    for run_id, entry in index.get("runs", {}).items():
-        if not isinstance(run_id, str) or not isinstance(entry, dict):
-            continue
+    for run_id, entry in run_registry.index_run_entries(index):
         record = _record_for_run(registry_root, run_id, entry)
         if record is not None:
             records.append(record)

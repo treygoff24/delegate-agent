@@ -278,9 +278,7 @@ def list_run_summaries(
     if limit < 1:
         raise ValueError("limit must be at least 1")
     summaries: list[JsonObject] = []
-    for run_id, entry in index.get("runs", {}).items():
-        if not isinstance(entry, dict):
-            continue
+    for run_id, entry in run_registry.index_run_entries(index):
         entry_harness = entry.get("harness")
         if harness is not None and entry_harness != harness:
             continue
