@@ -1277,7 +1277,12 @@ def _probe_claude(selector: tuple[str, ...], env: Mapping[str, str], _: Path | N
     combined = f"{result.stdout}\n{result.stderr}"
     fragment = parse_claude_efforts(combined)
     fragment["personaTransports"] = {
-        "native-file": "--append-system-prompt-file" in combined,
+        # claude --help emits the collapsed form "--append-system-prompt[-file]"
+        # (verified 2.1.220, where the long spelling works when invoked), so
+        # accept either spelling as evidence of native-file support.
+        "native-file": (
+            "--append-system-prompt-file" in combined or "--append-system-prompt[-file]" in combined
+        ),
     }
     return fragment
 
