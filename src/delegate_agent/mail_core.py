@@ -1336,6 +1336,8 @@ def emit(
         if payload.get("ok") is False:
             if command.json_mode:
                 print(json.dumps(payload, sort_keys=True), file=stdout)
+            else:
+                _render_human(action, payload, stdout)
             return int(payload.get("exitCode", 1))
     else:
         raise _error("unknown_mail_action", f"Unknown mail action: {action}.")
@@ -1356,15 +1358,96 @@ def _render_human(action: str, payload: JsonObject, stdout: TextIO) -> None:
                     print(f"  {row.get('recipient')}: {row.get('outcome')}", file=stdout)
         return
     if action == "inbox":
-        framing = payload.get("framing")
-        if isinstance(framing, dict):
-            print(json.dumps({"framing": framing}, sort_keys=True), file=stdout)
-    if action in {"inbox", "watch"}:
-        for row in payload.get("messages", []):
-            if isinstance(row, dict):
-                print(json.dumps(row, sort_keys=True), file=stdout)
+        _render_framing(payload, stdout)
+        for message in _payload_rows(payload, "messages"):
+            print(_inbox_line(message), file=stdout)
+        return
+    if action == "read":
+        _render_framing(payload, stdout)
+        message = payload.get("message")
+        if isinstance(message, dict):
+            _render_message(message, stdout)
+        return
+    if action == "status":
+        _render_framing(payload, stdout)
+        message = payload.get("message")
+        if isinstance(message, dict):
+            print(f"message {message.get('msgId')} seq={message.get('seq')}", file=stdout)
+            for row in _payload_rows(message, "recipients"):
+                _render_recipient_status(row, stdout)
         return
     if action == "prune":
-        print(f"mail prune: {len(payload.get('removed', []))} removed", file=stdout)
+        mode = "dry-run" if payload.get("dryRun") else "applied"
+        planned = _payload_rows(payload, "planned")
+        removed = _payload_rows(payload, "removed")
+        skipped = _payload_rows(payload, "skipped")
+        print(
+            f"mail prune ({mode}): planned {len(planned)}, removed {len(removed)}, "
+            f"skipped {len(skipped)}",
+            file=stdout,
+        )
+        for item in planned:
+            _render_prune_item("planned", item, stdout)
+        for item in removed:
+            _render_prune_item("removed", item, stdout)
+        for item in skipped:
+            _render_prune_item("skipped", item, stdout)
+        for item in _payload_rows(payload, "errors"):
+            _render_prune_item("error", item, stdout)
         return
-    print(json.dumps(payload, sort_keys=True), file=stdout)
+
+
+def _render_framing(payload: JsonObject, stdout: TextIO) -> None:
+    framing = payload.get("framing")
+    if not isinstance(framing, dict):
+        return
+    role = framing.get("role", "unknown")
+    tier = framing.get("tier", "unknown")
+    text = framing.get("text", "")
+    print(f"mail framing ({role}, tier {tier}): {text}", file=stdout)
+
+
+def _payload_rows(payload: JsonObject, key: str) -> list[JsonObject]:
+    rows = payload.get(key)
+    return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+
+def _compact_text(value: object, limit: int = 80) -> str:
+    text = " ".join(str(value or "").split())
+    return text if len(text) <= limit else f"{text[: limit - 3]}..."
+
+
+def _inbox_line(message: JsonObject) -> str:
+    return (
+        f"  {str(message.get('msgId', ''))[:12]} from {message.get('from', '-')} "
+        f"sent {message.get('sent', '-')} subject {_compact_text(message.get('subject'))!r}: "
+        f"{_compact_text(message.get('body'))}"
+    )
+
+
+def _render_message(message: JsonObject, stdout: TextIO) -> None:
+    print(f"message: {message.get('msgId')}", file=stdout)
+    for label, key in (
+        ("sequence", "seq"),
+        ("from", "from"),
+        ("sent", "sent"),
+        ("to", "to"),
+        ("group", "group"),
+        ("subject", "subject"),
+        ("reply-to", "replyTo"),
+    ):
+        print(f"{label}: {message.get(key) if message.get(key) is not None else '-'}", file=stdout)
+    print("body:", file=stdout)
+    print(message.get("body", ""), file=stdout)
+
+
+def _render_recipient_status(row: JsonObject, stdout: TextIO) -> None:
+    detail = row.get("pathState") or row.get("reason")
+    suffix = f" ({detail})" if detail else ""
+    print(f"  {row.get('recipient', '-')}: {row.get('outcome', '-')}{suffix}", file=stdout)
+
+
+def _render_prune_item(kind: str, item: JsonObject, stdout: TextIO) -> None:
+    identifier = item.get("msgId") or item.get("box") or item.get("path", "-")
+    detail = item.get("path") or item.get("reason") or item.get("message")
+    print(f"  {kind} {identifier}: {detail}", file=stdout)

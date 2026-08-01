@@ -207,6 +207,38 @@ class MailPruneTests(unittest.TestCase):
         self.assertEqual(actual["removed"], dry["planned"])
         self.assertFalse(any(path.exists() for path in before))
 
+    def test_human_prune_and_dry_run_render_counts_and_items(self):
+        self.write_mail_file(mail.COORDINATOR_BOX, "inbox", "old-message", self.OLD_SENT)
+        self.write_ledger("old-ledger", self.OLD_SENT)
+
+        dry_output = io.StringIO()
+        code = mail.emit(
+            mail.MailCommand(action="prune", older_than_days=30, dry_run=True),
+            workspace=self.workspace,
+            stdout=dry_output,
+            stderr=io.StringIO(),
+        )
+        self.assertEqual(code, 0)
+        self.assertIn(
+            "mail prune (dry-run): planned 2, removed 0, skipped 0", dry_output.getvalue()
+        )
+        self.assertIn("  planned old-message:", dry_output.getvalue())
+        self.assertIn("  planned old-ledger:", dry_output.getvalue())
+        self.assertNotIn('{"', dry_output.getvalue())
+
+        output = io.StringIO()
+        code = mail.emit(
+            mail.MailCommand(action="prune", older_than_days=30),
+            workspace=self.workspace,
+            stdout=output,
+            stderr=io.StringIO(),
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("mail prune (applied): planned 2, removed 2, skipped 0", output.getvalue())
+        self.assertIn("  removed old-message:", output.getvalue())
+        self.assertIn("  removed old-ledger:", output.getvalue())
+        self.assertNotIn('{"', output.getvalue())
+
     def test_dry_run_reports_legacy_home_without_removing_it(self):
         legacy_home = (
             mail.boxes_root(self.registry_root)
