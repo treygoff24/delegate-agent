@@ -1394,6 +1394,10 @@ def execute_request(
                 )
                 if provision.warning is not None and provision.env is not None:
                     ctx_runner = dc_replace(ctx_runner, env_overrides=dict(provision.env))
+            # Evaluate every argument expression BEFORE marking ownership
+            # transferred: a raise inside an argument (public_argv below) would
+            # otherwise skip both the CLI cleanup and the runner's guard.
+            manifest_argv = public_argv(isolated_request)
             mail_push_cleanup_transferred = provision is not None
             return delegate_runner.execute_tracked(
                 isolated_request.argv,
@@ -1416,7 +1420,7 @@ def execute_request(
                 persona_file_placeholder=PERSONA_FILE_ARG_PLACEHOLDER,
                 output_schema_text=isolated_request.output_schema_text,
                 output_schema_path=isolated_request.output_schema,
-                manifest_argv=public_argv(isolated_request),
+                manifest_argv=manifest_argv,
                 progress=isolated_request.progress,
                 progress_initial_delay_sec=isolated_request.progress_initial_delay_sec,
                 progress_interval_sec=isolated_request.progress_interval_sec,

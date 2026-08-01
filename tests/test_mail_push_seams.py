@@ -477,6 +477,48 @@ class MailPushSeamTests(CommandTestBase):
             self.assertEqual(len(run_paths), 1, run_paths)
             self._assert_no_private_credentials(workspace, run_paths[0])
 
+    def test_codex_mail_push_argument_evaluation_failure_cleans_credentials(self):
+        # A raise inside an execute_tracked ARGUMENT expression (public_argv)
+        # happens after context construction but before the runner's guard
+        # exists; ownership must not have transferred yet.
+        with tempfile.TemporaryDirectory(prefix="delegate-mail-push-argv-eval-") as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            observations = root / "observations.jsonl"
+            primary = self._write_codex_home(root, "primary-codex", self.credential_canary)
+            fake = self._write_fake_harness(root)
+            Path(self._config_env["DELEGATE_CONFIG"]).write_text(
+                json.dumps(self._config("codex", fake, observations, primary_home=primary)),
+                encoding="utf-8",
+            )
+            with mock.patch.object(
+                self.delegate,
+                "public_argv",
+                side_effect=self.delegate.DelegateError(
+                    "injected_argv_failure", "injected manifest argv failure"
+                ),
+            ):
+                code, stdout, _stderr = self._run_launch(
+                    [
+                        "--json",
+                        "--cwd",
+                        str(workspace),
+                        "codex",
+                        "work",
+                        "--mail-push",
+                        "launch",
+                    ],
+                    observations=observations,
+                )
+
+            self.assertEqual(code, self.delegate.EXIT_USAGE)
+            self.assertEqual(json.loads(stdout)["error"], "injected_argv_failure")
+            self.assertFalse(observations.exists())
+            run_paths = list((workspace / ".delegate" / "runs").iterdir())
+            self.assertEqual(len(run_paths), 1, run_paths)
+            self._assert_no_private_credentials(workspace, run_paths[0])
+
     def test_codex_mail_push_attached_revalidation_failure_cleans_credentials(self):
         _root, workspace, observations, _primary = self._run_verified_persistent("codex")
         _owner_run_path, owner_manifest = self._only_run(workspace)
