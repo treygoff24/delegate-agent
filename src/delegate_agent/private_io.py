@@ -245,6 +245,60 @@ def write_private_bytes(path: Path, payload: bytes) -> None:
         handle.write(payload)
 
 
+def write_bytes_atomic_if_absent(path: Path, payload: bytes) -> bool:
+    """Atomically create private bytes without replacing an existing target.
+
+    The temporary file is fsynced before an exclusive hard-link publication.
+    ``os.link`` is the claim operation: concurrent writers can publish only one
+    value, and a pre-existing destination is never replaced.
+    """
+    parent_fd, name = _open_strict_parent(path)
+    temp_name = f".{name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+    temp_exists = False
+    try:
+        try:
+            existing = os.lstat(name, dir_fd=parent_fd)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None:
+            if stat.S_ISLNK(existing.st_mode):
+                raise OSError(errno.ELOOP, "registry file is a symlink", str(path))
+            return False
+        fd = os.open(
+            temp_name,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY | _NOFOLLOW_FLAGS,
+            PRIVATE_FILE_MODE,
+            dir_fd=parent_fd,
+        )
+        temp_exists = True
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(
+                temp_name,
+                name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+        except FileExistsError:
+            existing = os.lstat(name, dir_fd=parent_fd)
+            if stat.S_ISLNK(existing.st_mode):
+                raise OSError(errno.ELOOP, "registry file is a symlink", str(path)) from None
+            return False
+        os.unlink(temp_name, dir_fd=parent_fd)
+        temp_exists = False
+        os.fsync(parent_fd)
+        return True
+    finally:
+        if temp_exists:
+            with suppress(OSError):
+                os.unlink(temp_name, dir_fd=parent_fd)
+        os.close(parent_fd)
+
+
 def write_text_atomic(path: Path, text: str, *, encoding: str = "utf-8") -> None:
     """Atomically replace a non-private text file while preserving existing mode."""
     temp = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")

@@ -15,6 +15,27 @@ Use `delegate --help` for the exact command list from the installed version. Glo
 --group NAME                  Tag a launch/run-input request with a lightweight group ([A-Za-z0-9._-]{1,64}).
 ```
 
+## Workspace mail
+
+Mail is a parent-owned pull mailbox under `.delegate/mail`; mail commands are
+available even when `mail.enabled` is false. Mail's `--group` is command-local
+and must not be confused with launch `--group`:
+
+```text
+delegate mail send (--to ALIAS|coordinator | --group NAME) [--reply-to ID] [--subject S] (BODY|--file FILE|-)
+delegate mail inbox [--from SENDER]
+delegate mail read ID_PREFIX [--peek]
+delegate mail status MESSAGE_ID
+delegate mail watch [--once] [--from SENDER] [--reply-to ID] [--timeout SEC] [--interval-ms N]
+delegate mail prune [--older-than DAYS] [--dry-run]
+```
+
+`send` records per-recipient outcomes (`delivered`, `failed`,
+`skipped_ineligible`, or `blocked`); `status` may report `pruned` when a
+delivered mailbox file is gone. `watch --once` emits metadata-only NDJSON and
+returns exit code 124 on timeout. Read-only profile guards allow inbox,
+status, watch, and `read --peek`; mutating mail operations remain protected.
+
 ## Personas
 
 Named personas are UTF-8 Markdown files resolved from the source workspace:

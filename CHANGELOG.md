@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added workspace-local Wave 1 pull mail: storage outside run records,
+  lock-serialized per-recipient delivery ledgers, inbox/read/status/watch, and
+  mail-only prune with versioned JSON contracts.
+- Added strict `mail.enabled` configuration, work-run identity binding, the
+  opt-in `mailPush` plumbing seam, and audited harness-specific mail-root
+  writable-root/warning behavior. Wave 2 stop-hook push remains unimplemented.
+
 ## [0.25.0] - 2026-08-01
 
 ### Added

@@ -14,6 +14,7 @@ from delegate_agent import (
     capability_commands,
     config_commands,
     inspection_commands,
+    mail,
     profile_commands,
     profiles,
     run_output_commands,
@@ -68,6 +69,7 @@ class LaunchOptions:
     persona_record_source: str | None = None
     persona_record_digest: str | None = None
     persona_record_path: str | None = None
+    mail_push: bool = False
 
 
 @dataclass
@@ -92,6 +94,7 @@ class ResumeOptions:
     persona: str | None = None
     no_persona: bool = False
     allow_repo_persona: bool = False
+    mail_push: bool = False
 
 
 @dataclass
@@ -120,6 +123,7 @@ class ParsedCommand:
     profiles_command: profile_commands.ProfilesCommand | None = None
     inspection: InspectionOptions | None = None
     resume: ResumeOptions | None = None
+    mail_command: mail.MailCommand | None = None
 
     def __init__(
         self,
@@ -141,6 +145,7 @@ class ParsedCommand:
         profiles_command: profile_commands.ProfilesCommand | None = None,
         inspection: InspectionOptions | None = None,
         resume: ResumeOptions | None = None,
+        mail_command: mail.MailCommand | None = None,
     ) -> None:
         self.subcommand = subcommand
         self.global_options = global_options or GlobalOptions()
@@ -159,6 +164,7 @@ class ParsedCommand:
         self.profiles_command = profiles_command
         self.inspection = inspection
         self.resume = resume
+        self.mail_command = mail_command
 
 
 @dataclass(frozen=True)
@@ -240,6 +246,7 @@ class Request:
     # True only when the central framer placed the persistent-worktree notes.
     # Execution uses this structural state rather than inspecting prompt bytes.
     persistent_worktree_notes_framed: bool = False
+    mail_push: bool = False
 
 
 @dataclass(frozen=True)

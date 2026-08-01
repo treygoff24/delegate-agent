@@ -18,6 +18,7 @@ from delegate_agent import (
     config_commands,
     harness_discovery,
     inspection_commands,
+    mail,
     personas,
     profile_commands,
     profile_guard,
@@ -63,6 +64,7 @@ from delegate_agent.constants import (
     KNOWN_ENGINES,
     MODE_CALL,
     MODE_SAFE,
+    MODE_WORK,
     PROMPT_INSTRUCTION_MODE_SLASH,
 )
 from delegate_agent.describe_payload import (  # noqa: F401  # re-exported for tests / back-compat
@@ -326,6 +328,8 @@ def dry_run_payload(request: Request) -> JsonObject:
         "promptTransport": request.prompt_transport,
         "promptInstructionMode": request.prompt_instruction_mode,
     }
+    if request.mail_push:
+        payload["mailPush"] = True
     run_metadata.add_model_payload_fields(payload, request)
     reasoning.add_reasoning_payload_fields(payload, request)
     run_metadata.add_speed_payload_fields(payload, request)
@@ -619,6 +623,7 @@ def make_run_context(
         auth_profile=request.auth_profile,
         fallback_auth_profile=request.fallback_auth_profile,
         include_dirty=request.include_dirty,
+        mail_push=request.mail_push,
         group=request.group,
         call_read_only=request.call_read_only or request.pure,
         pure=request.pure,
@@ -763,6 +768,26 @@ def _execute_attached_worktree(
             },
         },
     )
+    child_env = request.env_overrides or {}
+    mail.bind_mail_identity(child_env, run_id, alias)
+    request.env_overrides = child_env
+    if request.mode == MODE_WORK:
+        request.argv = mail.wire_work_mail_argv(
+            request.engine,
+            request.argv,
+            registry_root,
+            prompt=request.prompt,
+            prompt_transport=request.prompt_transport,
+            stderr=stderr,
+        )
+        if request.display_argv is not None:
+            request.display_argv = mail.wire_work_mail_argv(
+                request.engine,
+                request.display_argv,
+                registry_root,
+                prompt=request.prompt,
+                prompt_transport=request.prompt_transport,
+            )
     ctx_runner = make_run_context(
         registry_root,
         request,
@@ -1181,6 +1206,26 @@ def execute_request(
                 ),
             },
         )
+        child_env = isolated_request.env_overrides or {}
+        mail.bind_mail_identity(child_env, run_id, alias)
+        isolated_request.env_overrides = child_env
+        if isolated_request.mode == MODE_WORK:
+            isolated_request.argv = mail.wire_work_mail_argv(
+                isolated_request.engine,
+                isolated_request.argv,
+                registry_root,
+                prompt=isolated_request.prompt,
+                prompt_transport=isolated_request.prompt_transport,
+                stderr=stderr,
+            )
+            if isolated_request.display_argv is not None:
+                isolated_request.display_argv = mail.wire_work_mail_argv(
+                    isolated_request.engine,
+                    isolated_request.display_argv,
+                    registry_root,
+                    prompt=isolated_request.prompt,
+                    prompt_transport=isolated_request.prompt_transport,
+                )
         ctx_runner = make_run_context(
             registry_root,
             isolated_request,
@@ -1419,7 +1464,11 @@ def main(
             return emit_agent_help(stdout)
 
         if parsed.subcommand != "run":
-            workspace = resolve_workspace(global_options.cwd)
+            if parsed.subcommand == "mail":
+                mail_workspace = mail.resolve_mail_workspace(global_options.cwd)
+                workspace = resolve_workspace(str(mail_workspace))
+            else:
+                workspace = resolve_workspace(global_options.cwd)
 
         if parsed.subcommand == "capabilities":
             command = parsed.capabilities
@@ -1433,6 +1482,18 @@ def main(
                 auth_profile_override=global_options.auth_profile,
                 profile=discovery_profile,
                 discovery=discovery_snapshot,
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+        if parsed.subcommand == "mail":
+            command = parsed.mail_command
+            if command is None:
+                raise DelegateError("invalid_command", "mail options are required.")
+            return mail.emit(
+                command,
+                workspace=Path(workspace.path),
+                stdin=stdin,
                 stdout=stdout,
                 stderr=stderr,
             )

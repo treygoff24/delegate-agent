@@ -162,6 +162,7 @@ class RunContext:
     persona_digest: str | None = None
     persona_file: str | None = None
     persona_text: str | None = None
+    mail_push: bool = False
 
 
 def write_manifest(run_path: Path, manifest: JsonObject) -> None:
@@ -284,6 +285,8 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
         payload["fallbackProfile"] = ctx.fallback_auth_profile
     if ctx.group is not None:
         payload["group"] = ctx.group
+    if ctx.mail_push:
+        payload["mailPush"] = True
     if ctx.include_dirty:
         payload["includeDirty"] = True
         payload["syncedFiles"] = ctx.synced_files

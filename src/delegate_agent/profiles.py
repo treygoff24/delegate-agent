@@ -230,6 +230,10 @@ def child_environment(
         env.pop("DELEGATE_SOURCE_ROOT", None)
         env.pop("DELEGATE_EXECUTION_ROOT", None)
         env.pop("WORKSPACE_ROOT", None)
+        # A nested child must not inherit its parent's mail authority. The
+        # parent rebinds a fresh identity immediately after registration.
+        env.pop("DELEGATE_RUN_ID", None)
+        env.pop("DELEGATE_MAIL_SELF", None)
     if base:
         env.update(base)
     if overrides:
@@ -328,7 +332,14 @@ def codex_fallback_child_env_overrides(
         **{
             key: value
             for key, value in fallback.items()
-            if key not in {"DELEGATE_SOURCE_ROOT", "DELEGATE_EXECUTION_ROOT", "WORKSPACE_ROOT"}
+            if key
+            not in {
+                "DELEGATE_SOURCE_ROOT",
+                "DELEGATE_EXECUTION_ROOT",
+                "WORKSPACE_ROOT",
+                "DELEGATE_RUN_ID",
+                "DELEGATE_MAIL_SELF",
+            }
         },
     }
 

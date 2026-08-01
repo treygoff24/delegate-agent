@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TextIO
 
-from delegate_agent import harness_events, profiles, retention, run_registry, safe_workspace
+from delegate_agent import harness_events, mail, profiles, retention, run_registry, safe_workspace
 from delegate_agent import runner as delegate_runner
 from delegate_agent.argv_utils import public_argv, replace_workspace_arg_in_argv
 from delegate_agent.git_utils import (
@@ -311,6 +311,7 @@ def _build_persistent_worktree_run_context(
         fallback_auth_profile=request.fallback_auth_profile,
         include_dirty=bool(creation_context.get("includeDirty")),
         synced_files=int(creation_context.get("syncedFiles") or 0),
+        mail_push=request.mail_push,
         group=request.group,
         call_read_only=request.call_read_only or request.pure,
         pure=request.pure,
@@ -349,6 +350,26 @@ def _register_persistent_worktree_run(
             "group": request.group,
         },
     )
+    child_env = request.env_overrides or {}
+    mail.bind_mail_identity(child_env, run_id, alias)
+    request.env_overrides = child_env
+    if request.mode == "work":
+        request.argv = mail.wire_work_mail_argv(
+            request.engine,
+            request.argv,
+            preflight.registry_root,
+            prompt=request.prompt,
+            prompt_transport=request.prompt_transport,
+            stderr=execution.stderr,
+        )
+        if request.display_argv is not None:
+            request.display_argv = mail.wire_work_mail_argv(
+                request.engine,
+                request.display_argv,
+                preflight.registry_root,
+                prompt=request.prompt,
+                prompt_transport=request.prompt_transport,
+            )
 
     short_id = short_run_id(run_id)
     branch = plan_branch_name(label, short_id)

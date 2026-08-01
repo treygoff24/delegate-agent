@@ -42,6 +42,7 @@ TOP_LEVEL_COMMANDS = (
     "run",
     "snapshot",
     "runs",
+    "mail",
     "ps",
     "run-output",
     "resume",

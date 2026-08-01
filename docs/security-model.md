@@ -2,6 +2,39 @@
 
 Delegate is a launcher and run recorder for other agent runtimes. It improves consistency and provides some isolation patterns, but it is not a complete sandbox.
 
+Mail identity is **workspace trust, not authentication** — same-UID lanes can
+forge env or files; framing tiers are UX for cooperative agents, not a
+privilege boundary. Authoritative control stays on the launch prompt and
+parent-side commands.
+
+## Workspace-local mail
+
+Wave 1 mail is a parent-owned pull mailbox outside the run records:
+
+```text
+<registryRoot>/.delegate/mail/
+  boxes/<runId>/{inbox,read}/<msgId>.mail
+  boxes/coordinator/{inbox,read}/<msgId>.mail
+  sent/<msgId>.json
+  meta.json
+  rules.json
+```
+
+Delivery and sequence allocation are serialized under the Registry lock. Mail
+files are private, bounded, and published with an exclusive atomic claim.
+Only work-mode runs receive a bound lane identity; safe and call runs cannot
+send as lanes. The command surface enforces recipient eligibility and rule
+boundaries, but mailbox data and identity variables are cooperative same-UID
+workspace state, not an authentication or authorization boundary.
+
+The intended sandbox grant is `.delegate/mail` only, never `.delegate/runs`.
+Where the installed harness exposes a measured additional writable-root
+mechanism, Delegate adds the mail root to the work launch. Grok, OpenCode, and
+Devin currently receive an explicit degraded-scope warning because no verified
+mail-only grant is wired for them. Direct source-workspace launches and
+harnesses without an OS filesystem boundary may still reach other paths; the
+warning is honest scope reporting, not a claim of confinement.
+
 ## What Delegate controls
 
 Delegate controls:
