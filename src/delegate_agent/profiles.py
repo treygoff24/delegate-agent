@@ -327,20 +327,20 @@ def codex_fallback_child_env_overrides(
     fallback = codex_fallback_env_overrides(resolution)
     if fallback is None:
         return {}
+    mail_identity_keys = {"DELEGATE_RUN_ID", "DELEGATE_MAIL_SELF"}
+    fallback_excluded = {
+        "DELEGATE_SOURCE_ROOT",
+        "DELEGATE_EXECUTION_ROOT",
+        "WORKSPACE_ROOT",
+        *mail_identity_keys,
+    }
     return {
-        **(primary_overrides or {}),
         **{
             key: value
-            for key, value in fallback.items()
-            if key
-            not in {
-                "DELEGATE_SOURCE_ROOT",
-                "DELEGATE_EXECUTION_ROOT",
-                "WORKSPACE_ROOT",
-                "DELEGATE_RUN_ID",
-                "DELEGATE_MAIL_SELF",
-            }
+            for key, value in (primary_overrides or {}).items()
+            if key not in mail_identity_keys
         },
+        **{key: value for key, value in fallback.items() if key not in fallback_excluded},
     }
 
 

@@ -430,6 +430,8 @@ def _expand_group(
     for _run_id, entry in run_registry.index_run_entries(index):
         if entry.get("group") != group:
             continue
+        if _run_id == sender.run_id:
+            continue
         alias = entry.get("alias")
         if not isinstance(alias, str):
             continue
@@ -541,7 +543,7 @@ def _reply_sender_allowed(ledger: JsonObject, identity: MailIdentity) -> bool:
     if not isinstance(recipients, list):
         return False
     for row in recipients:
-        if not isinstance(row, dict):
+        if not isinstance(row, dict) or row.get("outcome") != "delivered":
             continue
         if identity.is_coordinator and row.get("recipient") == COORDINATOR_BOX:
             return True
@@ -550,6 +552,12 @@ def _reply_sender_allowed(ledger: JsonObject, identity: MailIdentity) -> bool:
         ):
             return True
     return False
+
+
+def _reply_watcher_allowed(ledger: JsonObject, identity: MailIdentity) -> bool:
+    if identity.is_coordinator:
+        return ledger.get("from") == COORDINATOR_BOX and ledger.get("fromRunId") is None
+    return identity.run_id is not None and ledger.get("fromRunId") == identity.run_id
 
 
 def _validate_reply(registry_root: Path, reply_to: str, identity: MailIdentity) -> JsonObject:
@@ -897,25 +905,36 @@ def watch(
     identity = _identity(registry_root, env=env)
     allowed: set[str] | None = None
     if command.reply_to:
-        ledger = _validate_reply(registry_root, command.reply_to, identity)
+        _message_id, _path, ledger = _match_message_id(
+            registry_root, command.reply_to, sent_only=True
+        )
+        if not _reply_watcher_allowed(ledger, identity):
+            raise _error(
+                "reply_not_participant",
+                "Only the original sender may watch this reply exchange; reply-to cannot be routed around that boundary.",
+            )
         allowed = {
             str(row.get("runId") or row.get("recipient"))
             for row in ledger.get("recipients", [])
             if isinstance(row, dict) and row.get("outcome") == "delivered"
         }
     deadline = time.monotonic() + (command.timeout or MAIL_WATCH_DEFAULT_TIMEOUT_SECONDS)
+    found_non_reply = False
     while True:
         with run_registry.registry_lock(registry_root):
             lines, found = _watch_once(registry_root, command, identity)
+        matching = False
         for line in lines:
             message = line.get("message")
-            if allowed is not None and isinstance(message, dict):
+            if isinstance(message, dict) and allowed is not None:
                 sender = str(message.get("fromRunId") or message.get("from"))
-                if sender not in allowed:
+                if sender not in allowed or message.get("replyTo") != command.reply_to:
                     continue
             print(json.dumps(line, sort_keys=True, separators=(",", ":")), file=stdout, flush=True)
-        if found and command.once:
+            matching = True
+        if (matching or (found and allowed is None)) and command.once:
             return 0
+        found_non_reply = found_non_reply or (found and allowed is not None)
         if not command.once:
             time.sleep(command.interval_ms / 1000)
             continue
@@ -933,7 +952,7 @@ def watch(
                 file=stdout,
                 flush=True,
             )
-            return 124
+            return 0 if found_non_reply else 124
         time.sleep(command.interval_ms / 1000)
 
 

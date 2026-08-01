@@ -53,11 +53,18 @@ class MailParserTests(unittest.TestCase):
                 for field, value in expected.items():
                     self.assertEqual(getattr(command, field), value)
 
-    def test_watch_interval_is_clamped_to_the_documented_bounds(self):
-        low = parse_cli(["mail", "watch", "--interval-ms", "1"]).mail_command
-        high = parse_cli(["mail", "watch", "--interval-ms", "60001"]).mail_command
-        self.assertEqual(low.interval_ms, 100)
-        self.assertEqual(high.interval_ms, 60000)
+    def test_watch_interval_rejects_values_outside_documented_bounds(self):
+        for value in ("1", "60001"):
+            with self.subTest(value=value), self.assertRaises(DelegateError) as caught:
+                parse_cli(["mail", "watch", "--interval-ms", value])
+            self.assertEqual(caught.exception.error, "invalid_interval")
+        self.assertEqual(
+            parse_cli(["mail", "watch", "--interval-ms", "100"]).mail_command.interval_ms, 100
+        )
+        self.assertEqual(
+            parse_cli(["mail", "watch", "--interval-ms", "60000"]).mail_command.interval_ms,
+            60000,
+        )
         self.assertEqual(
             parse_cli(["mail", "watch"]).mail_command.interval_ms,
             1000,
