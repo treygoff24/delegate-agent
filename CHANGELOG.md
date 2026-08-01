@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-08-01
+
 ### Added
 
 - Added workspace-local Wave 1 pull mail: storage outside run records,
@@ -860,6 +862,7 @@ Usage-audit fix wave: 82 sessions and 1,241 delegate invocations from one week o
 
 - Releases before 0.1.3 predate this changelog.
 
+[0.26.0]: https://github.com/treygoff24/delegate-agent/compare/v0.25.0...v0.26.0
 [0.25.0]: https://github.com/treygoff24/delegate-agent/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/treygoff24/delegate-agent/compare/v0.23.0...v0.24.0
 [0.23.0]: https://github.com/treygoff24/delegate-agent/compare/v0.22.0...v0.23.0
