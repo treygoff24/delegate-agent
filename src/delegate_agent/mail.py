@@ -658,6 +658,11 @@ def provision_mail_push(
                     name=MAIL_PUSH_FALLBACK_CODEX_HOME_NAME,
                 )
                 updated_fallback["CODEX_HOME"] = str(fallback_home.resolve(strict=False))
+                # The fallback attempt must keep the authenticated hook identity:
+                # without these keys its hook cannot emit a nonce-verified
+                # sentinel and unrecordable failures would go silent.
+                updated_fallback["DELEGATE_MAIL_HOOK_HARNESS"] = engine
+                updated_fallback["DELEGATE_MAIL_HOOK_NONCE"] = nonce
             for target in (updated, updated_display):
                 if target is None:
                     continue

@@ -506,6 +506,15 @@ class MailPushSeamTests(CommandTestBase):
             self.assertEqual(observed[1]["codexHome"], str(fallback_home.resolve()))
             self.assertTrue(observed[1]["codexHomeHooksPresent"])
             self.assertEqual(observed[1]["codexHomeAuth"], "fallback-auth")
+            # The fallback attempt keeps the authenticated hook identity.
+            self.assertEqual(
+                observed[1]["env"].get("DELEGATE_MAIL_HOOK_HARNESS"),
+                observed[0]["env"]["DELEGATE_MAIL_HOOK_HARNESS"],
+            )
+            self.assertEqual(
+                observed[1]["env"].get("DELEGATE_MAIL_HOOK_NONCE"),
+                observed[0]["env"]["DELEGATE_MAIL_HOOK_NONCE"],
+            )
             self.assertFalse(primary_home.exists())
             self.assertFalse(fallback_home.exists())
             self.assertEqual(manifest["argv"][1:], observed[1]["argv"])
