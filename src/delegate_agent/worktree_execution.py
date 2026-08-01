@@ -580,7 +580,11 @@ def _request_for_execution_workspace(
     )
     execution_stdin_text = request.stdin_text
     execution_prompt_file_text = request.prompt_file_text
-    execution_prompt = request.prompt
+    execution_prompt = (
+        request.argv[-1]
+        if request.prompt_transport not in (PROMPT_TRANSPORT_STDIN, PROMPT_TRANSPORT_FILE)
+        else request.prompt
+    )
     if request.isolation_context is not None and request.isolation_context.isolation_lifecycle in (
         "persistent",
         "attached",
@@ -588,7 +592,23 @@ def _request_for_execution_workspace(
         # Central-framed requests already contain these segments. Keep this
         # idempotent seam for manually-created Request objects and legacy
         # resumed records.
-        execution_prompt = _persistent_prompt(execution_prompt, forbid_commit=request.forbid_commit)
+        execution_prompt = _persistent_prompt(
+            execution_prompt,
+            forbid_commit=request.forbid_commit,
+            persona_text=request.persona_text,
+        )
+        if request.prompt_transport == PROMPT_TRANSPORT_STDIN:
+            execution_stdin_text = _persistent_prompt(
+                execution_stdin_text or execution_prompt,
+                forbid_commit=request.forbid_commit,
+                persona_text=request.persona_text,
+            )
+        elif request.prompt_transport == PROMPT_TRANSPORT_FILE:
+            execution_prompt_file_text = _persistent_prompt(
+                execution_prompt_file_text or execution_prompt,
+                forbid_commit=request.forbid_commit,
+                persona_text=request.persona_text,
+            )
     if request.prompt_transport == PROMPT_TRANSPORT_STDIN:
         execution_stdin_text = execution_stdin_text or request.prompt
     elif request.prompt_transport == PROMPT_TRANSPORT_FILE:
@@ -612,11 +632,20 @@ def _request_for_execution_workspace(
     )
 
 
-def _persistent_prompt(prompt: str, *, forbid_commit: bool) -> str:
+def _persistent_prompt(prompt: str, *, forbid_commit: bool, persona_text: str | None = None) -> str:
     if PERSISTENT_WORKTREE_CONTEXT_NOTE.strip() not in prompt:
-        prompt = prepend_persistent_worktree_context(prompt)
+        if persona_text is not None and (persona_at := prompt.find(persona_text)) >= 0:
+            insert_at = persona_at + len(persona_text)
+            prompt = (
+                prompt[:insert_at] + "\n\n" + PERSISTENT_WORKTREE_CONTEXT_NOTE + prompt[insert_at:]
+            )
+        else:
+            prompt = prepend_persistent_worktree_context(prompt)
     if forbid_commit and PERSISTENT_WORKTREE_COMMIT_NOTE not in prompt:
-        prompt = f"{PERSISTENT_WORKTREE_COMMIT_NOTE}\n\n{prompt}"
+        context_at = prompt.find(PERSISTENT_WORKTREE_CONTEXT_NOTE)
+        prompt = (
+            prompt[:context_at] + PERSISTENT_WORKTREE_COMMIT_NOTE + "\n\n" + prompt[context_at:]
+        )
     return prompt
 
 

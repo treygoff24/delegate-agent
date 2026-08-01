@@ -132,6 +132,15 @@ class PersonaOpenCodeTests(CommandTestBase):
         self.assertEqual(merged["agent"]["reviewer"]["prompt"], "existing\n\n" + self._PERSONA)
         self.assertEqual(merged["model"], original["model"])
 
+    def test_persona_merge_preserves_existing_prompt_trailing_bytes(self):
+        existing = "existing trailing spaces  \n\n"
+        request = self._request(
+            self._config_with_profile(json.dumps({"agent": {"reviewer": {"prompt": existing}}})),
+            agent="reviewer",
+        )
+        merged = json.loads((request.env_overrides or {})["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(merged["agent"]["reviewer"]["prompt"], existing + "\n\n" + self._PERSONA)
+
 
 if __name__ == "__main__":
     unittest.main()

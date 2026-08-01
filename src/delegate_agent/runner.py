@@ -242,6 +242,16 @@ def _merge_extra(payload: JsonObject, extra: JsonObject) -> None:
             payload[key] = value
 
 
+def _add_persona_payload_fields(payload: JsonObject, ctx: RunContext) -> None:
+    if ctx.persona_name is None:
+        return
+    payload["personaName"] = ctx.persona_name
+    payload["personaSource"] = ctx.persona_source
+    payload["personaTransport"] = ctx.persona_transport
+    payload["personaDigest"] = ctx.persona_digest
+    payload["personaFile"] = ctx.persona_file or PERSONA_TXT_FILE
+
+
 def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
     payload: JsonObject = {
         "schema": run_registry.MANIFEST_SCHEMA,
@@ -287,12 +297,7 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
         payload["outputSchema"] = ctx.output_schema_text
     if ctx.agent is not None:
         payload["agent"] = ctx.agent
-    if ctx.persona_name is not None:
-        payload["personaName"] = ctx.persona_name
-        payload["personaSource"] = ctx.persona_source
-        payload["personaTransport"] = ctx.persona_transport
-        payload["personaDigest"] = ctx.persona_digest
-        payload["personaFile"] = ctx.persona_file or PERSONA_TXT_FILE
+    _add_persona_payload_fields(payload, ctx)
     if ctx.resumed_from is not None:
         payload["resumedFrom"] = ctx.resumed_from
     if ctx.worktree_attachment is not None:
@@ -928,6 +933,7 @@ def completion_json_payload(
     run_metadata.add_model_payload_fields(payload, ctx)
     reasoning.add_reasoning_payload_fields(payload, ctx)
     run_metadata.add_speed_payload_fields(payload, ctx)
+    _add_persona_payload_fields(payload, ctx)
     if assistant_meta is not None:
         payload.update(assistant_meta)
     cleanup = _worktree_cleanup_commands(ctx)

@@ -32,8 +32,10 @@ surfaces refuse personas rather than silently changing their prompt contract.
 Claude native-file transport is discovery-gated and writes a private 0600 file;
 an absent, stale, or unproven capability falls back to prepend. OpenCode merges
 into the effective config without destroying existing root keys, agent fields,
-or prompt text; malformed config falls back to prepend with a warning. Persona
-bodies are not put in argv, dry-run output, or manifests. Tracked runs retain
+or prompt text; malformed config falls back to prepend with a warning. Claude
+native-file keeps persona bodies out of argv, dry-run output, and manifests;
+prepend engines using argv transport expose them in the live process argv.
+Tracked runs retain
 the resolved bytes only in private `persona.txt`, which is removed with the run.
 
 Delegate does not control:

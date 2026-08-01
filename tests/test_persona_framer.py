@@ -4,7 +4,7 @@ import copy
 import unittest
 from pathlib import Path
 
-from delegate_agent import argv_builders, prompt_instructions, worktree_execution
+from delegate_agent import argv_builders, prompt_instructions, resume_command, worktree_execution
 from delegate_agent.constants import SAFE_REVIEW_PREFIX_INJECTED_HERE_ENGINES
 from delegate_agent.isolation import PERSISTENT_WORKTREE_CONTEXT_NOTE, IsolationContext
 from delegate_agent.prompt_transport import (
@@ -12,6 +12,7 @@ from delegate_agent.prompt_transport import (
     PROMPT_TRANSPORT_FILE,
     PROMPT_TRANSPORT_STDIN,
 )
+from delegate_agent.request_models import ParsedCommand
 from tests.delegate_commands_test_base import CommandTestBase, make_git_repo
 
 
@@ -180,6 +181,87 @@ class PersonaFramerTests(CommandTestBase):
                         if segment is not None
                     )
                     self.assertEqual(self._final_prompt(request, str(repo / "exec")), expected)
+
+    def test_persona_framing_preserves_blank_bytes_for_each_transport_and_mode(self):
+        persona = "\n\npersona leading\n\npersona inner\n\n"
+        user = "\n\nuser leading\n\nuser inner\n\n"
+        repo = self._dirty_repo()
+        for engine in ("cursor", "codex", "droid"):
+            for mode in ("safe", "work"):
+                with self.subTest(engine=engine, mode=mode):
+                    request = self.build_git_request(
+                        engine,
+                        mode,
+                        None,
+                        str(repo),
+                        user,
+                        self._config(engine),
+                        False,
+                        persona="editor",
+                        persona_text_override=persona,
+                        frame_prompt=True,
+                    )
+                    safe = (
+                        argv_builders.SAFE_REVIEW_PREFIX_BY_ENGINE[engine].rstrip()
+                        if mode == "safe" and engine in SAFE_REVIEW_PREFIX_INJECTED_HERE_ENGINES
+                        else None
+                    )
+                    expected = "\n\n".join(
+                        segment
+                        for segment in (
+                            prompt_instructions.SKILL_REVIEW_PREFIX.rstrip(),
+                            persona,
+                            safe,
+                            user,
+                            prompt_instructions.COMPLETION_REPORT_SUFFIX.strip(),
+                        )
+                        if segment is not None
+                    )
+                    self.assertEqual(self._final_prompt(request, str(repo / "exec")), expected)
+
+    def test_attached_resume_reframes_each_transport_in_the_worktree_slot(self):
+        repo = self._dirty_repo()
+        persona = "RESUME PERSONA"
+        user = "RESUME USER"
+        for engine in ("cursor", "codex", "droid"):
+            with self.subTest(engine=engine):
+                request = self.build_git_request(
+                    engine,
+                    "work",
+                    None,
+                    str(repo),
+                    user,
+                    self._config(engine),
+                    False,
+                    persona="editor",
+                    persona_text_override=persona,
+                    frame_prompt=True,
+                )
+                resumed = resume_command.apply_resume_to_request(
+                    request,
+                    resume_command.ResumePlan(
+                        parsed=ParsedCommand("resume"),
+                        resumed_from={"runId": "del_source", "alias": "source"},
+                        attach={"path": str(repo / "exec"), "branch": "delegate/resume"},
+                        forbid_commit=True,
+                    ),
+                )
+                expected = "\n\n".join(
+                    (
+                        prompt_instructions.SKILL_REVIEW_PREFIX.rstrip(),
+                        persona,
+                        worktree_execution.PERSISTENT_WORKTREE_COMMIT_NOTE,
+                        PERSISTENT_WORKTREE_CONTEXT_NOTE,
+                        user,
+                        prompt_instructions.COMPLETION_REPORT_SUFFIX.strip(),
+                    )
+                )
+                prompt = self._final_prompt(resumed, str(repo / "exec"))
+                self.assertEqual(prompt, expected)
+                self.assertEqual(prompt.count(PERSISTENT_WORKTREE_CONTEXT_NOTE), 1)
+                self.assertEqual(
+                    prompt.count(worktree_execution.PERSISTENT_WORKTREE_COMMIT_NOTE), 1
+                )
 
     def test_adversarial_persona_cannot_follow_prompt_enforced_safe_policy(self):
         repo = self._dirty_repo()

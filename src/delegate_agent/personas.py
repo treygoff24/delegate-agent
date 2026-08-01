@@ -44,14 +44,40 @@ def _persona_dirs(workspace: str | Path) -> tuple[Path, Path]:
     return source / ".delegate" / PERSONA_DIR_NAME, Path.home() / ".delegate" / PERSONA_DIR_NAME
 
 
-def _read_persona(root: Path, *, name: str) -> tuple[str, int, str, str]:
-    """Read the fixed persona leaf through an anchored, no-follow descriptor walk."""
-    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    leaf_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+def _open_persona_dir(anchor: Path) -> int:
+    """Open ``.delegate/personas`` without following either untrusted component."""
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+    child_directory_flags = directory_flags | getattr(os, "O_NOFOLLOW", 0)
     try:
-        root_fd = os.open(root, directory_flags)
+        current_fd = os.open(anchor, directory_flags)
     except OSError as exc:
-        raise DelegateError("invalid_persona", f"persona {name!r} is not readable.") from exc
+        raise DelegateError("invalid_persona", "persona directory is not readable.") from exc
+    try:
+        for component in (".delegate", PERSONA_DIR_NAME):
+            try:
+                child_fd = os.open(component, child_directory_flags, dir_fd=current_fd)
+            except OSError as exc:
+                raise DelegateError(
+                    "invalid_persona", "persona directory is not readable."
+                ) from exc
+            try:
+                if not stat.S_ISDIR(os.fstat(child_fd).st_mode):
+                    raise DelegateError("invalid_persona", "persona directory is not readable.")
+            except Exception:
+                os.close(child_fd)
+                raise
+            os.close(current_fd)
+            current_fd = child_fd
+        return current_fd
+    except Exception:
+        os.close(current_fd)
+        raise
+
+
+def _read_persona(anchor: Path, *, name: str) -> tuple[str, int, str, str]:
+    """Read the fixed persona leaf through an anchored, no-follow descriptor walk."""
+    leaf_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    root_fd = _open_persona_dir(anchor)
     try:
         try:
             fd = os.open(f"{name}{PERSONA_SUFFIX}", leaf_flags, dir_fd=root_fd)
@@ -116,26 +142,30 @@ def resolve_persona(
                 "safe mode refuses workspace-local personas by default; use --allow-repo-persona to opt in.",
             )
         path, source = workspace_path, "workspace"
-        root = workspace_dir
     elif os.path.lexists(global_path):
         path, source = global_path, "global"
-        root = global_dir
     else:
         raise DelegateError("persona_not_found", f"persona {name!r} was not found.")
-    text, size, digest, preview = _read_persona(root, name=name)
+    anchor = workspace_dir.parent.parent if source == "workspace" else global_dir.parent.parent
+    text, size, digest, preview = _read_persona(anchor, name=name)
     return PersonaResolution(name, source, path, text, size, digest, preview)
 
 
-def _file_names(directory: Path) -> list[str]:
+def _file_names(anchor: Path) -> list[str]:
     try:
-        entries = list(directory.iterdir())
+        directory_fd = _open_persona_dir(anchor)
+    except DelegateError:
+        return []
+    try:
+        return sorted(
+            entry
+            for entry in os.listdir(directory_fd)
+            if entry.endswith(PERSONA_SUFFIX) and entry != PERSONA_SUFFIX
+        )
     except OSError:
         return []
-    return sorted(
-        entry.name
-        for entry in entries
-        if entry.name.endswith(PERSONA_SUFFIX) and entry.name != PERSONA_SUFFIX
-    )
+    finally:
+        os.close(directory_fd)
 
 
 def _invalid_reason(exc: DelegateError) -> str:
@@ -146,13 +176,15 @@ def list_personas(workspace: str | Path) -> list[dict[str, object]]:
     """List local/global persona rows without failing the whole inventory."""
 
     workspace_dir, global_dir = _persona_dirs(workspace)
-    local_names = {name[: -len(PERSONA_SUFFIX)] for name in _file_names(workspace_dir)}
-    global_names = {name[: -len(PERSONA_SUFFIX)] for name in _file_names(global_dir)}
+    workspace_anchor = workspace_dir.parent.parent
+    global_anchor = global_dir.parent.parent
+    local_names = {name[: -len(PERSONA_SUFFIX)] for name in _file_names(workspace_anchor)}
+    global_names = {name[: -len(PERSONA_SUFFIX)] for name in _file_names(global_anchor)}
     rows: list[dict[str, object]] = []
     for name in sorted(local_names | global_names):
-        sources = [("workspace", workspace_dir)] if name in local_names else []
+        sources = [("workspace", workspace_anchor)] if name in local_names else []
         if name in global_names and name not in local_names:
-            sources.append(("global", global_dir))
+            sources.append(("global", global_anchor))
         for source, directory in sources:
             row: dict[str, object] = {"name": name, "source": source}
             try:

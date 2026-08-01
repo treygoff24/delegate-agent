@@ -54,6 +54,25 @@ class PersonaResolutionTests(unittest.TestCase):
                 request_build.personas.resolve_persona(source, "editor")
             self.assertEqual(caught.exception.error, "invalid_persona")
 
+    def test_symlinked_delegate_parent_is_refused_for_workspace_and_global(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
+            root = Path(tmp)
+            target = root / "target"
+            (target / "personas").mkdir(parents=True)
+            (target / "personas" / "editor.md").write_text("escaped", encoding="utf-8")
+            source = root / "source"
+            source.mkdir()
+            os.symlink(target, source / ".delegate")
+
+            with self.assertRaises(DelegateError) as workspace_error:
+                request_build.personas.resolve_persona(source, "editor")
+            self.assertEqual(workspace_error.exception.error, "invalid_persona")
+
+            (root / ".delegate").symlink_to(target)
+            with self.assertRaises(DelegateError) as global_error:
+                request_build.personas.resolve_persona(root / "missing-workspace", "editor")
+            self.assertEqual(global_error.exception.error, "invalid_persona")
+
     def test_persona_leaf_validation_uses_the_opened_descriptor(self):
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp)

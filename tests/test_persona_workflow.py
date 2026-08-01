@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from subprocess import CompletedProcess
 from unittest import mock
 
-from delegate_agent import config, describe_payload, run_registry
+from delegate_agent import config, describe_payload, run_registry, runner
 from delegate_agent.cli import parse_cli, request_from_parsed
 from delegate_agent.errors import DelegateError
 from delegate_agent.workflows import registry as workflow_registry
@@ -58,16 +59,39 @@ class PersonaWorkflowTests(unittest.TestCase):
             input_path = Path(argv[argv.index("--input-json") + 1])
             payload = json.loads(input_path.read_text(encoding="utf-8"))
             calls.append(payload)
+            digest = payload.get("expectedPersonaDigest")
+            context = runner.RunContext(
+                registry_root=self.workspace,
+                run_id="del_persona_child",
+                alias="persona-child",
+                harness=str(payload["engine"]),
+                engine=str(payload["engine"]),
+                mode=str(payload["mode"]),
+                model=None,
+                source_cwd=str(self.workspace),
+                execution_cwd=str(self.workspace),
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-08-01T00:00:00Z",
+                persona_name=str(payload.get("persona") or "editor"),
+                persona_source="workspace",
+                persona_transport="prepend",
+                persona_digest=str(digest) if digest is not None else None,
+            )
+            envelope = runner.completion_json_payload(
+                context,
+                ok=True,
+                status="completed",
+                exit_code=0,
+                duration_ms=1,
+                stdout_bytes=0,
+                stderr_bytes=0,
+            )
+            envelope["text"] = "child result"
             return CompletedProcess(
                 argv,
                 0,
-                json.dumps(
-                    {
-                        "ok": True,
-                        "text": "child result",
-                        "personaDigest": payload.get("expectedPersonaDigest"),
-                    }
-                ).encode(),
+                json.dumps(envelope).encode(),
                 b"",
             )
 
@@ -119,10 +143,29 @@ class PersonaWorkflowTests(unittest.TestCase):
         )
         self.assertNotIn(self.old_text, json.dumps(payload))
 
+    def test_real_completion_envelope_reports_matching_persona_digest(self) -> None:
+        state = self._state()
+        calls: list[dict[str, object]] = []
+        with mock.patch.object(
+            workflow_runtime, "_run_child_command", side_effect=self._child_result(calls)
+        ):
+            self.assertEqual(
+                self._dsl(state).agent(
+                    "Review this workflow",
+                    engine="cursor",
+                    mode="safe",
+                    persona="editor",
+                    allow_repo_persona=True,
+                ),
+                "child result",
+            )
+        self.assertEqual(len(calls), 1)
+        payload = calls[0]
+
         live_events = workflow_registry.iter_journal(state.journal_path)
         self.assertEqual(
             [event["type"] for event in live_events],
-            ["budget", "agent_started", "agent_finished"],
+            ["budget", "agent_started", "agent_child", "agent_finished"],
         )
         started = live_events[1]
         persona_digest = hashlib.sha256(self.old_text.encode("utf-8")).hexdigest()
@@ -280,6 +323,108 @@ class PersonaWorkflowTests(unittest.TestCase):
         key = calls[0]["workflowAgentKey"]
         self.assertNotIn(key, state.replay)
         self.assertNotIn(key, state.replay_keys)
+
+    def test_post_pin_persona_resolution_error_does_not_cache_none(self) -> None:
+        state = self._state()
+        calls: list[dict[str, object]] = []
+
+        def delete_before_child_resolution(argv, *, cwd, timeout):
+            input_path = Path(argv[argv.index("--input-json") + 1])
+            payload = json.loads(input_path.read_text(encoding="utf-8"))
+            calls.append(payload)
+            (self.workspace / ".delegate" / "personas" / "editor.md").unlink()
+            return CompletedProcess(
+                argv,
+                2,
+                json.dumps({"ok": False, "error": "persona_not_found"}).encode(),
+                b"",
+            )
+
+        with (
+            self.assertRaises(workflow_runtime.PersonaDigestMismatch),
+            mock.patch.object(
+                workflow_runtime, "_run_child_command", side_effect=delete_before_child_resolution
+            ),
+        ):
+            self._dsl(state).agent(
+                "same prompt",
+                engine="cursor",
+                mode="safe",
+                persona="editor",
+                allow_repo_persona=True,
+            )
+        key = calls[0]["workflowAgentKey"]
+        self.assertNotIn(key, state.replay)
+        self.assertNotIn(key, state.replay_keys)
+
+        (self.workspace / ".delegate" / "personas" / "editor.md").write_text(
+            self.old_text, encoding="utf-8"
+        )
+        restored_calls: list[dict[str, object]] = []
+        with mock.patch.object(
+            workflow_runtime, "_run_child_command", side_effect=self._child_result(restored_calls)
+        ):
+            self.assertEqual(
+                self._dsl(state).agent(
+                    "same prompt",
+                    engine="cursor",
+                    mode="safe",
+                    persona="editor",
+                    allow_repo_persona=True,
+                ),
+                "child result",
+            )
+        self.assertEqual(len(restored_calls), 1)
+
+    def test_post_pin_workspace_refusal_does_not_cache_none(self) -> None:
+        workspace_persona = self.workspace / ".delegate" / "personas" / "editor.md"
+        workspace_persona.unlink()
+        fake_home = self.workspace / "home"
+        global_persona = fake_home / ".delegate" / "personas" / "editor.md"
+        global_persona.parent.mkdir(parents=True)
+        global_persona.write_text(self.old_text, encoding="utf-8")
+        state = self._state()
+        calls: list[dict[str, object]] = []
+
+        def create_workspace_shadow(argv, *, cwd, timeout):
+            input_path = Path(argv[argv.index("--input-json") + 1])
+            calls.append(json.loads(input_path.read_text(encoding="utf-8")))
+            workspace_persona.write_text("shadow", encoding="utf-8")
+            return CompletedProcess(
+                argv,
+                2,
+                json.dumps({"ok": False, "error": "workspace_persona_refused"}).encode(),
+                b"",
+            )
+
+        with mock.patch.dict(os.environ, {"HOME": str(fake_home)}):
+            with (
+                self.assertRaises(workflow_runtime.PersonaDigestMismatch),
+                mock.patch.object(
+                    workflow_runtime, "_run_child_command", side_effect=create_workspace_shadow
+                ),
+            ):
+                self._dsl(state).agent(
+                    "same prompt", engine="cursor", mode="safe", persona="editor"
+                )
+            key = calls[0]["workflowAgentKey"]
+            self.assertNotIn(key, state.replay)
+            self.assertNotIn(key, state.replay_keys)
+
+            workspace_persona.unlink()
+            restored_calls: list[dict[str, object]] = []
+            with mock.patch.object(
+                workflow_runtime,
+                "_run_child_command",
+                side_effect=self._child_result(restored_calls),
+            ):
+                self.assertEqual(
+                    self._dsl(state).agent(
+                        "same prompt", engine="cursor", mode="safe", persona="editor"
+                    ),
+                    "child result",
+                )
+        self.assertEqual(len(restored_calls), 1)
 
 
 if __name__ == "__main__":

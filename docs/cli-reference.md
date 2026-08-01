@@ -49,8 +49,10 @@ Work-mode transport is prepend for most engines, Claude native-file only when
 the discovery cache proves `--append-system-prompt-file` (otherwise prepend
 with a warning), and OpenCode agent-config merge. OpenCode preserves existing
 root keys, agent keys, and prompts, appending the persona after an existing
-agent prompt. Safe mode always prepends. The persona body is never placed in
-argv, dry-run JSON, or the manifest; tracked runs retain it only in the private
+agent prompt. Safe mode always prepends. Claude native-file keeps the persona
+body out of argv, dry-run JSON, and the manifest; prepend engines using argv
+transport (Cursor, Kimi, and Oh My Pi) expose it in the live process argv.
+Tracked runs retain it only in the private
 `persona.txt` artifact.
 
 ## Commands

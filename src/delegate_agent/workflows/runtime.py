@@ -41,6 +41,16 @@ DEFAULT_MODE = "safe"
 DEFAULT_STRUCTURED_RETRIES = 2
 DEFAULT_ITEM_THREADS = 64
 ENGINE_ARGV_TRANSPORT = frozenset(ARGV_PROMPT_TRANSPORT_ENGINES)
+PERSONA_RESOLUTION_ERRORS = frozenset(
+    {
+        "persona_not_found",
+        "invalid_persona",
+        "invalid_persona_encoding",
+        "invalid_persona_control",
+        "persona_too_large",
+        "workspace_persona_refused",
+    }
+)
 WORKFLOW_LOCK_FD_ENV = "DELEGATE_WORKFLOW_LOCK_FD"
 KILL_SUPERVISOR_WAIT_SECONDS = 5.0
 KILL_SUPERVISOR_FORCE_WAIT_SECONDS = 2.0
@@ -1138,6 +1148,18 @@ class WorkflowDsl:
         finally:
             Path(input_path).unlink(missing_ok=True)
         text = completed.stdout.decode("utf-8", errors="replace")
+        try:
+            result = json.loads(text)
+        except json.JSONDecodeError:
+            result = None
+        if (
+            expected_persona_digest is not None
+            and isinstance(result, dict)
+            and result.get("error") in PERSONA_RESOLUTION_ERRORS
+        ):
+            raise PersonaDigestMismatch(
+                "workflow child could not resolve the parent-pinned persona"
+            )
         if completed.returncode != 0:
             stderr = completed.stderr.decode("utf-8", errors="replace")[-2000:]
             if expected_persona_digest is not None and "workflow_persona_digest_mismatch" in text:
@@ -1145,10 +1167,8 @@ class WorkflowDsl:
             raise RuntimeError(
                 stderr or text or f"delegate child failed with {completed.returncode}"
             )
-        try:
-            result = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(f"delegate child returned invalid JSON: {text[:500]}") from exc
+        if result is None:
+            raise RuntimeError(f"delegate child returned invalid JSON: {text[:500]}")
         if not isinstance(result, dict) or not result.get("ok", False):
             return None
         if (

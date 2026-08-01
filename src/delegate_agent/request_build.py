@@ -248,7 +248,7 @@ def _prepare_persona_transport(
             ("malformed OPENCODE persona prompt; using prepend persona transport.",),
         )
     merged_agent["prompt"] = (
-        f"{existing_prompt.rstrip()}\n\n{persona.text}"
+        f"{existing_prompt}\n\n{persona.text}"
         if isinstance(existing_prompt, str) and existing_prompt
         else persona.text
     )
@@ -2076,6 +2076,7 @@ def build_request(
         probe_version=(
             engine == "claude"
             and mode == MODE_WORK
+            and not dry_run
             and persona is not None
             and _cached_native_persona_transport(discovery)
         ),

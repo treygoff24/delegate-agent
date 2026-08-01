@@ -13,7 +13,9 @@ class PersonaCapabilityTests(CommandTestBase):
         "claude native-file persona transport was not proven by discovery; using prepend."
     )
 
-    def _request(self, discovery: dict[str, object], *, force: str | None = None):
+    def _request(
+        self, discovery: dict[str, object], *, force: str | None = None, dry_run: bool = False
+    ):
         config = copy.deepcopy(self.delegate.DEFAULT_CONFIG)
         config["claude"]["binary"] = "old-claude-binary"
         if force is not None:
@@ -30,7 +32,7 @@ class PersonaCapabilityTests(CommandTestBase):
                 "/repo",
                 "review task",
                 config,
-                False,
+                dry_run,
                 persona="editor",
                 persona_text_override=self._PERSONA_TEXT,
             )
@@ -132,6 +134,19 @@ class PersonaCapabilityTests(CommandTestBase):
         self.assertNotIn("--append-system-prompt-file", request.argv)
         self.assertEqual(len(request.warnings), 2)
         self.assertEqual(request.warnings[-1], self._FALLBACK_WARNING)
+
+    def test_cached_native_dry_run_never_probes_the_claude_binary(self):
+        with (
+            mock.patch.object(
+                self.delegate.harness_discovery, "selector_has_drifted", return_value=False
+            ),
+            mock.patch.object(
+                self.delegate.harness_discovery, "cached_version_has_drifted"
+            ) as version_probe,
+        ):
+            request = self._request(self._production_discovery(True), dry_run=True)
+        version_probe.assert_not_called()
+        self.assertEqual(request.persona_transport, "native-file")
 
     def test_production_shaped_false_capability_stays_prepend(self):
         with mock.patch.object(
