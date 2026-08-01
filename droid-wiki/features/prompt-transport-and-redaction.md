@@ -27,7 +27,7 @@ Prompt transport controls how Delegate sends task text to child runtimes. Redact
 
 ## How it works
 
-Cursor and Kimi use argv prompt transport with redacted public argv. Droid, Grok, and Devin use private prompt files. Codex, Claude, and OpenCode use stdin. Display redaction masks common secret shapes in snapshots and run-output by default.
+Cursor, Oh My Pi, and Kimi use argv prompt transport with redacted public argv. Droid, Grok, and Devin use private prompt files. Codex, Claude, and OpenCode use stdin. Display redaction masks common secret shapes in snapshots and run-output by default.
 
 ## Integration points
 
