@@ -33,16 +33,17 @@ warning is needed: the mail tree is inside that workspace. For isolated runs:
 
 | Harness | Effective isolated-work behavior | Evidence |
 | --- | --- | --- |
-| Codex | Adds `sandbox_workspace_write.writable_roots` only with `--sandbox workspace-write`; `read-only` warns that mail is inaccessible; bypass and `danger-full-access` add no grant. | Local `codex --help` (0.100.0, 2026-08-01) documents `-c`; the writable-root override was accepted by a local probe. |
+| Codex | `workspace-write` adds `sandbox_workspace_write.writable_roots`; `read-only` warns that mail is inaccessible. `danger-full-access` and the bypass flag are honestly unsandboxed, so add no grant and no inaccessible-mail warning. Any unrecognized/missing sandbox value warns as degraded. | Local `codex --help` (0.100.0, 2026-08-01) documents `-c`; the writable-root override was accepted by a local probe. |
 | Claude | Adds `--add-dir <mail-root>`. | Local `claude --help` lists `--add-dir` as an additional directory allowed to tools. |
 | Kimi | Adds `--add-dir <mail-root>`. | Local `kimi --help` lists `--add-dir` as an additional workspace directory. |
 | Oh My Pi | Adds `--add-dir=<mail-root>`. | Local `omp --help` lists repeatable `--add-dir`. |
 | Cursor | No grant and no `--sandbox enabled`; its default work launch is unsandboxed/workspace-writable. | Delegate's existing Cursor work argv contains no sandbox selection. |
-| Droid, Grok, Devin, OpenCode, Pi | No mail-specific grant; their work rows are workspace-writable/unsandboxed. | No measured constrained writable-root mechanism in Delegate's current work argv. |
+| Droid, Devin, OpenCode, Pi | No mail-specific grant; their work rows are workspace-writable/unsandboxed. | No measured constrained writable-root mechanism in Delegate's current work argv. |
+| Grok | Derived from emitted `--sandbox`: absent/`none` is unsandboxed and `workspace` is workspace-writable, so neither gets a grant or warning. `devbox`, `read-only`, and `strict` warn that the isolated mailbox is unreachable; unknown values warn as degraded. | Delegate's emitted argv is the classification source; no measured Grok writable-root grant exists. |
 
-The warning is reserved for the isolated Codex `read-only` row, where the
-filesystem policy proves the source-root mail tree is unreachable. It is not a
-claim of confinement for workspace-writable or unsandboxed rows.
+The warning is reserved for isolated policies that cannot reach the source-root
+mail tree (or whose future value is unknown). It is not a claim of confinement
+for workspace-writable or unsandboxed rows.
 
 ## What Delegate controls
 

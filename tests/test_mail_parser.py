@@ -73,6 +73,7 @@ class MailParserTests(unittest.TestCase):
     def test_python_profile_guard_matrix(self):
         matrix = {
             ("inbox",): True,
+            ("--json", "inbox"): True,
             ("status", "id"): True,
             ("watch",): True,
             ("read", "id", "--peek"): True,
@@ -91,6 +92,9 @@ class MailParserTests(unittest.TestCase):
                     with self.subTest(args=args):
                         parsed = parse_cli(["mail", *args])
                         self.assertEqual(profile_guard.is_read_only_command(parsed), expected)
+        with self.assertRaises(DelegateError) as caught:
+            parse_cli(["mail", "read", "id", "--", "--peek"])
+        self.assertEqual(caught.exception.error, "missing_message")
 
     def test_shell_shim_and_python_profile_guard_have_mail_parity(self):
         shim = Path(__file__).parents[1] / "bin" / "delegate-profile-shim"
@@ -98,7 +102,9 @@ class MailParserTests(unittest.TestCase):
             ("mail", "inbox"): True,
             ("mail", "status", "id"): True,
             ("mail", "watch"): True,
+            ("mail", "--json", "inbox"): True,
             ("mail", "read", "id", "--peek"): True,
+            ("mail", "read", "id", "--", "--peek"): False,
             ("mail", "read", "id"): False,
             ("mail", "send", "--to", "coordinator", "body"): False,
             ("mail", "prune"): False,

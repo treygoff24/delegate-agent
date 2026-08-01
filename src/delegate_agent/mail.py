@@ -58,10 +58,10 @@ MESSAGE_ID_RE = re.compile(r"\d{8}-\d{6}-[0-9a-f]{6}\Z")
 MAIL_SANDBOX_ROWS: dict[str, str] = {
     "cursor": "workspace-writable",
     "droid": "workspace-writable",
-    "codex": "scoped",
+    "codex": "effective-argv",
     "kimi": "scoped",
     "claude": "scoped",
-    "grok": "workspace-writable",
+    "grok": "effective-argv",
     "devin": "workspace-writable",
     "opencode": "workspace-writable",
     "pi": "workspace-writable",
@@ -310,14 +310,43 @@ def wire_work_mail_argv(
     return wired
 
 
+def _argv_option(argv: list[str], option: str) -> str | None:
+    try:
+        return argv[argv.index(option) + 1]
+    except (ValueError, IndexError):
+        return None
+
+
 def _codex_mail_scope(argv: list[str]) -> str:
     if "--dangerously-bypass-approvals-and-sandbox" in argv:
         return "unsandboxed"
-    try:
-        sandbox = argv[argv.index("--sandbox") + 1]
-    except (ValueError, IndexError):
+    sandbox = _argv_option(argv, "--sandbox")
+    if sandbox == "workspace-write":
+        return "scoped"
+    if sandbox == "read-only":
+        return "mail-unreachable"
+    if sandbox == "danger-full-access":
         return "unsandboxed"
-    return "scoped" if sandbox == "workspace-write" else "read-only"
+    return "degraded"
+
+
+def _grok_mail_scope(argv: list[str]) -> str:
+    sandbox = _argv_option(argv, "--sandbox")
+    if sandbox is None or sandbox == "none":
+        return "unsandboxed"
+    if sandbox == "workspace":
+        return "workspace-writable"
+    if sandbox in {"devbox", "read-only", "strict"}:
+        return "mail-unreachable"
+    return "degraded"
+
+
+def _mail_scope(engine: str, argv: list[str]) -> str:
+    if engine == "codex":
+        return _codex_mail_scope(argv)
+    if engine == "grok":
+        return _grok_mail_scope(argv)
+    return MAIL_SANDBOX_ROWS[engine]
 
 
 def wire_work_mail_launch(
@@ -332,14 +361,15 @@ def wire_work_mail_launch(
     isolated_workspace: bool = False,
 ) -> tuple[list[str], list[str] | None]:
     """Wire actual and manifest argv together at a single launch seam."""
-    scope = _codex_mail_scope(argv) if engine == "codex" else MAIL_SANDBOX_ROWS[engine]
+    scope = _mail_scope(engine, argv)
     needs_grant = isolated_workspace and scope == "scoped"
-    inaccessible = isolated_workspace and scope == "read-only"
+    inaccessible = isolated_workspace and scope in {"mail-unreachable", "degraded"}
     if not needs_grant:
         if inaccessible and stderr is not None:
             print(
-                f"delegate mail: WARNING: {engine} work launch is read-only; "
-                ".delegate/mail is inaccessible from this isolated workspace.",
+                f"delegate mail: WARNING: {engine} work launch sandbox policy "
+                f"{_argv_option(argv, '--sandbox') or 'unknown'} cannot reach "
+                ".delegate/mail from this isolated workspace.",
                 file=stderr,
             )
         return list(argv), None if display_argv is None else list(display_argv)
@@ -578,6 +608,53 @@ def _envelope_from_message(path: Path) -> tuple[JsonObject, str]:
     return envelope, body_bytes.decode("utf-8")
 
 
+def _recipient_envelope_matches_ledger(path: Path, ledger: JsonObject) -> bool:
+    """Accept only the published envelope for this immutable sender ledger."""
+    try:
+        envelope, _body = _envelope_from_message(path)
+    except MailError:
+        return False
+    return all(
+        envelope.get(key) == ledger.get(key) for key in ("msgId", "from", "fromRunId", "sent")
+    )
+
+
+def _effective_recipient_rows(registry_root: Path, ledger: JsonObject) -> list[JsonObject]:
+    rows = ledger.get("recipients")
+    if not isinstance(rows, list):
+        return []
+    message_id = _message_id(ledger.get("msgId"))
+    index = run_registry.load_index(registry_root)
+    output: list[JsonObject] = []
+    for raw in rows:
+        if not isinstance(raw, dict):
+            continue
+        row = dict(raw)
+        box = raw.get("box")
+        path_state: str | None = None
+        if isinstance(box, str):
+            for folder in ("inbox", "read"):
+                path = _message_file(_box_dir(registry_root, box) / folder, message_id, ".mail")
+                if _recipient_envelope_matches_ledger(path, ledger):
+                    path_state = folder
+                    row["pathState"] = folder
+                    break
+        if path_state is not None and raw.get("outcome") == "failed":
+            row["outcome"] = "delivered"
+            row.pop("reason", None)
+        elif path_state is None and raw.get("outcome") == "delivered":
+            row["outcome"] = "pruned"
+            row["reason"] = "recipient mailbox no longer contains the message"
+        if (
+            path_state is None
+            and isinstance(raw.get("runId"), str)
+            and raw["runId"] not in index.get("runs", {})
+        ):
+            row["outcome"] = "pruned"
+        output.append(row)
+    return output
+
+
 def _message_view(envelope: JsonObject, body: str | None = None) -> JsonObject:
     view = dict(envelope)
     if body is not None:
@@ -626,12 +703,9 @@ def _read_body_source(command: MailCommand, stdin: TextIO | None) -> bytes:
     return body
 
 
-def _reply_sender_allowed(ledger: JsonObject, identity: MailIdentity) -> bool:
-    recipients = ledger.get("recipients")
-    if not isinstance(recipients, list):
-        return False
-    for row in recipients:
-        if not isinstance(row, dict) or row.get("outcome") != "delivered":
+def _reply_sender_allowed(registry_root: Path, ledger: JsonObject, identity: MailIdentity) -> bool:
+    for row in _effective_recipient_rows(registry_root, ledger):
+        if row.get("outcome") != "delivered":
             continue
         if identity.is_coordinator and row.get("recipient") == COORDINATOR_BOX:
             return True
@@ -640,7 +714,12 @@ def _reply_sender_allowed(ledger: JsonObject, identity: MailIdentity) -> bool:
     return False
 
 
-def _reply_watcher_allowed(ledger: JsonObject, identity: MailIdentity) -> bool:
+def _reply_watcher_allowed(registry_root: Path, ledger: JsonObject, identity: MailIdentity) -> bool:
+    if not any(
+        row.get("outcome") == "delivered"
+        for row in _effective_recipient_rows(registry_root, ledger)
+    ):
+        return False
     if identity.is_coordinator:
         return ledger.get("from") == COORDINATOR_BOX and ledger.get("fromRunId") is None
     return identity.run_id is not None and ledger.get("fromRunId") == identity.run_id
@@ -649,7 +728,7 @@ def _reply_watcher_allowed(ledger: JsonObject, identity: MailIdentity) -> bool:
 def _validate_reply(registry_root: Path, reply_to: str, identity: MailIdentity) -> JsonObject:
     _message_id(reply_to)
     _matched_message_id, _path, ledger = _match_message_id(registry_root, reply_to, sent_only=True)
-    if not _reply_sender_allowed(ledger, identity):
+    if not _reply_sender_allowed(registry_root, ledger, identity):
         raise _error(
             "reply_not_participant",
             "The sender did not participate in the original exchange; reply-to cannot be routed around that boundary.",
@@ -763,7 +842,10 @@ def send(
                 row["outcome"] = "failed"
                 row["reason"] = f"publication failed: {exc}"
             if not published:
-                if path.exists():
+                if (
+                    _effective_recipient_rows(registry_root, ledger)[index].get("outcome")
+                    == "delivered"
+                ):
                     row["outcome"] = "delivered"
                     row.pop("reason", None)
                 else:
@@ -897,40 +979,7 @@ def read_message(
 
 
 def _status_rows(registry_root: Path, ledger: JsonObject) -> list[JsonObject]:
-    rows = ledger.get("recipients")
-    if not isinstance(rows, list):
-        return []
-    output: list[JsonObject] = []
-    index = run_registry.load_index(registry_root)
-    for raw in rows:
-        if not isinstance(raw, dict):
-            continue
-        row = dict(raw)
-        box = raw.get("box")
-        message_id = _message_id(ledger.get("msgId"))
-        found = False
-        if isinstance(box, str) and isinstance(message_id, str):
-            for folder in ("inbox", "read"):
-                if _message_file(
-                    _box_dir(registry_root, box) / folder, message_id, ".mail"
-                ).is_file():
-                    found = True
-                    row["pathState"] = folder
-                    break
-        if found and raw.get("outcome") == "failed":
-            row["outcome"] = "delivered"
-            row.pop("reason", None)
-        elif not found and raw.get("outcome") == "delivered":
-            row["outcome"] = "pruned"
-            row["reason"] = "recipient mailbox no longer contains the message"
-        if (
-            not found
-            and isinstance(raw.get("runId"), str)
-            and raw["runId"] not in index.get("runs", {})
-        ):
-            row["outcome"] = "pruned"
-        output.append(row)
-    return output
+    return _effective_recipient_rows(registry_root, ledger)
 
 
 def status(
@@ -1019,15 +1068,15 @@ def watch(
         _matched_message_id, _path, ledger = _match_message_id(
             registry_root, command.reply_to, sent_only=True
         )
-        if not _reply_watcher_allowed(ledger, identity):
+        if not _reply_watcher_allowed(registry_root, ledger, identity):
             raise _error(
                 "reply_not_participant",
                 "Only the original sender may watch this reply exchange; reply-to cannot be routed around that boundary.",
             )
         allowed = {
             str(row.get("runId") or row.get("recipient"))
-            for row in ledger.get("recipients", [])
-            if isinstance(row, dict) and row.get("outcome") == "delivered"
+            for row in _effective_recipient_rows(registry_root, ledger)
+            if row.get("outcome") == "delivered"
         }
     deadline = time.monotonic() + (command.timeout or MAIL_WATCH_DEFAULT_TIMEOUT_SECONDS)
     while True:

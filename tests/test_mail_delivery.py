@@ -93,6 +93,35 @@ class MailDeliveryTests(unittest.TestCase):
         )
         self.assertEqual(result["message"]["recipients"][0]["outcome"], "failed")
 
+    def test_status_does_not_reconcile_junk_or_symlink_at_the_expected_filename(self):
+        _sender_id, _sender, sender_env = self.lane()
+        _recipient_id, recipient, _recipient_env = self.lane()
+        with mock.patch.object(
+            private_io, "write_bytes_atomic_if_absent", side_effect=OSError("nope")
+        ):
+            message = mail.send(
+                self.registry_root,
+                mail.MailCommand(action="send", to=recipient, body="hello"),
+                env=sender_env,
+            )["message"]
+        inbox = mail.boxes_root(self.registry_root) / message["recipients"][0]["box"] / "inbox"
+        expected = inbox / f"{message['msgId']}.mail"
+        for kind in ("junk", "symlink"):
+            with self.subTest(kind=kind):
+                if expected.exists() or expected.is_symlink():
+                    expected.unlink()
+                if kind == "junk":
+                    expected.write_text("not a mail envelope", encoding="utf-8")
+                else:
+                    target = inbox / "other.mail"
+                    target.write_text("not a mail envelope", encoding="utf-8")
+                    expected.symlink_to(target)
+                result = mail.status(
+                    self.registry_root,
+                    mail.MailCommand(action="status", message_id=message["msgId"]),
+                )
+                self.assertEqual(result["message"]["recipients"][0]["outcome"], "failed")
+
     def test_ledger_records_all_outcomes_and_status_probes_pruned_delivery(self):
         _sender_id, _sender, sender_env = self.lane(group="other")
         _delivered_id, delivered, _delivered_env = self.lane(group="crew")

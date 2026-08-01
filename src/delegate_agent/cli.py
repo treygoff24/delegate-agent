@@ -898,8 +898,7 @@ def execute_request(
     stderr: TextIO,
 ) -> tuple[int, JsonObject | None]:
     _set_child_root_env(request, source_workspace)
-    if request.mode != MODE_WORK:
-        profiles.strip_mail_identity(request.env_overrides)
+    profiles.strip_mail_identity(request.env_overrides)
     if request.mode == MODE_CALL:
         call_response: tuple[int, JsonObject | None] | None = None
         artifact_id: str | None = None

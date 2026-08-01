@@ -219,6 +219,7 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
             self.assertIn(mail_root, observed_argv)
             self.assertIn("--add-dir", manifest["argv"])
             self.assertIn(mail_root, manifest["argv"])
+            self.assertEqual(manifest["argv"][1:], observed_argv)
             observed_env = env_path.read_text(encoding="utf-8")
             self.assertIn(f"DELEGATE_RUN_ID={child_id}", observed_env)
             self.assertIn("DELEGATE_MAIL_SELF=claude-", observed_env)

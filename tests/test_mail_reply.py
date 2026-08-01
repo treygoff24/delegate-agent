@@ -7,8 +7,9 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from delegate_agent import mail, run_registry
+from delegate_agent import mail, private_io, run_registry
 from delegate_agent.errors import DelegateError
 
 
@@ -173,6 +174,40 @@ class MailReplyTests(unittest.TestCase):
         )
         self.assertEqual(reply["replyTo"], original["msgId"])
         self.assertEqual(reply["fromRunId"], replier_id)
+
+    def test_crash_recovered_delivery_can_reply_and_is_watched(self) -> None:
+        _sender_id, _sender = self._run()
+        replier_id, replier = self._run()
+        original_write = private_io.write_json_atomic
+
+        def crash_after_publication(path, payload):
+            if path.parent == mail.sent_root(self.root) and any(
+                (mail.boxes_root(self.root) / replier_id / "inbox").glob("*.mail")
+            ):
+                raise RuntimeError("simulated crash after publication")
+            return original_write(path, payload)
+
+        with (
+            mock.patch.object(private_io, "write_json_atomic", side_effect=crash_after_publication),
+            self.assertRaisesRegex(RuntimeError, "after publication"),
+        ):
+            self._send(mail.MailCommand(action="send", to=replier, body="question"))
+
+        original_id = next(mail.sent_root(self.root).glob("*.json")).stem
+        reply = self._send(
+            mail.MailCommand(action="send", to="coordinator", reply_to=original_id, body="answer"),
+            {"DELEGATE_RUN_ID": replier_id, "DELEGATE_MAIL_SELF": replier},
+        )
+        stdout = io.StringIO()
+        code = mail.watch(
+            self.root,
+            mail.MailCommand(action="watch", once=True, reply_to=original_id, timeout=1),
+            stdout=stdout,
+            env={},
+        )
+        self.assertEqual(reply["replyTo"], original_id)
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(stdout.getvalue())["message"]["fromRunId"], replier_id)
 
 
 if __name__ == "__main__":

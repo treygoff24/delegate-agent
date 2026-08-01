@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -207,41 +208,88 @@ class MailGatingTests(CommandTestBase):
         self.assertNotIn("--sandbox", argv)
         self.assertNotIn("--add-dir", argv)
 
-    def test_codex_effective_sandbox_policy_controls_mail_grant_and_warning(self):
+    def test_effective_sandbox_policy_controls_mail_grants_and_warnings(self):
         with tempfile.TemporaryDirectory(prefix="delegate-mail-sandbox-") as tmp:
             root = Path(tmp)
             mail_root = str((root / "mail").resolve())
             cases = {
-                "workspace-write": (
+                "codex workspace-write": (
+                    "codex",
                     ["codex", "exec", "--sandbox", "workspace-write", "prompt"],
                     True,
                     "",
                 ),
-                "read-only": (
+                "codex read-only": (
+                    "codex",
                     ["codex", "exec", "--sandbox", "read-only", "prompt"],
                     False,
-                    "read-only",
+                    "delegate mail: WARNING: codex work launch sandbox policy read-only cannot reach .delegate/mail from this isolated workspace.\n",
                 ),
-                "danger-full-access": (
+                "codex danger-full-access": (
+                    "codex",
                     ["codex", "exec", "--sandbox", "danger-full-access", "prompt"],
                     False,
                     "",
                 ),
-                "bypass": (
+                "codex bypass": (
+                    "codex",
                     ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "prompt"],
                     False,
                     "",
                 ),
+                "codex unknown": (
+                    "codex",
+                    ["codex", "exec", "--sandbox", "future-policy", "prompt"],
+                    False,
+                    "delegate mail: WARNING: codex work launch sandbox policy future-policy cannot reach .delegate/mail from this isolated workspace.\n",
+                ),
+                "grok absent": ("grok", ["grok", "--cwd", "/tmp", "prompt"], False, ""),
+                "grok none": (
+                    "grok",
+                    ["grok", "--sandbox", "none", "prompt"],
+                    False,
+                    "",
+                ),
+                "grok workspace": (
+                    "grok",
+                    ["grok", "--sandbox", "workspace", "prompt"],
+                    False,
+                    "",
+                ),
+                "grok devbox": (
+                    "grok",
+                    ["grok", "--sandbox", "devbox", "prompt"],
+                    False,
+                    "delegate mail: WARNING: grok work launch sandbox policy devbox cannot reach .delegate/mail from this isolated workspace.\n",
+                ),
+                "grok read-only": (
+                    "grok",
+                    ["grok", "--sandbox", "read-only", "prompt"],
+                    False,
+                    "delegate mail: WARNING: grok work launch sandbox policy read-only cannot reach .delegate/mail from this isolated workspace.\n",
+                ),
+                "grok strict": (
+                    "grok",
+                    ["grok", "--sandbox", "strict", "prompt"],
+                    False,
+                    "delegate mail: WARNING: grok work launch sandbox policy strict cannot reach .delegate/mail from this isolated workspace.\n",
+                ),
+                "grok unknown": (
+                    "grok",
+                    ["grok", "--sandbox", "future-policy", "prompt"],
+                    False,
+                    "delegate mail: WARNING: grok work launch sandbox policy future-policy cannot reach .delegate/mail from this isolated workspace.\n",
+                ),
             }
-            for name, (argv, granted, warning) in cases.items():
+            for name, (engine, argv, granted, expected_stderr) in cases.items():
                 with self.subTest(policy=name):
                     stderr = io.StringIO()
                     result = mail.wire_work_mail_argv(
-                        "codex", argv, root, stderr=stderr, isolated_workspace=True
+                        engine, argv, root, stderr=stderr, isolated_workspace=True
                     )
                     grant = f'sandbox_workspace_write.writable_roots=["{mail_root}"]'
                     self.assertEqual(grant in result, granted)
-                    self.assertIn(warning, stderr.getvalue())
+                    self.assertEqual(stderr.getvalue(), expected_stderr)
 
     def test_nonisolated_codex_has_no_writable_root_grant(self):
         with tempfile.TemporaryDirectory(prefix="delegate-mail-sandbox-") as tmp:
@@ -271,6 +319,121 @@ class MailGatingTests(CommandTestBase):
             index = run_registry.load_index(registry_root)
             self.assertEqual(index["runs"], {})
             self.assertEqual(list((registry_root / "aliases").iterdir()), [])
+
+    def test_work_pass_through_strips_profile_supplied_mail_identity(self):
+        with tempfile.TemporaryDirectory(prefix="delegate-mail-pass-through-") as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            capture = root / "child-env"
+            fake = root / "cursor"
+            fake.write_text(
+                '#!/bin/sh\nenv | grep "^DELEGATE_" > "$FAKE_ENV_LOG" || true\n',
+                encoding="utf-8",
+            )
+            fake.chmod(0o755)
+            config = self._config()
+            config["cursor"] = {**config["cursor"], "argvPrefix": [str(fake)]}
+            config["profiles"] = {
+                **config["profiles"],
+                "default": "identity-profile",
+                "definitions": {
+                    "identity-profile": {
+                        "env": {
+                            "DELEGATE_RUN_ID": "del_20260801T120000Z_abcdef",
+                            "DELEGATE_MAIL_SELF": "cursor-99",
+                        }
+                    }
+                },
+            }
+            Path(self._config_env["DELEGATE_CONFIG"]).write_text(
+                json.dumps(config), encoding="utf-8"
+            )
+            with mock.patch.dict(os.environ, {"FAKE_ENV_LOG": str(capture)}, clear=False):
+                code, _stdout, stderr = self.run_main(
+                    ["--pass-through", "--cwd", str(workspace), "cursor", "work", "prompt"]
+                )
+            self.assertEqual(code, 0, stderr)
+            observed = capture.read_text(encoding="utf-8")
+            self.assertNotIn("DELEGATE_RUN_ID=", observed)
+            self.assertNotIn("DELEGATE_MAIL_SELF=", observed)
+
+    def test_real_child_launches_bind_identity_only_for_tracked_work(self):
+        with tempfile.TemporaryDirectory(prefix="delegate-mail-launch-matrix-") as tmp:
+            root = Path(tmp)
+            args_path = root / "args"
+            env_path = root / "env"
+            fake = root / "fake-agent"
+            fake.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, os, sys\n"
+                "with open(os.environ['FAKE_ARGS_LOG'], 'w', encoding='utf-8') as handle:\n"
+                "    json.dump(sys.argv[1:], handle)\n"
+                "with open(os.environ['FAKE_ENV_LOG'], 'w', encoding='utf-8') as handle:\n"
+                "    json.dump({key: value for key, value in os.environ.items() if key.startswith('DELEGATE_')}, handle)\n"
+                "print(json.dumps([{'type': 'result', 'result': 'ok', 'permission_denials': []}]))\n",
+                encoding="utf-8",
+            )
+            fake.chmod(0o755)
+            config = self._config()
+            config["cursor"] = {**config["cursor"], "argvPrefix": [str(fake)]}
+            config["claude"] = {**config["claude"], "binary": str(fake)}
+            config["profiles"] = {
+                **config["profiles"],
+                "default": "identity-profile",
+                "definitions": {
+                    "identity-profile": {
+                        "env": {
+                            "DELEGATE_RUN_ID": "del_20260801T120000Z_abcdef",
+                            "DELEGATE_MAIL_SELF": "cursor-99",
+                            "FAKE_ARGS_LOG": str(args_path),
+                            "FAKE_ENV_LOG": str(env_path),
+                        }
+                    }
+                },
+            }
+            Path(self._config_env["DELEGATE_CONFIG"]).write_text(
+                json.dumps(config), encoding="utf-8"
+            )
+
+            cases = (
+                ("tracked work", ["cursor", "work", "prompt"], True),
+                ("safe", ["cursor", "safe", "prompt"], True),
+                ("grouped call", ["--group", "batch", "cursor", "call", "prompt"], True),
+                ("untracked call", ["cursor", "call", "prompt"], False),
+                ("read-only call", ["cursor", "call", "--read-only", "prompt"], False),
+                ("pure call", ["claude", "call", "--pure", "prompt"], False),
+            )
+            for name, command, tracked in cases:
+                with self.subTest(name=name):
+                    workspace = root / name.replace(" ", "-")
+                    workspace.mkdir()
+                    args_path.unlink(missing_ok=True)
+                    env_path.unlink(missing_ok=True)
+                    if "call" in command:
+                        original_cwd = os.getcwd()
+                        try:
+                            os.chdir(workspace)
+                            code, _stdout, stderr = self.run_main(command)
+                        finally:
+                            os.chdir(original_cwd)
+                    else:
+                        code, _stdout, stderr = self.run_main(["--cwd", str(workspace), *command])
+                    self.assertEqual(code, 0, stderr)
+                    observed_argv = json.loads(args_path.read_text(encoding="utf-8"))
+                    observed_env = json.loads(env_path.read_text(encoding="utf-8"))
+                    if name == "tracked work":
+                        self.assertTrue(observed_env["DELEGATE_RUN_ID"].startswith("del_"))
+                        self.assertTrue(observed_env["DELEGATE_MAIL_SELF"].startswith("cursor-"))
+                    else:
+                        self.assertNotIn("DELEGATE_RUN_ID", observed_env)
+                        self.assertNotIn("DELEGATE_MAIL_SELF", observed_env)
+                    manifests = list((workspace / ".delegate" / "runs").glob("*/manifest.json"))
+                    self.assertEqual(bool(manifests), tracked)
+                    if manifests:
+                        manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
+                        self.assertEqual(manifest["argv"][1:-1], observed_argv[:-1])
+                        self.assertIn("<prompt redacted:", manifest["argv"][-1])
 
 
 if __name__ == "__main__":

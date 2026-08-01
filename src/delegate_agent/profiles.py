@@ -246,7 +246,7 @@ def child_environment(
 
 
 def strip_mail_identity(env: dict[str, str] | None) -> None:
-    """Prevent non-work dispatch from regaining a parent lane identity."""
+    """Prevent every dispatched child from inheriting a mail identity."""
     if env is not None:
         env.pop("DELEGATE_RUN_ID", None)
         env.pop("DELEGATE_MAIL_SELF", None)

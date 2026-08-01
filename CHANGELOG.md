@@ -25,6 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   follows its effective sandbox policy. Read-only mail commands no longer
   create a registry, mailbox, lock, or Git exclude entry; status reconciles a
   published inbox envelope after a crash before its sender-ledger rewrite.
+- Mail sandbox reporting now derives Codex and Grok classification from the
+  emitted argv: unsandboxed policies are labelled honestly, constrained and
+  unknown isolated policies warn, and only Codex `workspace-write` receives
+  the scoped writable-root grant. Delivery reconciliation now validates the
+  no-follow recipient envelope against the ledger before treating a crash or
+  collision as delivered.
 
 ## [0.25.0] - 2026-08-01
 
