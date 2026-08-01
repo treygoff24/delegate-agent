@@ -94,7 +94,7 @@ class MailPushTests(unittest.TestCase):
         self.assertEqual(mail.hook_pump(self.registry_root, stdout=duplicate, env=self.env), 0)
         self.assertEqual(json.loads(duplicate.getvalue()), {})
 
-    def test_hook_output_failure_does_not_advance_cursor_and_records_marker(self):
+    def test_hook_output_failure_does_not_advance_cursor_or_emit_a_marker(self):
         self._send_from_coordinator("retry me")
         mail.provision_mail_push(
             "claude", ["claude", "prompt"], None, self.registry_root, self.run_id, self.env
@@ -106,8 +106,7 @@ class MailPushTests(unittest.TestCase):
             mail.boxes_root(self.registry_root) / self.run_id / mail.MAIL_PUSH_CURSOR_FILE_NAME
         )
         self.assertEqual(json.loads(cursor_path.read_text())["lastSeq"], 0)
-        marker = mail.read_hook_failure_marker(self.registry_root, self.run_id)
-        self.assertIsNotNone(marker)
+        self.assertIsNone(mail.read_hook_failure_marker(self.registry_root, self.run_id))
 
     def test_provisioning_is_audited_and_run_scoped(self):
         claude_env: dict[str, str] = {}
@@ -207,15 +206,12 @@ class MailPushTests(unittest.TestCase):
             self.registry_root,
             self.run_id,
             {"CODEX_HOME": str(primary)},
+            {"CODEX_HOME": str(fallback)},
         )
 
-        self.assertEqual(
-            mail.mail_push_fallback_env_overrides(provision, {}, self.registry_root, self.run_id),
-            {},
-        )
         fallback_env = mail.mail_push_fallback_env_overrides(
             provision,
-            {"CODEX_HOME": str(fallback)},
+            {},
             self.registry_root,
             self.run_id,
         )
@@ -237,23 +233,32 @@ class MailPushTests(unittest.TestCase):
         (source / "auth.json").write_text('{"token":"primary"}', encoding="utf-8")
         env = {"CODEX_HOME": str(source)}
         original_argv = ["codex", "exec", "prompt"]
-        provision = mail.provision_mail_push(
-            "codex", original_argv, None, self.registry_root, self.run_id, env
-        )
+        original_provision = mail._codex_home_for_mail_push
+        calls = 0
+
+        def fail_second(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("fallback home unavailable")
+            return original_provision(*args, **kwargs)
 
         with mock.patch.object(
             mail,
             "_codex_home_for_mail_push",
-            side_effect=OSError("fallback home unavailable"),
+            side_effect=fail_second,
         ):
-            fallback = mail.mail_push_fallback_env_overrides(
-                provision,
-                {"CODEX_HOME": str(source)},
+            provision = mail.provision_mail_push(
+                "codex",
+                original_argv,
+                None,
                 self.registry_root,
                 self.run_id,
+                env,
+                {"CODEX_HOME": str(source)},
             )
 
-        self.assertEqual(fallback, {"CODEX_HOME": str(source)})
+        self.assertEqual(provision.fallback_env, {"CODEX_HOME": str(source)})
         self.assertEqual(provision.argv, original_argv)
         self.assertEqual(env, {"CODEX_HOME": str(source)})
         self.assertIsNotNone(provision.warning)
@@ -261,7 +266,7 @@ class MailPushTests(unittest.TestCase):
             (run_registry.run_directory(self.registry_root, self.run_id) / "codex-home").exists()
         )
 
-    def test_unrecordable_hook_failure_emits_parent_observable_sentinel(self):
+    def test_unrecordable_hook_failure_after_write_attempt_stays_silent(self):
         mail.provision_mail_push(
             "claude", ["claude", "prompt"], None, self.registry_root, self.run_id, self.env
         )
@@ -281,7 +286,7 @@ class MailPushTests(unittest.TestCase):
         reason = mail.hook_failure_reason_from_stderr(
             stderr.getvalue(), nonce=self.env["DELEGATE_MAIL_HOOK_NONCE"]
         )
-        self.assertEqual(reason, "simulated hook output failure")
+        self.assertIsNone(reason)
         context = runner.RunContext(
             registry_root=self.registry_root,
             run_id=self.run_id,
@@ -297,7 +302,7 @@ class MailPushTests(unittest.TestCase):
             started_at=run_registry.utc_now_iso(),
             mail_push=True,
         )
-        self.assertEqual(runner._mail_push_failure_marker(context, reason), reason)
+        self.assertIsNone(runner._mail_push_failure_marker(context, reason))
         run_path = run_registry.run_directory(self.registry_root, self.run_id)
         runner.write_snapshot(run_path, {"recentEvents": [], "eventsTotal": 0, "warnings": []})
         runner.record_mail_push_degradation(

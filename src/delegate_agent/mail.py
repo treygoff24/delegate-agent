@@ -16,7 +16,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Mapping
-from contextlib import suppress
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -176,6 +176,7 @@ class MailPushProvision:
     original_display_argv: list[str] | None = None
     env: dict[str, str] | None = None
     original_env: dict[str, str] | None = None
+    fallback_env: dict[str, str] | None = None
 
 
 def _error(code: str, message: str) -> MailError:
@@ -582,31 +583,10 @@ def mail_push_fallback_env_overrides(
     run_id: str,
 ) -> dict[str, str]:
     """Keep a Codex fallback account distinct while preserving the mail hook."""
-    fallback = dict(fallback_env_overrides)
-    if provision is None or provision.codex_home is None or not fallback:
-        return fallback
-    try:
-        fallback_home = _codex_home_for_mail_push(
-            registry_root,
-            run_id,
-            fallback,
-            name=MAIL_PUSH_FALLBACK_CODEX_HOME_NAME,
-        )
-    except Exception:
-        with suppress(OSError):
-            cleanup_mail_push_private_homes(registry_root, run_id)
-        if provision.env is not None and provision.original_env is not None:
-            provision.env.clear()
-            provision.env.update(provision.original_env)
-        if provision.original_argv is not None:
-            provision.argv[:] = provision.original_argv
-        if provision.display_argv is not None and provision.original_display_argv is not None:
-            provision.display_argv[:] = provision.original_display_argv
-        provision.codex_home = None
-        provision.warning = mail_push_warning("codex", "launch-scoped hook provisioning failed")
-        return fallback
-    fallback["CODEX_HOME"] = str(fallback_home.resolve(strict=False))
-    return fallback
+    del registry_root, run_id
+    if provision is not None and provision.fallback_env is not None:
+        return dict(provision.fallback_env)
+    return dict(fallback_env_overrides)
 
 
 def cleanup_mail_push_private_homes(registry_root: Path, run_id: str) -> None:
@@ -633,6 +613,7 @@ def provision_mail_push(
     registry_root: Path,
     run_id: str,
     env: dict[str, str],
+    fallback_env: Mapping[str, str] | None = None,
 ) -> MailPushProvision:
     """Provision an audited stop hook using only run-scoped mail storage."""
     if mail_push_adapter(engine) != "verified":
@@ -643,6 +624,8 @@ def provision_mail_push(
         )
 
     original_env = dict(env)
+    updated_env = dict(env)
+    updated_fallback = dict(fallback_env or {})
     try:
         _remove_legacy_codex_homes(registry_root)
         box = _ensure_box(registry_root, run_id)
@@ -653,8 +636,8 @@ def provision_mail_push(
         private_io.write_json_atomic(box / MAIL_PUSH_SETTINGS_FILE_NAME, _hook_settings())
         nonce = secrets.token_urlsafe(24)
         private_io.write_private_text_atomic(_hook_nonce_path(registry_root, run_id), nonce)
-        env["DELEGATE_MAIL_HOOK_HARNESS"] = engine
-        env["DELEGATE_MAIL_HOOK_NONCE"] = nonce
+        updated_env["DELEGATE_MAIL_HOOK_HARNESS"] = engine
+        updated_env["DELEGATE_MAIL_HOOK_NONCE"] = nonce
         updated = list(argv)
         updated_display = None if display_argv is None else list(display_argv)
         codex_home: str | None = None
@@ -664,9 +647,17 @@ def provision_mail_push(
             if updated_display is not None:
                 _set_claude_settings(updated_display, settings_path)
         else:
-            codex_home_path = _codex_home_for_mail_push(registry_root, run_id, env)
+            codex_home_path = _codex_home_for_mail_push(registry_root, run_id, updated_env)
             codex_home = str(codex_home_path.resolve(strict=False))
-            env["CODEX_HOME"] = codex_home
+            updated_env["CODEX_HOME"] = codex_home
+            if updated_fallback:
+                fallback_home = _codex_home_for_mail_push(
+                    registry_root,
+                    run_id,
+                    updated_fallback,
+                    name=MAIL_PUSH_FALLBACK_CODEX_HOME_NAME,
+                )
+                updated_fallback["CODEX_HOME"] = str(fallback_home.resolve(strict=False))
             for target in (updated, updated_display):
                 if target is None:
                     continue
@@ -677,6 +668,8 @@ def provision_mail_push(
                 if "--dangerously-bypass-hook-trust" not in target:
                     flags.append("--dangerously-bypass-hook-trust")
                 target[insert_at:insert_at] = flags
+        env.clear()
+        env.update(updated_env)
         return MailPushProvision(
             updated,
             updated_display,
@@ -685,17 +678,27 @@ def provision_mail_push(
             original_display_argv=None if display_argv is None else list(display_argv),
             env=env,
             original_env=original_env,
+            fallback_env=updated_fallback,
         )
     except Exception:
         env.clear()
         env.update(original_env)
-        with suppress(OSError):
+        cleanup_failed = False
+        try:
             cleanup_mail_push_private_homes(registry_root, run_id)
             _hook_nonce_path(registry_root, run_id).unlink(missing_ok=True)
+        except OSError:
+            cleanup_failed = True
         return MailPushProvision(
             list(argv),
             None if display_argv is None else list(display_argv),
-            warning=mail_push_warning(engine, "launch-scoped hook provisioning failed"),
+            warning=mail_push_warning(
+                engine,
+                "launch-scoped hook provisioning cleanup failed"
+                if cleanup_failed
+                else "launch-scoped hook provisioning failed",
+            ),
+            fallback_env=dict(fallback_env or {}),
         )
 
 
@@ -954,6 +957,13 @@ def hook_pump(
     run_id = environ.get("DELEGATE_RUN_ID")
     harness = environ.get("DELEGATE_MAIL_HOOK_HARNESS") or "unknown"
     response_emitted = False
+    response_emission_attempted = False
+
+    def emit_response(payload: bytes) -> None:
+        nonlocal response_emission_attempted
+        response_emission_attempted = True
+        _write_hook_response(stdout, payload)
+
     try:
         identity = _identity(registry_root, env=environ)
         if identity.is_coordinator or run_id is None:
@@ -961,14 +971,14 @@ def hook_pump(
         pending = _hook_pending(registry_root, run_id)
         if pending is not None and pending.get("emitted") is True:
             _promote_emitted_hook_pending(registry_root, run_id, pending)
-            _write_hook_response(stdout, b"{}")
+            emit_response(b"{}")
             return 0
         if pending is None:
             messages, _cursor = _bounded_hook_messages(registry_root, run_id)
         else:
             messages = _pending_messages(registry_root, run_id, pending)
         if not messages:
-            _write_hook_response(stdout, b"{}")
+            emit_response(b"{}")
             return 0
         if pending is None:
             _write_hook_pending(registry_root, run_id, messages)
@@ -981,7 +991,7 @@ def hook_pump(
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
-        _write_hook_response(stdout, response)
+        emit_response(response)
         response_emitted = True
         try:
             _mark_hook_pending_emitted(registry_root, run_id, pending)
@@ -989,7 +999,7 @@ def hook_pump(
             return 1
         return 0
     except (MailError, OSError, ValueError) as exc:
-        if response_emitted:
+        if response_emitted or response_emission_attempted:
             return 1
         recorded = _record_hook_failure(
             registry_root,
@@ -1002,7 +1012,7 @@ def hook_pump(
             if nonce:
                 print(hook_failure_sentinel(nonce, str(exc)), file=stderr or sys.stderr)
         try:
-            _write_hook_response(stdout, b"{}")
+            emit_response(b"{}")
         except (OSError, ValueError):
             return 1
         return 0
@@ -1702,7 +1712,10 @@ def prune(
     removed: list[JsonObject] = []
     skipped: list[JsonObject] = []
     errors: list[JsonObject] = []
-    with run_registry.registry_lock(registry_root):
+    # Dry runs intentionally do not lock: registry_lock creates the registry
+    # and lock file, while this command's contract is byte-for-byte read-only.
+    lock = nullcontext() if command.dry_run else run_registry.registry_lock(registry_root)
+    with lock:
         if not command.dry_run:
             _ensure_mail_tree(registry_root)
         for legacy_home in _legacy_codex_homes(registry_root):
@@ -1786,7 +1799,11 @@ def emit(
     stdin: TextIO | None = None,
 ) -> int:
     action = command.action
-    mutates = action in {"send", "prune", "hook-pump"} or (action == "read" and not command.peek)
+    mutates = (
+        action in {"send", "hook-pump"}
+        or (action == "prune" and not command.dry_run)
+        or (action == "read" and not command.peek)
+    )
     registry_root = (
         _registry_for_workspace(workspace) if mutates else run_registry.registry_root(workspace)
     )

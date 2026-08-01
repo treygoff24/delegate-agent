@@ -808,6 +808,9 @@ def _execute_attached_worktree(
                 registry_root,
                 run_id,
                 request.env_overrides or {},
+                profiles.codex_fallback_child_env_overrides(
+                    request.profile_resolution, request.env_overrides or {}
+                ),
             )
             if provision.warning is not None:
                 request.warnings = (*request.warnings, provision.warning)
@@ -859,6 +862,16 @@ def _execute_attached_worktree(
             registry_root, attachment, expected_branch=iso.planned_branch
         )
     except DelegateError as exc:
+        if provision is not None:
+            try:
+                mail.cleanup_mail_push_private_homes(registry_root, run_id)
+            except OSError:
+                warning = delegate_runner.MAIL_PUSH_CLEANUP_WARNING
+                request.warnings = (*request.warnings, warning)
+                ctx_runner = dc_replace(
+                    ctx_runner, warnings=tuple(dict.fromkeys((*ctx_runner.warnings, warning)))
+                )
+                print(f"delegate mail: WARNING: {warning}", file=stderr)
         run_path = run_registry.run_directory(registry_root, run_id)
         if ctx_runner.source_prompt is not None:
             run_registry.write_private_text(
@@ -1297,6 +1310,9 @@ def execute_request(
                     registry_root,
                     run_id,
                     isolated_request.env_overrides or {},
+                    profiles.codex_fallback_child_env_overrides(
+                        isolated_request.profile_resolution, isolated_request.env_overrides or {}
+                    ),
                 )
                 if provision.warning is not None:
                     isolated_request.warnings = (*isolated_request.warnings, provision.warning)

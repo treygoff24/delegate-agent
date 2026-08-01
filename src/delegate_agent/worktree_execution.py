@@ -684,6 +684,9 @@ def _launch_child_in_persistent_worktree(
                     preflight.registry_root,
                     registration.run_id,
                     request.env_overrides or {},
+                    profiles.codex_fallback_child_env_overrides(
+                        request.profile_resolution, request.env_overrides or {}
+                    ),
                 )
                 if provision.warning is not None:
                     request.warnings = (*request.warnings, provision.warning)
@@ -759,6 +762,17 @@ def _launch_child_in_persistent_worktree(
             timeout=request.timeout,
         )
     except Exception as exc:
+        if provision is not None:
+            try:
+                mail.cleanup_mail_push_private_homes(preflight.registry_root, registration.run_id)
+            except OSError:
+                warning = delegate_runner.MAIL_PUSH_CLEANUP_WARNING
+                request.warnings = (*request.warnings, warning)
+                registration.pre_ctx = replace(
+                    registration.pre_ctx,
+                    warnings=(*registration.pre_ctx.warnings, warning),
+                )
+                print(f"delegate mail: WARNING: {warning}", file=execution.stderr)
         error_msg = str(exc)
         error_code = getattr(exc, "error", "execution_failed")
         state = run_registry.load_run_state_or_none(preflight.registry_root, registration.run_id)

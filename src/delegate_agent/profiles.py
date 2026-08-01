@@ -408,29 +408,35 @@ def _capture_directory_baseline(cwd: str) -> WorkspaceBaseline | None:
     root = Path(cwd)
     entries: list[tuple[str, int, int, int]] = []
     try:
-        for current_root, directories, files in os.walk(root, followlinks=False):
-            current = Path(current_root)
-            if current == root:
-                directories[:] = [name for name in directories if name != ".delegate"]
-            for name in (*directories, *files):
-                path = current / name
-                stat = path.lstat()
-                entries.append(
-                    (
-                        str(path.relative_to(root)),
-                        stat.st_mode,
-                        stat.st_size,
-                        stat.st_mtime_ns,
+        pending = [root]
+        while pending:
+            current = pending.pop()
+            with os.scandir(current) as directory:
+                for entry in directory:
+                    if current == root and entry.name == ".delegate":
+                        continue
+                    stat = entry.stat(follow_symlinks=False)
+                    path = Path(entry.path)
+                    entries.append(
+                        (
+                            str(path.relative_to(root)),
+                            stat.st_mode,
+                            stat.st_size,
+                            stat.st_mtime_ns,
+                        )
                     )
-                )
-                if len(entries) > DIRECTORY_BASELINE_MAX_ENTRIES:
-                    return None
+                    if len(entries) > DIRECTORY_BASELINE_MAX_ENTRIES:
+                        return None
+                    if entry.is_dir(follow_symlinks=False):
+                        pending.append(path)
     except OSError:
         return None
     return WorkspaceBaseline(directory_entries=tuple(sorted(entries)))
 
 
-def capture_workspace_baseline(cwd: str) -> WorkspaceBaseline | None:
+def capture_workspace_baseline(
+    cwd: str, *, allow_directory: bool = True
+) -> WorkspaceBaseline | None:
     try:
         porcelain = capture_workspace_porcelain(cwd)
         if porcelain is not None:
@@ -445,7 +451,7 @@ def capture_workspace_baseline(cwd: str) -> WorkspaceBaseline | None:
         # No baseline means retry stays disabled — safe degradation, but only
         # for environment failures; programming errors should still surface.
         return None
-    return _capture_directory_baseline(cwd)
+    return _capture_directory_baseline(cwd) if allow_directory else None
 
 
 def workspace_is_clean(porcelain: str | None) -> bool:

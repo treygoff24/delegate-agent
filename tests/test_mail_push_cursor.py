@@ -16,6 +16,17 @@ class _FailBeforeInjection(io.StringIO):
         raise OSError("simulated injection failure")
 
 
+class _PartialWriter(io.StringIO):
+    def write(self, text: str) -> int:
+        super().write(text[:1])
+        raise OSError("simulated short write")
+
+
+class _FlushFailure(io.StringIO):
+    def flush(self) -> None:
+        raise OSError("simulated flush failure")
+
+
 class MailPushCursorTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="delegate-mail-push-cursor-")
@@ -122,7 +133,7 @@ class MailPushCursorTests(unittest.TestCase):
         self.assertEqual(self._cursor(), third["seq"])
         self.assertEqual(self._pump(), {})
 
-    def test_crash_before_injection_leaves_cursor_unadvanced_and_retries_without_loss(self) -> None:
+    def test_write_failure_leaves_cursor_unadvanced_without_post_response_output(self) -> None:
         message = self._send("retry before injection")
         self.assertEqual(
             mail.hook_pump(self.registry_root, stdout=_FailBeforeInjection(), env=self.env),
@@ -130,10 +141,7 @@ class MailPushCursorTests(unittest.TestCase):
         )
 
         self.assertEqual(self._cursor(), 0)
-        self.assertEqual(
-            mail.read_hook_failure_marker(self.registry_root, self.run_id),
-            "hook_runtime_failed: simulated injection failure",
-        )
+        self.assertIsNone(mail.read_hook_failure_marker(self.registry_root, self.run_id))
         retry = self._pump()
         self.assertEqual(
             [row["message"]["msgId"] for row in self._payload(retry)["messages"]],
@@ -142,6 +150,26 @@ class MailPushCursorTests(unittest.TestCase):
         self.assertEqual(self._cursor(), 0)
         self.assertEqual(self._pump(), {})
         self.assertEqual(self._cursor(), message["seq"])
+
+    def test_short_write_stays_silent_and_keeps_pending_unpromoted(self) -> None:
+        self._send("short write")
+        output = _PartialWriter()
+        self.assertEqual(mail.hook_pump(self.registry_root, stdout=output, env=self.env), 1)
+        self.assertEqual(output.getvalue(), "{")
+        pending = mail._hook_pending(self.registry_root, self.run_id)
+        self.assertIsNotNone(pending)
+        self.assertFalse(pending["emitted"])
+        self.assertIsNone(mail.read_hook_failure_marker(self.registry_root, self.run_id))
+
+    def test_flush_failure_stays_silent_and_keeps_pending_unpromoted(self) -> None:
+        self._send("flush failure")
+        output = _FlushFailure()
+        self.assertEqual(mail.hook_pump(self.registry_root, stdout=output, env=self.env), 1)
+        self.assertNotEqual(output.getvalue(), "")
+        pending = mail._hook_pending(self.registry_root, self.run_id)
+        self.assertIsNotNone(pending)
+        self.assertFalse(pending["emitted"])
+        self.assertIsNone(mail.read_hook_failure_marker(self.registry_root, self.run_id))
 
     def test_crash_after_injection_before_cursor_write_allows_only_one_bounded_retry(self) -> None:
         message = self._send("retry after injection")

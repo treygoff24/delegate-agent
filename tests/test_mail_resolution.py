@@ -128,7 +128,7 @@ class MailResolutionTests(unittest.TestCase):
         self.assertLess(events.index("validate"), events.index("publish"))
         self.assertEqual(events[-1], "lock-exit")
 
-    def test_prune_cannot_enter_until_send_publication_releases_lock(self) -> None:
+    def test_dry_run_prune_uses_an_unlocked_best_effort_snapshot(self) -> None:
         sender_id, sender = self._run()
         _recipient_id, recipient = self._run()
         publication_started = threading.Event()
@@ -167,7 +167,7 @@ class MailResolutionTests(unittest.TestCase):
             prune_thread = threading.Thread(target=do_prune)
             prune_thread.start()
             time.sleep(0.1)
-            self.assertFalse(prune_finished.is_set())
+            self.assertTrue(prune_finished.is_set())
             release_publication.set()
             send_thread.join(timeout=5)
             prune_thread.join(timeout=5)

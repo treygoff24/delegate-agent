@@ -2123,9 +2123,15 @@ def _retry_is_safe(
         return ctx.call_read_only
     if ctx.mode == "work":
         return profiles.work_mode_safe_for_codex_fallback(cwd, workspace_baseline)
-    if ctx.mode == "safe" and ctx.isolated_workspace:
-        return profiles.workspace_baseline_unchanged(cwd, workspace_baseline)
-    return True
+    if ctx.mode == "safe":
+        if not ctx.isolated_workspace:
+            return True
+        return (
+            workspace_baseline is not None
+            and workspace_baseline.directory_entries is None
+            and profiles.workspace_baseline_unchanged(cwd, workspace_baseline)
+        )
+    return False
 
 
 def _cancel_requested_or_cancelled(ctx: RunContext) -> bool:
@@ -2376,9 +2382,15 @@ def execute_tracked(
     )
     retry_workspace = ctx.execution_cwd if ctx.isolated_workspace else cwd
     workspace_baseline = (
-        profiles.capture_workspace_baseline(retry_workspace)
+        profiles.capture_workspace_baseline(
+            retry_workspace,
+            allow_directory=ctx.mode == "work" and ctx.workspace_kind == "directory",
+        )
         if ctx.engine == "codex"
-        and (ctx.mode == "work" or (ctx.mode == "safe" and ctx.isolated_workspace))
+        and (
+            ctx.mode == "work"
+            or (ctx.mode == "safe" and ctx.isolated_workspace and ctx.workspace_kind == "git")
+        )
         else None
     )
     fallback_extra: JsonObject | None = None

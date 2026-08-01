@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import io
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from datetime import UTC, datetime
@@ -59,6 +61,48 @@ class MailPruneTests(unittest.TestCase):
             },
         )
         return path
+
+    @staticmethod
+    def _workspace_snapshot(root: Path) -> dict[str, bytes | str]:
+        snapshot: dict[str, bytes | str] = {}
+        if not root.exists():
+            return snapshot
+        for path in root.rglob("*"):
+            relative = str(path.relative_to(root))
+            if path.is_symlink():
+                snapshot[relative] = os.readlink(path)
+            elif path.is_file():
+                snapshot[relative] = path.read_bytes()
+            elif path.is_dir():
+                snapshot[f"{relative}/"] = "directory"
+        return snapshot
+
+    def test_emit_dry_run_is_byte_identical_for_empty_workspace(self):
+        with tempfile.TemporaryDirectory(prefix="delegate-mail-prune-empty-") as tmp:
+            workspace = Path(tmp)
+            before = self._workspace_snapshot(workspace)
+            result = mail.emit(
+                mail.MailCommand(action="prune", dry_run=True),
+                workspace=workspace,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+            self.assertEqual(result, 0)
+            self.assertEqual(self._workspace_snapshot(workspace), before)
+
+    def test_emit_dry_run_is_byte_identical_for_fresh_git_workspace(self):
+        with tempfile.TemporaryDirectory(prefix="delegate-mail-prune-git-") as tmp:
+            workspace = Path(tmp)
+            subprocess.run(["git", "init"], cwd=workspace, check=True, capture_output=True)
+            before = self._workspace_snapshot(workspace)
+            result = mail.emit(
+                mail.MailCommand(action="prune", dry_run=True),
+                workspace=workspace,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+            self.assertEqual(result, 0)
+            self.assertEqual(self._workspace_snapshot(workspace), before)
 
     def test_mail_prune_has_own_schema_and_does_not_change_runs_prune_schema(self):
         payload = mail.prune(

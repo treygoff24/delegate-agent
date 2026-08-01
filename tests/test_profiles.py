@@ -822,6 +822,40 @@ class CodexProfileExecutionTests(unittest.TestCase):
             Path(tmp, "changed.txt").write_text("changed\n", encoding="utf-8")
             self.assertFalse(self.profiles.work_mode_safe_for_codex_fallback(tmp, baseline))
 
+    def test_directory_baseline_stops_scandir_before_exhausting_a_large_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            consumed = 0
+            limit = self.profiles.DIRECTORY_BASELINE_MAX_ENTRIES
+
+            class Entry:
+                def __init__(self, index: int) -> None:
+                    self.name = f"entry-{index}"
+                    self.path = str(root / self.name)
+
+                def stat(self, *, follow_symlinks: bool = False):
+                    return root.stat()
+
+                def is_dir(self, *, follow_symlinks: bool = False) -> bool:
+                    return False
+
+            class Directory:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_args):
+                    return False
+
+                def __iter__(self):
+                    nonlocal consumed
+                    for index in range(limit + 100):
+                        consumed += 1
+                        yield Entry(index)
+
+            with mock.patch.object(self.profiles.os, "scandir", return_value=Directory()):
+                self.assertIsNone(self.profiles._capture_directory_baseline(tmp))
+            self.assertEqual(consumed, limit + 1)
+
     def test_unborn_head_git_workspace_fails_closed_instead_of_directory_baseline(self):
         with tempfile.TemporaryDirectory() as tmp:
             subprocess.run(["git", "init", "-q", tmp], check=True, capture_output=True, text=True)
