@@ -134,7 +134,7 @@ _delegate_is_readonly_request() {
     esac
   done
   case "$_cmd" in
-    profiles|runs|ps|run-output|describe|snapshot|agent-help|help|--help|-h|--version)
+    profiles|runs|ps|run-output|describe|snapshot|agent-help|personas|help|--help|-h|--version)
       return 0
       ;;
     models)
