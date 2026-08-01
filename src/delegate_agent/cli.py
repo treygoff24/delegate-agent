@@ -807,39 +807,27 @@ def _execute_attached_worktree(
     if request.mode == MODE_WORK:
         mail.bind_mail_identity(child_env, run_id, alias)
     request.env_overrides = child_env
-    provision: mail.MailPushProvision | None = None
-    if request.mode == MODE_WORK and delegate_config.mail_enabled(config):
-        wired_argv, wired_display_argv = mail.wire_work_mail_launch(
-            request.engine,
-            execution_request.argv,
-            execution_request.display_argv,
-            registry_root,
-            prompt=request.prompt,
-            prompt_transport=request.prompt_transport,
-            stderr=stderr,
-            isolated_workspace=True,
-        )
-        execution_request = dc_replace(
-            execution_request, argv=wired_argv, display_argv=wired_display_argv
-        )
-        if request.mail_push:
-            provision = mail.provision_mail_push(
-                request.engine,
-                execution_request.argv,
-                execution_request.display_argv,
-                registry_root,
-                run_id,
-                request.env_overrides or {},
-                profiles.codex_fallback_child_env_overrides(
-                    request.profile_resolution, request.env_overrides or {}
-                ),
-            )
-            if provision.warning is not None:
-                request.warnings = (*request.warnings, provision.warning)
-                print(f"delegate mail: WARNING: {provision.warning}", file=stderr)
-            execution_request = dc_replace(
-                execution_request, argv=provision.argv, display_argv=provision.display_argv
-            )
+    mail_launch = mail.prepare_work_mail_launch(
+        enabled=request.mode == MODE_WORK and delegate_config.mail_enabled(config),
+        mail_push=request.mail_push,
+        engine=request.engine,
+        argv=execution_request.argv,
+        display_argv=execution_request.display_argv,
+        registry_root=registry_root,
+        run_id=run_id,
+        env_overrides=request.env_overrides,
+        profile_resolution=request.profile_resolution,
+        prompt=request.prompt,
+        prompt_transport=request.prompt_transport,
+        stderr=stderr,
+        isolated_workspace=True,
+        warnings=request.warnings,
+    )
+    execution_request = dc_replace(
+        execution_request, argv=mail_launch.argv, display_argv=mail_launch.display_argv
+    )
+    request.warnings = mail_launch.request_warnings
+    provision = mail_launch.provision
     ctx_runner = make_run_context(
         registry_root,
         request,
@@ -850,22 +838,10 @@ def _execute_attached_worktree(
     if provision is not None:
         ctx_runner = dc_replace(
             ctx_runner,
-            env_overrides=(
-                dict(provision.env)
-                if provision.warning is not None and provision.env is not None
-                else ctx_runner.env_overrides
-            ),
-            fallback_env_overrides=mail.mail_push_fallback_env_overrides(
-                provision, ctx_runner.fallback_env_overrides, registry_root, run_id
-            ),
-            warnings=tuple(
-                dict.fromkeys(
-                    (*ctx_runner.warnings, *((provision.warning,) if provision.warning else ()))
-                )
+            **mail_launch.context_updates(
+                ctx_runner.env_overrides, ctx_runner.fallback_env_overrides, ctx_runner.warnings
             ),
         )
-        if provision.warning is not None and provision.env is not None:
-            ctx_runner = dc_replace(ctx_runner, env_overrides=dict(provision.env))
     attachment = {
         **(iso.attachment or {}),
         "startHeadOid": start_head_oid,
@@ -1330,41 +1306,32 @@ def execute_request(
         provision: mail.MailPushProvision | None = None
         mail_push_cleanup_transferred = False
         try:
-            if isolated_request.mode == MODE_WORK and delegate_config.mail_enabled(config):
-                isolated_request.argv, isolated_request.display_argv = mail.wire_work_mail_launch(
-                    isolated_request.engine,
-                    isolated_request.argv,
-                    isolated_request.display_argv,
-                    registry_root,
-                    prompt=isolated_request.prompt,
-                    prompt_transport=isolated_request.prompt_transport,
-                    stderr=stderr,
-                    isolated_workspace=bool(
-                        isolated_request.isolation_context
-                        and isolated_request.isolation_context.isolation_lifecycle
-                        in ("temporary", "persistent", "attached")
-                    ),
-                )
-                if isolated_request.mail_push:
-                    provision = mail.provision_mail_push(
-                        isolated_request.engine,
-                        isolated_request.argv,
-                        isolated_request.display_argv,
-                        registry_root,
-                        run_id,
-                        isolated_request.env_overrides or {},
-                        profiles.codex_fallback_child_env_overrides(
-                            isolated_request.profile_resolution,
-                            isolated_request.env_overrides or {},
-                        ),
-                    )
-                    if provision.warning is not None:
-                        isolated_request.warnings = (*isolated_request.warnings, provision.warning)
-                        print(f"delegate mail: WARNING: {provision.warning}", file=stderr)
-                    isolated_request.argv, isolated_request.display_argv = (
-                        provision.argv,
-                        provision.display_argv,
-                    )
+            mail_launch = mail.prepare_work_mail_launch(
+                enabled=isolated_request.mode == MODE_WORK and delegate_config.mail_enabled(config),
+                mail_push=isolated_request.mail_push,
+                engine=isolated_request.engine,
+                argv=isolated_request.argv,
+                display_argv=isolated_request.display_argv,
+                registry_root=registry_root,
+                run_id=run_id,
+                env_overrides=isolated_request.env_overrides,
+                profile_resolution=isolated_request.profile_resolution,
+                prompt=isolated_request.prompt,
+                prompt_transport=isolated_request.prompt_transport,
+                stderr=stderr,
+                isolated_workspace=bool(
+                    isolated_request.isolation_context
+                    and isolated_request.isolation_context.isolation_lifecycle
+                    in ("temporary", "persistent", "attached")
+                ),
+                warnings=isolated_request.warnings,
+            )
+            isolated_request.argv, isolated_request.display_argv = (
+                mail_launch.argv,
+                mail_launch.display_argv,
+            )
+            isolated_request.warnings = mail_launch.request_warnings
+            provision = mail_launch.provision
             ctx_runner = make_run_context(
                 registry_root,
                 isolated_request,
@@ -1375,25 +1342,12 @@ def execute_request(
             if provision is not None:
                 ctx_runner = dc_replace(
                     ctx_runner,
-                    env_overrides=(
-                        dict(provision.env)
-                        if provision.warning is not None and provision.env is not None
-                        else ctx_runner.env_overrides
-                    ),
-                    fallback_env_overrides=mail.mail_push_fallback_env_overrides(
-                        provision, ctx_runner.fallback_env_overrides, registry_root, run_id
-                    ),
-                    warnings=tuple(
-                        dict.fromkeys(
-                            (
-                                *ctx_runner.warnings,
-                                *((provision.warning,) if provision.warning else ()),
-                            )
-                        )
+                    **mail_launch.context_updates(
+                        ctx_runner.env_overrides,
+                        ctx_runner.fallback_env_overrides,
+                        ctx_runner.warnings,
                     ),
                 )
-                if provision.warning is not None and provision.env is not None:
-                    ctx_runner = dc_replace(ctx_runner, env_overrides=dict(provision.env))
             # Evaluate every argument expression BEFORE marking ownership
             # transferred: a raise inside an argument (public_argv below) would
             # otherwise skip both the CLI cleanup and the runner's guard.

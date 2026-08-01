@@ -43,6 +43,7 @@ from delegate_agent.request_models import (
     InspectionOptions,
     LaunchOptions,
     ParsedCommand,
+    PromptTail,
     ResumeOptions,
     RunJsonOptions,
 )
@@ -985,27 +986,26 @@ def parse_modeless_engine(
     # prompt text (`cursor work explain --help`).
     if len(rest) >= 2 and command_help.is_help_token(rest[1]):
         return help_command(json_mode, f"{topic} call" if mode == "call" else topic)
-    (
-        prompt_file,
-        output_schema,
-        reasoning_effort,
-        fast,
-        progress_intent,
-        forbid_commit,
-        prompt_parts,
-        json_mode,
-        isolation,
-        read_only,
-        pure,
-        timeout,
-        include_dirty,
-        mail_push,
-        model,
-        agent,
-        persona,
-        no_persona,
-        allow_repo_persona,
-    ) = parse_prompt_tail(rest[1:], json_mode, isolation, command_prefix=[engine, mode])
+    tail = parse_prompt_tail(rest[1:], json_mode, isolation, command_prefix=[engine, mode])
+    prompt_file = tail.prompt_file
+    output_schema = tail.output_schema
+    reasoning_effort = tail.reasoning_effort
+    fast = tail.fast
+    progress_intent = tail.progress_intent
+    forbid_commit = tail.forbid_commit
+    prompt_parts = tail.prompt_parts
+    json_mode = tail.json_mode
+    isolation = tail.isolation
+    read_only = tail.read_only
+    pure = tail.pure
+    timeout = tail.timeout
+    include_dirty = tail.include_dirty
+    mail_push = tail.mail_push
+    model = tail.model
+    agent = tail.agent
+    persona = tail.persona
+    no_persona = tail.no_persona
+    allow_repo_persona = tail.allow_repo_persona
     if agent is not None and engine != "opencode":
         raise DelegateError("unsupported_agent", "--agent is only supported by opencode.")
     if fast is not None and engine != "codex":
@@ -1120,27 +1120,26 @@ def parse_droid(
     # Help wins after the mode, before prompt capture: `droid [alias] safe --help`.
     if tail and command_help.is_help_token(tail[0]):
         return help_command(json_mode, f"{topic} call" if mode == "call" else topic)
-    (
-        prompt_file,
-        output_schema,
-        reasoning_effort,
-        fast,
-        progress_intent,
-        forbid_commit,
-        prompt_parts,
-        json_mode,
-        isolation,
-        read_only,
-        pure,
-        timeout,
-        include_dirty,
-        mail_push,
-        model,
-        agent,
-        persona,
-        no_persona,
-        allow_repo_persona,
-    ) = parse_prompt_tail(tail, json_mode, isolation, command_prefix=command_prefix)
+    tail_result = parse_prompt_tail(tail, json_mode, isolation, command_prefix=command_prefix)
+    prompt_file = tail_result.prompt_file
+    output_schema = tail_result.output_schema
+    reasoning_effort = tail_result.reasoning_effort
+    fast = tail_result.fast
+    progress_intent = tail_result.progress_intent
+    forbid_commit = tail_result.forbid_commit
+    prompt_parts = tail_result.prompt_parts
+    json_mode = tail_result.json_mode
+    isolation = tail_result.isolation
+    read_only = tail_result.read_only
+    pure = tail_result.pure
+    timeout = tail_result.timeout
+    include_dirty = tail_result.include_dirty
+    mail_push = tail_result.mail_push
+    model = tail_result.model
+    agent = tail_result.agent
+    persona = tail_result.persona
+    no_persona = tail_result.no_persona
+    allow_repo_persona = tail_result.allow_repo_persona
     if agent is not None:
         raise DelegateError("unsupported_agent", "--agent is only supported by opencode.")
     if fast is not None:
@@ -1467,27 +1466,7 @@ def parse_prompt_tail(
     isolation: str | None,
     *,
     command_prefix: list[str] | None = None,
-) -> tuple[
-    str | None,
-    str | None,
-    str | None,
-    bool | None,
-    str | None,
-    bool,
-    list[str],
-    bool,
-    str | None,
-    bool,
-    bool,
-    int | None,
-    bool,
-    str | None,
-    str | None,
-    str | None,
-    bool,
-    bool,
-    bool,
-]:
+) -> PromptTail:
     prompt_file: str | None = None
     output_schema: str | None = None
     reasoning_effort: str | None = None
@@ -1793,7 +1772,7 @@ def parse_prompt_tail(
         raise_misplaced_global_option(
             "Global options must appear before the subcommand; use --prompt-file for literal flag text.",
         )
-    return (
+    return PromptTail(
         prompt_file,
         output_schema,
         reasoning_effort,

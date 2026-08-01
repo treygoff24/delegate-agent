@@ -662,39 +662,27 @@ def _launch_child_in_persistent_worktree(
             request,
             registration.worktree_path,
         )
-        provision: mail.MailPushProvision | None = None
-        if request.mode == "work" and delegate_config.mail_enabled(execution.config):
-            wired_argv, wired_display_argv = mail.wire_work_mail_launch(
-                request.engine,
-                execution_request.argv,
-                execution_request.display_argv,
-                preflight.registry_root,
-                prompt=request.prompt,
-                prompt_transport=request.prompt_transport,
-                stderr=execution.stderr,
-                isolated_workspace=True,
-            )
-            execution_request = replace(
-                execution_request, argv=wired_argv, display_argv=wired_display_argv
-            )
-            if request.mail_push:
-                provision = mail.provision_mail_push(
-                    request.engine,
-                    execution_request.argv,
-                    execution_request.display_argv,
-                    preflight.registry_root,
-                    registration.run_id,
-                    request.env_overrides or {},
-                    profiles.codex_fallback_child_env_overrides(
-                        request.profile_resolution, request.env_overrides or {}
-                    ),
-                )
-                if provision.warning is not None:
-                    request.warnings = (*request.warnings, provision.warning)
-                    print(f"delegate mail: WARNING: {provision.warning}", file=execution.stderr)
-                execution_request = replace(
-                    execution_request, argv=provision.argv, display_argv=provision.display_argv
-                )
+        mail_launch = mail.prepare_work_mail_launch(
+            enabled=request.mode == "work" and delegate_config.mail_enabled(execution.config),
+            mail_push=request.mail_push,
+            engine=request.engine,
+            argv=execution_request.argv,
+            display_argv=execution_request.display_argv,
+            registry_root=preflight.registry_root,
+            run_id=registration.run_id,
+            env_overrides=request.env_overrides,
+            profile_resolution=request.profile_resolution,
+            prompt=request.prompt,
+            prompt_transport=request.prompt_transport,
+            stderr=execution.stderr,
+            isolated_workspace=True,
+            warnings=request.warnings,
+        )
+        execution_request = replace(
+            execution_request, argv=mail_launch.argv, display_argv=mail_launch.display_argv
+        )
+        request.warnings = mail_launch.request_warnings
+        provision = mail_launch.provision
         if request.resumed_from is not None:
             from delegate_agent.resume_command import enforce_resume_prompt_size
 
@@ -713,25 +701,12 @@ def _launch_child_in_persistent_worktree(
         if provision is not None:
             exec_ctx = replace(
                 exec_ctx,
-                env_overrides=(
-                    dict(provision.env)
-                    if provision.warning is not None and provision.env is not None
-                    else exec_ctx.env_overrides
-                ),
-                fallback_env_overrides=mail.mail_push_fallback_env_overrides(
-                    provision,
+                **mail_launch.context_updates(
+                    exec_ctx.env_overrides,
                     exec_ctx.fallback_env_overrides,
-                    preflight.registry_root,
-                    registration.run_id,
-                ),
-                warnings=tuple(
-                    dict.fromkeys(
-                        (*exec_ctx.warnings, *((provision.warning,) if provision.warning else ()))
-                    )
+                    exec_ctx.warnings,
                 ),
             )
-            if provision.warning is not None and provision.env is not None:
-                exec_ctx = replace(exec_ctx, env_overrides=dict(provision.env))
         if exec_ctx.persona_text is not None:
             run_registry.write_private_text(
                 registration.run_path / run_registry.PERSONA_TXT_FILE,

@@ -1429,6 +1429,31 @@ def _record_tracked_launch_failure(
         write_snapshot(files.run_path, snapshot)
 
 
+def _mail_push_failure_nonce(ctx: RunContext) -> str | None:
+    if not ctx.mail_push:
+        return None
+    try:
+        from delegate_agent import mail
+
+        return mail.read_hook_failure_nonce(ctx.registry_root, ctx.run_id)
+    except (OSError, ValueError):
+        return None
+
+
+def _capture_mail_push_failure_sentinel(
+    ctx: RunContext,
+    chunk_text: str,
+    *,
+    nonce: str | None,
+    current_reason: str | None,
+) -> str | None:
+    if current_reason is not None or not ctx.mail_push:
+        return current_reason
+    from delegate_agent import mail
+
+    return mail.hook_failure_reason_from_stderr(chunk_text, nonce=nonce)
+
+
 def _capture_tracked_process(
     process: subprocess.Popen[bytes],
     files: TrackedRunFiles,
@@ -1454,14 +1479,7 @@ def _capture_tracked_process(
     last_persist_at = time.monotonic()
     progress_dirty = False
     mail_push_failure_reason: str | None = None
-    mail_push_nonce: str | None = None
-    if ctx.mail_push:
-        try:
-            from delegate_agent import mail
-
-            mail_push_nonce = mail.read_hook_failure_nonce(ctx.registry_root, ctx.run_id)
-        except (OSError, ValueError):
-            mail_push_nonce = None
+    mail_push_nonce = _mail_push_failure_nonce(ctx)
 
     def maybe_persist_running() -> None:
         nonlocal lines_since_persist, last_persist_at, progress_dirty
@@ -1509,12 +1527,11 @@ def _capture_tracked_process(
 
         def handle_stderr_line(chunk_text: str) -> None:
             nonlocal mail_push_failure_reason
-            if mail_push_failure_reason is not None or not ctx.mail_push:
-                return
-            from delegate_agent import mail
-
-            mail_push_failure_reason = mail.hook_failure_reason_from_stderr(
-                chunk_text, nonce=mail_push_nonce
+            mail_push_failure_reason = _capture_mail_push_failure_sentinel(
+                ctx,
+                chunk_text,
+                nonce=mail_push_nonce,
+                current_reason=mail_push_failure_reason,
             )
 
         stdout_thread = threading.Thread(
@@ -1783,14 +1800,11 @@ def _append_mail_push_event(accumulator: harness_events.StreamAccumulator, warni
     )
 
 
-def _finalize_tracked_run(
+def _finalize_mail_push_state(
     files: TrackedRunFiles,
     ctx: RunContext,
     capture: TrackedCaptureResult,
-    *,
-    completion_report_mode: str,
-    extra: JsonObject | None = None,
-) -> TrackedFinalization:
+) -> tuple[list[str], str]:
     mail_warnings = _mail_push_warnings(ctx)
     cleanup_warning = _cleanup_mail_push_private_homes(ctx)
     if cleanup_warning is not None:
@@ -1811,6 +1825,18 @@ def _finalize_tracked_run(
             mail_warnings.append(
                 f"{MAIL_PUSH_WARNING_PREFIX} for {ctx.engine}: event recording failed."
             )
+    return mail_warnings, stderr_tail
+
+
+def _finalize_tracked_run(
+    files: TrackedRunFiles,
+    ctx: RunContext,
+    capture: TrackedCaptureResult,
+    *,
+    completion_report_mode: str,
+    extra: JsonObject | None = None,
+) -> TrackedFinalization:
+    mail_warnings, stderr_tail = _finalize_mail_push_state(files, ctx, capture)
     for warning in dict.fromkeys(mail_warnings):
         _append_mail_push_event(capture.accumulator, warning)
     exit_code, merged_extra = _final_extra(ctx, capture.exit_code)

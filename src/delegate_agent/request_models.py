@@ -9,6 +9,7 @@ without an import cycle.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 from delegate_agent import (
     capability_commands,
@@ -171,6 +172,28 @@ class ParsedCommand:
 class ResolvedWorkspace:
     path: str
     kind: str
+
+
+class PromptTail(NamedTuple):
+    prompt_file: str | None
+    output_schema: str | None
+    reasoning_effort: str | None
+    fast: bool | None
+    progress_intent: str | None
+    forbid_commit: bool
+    prompt_parts: list[str]
+    json_mode: bool
+    isolation: str | None
+    read_only: bool
+    pure: bool
+    timeout: int | None
+    include_dirty: bool
+    mail_push: bool
+    model: str | None
+    agent: str | None
+    persona: str | None
+    no_persona: bool
+    allow_repo_persona: bool
 
 
 @dataclass
