@@ -46,6 +46,9 @@ class LaunchOptions:
     prompt_parts: list[str] | None = None
     prompt_file: str | None = None
     output_schema: str | None = None
+    # Internal-only resume seam: verified inherited schema text stays in memory
+    # until normal launch-time materialization.
+    output_schema_text: str | None = None
     reasoning_effort: str | None = None
     fast: bool | None = None
     progress_intent: str | None = None
@@ -63,6 +66,22 @@ class LaunchOptions:
 @dataclass
 class RunJsonOptions:
     input_json: str
+
+
+@dataclass
+class ResumeOptions:
+    handle: str
+    extra_parts: list[str] = field(default_factory=list)
+    engine: str | None = None
+    model: str | None = None
+    reasoning_effort: str | None = None
+    fast: bool | None = None
+    progress_intent: str | None = None
+    timeout: int | None = None
+    output_schema: str | None = None
+    drop_output_schema: bool = False
+    include_dirty: bool = False
+    dry_run: bool = False
 
 
 @dataclass
@@ -90,6 +109,7 @@ class ParsedCommand:
     capabilities: capability_commands.CapabilitiesCommand | None = None
     profiles_command: profile_commands.ProfilesCommand | None = None
     inspection: InspectionOptions | None = None
+    resume: ResumeOptions | None = None
 
     def __init__(
         self,
@@ -110,6 +130,7 @@ class ParsedCommand:
         capabilities: capability_commands.CapabilitiesCommand | None = None,
         profiles_command: profile_commands.ProfilesCommand | None = None,
         inspection: InspectionOptions | None = None,
+        resume: ResumeOptions | None = None,
     ) -> None:
         self.subcommand = subcommand
         self.global_options = global_options or GlobalOptions()
@@ -127,6 +148,7 @@ class ParsedCommand:
         self.capabilities = capabilities
         self.profiles_command = profiles_command
         self.inspection = inspection
+        self.resume = resume
 
 
 @dataclass(frozen=True)
@@ -183,6 +205,19 @@ class Request:
     profile_resolution: profiles.ProfileResolution = field(
         default_factory=profiles.empty_profile_resolution
     )
+    # The user prompt exactly as resolved (before instruction framing); persisted
+    # to <runDir>/prompt.txt for tracked runs so `delegate resume` can rebuild it.
+    source_prompt: str | None = None
+    # Requested progress intent as passed ("on"/"off"/None), distinct from the
+    # effective `progress` bool, so resume can inherit intent rather than outcome.
+    progress_requested: str | None = None
+    # Output schema text recorded for the run manifest (codex: normalized
+    # preflight text; claude: raw file text). Transport still uses
+    # output_schema/output_schema_text unchanged.
+    output_schema_record_text: str | None = None
+    agent: str | None = None
+    # Set on runs launched by `delegate resume`: {"runId": ..., "alias": ...}.
+    resumed_from: JsonObject | None = None
 
 
 @dataclass(frozen=True)

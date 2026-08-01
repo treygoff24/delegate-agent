@@ -56,6 +56,9 @@ class IsolationContext:
     safe_workspace_method: str | None = None
     include_dirty: bool = False
     warnings: tuple[str, ...] = ()
+    # Populated only for lifecycle "attached" (resume into a live persistent
+    # worktree): {"sourceRunId", "sourceAlias", "path"}.
+    attachment: JsonObject | None = None
 
 
 def compute_repo_fingerprint_from_common_dir(git_common_dir: str) -> str:

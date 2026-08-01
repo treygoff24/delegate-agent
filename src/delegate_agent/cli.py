@@ -23,6 +23,7 @@ from delegate_agent import (
     profiles,
     reasoning,
     redaction,
+    resume_command,
     run_metadata,
     run_output_commands,
     run_registry,
@@ -79,7 +80,7 @@ from delegate_agent.errors import (
     EXIT_USAGE,
     DelegateError,
 )
-from delegate_agent.git_utils import capture_git_metadata  # noqa: F401  # re-exported for tests
+from delegate_agent.git_utils import capture_git_metadata  # re-exported for tests
 from delegate_agent.isolation import (  # noqa: F401  # re-exported for tests
     IsolationContext,
     build_isolation_context,
@@ -100,6 +101,7 @@ from delegate_agent.prompt_transport import (  # noqa: F401  # CURSOR_PROMPT_RED
 )
 from delegate_agent.request_build import (  # noqa: F401  # re-exported for tests / back-compat
     CALL_TEMP_CWD_PLACEHOLDER,
+    INLINE_OUTPUT_SCHEMA_PLACEHOLDER,
     RUN_INPUT_KEYS,
     _load_input_json_object,
     build_request,
@@ -306,16 +308,28 @@ def dry_run_payload(request: Request) -> JsonObject:
     run_metadata.add_model_payload_fields(payload, request)
     reasoning.add_reasoning_payload_fields(payload, request)
     run_metadata.add_speed_payload_fields(payload, request)
+    if request.output_schema_text is not None:
+        payload["outputSchemaInline"] = True
+        payload["argv"] = [
+            "<inline output schema>" if value == INLINE_OUTPUT_SCHEMA_PLACEHOLDER else value
+            for value in payload["argv"]
+        ]
     if request.warnings:
         payload["warnings"] = list(request.warnings)
     if request.progress:
         payload["progressRequested"] = True
+    if request.timeout is not None:
+        payload["timeoutSeconds"] = request.timeout
     if request.forbid_commit:
         payload["commitPolicy"] = {"forbidCommit": True}
     if request.include_dirty:
         payload["includeDirty"] = True
     if request.group is not None:
         payload["group"] = request.group
+    if request.agent is not None:
+        payload["agent"] = request.agent
+    if request.resumed_from is not None:
+        payload["resumedFrom"] = request.resumed_from
     if request.auth_profile is not None:
         payload["authProfile"] = request.auth_profile
     if request.fallback_auth_profile is not None:
@@ -329,6 +343,8 @@ def dry_run_payload(request: Request) -> JsonObject:
         # Keep the existing human-readable `isolation` note for legacy use.
         if ctx.effective_isolation == "worktree" and ctx.isolation_lifecycle == "persistent":
             payload["isolation"] = "worktree persistent"
+        elif ctx.effective_isolation == "worktree" and ctx.isolation_lifecycle == "attached":
+            payload["isolation"] = "worktree attached (resume)"
         elif ctx.effective_isolation == "worktree":
             payload["isolation"] = "worktree temporary"
         elif ctx.effective_isolation == "none":
@@ -344,7 +360,7 @@ def dry_run_payload(request: Request) -> JsonObject:
         # Only persistent worktree isolation has a planned Delegate-managed
         # branch/path. Temporary safe-mode isolation is created ephemerally at
         # execution time and must not claim a persistent worktree plan.
-        if ctx.isolation_lifecycle == "persistent":
+        if ctx.isolation_lifecycle in ("persistent", "attached"):
             planned_cwd = ctx.planned_execution_cwd or "<planned-worktree-path>"
             planned_branch = ctx.planned_branch or "<planned-branch>"
             payload["plannedExecutionCwd"] = planned_cwd
@@ -356,7 +372,11 @@ def dry_run_payload(request: Request) -> JsonObject:
             payload["plannedBranch"] = None
 
         # Always emit isolatedWorkspace as explicit boolean (mirrors preservedWorkspace).
-        payload["isolatedWorkspace"] = ctx.isolation_lifecycle in ("temporary", "persistent")
+        payload["isolatedWorkspace"] = ctx.isolation_lifecycle in (
+            "temporary",
+            "persistent",
+            "attached",
+        )
     else:
         # Fallback when no isolation context is provided (e.g. direct build_request calls in tests).
         # Use embedded-default logic: safe local harnesses -> worktree temporary, others -> none.
@@ -498,10 +518,11 @@ def make_run_context(
     )
     execution_cwd = request.workspace
     # isolated_workspace must reflect the EFFECTIVE behavior, not the
-    # mere presence of an isolation_context object.  Only "temporary" or
-    # "persistent" lifecycle means a physically separate execution workspace.
+    # mere presence of an isolation_context object.  Only "temporary",
+    # "persistent", or "attached" lifecycle means a physically separate
+    # execution workspace.
     isolated_workspace = (
-        request.isolation_context.isolation_lifecycle in ("temporary", "persistent")
+        request.isolation_context.isolation_lifecycle in ("temporary", "persistent", "attached")
         if request.isolation_context is not None
         else False
     )
@@ -575,6 +596,12 @@ def make_run_context(
         call_read_only=request.call_read_only or request.pure,
         pure=request.pure,
         prompt_instruction_mode=request.prompt_instruction_mode,
+        source_prompt=request.source_prompt,
+        progress_requested=request.progress_requested,
+        timeout_seconds=request.timeout,
+        output_schema_text=request.output_schema_record_text,
+        agent=request.agent,
+        resumed_from=request.resumed_from,
     )
 
 
@@ -624,6 +651,173 @@ def _preserve_call_artifacts(
             f"Could not move call artifacts into Delegate state; retained temp cwd at "
             f"{workspace}: {exc}",
         )
+
+
+def _execute_attached_worktree(
+    request: Request,
+    json_mode: bool,
+    *,
+    config: JsonObject,
+    config_source: str | None,
+    completion_report_mode: str,
+    source_workspace: ResolvedWorkspace,
+    stdout: TextIO,
+    stderr: TextIO,
+) -> tuple[int, JsonObject | None]:
+    """Launch a resumed child inside the source run's existing worktree.
+
+    Lease-by-derivation: the attachment is recorded in this run's manifest
+    (``worktreeAttachment``) and removal paths refuse while the run is
+    effectively running. No worktree record is derived for attached runs.
+    """
+    from dataclasses import replace as dc_replace
+
+    iso = request.isolation_context
+    assert iso is not None and iso.isolation_lifecycle == "attached"
+    worktree_path = iso.planned_execution_cwd
+    if not worktree_path:
+        raise DelegateError("worktree_missing", "Attached execution has no worktree path.")
+    wt = Path(worktree_path)
+    if wt.is_symlink() or not wt.is_dir():
+        raise DelegateError(
+            "worktree_missing",
+            f"The source run's worktree path is no longer a directory: {worktree_path}",
+        )
+
+    head_probe = capture_git_metadata(worktree_path)
+    start_head_oid = head_probe[2]
+    if not start_head_oid:
+        raise DelegateError(
+            "worktree_missing",
+            f"Could not resolve HEAD in the attached worktree: {worktree_path}",
+        )
+
+    execution_request = worktree_execution._request_for_execution_workspace(request, worktree_path)
+    # Re-check the actual argv payload now that the worktree note (and any
+    # forbid-commit note) has been prepended.
+    resume_command.enforce_resume_prompt_size(
+        request.engine,
+        execution_request.argv[-1],
+    )
+    ensure_binary(
+        execution_request.argv,
+        engine=request.engine,
+        config_source=config_source,
+        env_overrides=request.env_overrides,
+    )
+    if request.engine == "codex":
+        profiles.preflight_codex_request(request, config.get("codex", {}))
+
+    registry_root = run_registry.ensure_registry(
+        Path(source_workspace.path),
+        workspace_kind=source_workspace.kind,
+    )
+    maybe_run_retention_pass(registry_root, config)
+    run_id, alias = run_registry.register_run(
+        registry_root,
+        harness=request.engine,
+        metadata={
+            "mode": request.mode,
+            "model": request.model,
+            "modelAlias": request.model_alias,
+            "modelResolved": request.model,
+            "group": request.group,
+            "workflowAgentKey": request.workflow_agent_key,
+            "cwd": source_workspace.path,
+            "worktreeAttachment": {
+                **(iso.attachment or {}),
+                "startHeadOid": start_head_oid,
+            },
+        },
+    )
+    ctx_runner = make_run_context(
+        registry_root,
+        request,
+        run_id=run_id,
+        alias=alias,
+        source_workspace=source_workspace,
+    )
+    attachment = {
+        **(iso.attachment or {}),
+        "startHeadOid": start_head_oid,
+    }
+    ctx_runner = dc_replace(
+        ctx_runner,
+        execution_cwd=worktree_path,
+        isolated_workspace=True,
+        branch=iso.planned_branch,
+        source_git_root=iso.source_git_root,
+        creation_context={"sourceHeadOid": start_head_oid},
+        worktree_attachment=attachment,
+    )
+    try:
+        resume_command.revalidate_attached_target(
+            registry_root, attachment, expected_branch=iso.planned_branch
+        )
+    except DelegateError as exc:
+        run_path = run_registry.run_directory(registry_root, run_id)
+        if ctx_runner.source_prompt is not None:
+            run_registry.write_private_text(
+                run_path / run_registry.PROMPT_TXT_FILE, ctx_runner.source_prompt
+            )
+        delegate_runner.write_manifest(
+            run_path,
+            delegate_runner.build_manifest(ctx_runner, execution_request.display_argv),
+        )
+        delegate_runner.write_state(
+            run_path,
+            delegate_runner.build_state(
+                ctx_runner,
+                status=run_registry.STATUS_FAILED,
+                exit_code=1,
+                extra={
+                    "error": "worktree_missing",
+                    "message": exc.message,
+                    "failureReason": "worktree_missing",
+                },
+            ),
+        )
+        raise DelegateError("worktree_missing", exc.message) from exc
+    execution_root = str(Path(worktree_path).resolve(strict=False))
+    source_root = str(Path(source_workspace.path).resolve(strict=False))
+    child_env = {
+        **(request.env_overrides or {}),
+        "DELEGATE_SOURCE_ROOT": source_root,
+        "DELEGATE_EXECUTION_ROOT": execution_root,
+        "WORKSPACE_ROOT": execution_root,
+    }
+    ctx_runner = dc_replace(
+        ctx_runner,
+        env_overrides=child_env,
+        fallback_env_overrides=profiles.codex_fallback_child_env_overrides(
+            request.profile_resolution,
+            child_env,
+        ),
+    )
+    try:
+        return delegate_runner.execute_tracked(
+            execution_request.argv,
+            worktree_path,
+            ctx_runner,
+            json_mode=json_mode,
+            stdout=stdout,
+            stderr=stderr,
+            completion_report_mode=completion_report_mode,
+            stdin_text=execution_request.stdin_text,
+            prompt_file_text=execution_request.prompt_file_text,
+            prompt_file_placeholder=PROMPT_FILE_ARG_PLACEHOLDER,
+            agent_config_text=execution_request.agent_config_text,
+            agent_config_placeholder=DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
+            output_schema_text=request.output_schema_text,
+            output_schema_path=request.output_schema,
+            manifest_argv=execution_request.display_argv,
+            progress=request.progress,
+            progress_initial_delay_sec=request.progress_initial_delay_sec,
+            progress_interval_sec=request.progress_interval_sec,
+            timeout=request.timeout,
+        )
+    except delegate_runner.RunnerLaunchError as exc:
+        raise DelegateError(exc.error, exc.message, exc.exit_code) from exc
 
 
 def execute_request(
@@ -849,6 +1043,21 @@ def execute_request(
         profiles.preflight_codex_request(request, config.get("codex", {}))
     ctx = request.isolation_context
 
+    # Attached resume runs execute inside an existing persistent worktree:
+    # never plan, create, or sync a worktree — short-circuit before the
+    # persistent branch.
+    if ctx is not None and ctx.isolation_lifecycle == "attached":
+        return _execute_attached_worktree(
+            request,
+            json_mode,
+            config=config,
+            config_source=config_source,
+            completion_report_mode=completion_report_mode,
+            source_workspace=source_workspace,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
     # Persistent worktree runs (work + worktree) hand off to worktree_execution.
     if ctx is not None and ctx.isolation_lifecycle == "persistent":
         try:
@@ -875,6 +1084,10 @@ def execute_request(
 
     with safe_isolated_request(request) as isolated_request:
         _set_child_root_env(isolated_request, source_workspace)
+        if isolated_request.resumed_from is not None and isolated_request.argv:
+            resume_command.enforce_resume_prompt_size(
+                isolated_request.engine, isolated_request.argv[-1]
+            )
         ensure_binary(
             isolated_request.argv,
             engine=isolated_request.engine,
@@ -1205,7 +1418,16 @@ def main(
         if parsed.subcommand == "profiles":
             return emit_profiles_command(parsed, config, source, stdout)
 
+        resume_plan: resume_command.ResumePlan | None = None
+        if parsed.subcommand == "resume":
+            resume_plan = resume_command.build_resume_plan(parsed, workspace, config, stderr=stderr)
+            # The plan is a fully ordinary launch; from here on the resume flows
+            # through the normal request build and execution path.
+            parsed = resume_plan.parsed
+            global_options = parsed.global_options
         request = request_from_parsed(parsed, config, stdin)
+        if resume_plan is not None:
+            request = resume_command.apply_resume_to_request(request, resume_plan)
         if request.dry_run:
             payload = dry_run_payload(request)
             if global_options.json_mode:

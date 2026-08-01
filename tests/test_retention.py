@@ -285,6 +285,39 @@ class RetentionTests(unittest.TestCase):
         self.assertTrue((state_corrupt_path / "stdout.log").exists())
         self.assertTrue((manifest_corrupt_path / "stdout.log").exists())
 
+    def test_retention_skips_hardlinked_and_oversized_unrelated_records(self):
+        for kind in ("hardlinked", "oversized"):
+            with self.subTest(kind=kind):
+                good_id, _ = self.write_completed_run(finished_at="2000-01-01T00:00:00Z")
+                bad_id, _ = self.write_completed_run(finished_at="2000-01-01T00:00:00Z")
+                bad_state = self.registry.run_directory(self.registry_root, bad_id) / "state.json"
+                if kind == "hardlinked":
+                    outside = self.workspace / f"outside-{bad_id}.json"
+                    outside.write_text("{}", encoding="utf-8")
+                    bad_state.unlink()
+                    os.link(outside, bad_state)
+                else:
+                    bad_state.write_bytes(
+                        b"x" * (self.registry.private_io.PRIVATE_RECORD_READ_MAX_BYTES + 1)
+                    )
+
+                result = self.retention.run_retention_pass(
+                    self.registry_root,
+                    self.config,
+                    now=datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC),
+                )
+
+                self.assertGreaterEqual(result["archived"], 1)
+                self.assertTrue(
+                    self.retention.archive_path(self.registry_root, good_id).exists(),
+                    "a tampered unrelated run must not interrupt the retention sweep",
+                )
+                self.assertTrue(
+                    (
+                        self.registry.run_directory(self.registry_root, bad_id) / "stdout.log"
+                    ).exists()
+                )
+
     def test_mark_raw_logs_archived_treats_corrupt_state_as_empty(self):
         run_id, _alias = self.write_completed_run()
         run_path = self.registry.run_directory(self.registry_root, run_id)

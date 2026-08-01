@@ -83,6 +83,25 @@ Delegate also creates a local branch named like:
 delegate/<label>-<short-run-id>
 ```
 
+### Resume attachment
+
+To continue a terminal Run that used a persistent worktree, use the Run handle
+rather than launching a second persistent worktree:
+
+```bash
+delegate resume <alias-or-runId> "Continue the implementation and run the tests."
+```
+
+The resumed Run attaches to the existing execution path and records an
+attachment lease. It does not create a new branch, copy dirty files, or derive
+a second persistent-worktree record. The lease is released when the attached
+Run reaches a terminal state. Worktree removal, pruning, and registry repair
+refuse or skip a path with a live attached Run; inspect or wait for that Run
+before cleanup. A missing, moved, symlinked, unregistered, or branch-mismatched
+source worktree is refused rather than recreated implicitly. `--include-dirty`
+is rejected on attached resume because it only controls creation-time
+synchronization; ordinary resume drops the flag with a note.
+
 ## Preflight requirements
 
 Persistent worktree work-mode runs require:

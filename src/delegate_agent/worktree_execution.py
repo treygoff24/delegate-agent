@@ -312,6 +312,12 @@ def _build_persistent_worktree_run_context(
         call_read_only=request.call_read_only or request.pure,
         pure=request.pure,
         prompt_instruction_mode=request.prompt_instruction_mode,
+        source_prompt=request.source_prompt,
+        progress_requested=request.progress_requested,
+        timeout_seconds=request.timeout,
+        output_schema_text=request.output_schema_record_text,
+        agent=request.agent,
+        resumed_from=request.resumed_from,
     )
 
 
@@ -372,7 +378,13 @@ def _register_persistent_worktree_run(
         creation_context=creation_context,
     )
     run_path = run_registry.run_directory(preflight.registry_root, run_id)
-    run_path.mkdir(parents=True, exist_ok=True)
+    run_registry.ensure_private_dir(run_path)
+    if pre_ctx.source_prompt is not None:
+        # Written here as well as in _prepare_tracked_run so a worktree-creation
+        # failure still leaves a resumable prompt record.
+        run_registry.write_private_text(
+            run_path / run_registry.PROMPT_TXT_FILE, pre_ctx.source_prompt
+        )
     delegate_runner.write_manifest(
         run_path,
         delegate_runner.build_manifest(pre_ctx, public_argv(request)),
@@ -605,6 +617,10 @@ def _launch_child_in_persistent_worktree(
             request,
             registration.worktree_path,
         )
+        if request.resumed_from is not None:
+            from delegate_agent.resume_command import enforce_resume_prompt_size
+
+            enforce_resume_prompt_size(request.engine, execution_request.argv[-1])
         execution.binary_validator(execution_request.argv, request.engine)
 
         exec_ctx = _build_persistent_worktree_run_context(
@@ -747,7 +763,7 @@ def _cleanup_partial_worktree(
                     existing["manualCleanup"] = manual
                     if guarded:
                         existing["cleanupRefused"] = "source_root_guard"
-                    run_registry.write_json_atomic(snapshot_path, existing)
+                    run_registry.write_snapshot(run_path, existing)
             except (OSError, ValueError) as exc:
                 metadata_warning = (
                     "warning: partial worktree cleanup failed, and Delegate could not "

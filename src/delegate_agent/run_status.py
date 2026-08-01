@@ -201,7 +201,14 @@ def build_run_summary(
         "activityAt": activity_timestamp(state, manifest),
     }
     if manifest:
-        for key in ("modelAlias", "modelResolved", "terminalEvent", "terminalStatus"):
+        for key in (
+            "modelAlias",
+            "modelResolved",
+            "terminalEvent",
+            "terminalStatus",
+            "resumedFrom",
+            "worktreeAttachment",
+        ):
             value = manifest.get(key)
             if value is not None:
                 summary[key] = value
@@ -271,9 +278,7 @@ def list_run_summaries(
     if limit < 1:
         raise ValueError("limit must be at least 1")
     summaries: list[JsonObject] = []
-    for run_id, entry in index.get("runs", {}).items():
-        if not isinstance(entry, dict):
-            continue
+    for run_id, entry in run_registry.index_run_entries(index):
         entry_harness = entry.get("harness")
         if harness is not None and entry_harness != harness:
             continue

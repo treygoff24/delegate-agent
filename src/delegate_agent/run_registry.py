@@ -7,10 +7,11 @@ import re
 import secrets
 import shlex
 import shutil
+import stat
 import subprocess
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -28,12 +29,14 @@ from delegate_agent.private_io import (  # noqa: F401  # re-exported
     write_json_atomic,
     write_private_bytes,
     write_private_text,
+    write_private_text_atomic,
     write_text_atomic,
 )
 
 DELEGATE_DIR_NAME = ".delegate"
 GIT_EXCLUDE_ENTRY = ".delegate/"
 RUN_ID_RE = re.compile(r"^del_\d{8}T\d{6}Z_[0-9a-f]{6}$")
+ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 STDOUT_LOG = "stdout.log"
 STDERR_LOG = "stderr.log"
@@ -42,6 +45,7 @@ MANIFEST_FILE = "manifest.json"
 STATE_FILE = "state.json"
 SNAPSHOT_FILE = "snapshot.json"
 COMPLETION_REPORT_FILE = "completion-report.md"
+PROMPT_TXT_FILE = "prompt.txt"
 INDEX_VERSION = 1
 MANIFEST_SCHEMA = "delegate.manifest.v1"
 STATE_SCHEMA = "delegate.state.v1"
@@ -50,12 +54,15 @@ RUNS_SCHEMA = "delegate.runs.v1"
 RUN_OUTPUT_SCHEMA = "delegate.run-output.v1"
 RUNS_PRUNE_SCHEMA = "delegate.runs-prune.v1"
 DEFAULT_RUN_PRUNE_DAYS = 30
+LEGACY_RESUME_SCHEMA_MIN_AGE_SECONDS = 60 * 60
+LEGACY_RESUME_SCHEMA_RE = re.compile(r"^resume-schema-(?P<pid>[1-9][0-9]*)-[0-9a-f]{8,}\.json$")
 RUN_PRUNE_ERROR_EXIT_CODE = 1
 REGISTRY_LOCK_NAME = ".registry.lock"
 REGISTRY_LOCK_TIMEOUT_SECONDS = 30.0
 REGISTRY_LOCK_POLL_SECONDS = 0.05
 PRIVATE_DIR_MODE = private_io.PRIVATE_DIR_MODE
 PRIVATE_FILE_MODE = private_io.PRIVATE_FILE_MODE
+PRIVATE_RECORD_READ_MAX_BYTES = private_io.PRIVATE_RECORD_READ_MAX_BYTES
 GIT_INFO_EXCLUDE_TIMEOUT_SECONDS = 5.0
 BYTES_PER_KIB = 1 << 10
 BYTES_PER_MIB = BYTES_PER_KIB * BYTES_PER_KIB
@@ -152,8 +159,31 @@ def load_index(registry_root: Path) -> JsonObject:
     }
 
 
+def _serialized_json_size(payload: JsonObject) -> int:
+    return len((json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8"))
+
+
+def _write_bounded_json(path: Path, payload: JsonObject, *, record_name: str) -> None:
+    size = _serialized_json_size(payload)
+    if size > PRIVATE_RECORD_READ_MAX_BYTES:
+        repair = (
+            " Run 'delegate runs prune' before registering another run."
+            if record_name == "index"
+            else ""
+        )
+        raise RegistryJsonError(
+            f"{record_name} exceeds the {PRIVATE_RECORD_READ_MAX_BYTES}-byte registry "
+            f"limit ({size} bytes).{repair}"
+        )
+    write_json_atomic(path, payload)
+
+
 def save_index(registry_root: Path, index: JsonObject) -> None:
-    write_json_atomic(index_path(registry_root), index)
+    _write_bounded_json(index_path(registry_root), index, record_name="index")
+
+
+def write_snapshot(run_path: Path, snapshot: JsonObject) -> None:
+    _write_bounded_json(run_path / SNAPSHOT_FILE, snapshot, record_name="snapshot")
 
 
 def ensure_git_delegate_exclude(git_root: Path) -> None:
@@ -257,9 +287,6 @@ def register_run(
         raise ValueError(f"run id does not match expected format: {run_id}")
     with registry_lock(registry_root):
         alias = allocate_alias(registry_root, harness)
-        bind_alias_claim(registry_root, alias, run_id)
-        run_dir = runs_dir(registry_root) / run_id
-        ensure_private_dir(run_dir)
         index = load_index(registry_root)
         # Stamp an explicit registration ordinal so the latest-run tiebreaker
         # survives the persisted round trip. save_index writes with
@@ -285,19 +312,49 @@ def register_run(
             **(metadata or {}),
             "registrationOrdinal": next_ordinal,
         }
-        index["aliases"][alias] = run_id
-        index["runs"][run_id] = entry
-        save_index(registry_root, index)
+        claim_path = aliases_dir(registry_root) / alias
+        run_path = run_directory(registry_root, run_id)
+        run_directory_existed = run_path.exists()
+        try:
+            bind_alias_claim(registry_root, alias, run_id)
+            ensure_private_dir(run_path)
+            index["aliases"][alias] = run_id
+            index["runs"][run_id] = entry
+            save_index(registry_root, index)
+        except Exception:
+            claim_path.unlink(missing_ok=True)
+            if not run_directory_existed:
+                with suppress(OSError):
+                    run_path.rmdir()
+            raise
     return run_id, alias
 
 
 def lookup_run_id(index: JsonObject, handle: str) -> str | None:
-    if handle in index.get("runs", {}):
+    runs = index.get("runs", {})
+    if handle in runs:
+        if not RUN_ID_RE.fullmatch(handle):
+            raise RegistryJsonError(f"invalid run id in registry: {handle!r}")
         return handle
     aliases = index.get("aliases", {})
     if handle in aliases:
-        return aliases[handle]
+        if not ALIAS_RE.fullmatch(handle):
+            raise RegistryJsonError(f"invalid alias in registry: {handle!r}")
+        run_id = aliases[handle]
+        if not isinstance(run_id, str) or not RUN_ID_RE.fullmatch(run_id):
+            raise RegistryJsonError(f"invalid run id for alias {handle!r} in registry")
+        return run_id
     return None
+
+
+def index_run_entries(index: JsonObject) -> Iterator[tuple[str, JsonObject]]:
+    """Yield usable index entries without deriving paths from corrupt keys."""
+    runs = index.get("runs", {})
+    if not isinstance(runs, dict):
+        return
+    for run_id, entry in runs.items():
+        if isinstance(run_id, str) and RUN_ID_RE.fullmatch(run_id) and isinstance(entry, dict):
+            yield run_id, entry
 
 
 UTC_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
@@ -345,8 +402,8 @@ def latest_handle_suggestions(
     harnesses = sorted(
         {
             entry.get("harness")
-            for entry in index.get("runs", {}).values()
-            if isinstance(entry, dict) and isinstance(entry.get("harness"), str)
+            for _run_id, entry in index_run_entries(index)
+            if isinstance(entry.get("harness"), str)
         }
     )
     for harness in harnesses:
@@ -496,11 +553,23 @@ def add_run_target_resolution(payload: JsonObject, target: RunTarget) -> None:
 
 
 def run_directory(registry_root: Path, run_id: str) -> Path:
-    return runs_dir(registry_root) / run_id
+    if not RUN_ID_RE.fullmatch(run_id):
+        raise RegistryJsonError(f"invalid run id for registry path: {run_id!r}")
+    root = runs_dir(registry_root).resolve(strict=False)
+    path = (root / run_id).resolve(strict=False)
+    try:
+        path.relative_to(root)
+    except ValueError:
+        raise RegistryJsonError(f"run path escapes registry: {run_id!r}") from None
+    return path
 
 
 def suggest_handles(index: JsonObject, handle: str, *, limit: int = 8) -> list[str]:
-    aliases = sorted(index.get("aliases", {}).keys())
+    aliases = sorted(
+        alias
+        for alias in index.get("aliases", {})
+        if isinstance(alias, str) and ALIAS_RE.fullmatch(alias)
+    )
     if not aliases:
         return []
     exact_ci = [alias for alias in aliases if alias.lower() == handle.lower()]
@@ -547,13 +616,7 @@ def resolve_handle(
     run_id = lookup_run_id(index, handle)
     if run_id is None:
         return ResolveResult(None, None, tuple(suggest_handles(index, handle)))
-    alias = index.get("runs", {}).get(run_id, {}).get("alias")
-    if not isinstance(alias, str):
-        alias = None
-        for candidate, candidate_id in index.get("aliases", {}).items():
-            if candidate_id == run_id:
-                alias = candidate
-                break
+    alias = alias_for_run(index, run_id)
     return ResolveResult(run_id, alias, (), handle, alias or run_id, "literal")
 
 
@@ -645,10 +708,10 @@ def alias_for_run(index: JsonObject, run_id: str) -> str | None:
     entry = index.get("runs", {}).get(run_id)
     if isinstance(entry, dict):
         alias = entry.get("alias")
-        if isinstance(alias, str):
+        if isinstance(alias, str) and ALIAS_RE.fullmatch(alias):
             return alias
     for candidate, candidate_id in index.get("aliases", {}).items():
-        if candidate_id == run_id and isinstance(candidate, str):
+        if candidate_id == run_id and isinstance(candidate, str) and ALIAS_RE.fullmatch(candidate):
             return candidate
     return None
 
@@ -674,9 +737,9 @@ def _write_worktree_status(
         raise ValueError(f"worktree status must be one of: {', '.join(sorted(valid_statuses))}")
     run_path = run_directory(registry_root, run_id)
     state_path = run_path / STATE_FILE
-    if not state_path.exists():
+    state = read_json_object(state_path)
+    if state is None:
         raise FileNotFoundError(f"State file not found for run {run_id}")
-    state: JsonObject = json.loads(state_path.read_text(encoding="utf-8"))
     state["worktreeStatus"] = status
     if removed_at is not None:
         state["worktreeRemovedAt"] = removed_at
@@ -773,8 +836,8 @@ def _latest_run_id_for_harness(
     # which is chronologically correct because new runs ARE later. Using the
     # run_id suffix here would be wrong because that suffix is random, so
     # lexicographic run_id order can rank an older run as latest.
-    for insertion_index, (run_id, entry) in enumerate(index.get("runs", {}).items()):
-        if not isinstance(entry, dict) or entry.get("harness") != harness:
+    for insertion_index, (run_id, entry) in enumerate(index_run_entries(index)):
+        if entry.get("harness") != harness:
             continue
         entry_model_alias = entry.get("modelAlias")
         if (
@@ -874,6 +937,7 @@ def empty_run_prune_payload(*, older_than_days: int, dry_run: bool) -> JsonObjec
         "removed": [],
         "skipped": [],
         "errors": [],
+        "staleResumeSchemas": [],
     }
 
 
@@ -895,18 +959,63 @@ def prune_runs(
     removed: list[JsonObject] = []
     skipped: list[JsonObject] = []
     errors: list[JsonObject] = []
+    stale_resume_schemas: list[str] = []
     index_changed = False
 
     with registry_lock(registry_root):
+        tmp_dir = registry_root / "tmp"
+        if tmp_dir.is_dir() and not tmp_dir.is_symlink():
+            for path in tmp_dir.iterdir():
+                try:
+                    match = LEGACY_RESUME_SCHEMA_RE.fullmatch(path.name)
+                    if match is None:
+                        continue
+                    info = path.lstat()
+                    if not (path.is_symlink() or stat.S_ISREG(info.st_mode)):
+                        continue
+                    pid = int(match.group("pid"))
+                    try:
+                        os.kill(pid, 0)
+                    except ProcessLookupError:
+                        pass
+                    except PermissionError:
+                        continue
+                    else:
+                        continue
+                    if time.time() - info.st_mtime < LEGACY_RESUME_SCHEMA_MIN_AGE_SECONDS:
+                        continue
+                    stale_resume_schemas.append(path.name)
+                    if not dry_run:
+                        path.unlink()
+                except OSError as exc:
+                    errors.append(
+                        {
+                            "code": "stale_schema_remove_failed",
+                            "message": str(exc),
+                            "path": str(path),
+                        }
+                    )
         index = load_index(registry_root)
         # Like worktree gc, treat unknown/unrecorded status as possibly present:
         # only records whose worktree is affirmatively gone are prunable.
+        persistent_records = worktree_records.load_persistent_records(registry_root)
         present_persistent_worktree_run_ids = {
             record["runId"]
-            for record in worktree_records.load_persistent_records(registry_root)
+            for record in persistent_records
             if record.get("registryWorktreeStatus")
             not in (worktree_records.STATUS_REMOVED, worktree_records.STATUS_MISSING)
         }
+        # A worktree owner whose path has a live attached resume run must keep
+        # its record even if its own worktree status is stale: pruning it would
+        # orphan the attachment lease derivation mid-run.
+        live_attachments_by_owner_id: dict[str, list[JsonObject]] = {}
+        for record in persistent_records:
+            execution_cwd = record.get("executionCwd")
+            if not isinstance(execution_cwd, str):
+                continue
+            attached_runs = worktree_records.live_attachments_for_path(registry_root, execution_cwd)
+            if attached_runs:
+                live_attachments_by_owner_id[record["runId"]] = attached_runs
         for run_id, index_entry in list(index.get("runs", {}).items()):
             if not isinstance(run_id, str) or not isinstance(index_entry, dict):
                 continue
@@ -919,6 +1028,17 @@ def prune_runs(
                 continue
             state = load_run_state_or_none(registry_root, run_id)
             effective_status = run_status.effective_status(state)
+            attached_runs = live_attachments_by_owner_id.get(run_id)
+            if attached_runs:
+                skipped_entry = _run_prune_ref(
+                    index,
+                    run_id,
+                    effective_status,
+                    reason="live_attachment",
+                )
+                skipped_entry["attachedRuns"] = attached_runs
+                skipped.append(skipped_entry)
+                continue
             if run_id in present_persistent_worktree_run_ids:
                 skipped.append(
                     _run_prune_ref(
@@ -980,6 +1100,7 @@ def prune_runs(
     payload["removed"] = removed
     payload["skipped"] = skipped
     payload["errors"] = errors
+    payload["staleResumeSchemas"] = stale_resume_schemas
     if errors:
         payload["ok"] = False
         payload["exitCode"] = RUN_PRUNE_ERROR_EXIT_CODE

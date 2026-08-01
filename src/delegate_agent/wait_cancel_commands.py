@@ -508,7 +508,7 @@ def _persist_cancelled_terminal_locked(
             *existing,
             *(warning for warning in warnings if warning not in existing),
         ]
-    run_registry.write_json_atomic(run_path / run_registry.SNAPSHOT_FILE, snapshot)
+    run_registry.write_snapshot(run_path, snapshot)
 
 
 def _cancel_target(registry_root: Path, target: run_registry.RunTarget) -> JsonObject:

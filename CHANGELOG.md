@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.0] - 2026-07-31
+
+### Added
+
+- Added `delegate resume` for relaunching terminal Runs with a bounded,
+  untrusted continuation built from the original prompt and prior result.
+  Resume preserves compatible launch settings, supports explicit cross-engine
+  resumes, and attaches to an existing persistent worktree with a live cleanup
+  lease rather than creating a second worktree.
+- Added private `prompt.txt` capture for new tracked Runs so their original
+  prompts can be resumed without placing prompt text in the Manifest or
+  Snapshot. Legacy records without that capture fail closed with a clear
+  `resume_prompt_unavailable` error.
+
 ## [0.23.0] - 2026-07-30
 
 ### Added
@@ -769,6 +783,7 @@ Usage-audit fix wave: 82 sessions and 1,241 delegate invocations from one week o
 
 - Releases before 0.1.3 predate this changelog.
 
+[0.24.0]: https://github.com/treygoff24/delegate-agent/compare/v0.23.0...v0.24.0
 [0.23.0]: https://github.com/treygoff24/delegate-agent/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/treygoff24/delegate-agent/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/treygoff24/delegate-agent/compare/v0.20.0...v0.21.0

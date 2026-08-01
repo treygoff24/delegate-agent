@@ -755,6 +755,67 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         ),
         see_also=("cursor", "codex", "droid", "claude", "grok", "agent-help"),
     ),
+    "resume": CommandSpec(
+        name="resume",
+        summary=("Relaunch a terminal Run as a NEW Run with a synthesized continuation prompt."),
+        usage=(
+            'delegate [--json] [--cwd PATH] resume [resume-options] <alias|runId> ["extra instructions"...]',
+        ),
+        arguments=(
+            ArgSpec(
+                "handle",
+                True,
+                "Alias or run id of a finished (succeeded/failed/cancelled/stale) Run.",
+            ),
+            ArgSpec(
+                "extra instructions",
+                False,
+                "Continuation instructions; required when the source Run succeeded.",
+            ),
+        ),
+        options=(
+            OptionSpec("--engine", "ENGINE", "Resume on a different engine (cross-engine resume)."),
+            OptionSpec("--model", "MODEL", "Override the inherited model selection."),
+            OptionSpec("--reasoning-effort", "LEVEL", "Override the inherited reasoning effort."),
+            OptionSpec("--fast", None, "Codex only: request the Fast service tier."),
+            OptionSpec("--no-fast", None, "Codex only: pin the default service tier."),
+            OptionSpec("--progress", None, "Enable the stderr progress heartbeat."),
+            OptionSpec("--no-progress", None, "Disable the stderr progress heartbeat."),
+            OptionSpec("--timeout", "SEC", "Override the inherited run timeout."),
+            OptionSpec("--output-schema", "FILE", "Override the inherited output schema."),
+            OptionSpec("--no-output-schema", None, "Drop the inherited output schema."),
+            OptionSpec(
+                "--include-dirty",
+                None,
+                "Creation-only; rejected when resume attaches to a persistent worktree.",
+            ),
+            OptionSpec(
+                "--dry-run", None, "Show the resolved continuation launch without executing."
+            ),
+        ),
+        examples=(
+            'delegate resume codex-3 "the tests now pass; finish the docs"',
+            'delegate --json resume --engine claude grok-2 "continue where grok stopped"',
+            "delegate resume --dry-run cursor-1",
+        ),
+        notes=(
+            "The new Run inherits engine, mode, model, effort, timeout, group, and "
+            "commit policy from the source Run's manifest; resume options and "
+            "global --group/--auth-profile override per field. Mode is never "
+            "overridable, and call runs cannot be resumed.",
+            "The continuation prompt is synthesized plain text: the original "
+            "prompt verbatim, a bounded prior-run report/digest framed as data, "
+            "and your extra instructions last. Cross-engine resume therefore "
+            "works, but discloses the prior run's content to the new provider.",
+            "A source Run that ran in a persistent worktree resumes by ATTACHING "
+            "to that worktree; worktree remove/prune refuse while an attached "
+            "resume run is live. Distinct from `workflow run --resume` (workflow "
+            "replay).",
+            "Resume options must appear before the handle; tokens after the handle "
+            "are continuation instructions, including flag-like text.",
+        ),
+        see_also=("runs", "snapshot", "run-output", "worktree show"),
+    ),
     "snapshot": CommandSpec(
         name="snapshot",
         summary="Print a bounded snapshot of a tracked run.",

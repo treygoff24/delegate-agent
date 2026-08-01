@@ -299,6 +299,7 @@ delegate runs --recent
 delegate ps                   # active and stale tracked runs
 delegate snapshot <alias-or-runId>
 delegate run-output <alias-or-runId>
+delegate resume <alias-or-runId> "Continue from the previous result and run the tests."
 delegate runs prune --dry-run # preview GC of terminal run records older than 30 days
 ```
 
@@ -307,6 +308,12 @@ resolves to the latest matching run**, so `delegate run-output codex` reads the
 newest codex run and `delegate run-output codex:glm` the newest matching
 model. Envelopes echo `requestedHandle`/`resolvedHandle`/`resolutionKind` so you
 can confirm which run you addressed.
+
+`resume` creates a new Run from a terminal source Run. It carries forward the
+source mode and compatible launch settings, places the prior prompt and bounded
+result before your new instructions, and attaches to an existing persistent
+worktree instead of creating another one. Use `--dry-run` to inspect the
+resolved launch without creating a Run.
 
 `run-output` defaults to the best available parent-facing output: a completion
 report when present, a recovered final assistant message when possible, or

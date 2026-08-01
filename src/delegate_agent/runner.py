@@ -25,6 +25,7 @@ from delegate_agent import (
     reasoning,
     redaction,
     rendering,
+    resume_command,
     run_metadata,
     run_registry,
     seatbelt,
@@ -32,6 +33,7 @@ from delegate_agent import (
 )
 from delegate_agent import config as delegate_config
 from delegate_agent.constants import PROMPT_INSTRUCTION_MODE_SLASH, PROMPT_INSTRUCTION_MODE_WRAPPED
+from delegate_agent.errors import DelegateError
 from delegate_agent.json_types import JsonObject
 
 STDOUT_LOG = run_registry.STDOUT_LOG
@@ -41,6 +43,7 @@ MANIFEST_FILE = run_registry.MANIFEST_FILE
 STATE_FILE = run_registry.STATE_FILE
 SNAPSHOT_FILE = run_registry.SNAPSHOT_FILE
 COMPLETION_REPORT_FILE = run_registry.COMPLETION_REPORT_FILE
+PROMPT_TXT_FILE = run_registry.PROMPT_TXT_FILE
 
 PROGRESS_PERSIST_LINE_INTERVAL = 10
 PROGRESS_PERSIST_TIME_INTERVAL_SEC = 0.5
@@ -145,6 +148,13 @@ class RunContext:
     call_read_only: bool = False
     pure: bool = False
     prompt_instruction_mode: str = PROMPT_INSTRUCTION_MODE_WRAPPED
+    source_prompt: str | None = None
+    progress_requested: str | None = None
+    timeout_seconds: int | None = None
+    output_schema_text: str | None = None
+    agent: str | None = None
+    resumed_from: JsonObject | None = None
+    worktree_attachment: JsonObject | None = None
 
 
 def write_manifest(run_path: Path, manifest: JsonObject) -> None:
@@ -156,7 +166,7 @@ def write_state(run_path: Path, state: JsonObject) -> None:
 
 
 def write_snapshot(run_path: Path, snapshot: JsonObject) -> None:
-    run_registry.write_json_atomic(run_path / SNAPSHOT_FILE, snapshot)
+    run_registry.write_snapshot(run_path, snapshot)
 
 
 def open_events_log(run_path: Path) -> TextIO:
@@ -260,6 +270,20 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
     if ctx.include_dirty:
         payload["includeDirty"] = True
         payload["syncedFiles"] = ctx.synced_files
+    if ctx.source_prompt is not None:
+        payload["promptFile"] = PROMPT_TXT_FILE
+    if ctx.progress_requested is not None:
+        payload["progressRequested"] = ctx.progress_requested
+    if ctx.timeout_seconds is not None:
+        payload["timeoutSeconds"] = ctx.timeout_seconds
+    if ctx.output_schema_text is not None:
+        payload["outputSchema"] = ctx.output_schema_text
+    if ctx.agent is not None:
+        payload["agent"] = ctx.agent
+    if ctx.resumed_from is not None:
+        payload["resumedFrom"] = ctx.resumed_from
+    if ctx.worktree_attachment is not None:
+        payload["worktreeAttachment"] = ctx.worktree_attachment
     return payload
 
 
@@ -545,7 +569,7 @@ def write_completion_report(run_path: Path, text: str) -> bool:
     if not cleaned:
         return False
     path = run_path / COMPLETION_REPORT_FILE
-    run_registry.write_private_text(path, cleaned + "\n")
+    run_registry.write_private_text_atomic(path, cleaned + "\n")
     return True
 
 
@@ -1017,14 +1041,20 @@ def _materialize_output_schema_argv(
     *,
     output_schema_text: str | None,
     output_schema_path: str | None,
+    destination_dir: Path | None = None,
 ) -> tuple[list[str], Path | None]:
     if output_schema_text is None:
         return list(argv), None
     if output_schema_path is None or output_schema_path not in argv:
         raise ValueError("output_schema_path must be present in argv")
-    temp_dir = Path(tempfile.mkdtemp(prefix="delegate-schema-"))
-    os.chmod(temp_dir, run_registry.PRIVATE_DIR_MODE)
-    schema_path = temp_dir / "schema.json"
+    temp_dir: Path | None = None
+    if destination_dir is None:
+        temp_dir = Path(tempfile.mkdtemp(prefix="delegate-schema-"))
+        os.chmod(temp_dir, run_registry.PRIVATE_DIR_MODE)
+        schema_path = temp_dir / "schema.json"
+    else:
+        run_registry.ensure_private_dir(destination_dir)
+        schema_path = destination_dir / "output-schema.json"
     try:
         run_registry.write_private_text(schema_path, output_schema_text)
     except BaseException:
@@ -1090,7 +1120,10 @@ class TrackedFinalization:
 
 
 def _persistent_work_summary(ctx: RunContext) -> JsonObject | None:
-    if ctx.isolation_lifecycle != "persistent":
+    # Attached resume runs share the owner's worktree; their commit accounting
+    # keys on the attachment-start HEAD (recorded in creation_context by the
+    # attach executor), not the owner's creation base.
+    if ctx.isolation_lifecycle not in ("persistent", "attached"):
         return None
     return worktree_summary.build_work_summary(
         source_git_root=ctx.source_git_root,
@@ -1122,8 +1155,14 @@ def _final_extra(ctx: RunContext, capture_exit_code: int) -> tuple[int, JsonObje
         extra["warnings"] = [
             "Child command created commits; review the persistent worktree before integration."
         ]
+        # Attached resume runs have no worktree record of their own; point
+        # inspection commands at the owning run's alias.
+        attachment = ctx.worktree_attachment or {}
+        show_handle = (
+            attachment.get("sourceAlias") if ctx.isolation_lifecycle == "attached" else None
+        )
         extra["nextActions"] = [
-            f"delegate worktree show {ctx.alias}",
+            f"delegate worktree show {show_handle or ctx.alias}",
             f"git -C {shlex.quote(ctx.execution_cwd)} log --oneline --decorate --max-count=5 HEAD",
         ]
         extra["commitsCreatedByChild"] = True
@@ -1223,6 +1262,11 @@ def _prepare_tracked_run(
     if ctx.mode == "safe" or ctx.effective_isolation != "none":
         scratch_dir = run_path / "scratch"
         run_registry.ensure_private_dir(scratch_dir)
+    if ctx.source_prompt is not None:
+        # The user prompt exactly as resolved, before instruction framing, so
+        # `delegate resume` can rebuild the original task text. Verbatim by
+        # design; deleted only by `runs prune` (never archived).
+        run_registry.write_private_text(run_path / PROMPT_TXT_FILE, ctx.source_prompt)
     write_manifest(run_path, build_manifest(ctx, manifest_argv or argv))
 
     stdout_log = run_path / STDOUT_LOG
@@ -2130,6 +2174,7 @@ def execute_tracked(
         launch_argv,
         output_schema_text=output_schema_text,
         output_schema_path=output_schema_path,
+        destination_dir=files.run_path if ctx.resumed_from is not None else None,
     )
     retry_workspace = ctx.execution_cwd if ctx.isolated_workspace else cwd
     workspace_baseline = (
@@ -2313,6 +2358,17 @@ def execute_tracked(
                     agent_config_placeholder=agent_config_placeholder,
                     agent_config_dir=files.run_path,
                 )
+                if (
+                    ctx.resumed_from is not None
+                    and ctx.engine in resume_command.ARGV_PROMPT_TRANSPORT_ENGINES
+                    and retry_stdin is None
+                ):
+                    try:
+                        resume_command.enforce_resume_prompt_size(ctx.engine, retry_argv[-1])
+                    except DelegateError as exc:
+                        error = RunnerLaunchError(exc.error, exc.message)
+                        _record_tracked_launch_failure(files, ctx, error, prior_capture=capture)
+                        raise error from exc
                 _prepend_attempt_delimiter(files.stderr_log, label="primary")
                 retry_capture = run_attempt(
                     retry_argv,

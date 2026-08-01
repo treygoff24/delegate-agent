@@ -113,6 +113,9 @@ OUTPUT_SCHEMA_COMPLETION_REPORT_WARNING = (
     "suppressed for this run."
 )
 CALL_TEMP_CWD_PLACEHOLDER = "<delegate-call-temp-cwd>"
+# This placeholder is internal-only: a resume's verified schema text is held
+# in memory until runner launch-time materialization.
+INLINE_OUTPUT_SCHEMA_PLACEHOLDER = "<delegate-inline-output-schema>"
 CODEX_HARNESS_DEFAULT_REASONING_EFFORTS = ("low", "medium", "high", "xhigh")
 DEVIN_READ_ONLY_AGENT_CONFIG = {
     "permissions": {
@@ -381,18 +384,22 @@ def resolve_output_schema(engine: str, output_schema: object) -> str | None:
 
 
 def _preflight_codex_output_schema(
-    engine: str, output_schema: str | None
+    engine: str, output_schema: str | None, *, schema_text: str | None = None
 ) -> tuple[str | None, tuple[str, ...]]:
-    if engine != "codex" or output_schema is None:
+    if engine != "codex" or (output_schema is None and schema_text is None):
         return None, ()
     try:
-        schema = json.loads(Path(output_schema).read_text(encoding="utf-8"))
+        schema = json.loads(
+            schema_text
+            if schema_text is not None
+            else Path(output_schema).read_text(encoding="utf-8")
+        )
     except json.JSONDecodeError as exc:
         raise DelegateError(
             "invalid_output_schema",
             f"Codex output schema is not valid JSON at line {exc.lineno}, column {exc.colno}.",
         ) from exc
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise DelegateError(
             "invalid_output_schema", f"Output schema is not readable: {output_schema}"
         ) from exc
@@ -599,7 +606,10 @@ def _validate_forbid_commit(
             "available here. Omit --forbid-commit (the child may commit), or run "
             "from a Git workspace.",
         )
-    if isolation_context is None or isolation_context.isolation_lifecycle != "persistent":
+    if isolation_context is None or isolation_context.isolation_lifecycle not in (
+        "persistent",
+        "attached",
+    ):
         raise DelegateError(
             "invalid_option_combination",
             "--forbid-commit requires --isolation worktree so Delegate can enforce "
@@ -1235,7 +1245,11 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
             _reject_droid_model_conflict(launch.model_alias, launch.model)
             if launch.model_alias is not None:
                 _validate_droid_model_alias(config, launch.model_alias)
-        output_schema = resolve_output_schema(launch.engine, launch.output_schema)
+        output_schema = (
+            INLINE_OUTPUT_SCHEMA_PLACEHOLDER
+            if launch.output_schema_text is not None
+            else resolve_output_schema(launch.engine, launch.output_schema)
+        )
         raw_prompt = resolve_prompt(launch.prompt_parts, launch.prompt_file, stdin)
         if read_only and delegate_runner.detect_slash_command(raw_prompt):
             raise DelegateError(
@@ -1264,6 +1278,7 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
                 forbid_commit=False,
                 auth_profile_override=global_options.auth_profile,
                 output_schema=output_schema,
+                output_schema_text=launch.output_schema_text,
                 cleanup_workspace=cleanup_workspace,
                 call_read_only=read_only,
                 pure=pure,
@@ -1271,6 +1286,7 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
                 group=global_options.group,
                 agent=launch.agent,
                 model_override=cli_model_override,
+                source_prompt=raw_prompt,
             )
         except BaseException:
             if cleanup_workspace:
@@ -1290,10 +1306,17 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
             "--progress is incompatible with --pass-through.",
         )
     progress_initial_delay_sec, progress_interval_sec = resolve_progress_timing(config)
-    _validate_output_schema_mode(launch.engine, launch.mode, launch.output_schema)
-    output_schema = resolve_output_schema(launch.engine, launch.output_schema)
+    _validate_output_schema_mode(
+        launch.engine, launch.mode, launch.output_schema or launch.output_schema_text
+    )
+    output_schema = (
+        INLINE_OUTPUT_SCHEMA_PLACEHOLDER
+        if launch.output_schema_text is not None
+        else resolve_output_schema(launch.engine, launch.output_schema)
+    )
     workspace = resolve_workspace(global_options.cwd)
     prompt = resolve_prompt(launch.prompt_parts, launch.prompt_file, stdin)
+    source_prompt = prompt
 
     # Capture git metadata for isolation planning (read-only, safe in dry-run too).
     git_root, git_common_dir, git_head_oid, git_head_ref, git_branch = capture_git_metadata(
@@ -1389,12 +1412,15 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         include_dirty=launch.include_dirty,
         auth_profile_override=global_options.auth_profile,
         output_schema=output_schema,
+        output_schema_text=launch.output_schema_text,
         warnings=(*output_schema_warnings, *isolation_warnings),
         timeout=launch.timeout,
         group=global_options.group,
         prompt_instruction_mode=instruction_mode,
         agent=launch.agent,
         model_override=cli_model_override,
+        source_prompt=source_prompt,
+        progress_requested=launch.progress_intent,
     )
 
 
@@ -1594,6 +1620,7 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
                 ),
                 agent=json_agent,
                 model_override=json_model_override,
+                source_prompt=call_prompt,
             )
         except BaseException:
             if cleanup_workspace:
@@ -1689,6 +1716,7 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         output_schema,
     )
     prompt = validate_prompt(prompt)
+    source_prompt = prompt
     instruction_mode = resolve_input_json_prompt_instruction_mode(
         raw_instruction_mode,
         prompt,
@@ -1731,6 +1759,8 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         model_override=json_model_override,
         pure=raw_pure,
         timeout=raw_timeout,
+        source_prompt=source_prompt,
+        progress_requested=raw_progress_intent,
     )
 
 
@@ -1755,6 +1785,7 @@ def build_request(
     include_dirty: bool = False,
     auth_profile_override: str | None = None,
     output_schema: str | None = None,
+    output_schema_text: str | None = None,
     warnings: tuple[str, ...] = (),
     cleanup_workspace: bool = False,
     call_read_only: bool = False,
@@ -1765,6 +1796,8 @@ def build_request(
     prompt_instruction_mode: str = PROMPT_INSTRUCTION_MODE_WRAPPED,
     agent: str | None = None,
     model_override: str | None = None,
+    source_prompt: str | None = None,
+    progress_requested: str | None = None,
 ) -> Request:
     _validate_agent_option(engine, agent)
     if not isinstance(workspace, ResolvedWorkspace):
@@ -1780,8 +1813,15 @@ def build_request(
     )
     if fast is not None and engine != "codex":
         raise DelegateError("unsupported_fast", "fast is only supported by codex.")
-    _validate_output_schema_mode(engine, mode, output_schema)
-    output_schema = resolve_output_schema(engine, output_schema)
+    _validate_output_schema_mode(engine, mode, output_schema or output_schema_text)
+    if output_schema_text is not None:
+        if not output_schema_text:
+            raise DelegateError("invalid_output_schema", "outputSchema must be a non-empty string.")
+        if output_schema not in (None, INLINE_OUTPUT_SCHEMA_PLACEHOLDER):
+            raise ValueError("inline output schema cannot also name a schema path")
+        output_schema = INLINE_OUTPUT_SCHEMA_PLACEHOLDER
+    else:
+        output_schema = resolve_output_schema(engine, output_schema)
     if pure:
         if mode != MODE_CALL:
             raise DelegateError("unsupported_pure_call", "--pure only applies to call mode.")
@@ -1828,6 +1868,7 @@ def build_request(
             profile_resolution=profile_resolution,
             discovery=snapshot,
             output_schema=output_schema,
+            output_schema_text=output_schema_text,
             warnings=(*warnings, *extra_warnings),
             cleanup_workspace=cleanup_workspace,
             call_read_only=call_read_only,
@@ -1838,6 +1879,8 @@ def build_request(
             prompt_instruction_mode=prompt_instruction_mode,
             agent=agent,
             model_override=model_override,
+            source_prompt=source_prompt,
+            progress_requested=progress_requested,
         )
 
     def reprobed() -> tuple[JsonObject | None, tuple[str, ...]] | None:
@@ -2228,7 +2271,7 @@ def _claude_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     if build.output_schema is not None:
         try:
             schema_contents = Path(build.output_schema).read_text(encoding="utf-8")
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError) as exc:
             raise DelegateError(
                 "invalid_output_schema", f"Output schema is not readable: {build.output_schema}"
             ) from exc
@@ -2675,6 +2718,7 @@ def _build_request_for_workspace(
     profile_resolution: profiles.ProfileResolution,
     discovery: JsonObject | None,
     output_schema: str | None,
+    output_schema_text: str | None,
     warnings: tuple[str, ...],
     cleanup_workspace: bool,
     call_read_only: bool = False,
@@ -2685,8 +2729,30 @@ def _build_request_for_workspace(
     prompt_instruction_mode: str = PROMPT_INSTRUCTION_MODE_WRAPPED,
     agent: str | None = None,
     model_override: str | None = None,
+    source_prompt: str | None = None,
+    progress_requested: str | None = None,
 ) -> Request:
-    output_schema_text, schema_warnings = _preflight_codex_output_schema(engine, output_schema)
+    materialized_schema_text, schema_warnings = _preflight_codex_output_schema(
+        engine, output_schema, schema_text=output_schema_text
+    )
+    output_schema_record_text = (
+        materialized_schema_text if engine == "codex" and mode != MODE_CALL else None
+    )
+    if (
+        output_schema is not None
+        and output_schema_record_text is None
+        and output_schema_text is None
+        and engine == "codex"
+        and mode != MODE_CALL
+    ):
+        # Record the schema text in the manifest (codex stores its normalized
+        # preflight form above); resume re-materializes it to a file at launch.
+        try:
+            output_schema_record_text = Path(output_schema).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise DelegateError(
+                "invalid_output_schema", f"Output schema is not readable: {output_schema}"
+            ) from exc
     warnings = (*warnings, *schema_warnings)
     if prompt_instruction_mode != PROMPT_INSTRUCTION_MODE_SLASH:
         prompt = _append_safe_dirty_tree_note(prompt, resolved, mode, isolation_context)
@@ -2732,7 +2798,7 @@ def _build_request_for_workspace(
             capability_model=parts.capability_model,
             capability_model_source=parts.capability_model_source,
             output_schema=output_schema,
-            output_schema_text=output_schema_text,
+            output_schema_text=materialized_schema_text,
             pure=pure,
             timeout=timeout,
             dry_run=dry_run,
@@ -2768,6 +2834,10 @@ def _build_request_for_workspace(
             group=group,
             workflow_agent_key=workflow_agent_key,
             prompt_instruction_mode=prompt_instruction_mode,
+            source_prompt=source_prompt,
+            progress_requested=progress_requested,
+            output_schema_record_text=output_schema_record_text,
+            agent=agent,
         ),
         config,
         resolution=profile_resolution,

@@ -27,16 +27,20 @@ from delegate_agent.constants import (
     PROMPT_INSTRUCTION_MODE_WRAPPED,
 )
 from delegate_agent.json_types import JsonObject, JsonValue
+from delegate_agent.prompt_transport import (
+    ARGV_PROMPT_GUARD_BYTES,
+    ARGV_PROMPT_TRANSPORT_ENGINES,
+)
 from delegate_agent.workflows import registry
 from delegate_agent.workflows import schema as workflow_schema
 from delegate_agent.workflows import script as workflow_script
 
-PROMPT_ARGV_GUARD_BYTES = 100 * 1024
+PROMPT_ARGV_GUARD_BYTES = ARGV_PROMPT_GUARD_BYTES
 DEFAULT_ENGINE = "codex"
 DEFAULT_MODE = "safe"
 DEFAULT_STRUCTURED_RETRIES = 2
 DEFAULT_ITEM_THREADS = 64
-ENGINE_ARGV_TRANSPORT = {"cursor", "kimi"}
+ENGINE_ARGV_TRANSPORT = frozenset(ARGV_PROMPT_TRANSPORT_ENGINES)
 WORKFLOW_LOCK_FD_ENV = "DELEGATE_WORKFLOW_LOCK_FD"
 KILL_SUPERVISOR_WAIT_SECONDS = 5.0
 KILL_SUPERVISOR_FORCE_WAIT_SECONDS = 2.0

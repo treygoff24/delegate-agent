@@ -17,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from delegate_agent import run_registry
+from delegate_agent import run_registry, worktree_records
 from delegate_agent.git_utils import GIT_TIMEOUT_RETURN_CODE
 from delegate_agent.isolation import target_contains_source_root
 from delegate_agent.json_types import JsonObject
@@ -532,6 +532,36 @@ def remove_worktree(
 
         if status == STATUS_REMOVED:
             return _remove_already_removed(record, alias=alias, options=options)
+
+        execution_cwd = record.get("executionCwd")
+        if status in (STATUS_PRESENT, STATUS_UNKNOWN) and isinstance(execution_cwd, str):
+            attachments = worktree_records.live_attachments_for_path(registry_root, execution_cwd)
+            if attachments:
+                attached = ", ".join(
+                    str(item.get("alias") or item.get("runId")) for item in attachments
+                )
+                corrupt = ", ".join(
+                    str(item.get("alias") or item.get("runId"))
+                    for item in attachments
+                    if item.get("warning") == "corrupt_attachment"
+                )
+                warning = (
+                    f" Warning: corrupt attachment record for {corrupt}; refusing removal."
+                    if corrupt
+                    else ""
+                )
+                raise wm.WorktreeManagementError(
+                    wm._error_payload(
+                        "worktree_attached",
+                        f"Worktree is in use by attached resume run(s): {attached}. "
+                        f"Wait for or cancel the attached run before removing.{warning}",
+                        record=record,
+                        next_actions=[
+                            f"delegate wait {attached.split(', ')[0]}",
+                            f"delegate cancel {attached.split(', ')[0]}",
+                        ],
+                    )
+                )
 
         plan = _build_remove_worktree_plan(
             record,

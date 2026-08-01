@@ -2947,6 +2947,86 @@ class RunnerCaptureTests(unittest.TestCase):
             )
             self.assertEqual(payload["stderrBytes"], len(primary_child) + len(retry_stderr))
 
+    def test_safe_resume_empty_retry_refuses_argv_overflow_before_spawning(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            script = Path(workspace) / "cursor"
+            script.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            script.chmod(0o755)
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="cursor")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="cursor",
+                engine="cursor",
+                mode="safe",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-07-31T12:00:00Z",
+                resumed_from={"runId": "del_source", "alias": "cursor-1"},
+            )
+            prompt = "x" * (self.runner.resume_command.ARGV_PROMPT_GUARD_BYTES - 1)
+
+            with self.assertRaises(self.runner.RunnerLaunchError) as caught:
+                self.runner.execute_tracked(
+                    [str(script), prompt],
+                    workspace,
+                    ctx,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                    manifest_argv=[str(script), "<prompt>"],
+                )
+
+            self.assertEqual(caught.exception.error, "resume_prompt_too_large")
+            state = json.loads(
+                (self.registry.run_directory(root, run_id) / self.registry.STATE_FILE).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(state["status"], "failed")
+
+    def test_non_resume_empty_retry_does_not_raise_resume_prompt_overflow(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            script = Path(workspace) / "cursor"
+            script.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            script.chmod(0o755)
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="cursor")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="cursor",
+                engine="cursor",
+                mode="safe",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-07-31T12:00:00Z",
+            )
+            prompt = "x" * (self.runner.resume_command.ARGV_PROMPT_GUARD_BYTES - 1)
+
+            code, payload = self.runner.execute_tracked(
+                [str(script), prompt],
+                workspace,
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+                manifest_argv=[str(script), "<prompt>"],
+            )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(payload["emptyRetry"], {"attempted": True, "resolved": False})
+            self.assertNotEqual(payload.get("error"), "resume_prompt_too_large")
+
     def test_safe_empty_retry_preserves_both_attempts_and_stays_empty(self):
         with tempfile.TemporaryDirectory() as workspace:
             script = Path(workspace) / "codex"

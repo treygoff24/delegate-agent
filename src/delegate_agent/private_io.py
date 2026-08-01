@@ -13,12 +13,73 @@ from delegate_agent.json_types import JsonObject, JsonValue
 
 PRIVATE_DIR_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
+PRIVATE_RECORD_READ_MAX_BYTES = 4 * 1024 * 1024
 _DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 _NOFOLLOW_FLAGS = getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
 
 
 class RegistryJsonError(ValueError):
     """Raised when an existing registry JSON file cannot be trusted."""
+
+
+class BoundedReadError(ValueError):
+    """A record file could not be read within the bounded-trust contract.
+
+    ``reason`` is one of: ``not_found``, ``not_regular``, ``multiple_links``, ``too_large``,
+    ``undecodable``, ``unreadable``. Callers map these onto their own
+    user-facing error codes.
+    """
+
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
+def read_private_text_bounded(path: Path, *, max_bytes: int) -> str:
+    """Read a registry-owned text file through one bounded, no-follow reader.
+
+    Registry record content is potentially child-tampered after write (work
+    children run in the workspace that owns ``.delegate``), so every parent
+    read of record text refuses symlinks, hard links, non-regular files, oversized
+    content, and invalid UTF-8 instead of trusting the path.
+    """
+    try:
+        fd = open_private_file(path, os.O_RDONLY)
+    except FileNotFoundError:
+        raise BoundedReadError("not_found", f"record file not found: {path}") from None
+    except OSError as exc:
+        raise BoundedReadError("unreadable", f"could not open record file {path}: {exc}") from exc
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise BoundedReadError("not_regular", f"record file is not a regular file: {path}")
+        if info.st_nlink != 1:
+            raise BoundedReadError(
+                "multiple_links", f"record file has {info.st_nlink} links: {path}"
+            )
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise BoundedReadError(
+                    "too_large",
+                    f"record file {path} exceeds the {max_bytes}-byte read bound",
+                )
+            chunks.append(chunk)
+    except OSError as exc:
+        raise BoundedReadError("unreadable", f"could not read record file {path}: {exc}") from exc
+    finally:
+        os.close(fd)
+    try:
+        return b"".join(chunks).decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise BoundedReadError(
+            "undecodable", f"record file {path} is not valid UTF-8: {exc}"
+        ) from exc
 
 
 def supports_private_modes() -> bool:
@@ -144,6 +205,37 @@ def write_private_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
     fd = open_private_file(path, os.O_CREAT | os.O_TRUNC | os.O_WRONLY)
     with os.fdopen(fd, "w", encoding=encoding) as handle:
         handle.write(text)
+
+
+def write_private_text_atomic(path: Path, text: str, *, encoding: str = "utf-8") -> None:
+    """Atomically replace an owner-only registry text file."""
+    parent_fd, name = _open_parent(path, create=True)
+    temp_name = f".{name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+    replaced = False
+    try:
+        existing = None
+        with suppress(FileNotFoundError):
+            existing = os.lstat(name, dir_fd=parent_fd)
+        if existing is not None and stat.S_ISLNK(existing.st_mode):
+            raise OSError(errno.ELOOP, "registry file is a symlink", str(path))
+        fd = os.open(
+            temp_name,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY | _NOFOLLOW_FLAGS,
+            PRIVATE_FILE_MODE,
+            dir_fd=parent_fd,
+        )
+        with os.fdopen(fd, "w", encoding=encoding) as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        replaced = True
+        os.fsync(parent_fd)
+    finally:
+        if not replaced:
+            with suppress(OSError):
+                os.unlink(temp_name, dir_fd=parent_fd)
+        os.close(parent_fd)
 
 
 def write_private_bytes(path: Path, payload: bytes) -> None:
@@ -278,14 +370,13 @@ def write_json_atomic_if_absent(path: Path, payload: JsonObject) -> bool:
 
 def read_json_object(path: Path) -> JsonObject | None:
     try:
-        fd = open_private_file(path, os.O_RDONLY)
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
+        text = read_private_text_bounded(path, max_bytes=PRIVATE_RECORD_READ_MAX_BYTES)
+    except BoundedReadError as exc:
+        if exc.reason == "not_found":
+            return None
         raise RegistryJsonError(f"could not read JSON file {path}: {exc}") from exc
     try:
-        with os.fdopen(fd, "r", encoding="utf-8") as handle:
-            data: JsonValue = json.load(handle)
+        data: JsonValue = json.loads(text)
     except json.JSONDecodeError as exc:
         raise RegistryJsonError(f"invalid JSON in {path}: {exc}") from exc
     except OSError as exc:
