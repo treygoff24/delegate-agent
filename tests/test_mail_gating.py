@@ -304,7 +304,11 @@ class MailGatingTests(CommandTestBase):
     def test_mail_storage_failure_refuses_work_launch_before_run_or_alias_claim(self):
         with tempfile.TemporaryDirectory(prefix="delegate-mail-storage-") as tmp:
             workspace = Path(tmp)
-            fake_bin = self.write_fake_executable("cursor")
+            # Cursor resolves via the "agent"/"cursor-agent" candidates, not a
+            # binary literally named "cursor" — naming the fake wrong makes this
+            # test depend on the host's real cursor install (green locally, exit
+            # 3 missing_binary on CI).
+            fake_bin = self.write_fake_executable("cursor-agent")
             with mock.patch.object(
                 mail,
                 "prepare_mail_storage",
