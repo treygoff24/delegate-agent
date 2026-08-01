@@ -78,7 +78,7 @@ def is_read_only_command(parsed: ParsedCommand) -> bool:
         command = parsed.mail_command
         if command is None:
             return False
-        if command.action in {"inbox", "status", "watch", "hook-pump"}:
+        if command.action in {"inbox", "status", "watch"}:
             return True
         return command.action == "read" and command.peek
     return False

@@ -822,13 +822,12 @@ def _execute_attached_worktree(
         alias=alias,
         source_workspace=source_workspace,
     )
-    if provision is not None and provision.codex_home is not None:
+    if provision is not None:
         ctx_runner = dc_replace(
             ctx_runner,
-            fallback_env_overrides={
-                **ctx_runner.fallback_env_overrides,
-                "CODEX_HOME": provision.codex_home,
-            },
+            fallback_env_overrides=mail.mail_push_fallback_env_overrides(
+                provision, ctx_runner.fallback_env_overrides, registry_root, run_id
+            ),
         )
     attachment = {
         **(iso.attachment or {}),
@@ -886,9 +885,14 @@ def _execute_attached_worktree(
     ctx_runner = dc_replace(
         ctx_runner,
         env_overrides=child_env,
-        fallback_env_overrides=profiles.codex_fallback_child_env_overrides(
-            request.profile_resolution,
-            child_env,
+        fallback_env_overrides=mail.mail_push_fallback_env_overrides(
+            provision,
+            profiles.codex_fallback_child_env_overrides(
+                request.profile_resolution,
+                child_env,
+            ),
+            registry_root,
+            run_id,
         ),
     )
     try:
@@ -1288,13 +1292,12 @@ def execute_request(
             alias=alias,
             source_workspace=source_workspace,
         )
-        if provision is not None and provision.codex_home is not None:
+        if provision is not None:
             ctx_runner = dc_replace(
                 ctx_runner,
-                fallback_env_overrides={
-                    **ctx_runner.fallback_env_overrides,
-                    "CODEX_HOME": provision.codex_home,
-                },
+                fallback_env_overrides=mail.mail_push_fallback_env_overrides(
+                    provision, ctx_runner.fallback_env_overrides, registry_root, run_id
+                ),
             )
         try:
             return delegate_runner.execute_tracked(

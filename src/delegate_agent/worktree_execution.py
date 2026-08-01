@@ -706,13 +706,15 @@ def _launch_child_in_persistent_worktree(
             worktree_path=registration.worktree_path,
             creation_context=registration.creation_context,
         )
-        if provision is not None and provision.codex_home is not None:
+        if provision is not None:
             exec_ctx = replace(
                 exec_ctx,
-                fallback_env_overrides={
-                    **exec_ctx.fallback_env_overrides,
-                    "CODEX_HOME": provision.codex_home,
-                },
+                fallback_env_overrides=mail.mail_push_fallback_env_overrides(
+                    provision,
+                    exec_ctx.fallback_env_overrides,
+                    preflight.registry_root,
+                    registration.run_id,
+                ),
             )
         if exec_ctx.persona_text is not None:
             run_registry.write_private_text(

@@ -1713,11 +1713,13 @@ def record_mail_push_degradation(
     return warning
 
 
-def _mail_push_failure_marker(ctx: RunContext) -> str | None:
+def _mail_push_failure_marker(ctx: RunContext, stderr_text: str) -> str | None:
     try:
         from delegate_agent import mail
 
-        return mail.read_hook_failure_marker(ctx.registry_root, ctx.run_id)
+        return mail.read_hook_failure_marker(
+            ctx.registry_root, ctx.run_id
+        ) or mail.hook_failure_reason_from_stderr(stderr_text)
     except (DelegateError, OSError, ValueError):
         return "hook failure marker could not be read"
 
@@ -1742,7 +1744,8 @@ def _finalize_tracked_run(
     extra: JsonObject | None = None,
 ) -> TrackedFinalization:
     mail_warnings = _mail_push_warnings(ctx)
-    marker_reason = _mail_push_failure_marker(ctx)
+    stderr_tail = profiles.read_bounded_stderr_tail(files.stderr_log)
+    marker_reason = _mail_push_failure_marker(ctx, stderr_tail)
     if marker_reason is not None:
         try:
             mail_warnings.append(
@@ -1800,7 +1803,6 @@ def _finalize_tracked_run(
     elif status == run_registry.STATUS_SUCCEEDED:
         for key in ("failureReason", "error", "message"):
             merged_extra.pop(key, None)
-    stderr_tail = profiles.read_bounded_stderr_tail(files.stderr_log)
     failure = _failure_details(
         status=status,
         signal_text="\n".join(
@@ -1902,6 +1904,12 @@ def _finalize_tracked_run(
     # reports success, so normalize exit_code to 1, status to cancelled, and
     # the failure reason to cancelled_by_user. This keeps the CLI envelope
     # (ok/status/exitCode), the process exit code, and state.json in lockstep.
+    try:
+        from delegate_agent import mail
+
+        mail.cleanup_mail_push_private_homes(ctx.registry_root, ctx.run_id)
+    except OSError:
+        pass
     if persisted_status == run_registry.STATUS_CANCELLED:
         return TrackedFinalization(
             status=run_registry.STATUS_CANCELLED,

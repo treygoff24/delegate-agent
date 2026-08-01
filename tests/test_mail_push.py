@@ -6,6 +6,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from delegate_agent import mail, run_registry, run_status, runner
 
@@ -73,7 +74,21 @@ class MailPushTests(unittest.TestCase):
                 mail.boxes_root(self.registry_root) / self.run_id / mail.MAIL_PUSH_CURSOR_FILE_NAME
             ).read_text()
         )
-        self.assertEqual(cursor["lastSeq"], first["seq"])
+        self.assertEqual(cursor["lastSeq"], 0)
+
+        replay = io.StringIO()
+        self.assertEqual(mail.hook_pump(self.registry_root, stdout=replay, env=self.env), 0)
+        self.assertEqual(json.loads(replay.getvalue())["reason"], response["reason"])
+        self.assertEqual(
+            json.loads(
+                (
+                    mail.boxes_root(self.registry_root)
+                    / self.run_id
+                    / mail.MAIL_PUSH_CURSOR_FILE_NAME
+                ).read_text()
+            )["lastSeq"],
+            first["seq"],
+        )
 
         duplicate = io.StringIO()
         self.assertEqual(mail.hook_pump(self.registry_root, stdout=duplicate, env=self.env), 0)
@@ -85,7 +100,7 @@ class MailPushTests(unittest.TestCase):
             "claude", ["claude", "prompt"], None, self.registry_root, self.run_id, self.env
         )
         self.assertEqual(
-            mail.hook_pump(self.registry_root, stdout=_FailingWriter(), env=self.env), 0
+            mail.hook_pump(self.registry_root, stdout=_FailingWriter(), env=self.env), 1
         )
         cursor_path = (
             mail.boxes_root(self.registry_root) / self.run_id / mail.MAIL_PUSH_CURSOR_FILE_NAME
@@ -134,6 +149,14 @@ class MailPushTests(unittest.TestCase):
         self.assertEqual(codex_env["DELEGATE_MAIL_HOOK_HARNESS"], "codex")
         self.assertEqual(codex_env["CODEX_HOME"], codex.codex_home)
         self.assertTrue(Path(codex.codex_home or "").joinpath("auth.json").is_file())
+        self.assertTrue(
+            Path(codex.codex_home or "").is_relative_to(
+                run_registry.run_directory(self.registry_root, self.run_id)
+            )
+        )
+        self.assertFalse(
+            (mail.boxes_root(self.registry_root) / self.run_id / "codex-home").exists()
+        )
         self.assertEqual((codex_source / "auth.json").read_text(), '{"token":"test"}')
 
         before = dict(codex_env)
@@ -142,6 +165,113 @@ class MailPushTests(unittest.TestCase):
         )
         self.assertIsNotNone(unverified.warning)
         self.assertEqual(codex_env, before)
+
+    def test_codex_credentials_never_enter_mail_and_legacy_homes_are_swept(self):
+        source = self.workspace / "source-codex-home"
+        source.mkdir()
+        (source / "auth.json").write_text('{"token":"mail-secret-canary"}', encoding="utf-8")
+        (source / "config.toml").write_text("model = 'test'\n", encoding="utf-8")
+        legacy = mail.boxes_root(self.registry_root) / self.run_id / "codex-home"
+        legacy.mkdir(parents=True)
+        (legacy / "auth.json").write_text('{"token":"mail-secret-canary"}', encoding="utf-8")
+
+        provision = mail.provision_mail_push(
+            "codex",
+            ["codex", "exec", "prompt"],
+            None,
+            self.registry_root,
+            self.run_id,
+            {"CODEX_HOME": str(source)},
+        )
+
+        self.assertIsNone(provision.warning)
+        self.assertFalse(legacy.exists())
+        self.assertTrue(Path(provision.codex_home or "").joinpath("auth.json").is_file())
+        for path in mail.mail_root(self.registry_root).rglob("*"):
+            if path.is_file() and not path.is_symlink():
+                self.assertNotIn("mail-secret-canary", path.read_text(encoding="utf-8"))
+
+        mail.cleanup_mail_push_private_homes(self.registry_root, self.run_id)
+        self.assertFalse(Path(provision.codex_home or "").exists())
+
+    def test_codex_fallback_uses_a_second_private_home_only_when_present(self):
+        primary = self.workspace / "primary-codex-home"
+        fallback = self.workspace / "fallback-codex-home"
+        for home, token in ((primary, "primary-token"), (fallback, "fallback-token")):
+            home.mkdir()
+            (home / "auth.json").write_text(f'{{"token":"{token}"}}', encoding="utf-8")
+        provision = mail.provision_mail_push(
+            "codex",
+            ["codex", "exec", "prompt"],
+            None,
+            self.registry_root,
+            self.run_id,
+            {"CODEX_HOME": str(primary)},
+        )
+
+        self.assertEqual(
+            mail.mail_push_fallback_env_overrides(provision, {}, self.registry_root, self.run_id),
+            {},
+        )
+        fallback_env = mail.mail_push_fallback_env_overrides(
+            provision,
+            {"CODEX_HOME": str(fallback)},
+            self.registry_root,
+            self.run_id,
+        )
+        fallback_home = Path(fallback_env["CODEX_HOME"])
+        self.assertNotEqual(fallback_home, Path(provision.codex_home or ""))
+        self.assertEqual(
+            fallback_home.joinpath("auth.json").read_text(encoding="utf-8"),
+            '{"token":"fallback-token"}',
+        )
+        self.assertTrue(
+            fallback_home.is_relative_to(
+                run_registry.run_directory(self.registry_root, self.run_id)
+            )
+        )
+
+    def test_unrecordable_hook_failure_emits_parent_observable_sentinel(self):
+        stderr = io.StringIO()
+        with mock.patch.object(
+            mail.private_io, "write_json_atomic_if_absent", side_effect=OSError("box unavailable")
+        ):
+            self.assertEqual(
+                mail.hook_pump(
+                    self.registry_root,
+                    stdout=_FailingWriter(),
+                    stderr=stderr,
+                    env=self.env,
+                ),
+                1,
+            )
+        reason = mail.hook_failure_reason_from_stderr(stderr.getvalue())
+        self.assertEqual(reason, "simulated hook output failure")
+        context = runner.RunContext(
+            registry_root=self.registry_root,
+            run_id=self.run_id,
+            alias=self.alias,
+            harness="claude",
+            engine="claude",
+            mode="work",
+            model=None,
+            source_cwd=str(self.workspace),
+            execution_cwd=str(self.workspace),
+            workspace_kind="directory",
+            isolated_workspace=False,
+            started_at=run_registry.utc_now_iso(),
+        )
+        self.assertEqual(runner._mail_push_failure_marker(context, stderr.getvalue()), reason)
+        run_path = run_registry.run_directory(self.registry_root, self.run_id)
+        runner.write_snapshot(run_path, {"recentEvents": [], "eventsTotal": 0, "warnings": []})
+        runner.record_mail_push_degradation(
+            self.registry_root, self.run_id, engine="claude", reason=reason or "missing"
+        )
+        runner.record_mail_push_degradation(
+            self.registry_root, self.run_id, engine="claude", reason=reason or "missing"
+        )
+        snapshot = run_registry.load_run_snapshot(self.registry_root, self.run_id)
+        self.assertEqual(snapshot["eventsTotal"], 1)
 
     def test_degradation_is_recorded_once_in_state_events_and_snapshot(self):
         run_path = run_registry.run_directory(self.registry_root, self.run_id)

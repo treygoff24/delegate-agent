@@ -90,7 +90,7 @@ class MailPushCursorTests(unittest.TestCase):
             [row["message"]["msgId"] for row in self._payload(response)["messages"]],
             [first["msgId"], second["msgId"]],
         )
-        self.assertEqual(self._cursor(), second["seq"])
+        self.assertEqual(self._cursor(), 0)
         self.assertEqual(
             {
                 "inbox": sorted(path.name for path in (box / "inbox").iterdir()),
@@ -108,12 +108,21 @@ class MailPushCursorTests(unittest.TestCase):
             [first["msgId"], second["msgId"]],
         )
 
+        replay = self._pump()
+        self.assertEqual(
+            [row["message"]["msgId"] for row in self._payload(replay)["messages"]],
+            [first["msgId"], second["msgId"]],
+        )
+        self.assertEqual(self._cursor(), second["seq"])
+
         third = self._send("third")
         response = self._pump()
         self.assertEqual(
             [row["message"]["msgId"] for row in self._payload(response)["messages"]],
             [third["msgId"]],
         )
+        self.assertEqual(self._cursor(), second["seq"])
+        self._pump()
         self.assertEqual(self._cursor(), third["seq"])
         self.assertEqual(self._pump(), {})
 
@@ -121,7 +130,7 @@ class MailPushCursorTests(unittest.TestCase):
         message = self._send("retry before injection")
         self.assertEqual(
             mail.hook_pump(self.registry_root, stdout=_FailBeforeInjection(), env=self.env),
-            0,
+            1,
         )
 
         self.assertEqual(self._cursor(), 0)
@@ -138,24 +147,32 @@ class MailPushCursorTests(unittest.TestCase):
 
     def test_crash_after_injection_before_cursor_write_allows_only_one_bounded_retry(self) -> None:
         message = self._send("retry after injection")
+        first_output = io.StringIO()
+        self.assertEqual(mail.hook_pump(self.registry_root, stdout=first_output, env=self.env), 0)
+        first = json.loads(first_output.getvalue())
+        self.assertEqual(
+            [row["message"]["msgId"] for row in self._payload(first)["messages"]],
+            [message["msgId"]],
+        )
+        self.assertEqual(self._cursor(), 0)
+
         original_write = private_io.write_json_atomic
 
         def crash_before_cursor_write(path: Path, payload: dict) -> None:
             if path == self.cursor_path:
-                raise RuntimeError("simulated crash before cursor write")
+                raise OSError("simulated kill after flush")
             original_write(path, payload)
 
-        first_output = io.StringIO()
-        with (
-            mock.patch.object(
-                private_io, "write_json_atomic", side_effect=crash_before_cursor_write
-            ),
-            self.assertRaisesRegex(RuntimeError, "before cursor write"),
+        retry_output = io.StringIO()
+        with mock.patch.object(
+            private_io, "write_json_atomic", side_effect=crash_before_cursor_write
         ):
-            mail.hook_pump(self.registry_root, stdout=first_output, env=self.env)
-        first = json.loads(first_output.getvalue())
+            self.assertEqual(
+                mail.hook_pump(self.registry_root, stdout=retry_output, env=self.env), 1
+            )
+        retry = json.loads(retry_output.getvalue())
         self.assertEqual(
-            [row["message"]["msgId"] for row in self._payload(first)["messages"]],
+            [row["message"]["msgId"] for row in self._payload(retry)["messages"]],
             [message["msgId"]],
         )
         self.assertEqual(self._cursor(), 0)
@@ -179,7 +196,7 @@ class MailPushCursorTests(unittest.TestCase):
             [row["message"]["msgId"] for row in self._payload(first)["messages"]],
             [message["msgId"]],
         )
-        self.assertEqual(self._pump(), {})
+        self.assertEqual(self._pump(), first)
         self.assertEqual(self._cursor(), message["seq"])
 
 

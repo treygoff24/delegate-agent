@@ -86,6 +86,14 @@ class MailPushBatchTests(unittest.TestCase):
         )
         self.assertEqual(
             json.loads(self.cursor_path.read_text(encoding="utf-8"))["lastSeq"],
+            0,
+        )
+
+        response, _payload = self._pump()
+        injected = json.loads(response["reason"])["messages"]
+        self.assertEqual(len(injected), mail.MAIL_PUSH_MAX_MESSAGES)
+        self.assertEqual(
+            json.loads(self.cursor_path.read_text(encoding="utf-8"))["lastSeq"],
             messages[mail.MAIL_PUSH_MAX_MESSAGES - 1]["seq"],
         )
 
@@ -157,6 +165,28 @@ class MailPushBatchTests(unittest.TestCase):
         ).encode("utf-8")
         self.assertEqual(response["reason"].encode("utf-8"), expected)
         self.assertEqual(payload_bytes, expected)
+
+    def test_cursor_filtering_reaches_messages_beyond_the_inbox_scan_cap(self) -> None:
+        messages = [
+            self._send(f"message-{number}") for number in range(mail.MAIL_MAX_INBOX_ITEMS + 1)
+        ]
+        private_io.write_json_atomic(
+            self.cursor_path,
+            {
+                "schema": mail.MAIL_PUSH_SCHEMA,
+                "lastSeq": messages[mail.MAIL_MAX_INBOX_ITEMS - 1]["seq"],
+            },
+        )
+
+        response, _payload = self._pump()
+        self.assertEqual(
+            [row["message"]["msgId"] for row in json.loads(response["reason"])["messages"]],
+            [messages[-1]["msgId"]],
+        )
+        self._pump()
+        self.assertEqual(
+            json.loads(self.cursor_path.read_text(encoding="utf-8"))["lastSeq"], messages[-1]["seq"]
+        )
 
 
 if __name__ == "__main__":

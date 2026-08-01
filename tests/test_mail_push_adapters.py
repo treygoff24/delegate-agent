@@ -118,10 +118,13 @@ class MailPushAdapterTests(CommandTestBase):
                 elif engine == "codex":
                     self.assertIn("hooks=true", provision.argv)
                     self.assertIn("--dangerously-bypass-hook-trust", provision.argv)
-                    self.assertEqual(
-                        Path(env["CODEX_HOME"]).resolve(), (box / "codex-home").resolve()
+                    self.assertTrue(
+                        Path(env["CODEX_HOME"])
+                        .resolve()
+                        .is_relative_to(run_registry.run_directory(self.registry_root, self.run_id))
                     )
-                    self.assertTrue((box / "codex-home" / "hooks.json").is_file())
+                    self.assertTrue(Path(env["CODEX_HOME"]).joinpath("hooks.json").is_file())
+                    self.assertFalse((box / "codex-home").exists())
                 else:
                     self.assertNotEqual(provision.argv, argv)
 
@@ -134,7 +137,13 @@ class MailPushAdapterTests(CommandTestBase):
                 }
                 self.assertTrue(created_files)
                 self.assertTrue(
-                    all(path.is_relative_to(box.resolve()) for path in created_files),
+                    all(
+                        path.is_relative_to(box.resolve())
+                        or path.is_relative_to(
+                            run_registry.run_directory(self.registry_root, self.run_id)
+                        )
+                        for path in created_files
+                    ),
                     created_files,
                 )
 
@@ -162,12 +171,12 @@ class MailPushAdapterTests(CommandTestBase):
         self.assertFalse(parsed.launch.mail_push)
         self.assertFalse((mail.boxes_root(self.registry_root) / self.run_id).exists())
 
-    def test_hook_pump_is_allowlisted_by_both_python_and_shell_guards(self):
+    def test_hook_pump_is_classified_as_a_mutation_by_both_python_and_shell_guards(self):
         parsed = cli.parse_cli(["mail", "hook-pump"])
-        self.assertTrue(profile_guard.is_read_only_command(parsed))
+        self.assertFalse(profile_guard.is_read_only_command(parsed))
         shim = Path(__file__).resolve().parents[1] / "bin" / "delegate-profile-shim"
         shim_text = shim.read_text(encoding="utf-8")
-        self.assertIn("inbox|status|watch|hook-pump)", shim_text)
+        self.assertIn("inbox|status|watch)", shim_text)
 
 
 if __name__ == "__main__":
