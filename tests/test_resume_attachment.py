@@ -191,6 +191,35 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
             self.assertEqual(len(records), 1)
             self.assertEqual(records[0]["runId"], owner_id)
 
+    def test_resume_of_attached_alias_reuses_the_original_owner_worktree(self):
+        _repo, repo_path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home, self._fake_agent() as fake_agent:
+            owner_id, owner_alias, worktree_path, _branch = self._owner(repo_path, fake_home)
+            before = git("worktree", "list", "--porcelain", cwd=repo_path).stdout
+            with mock.patch.dict(
+                os.environ, {"PATH": fake_agent + os.pathsep + os.environ.get("PATH", "")}
+            ):
+                code, _payload, stderr = self._resume(repo_path, fake_home, owner_alias, "first")
+                self.assertEqual(code, 0, stderr)
+                first_id, first_manifest, _state = self._child_manifest(repo_path, owner_id)
+                code, _payload, stderr = self._resume(
+                    repo_path, fake_home, first_manifest["alias"], "second"
+                )
+            self.assertEqual(code, 0, stderr)
+            self.assertEqual(git("worktree", "list", "--porcelain", cwd=repo_path).stdout, before)
+
+            root = self._registry_root(repo_path)
+            index = self.delegate.run_registry.load_index(root)
+            child_ids = [run_id for run_id in index["runs"] if run_id != owner_id]
+            self.assertEqual(len(child_ids), 2)
+            second_id = next(run_id for run_id in child_ids if run_id != first_id)
+            second_manifest = self.delegate.run_registry.load_run_manifest(root, second_id)
+            self.assertEqual(second_manifest["isolationLifecycle"], "attached")
+            self.assertEqual(second_manifest["worktreeAttachment"]["sourceRunId"], owner_id)
+            self.assertEqual(second_manifest["worktreeAttachment"]["path"], worktree_path)
+            records = worktree_records.load_persistent_records(root)
+            self.assertEqual([record["runId"] for record in records], [owner_id])
+
     def test_live_attachment_guards_remove_gc_and_runs_prune(self):
         _repo, repo_path = self._make_repo()
         with tempfile.TemporaryDirectory() as fake_home:
@@ -286,6 +315,7 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
                 code, _payload, stderr = self._resume(repo_path, fake_home, owner_alias, "continue")
             self.assertEqual(code, 0, stderr)
             self.assertIn("includeDirty is creation-only and was dropped", stderr)
+            self.assertEqual(stderr.count("includeDirty is creation-only and was dropped"), 1)
             _child_id, manifest, state = self._child_manifest(repo_path, owner_id)
             self.assertNotIn("includeDirty", manifest)
             self.assertNotIn("includeDirty", state)
@@ -296,8 +326,8 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
             self.assertEqual(code, self.delegate.EXIT_USAGE)
             self.assertEqual(payload["error"], "invalid_option_combination")
 
-    def test_reentry_validation_refuses_missing_symlink_and_branch_mismatch(self):
-        cases = ("missing", "symlink", "branch")
+    def test_reentry_validation_refuses_missing_symlink_unregistered_and_branch_mismatch(self):
+        cases = ("missing", "symlink", "unregistered", "branch")
         for case in cases:
             with self.subTest(case=case):
                 _repo, repo_path = self._make_repo()
@@ -324,6 +354,11 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
                             manifest,
                         )
                         expected = "worktree_path_changed"
+                    elif case == "unregistered":
+                        moved = str(Path(fake_home) / "worktree" / "moved")
+                        git("worktree", "move", worktree_path, moved, cwd=repo_path)
+                        Path(worktree_path).mkdir(parents=True)
+                        expected = "worktree_unregistered"
                     else:
                         git("checkout", "-b", "delegate/other-branch", cwd=worktree_path)
                         expected = "worktree_branch_mismatch"
@@ -332,6 +367,35 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
                     )
                     self.assertEqual(code, self.delegate.EXIT_USAGE)
                     self.assertEqual(payload["error"], expected)
+
+    def test_attachment_race_after_registration_terminalizes_without_spawning_child(self):
+        _repo, repo_path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            owner_id, owner_alias, worktree_path, _branch = self._owner(repo_path, fake_home)
+            original_register = self.delegate.run_registry.register_run
+
+            def register_then_remove(*args, **kwargs):
+                result = original_register(*args, **kwargs)
+                git("worktree", "remove", "--force", worktree_path, cwd=repo_path)
+                return result
+
+            with (
+                mock.patch.object(
+                    self.delegate.run_registry, "register_run", side_effect=register_then_remove
+                ),
+                mock.patch.object(
+                    self.delegate.delegate_runner, "execute_tracked"
+                ) as execute_tracked,
+            ):
+                code, payload, _stderr = self._resume(repo_path, fake_home, owner_alias, "continue")
+            self.assertEqual(code, self.delegate.EXIT_USAGE)
+            self.assertEqual(payload["error"], "worktree_missing")
+            execute_tracked.assert_not_called()
+            child_id, manifest, state = self._child_manifest(repo_path, owner_id)
+            self.assertNotEqual(child_id, owner_id)
+            self.assertEqual(manifest["worktreeAttachment"]["sourceRunId"], owner_id)
+            self.assertEqual(state["status"], "failed")
+            self.assertEqual(state["failureReason"], "worktree_missing")
 
 
 if __name__ == "__main__":

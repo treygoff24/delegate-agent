@@ -46,6 +46,9 @@ class LaunchOptions:
     prompt_parts: list[str] | None = None
     prompt_file: str | None = None
     output_schema: str | None = None
+    # Internal-only resume seam: verified inherited schema text stays in memory
+    # until normal launch-time materialization.
+    output_schema_text: str | None = None
     reasoning_effort: str | None = None
     fast: bool | None = None
     progress_intent: str | None = None

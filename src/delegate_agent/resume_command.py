@@ -19,8 +19,6 @@ from __future__ import annotations
 
 import json
 import os
-import secrets
-from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TextIO
@@ -75,7 +73,6 @@ class ResumePlan:
     resumed_from: JsonObject
     attach: JsonObject | None = None
     forbid_commit: bool = False
-    schema_temp_path: str | None = None
     notes: tuple[str, ...] = field(default_factory=tuple)
 
 
@@ -282,6 +279,11 @@ def _validate_attach_target(
             "could be derived for it."
         )
     status, _warnings = worktree_mgmt.detect_worktree_status(record)
+    if any("not registered" in warning for warning in _warnings):
+        raise DelegateError(
+            "worktree_unregistered",
+            "The source run's worktree is no longer registered with Git.",
+        )
     if status != worktree_records.STATUS_PRESENT:
         raise DelegateError(
             "worktree_missing",
@@ -323,11 +325,6 @@ def _validate_attach_target(
         )
     status_warnings = _warnings
     if status_warnings:
-        if any("not registered" in warning for warning in status_warnings):
-            raise DelegateError(
-                "worktree_unregistered",
-                "The source run's worktree is no longer registered with Git.",
-            )
         raise DelegateError(
             "worktree_missing",
             "The source run's worktree metadata is inconsistent; refusing to attach.",
@@ -363,24 +360,129 @@ def _validate_attach_target(
     }
 
 
-def _materialize_schema_text(registry_root: Path, schema_text: str) -> str:
-    """Write inherited schema text to a private file for the path-only resolver.
+def _attachment_owner_target(
+    registry_root: Path,
+    manifest: JsonObject,
+) -> JsonObject:
+    """Resolve an attached source to its persistent owner and revalidate it."""
+    attachment = manifest.get("worktreeAttachment")
+    if not isinstance(attachment, dict):
+        raise _record_invalid("The attached source run has no worktree attachment record.")
+    expected_path = attachment.get("path")
+    expected_canonical = (
+        worktree_records._canonical_path(expected_path) if isinstance(expected_path, str) else None
+    )
+    index = run_registry.load_index(registry_root)
+    source_run_id = attachment.get("sourceRunId")
+    candidates: list[str] = [source_run_id] if isinstance(source_run_id, str) else []
 
-    ``resolve_output_schema`` accepts only a filesystem path, so the stored
-    inline text is re-materialized rather than rewriting the builders. The file
-    lives under the registry (private, 0600) and is deleted after the launch.
-    """
-    tmp_dir = registry_root / "tmp"
-    run_registry.ensure_private_dir(tmp_dir)
-    path = tmp_dir / f"resume-schema-{os.getpid()}-{secrets.token_hex(4)}.json"
-    run_registry.write_private_text(path, schema_text)
-    return str(path)
+    if expected_canonical is not None:
+        for candidate_id in index.get("runs", {}):
+            if not isinstance(candidate_id, str) or candidate_id in candidates:
+                continue
+            candidate_manifest = _read_record_json(
+                run_registry.run_directory(registry_root, candidate_id)
+                / run_registry.MANIFEST_FILE,
+                allow_missing=True,
+            )
+            if candidate_manifest is None:
+                continue
+            candidate_state = _read_record_json(
+                run_registry.run_directory(registry_root, candidate_id) / run_registry.STATE_FILE,
+                allow_missing=True,
+            )
+            candidate_snapshot = _read_record_json(
+                run_registry.run_directory(registry_root, candidate_id)
+                / run_registry.SNAPSHOT_FILE,
+                allow_missing=True,
+            )
+            record = worktree_records._record_from_parts(
+                registry_root,
+                candidate_id,
+                {},
+                candidate_state,
+                candidate_manifest,
+                candidate_snapshot,
+            )
+            if (
+                record is not None
+                and record.get("executionCwd")
+                and (
+                    worktree_records._canonical_path(str(record["executionCwd"]))
+                    == expected_canonical
+                )
+            ):
+                candidates.append(candidate_id)
+
+    for candidate_id in candidates:
+        if not isinstance(index.get("runs", {}).get(candidate_id), dict):
+            continue
+        owner_path = run_registry.run_directory(registry_root, candidate_id)
+        owner_manifest = _read_record_json(
+            owner_path / run_registry.MANIFEST_FILE, allow_missing=True
+        )
+        if owner_manifest is None:
+            continue
+        owner_state = _read_record_json(owner_path / run_registry.STATE_FILE, allow_missing=True)
+        owner_snapshot = _read_record_json(
+            owner_path / run_registry.SNAPSHOT_FILE, allow_missing=True
+        )
+        if not worktree_records._is_persistent_worktree_run(
+            owner_state, owner_manifest, owner_snapshot
+        ):
+            continue
+        target = _validate_attach_target(
+            registry_root, candidate_id, owner_manifest, owner_state, owner_snapshot
+        )
+        if (
+            expected_canonical is not None
+            and worktree_records._canonical_path(str(target["path"])) != expected_canonical
+        ):
+            raise DelegateError(
+                "worktree_path_changed",
+                "The attached source no longer points at its persistent owner worktree.",
+            )
+        return target
+    raise DelegateError(
+        "worktree_missing",
+        "The attached source's persistent worktree owner is no longer available.",
+    )
 
 
-def cleanup_schema_temp(plan: ResumePlan) -> None:
-    if plan.schema_temp_path:
-        with suppress(OSError):
-            os.unlink(plan.schema_temp_path)
+def revalidate_attached_target(
+    registry_root: Path, attachment: JsonObject, *, expected_branch: str | None
+) -> JsonObject:
+    """Revalidate an attachment after registration establishes its removal lease."""
+    owner_id = attachment.get("sourceRunId")
+    if not isinstance(owner_id, str):
+        raise DelegateError("worktree_missing", "Attached execution has no persistent owner.")
+    with run_registry.registry_lock(registry_root):
+        owner_path = run_registry.run_directory(registry_root, owner_id)
+        owner_manifest = _read_record_json(
+            owner_path / run_registry.MANIFEST_FILE, allow_missing=True
+        )
+        if owner_manifest is None:
+            raise DelegateError(
+                "worktree_missing", "The attached worktree owner is no longer available."
+            )
+        owner_state = _read_record_json(owner_path / run_registry.STATE_FILE, allow_missing=True)
+        owner_snapshot = _read_record_json(
+            owner_path / run_registry.SNAPSHOT_FILE, allow_missing=True
+        )
+        target = _validate_attach_target(
+            registry_root, owner_id, owner_manifest, owner_state, owner_snapshot
+        )
+        if worktree_records._canonical_path(
+            str(target["path"])
+        ) != worktree_records._canonical_path(str(attachment.get("path") or "")):
+            raise DelegateError(
+                "worktree_missing", "The attached worktree path changed before launch."
+            )
+        if target.get("branch") != expected_branch:
+            raise DelegateError(
+                "worktree_missing", "The attached worktree branch changed before launch."
+            )
+        return target
 
 
 def _inherit_model(
@@ -550,10 +652,24 @@ def build_resume_plan(
     timeout = opts.timeout
     if timeout is None:
         manifest_timeout = manifest.get("timeoutSeconds")
-        if isinstance(manifest_timeout, int) and not isinstance(manifest_timeout, bool):
+        if (
+            isinstance(manifest_timeout, int)
+            and not isinstance(manifest_timeout, bool)
+            and manifest_timeout > 0
+        ):
             timeout = manifest_timeout
+        elif (
+            isinstance(manifest_timeout, float)
+            and manifest_timeout.is_integer()
+            and manifest_timeout > 0
+        ):
+            timeout = int(manifest_timeout)
         elif "timeoutSeconds" not in manifest:
             notes.append("timeout absent from the source manifest; using the target default.")
+        else:
+            raise _record_invalid(
+                "timeoutSeconds in the source manifest must be a positive integer."
+            )
 
     progress_intent = opts.progress_intent
     if progress_intent is None:
@@ -587,23 +703,29 @@ def build_resume_plan(
         manifest,
         source_snapshot,
     )
-    if opts.include_dirty and persistent_source:
+    attached_source = isinstance(manifest.get("worktreeAttachment"), dict)
+    worktree_source = persistent_source or attached_source
+    if opts.include_dirty and worktree_source:
         raise DelegateError(
             "invalid_option_combination",
             "--include-dirty cannot be used when resume attaches to a persistent "
             "worktree; dirty-file sync is creation-only.",
         )
-    if opts.include_dirty or (not persistent_source and manifest.get("includeDirty") is True):
+    if opts.include_dirty or (not worktree_source and manifest.get("includeDirty") is True):
         notes.append(
             "includeDirty is creation-only and was dropped: resume does not create a new worktree."
         )
-    if persistent_source:
-        attach = _validate_attach_target(
-            registry_root,
-            run_id,
-            manifest,
-            source_state,
-            source_snapshot,
+    if worktree_source:
+        attach = (
+            _attachment_owner_target(registry_root, manifest)
+            if attached_source
+            else _validate_attach_target(
+                registry_root,
+                run_id,
+                manifest,
+                source_state,
+                source_snapshot,
+            )
         )
         isolation = "none"  # the attach executor supplies the execution workspace
         if manifest.get("includeDirty") is True:
@@ -621,8 +743,8 @@ def build_resume_plan(
             )
 
     # Output schema: inherit inline text, override path, or drop.
-    schema_temp_path: str | None = None
     output_schema: str | None = None
+    output_schema_text: str | None = None
     if opts.drop_output_schema:
         pass
     elif opts.output_schema is not None:
@@ -634,8 +756,7 @@ def build_resume_plan(
             # carry a schema in tracked modes (claude is call-only; grok and the
             # rest have no native enforcement).
             if engine == "codex":
-                schema_temp_path = _materialize_schema_text(registry_root, schema_text)
-                output_schema = schema_temp_path
+                output_schema_text = schema_text
             else:
                 notes.append(
                     f"output schema dropped: {engine} {mode} cannot enforce a "
@@ -660,6 +781,7 @@ def build_resume_plan(
         model_alias=model_alias,
         prompt_parts=[continuation],
         output_schema=output_schema,
+        output_schema_text=output_schema_text,
         reasoning_effort=reasoning_effort,
         fast=fast,
         progress_intent=progress_intent,
@@ -690,7 +812,6 @@ def build_resume_plan(
         resumed_from={"runId": run_id, "alias": alias},
         attach=attach,
         forbid_commit=forbid_commit,
-        schema_temp_path=schema_temp_path,
         notes=tuple(notes),
     )
 

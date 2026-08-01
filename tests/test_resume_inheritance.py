@@ -3,12 +3,12 @@ from __future__ import annotations
 import io
 import json
 import os
-import stat
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
+from delegate_agent import request_build
 from tests.delegate_commands_test_base import CommandTestBase
 
 
@@ -275,8 +275,10 @@ class ResumeInheritanceTests(ResumeFixture):
         self.assertIn("fast-tier selection dropped", stderr)
         self.assertIn("output schema dropped", stderr)
 
-    def test_schema_text_is_rematerialized_with_exact_bytes_and_private_mode(self):
-        schema_text = '{"type":"object","required":["answer"]}\n'
+    def test_schema_text_stays_in_memory_until_normal_launch_materialization(self):
+        schema_text = (
+            '{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]}\n'
+        )
         self.write_config({})
         _run_id, alias, _run_path = self.seed_run(
             manifest={"outputSchema": schema_text, "isolationMode": "none"}
@@ -292,13 +294,55 @@ class ResumeInheritanceTests(ResumeFixture):
                 self.loaded_config(),
                 stderr=io.StringIO(),
             )
-        try:
-            schema_path = Path(plan.parsed.launch.output_schema)
-            self.assertEqual(schema_path.read_bytes(), schema_text.encode("utf-8"))
-            self.assertEqual(stat.S_IMODE(schema_path.stat().st_mode), 0o600)
-            self.assertNotEqual(schema_path, Path(_run_path) / "output-schema.json")
-        finally:
-            self.delegate.resume_command.cleanup_schema_temp(plan)
+        self.assertIsNone(plan.parsed.launch.output_schema)
+        self.assertEqual(plan.parsed.launch.output_schema_text, schema_text)
+        self.assertFalse(list((self.workspace / ".delegate" / "tmp").glob("resume-schema-*")))
+        with mock.patch.object(request_build, "resolve_output_schema") as resolve:
+            request = self.delegate.request_from_parsed(
+                plan.parsed, self.loaded_config(), io.StringIO()
+            )
+        resolve.assert_not_called()
+        self.assertIn(request_build.INLINE_OUTPUT_SCHEMA_PLACEHOLDER, request.argv)
+        self.assertIsNotNone(request.output_schema_text)
+
+    def test_inherited_timeout_accepts_integral_float_and_refuses_invalid_values(self):
+        self.write_config({})
+        _run_id, float_alias, _run_path = self.seed_run(
+            manifest={"timeoutSeconds": 12.0, "isolationMode": "none"}
+        )
+        payload, _stderr = self.run_resume(["--dry-run", float_alias, "continue"])
+        self.assertEqual(payload["timeoutSeconds"], 12)
+
+        for timeout in (0, -1, 1.5, True, "12"):
+            with self.subTest(timeout=timeout):
+                _run_id, alias, _run_path = self.seed_run(
+                    manifest={"timeoutSeconds": timeout, "isolationMode": "none"}
+                )
+                code, stdout, _stderr = self.run_main(
+                    [
+                        "--json",
+                        "--cwd",
+                        str(self.workspace),
+                        "resume",
+                        "--dry-run",
+                        alias,
+                        "continue",
+                    ]
+                )
+                self.assertEqual(code, self.delegate.EXIT_USAGE)
+                self.assertEqual(json.loads(stdout)["error"], "resume_record_invalid")
+
+    def test_runs_prune_removes_legacy_crash_orphaned_resume_schema(self):
+        self.write_config({})
+        tmp = self.registry_root / "tmp"
+        tmp.mkdir()
+        orphan = tmp / "resume-schema-crashed.json"
+        orphan.write_text('{"type":"object"}', encoding="utf-8")
+
+        payload = self.delegate.run_registry.prune_runs(self.registry_root, older_than_days=30)
+
+        self.assertFalse(orphan.exists())
+        self.assertEqual(payload["staleResumeSchemas"], [orphan.name])
 
     def test_opencode_agent_is_threaded_through_dry_run(self):
         self.write_config({"opencode": {"defaultModel": "open-model"}})

@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -84,6 +85,26 @@ class ResumeTrustTests(unittest.TestCase):
                 target.write_bytes(path.read_bytes())
                 path.unlink()
                 path.symlink_to(target)
+                self.assertEqual(self._error_for(workspace, alias), "resume_record_invalid")
+
+    def test_hardlinked_record_files_are_refused_without_reading_the_link_target(self):
+        for record_name in (
+            run_registry.MANIFEST_FILE,
+            run_registry.STATE_FILE,
+            run_registry.SNAPSHOT_FILE,
+            run_registry.PROMPT_TXT_FILE,
+            run_registry.COMPLETION_REPORT_FILE,
+        ):
+            with self.subTest(record_name=record_name), tempfile.TemporaryDirectory() as tmp:
+                workspace = Path(tmp)
+                _root, _run_id, alias, run_path = self._seed_record(workspace)
+                path = run_path / record_name
+                if record_name == run_registry.COMPLETION_REPORT_FILE:
+                    run_registry.write_private_text(path, "captured report\n")
+                target = workspace / f"outside-{record_name}"
+                os.link(path, target)
+                path.unlink()
+                os.link(target, path)
                 self.assertEqual(self._error_for(workspace, alias), "resume_record_invalid")
 
     def test_non_regular_prompt_record_is_refused(self):

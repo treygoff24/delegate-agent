@@ -730,14 +730,6 @@ def _execute_attached_worktree(
         alias=alias,
         source_workspace=source_workspace,
     )
-    execution_root = str(Path(worktree_path).resolve(strict=False))
-    source_root = str(Path(source_workspace.path).resolve(strict=False))
-    child_env = {
-        **(request.env_overrides or {}),
-        "DELEGATE_SOURCE_ROOT": source_root,
-        "DELEGATE_EXECUTION_ROOT": execution_root,
-        "WORKSPACE_ROOT": execution_root,
-    }
     attachment = {
         **(iso.attachment or {}),
         "startHeadOid": start_head_oid,
@@ -748,11 +740,43 @@ def _execute_attached_worktree(
         isolated_workspace=True,
         branch=iso.planned_branch,
         source_git_root=iso.source_git_root,
-        # Commit accounting for the resumed run keys on the attachment-start
-        # HEAD, not the owner's creation base: the owner's sourceHeadOid would
-        # mis-attribute the source run's commits to this run.
         creation_context={"sourceHeadOid": start_head_oid},
         worktree_attachment=attachment,
+    )
+    try:
+        resume_command.revalidate_attached_target(
+            registry_root, attachment, expected_branch=iso.planned_branch
+        )
+    except DelegateError as exc:
+        run_path = run_registry.run_directory(registry_root, run_id)
+        delegate_runner.write_manifest(
+            run_path,
+            delegate_runner.build_manifest(ctx_runner, execution_request.display_argv),
+        )
+        delegate_runner.write_state(
+            run_path,
+            delegate_runner.build_state(
+                ctx_runner,
+                status=run_registry.STATUS_FAILED,
+                exit_code=1,
+                extra={
+                    "error": "worktree_missing",
+                    "message": exc.message,
+                    "failureReason": "worktree_missing",
+                },
+            ),
+        )
+        raise DelegateError("worktree_missing", exc.message) from exc
+    execution_root = str(Path(worktree_path).resolve(strict=False))
+    source_root = str(Path(source_workspace.path).resolve(strict=False))
+    child_env = {
+        **(request.env_overrides or {}),
+        "DELEGATE_SOURCE_ROOT": source_root,
+        "DELEGATE_EXECUTION_ROOT": execution_root,
+        "WORKSPACE_ROOT": execution_root,
+    }
+    ctx_runner = dc_replace(
+        ctx_runner,
         env_overrides=child_env,
         fallback_env_overrides=profiles.codex_fallback_child_env_overrides(
             request.profile_resolution,
@@ -1049,6 +1073,10 @@ def execute_request(
 
     with safe_isolated_request(request) as isolated_request:
         _set_child_root_env(isolated_request, source_workspace)
+        if isolated_request.resumed_from is not None and isolated_request.argv:
+            resume_command.enforce_resume_prompt_size(
+                isolated_request.engine, isolated_request.argv[-1]
+            )
         ensure_binary(
             isolated_request.argv,
             engine=isolated_request.engine,
@@ -1386,61 +1414,57 @@ def main(
             # through the normal request build and execution path.
             parsed = resume_plan.parsed
             global_options = parsed.global_options
-        try:
-            request = request_from_parsed(parsed, config, stdin)
-            if resume_plan is not None:
-                request = resume_command.apply_resume_to_request(request, resume_plan)
-            if request.dry_run:
-                payload = dry_run_payload(request)
-                if global_options.json_mode:
-                    delegate_rendering.print_json(payload, stdout)
-                else:
-                    print(f"cwd: {request.workspace} ({request.workspace_kind})", file=stdout)
-                    if payload.get("isolatedWorkspace"):
-                        print(f"isolation: {payload['isolation']}", file=stdout)
-                    lifecycle = payload.get("isolationLifecycle", "")
-                    if lifecycle:
-                        print(f"isolationLifecycle: {lifecycle}", file=stdout)
-                    if payload.get("plannedBranch"):
-                        print(f"plannedBranch: {payload['plannedBranch']}", file=stdout)
-                    if payload.get("plannedExecutionCwd"):
-                        print(f"plannedExecutionCwd: {payload['plannedExecutionCwd']}", file=stdout)
-                    # Use the payload's rewritten argv (which shows planned paths) when
-                    # worktree isolation is active; otherwise use the source request.argv.
-                    display_argv = payload.get("argv", request.argv)
-                    print(f"argv: {shell_join(display_argv)}", file=stdout)
-                    for warning in payload.get("warnings", ()):
-                        print(f"warning: {warning}", file=stdout)
-                return EXIT_OK
-
-            completion_report_mode = resolve_completion_report_mode(parsed, config)
-            if request.prompt_instruction_mode == PROMPT_INSTRUCTION_MODE_SLASH:
-                # Verbatim prompt carries no completion-report instruction; don't
-                # expect (or synthesize around) a report the child was never asked for.
-                completion_report_mode = delegate_config.COMPLETION_REPORT_MODE_NONE
-                if not global_options.pass_through and not global_options.json_mode:
-                    print(
-                        "notice: leading slash command detected; sending prompt verbatim "
-                        "(delegate instruction wrapping suppressed).",
-                        file=stderr,
-                    )
-            exit_code, payload = execute_request(
-                request,
-                global_options.json_mode,
-                config=config,
-                config_source=source,
-                pass_through=global_options.pass_through,
-                completion_report_mode=completion_report_mode,
-                source_workspace=workspace,
-                stdout=stdout,
-                stderr=stderr,
-            )
-            if global_options.json_mode and payload is not None:
+        request = request_from_parsed(parsed, config, stdin)
+        if resume_plan is not None:
+            request = resume_command.apply_resume_to_request(request, resume_plan)
+        if request.dry_run:
+            payload = dry_run_payload(request)
+            if global_options.json_mode:
                 delegate_rendering.print_json(payload, stdout)
-            return exit_code
-        finally:
-            if resume_plan is not None:
-                resume_command.cleanup_schema_temp(resume_plan)
+            else:
+                print(f"cwd: {request.workspace} ({request.workspace_kind})", file=stdout)
+                if payload.get("isolatedWorkspace"):
+                    print(f"isolation: {payload['isolation']}", file=stdout)
+                lifecycle = payload.get("isolationLifecycle", "")
+                if lifecycle:
+                    print(f"isolationLifecycle: {lifecycle}", file=stdout)
+                if payload.get("plannedBranch"):
+                    print(f"plannedBranch: {payload['plannedBranch']}", file=stdout)
+                if payload.get("plannedExecutionCwd"):
+                    print(f"plannedExecutionCwd: {payload['plannedExecutionCwd']}", file=stdout)
+                # Use the payload's rewritten argv (which shows planned paths) when
+                # worktree isolation is active; otherwise use the source request.argv.
+                display_argv = payload.get("argv", request.argv)
+                print(f"argv: {shell_join(display_argv)}", file=stdout)
+                for warning in payload.get("warnings", ()):
+                    print(f"warning: {warning}", file=stdout)
+            return EXIT_OK
+
+        completion_report_mode = resolve_completion_report_mode(parsed, config)
+        if request.prompt_instruction_mode == PROMPT_INSTRUCTION_MODE_SLASH:
+            # Verbatim prompt carries no completion-report instruction; don't
+            # expect (or synthesize around) a report the child was never asked for.
+            completion_report_mode = delegate_config.COMPLETION_REPORT_MODE_NONE
+            if not global_options.pass_through and not global_options.json_mode:
+                print(
+                    "notice: leading slash command detected; sending prompt verbatim "
+                    "(delegate instruction wrapping suppressed).",
+                    file=stderr,
+                )
+        exit_code, payload = execute_request(
+            request,
+            global_options.json_mode,
+            config=config,
+            config_source=source,
+            pass_through=global_options.pass_through,
+            completion_report_mode=completion_report_mode,
+            source_workspace=workspace,
+            stdout=stdout,
+            stderr=stderr,
+        )
+        if global_options.json_mode and payload is not None:
+            delegate_rendering.print_json(payload, stdout)
+        return exit_code
     except worktree_mgmt.WorktreeManagementError as exc:
         if json_mode:
             delegate_rendering.print_json(exc.payload, stdout)

@@ -7,6 +7,7 @@ import re
 import secrets
 import shlex
 import shutil
+import stat
 import subprocess
 import time
 from collections.abc import Iterator
@@ -875,6 +876,7 @@ def empty_run_prune_payload(*, older_than_days: int, dry_run: bool) -> JsonObjec
         "removed": [],
         "skipped": [],
         "errors": [],
+        "staleResumeSchemas": [],
     }
 
 
@@ -896,9 +898,28 @@ def prune_runs(
     removed: list[JsonObject] = []
     skipped: list[JsonObject] = []
     errors: list[JsonObject] = []
+    stale_resume_schemas: list[str] = []
     index_changed = False
 
     with registry_lock(registry_root):
+        tmp_dir = registry_root / "tmp"
+        if tmp_dir.is_dir() and not tmp_dir.is_symlink():
+            for path in tmp_dir.glob("resume-schema-*"):
+                try:
+                    info = path.lstat()
+                    if not (path.is_symlink() or stat.S_ISREG(info.st_mode)):
+                        continue
+                    stale_resume_schemas.append(path.name)
+                    if not dry_run:
+                        path.unlink()
+                except OSError as exc:
+                    errors.append(
+                        {
+                            "code": "stale_schema_remove_failed",
+                            "message": str(exc),
+                            "path": str(path),
+                        }
+                    )
         index = load_index(registry_root)
         # Like worktree gc, treat unknown/unrecorded status as possibly present:
         # only records whose worktree is affirmatively gone are prunable.
@@ -1004,6 +1025,7 @@ def prune_runs(
     payload["removed"] = removed
     payload["skipped"] = skipped
     payload["errors"] = errors
+    payload["staleResumeSchemas"] = stale_resume_schemas
     if errors:
         payload["ok"] = False
         payload["exitCode"] = RUN_PRUNE_ERROR_EXIT_CODE

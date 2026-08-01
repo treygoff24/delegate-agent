@@ -24,7 +24,7 @@ class RegistryJsonError(ValueError):
 class BoundedReadError(ValueError):
     """A record file could not be read within the bounded-trust contract.
 
-    ``reason`` is one of: ``not_found``, ``not_regular``, ``too_large``,
+    ``reason`` is one of: ``not_found``, ``not_regular``, ``multiple_links``, ``too_large``,
     ``undecodable``, ``unreadable``. Callers map these onto their own
     user-facing error codes.
     """
@@ -39,7 +39,7 @@ def read_private_text_bounded(path: Path, *, max_bytes: int) -> str:
 
     Registry record content is potentially child-tampered after write (work
     children run in the workspace that owns ``.delegate``), so every parent
-    read of record text refuses symlinks, non-regular files, oversized
+    read of record text refuses symlinks, hard links, non-regular files, oversized
     content, and invalid UTF-8 instead of trusting the path.
     """
     try:
@@ -52,6 +52,10 @@ def read_private_text_bounded(path: Path, *, max_bytes: int) -> str:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
             raise BoundedReadError("not_regular", f"record file is not a regular file: {path}")
+        if info.st_nlink != 1:
+            raise BoundedReadError(
+                "multiple_links", f"record file has {info.st_nlink} links: {path}"
+            )
         chunks: list[bytes] = []
         total = 0
         while True:

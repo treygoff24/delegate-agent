@@ -214,6 +214,23 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(ctx.exception.error, "invalid_output_schema")
         self.assertIn("schema.required", ctx.exception.message)
 
+    def test_claude_call_schema_non_utf8_is_structured_and_is_not_recorded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            schema = Path(tmp) / "schema.json"
+            schema.write_bytes(b"\xff")
+            parsed = self.delegate.parse_cli(
+                ["claude", "call", "--output-schema", str(schema), "return json"]
+            )
+            with self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.delegate.request_from_parsed(parsed, self.delegate.DEFAULT_CONFIG, TtyStdin())
+            self.assertEqual(ctx.exception.error, "invalid_output_schema")
+
+            schema.write_text('{"type":"object"}', encoding="utf-8")
+            request = self.delegate.request_from_parsed(
+                parsed, self.delegate.DEFAULT_CONFIG, TtyStdin()
+            )
+            self.assertIsNone(request.output_schema_record_text)
+
     def test_stdin_works(self):
         self.assertEqual(
             self.delegate.resolve_prompt([], None, NonTtyStdin("from stdin")), "from stdin"

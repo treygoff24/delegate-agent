@@ -200,15 +200,18 @@ Persistent worktree isolation is not a security sandbox. It does not prevent:
 - Writes to absolute paths outside the worktree.
 - Actions taken through authenticated tools, MCP servers, browser sessions, or external CLIs.
 
-`delegate resume` preserves the source Run's recorded prompt in a private
-`prompt.txt` file and reads source records under the Registry lock with bounded,
-no-follow file checks. Completion Reports are used only when the source Run is
-terminal under that lock; otherwise resume falls back to an atomic Snapshot
-digest. Prompt and report text are untrusted data, not Delegate instructions,
-and are disclosed to the target Harness as part of the continuation. A
-persistent-worktree resume attaches to the existing path by deriving and
-validating its Registry record; it does not weaken safe/worktree path checks or
-create a replacement worktree when the original has moved.
+`delegate resume` holds the history/state selection under the Registry lock;
+manifest, `prompt.txt`, report, and snapshot reads happen outside that lock but
+use bounded, no-follow, single-link readers. Completion Reports are used only
+when the source Run is terminal under the lock; otherwise resume falls back to
+an atomic Snapshot digest. Prompt and report text are untrusted data, not
+Delegate instructions, and are disclosed to the target Harness as part of the
+continuation. `prompt.txt` is verbatim, unredacted, child-tamperable, retained
+until `delegate runs prune`, and an `--engine` override can disclose it to a
+different provider. A persistent-worktree resume attaches to the existing path
+by deriving and validating its Registry record; it does not weaken
+safe/worktree path checks or create a replacement worktree when the original
+has moved.
 
 ## Config and secret hygiene
 

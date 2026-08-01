@@ -8,9 +8,11 @@ from delegate_agent import (
     prompt_transport,
     request_build,
     resume_command,
+    safe_workspace,
     worktree_execution,
 )
 from delegate_agent.errors import DelegateError
+from delegate_agent.isolation import IsolationContext
 from delegate_agent.request_models import ParsedCommand, Request, ResolvedWorkspace
 
 
@@ -116,6 +118,33 @@ class ResumeSizeGuardTests(unittest.TestCase):
         with self.assertRaises(DelegateError) as ctx:
             resume_command.enforce_resume_prompt_size("cursor", chain)
         self.assertEqual(ctx.exception.error, "resume_prompt_too_large")
+
+    def test_safe_isolation_final_argv_guard_rejects_post_rewrite_overflow(self):
+        limit = prompt_transport.ARGV_PROMPT_GUARD_BYTES
+        with tempfile.TemporaryDirectory() as workspace:
+            prompt = "x" * (limit - 1)
+            request = Request(
+                engine="cursor",
+                mode="safe",
+                workspace=workspace,
+                prompt=prompt,
+                argv=["cursor", prompt],
+                model=None,
+                isolation_context=IsolationContext(
+                    source_workspace=workspace,
+                    effective_isolation="worktree",
+                    isolation_mode="auto",
+                    isolation_lifecycle="temporary",
+                    preserved_workspace=False,
+                ),
+                resumed_from={"runId": "del_source"},
+            )
+            resume_command.enforce_resume_prompt_size("cursor", request.argv[-1])
+            with safe_workspace.safe_isolated_request(request) as isolated:
+                self.assertGreater(len(isolated.argv[-1].encode("utf-8")), limit)
+                with self.assertRaises(DelegateError) as ctx:
+                    resume_command.enforce_resume_prompt_size("cursor", isolated.argv[-1])
+            self.assertEqual(ctx.exception.error, "resume_prompt_too_large")
 
 
 if __name__ == "__main__":
