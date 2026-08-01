@@ -162,6 +162,89 @@ class ResumeTrustTests(unittest.TestCase):
             self.assertEqual(plan.resumed_from["runId"], good_id)
             self.assertEqual(root, workspace / ".delegate")
 
+    def test_resume_uses_bounded_reads_for_all_record_access(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            _root, run_id, alias, _run_path = self._seed_record(workspace)
+            parsed = cli.parse_cli(["resume", alias])
+            private_io = __import__(
+                "delegate_agent.private_io", fromlist=["read_private_text_bounded"]
+            )
+            original = private_io.read_private_text_bounded
+            calls: list[int] = []
+
+            def bounded(path, *, max_bytes):
+                calls.append(max_bytes)
+                return original(path, max_bytes=max_bytes)
+
+            with (
+                mock.patch.object(private_io, "read_private_text_bounded", side_effect=bounded),
+                mock.patch.object(resume_command, "read_private_text_bounded", side_effect=bounded),
+            ):
+                plan = resume_command.build_resume_plan(
+                    parsed,
+                    ResolvedWorkspace(str(workspace), "directory"),
+                    cli.DEFAULT_CONFIG,
+                    stderr=io.StringIO(),
+                )
+
+            self.assertEqual(plan.resumed_from["runId"], run_id)
+            self.assertTrue(calls)
+            self.assertTrue(
+                all(size == resume_command.RESUME_RECORD_READ_MAX_BYTES for size in calls)
+            )
+
+    def test_resume_bare_harness_matches_registry_latest_activity_selection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            root, earlier_id, _earlier_alias, earlier_path = self._seed_record(workspace)
+            _root, later_id, _later_alias, later_path = self._seed_record(workspace)
+            for run_path, activity in (
+                (earlier_path, "2026-07-31T13:00:00Z"),
+                (later_path, "2026-07-31T12:00:00Z"),
+            ):
+                state = run_registry.load_run_state(root, run_path.name)
+                state["lastActivityAt"] = activity
+                run_registry.write_json_atomic(run_path / run_registry.STATE_FILE, state)
+            index = run_registry.load_index(root)
+            expected = run_registry.resolve_handle(index, "cursor", registry_root=root)
+
+            plan = resume_command.build_resume_plan(
+                cli.parse_cli(["resume", "cursor"]),
+                ResolvedWorkspace(str(workspace), "directory"),
+                cli.DEFAULT_CONFIG,
+                stderr=io.StringIO(),
+            )
+
+            self.assertEqual(expected.run_id, earlier_id)
+            self.assertNotEqual(earlier_id, later_id)
+            self.assertEqual(plan.resumed_from["runId"], expected.run_id)
+
+    def test_resume_harness_model_and_orphaned_exact_run_id_resolve(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            root, run_id, alias, _run_path = self._seed_record(workspace)
+            index = run_registry.load_index(root)
+            index["runs"][run_id]["modelAlias"] = "composer"
+            run_registry.save_index(root, index)
+
+            by_model = resume_command.build_resume_plan(
+                cli.parse_cli(["resume", "cursor:composer"]),
+                ResolvedWorkspace(str(workspace), "directory"),
+                cli.DEFAULT_CONFIG,
+                stderr=io.StringIO(),
+            )
+            self.assertEqual(by_model.resumed_from["runId"], run_id)
+
+            (run_registry.aliases_dir(root) / alias).unlink()
+            by_id = resume_command.build_resume_plan(
+                cli.parse_cli(["resume", run_id]),
+                ResolvedWorkspace(str(workspace), "directory"),
+                cli.DEFAULT_CONFIG,
+                stderr=io.StringIO(),
+            )
+            self.assertEqual(by_id.resumed_from["runId"], run_id)
+
     def test_unknown_handle_suggestions_read_no_record_bodies(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)

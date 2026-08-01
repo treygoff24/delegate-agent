@@ -1262,12 +1262,12 @@ def _prepare_tracked_run(
     if ctx.mode == "safe" or ctx.effective_isolation != "none":
         scratch_dir = run_path / "scratch"
         run_registry.ensure_private_dir(scratch_dir)
-    write_manifest(run_path, build_manifest(ctx, manifest_argv or argv))
     if ctx.source_prompt is not None:
         # The user prompt exactly as resolved, before instruction framing, so
         # `delegate resume` can rebuild the original task text. Verbatim by
         # design; deleted only by `runs prune` (never archived).
         run_registry.write_private_text(run_path / PROMPT_TXT_FILE, ctx.source_prompt)
+    write_manifest(run_path, build_manifest(ctx, manifest_argv or argv))
 
     stdout_log = run_path / STDOUT_LOG
     stderr_log = run_path / STDERR_LOG
@@ -2359,7 +2359,8 @@ def execute_tracked(
                     agent_config_dir=files.run_path,
                 )
                 if (
-                    ctx.engine in resume_command.ARGV_PROMPT_TRANSPORT_ENGINES
+                    ctx.resumed_from is not None
+                    and ctx.engine in resume_command.ARGV_PROMPT_TRANSPORT_ENGINES
                     and retry_stdin is None
                 ):
                     try:

@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from delegate_agent import cli, run_registry, runner, safe_workspace, worktree_execution
 from delegate_agent.isolation import IsolationContext
@@ -54,14 +55,31 @@ class ResumeCaptureTests(unittest.TestCase):
                 source_prompt=source_prompt,
             )
 
-            code, _payload = runner.execute_tracked(
-                [sys.executable, "-c", "pass"],
-                str(workspace),
-                context,
-                json_mode=True,
-                stdout=io.StringIO(),
-                stderr=io.StringIO(),
-            )
+            events: list[str] = []
+            original_prompt_write = run_registry.write_private_text
+            original_manifest_write = runner.write_manifest
+
+            def write_prompt(path, text, **kwargs):
+                if path.name == "prompt.txt":
+                    events.append("prompt")
+                return original_prompt_write(path, text, **kwargs)
+
+            def write_manifest(path, manifest):
+                events.append("manifest")
+                return original_manifest_write(path, manifest)
+
+            with (
+                mock.patch.object(run_registry, "write_private_text", side_effect=write_prompt),
+                mock.patch.object(runner, "write_manifest", side_effect=write_manifest),
+            ):
+                code, _payload = runner.execute_tracked(
+                    [sys.executable, "-c", "pass"],
+                    str(workspace),
+                    context,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
 
             self.assertEqual(code, 0)
             run_path = registry_root / "runs" / run_id
@@ -70,6 +88,7 @@ class ResumeCaptureTests(unittest.TestCase):
             manifest = json.loads((run_path / "manifest.json").read_text())
             self.assertEqual(manifest["promptFile"], "prompt.txt")
             self.assertNotIn("Delegate sub-agent skill review requirement", source_prompt)
+            self.assertLess(events.index("prompt"), events.index("manifest"))
 
     def test_persistent_worktree_registration_captures_prompt_at_second_seam(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -123,9 +142,26 @@ class ResumeCaptureTests(unittest.TestCase):
                 dirty_snapshot=safe_workspace.DirtySyncSnapshot((), ()),
             )
 
-            registration = worktree_execution._register_persistent_worktree_run(
-                execution, preflight
-            )
+            events: list[str] = []
+            original_prompt_write = run_registry.write_private_text
+            original_manifest_write = runner.write_manifest
+
+            def write_prompt(path, text, **kwargs):
+                if path.name == "prompt.txt":
+                    events.append("prompt")
+                return original_prompt_write(path, text, **kwargs)
+
+            def write_manifest(path, manifest):
+                events.append("manifest")
+                return original_manifest_write(path, manifest)
+
+            with (
+                mock.patch.object(run_registry, "write_private_text", side_effect=write_prompt),
+                mock.patch.object(runner, "write_manifest", side_effect=write_manifest),
+            ):
+                registration = worktree_execution._register_persistent_worktree_run(
+                    execution, preflight
+                )
 
             prompt_path = registration.run_path / "prompt.txt"
             self.assertEqual(prompt_path.read_text(), source_prompt)
@@ -133,6 +169,7 @@ class ResumeCaptureTests(unittest.TestCase):
             manifest = json.loads((registration.run_path / "manifest.json").read_text())
             self.assertEqual(manifest["promptFile"], "prompt.txt")
             self.assertNotIn("framed prompt", prompt_path.read_text())
+            self.assertLess(events.index("prompt"), events.index("manifest"))
 
     def test_dry_run_does_not_create_registry_or_prompt_record(self):
         with tempfile.TemporaryDirectory() as tmp:

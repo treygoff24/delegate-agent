@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from delegate_agent import worktree_records
+from delegate_agent import private_io, resume_command, worktree_records
 from tests.worktree_mgmt_test_base import WorktreeMgmtTestBase, git
 
 
@@ -256,6 +256,116 @@ class ResumeAttachmentTests(WorktreeMgmtTestBase):
             self.assertEqual(skipped["reason"], "live_attachment")
             self.assertIn(attached_alias, json.dumps(skipped))
             self.assertNotEqual(attached_id, owner_id)
+
+    def test_live_attachment_scan_skips_hardlinked_and_oversized_unrelated_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.delegate.run_registry.ensure_registry(Path(tmp), workspace_kind="directory")
+            attached_path = str(Path(tmp) / "attached")
+            good_id, good_alias = self.delegate.run_registry.register_run(root, harness="cursor")
+            bad_id, bad_alias = self.delegate.run_registry.register_run(root, harness="cursor")
+            for run_id, alias in ((good_id, good_alias), (bad_id, bad_alias)):
+                run_path = self.delegate.run_registry.run_directory(root, run_id)
+                self.delegate.run_registry.write_json_atomic(
+                    run_path / "manifest.json",
+                    {
+                        "schema": self.delegate.run_registry.MANIFEST_SCHEMA,
+                        "runId": run_id,
+                        "alias": alias,
+                        "worktreeAttachment": {"path": attached_path},
+                    },
+                )
+                self.delegate.run_registry.write_json_atomic(
+                    run_path / "state.json",
+                    {
+                        "schema": self.delegate.run_registry.STATE_SCHEMA,
+                        "status": "running",
+                        "pid": os.getpid(),
+                    },
+                )
+            for kind in ("hardlinked", "oversized"):
+                with self.subTest(kind=kind):
+                    bad_manifest = (
+                        self.delegate.run_registry.run_directory(root, bad_id) / "manifest.json"
+                    )
+                    if kind == "hardlinked":
+                        outside = Path(tmp) / "outside-manifest.json"
+                        outside.write_text("{}", encoding="utf-8")
+                        bad_manifest.unlink()
+                        os.link(outside, bad_manifest)
+                    else:
+                        bad_manifest.write_bytes(
+                            b"x" * (private_io.PRIVATE_RECORD_READ_MAX_BYTES + 1)
+                        )
+                    self.assertEqual(
+                        worktree_records.live_attachments_for_path(root, attached_path),
+                        [{"runId": good_id, "alias": good_alias}],
+                    )
+                    self.delegate.run_registry.write_json_atomic(
+                        bad_manifest,
+                        {
+                            "schema": self.delegate.run_registry.MANIFEST_SCHEMA,
+                            "runId": bad_id,
+                            "alias": bad_alias,
+                            "worktreeAttachment": {"path": attached_path},
+                        },
+                    )
+
+    def test_explicit_attachment_owner_path_conflict_refuses_without_legacy_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.delegate.run_registry.ensure_registry(Path(tmp), workspace_kind="directory")
+            index = self.delegate.run_registry.load_index(root)
+            index["runs"] = {"owner-a": {}, "owner-b": {}}
+            self.delegate.run_registry.save_index(root, index)
+            attachment = {
+                "worktreeAttachment": {
+                    "sourceRunId": "owner-a",
+                    "path": str(Path(tmp) / "worktree-b"),
+                }
+            }
+
+            def owner_target(_root, run_id, *_parts):
+                return {
+                    "path": str(Path(tmp) / ("worktree-a" if run_id == "owner-a" else "worktree-b"))
+                }
+
+            with (
+                mock.patch.object(resume_command, "_read_record_json", return_value={}),
+                mock.patch.object(
+                    worktree_records, "_is_persistent_worktree_run", return_value=True
+                ),
+                mock.patch.object(
+                    resume_command, "_validate_attach_target", side_effect=owner_target
+                ) as validate,
+                self.assertRaises(self.delegate.DelegateError) as caught,
+            ):
+                resume_command._attachment_owner_target(root, attachment)
+
+            self.assertEqual(caught.exception.error, "worktree_path_changed")
+            self.assertEqual(validate.call_args.args[1], "owner-a")
+
+    def test_missing_attachment_owner_still_uses_matching_legacy_owner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.delegate.run_registry.ensure_registry(Path(tmp), workspace_kind="directory")
+            index = self.delegate.run_registry.load_index(root)
+            index["runs"] = {"owner-b": {}}
+            self.delegate.run_registry.save_index(root, index)
+            expected_path = str(Path(tmp) / "worktree-b")
+            attachment = {"worktreeAttachment": {"sourceRunId": "owner-a", "path": expected_path}}
+
+            with (
+                mock.patch.object(resume_command, "_read_record_json", return_value={}),
+                mock.patch.object(
+                    worktree_records, "_is_persistent_worktree_run", return_value=True
+                ),
+                mock.patch.object(
+                    resume_command,
+                    "_validate_attach_target",
+                    return_value={"path": expected_path},
+                ),
+            ):
+                target = resume_command._attachment_owner_target(root, attachment)
+
+            self.assertEqual(target["path"], expected_path)
 
     def test_forbid_commit_is_inherited_and_enforced_on_attached_run(self):
         _repo, repo_path = self._make_repo()

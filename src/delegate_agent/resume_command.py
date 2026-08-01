@@ -33,7 +33,11 @@ from delegate_agent.errors import DelegateError
 from delegate_agent.git_utils import GIT_QUICK_TIMEOUT_SECONDS, run_git
 from delegate_agent.isolation import IsolationContext
 from delegate_agent.json_types import JsonObject
-from delegate_agent.private_io import BoundedReadError, read_private_text_bounded
+from delegate_agent.private_io import (
+    PRIVATE_RECORD_READ_MAX_BYTES,
+    BoundedReadError,
+    read_private_text_bounded,
+)
 from delegate_agent.prompt_transport import (
     ARGV_PROMPT_GUARD_BYTES,
     ARGV_PROMPT_TRANSPORT_ENGINES,
@@ -50,7 +54,7 @@ from delegate_agent.request_models import (
 # One global byte cap for every record file resume reads. A sandboxed child
 # must not be able to make the unsandboxed parent read an arbitrary host file
 # (or a multi-gigabyte one) into another provider's prompt.
-RESUME_RECORD_READ_MAX_BYTES = 4 * 1024 * 1024
+RESUME_RECORD_READ_MAX_BYTES = PRIVATE_RECORD_READ_MAX_BYTES
 # Prior-run report/digest text is inlined into the continuation with a hard
 # cap; the full history stays reachable via `delegate run-output`.
 REPORT_INLINE_MAX_CHARS = 32_000
@@ -220,8 +224,8 @@ def _load_history(
     """Return (effective_status, history_kind, history_text) under the registry lock.
 
     The completion report is trusted as a whole document ONLY when the run is
-    terminal under the lock: report writes are truncate-then-write, so a wedged
-    finalizer can leave a partial file. Still effectively stale after the
+    terminal under the lock: a non-Delegate or wedged writer can still leave a
+    partial file. Still effectively stale after the
     locked recheck → assemble from the snapshot only (snapshots are atomically
     replaced).
     """
@@ -260,19 +264,9 @@ def _load_history(
 def _resolve_resume_target(registry_root: Path, handle: str) -> tuple[str, str]:
     """Resolve a resume source without inspecting arbitrary run records."""
     index = run_registry.load_index(registry_root)
-    run_id = run_registry.lookup_run_id(index, handle)
-    if run_id is None and handle in run_registry.HARNESS_NAMES:
-        candidates = [
-            (entry.get("registrationOrdinal", 0), run_id)
-            for run_id, entry in index.get("runs", {}).items()
-            if isinstance(run_id, str)
-            and isinstance(entry, dict)
-            and entry.get("harness") == handle
-            and isinstance(entry.get("registrationOrdinal", 0), int)
-        ]
-        if candidates:
-            run_id = max(candidates)[1]
-    alias = run_registry.alias_for_run(index, run_id) if isinstance(run_id, str) else None
+    resolved = run_registry.resolve_handle(index, handle, registry_root=registry_root)
+    run_id = resolved.run_id
+    alias = resolved.alias
     if not isinstance(run_id, str) or not isinstance(alias, str):
         suggestions = ", ".join(run_registry.suggest_handles(index, handle)) or "(none)"
         raise DelegateError(
@@ -281,6 +275,8 @@ def _resolve_resume_target(registry_root: Path, handle: str) -> tuple[str, str]:
             "Runs are recorded per-workspace under <workspace>/.delegate; "
             "if this run was launched elsewhere, pass --cwd <that workspace>.",
         )
+    if handle == run_id:
+        return run_id, alias
     try:
         claim = _read_record_text(run_registry.aliases_dir(registry_root) / alias).strip()
     except BoundedReadError as exc:
@@ -407,7 +403,9 @@ def _attachment_owner_target(
     )
     index = run_registry.load_index(registry_root)
 
-    def candidate_target(candidate_id: str) -> JsonObject | None:
+    def candidate_target(
+        candidate_id: str, *, refuse_path_conflict: bool = False
+    ) -> JsonObject | None:
         if not isinstance(index.get("runs", {}).get(candidate_id), dict):
             return None
         owner_path = run_registry.run_directory(registry_root, candidate_id)
@@ -436,12 +434,17 @@ def _attachment_owner_target(
             expected_canonical is not None
             and worktree_records._canonical_path(str(target["path"])) != expected_canonical
         ):
+            if refuse_path_conflict:
+                raise DelegateError(
+                    "worktree_path_changed",
+                    "The attached source's recorded owner path conflicts with its attachment path.",
+                )
             return None
         return target
 
     source_run_id = attachment.get("sourceRunId")
     if isinstance(source_run_id, str):
-        target = candidate_target(source_run_id)
+        target = candidate_target(source_run_id, refuse_path_conflict=True)
         if target is not None:
             return target
 

@@ -13,6 +13,7 @@ from delegate_agent.json_types import JsonObject, JsonValue
 
 PRIVATE_DIR_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
+PRIVATE_RECORD_READ_MAX_BYTES = 4 * 1024 * 1024
 _DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 _NOFOLLOW_FLAGS = getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
 
@@ -369,14 +370,13 @@ def write_json_atomic_if_absent(path: Path, payload: JsonObject) -> bool:
 
 def read_json_object(path: Path) -> JsonObject | None:
     try:
-        fd = open_private_file(path, os.O_RDONLY)
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
+        text = read_private_text_bounded(path, max_bytes=PRIVATE_RECORD_READ_MAX_BYTES)
+    except BoundedReadError as exc:
+        if exc.reason == "not_found":
+            return None
         raise RegistryJsonError(f"could not read JSON file {path}: {exc}") from exc
     try:
-        with os.fdopen(fd, "r", encoding="utf-8") as handle:
-            data: JsonValue = json.load(handle)
+        data: JsonValue = json.loads(text)
     except json.JSONDecodeError as exc:
         raise RegistryJsonError(f"invalid JSON in {path}: {exc}") from exc
     except OSError as exc:

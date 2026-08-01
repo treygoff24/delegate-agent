@@ -379,16 +379,16 @@ def _register_persistent_worktree_run(
     )
     run_path = run_registry.run_directory(preflight.registry_root, run_id)
     run_registry.ensure_private_dir(run_path)
-    delegate_runner.write_manifest(
-        run_path,
-        delegate_runner.build_manifest(pre_ctx, public_argv(request)),
-    )
     if pre_ctx.source_prompt is not None:
         # Written here as well as in _prepare_tracked_run so a worktree-creation
         # failure still leaves a resumable prompt record.
         run_registry.write_private_text(
             run_path / run_registry.PROMPT_TXT_FILE, pre_ctx.source_prompt
         )
+    delegate_runner.write_manifest(
+        run_path,
+        delegate_runner.build_manifest(pre_ctx, public_argv(request)),
+    )
 
     delegate_runner.write_state(
         run_path,
