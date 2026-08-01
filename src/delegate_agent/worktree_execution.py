@@ -337,6 +337,8 @@ def _register_persistent_worktree_run(
 ) -> PersistentWorktreeRegistration:
     request = execution.request
     label = branch_label(request.engine, request.model_alias)
+    if request.mode == "work":
+        mail.prepare_mail_storage(preflight.registry_root)
     mail.sanitize_inherited_mail_identity(request.env_overrides)
 
     run_id, alias = run_registry.register_run(
@@ -355,26 +357,6 @@ def _register_persistent_worktree_run(
     if request.mode == "work":
         mail.bind_mail_identity(child_env, run_id, alias)
     request.env_overrides = child_env
-    if request.mode == "work":
-        request.argv = mail.wire_work_mail_argv(
-            request.engine,
-            request.argv,
-            preflight.registry_root,
-            prompt=request.prompt,
-            prompt_transport=request.prompt_transport,
-            stderr=execution.stderr,
-            isolated_workspace=True,
-        )
-        if request.display_argv is not None:
-            request.display_argv = mail.wire_work_mail_argv(
-                request.engine,
-                request.display_argv,
-                preflight.registry_root,
-                prompt=request.prompt,
-                prompt_transport=request.prompt_transport,
-                isolated_workspace=True,
-            )
-
     short_id = short_run_id(run_id)
     branch = plan_branch_name(label, short_id)
     data_home = worktrees_data_home(execution.config)
@@ -679,6 +661,20 @@ def _launch_child_in_persistent_worktree(
             request,
             registration.worktree_path,
         )
+        if request.mode == "work":
+            wired_argv, wired_display_argv = mail.wire_work_mail_launch(
+                request.engine,
+                execution_request.argv,
+                execution_request.display_argv,
+                preflight.registry_root,
+                prompt=request.prompt,
+                prompt_transport=request.prompt_transport,
+                stderr=execution.stderr,
+                isolated_workspace=True,
+            )
+            execution_request = replace(
+                execution_request, argv=wired_argv, display_argv=wired_display_argv
+            )
         if request.resumed_from is not None:
             from delegate_agent.resume_command import enforce_resume_prompt_size
 

@@ -245,6 +245,13 @@ def child_environment(
     return env
 
 
+def strip_mail_identity(env: dict[str, str] | None) -> None:
+    """Prevent non-work dispatch from regaining a parent lane identity."""
+    if env is not None:
+        env.pop("DELEGATE_RUN_ID", None)
+        env.pop("DELEGATE_MAIL_SELF", None)
+
+
 def _auth_file_readable(path: Path) -> bool:
     try:
         return path.is_file() and os.access(path, os.R_OK)

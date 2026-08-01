@@ -16,6 +16,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   opt-in `mailPush` plumbing seam, and audited harness-specific scoped or
   workspace-writable mail behavior. Wave 2 stop-hook push remains unimplemented.
 
+### Fixed
+
+- Mail launch wiring now applies to the actual child argv and matching manifest
+  argv after persistent or attached worktree rewriting. Isolated grants are
+  limited to evidenced harness mechanisms; Cursor no longer receives a new
+  sandbox, non-isolated work launches receive no redundant grant, and Codex
+  follows its effective sandbox policy. Read-only mail commands no longer
+  create a registry, mailbox, lock, or Git exclude entry; status reconciles a
+  published inbox envelope after a crash before its sender-ledger rewrite.
+
 ## [0.25.0] - 2026-08-01
 
 ### Added

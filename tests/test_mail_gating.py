@@ -5,6 +5,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from delegate_agent import config as delegate_config
 from delegate_agent import mail, request_build, run_registry, runner
@@ -160,18 +161,14 @@ class MailGatingTests(CommandTestBase):
             request = request_build.request_from_input_json(parsed, self._config(True))
             self.assertTrue(request.mail_push)
 
-    def test_degraded_harness_launch_warns_and_does_not_claim_scoping(self):
+    def test_nonisolated_work_launch_is_already_workspace_writable_without_a_warning(self):
         stderr = io.StringIO()
         argv = ["grok", "work", "prompt"]
         with tempfile.TemporaryDirectory(prefix="delegate-mail-sandbox-") as tmp:
             result = mail.wire_work_mail_argv("grok", argv, Path(tmp), stderr=stderr)
             self.assertEqual(result, argv)
-            self.assertTrue((Path(tmp) / "mail").is_dir())
-        self.assertEqual(
-            stderr.getvalue(),
-            "delegate mail: WARNING: grok work launch is workspace-writable; "
-            "it is not filesystem-scoped to .delegate/mail.\n",
-        )
+            self.assertFalse((Path(tmp) / "mail").exists())
+        self.assertEqual(stderr.getvalue(), "")
 
     def test_mail_sandbox_table_lists_every_known_engine(self):
         self.assertEqual(set(mail.MAIL_SANDBOX_ROWS), set(KNOWN_ENGINES))
@@ -182,35 +179,98 @@ class MailGatingTests(CommandTestBase):
             mail_root = str((root / "mail").resolve())
             cases = {
                 "codex": ["-c", f'sandbox_workspace_write.writable_roots=["{mail_root}"]'],
-                "cursor": ["--sandbox", "enabled", "--add-dir", mail_root],
                 "kimi": ["--add-dir", mail_root],
                 "claude": ["--add-dir", mail_root],
                 "omp": [f"--add-dir={mail_root}"],
             }
             for engine, expected in cases.items():
                 with self.subTest(engine=engine):
+                    argv = [engine, "work", "prompt"]
+                    if engine == "codex":
+                        argv = [engine, "exec", "--sandbox", "workspace-write", "prompt"]
                     argv = mail.wire_work_mail_argv(
                         engine,
-                        [engine, "work", "prompt"],
+                        argv,
                         root,
-                        isolated_workspace=engine == "codex",
+                        isolated_workspace=True,
                     )
                     for flag in expected:
                         self.assertIn(flag, argv)
-                    self.assertTrue((root / "mail").is_dir())
+                    self.assertFalse((root / "mail").exists())
 
-    def test_workspace_writable_harnesses_warn(self):
+    def test_cursor_default_work_argv_is_not_changed_to_enable_a_sandbox(self):
         with tempfile.TemporaryDirectory(prefix="delegate-mail-sandbox-") as tmp:
-            for engine in ("droid", "grok", "devin", "opencode", "pi"):
-                with self.subTest(engine=engine):
+            argv = mail.wire_work_mail_argv(
+                "cursor", ["cursor", "work", "prompt"], Path(tmp), isolated_workspace=True
+            )
+        self.assertEqual(argv, ["cursor", "work", "prompt"])
+        self.assertNotIn("--sandbox", argv)
+        self.assertNotIn("--add-dir", argv)
+
+    def test_codex_effective_sandbox_policy_controls_mail_grant_and_warning(self):
+        with tempfile.TemporaryDirectory(prefix="delegate-mail-sandbox-") as tmp:
+            root = Path(tmp)
+            mail_root = str((root / "mail").resolve())
+            cases = {
+                "workspace-write": (
+                    ["codex", "exec", "--sandbox", "workspace-write", "prompt"],
+                    True,
+                    "",
+                ),
+                "read-only": (
+                    ["codex", "exec", "--sandbox", "read-only", "prompt"],
+                    False,
+                    "read-only",
+                ),
+                "danger-full-access": (
+                    ["codex", "exec", "--sandbox", "danger-full-access", "prompt"],
+                    False,
+                    "",
+                ),
+                "bypass": (
+                    ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "prompt"],
+                    False,
+                    "",
+                ),
+            }
+            for name, (argv, granted, warning) in cases.items():
+                with self.subTest(policy=name):
                     stderr = io.StringIO()
-                    self.assertEqual(
-                        mail.wire_work_mail_argv(
-                            engine, [engine, "work"], Path(tmp), stderr=stderr
-                        ),
-                        [engine, "work"],
+                    result = mail.wire_work_mail_argv(
+                        "codex", argv, root, stderr=stderr, isolated_workspace=True
                     )
-                    self.assertIn("workspace-writable", stderr.getvalue())
+                    grant = f'sandbox_workspace_write.writable_roots=["{mail_root}"]'
+                    self.assertEqual(grant in result, granted)
+                    self.assertIn(warning, stderr.getvalue())
+
+    def test_nonisolated_codex_has_no_writable_root_grant(self):
+        with tempfile.TemporaryDirectory(prefix="delegate-mail-sandbox-") as tmp:
+            result = mail.wire_work_mail_argv(
+                "codex",
+                ["codex", "exec", "--sandbox", "workspace-write", "prompt"],
+                Path(tmp),
+                isolated_workspace=False,
+            )
+        self.assertNotIn("sandbox_workspace_write.writable_roots", " ".join(result))
+
+    def test_mail_storage_failure_refuses_work_launch_before_run_or_alias_claim(self):
+        with tempfile.TemporaryDirectory(prefix="delegate-mail-storage-") as tmp:
+            workspace = Path(tmp)
+            fake_bin = self.write_fake_executable("cursor")
+            with mock.patch.object(
+                mail,
+                "prepare_mail_storage",
+                side_effect=mail._error("mail_storage_unavailable", "blocked"),
+            ):
+                code, _stdout, stderr = self.run_main(
+                    ["--cwd", str(workspace), "cursor", "work", "prompt"], path_prefix=fake_bin
+                )
+            self.assertEqual(code, 2)
+            self.assertIn("mail_storage_unavailable", stderr)
+            registry_root = workspace / ".delegate"
+            index = run_registry.load_index(registry_root)
+            self.assertEqual(index["runs"], {})
+            self.assertEqual(list((registry_root / "aliases").iterdir()), [])
 
 
 if __name__ == "__main__":

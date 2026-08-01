@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import errno
+import io
 import json
 import os
+import subprocess
 import tempfile
 import unittest
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from unittest import mock
 
 from delegate_agent import mail, private_io, run_registry
+from delegate_agent.errors import DelegateError
 
 
 class MailDeliveryTests(unittest.TestCase):
@@ -43,6 +46,52 @@ class MailDeliveryTests(unittest.TestCase):
             state,
         )
         return run_id, alias, {"DELEGATE_RUN_ID": run_id, "DELEGATE_MAIL_SELF": alias}
+
+    def test_status_reconciles_crash_after_publication_before_ledger_rewrite(self):
+        _sender_id, _sender, sender_env = self.lane()
+        recipient_id, recipient, _recipient_env = self.lane()
+        original_write = private_io.write_json_atomic
+
+        def crash_after_publication(path, payload):
+            if path.parent == mail.sent_root(self.registry_root) and any(
+                (mail.boxes_root(self.registry_root) / recipient_id / "inbox").glob("*.mail")
+            ):
+                raise RuntimeError("simulated crash after publication")
+            return original_write(path, payload)
+
+        with (
+            mock.patch.object(private_io, "write_json_atomic", side_effect=crash_after_publication),
+            self.assertRaisesRegex(RuntimeError, "after publication"),
+        ):
+            mail.send(
+                self.registry_root,
+                mail.MailCommand(action="send", to=recipient, body="hello"),
+                env=sender_env,
+            )
+
+        message_id = next(mail.sent_root(self.registry_root).glob("*.json")).stem
+        result = mail.status(
+            self.registry_root, mail.MailCommand(action="status", message_id=message_id)
+        )
+        self.assertEqual(result["message"]["recipients"][0]["outcome"], "delivered")
+        self.assertEqual(result["message"]["recipients"][0]["pathState"], "inbox")
+
+    def test_status_keeps_failed_when_publication_never_happened(self):
+        _sender_id, _sender, sender_env = self.lane()
+        _recipient_id, recipient, _recipient_env = self.lane()
+        with mock.patch.object(
+            private_io, "write_bytes_atomic_if_absent", side_effect=OSError("nope")
+        ):
+            message = mail.send(
+                self.registry_root,
+                mail.MailCommand(action="send", to=recipient, body="hello"),
+                env=sender_env,
+            )["message"]
+        result = mail.status(
+            self.registry_root,
+            mail.MailCommand(action="status", message_id=message["msgId"]),
+        )
+        self.assertEqual(result["message"]["recipients"][0]["outcome"], "failed")
 
     def test_ledger_records_all_outcomes_and_status_probes_pruned_delivery(self):
         _sender_id, _sender, sender_env = self.lane(group="other")
@@ -265,6 +314,40 @@ class MailDeliveryTests(unittest.TestCase):
             (mail.mail_root(self.registry_root) / mail.META_FILE_NAME).read_text(encoding="utf-8")
         )
         self.assertEqual(meta["nextSeq"], 3)
+
+
+class MailReadOnlyFilesystemTests(unittest.TestCase):
+    def _snapshot(self, root: Path) -> dict[str, bytes]:
+        return {
+            str(path.relative_to(root)): path.read_bytes()
+            for path in sorted(root.rglob("*"))
+            if path.is_file()
+        }
+
+    def test_read_only_commands_leave_a_fresh_git_workspace_byte_identical(self):
+        with tempfile.TemporaryDirectory(prefix="delegate-mail-read-only-") as tmp:
+            workspace = Path(tmp)
+            subprocess.run(["git", "-C", str(workspace), "init"], check=True, capture_output=True)
+            before = self._snapshot(workspace)
+            commands = (
+                mail.MailCommand(action="inbox"),
+                mail.MailCommand(action="read", message_id="20260801", peek=True),
+                mail.MailCommand(action="status", message_id="20260801-120000-abcdef"),
+            )
+            for command in commands:
+                with self.subTest(action=command.action), suppress(DelegateError):
+                    mail.emit(
+                        command, workspace=workspace, stdout=io.StringIO(), stderr=io.StringIO()
+                    )
+                self.assertEqual(self._snapshot(workspace), before)
+            code = mail.emit(
+                mail.MailCommand(action="watch", once=True, timeout=1, interval_ms=100),
+                workspace=workspace,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+            self.assertEqual(code, 124)
+            self.assertEqual(self._snapshot(workspace), before)
 
 
 if __name__ == "__main__":

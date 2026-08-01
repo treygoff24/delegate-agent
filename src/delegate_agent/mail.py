@@ -51,11 +51,12 @@ MAIL_MAX_WATCH_ITEMS = 1000
 MESSAGE_SEPARATOR = b"\n---\n"
 MESSAGE_ID_RE = re.compile(r"\d{8}-\d{6}-[0-9a-f]{6}\Z")
 
-# Codex 0.100.0 accepted this config override in the 2026-08-01 local probe.
-# `--add-dir` is intentionally not used: it does not add a writable root to a
-# read-only Codex sandbox. Direct source-workspace runs remain workspace-writable.
+# Evidence: `codex --help` (0.100.0, probed 2026-08-01) documents `-c` config
+# overrides and accepts `sandbox_workspace_write.writable_roots`.  `claude`,
+# `kimi`, and `omp` each document their respective `--add-dir` form in `--help`.
+# Cursor's default work launch is not sandboxed; do not enable one merely for mail.
 MAIL_SANDBOX_ROWS: dict[str, str] = {
-    "cursor": "scoped",
+    "cursor": "workspace-writable",
     "droid": "workspace-writable",
     "codex": "scoped",
     "kimi": "scoped",
@@ -195,6 +196,16 @@ def _ensure_mail_tree(registry_root: Path) -> Path:
     return root
 
 
+def prepare_mail_storage(registry_root: Path) -> Path:
+    """Validate and create mail storage before a run claims an identity."""
+    try:
+        return _ensure_mail_tree(registry_root)
+    except OSError as exc:
+        raise _error(
+            "mail_storage_unavailable", f"Could not prepare .delegate/mail: {exc}"
+        ) from exc
+
+
 def _workspace_root(path_text: str) -> Path:
     path = Path(path_text).expanduser().resolve()
     if not path.exists() or not path.is_dir():
@@ -285,37 +296,73 @@ def wire_work_mail_argv(
     stderr: TextIO | None = None,
     isolated_workspace: bool = False,
 ) -> list[str]:
-    """Add the measured mail-root grant, or warn for a degraded harness."""
-    _ensure_mail_tree(registry_root)
-    scope = MAIL_SANDBOX_ROWS[engine]
-    if engine == "codex" and not isolated_workspace:
-        scope = "workspace-writable"
-    if scope != "scoped":
-        if stderr is not None:
+    """Compatibility wrapper for one argv; launch seams use ``wire_work_mail_launch``."""
+    wired, _display = wire_work_mail_launch(
+        engine,
+        argv,
+        None,
+        registry_root,
+        prompt=prompt,
+        prompt_transport=prompt_transport,
+        stderr=stderr,
+        isolated_workspace=isolated_workspace,
+    )
+    return wired
+
+
+def _codex_mail_scope(argv: list[str]) -> str:
+    if "--dangerously-bypass-approvals-and-sandbox" in argv:
+        return "unsandboxed"
+    try:
+        sandbox = argv[argv.index("--sandbox") + 1]
+    except (ValueError, IndexError):
+        return "unsandboxed"
+    return "scoped" if sandbox == "workspace-write" else "read-only"
+
+
+def wire_work_mail_launch(
+    engine: str,
+    argv: list[str],
+    display_argv: list[str] | None,
+    registry_root: Path,
+    *,
+    prompt: str | None = None,
+    prompt_transport: str = "argv",
+    stderr: TextIO | None = None,
+    isolated_workspace: bool = False,
+) -> tuple[list[str], list[str] | None]:
+    """Wire actual and manifest argv together at a single launch seam."""
+    scope = _codex_mail_scope(argv) if engine == "codex" else MAIL_SANDBOX_ROWS[engine]
+    needs_grant = isolated_workspace and scope == "scoped"
+    inaccessible = isolated_workspace and scope == "read-only"
+    if not needs_grant:
+        if inaccessible and stderr is not None:
             print(
-                f"delegate mail: WARNING: {engine} work launch is {scope}; "
-                "it is not filesystem-scoped to .delegate/mail.",
+                f"delegate mail: WARNING: {engine} work launch is read-only; "
+                ".delegate/mail is inaccessible from this isolated workspace.",
                 file=stderr,
             )
-        return argv
+        return list(argv), None if display_argv is None else list(display_argv)
     root = str(mail_root(registry_root).resolve(strict=False))
     if engine == "codex":
         flags = ["-c", f"sandbox_workspace_write.writable_roots=[{json.dumps(root)}]"]
-    elif engine == "cursor":
-        flags = ["--sandbox", "enabled", "--add-dir", root]
     elif engine == "omp":
         flags = [f"--add-dir={root}"]
     else:
         flags = ["--add-dir", root]
-    updated = list(argv)
-    if flags and not all(flag in updated for flag in flags):
-        if engine == "kimi" and "--prompt" in updated:
-            updated[updated.index("--prompt") : updated.index("--prompt")] = flags
-        elif engine in {"codex", "cursor", "omp"} and prompt_transport == "argv" and updated:
-            updated[-1:-1] = flags
-        else:
-            updated.extend(flags)
-    return updated
+
+    def add_flags(command: list[str]) -> list[str]:
+        updated = list(command)
+        if flags and not all(flag in updated for flag in flags):
+            if engine == "kimi" and "--prompt" in updated:
+                updated[updated.index("--prompt") : updated.index("--prompt")] = flags
+            elif engine in {"codex", "omp"} and prompt_transport == "argv" and updated:
+                updated[-1:-1] = flags
+            else:
+                updated.extend(flags)
+        return updated
+
+    return add_flags(argv), None if display_argv is None else add_flags(display_argv)
 
 
 def _registry_for_workspace(workspace: Path) -> Path:
@@ -726,6 +773,7 @@ def send(
                 row["outcome"] = "delivered"
                 row.pop("reason", None)
                 row["deliveredAt"] = run_registry.utc_now_iso()
+            private_io.write_json_atomic(sent_path, ledger)
         ledger["recipients"] = rows
         private_io.write_json_atomic(sent_path, ledger)
         return _send_payload(ledger, identity)
@@ -741,10 +789,6 @@ def _send_payload(ledger: JsonObject, identity: MailIdentity) -> JsonObject:
 
 
 def _current_recipient(registry_root: Path, identity: MailIdentity) -> str:
-    _ensure_mail_tree(registry_root)
-    _ensure_box(
-        registry_root, COORDINATOR_BOX if identity.is_coordinator else identity.run_id or ""
-    )
     return COORDINATOR_BOX if identity.is_coordinator else identity.run_id or ""
 
 
@@ -782,13 +826,12 @@ def inbox(
     env: Mapping[str, str | None] | None = None,
 ) -> JsonObject:
     identity = _identity(registry_root, env=env)
-    with run_registry.registry_lock(registry_root):
-        box_key = _current_recipient(registry_root, identity)
-        rows = [
-            _message_view(envelope, body)
-            for _path, envelope, body in _iter_box_messages(registry_root, box_key)
-            if _filter_sender(envelope, command.from_sender)
-        ]
+    box_key = _current_recipient(registry_root, identity)
+    rows = [
+        _message_view(envelope, body)
+        for _path, envelope, body in _iter_box_messages(registry_root, box_key)
+        if _filter_sender(envelope, command.from_sender)
+    ]
     return {
         "schema": MAIL_INBOX_SCHEMA,
         "ok": True,
@@ -806,7 +849,7 @@ def read_message(
     if command.message_id is None:
         raise _error("missing_message", "mail read requires a message id prefix.")
     identity = _identity(registry_root, env=env)
-    with run_registry.registry_lock(registry_root):
+    if command.peek:
         box_key = _current_recipient(registry_root, identity)
         found: list[tuple[Path, JsonObject, str, str]] = []
         for folder_name in ("inbox", "read"):
@@ -822,9 +865,28 @@ def read_message(
                 "ambiguous_message", f"Mail message prefix is ambiguous: {command.message_id}."
             )
         path, envelope, body, folder_name = found[0]
-        if not command.peek and folder_name == "inbox":
-            target = _box_dir(registry_root, box_key) / "read" / path.name
-            os.rename(path, target)
+    else:
+        with run_registry.registry_lock(registry_root):
+            _ensure_mail_tree(registry_root)
+            box_key = _current_recipient(registry_root, identity)
+            found = []
+            for folder_name in ("inbox", "read"):
+                for path, envelope, body in _iter_box_messages(registry_root, box_key, folder_name):
+                    if str(envelope.get("msgId", "")).startswith(command.message_id):
+                        found.append((path, envelope, body, folder_name))
+            if not found:
+                raise _error(
+                    "unknown_message",
+                    f"Unknown message for {identity.alias}: {command.message_id}.",
+                )
+            if len(found) > 1:
+                raise _error(
+                    "ambiguous_message", f"Mail message prefix is ambiguous: {command.message_id}."
+                )
+            path, envelope, body, folder_name = found[0]
+            if folder_name == "inbox":
+                target = _box_dir(registry_root, box_key) / "read" / path.name
+                os.rename(path, target)
     return {
         "schema": MAIL_READ_SCHEMA,
         "ok": True,
@@ -855,7 +917,10 @@ def _status_rows(registry_root: Path, ledger: JsonObject) -> list[JsonObject]:
                     found = True
                     row["pathState"] = folder
                     break
-        if not found and raw.get("outcome") == "delivered":
+        if found and raw.get("outcome") == "failed":
+            row["outcome"] = "delivered"
+            row.pop("reason", None)
+        elif not found and raw.get("outcome") == "delivered":
             row["outcome"] = "pruned"
             row["reason"] = "recipient mailbox no longer contains the message"
         if (
@@ -877,13 +942,11 @@ def status(
     identity = _identity(registry_root, env=env)
     if command.message_id is None:
         raise _error("missing_message", "mail status requires a message id.")
-    with run_registry.registry_lock(registry_root):
-        _ensure_mail_tree(registry_root)
-        _matched_message_id, _path, ledger = _match_message_id(
-            registry_root, command.message_id, sent_only=True
-        )
-        ledger = dict(ledger)
-        ledger["recipients"] = _status_rows(registry_root, ledger)
+    _matched_message_id, _path, ledger = _match_message_id(
+        registry_root, command.message_id, sent_only=True
+    )
+    ledger = dict(ledger)
+    ledger["recipients"] = _status_rows(registry_root, ledger)
     return {
         "schema": MAIL_STATUS_SCHEMA,
         "ok": True,
@@ -968,8 +1031,7 @@ def watch(
         }
     deadline = time.monotonic() + (command.timeout or MAIL_WATCH_DEFAULT_TIMEOUT_SECONDS)
     while True:
-        with run_registry.registry_lock(registry_root):
-            lines, found = _watch_once(registry_root, command, identity)
+        lines, found = _watch_once(registry_root, command, identity)
         matching = False
         for line in lines:
             message = line.get("message")
@@ -1106,8 +1168,11 @@ def emit(
     stderr: TextIO,
     stdin: TextIO | None = None,
 ) -> int:
-    registry_root = _registry_for_workspace(workspace)
     action = command.action
+    mutates = action in {"send", "prune"} or (action == "read" and not command.peek)
+    registry_root = (
+        _registry_for_workspace(workspace) if mutates else run_registry.registry_root(workspace)
+    )
     if action == "send":
         payload = send(registry_root, command, stdin=stdin)
     elif action == "inbox":

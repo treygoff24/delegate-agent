@@ -197,8 +197,9 @@ class MailContractTests(CommandTestBase):
         self.assertEqual(json.loads(lines[1])["body"], "hello")
 
     def test_watch_emits_an_unreadable_ndjson_record(self):
-        mail.inbox(self.registry_root, mail.MailCommand(action="inbox"))
-        malformed = mail.boxes_root(self.registry_root) / "coordinator" / "inbox" / "bad.mail"
+        malformed = (
+            mail._ensure_box(self.registry_root, mail.COORDINATOR_BOX) / "inbox" / "bad.mail"
+        )
         malformed.write_bytes(b"not a mail envelope")
         output = io.StringIO()
         code = mail.watch(

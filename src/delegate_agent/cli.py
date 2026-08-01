@@ -751,6 +751,8 @@ def _execute_attached_worktree(
         workspace_kind=source_workspace.kind,
     )
     maybe_run_retention_pass(registry_root, config)
+    if request.mode == MODE_WORK:
+        mail.prepare_mail_storage(registry_root)
     mail.sanitize_inherited_mail_identity(request.env_overrides)
     run_id, alias = run_registry.register_run(
         registry_root,
@@ -774,24 +776,19 @@ def _execute_attached_worktree(
         mail.bind_mail_identity(child_env, run_id, alias)
     request.env_overrides = child_env
     if request.mode == MODE_WORK:
-        request.argv = mail.wire_work_mail_argv(
+        wired_argv, wired_display_argv = mail.wire_work_mail_launch(
             request.engine,
-            request.argv,
+            execution_request.argv,
+            execution_request.display_argv,
             registry_root,
             prompt=request.prompt,
             prompt_transport=request.prompt_transport,
             stderr=stderr,
             isolated_workspace=True,
         )
-        if request.display_argv is not None:
-            request.display_argv = mail.wire_work_mail_argv(
-                request.engine,
-                request.display_argv,
-                registry_root,
-                prompt=request.prompt,
-                prompt_transport=request.prompt_transport,
-                isolated_workspace=True,
-            )
+        execution_request = dc_replace(
+            execution_request, argv=wired_argv, display_argv=wired_display_argv
+        )
     ctx_runner = make_run_context(
         registry_root,
         request,
@@ -901,6 +898,8 @@ def execute_request(
     stderr: TextIO,
 ) -> tuple[int, JsonObject | None]:
     _set_child_root_env(request, source_workspace)
+    if request.mode != MODE_WORK:
+        profiles.strip_mail_identity(request.env_overrides)
     if request.mode == MODE_CALL:
         call_response: tuple[int, JsonObject | None] | None = None
         artifact_id: str | None = None
@@ -1193,6 +1192,8 @@ def execute_request(
             workspace_kind=source_workspace.kind,
         )
         maybe_run_retention_pass(registry_root, config)
+        if isolated_request.mode == MODE_WORK:
+            mail.prepare_mail_storage(registry_root)
         mail.sanitize_inherited_mail_identity(isolated_request.env_overrides)
         run_id, alias = run_registry.register_run(
             registry_root,
@@ -1216,9 +1217,10 @@ def execute_request(
             mail.bind_mail_identity(child_env, run_id, alias)
         isolated_request.env_overrides = child_env
         if isolated_request.mode == MODE_WORK:
-            isolated_request.argv = mail.wire_work_mail_argv(
+            isolated_request.argv, isolated_request.display_argv = mail.wire_work_mail_launch(
                 isolated_request.engine,
                 isolated_request.argv,
+                isolated_request.display_argv,
                 registry_root,
                 prompt=isolated_request.prompt,
                 prompt_transport=isolated_request.prompt_transport,
@@ -1229,19 +1231,6 @@ def execute_request(
                     in ("temporary", "persistent", "attached")
                 ),
             )
-            if isolated_request.display_argv is not None:
-                isolated_request.display_argv = mail.wire_work_mail_argv(
-                    isolated_request.engine,
-                    isolated_request.display_argv,
-                    registry_root,
-                    prompt=isolated_request.prompt,
-                    prompt_transport=isolated_request.prompt_transport,
-                    isolated_workspace=bool(
-                        isolated_request.isolation_context
-                        and isolated_request.isolation_context.isolation_lifecycle
-                        in ("temporary", "persistent", "attached")
-                    ),
-                )
         ctx_runner = make_run_context(
             registry_root,
             isolated_request,
