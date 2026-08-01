@@ -159,18 +159,22 @@ class MailDeliveryTests(unittest.TestCase):
                         mail._recipient_envelope_matches_ledger(path, candidate_ledger)
                     )
 
-            candidate_envelope = dict(envelope)
-            candidate_ledger = dict(ledger)
-            candidate_envelope["fromRunId"] = 1
-            candidate_ledger["fromRunId"] = 1
-            path.write_bytes(
-                json.dumps(candidate_envelope, sort_keys=True, separators=(",", ":")).encode(
-                    "utf-8"
-                )
-                + mail.MESSAGE_SEPARATOR
-                + body.encode("utf-8")
-            )
-            self.assertFalse(mail._recipient_envelope_matches_ledger(path, candidate_ledger))
+            for field in ("msgId", "from", "fromRunId", "sent"):
+                with self.subTest(mistyped=field):
+                    candidate_envelope = dict(envelope)
+                    candidate_ledger = dict(ledger)
+                    candidate_envelope[field] = 1
+                    candidate_ledger[field] = 1
+                    path.write_bytes(
+                        json.dumps(
+                            candidate_envelope, sort_keys=True, separators=(",", ":")
+                        ).encode("utf-8")
+                        + mail.MESSAGE_SEPARATOR
+                        + body.encode("utf-8")
+                    )
+                    self.assertFalse(
+                        mail._recipient_envelope_matches_ledger(path, candidate_ledger)
+                    )
         finally:
             path.write_bytes(original)
 
