@@ -8,6 +8,9 @@
       "rawLogDays": 7
     }
   },
+  "personas": {
+    "forceTransport": null
+  },
   "cursor": {
     "argvPrefix": [
       "agent"

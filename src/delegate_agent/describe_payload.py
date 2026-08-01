@@ -48,6 +48,7 @@ from delegate_agent.constants import (
 from delegate_agent.errors import EXIT_OK, DelegateError
 from delegate_agent.json_types import JsonObject
 from delegate_agent.prompt_transport import (
+    ARGV_PROMPT_TRANSPORT_ENGINES,
     DROID_PROMPT_FILE_DISPLAY,
     PROMPT_TRANSPORT_ARGV,
     PROMPT_TRANSPORT_FILE,
@@ -903,12 +904,35 @@ def describe_payload(
             "pi": PROMPT_TRANSPORT_STDIN,
             "omp": PROMPT_TRANSPORT_ARGV,
         },
+        "personaTransports": {
+            "safe": {engine: "prepend" for engine in KNOWN_ENGINES},
+            "work": {
+                **{
+                    engine: "prepend"
+                    for engine in KNOWN_ENGINES
+                    if engine not in {"claude", "opencode"}
+                },
+                "claude": "native-file when discovery proves --append-system-prompt-file; otherwise prepend",
+                "opencode": "agent-config merge (existing config and prompt preserved)",
+            },
+            "notes": [
+                "Native channels are work-mode only; safe mode always prepends persona text.",
+                "Claude native-file is capability-cache gated and falls back to prepend with a warning.",
+                "personas.forceTransport may explicitly pin prepend, native-file, or agent-config.",
+            ],
+        },
         "globalOptions": _global_options(),
         "launchOptions": _launch_options(),
         "completionReportModes": list(delegate_config.COMPLETION_REPORT_MODES),
         "promptTransforms": [
             "Prepends mandatory skill review instructions before the operator prompt "
             "(suppressed under slash-passthrough).",
+            "Resolves one named persona from the source workspace, with workspace-local "
+            "files shadowing global files; persona text is prepended in safe mode and "
+            "uses the documented work-mode transport when available.",
+            "Final framed order is work: skill, persona, worktree note, user, "
+            "completion suffix, dirty note; safe: skill, persona, safe, worktree note, "
+            "user, completion suffix, dirty note.",
             "Optionally appends completion-report instructions unless disabled.",
         ],
         "promptInstructionModes": {
@@ -993,14 +1017,15 @@ def describe_payload(
                     "signature": (
                         "agent(prompt, engine=None, mode=None, model=None, effort=None, "
                         "schema=None, label=None, phase=None, isolation=None, "
-                        "passthrough=False, timeout=None, retries=None, fast=None)"
+                        "passthrough=False, timeout=None, retries=None, "
+                        "fast=None, persona=None, allow_repo_persona=False)"
                     ),
                     "returns": "parent-facing output string, schema object, or None",
                     "notes": [
                         "engine may be a fallback list; child runs are tagged --group <wfId>.",
                         "fast is a Codex-only per-run service-tier preference; non-Codex fallbacks ignore it.",
                         "passthrough=True is explicit and mutually exclusive with schema= and mode='call'.",
-                        "cursor/kimi argv transport rejects prompts around 100KB; route large stages to codex/claude/droid/opencode/pi.",
+                        f"{'/'.join(ARGV_PROMPT_TRANSPORT_ENGINES)} argv transport rejects prompts around 100KB; route large stages to codex/claude/droid/opencode/pi.",
                     ],
                 },
                 "phase": "phase(title) emits a phase event for human-readable progress.",

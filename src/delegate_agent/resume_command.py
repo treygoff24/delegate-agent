@@ -17,13 +17,14 @@ docs/security-model.md.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TextIO
 
-from delegate_agent import run_registry, worktree_mgmt, worktree_records
+from delegate_agent import personas, run_registry, worktree_mgmt, worktree_records
 from delegate_agent.constants import (
     KNOWN_ENGINES,
     MODE_CALL,
@@ -96,6 +97,38 @@ def _read_record_text(path: Path, *, prompt: bool = False) -> str:
                 f"Recorded prompt exceeds the {RESUME_RECORD_READ_MAX_BYTES}-byte resume bound.",
             ) from exc
         raise _record_invalid(str(exc)) from exc
+
+
+def _read_recorded_persona(run_path: Path, manifest: JsonObject) -> tuple[str, str, str, str, str]:
+    """Load one verified, fixed-name persona artifact from a prior run."""
+    name = _manifest_str(manifest, "personaName")
+    source = _manifest_str(manifest, "personaSource")
+    digest = _manifest_str(manifest, "personaDigest")
+    if (
+        name is None
+        or source not in {"workspace", "global"}
+        or digest is None
+        or _manifest_str(manifest, "personaFile") != run_registry.PERSONA_TXT_FILE
+    ):
+        raise _record_invalid("source run persona metadata is incomplete or invalid")
+    try:
+        personas.validate_persona_name(name)
+    except DelegateError as exc:
+        raise _record_invalid("source run personaName is invalid") from exc
+    if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+        raise _record_invalid("source run personaDigest is invalid")
+    try:
+        text = read_private_text_bounded(
+            run_path / run_registry.PERSONA_TXT_FILE,
+            max_bytes=personas.PERSONA_MAX_BYTES,
+        )
+    except BoundedReadError as exc:
+        raise _record_invalid("source run persona.txt artifact is unavailable") from exc
+    if personas.contains_c0_control(text):
+        raise _record_invalid("source run persona.txt contains a disallowed C0 control character")
+    if hashlib.sha256(text.encode("utf-8")).hexdigest() != digest:
+        raise _record_invalid("source run persona.txt digest does not match its manifest")
+    return name, text, source, digest, str(run_path / run_registry.PERSONA_TXT_FILE)
 
 
 def _read_record_json(path: Path, *, allow_missing: bool = False) -> JsonObject | None:
@@ -620,6 +653,24 @@ def build_resume_plan(
 
     notes: list[str] = []
 
+    persona_name = _manifest_str(manifest, "personaName")
+    persona_record_text: str | None = None
+    persona_record_source: str | None = None
+    persona_record_digest: str | None = None
+    persona_record_path: str | None = None
+    if opts.persona is not None:
+        persona_name = opts.persona
+    elif opts.no_persona:
+        persona_name = None
+    elif persona_name is not None:
+        (
+            persona_name,
+            persona_record_text,
+            persona_record_source,
+            persona_record_digest,
+            persona_record_path,
+        ) = _read_recorded_persona(run_path, manifest)
+
     # Inheritance table (see docs/cli-reference.md): per-field source key,
     # override flag, legacy-absent semantics, and cross-engine drop rule.
     model_alias, model = _inherit_model(opts, manifest, engine, source_engine, notes)
@@ -799,6 +850,13 @@ def build_resume_plan(
         dry_run=opts.dry_run,
         model=model,
         agent=agent,
+        persona=persona_name,
+        no_persona=opts.no_persona,
+        allow_repo_persona=opts.allow_repo_persona,
+        persona_record_text=persona_record_text,
+        persona_record_source=persona_record_source,
+        persona_record_digest=persona_record_digest,
+        persona_record_path=persona_record_path,
     )
     synthetic = ParsedCommand(
         engine if engine != "droid" else "droid",
@@ -830,7 +888,7 @@ def apply_resume_to_request(request: Request, plan: ResumePlan) -> Request:
     """Stamp resume metadata and the attach execution context onto the Request."""
     updated = replace(request, resumed_from=plan.resumed_from)
     if plan.forbid_commit:
-        updated = replace(updated, forbid_commit=True)
+        updated = replace(updated, forbid_commit=True, persistent_worktree_notes_framed=False)
     if plan.attach is not None:
         attach = plan.attach
         source_git_root = attach.get("sourceGitRoot")
@@ -851,6 +909,7 @@ def apply_resume_to_request(request: Request, plan: ResumePlan) -> Request:
                     "path": attach.get("path"),
                 },
             ),
+            persistent_worktree_notes_framed=False,
         )
     # The built argv, not Request.prompt, is the materialized transport payload
     # after skill/safe/dirty framing. Retain the Request fallback for direct

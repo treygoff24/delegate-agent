@@ -13,6 +13,31 @@ Delegate controls:
 - Prompt framing that tells sub-agents to review available skills and, in safe mode, avoid edits.
 - Local run metadata under `.delegate/` for tracked runs.
 
+### Persona boundary
+
+Personas are untrusted prompt text, not policy. Delegate validates the name,
+path containment, file type, UTF-8, byte limit, and C0 controls, but does not
+trust persona instructions. Safe-mode framing deliberately places the safe
+advisory after the persona (`skill -> persona -> safe`) so a persona cannot
+replace the safety text by recency. Native persona channels are work-only;
+safe mode always prepends.
+
+Workspace-local personas live under `.delegate/personas/`, which is local state
+and is not VCS-shared. Safe mode refuses them by default; use
+`--allow-repo-persona` only when the source workspace is trusted. Global
+personas are resolved from `~/.delegate/personas/` when no workspace file
+shadows the name. Call, read-only call, pass-through, and slash-passthrough
+surfaces refuse personas rather than silently changing their prompt contract.
+
+Claude native-file transport is discovery-gated and writes a private 0600 file;
+an absent, stale, or unproven capability falls back to prepend. OpenCode merges
+into the effective config without destroying existing root keys, agent fields,
+or prompt text; malformed config falls back to prepend with a warning. Claude
+native-file keeps persona bodies out of argv, dry-run output, and manifests;
+prepend engines using argv transport expose them in the live process argv.
+Tracked runs retain
+the resolved bytes only in private `persona.txt`, which is removed with the run.
+
 Delegate does not control:
 
 - The child runtime's implementation.

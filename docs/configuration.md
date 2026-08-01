@@ -201,6 +201,30 @@ reasoning defaults.
 
 ## Sections
 
+### `personas`
+
+Persona files are workspace-local by design, not VCS-shared configuration:
+`.delegate/personas/*.md` shadows the same name under
+`~/.delegate/personas/`. The `delegate personas` command lists both scopes
+without exposing persona bodies in JSON previews. Because `.delegate` is
+normally excluded, teams that intentionally version a persona must force-add
+the individual file; the resolution scope remains workspace-local.
+
+```json
+{
+  "personas": {
+    "forceTransport": null
+  }
+}
+```
+
+`forceTransport` is optional and accepts `null`, `prepend`, `native-file`, or
+`agent-config`. It is an explicit transport pin, not a capability probe;
+`native-file` is appropriate only when the configured Claude binary supports
+`--append-system-prompt-file`, and `agent-config` is meaningful for OpenCode.
+Safe mode never uses native persona channels. A workspace-local persona is
+refused in safe mode unless the launch includes `--allow-repo-persona`.
+
 ### `tracking`
 
 Controls local run recording.

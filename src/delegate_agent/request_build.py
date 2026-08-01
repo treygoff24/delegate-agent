@@ -10,6 +10,7 @@ engines differ materially; the argv strings themselves are built in
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -25,6 +26,7 @@ from typing import TextIO
 from delegate_agent import config as delegate_config
 from delegate_agent import (
     harness_discovery,
+    personas,
     profiles,
     reasoning,
     safe_workspace,
@@ -46,7 +48,6 @@ from delegate_agent.argv_builders import (
     build_omp_argv,
     build_opencode_argv,
     build_pi_argv,
-    prefix_droid_safe_prompt,
     redacted_prompt_argv,
 )
 from delegate_agent.constants import (
@@ -66,15 +67,24 @@ from delegate_agent.constants import (
 from delegate_agent.errors import DelegateError
 from delegate_agent.git_utils import GIT_QUICK_TIMEOUT_SECONDS, capture_git_metadata
 from delegate_agent.git_utils import run_git as _run_git
-from delegate_agent.isolation import IsolationContext, build_isolation_context
+from delegate_agent.isolation import (
+    PERSISTENT_WORKTREE_COMMIT_NOTE,
+    PERSISTENT_WORKTREE_CONTEXT_NOTE,
+    IsolationContext,
+    build_isolation_context,
+)
 from delegate_agent.json_types import JsonObject, JsonValue
 from delegate_agent.prompt_transport import (
+    ARGV_PROMPT_GUARD_BYTES,
+    ARGV_PROMPT_TRANSPORT_ENGINES,
     KIMI_PROMPT_REDACTION,
     OMP_PROMPT_REDACTION,
+    PERSONA_FILE_ARG_PLACEHOLDER,
     PROMPT_TRANSPORT_ARGV,
     PROMPT_TRANSPORT_FILE,
     PROMPT_TRANSPORT_STDIN,
     devin_display_argv,
+    persona_display_argv,
     prompt_file_display_argv,
 )
 from delegate_agent.request_models import (
@@ -106,6 +116,9 @@ RUN_INPUT_KEYS = {
     "workflowAgentKey",
     "pure",
     "timeout",
+    "persona",
+    "allowRepoPersona",
+    "expectedPersonaDigest",
 }
 
 OUTPUT_SCHEMA_COMPLETION_REPORT_WARNING = (
@@ -140,6 +153,121 @@ OPENCODE_SAFE_PERMISSION = {
 OPENCODE_SAFE_PERMISSION_JSON = json.dumps(OPENCODE_SAFE_PERMISSION, separators=(",", ":"))
 OPENCODE_PURE_PERMISSION = {key: "deny" for key in OPENCODE_SAFE_PERMISSION}
 OPENCODE_PURE_PERMISSION_JSON = json.dumps(OPENCODE_PURE_PERMISSION, separators=(",", ":"))
+OPENCODE_PERSONA_AGENT = "delegate-persona"
+
+
+def _prepare_persona_transport(
+    *,
+    engine: str,
+    mode: str,
+    config: JsonObject,
+    profile_resolution: profiles.ProfileResolution,
+    discovery: JsonObject | None,
+    agent: str | None,
+    persona: personas.PersonaResolution | None,
+) -> tuple[str | None, dict[str, str] | None, str | None, tuple[str, ...]]:
+    if persona is None:
+        return None, None, agent, ()
+    if mode != MODE_WORK:
+        return "prepend", None, agent, ()
+    personas_config = config.get("personas")
+    forced = personas_config.get("forceTransport") if isinstance(personas_config, dict) else None
+    if forced == "prepend":
+        return "prepend", None, agent, ()
+    if engine == "claude":
+        native = False
+        harnesses = discovery.get("harnesses") if isinstance(discovery, dict) else None
+        record = harnesses.get("claude") if isinstance(harnesses, dict) else None
+        transports = record.get("personaTransports") if isinstance(record, dict) else None
+        if isinstance(transports, dict) and transports.get("native-file") is True:
+            native = True
+        if forced == "native-file" or native:
+            return "native-file", None, agent, ()
+        return (
+            "prepend",
+            None,
+            agent,
+            ("claude native-file persona transport was not proven by discovery; using prepend.",),
+        )
+    if engine != "opencode":
+        return "prepend", None, agent, ()
+    if forced == "prepend":
+        return "prepend", None, agent, ()
+    selected_agent = agent
+    opencode = config.get("opencode")
+    if selected_agent is None and isinstance(opencode, dict):
+        configured = opencode.get("defaultAgent")
+        if isinstance(configured, str) and configured.strip():
+            selected_agent = configured
+    effective_env = profiles.child_environment(overrides=profile_resolution.env)
+    raw_config = effective_env.get("OPENCODE_CONFIG_CONTENT")
+    merged: JsonObject
+    if raw_config is None or raw_config == "":
+        merged = {}
+    else:
+        try:
+            loaded = json.loads(raw_config)
+        except (TypeError, json.JSONDecodeError):
+            loaded = None
+        if not isinstance(loaded, dict):
+            return (
+                "prepend",
+                None,
+                selected_agent,
+                ("malformed OPENCODE_CONFIG_CONTENT; using prepend persona transport.",),
+            )
+        merged = loaded
+    existing_agents = merged.get("agent")
+    if existing_agents is None:
+        existing_agents = {}
+    if not isinstance(existing_agents, dict):
+        return (
+            "prepend",
+            None,
+            selected_agent,
+            ("malformed OPENCODE_CONFIG_CONTENT agent section; using prepend persona transport.",),
+        )
+    materialized_agent = selected_agent or OPENCODE_PERSONA_AGENT
+    merged_agent = existing_agents.get(materialized_agent)
+    if merged_agent is None:
+        merged_agent = {}
+    if not isinstance(merged_agent, dict):
+        return (
+            "prepend",
+            None,
+            selected_agent,
+            ("malformed OPENCODE persona agent entry; using prepend persona transport.",),
+        )
+    merged_agent = dict(merged_agent)
+    existing_prompt = merged_agent.get("prompt")
+    if existing_prompt is not None and not isinstance(existing_prompt, str):
+        return (
+            "prepend",
+            None,
+            selected_agent,
+            ("malformed OPENCODE persona prompt; using prepend persona transport.",),
+        )
+    merged_agent["prompt"] = (
+        f"{existing_prompt}\n\n{persona.text}"
+        if isinstance(existing_prompt, str) and existing_prompt
+        else persona.text
+    )
+    merged["agent"] = dict(existing_agents)
+    merged["agent"][materialized_agent] = merged_agent
+    return (
+        "agent-config",
+        {"OPENCODE_CONFIG_CONTENT": json.dumps(merged, separators=(",", ":"))},
+        materialized_agent,
+        (),
+    )
+
+
+def _cached_native_persona_transport(discovery: JsonObject | None) -> bool:
+    harnesses = discovery.get("harnesses") if isinstance(discovery, dict) else None
+    record = harnesses.get("claude") if isinstance(harnesses, dict) else None
+    transports = record.get("personaTransports") if isinstance(record, dict) else None
+    return isinstance(transports, dict) and transports.get("native-file") is True
+
 
 # Read-only call is the stateless "judge/completion" contract: text in, text out,
 # no tree. These harnesses default to a coding-agent framing ("inspect the
@@ -510,35 +638,48 @@ def effective_prompt(
     completion_report_mode: str,
     instruction_mode: str = PROMPT_INSTRUCTION_MODE_WRAPPED,
     skip_skill_preamble: bool = False,
+    persona_text: str | None = None,
+    worktree_note: str | None = None,
+    dirty_note: str | None = None,
 ) -> str:
     if instruction_mode == PROMPT_INSTRUCTION_MODE_SLASH:
-        # Verbatim means verbatim: no skill preamble, no safe prefix, no
-        # completion-report suffix. Harness slash commands need position zero.
-        return prompt
+        # Verbatim means verbatim except for Delegate-owned persistent-worktree
+        # operational notes, which v0.24.0 placed ahead of slash prompts. The
+        # slash command keeps position zero within the user-controlled remainder.
+        return f"{worktree_note}\n\n{prompt}" if worktree_note is not None else prompt
     if mode == MODE_CALL:
         return prompt
-    if not skip_skill_preamble:
-        # --pass-through suppresses delegate's instruction wrapping but keeps the
-        # safe-review prefix: that prefix is the write boundary for prompt-enforced
-        # safe engines, not report plumbing.
-        prompt = delegate_runner.prepend_skill_review_instructions(prompt)
+    segments: list[str] = []
+    has_skill_prefix = prompt.startswith(delegate_runner.SKILL_REVIEW_PREFIX)
+    if not skip_skill_preamble and not has_skill_prefix:
+        segments.append(delegate_runner.SKILL_REVIEW_PREFIX.rstrip())
     safe_prefix = (
         SAFE_REVIEW_PREFIX_BY_ENGINE.get(engine)
-        if engine in SAFE_REVIEW_PREFIX_INJECTED_HERE_ENGINES
+        if mode == MODE_SAFE and engine in SAFE_REVIEW_PREFIX_INJECTED_HERE_ENGINES
         else None
     )
-    if mode == MODE_SAFE and safe_prefix is not None and safe_prefix not in prompt:
-        # When the skill preamble is present it is guaranteed at index 0, so the
-        # provider-specific safe prefix slots in between it and the user prompt.
-        insert_at = (
-            len(delegate_runner.SKILL_REVIEW_PREFIX)
-            if prompt.startswith(delegate_runner.SKILL_REVIEW_PREFIX)
-            else 0
-        )
-        prompt = prompt[:insert_at] + safe_prefix + prompt[insert_at:]
+    if safe_prefix is not None:
+        safe_start = len(delegate_runner.SKILL_REVIEW_PREFIX) if has_skill_prefix else 0
+        if prompt[safe_start:].startswith(safe_prefix):
+            safe_prefix = None
+    if mode == MODE_SAFE:
+        if persona_text is not None:
+            segments.append(persona_text)
+        if safe_prefix is not None:
+            segments.append(safe_prefix.rstrip())
+    else:
+        if safe_prefix is not None:
+            segments.append(safe_prefix.rstrip())
+        if persona_text is not None:
+            segments.append(persona_text)
+    if worktree_note is not None:
+        segments.append(worktree_note)
+    segments.append(prompt)
     if completion_report_mode == delegate_config.COMPLETION_REPORT_MODE_MARKDOWN:
-        return delegate_runner.append_completion_report_instructions(prompt)
-    return prompt
+        segments.append(delegate_runner.COMPLETION_REPORT_SUFFIX.strip())
+    if dirty_note is not None:
+        segments.append(dirty_note)
+    return "\n\n".join(segment for segment in segments if segment)
 
 
 def _safe_dirty_tree_note(
@@ -772,6 +913,7 @@ def _runtime_discovery_for_engine(
     profile_resolution: profiles.ProfileResolution,
     *,
     probe_version: bool,
+    require_current_version: bool = False,
 ) -> tuple[JsonObject | None, tuple[str, ...]]:
     """Drop the engine record when its selector drifted or its harness moved on.
 
@@ -823,20 +965,36 @@ def _runtime_discovery_for_engine(
         if not probe_version:
             return discovery, ()
         try:
-            version_drifted = harness_discovery.cached_version_has_drifted(
-                engine, record, profile=profile_resolution
+            freshness = (
+                harness_discovery.cached_version_freshness(
+                    engine, record, profile=profile_resolution
+                )
+                if require_current_version
+                else (
+                    "drifted"
+                    if harness_discovery.cached_version_has_drifted(
+                        engine, record, profile=profile_resolution
+                    )
+                    else "current"
+                )
             )
         except harness_discovery.HarnessIdentityMismatchError as exc:
             raise _harness_identity_mismatch_error(exc, profile_resolution) from exc
-        if not version_drifted:
+        if freshness == "current":
             return discovery, ()
-        warnings = (
-            f"ignoring the cached {engine} capabilities: {engine} reports a different "
-            f"version than the cache recorded, so this run re-read its capabilities from "
-            f"the harness. Run `delegate capabilities refresh {engine}` to persist them; "
-            f"until then every run that needs a newly discovered model or reasoning level "
-            f"pays for the same probe.",
-        )
+        if freshness == "drifted":
+            warnings = (
+                f"ignoring the cached {engine} capabilities: {engine} reports a different "
+                f"version than the cache recorded, so this run re-read its capabilities from "
+                f"the harness. Run `delegate capabilities refresh {engine}` to persist them; "
+                f"until then every run that needs a newly discovered model or reasoning level "
+                f"pays for the same probe.",
+            )
+        else:
+            warnings = (
+                f"ignoring the cached {engine} capabilities: its version could not be "
+                "positively confirmed, so this run re-read its capabilities from the harness.",
+            )
     return {
         **discovery,
         "harnesses": {harness: value for harness, value in harnesses.items() if harness != engine},
@@ -1226,10 +1384,15 @@ def _safe_none_normalization_warnings(
     return ()
 
 
-def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO) -> Request:
+def request_from_parsed(
+    parsed: ParsedCommand,
+    config: JsonObject,
+    stdin: TextIO,
+    stderr: TextIO | None = None,
+) -> Request:
     validate_config(config)
     if parsed.subcommand == "run":
-        return request_from_input_json(parsed, config)
+        return request_from_input_json(parsed, config, stderr=stderr)
     launch = parsed.launch
     global_options = parsed.global_options
     if launch is None or launch.engine not in KNOWN_ENGINES:
@@ -1238,6 +1401,11 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         raise DelegateError("invalid_command", "Command does not map to an execution request.")
     _validate_agent_option(launch.engine, launch.agent)
     if launch.mode == MODE_CALL:
+        if launch.persona is not None:
+            raise DelegateError(
+                "persona_read_only_call_refused" if launch.read_only else "persona_call_refused",
+                "personas are not supported for call mode (including read-only calls).",
+            )
         _validate_call_cli_options(global_options, launch)
         read_only = launch.read_only
         pure = launch.pure
@@ -1287,6 +1455,15 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
                 agent=launch.agent,
                 model_override=cli_model_override,
                 source_prompt=raw_prompt,
+                persona=None,
+                allow_repo_persona=launch.allow_repo_persona,
+                pass_through=global_options.pass_through,
+                stderr=stderr,
+                persona_text_override=launch.persona_record_text,
+                persona_source_override=launch.persona_record_source,
+                persona_digest_override=launch.persona_record_digest,
+                persona_path_override=launch.persona_record_path,
+                frame_prompt=True,
             )
         except BaseException:
             if cleanup_workspace:
@@ -1383,14 +1560,6 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         engine=launch.engine,
         mode=launch.mode,
     )
-    prompt = effective_prompt(
-        prompt,
-        engine=launch.engine,
-        mode=launch.mode,
-        completion_report_mode=completion_report_prompt_mode,
-        instruction_mode=instruction_mode,
-        skip_skill_preamble=global_options.pass_through,
-    )
     cli_model_alias, cli_model_override = _classify_cli_model(launch)
     return build_request(
         launch.engine,
@@ -1421,6 +1590,16 @@ def request_from_parsed(parsed: ParsedCommand, config: JsonObject, stdin: TextIO
         model_override=cli_model_override,
         source_prompt=source_prompt,
         progress_requested=launch.progress_intent,
+        completion_report_mode=completion_report_prompt_mode,
+        persona=launch.persona,
+        allow_repo_persona=launch.allow_repo_persona,
+        pass_through=global_options.pass_through,
+        stderr=stderr,
+        persona_text_override=launch.persona_record_text,
+        persona_source_override=launch.persona_record_source,
+        persona_digest_override=launch.persona_record_digest,
+        persona_path_override=launch.persona_record_path,
+        frame_prompt=True,
     )
 
 
@@ -1436,7 +1615,9 @@ def _load_input_json_object(path: Path) -> JsonObject:
     return raw
 
 
-def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Request:
+def request_from_input_json(
+    parsed: ParsedCommand, config: JsonObject, *, stderr: TextIO | None = None
+) -> Request:
     run_json = parsed.run_json
     if run_json is None:
         raise DelegateError("invalid_command", "run --input-json options are required.")
@@ -1565,14 +1746,39 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
     _validate_agent_option(str(engine), json_agent)
     if engine == "opencode" and json_agent is not None:
         _reject_opencode_flag_like_value(json_agent, field="agent", error="invalid_agent")
+    raw_persona = raw.get("persona")
+    if raw_persona is not None and (not isinstance(raw_persona, str) or not raw_persona.strip()):
+        raise DelegateError("invalid_persona", "persona must be a non-empty string or null.")
+    json_persona = raw_persona if isinstance(raw_persona, str) else None
+    raw_allow_repo_persona = raw.get("allowRepoPersona", False)
+    if not isinstance(raw_allow_repo_persona, bool):
+        raise DelegateError("invalid_allow_repo_persona", "allowRepoPersona must be true or false.")
     _validate_output_schema_mode(str(engine), str(mode), raw.get("outputSchema"))
     output_schema = resolve_output_schema(str(engine), raw.get("outputSchema"))
     raw_instruction_mode = raw.get("promptInstructionMode")
     raw_workflow_agent_key = raw.get("workflowAgentKey")
     if raw_workflow_agent_key is not None and not isinstance(raw_workflow_agent_key, str):
         raise DelegateError("invalid_workflow_agent_key", "workflowAgentKey must be a string.")
+    raw_expected_persona_digest = raw.get("expectedPersonaDigest")
+    if raw_expected_persona_digest is not None and (
+        not isinstance(raw_expected_persona_digest, str)
+        or len(raw_expected_persona_digest) != 64
+        or any(char not in "0123456789abcdef" for char in raw_expected_persona_digest)
+    ):
+        raise DelegateError(
+            "invalid_expected_persona_digest",
+            "expectedPersonaDigest must be a lowercase SHA-256 digest.",
+        )
+    if raw_expected_persona_digest is not None and json_persona is None:
+        raise DelegateError(
+            "invalid_expected_persona_digest",
+            "expectedPersonaDigest requires persona.",
+        )
 
     if mode == MODE_CALL:
+        if json_persona is not None:
+            error = "persona_read_only_call_refused" if raw_read_only else "persona_call_refused"
+            raise DelegateError(error, "personas are not supported for call mode.")
         _validate_call_input_json_options(
             global_options,
             raw,
@@ -1621,6 +1827,11 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
                 agent=json_agent,
                 model_override=json_model_override,
                 source_prompt=call_prompt,
+                persona=None,
+                allow_repo_persona=raw_allow_repo_persona,
+                pass_through=global_options.pass_through,
+                stderr=stderr,
+                frame_prompt=True,
             )
         except BaseException:
             if cleanup_workspace:
@@ -1723,14 +1934,6 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         engine=str(engine),
         mode=str(mode),
     )
-    prompt = effective_prompt(
-        prompt,
-        engine=str(engine),
-        mode=str(mode),
-        completion_report_mode=completion_report_prompt_mode,
-        instruction_mode=instruction_mode,
-        skip_skill_preamble=global_options.pass_through,
-    )
     return build_request(
         str(engine),
         str(mode),
@@ -1761,6 +1964,13 @@ def request_from_input_json(parsed: ParsedCommand, config: JsonObject) -> Reques
         timeout=raw_timeout,
         source_prompt=source_prompt,
         progress_requested=raw_progress_intent,
+        completion_report_mode=completion_report_prompt_mode,
+        persona=json_persona,
+        allow_repo_persona=raw_allow_repo_persona,
+        expected_persona_digest=raw_expected_persona_digest,
+        pass_through=global_options.pass_through,
+        stderr=stderr,
+        frame_prompt=True,
     )
 
 
@@ -1798,6 +2008,17 @@ def build_request(
     model_override: str | None = None,
     source_prompt: str | None = None,
     progress_requested: str | None = None,
+    completion_report_mode: str = delegate_config.COMPLETION_REPORT_MODE_MARKDOWN,
+    persona: str | None = None,
+    allow_repo_persona: bool = False,
+    pass_through: bool = False,
+    stderr: TextIO | None = None,
+    persona_text_override: str | None = None,
+    persona_source_override: str | None = None,
+    persona_digest_override: str | None = None,
+    persona_path_override: str | None = None,
+    expected_persona_digest: str | None = None,
+    frame_prompt: bool | None = None,
 ) -> Request:
     _validate_agent_option(engine, agent)
     if not isinstance(workspace, ResolvedWorkspace):
@@ -1828,6 +2049,31 @@ def build_request(
         validate_pure_call(engine, pure=True, read_only=call_read_only, group=group)
     if timeout is not None and timeout <= 0:
         raise DelegateError("invalid_timeout", "timeout must be a positive integer.")
+    if persona is not None:
+        if mode == MODE_CALL:
+            raise DelegateError("persona_call_refused", "personas are not supported for call mode.")
+        if pass_through:
+            raise DelegateError(
+                "persona_pass_through_refused",
+                "personas are not supported with --pass-through.",
+            )
+        if prompt_instruction_mode == PROMPT_INSTRUCTION_MODE_SLASH:
+            raise DelegateError(
+                "persona_slash_passthrough_refused",
+                "personas cannot be combined with slash-passthrough prompts.",
+            )
+    if frame_prompt is None:
+        # Requests with an isolation context are production-shaped and must
+        # receive the central framing pass even without a persona (notably the
+        # safe dirty-tree note and persistent worktree context). Preserve the
+        # legacy low-level no-context builder behavior for existing callers.
+        frame_prompt = persona is not None or (
+            isolation_context is not None
+            and (
+                mode == MODE_SAFE
+                or isolation_context.isolation_lifecycle in ("persistent", "attached")
+            )
+        )
 
     expand_env = profiles.child_environment(pure=True) if pure else os.environ
     profile_resolution = profiles.resolve_active_profile(
@@ -1842,9 +2088,55 @@ def build_request(
         engine,
         discovery,
         profile_resolution,
-        probe_version=False,
+        # Native persona transport is an argv-compatibility safety decision, so
+        # spend the existing lazy identity probe only when this request would
+        # otherwise trust its positive cached capability.
+        probe_version=(
+            engine == "claude"
+            and mode == MODE_WORK
+            and not dry_run
+            and persona is not None
+            and _cached_native_persona_transport(discovery)
+        ),
+        require_current_version=(
+            engine == "claude"
+            and mode == MODE_WORK
+            and not dry_run
+            and persona is not None
+            and _cached_native_persona_transport(discovery)
+        ),
     )
     warnings = (*warnings, *drift_warnings)
+    persona_resolution = None
+    if persona is not None:
+        if persona_text_override is not None:
+            raw_bytes = persona_text_override.encode("utf-8")
+            persona_resolution = personas.PersonaResolution(
+                name=persona,
+                source=persona_source_override or "global",
+                path=Path(persona_path_override or "persona.txt"),
+                text=persona_text_override,
+                size_bytes=len(raw_bytes),
+                digest=persona_digest_override or hashlib.sha256(raw_bytes).hexdigest(),
+                preview=personas.escaped_preview(persona_text_override),
+            )
+        else:
+            persona_resolution = personas.resolve_persona(
+                workspace.path,
+                persona,
+                mode=mode,
+                allow_repo_persona=allow_repo_persona,
+            )
+        if (
+            expected_persona_digest is not None
+            and persona_resolution.digest != expected_persona_digest
+        ):
+            raise DelegateError(
+                "workflow_persona_digest_mismatch",
+                "workflow persona bytes changed after the parent pinned their digest.",
+            )
+        if stderr is not None:
+            print(f"persona: {persona_resolution.name} ({persona_resolution.source})", file=stderr)
 
     def attempt(snapshot: JsonObject | None, extra_warnings: tuple[str, ...]) -> Request:
         return _build_request_for_workspace(
@@ -1881,6 +2173,11 @@ def build_request(
             model_override=model_override,
             source_prompt=source_prompt,
             progress_requested=progress_requested,
+            completion_report_mode=completion_report_mode,
+            persona_resolution=persona_resolution,
+            allow_repo_persona=allow_repo_persona,
+            skip_skill_preamble=pass_through,
+            frame_prompt=frame_prompt,
         )
 
     def reprobed() -> tuple[JsonObject | None, tuple[str, ...]] | None:
@@ -2138,28 +2435,26 @@ def _droid_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         engine="droid",
         effort_source=build.effort_source,
     )
-    prompt = build.prompt
-    if build.mode == MODE_SAFE:
-        prompt = prefix_droid_safe_prompt(prompt)
     argv = build_droid_argv(
         droid["binary"],
         build.mode,
         build.resolved.path,
         model,
-        prompt,
+        build.prompt,
         stream_capture=build.stream_capture,
         reasoning_capability=capability,
         prompt_transport=PROMPT_TRANSPORT_FILE,
         call_read_only=build.call_read_only,
         pure=build.pure,
     )
+    prompt_file_text = build.prompt
     display_argv = prompt_file_display_argv(argv)
     return EngineRequestParts(
         model=model,
         argv=argv,
         model_alias=alias_for_errors if alias_for_errors is not None else build.model_alias,
         prompt_transport=PROMPT_TRANSPORT_FILE,
-        prompt_file_text=prompt,
+        prompt_file_text=prompt_file_text,
         display_argv=display_argv,
         warnings=reasoning_warnings,
         **_model_context_kwargs(capability_model, capability_model_source),
@@ -2286,15 +2581,24 @@ def _claude_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         call_read_only=build.call_read_only,
         pure=build.pure,
         output_schema=schema_contents,
+        persona_file=build.persona_transport == "native-file",
     )
+    display_argv = persona_display_argv(argv)
     return EngineRequestParts(
         model=model,
         argv=argv,
         model_alias=build.model_alias,
         prompt_transport=PROMPT_TRANSPORT_STDIN,
         stdin_text=build.prompt,
-        display_argv=list(argv),
+        display_argv=display_argv,
         warnings=warnings,
+        persona_transport=build.persona_transport,
+        persona_file_text=(
+            build.persona_text if build.persona_transport == "native-file" else None
+        ),
+        persona_file_placeholder=(
+            PERSONA_FILE_ARG_PLACEHOLDER if build.persona_transport == "native-file" else None
+        ),
         **_model_context_kwargs(capability_model, capability_model_source),
         **reasoning_request_kwargs(capability, build.effort_source),
     )
@@ -2466,6 +2770,9 @@ def _opencode_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     )
     if read_only and agent is None:
         agent = OPENCODE_SAFE_AGENT
+    env_overrides = _opencode_env_overrides(read_only=read_only, pure=build.pure, agent=agent)
+    if build.persona_env_overrides:
+        env_overrides.update(build.persona_env_overrides)
     argv = build_opencode_argv(
         opencode,
         build.mode,
@@ -2484,7 +2791,10 @@ def _opencode_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         stdin_text=build.prompt,
         display_argv=list(argv),
         warnings=(*capability_warnings, *fallback_warnings),
-        env_overrides=_opencode_env_overrides(read_only=read_only, pure=build.pure, agent=agent),
+        env_overrides=env_overrides,
+        persona_transport=build.persona_transport,
+        persona_env_overrides=build.persona_env_overrides,
+        agent=agent,
         **_model_context_kwargs(capability_model, capability_model_source),
         **reasoning_request_kwargs(capability, variant_source),
     )
@@ -2731,7 +3041,13 @@ def _build_request_for_workspace(
     model_override: str | None = None,
     source_prompt: str | None = None,
     progress_requested: str | None = None,
+    completion_report_mode: str = delegate_config.COMPLETION_REPORT_MODE_MARKDOWN,
+    persona_resolution: personas.PersonaResolution | None = None,
+    allow_repo_persona: bool = False,
+    skip_skill_preamble: bool = False,
+    frame_prompt: bool = True,
 ) -> Request:
+    source_prompt = prompt if source_prompt is None else source_prompt
     materialized_schema_text, schema_warnings = _preflight_codex_output_schema(
         engine, output_schema, schema_text=output_schema_text
     )
@@ -2754,8 +3070,51 @@ def _build_request_for_workspace(
                 "invalid_output_schema", f"Output schema is not readable: {output_schema}"
             ) from exc
     warnings = (*warnings, *schema_warnings)
-    if prompt_instruction_mode != PROMPT_INSTRUCTION_MODE_SLASH:
-        prompt = _append_safe_dirty_tree_note(prompt, resolved, mode, isolation_context)
+    persona_transport, persona_env, persona_agent, persona_warnings = _prepare_persona_transport(
+        engine=engine,
+        mode=mode,
+        config=config,
+        profile_resolution=profile_resolution,
+        discovery=discovery,
+        agent=agent,
+        persona=persona_resolution,
+    )
+    warnings = (*warnings, *persona_warnings)
+    dirty_note = _safe_dirty_tree_note(resolved, mode, isolation_context)
+    worktree_note = (
+        PERSISTENT_WORKTREE_CONTEXT_NOTE
+        if isolation_context is not None
+        and isolation_context.isolation_lifecycle in ("persistent", "attached")
+        and mode in (MODE_SAFE, MODE_WORK)
+        else None
+    )
+    if worktree_note is not None and forbid_commit:
+        worktree_note = f"{PERSISTENT_WORKTREE_COMMIT_NOTE}\n\n{worktree_note}"
+    framed_worktree_note = worktree_note if frame_prompt else None
+    if frame_prompt:
+        prompt = effective_prompt(
+            prompt,
+            engine=engine,
+            mode=mode,
+            completion_report_mode=completion_report_mode,
+            instruction_mode=prompt_instruction_mode,
+            skip_skill_preamble=skip_skill_preamble,
+            persona_text=(
+                persona_resolution.text
+                if persona_resolution is not None and persona_transport == "prepend"
+                else None
+            ),
+            worktree_note=framed_worktree_note,
+            dirty_note=dirty_note,
+        )
+    if frame_prompt and engine in ARGV_PROMPT_TRANSPORT_ENGINES:
+        prompt_bytes = len(prompt.encode("utf-8"))
+        if prompt_bytes > ARGV_PROMPT_GUARD_BYTES:
+            raise DelegateError(
+                "prompt_too_large",
+                f"The fully framed prompt is {prompt_bytes} UTF-8 bytes, exceeding the "
+                f"{ARGV_PROMPT_GUARD_BYTES}-byte argv transport limit for {engine}.",
+            )
     workspace_warning = wsl.drivefs_workspace_warning(resolved.path)
     if workspace_warning is not None:
         warnings = (*warnings, workspace_warning)
@@ -2782,7 +3141,13 @@ def _build_request_for_workspace(
             call_read_only=call_read_only,
             pure=pure,
             model_override=model_override,
-            agent=agent,
+            agent=persona_agent if persona_agent is not None else agent,
+            persona_name=persona_resolution.name if persona_resolution is not None else None,
+            persona_text=persona_resolution.text if persona_resolution is not None else None,
+            persona_digest=persona_resolution.digest if persona_resolution is not None else None,
+            persona_transport=persona_transport,
+            persona_env_overrides=persona_env,
+            prompt_framed=frame_prompt,
         ),
     )
     return _apply_profile_resolution(
@@ -2837,7 +3202,17 @@ def _build_request_for_workspace(
             source_prompt=source_prompt,
             progress_requested=progress_requested,
             output_schema_record_text=output_schema_record_text,
-            agent=agent,
+            agent=parts.agent if parts.agent is not None else agent,
+            persona_name=persona_resolution.name if persona_resolution is not None else None,
+            persona_source=persona_resolution.source if persona_resolution is not None else None,
+            persona_transport=parts.persona_transport or persona_transport,
+            persona_digest=persona_resolution.digest if persona_resolution is not None else None,
+            persona_file=("persona.txt" if persona_resolution is not None else None),
+            persona_text=persona_resolution.text if persona_resolution is not None else None,
+            allow_repo_persona=allow_repo_persona,
+            persona_env_overrides=parts.persona_env_overrides or persona_env,
+            completion_report_mode=completion_report_mode,
+            persistent_worktree_notes_framed=framed_worktree_note is not None,
         ),
         config,
         resolution=profile_resolution,
@@ -2863,6 +3238,11 @@ def _apply_profile_resolution(
 ) -> Request:
     env_overrides = dict(request.env_overrides or {})
     env_overrides.update(resolution.env)
+    if request.persona_transport == "agent-config" and request.persona_env_overrides:
+        # Reassert the merged persona config after profile env expansion. This
+        # preserves the profile's effective config while preventing a later
+        # ambient/profile value from clobbering the persona agent entry.
+        env_overrides.update(request.persona_env_overrides)
     if request.engine == "opencode":
         # Profiles and ambient environment must not relax a read-only request.
         request_env = request.env_overrides or {}

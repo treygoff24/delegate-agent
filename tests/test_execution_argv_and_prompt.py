@@ -684,6 +684,11 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertFalse((Path(repo.name) / "mutated-by-agent.txt").exists())
         self.assertEqual(tracked.read_text(), "dirty\n")
         self.assertEqual(untracked.read_text(), "local-only\n")
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if not safe_temp_dirs() - temp_dirs_before:
+                break
+            time.sleep(0.02)
         self.assertEqual(safe_temp_dirs() - temp_dirs_before, set())
 
     def test_cursor_safe_directory_execution_does_not_mutate_original_workspace(self):
@@ -708,6 +713,11 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
             self.assertEqual(completed.returncode, 0)
             self.assertFalse((Path(workspace) / "mutated-by-agent.txt").exists())
             self.assertEqual(source.read_text(), "keep-me\n")
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if not safe_temp_dirs() - temp_dirs_before:
+                    break
+                time.sleep(0.02)
             self.assertEqual(safe_temp_dirs() - temp_dirs_before, set())
 
     def make_codex_safe_fake(self):
@@ -1089,7 +1099,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertEqual(Path(payload["cwd"]).resolve(), Path(repo.name).resolve())
         self.assertIn("executionCwd", payload)
         self.assertNotEqual(payload["executionCwd"], payload["cwd"])
-        self.assertEqual(safe_temp_dirs() - temp_dirs_before, set())
+        self.assert_tracked_child_exited_and_safe_temp_dirs_cleaned(payload, temp_dirs_before)
 
     def test_effective_prompt_codex_safe_order(self):
         user = "review the diff"

@@ -131,6 +131,7 @@ _HARNESS_FIELDS = frozenset(
         "defaultModel",
         "models",
         "harnessReasoning",
+        "personaTransports",
         "warnings",
     }
 )
@@ -241,6 +242,19 @@ def _validate_harness_record(harness: str, record: JsonObject) -> None:
                 f"discovery harness {harness}.harnessReasoning must be an object or null"
             )
         _validate_reasoning(harness, "harnessReasoning", harness_reasoning)
+    persona_transports = record.get("personaTransports")
+    if persona_transports is not None:
+        if not isinstance(persona_transports, dict):
+            raise ValueError(f"discovery harness {harness}.personaTransports must be an object")
+        _reject_extra_fields(
+            persona_transports,
+            frozenset({"native-file"}),
+            f"discovery harness {harness}.personaTransports",
+        )
+        if not isinstance(persona_transports.get("native-file"), bool):
+            raise ValueError(
+                f"discovery harness {harness}.personaTransports.native-file must be boolean"
+            )
     if not _string_list(record.get("warnings")):
         raise ValueError(f"discovery harness {harness}.warnings must be a string array")
 
@@ -1261,7 +1275,16 @@ def _probe_claude(selector: tuple[str, ...], env: Mapping[str, str], _: Path | N
     if result.error not in {None, "probe_failed"}:
         raise ValueError(f"Claude effort discovery failed: {result.error}")
     combined = f"{result.stdout}\n{result.stderr}"
-    return parse_claude_efforts(combined)
+    fragment = parse_claude_efforts(combined)
+    fragment["personaTransports"] = {
+        # claude --help emits the collapsed form "--append-system-prompt[-file]"
+        # (verified 2.1.220, where the long spelling works when invoked), so
+        # accept either spelling as evidence of native-file support.
+        "native-file": (
+            "--append-system-prompt-file" in combined or "--append-system-prompt[-file]" in combined
+        ),
+    }
+    return fragment
 
 
 def _probe_grok(selector: tuple[str, ...], env: Mapping[str, str], _: Path | None) -> JsonObject:
@@ -1597,6 +1620,42 @@ def cached_version_has_drifted(
     if identity.version is None:
         return False
     return identity.version != cached_version
+
+
+def cached_version_freshness(
+    harness: str,
+    cached_record: JsonObject,
+    *,
+    profile: profiles.ProfileResolution,
+) -> str:
+    """Return whether a cached harness version is current, drifted, or unknown.
+
+    This is intentionally stricter than ``cached_version_has_drifted``: callers
+    that need argv compatibility must not treat a failed identity probe as
+    evidence that a cached capability remains safe to use.
+    """
+    cached_version = cached_record.get("version")
+    selector = cached_record.get("selector")
+    if not _nonempty_string(cached_version) or not _string_list(selector, allow_empty=False):
+        return "indeterminate"
+    env = profiles.child_environment(overrides=profile.env)
+    try:
+        probe = run_metadata_probe(
+            [*selector, "--version"],
+            env=env,
+            timeout_sec=METADATA_PROBE_TIMEOUT_SEC,
+        )
+    except (OSError, ValueError):
+        return "indeterminate"
+    if probe.error is not None:
+        return "indeterminate"
+    output = "\n".join(part for part in (probe.stdout, probe.stderr) if part)
+    identity = _identify_version(harness, tuple(selector), output)
+    if identity.status == _VERSION_KNOWN_OTHER:
+        raise HarnessIdentityMismatchError(harness, identity.identified, tuple(selector))
+    if identity.version is None:
+        return "indeterminate"
+    return "current" if identity.version == cached_version else "drifted"
 
 
 def refresh_discovery(

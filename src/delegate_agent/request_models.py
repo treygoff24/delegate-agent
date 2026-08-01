@@ -61,6 +61,13 @@ class LaunchOptions:
     dry_run: bool = False
     model: str | None = None
     agent: str | None = None
+    persona: str | None = None
+    no_persona: bool = False
+    allow_repo_persona: bool = False
+    persona_record_text: str | None = None
+    persona_record_source: str | None = None
+    persona_record_digest: str | None = None
+    persona_record_path: str | None = None
 
 
 @dataclass
@@ -82,6 +89,9 @@ class ResumeOptions:
     drop_output_schema: bool = False
     include_dirty: bool = False
     dry_run: bool = False
+    persona: str | None = None
+    no_persona: bool = False
+    allow_repo_persona: bool = False
 
 
 @dataclass
@@ -218,6 +228,18 @@ class Request:
     agent: str | None = None
     # Set on runs launched by `delegate resume`: {"runId": ..., "alias": ...}.
     resumed_from: JsonObject | None = None
+    persona_name: str | None = None
+    persona_source: str | None = None
+    persona_transport: str | None = None
+    persona_digest: str | None = None
+    persona_file: str | None = None
+    persona_text: str | None = None
+    allow_repo_persona: bool = False
+    persona_env_overrides: dict[str, str] | None = None
+    completion_report_mode: str = "markdown"
+    # True only when the central framer placed the persistent-worktree notes.
+    # Execution uses this structural state rather than inspecting prompt bytes.
+    persistent_worktree_notes_framed: bool = False
 
 
 @dataclass(frozen=True)
@@ -240,6 +262,11 @@ class EngineRequestParts:
     reasoning_capability_evidence: str | None = None
     reasoning_transport: str | None = None
     env_overrides: dict[str, str] | None = None
+    persona_transport: str | None = None
+    persona_file_text: str | None = None
+    persona_file_placeholder: str | None = None
+    persona_env_overrides: dict[str, str] | None = None
+    agent: str | None = None
 
 
 @dataclass(frozen=True)
@@ -260,3 +287,9 @@ class EngineBuildInput:
     pure: bool = False
     model_override: str | None = None
     agent: str | None = None
+    persona_name: str | None = None
+    persona_text: str | None = None
+    persona_digest: str | None = None
+    persona_transport: str | None = None
+    persona_env_overrides: dict[str, str] | None = None
+    prompt_framed: bool = False

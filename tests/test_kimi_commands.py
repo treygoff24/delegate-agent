@@ -1,6 +1,7 @@
 import json
 import unittest
 
+from delegate_agent import prompt_instructions
 from tests.delegate_commands_test_base import CommandTestBase
 
 
@@ -14,6 +15,7 @@ class KimiCommandTests(CommandTestBase):
             "hello",
             self.delegate.DEFAULT_CONFIG,
             dry_run=True,
+            frame_prompt=True,
         )
         self.assertNotIn("--plan", request.argv)
         self.assertNotIn("--yolo", request.argv)
@@ -23,8 +25,9 @@ class KimiCommandTests(CommandTestBase):
         self.assertIn("stream-json", request.argv)
         self.assertIn("--prompt", request.argv)
         prompt_arg = request.argv[request.argv.index("--prompt") + 1]
-        self.assertTrue(prompt_arg.startswith(self.delegate.SAFE_REVIEW_PREFIX_BY_ENGINE["kimi"]))
-        self.assertTrue(prompt_arg.endswith("hello"))
+        self.assertTrue(prompt_arg.startswith(prompt_instructions.SKILL_REVIEW_PREFIX))
+        self.assertIn(self.delegate.SAFE_REVIEW_PREFIX_BY_ENGINE["kimi"], prompt_arg)
+        self.assertIn("hello", prompt_arg)
 
     def test_kimi_work_argv(self):
         request = self.build_git_request(

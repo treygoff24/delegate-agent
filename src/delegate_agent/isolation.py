@@ -436,6 +436,12 @@ PERSISTENT_WORKTREE_CONTEXT_NOTE = (
     "or `delegate worktree prune --merged` for bulk integrated entries."
     "\n\n"
 )
+PERSISTENT_WORKTREE_COMMIT_NOTE = (
+    "Delegate commit policy: --forbid-commit is active for this run. "
+    "Do not run `git commit` or create commits. Leave file changes uncommitted; "
+    "Delegate will mark the run failed if commits remain ahead of the creation base "
+    "when the child exits."
+)
 
 
 def prepend_persistent_worktree_context(prompt: str) -> str:

@@ -46,6 +46,7 @@ STATE_FILE = "state.json"
 SNAPSHOT_FILE = "snapshot.json"
 COMPLETION_REPORT_FILE = "completion-report.md"
 PROMPT_TXT_FILE = "prompt.txt"
+PERSONA_TXT_FILE = "persona.txt"
 INDEX_VERSION = 1
 MANIFEST_SCHEMA = "delegate.manifest.v1"
 STATE_SCHEMA = "delegate.state.v1"

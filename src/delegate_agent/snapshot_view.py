@@ -60,6 +60,11 @@ class SnapshotView(TypedDict, total=False):
     requestedFast: bool
     resumedFrom: JsonObject
     worktreeAttachment: JsonObject
+    personaName: str
+    personaSource: str
+    personaTransport: str
+    personaDigest: str
+    personaFile: str
     snapshotCommand: str
     completionReport: JsonObject
     completionReportWritten: bool

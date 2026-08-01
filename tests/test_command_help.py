@@ -53,6 +53,7 @@ TOP_LEVEL_COMMANDS = (
     "setup",
     "describe",
     "agent-help",
+    "personas",
     "capabilities",
     "config",
 )

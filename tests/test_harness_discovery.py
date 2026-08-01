@@ -634,6 +634,23 @@ class AdapterOrchestrationTests(unittest.TestCase):
                 ):
                     harness_discovery._probe_claude(("claude",), {}, None)
 
+    def test_claude_persona_transport_accepts_both_help_spellings(self):
+        from delegate_agent import harness_discovery
+
+        base = (FIXTURES / "claude_effort_help.txt").read_text()
+        cases = {
+            "long form": (base + "\n  --append-system-prompt-file <file>\n", True),
+            # claude 2.1.220 collapses the flag pair into bracket notation.
+            "collapsed form": (base + "\n  --append-system-prompt[-file], --add-dir\n", True),
+            "absent": (base, False),
+        }
+        for label, (help_text, expected) in cases.items():
+            with self.subTest(label=label):
+                probe = harness_discovery.ProbeResult(("claude",), 1, "", help_text, "probe_failed")
+                with mock.patch.object(harness_discovery, "run_metadata_probe", return_value=probe):
+                    fragment = harness_discovery._probe_claude(("claude",), {}, None)
+                self.assertEqual(fragment["personaTransports"], {"native-file": expected}, label)
+
     def test_droid_unreadable_settings_is_not_reported_as_invalid_json(self):
         from delegate_agent import harness_discovery
 
