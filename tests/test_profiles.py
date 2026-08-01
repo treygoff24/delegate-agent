@@ -822,6 +822,15 @@ class CodexProfileExecutionTests(unittest.TestCase):
             Path(tmp, "changed.txt").write_text("changed\n", encoding="utf-8")
             self.assertFalse(self.profiles.work_mode_safe_for_codex_fallback(tmp, baseline))
 
+    def test_unborn_head_git_workspace_fails_closed_instead_of_directory_baseline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            subprocess.run(["git", "init", "-q", tmp], check=True, capture_output=True, text=True)
+            Path(tmp, "staged.txt").write_text("dirty\n", encoding="utf-8")
+            # git repo, no commits: porcelain works, HEAD is unborn. The weaker
+            # directory baseline must not be used — no baseline, no retry.
+            self.assertIsNone(self.profiles.capture_workspace_baseline(tmp))
+            self.assertFalse(self.profiles.work_mode_safe_for_codex_fallback(tmp, None))
+
     def test_work_mode_clean_unchanged_baseline_retries_with_fallback(self):
         repo = make_git_repo()
         self.addCleanup(repo.cleanup)

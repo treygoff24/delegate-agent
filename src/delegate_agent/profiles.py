@@ -437,6 +437,10 @@ def capture_workspace_baseline(cwd: str) -> WorkspaceBaseline | None:
             head = capture_head_oid(cwd)
             if head is not None:
                 return WorkspaceBaseline(porcelain=porcelain, head=head)
+            # A git workspace whose HEAD cannot be resolved (unborn/corrupt) must
+            # not fall through to the weaker directory baseline: that would skip
+            # the clean-porcelain gate git retries rely on. Fail closed instead.
+            return None
     except (OSError, subprocess.SubprocessError, ValueError):
         # No baseline means retry stays disabled — safe degradation, but only
         # for environment failures; programming errors should still surface.
