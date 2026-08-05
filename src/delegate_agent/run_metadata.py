@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+from collections.abc import Mapping
 from typing import Protocol, TypeAlias
 
 from delegate_agent.json_types import JsonObject
@@ -41,6 +43,7 @@ MODEL_METADATA_KEYS: MetadataKeyGroup = (
 SPEED_METADATA_KEYS: MetadataKeyGroup = ("requestedFast",)
 
 RESUME_METADATA_KEYS: MetadataKeyGroup = ("resumedFrom", "worktreeAttachment")
+INITIATOR_METADATA_KEYS: MetadataKeyGroup = ("initiatorRoot",)
 PERSONA_METADATA_KEYS: MetadataKeyGroup = (
     "personaName",
     "personaSource",
@@ -64,6 +67,61 @@ SNAPSHOT_MANIFEST_FALLBACK_KEYS: MetadataKeyGroup = (
     *RESUME_METADATA_KEYS,
     *PERSONA_METADATA_KEYS,
 )
+
+_NATIVE_INITIATOR_ENV_KEYS = (
+    ("CODEX_THREAD_ID", "codex"),
+    ("CLAUDE_CODE_SESSION_ID", "claude"),
+)
+_ROOT_INITIATOR_NAMESPACES = {"codex", "claude"}
+
+
+def _clean_initiator_value(value: object) -> str | None:
+    if not isinstance(value, str) or not value or value != value.strip() or len(value) > 256:
+        return None
+    if ":" in value or any(ord(char) < 32 or ord(char) == 127 for char in value):
+        return None
+    return value
+
+
+def _clean_root_initiator(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    namespace, sep, native_id = value.partition(":")
+    if sep != ":" or namespace not in _ROOT_INITIATOR_NAMESPACES:
+        return None
+    clean_id = _clean_initiator_value(native_id)
+    if clean_id is None:
+        return None
+    return f"{namespace}:{clean_id}"
+
+
+def resolve_initiator_root(env: Mapping[str, str | None]) -> str | None:
+    existing = _clean_root_initiator(env.get("DELEGATE_INITIATOR_ROOT"))
+    if existing is not None:
+        return existing
+
+    roots = [
+        f"{namespace}:{value}"
+        for key, namespace in _NATIVE_INITIATOR_ENV_KEYS
+        if (value := _clean_initiator_value(env.get(key))) is not None
+    ]
+    return roots[0] if len(roots) == 1 else None
+
+
+def apply_initiator_root_env(
+    env_overrides: dict[str, str] | None,
+    parent_env: Mapping[str, str | None] | None = None,
+) -> tuple[str | None, dict[str, str] | None]:
+    env = {**(os.environ if parent_env is None else parent_env), **(env_overrides or {})}
+    root = resolve_initiator_root(env)
+    if root is None:
+        return None, env_overrides
+    return root, {**(env_overrides or {}), "DELEGATE_INITIATOR_ROOT": root}
+
+
+def add_initiator_metadata(metadata: JsonObject, initiator_root: str | None) -> None:
+    if initiator_root is not None:
+        metadata["initiatorRoot"] = initiator_root
 
 
 class SpeedMetadataCarrier(Protocol):

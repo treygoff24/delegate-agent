@@ -1008,7 +1008,7 @@ repo copy or persistent worktree itself.
 Tracked runs return bounded parent-facing output and store local metadata under `.delegate/` in the source workspace.
 
 ```bash
-delegate runs [--active|--running|--stale|--recent] [--harness HARNESS] [--group NAME] [--limit N]
+delegate runs [--active|--running|--stale|--recent] [--harness HARNESS] [--group NAME] [--limit N] [--structural]
 delegate runs prune [--older-than DAYS] [--dry-run]
 delegate ps [--harness HARNESS] [--group NAME] [--limit N]
 delegate snapshot [--latest HARNESS] [--no-redact] <handle>
@@ -1055,6 +1055,8 @@ creating a Run or writing a prompt record.
 | Include dirty | `includeDirty` | `--include-dirty` | Source and explicit values are creation-only and are dropped for ordinary resume with a note. | Retained only as a drop decision; on a persistent/attached source, explicit `--include-dirty` is rejected because attachment does not create or sync a worktree. |
 
 `delegate runs` defaults to recent runs. `--active` preserves the legacy active view and includes both live `running` runs and `stale` runs. Use `--running` for only live tracked processes and `--stale` for runs recorded as running whose PID is missing or dead. `--active`, `--running`, `--stale`, and `--recent` are mutually exclusive. `--group NAME` filters by launch group and the runs table shows a `group` column when any visible run has one.
+`--structural` omits content-bearing run fields and emits only identity, lifecycle, model,
+timestamp, group/mode, and `initiatorRoot` metadata. It is intended for local status collectors.
 `delegate ps` is the shorter first-class form of `delegate runs --active` and
 accepts the same harness, group, and limit selectors.
 

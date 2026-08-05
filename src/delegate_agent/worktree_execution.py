@@ -8,7 +8,15 @@ from pathlib import Path
 from typing import TextIO
 
 from delegate_agent import config as delegate_config
-from delegate_agent import harness_events, mail, profiles, retention, run_registry, safe_workspace
+from delegate_agent import (
+    harness_events,
+    mail,
+    profiles,
+    retention,
+    run_metadata,
+    run_registry,
+    safe_workspace,
+)
 from delegate_agent import runner as delegate_runner
 from delegate_agent.argv_utils import public_argv, replace_workspace_arg_in_argv
 from delegate_agent.git_utils import (
@@ -340,19 +348,26 @@ def _register_persistent_worktree_run(
     label = branch_label(request.engine, request.model_alias)
     if request.mode == "work" and delegate_config.mail_enabled(execution.config):
         mail.prepare_mail_storage(preflight.registry_root)
+    _initiator_root, request.env_overrides = run_metadata.apply_initiator_root_env(
+        request.env_overrides
+    )
     mail.sanitize_inherited_mail_identity(request.env_overrides)
+    metadata = {
+        "mode": request.mode,
+        "model": request.model,
+        "modelAlias": request.model_alias,
+        "modelResolved": request.model,
+        "cwd": execution.source_workspace.path,
+        "group": request.group,
+    }
+    run_metadata.add_initiator_metadata(
+        metadata, run_metadata.resolve_initiator_root(request.env_overrides or {})
+    )
 
     run_id, alias = run_registry.register_run(
         preflight.registry_root,
         harness=request.engine,
-        metadata={
-            "mode": request.mode,
-            "model": request.model,
-            "modelAlias": request.model_alias,
-            "modelResolved": request.model,
-            "cwd": execution.source_workspace.path,
-            "group": request.group,
-        },
+        metadata=metadata,
     )
     child_env = request.env_overrides or {}
     if request.mode == "work":

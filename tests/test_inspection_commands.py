@@ -185,6 +185,51 @@ class InspectionCommandTests(unittest.TestCase):
         self.assertEqual(len(payload["runs"]), 1)
         self.assertEqual(payload["runs"][0]["group"], "wave4")
 
+    def test_emit_runs_projects_initiator_root_from_registry_metadata(self):
+        run_id, _alias = self.write_run(harness="codex", assistant_text="included")
+        index = run_registry.load_index(self.registry_root)
+        index["runs"][run_id]["initiatorRoot"] = "codex:root-thread"
+        run_registry.save_index(self.registry_root, index)
+        stdout = io.StringIO()
+
+        code = inspection_commands.emit_runs(
+            inspection_commands.RunsCommand(json_mode=True),
+            workspace_path=str(self.workspace),
+            stdout=stdout,
+        )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["runs"][0]["initiatorRoot"], "codex:root-thread")
+
+    def test_emit_runs_structural_projection_omits_content_fields(self):
+        run_id, _alias = self.write_run(harness="codex", assistant_text="included")
+        index = run_registry.load_index(self.registry_root)
+        index["runs"][run_id]["initiatorRoot"] = "codex:root-thread"
+        run_registry.save_index(self.registry_root, index)
+        state = run_registry.load_run_state(self.registry_root, run_id)
+        state.update(
+            {"current": "secret current", "message": "secret message", "error": "secret error"}
+        )
+        run_registry.write_json_atomic(
+            run_registry.run_directory(self.registry_root, run_id) / "state.json", state
+        )
+        stdout = io.StringIO()
+
+        code = inspection_commands.emit_runs(
+            inspection_commands.RunsCommand(structural=True, json_mode=True),
+            workspace_path=str(self.workspace),
+            stdout=stdout,
+        )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(code, 0)
+        summary = payload["runs"][0]
+        self.assertEqual(summary["initiatorRoot"], "codex:root-thread")
+        self.assertEqual(summary["runId"], run_id)
+        self.assertFalse({"current", "message", "error", "nextActions"} & summary.keys())
+        self.assertLessEqual(set(summary), set(inspection_commands.STRUCTURAL_RUN_KEYS))
+
     def test_emit_snapshot_literal_handle_omits_resolution_fields(self):
         run_id, alias = self.write_run(harness="cursor", assistant_text="literal run")
         stdout = io.StringIO()

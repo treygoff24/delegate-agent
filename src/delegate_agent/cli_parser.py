@@ -1875,6 +1875,7 @@ def parse_runs(
     recent = False
     running = False
     stale = False
+    structural = False
     harness: str | None = None
     group: str | None = None
     limit: int | None = None
@@ -1895,6 +1896,10 @@ def parse_runs(
             continue
         if token == "--recent":
             recent = True
+            i += 1
+            continue
+        if token == "--structural":
+            structural = True
             i += 1
             continue
         if token == "--harness":
@@ -1953,6 +1958,7 @@ def parse_runs(
             harness=harness,
             group=group,
             limit=limit,
+            structural=structural,
             json_mode=json_mode,
         ),
     )

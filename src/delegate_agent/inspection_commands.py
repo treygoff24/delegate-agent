@@ -8,6 +8,23 @@ from delegate_agent import command_errors, redaction, run_registry, snapshot_vie
 from delegate_agent import rendering as delegate_rendering
 from delegate_agent.json_types import JsonObject
 
+STRUCTURAL_RUN_KEYS = (
+    "runId",
+    "alias",
+    "harness",
+    "group",
+    "mode",
+    "modelAlias",
+    "modelResolved",
+    "rawStatus",
+    "effectiveStatus",
+    "status",
+    "terminalEvent",
+    "terminalStatus",
+    "activityAt",
+    "initiatorRoot",
+)
+
 
 @dataclass(frozen=True)
 class SnapshotCommand:
@@ -28,6 +45,7 @@ class RunsCommand:
     limit: int | None = None
     older_than_days: int | None = None
     dry_run: bool = False
+    structural: bool = False
     json_mode: bool = False
 
 
@@ -121,7 +139,13 @@ def emit_runs(command: RunsCommand, *, workspace_path: str, stdout: TextIO) -> i
             group=command.group,
             limit=limit,
         )
-    summaries = [redaction.redact_value(summary) for summary in summaries]
+    if command.structural:
+        summaries = [
+            {key: summary[key] for key in STRUCTURAL_RUN_KEYS if key in summary}
+            for summary in summaries
+        ]
+    else:
+        summaries = [redaction.redact_value(summary) for summary in summaries]
     if command.json_mode:
         delegate_rendering.print_json(
             delegate_rendering.runs_json_payload(summaries, limit=limit, mode=mode),

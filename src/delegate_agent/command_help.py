@@ -875,7 +875,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         summary="List tracked runs, optionally filtered by activity, recency, or harness.",
         usage=(
             "delegate [--json] runs [--active|--running|--stale|--recent] "
-            "[--harness HARNESS] [--group NAME] [--limit N]",
+            "[--harness HARNESS] [--group NAME] [--limit N] [--structural]",
         ),
         options=(
             OptionSpec(
@@ -893,6 +893,11 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             ),
             OptionSpec("--limit", "N", "Cap the number of runs listed (positive integer)."),
             OptionSpec("--group", "NAME", "Filter by launch group."),
+            OptionSpec(
+                "--structural",
+                None,
+                "Emit only lifecycle, model, provenance, and identity metadata; omit run content.",
+            ),
         ),
         examples=(
             "delegate runs --active",
@@ -900,6 +905,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "delegate runs --stale",
             "delegate runs --harness cursor --limit 5",
             "delegate runs --group wave4",
+            "delegate --json runs --recent --structural",
         ),
         notes=("--active, --running, --stale, and --recent are mutually exclusive.",),
         see_also=("ps", "runs prune", "snapshot", "run-output"),

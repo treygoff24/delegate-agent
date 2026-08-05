@@ -480,6 +480,45 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             self.assertNotEqual(observed["DELEGATE_RUN_ID"], "del_20260801T120000Z_abcdef")
             self.assertNotEqual(observed["DELEGATE_MAIL_SELF"], "cursor-99")
 
+    def test_persistent_worktree_persists_initiator_root_and_passes_child_env(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            repo, _git_cd = self._make_git_repo_with_commit()
+            observed_path = Path(fake_home) / "initiator.txt"
+            fake = Path(fake_home) / "fake-agent"
+            fake.write_text(
+                "#!/usr/bin/env bash\n"
+                f'printf "%s\\n" "${{DELEGATE_INITIATOR_ROOT:-}}" > "{observed_path}"\n',
+                encoding="utf-8",
+            )
+            fake.chmod(0o755)
+            config = dict(self.delegate.DEFAULT_CONFIG)
+            config["cursor"] = {**config["cursor"], "argvPrefix": [str(fake)]}
+            workspace = self.delegate.resolve_workspace(repo.name)
+            request = self._make_persistent_worktree_request("cursor", "work", repo.name, config)
+
+            with mock.patch.dict(
+                os.environ,
+                {"HOME": fake_home, "CLAUDE_CODE_SESSION_ID": "session-1", "CODEX_THREAD_ID": ""},
+                clear=False,
+            ):
+                code, _payload = self.delegate.execute_request(
+                    request,
+                    json_mode=True,
+                    config=config,
+                    pass_through=False,
+                    completion_report_mode="none",
+                    source_workspace=workspace,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+
+            self.assertEqual(code, 0)
+            registry_root = Path(repo.name) / ".delegate"
+            index = self.delegate.run_registry.load_index(registry_root)
+            run_id = next(iter(index["runs"]))
+            self.assertEqual(index["runs"][run_id]["initiatorRoot"], "claude:session-1")
+            self.assertEqual(observed_path.read_text(encoding="utf-8").strip(), "claude:session-1")
+
     # -- Safe + worktree passthrough allowed and cleans up --------------------
 
     def test_safe_worktree_passthrough_allowed_and_cleans_up(self):

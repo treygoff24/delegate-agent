@@ -195,11 +195,15 @@ def build_run_summary(
         "alias": alias if isinstance(alias, str) else None,
         "harness": harness if isinstance(harness, str) else None,
         "group": index_entry.get("group") if isinstance(index_entry.get("group"), str) else None,
+        "mode": index_entry.get("mode") if isinstance(index_entry.get("mode"), str) else None,
         "stdoutBytes": stdout_bytes,
         "stderrBytes": stderr_bytes,
         "warnings": warnings,
         "activityAt": activity_timestamp(state, manifest),
     }
+    initiator_root = index_entry.get("initiatorRoot")
+    if isinstance(initiator_root, str):
+        summary["initiatorRoot"] = initiator_root
     if manifest:
         for key in (
             "modelAlias",
