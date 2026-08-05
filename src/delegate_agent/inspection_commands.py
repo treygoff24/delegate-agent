@@ -19,7 +19,6 @@ STRUCTURAL_RUN_KEYS = (
     "rawStatus",
     "effectiveStatus",
     "status",
-    "terminalEvent",
     "terminalStatus",
     "activityAt",
     "initiatorRoot",
@@ -141,7 +140,9 @@ def emit_runs(command: RunsCommand, *, workspace_path: str, stdout: TextIO) -> i
         )
     if command.structural:
         summaries = [
-            {key: summary[key] for key in STRUCTURAL_RUN_KEYS if key in summary}
+            redaction.redact_value(
+                {key: summary[key] for key in STRUCTURAL_RUN_KEYS if key in summary}
+            )
             for summary in summaries
         ]
     else:

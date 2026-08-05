@@ -235,6 +235,8 @@ class Request:
     env_overrides: dict[str, str] | None = None
     auth_profile: str | None = None
     fallback_auth_profile: str | None = None
+    codex_failover_identity: str | None = None
+    codex_fallback_failover_identity: str | None = None
     cleanup_workspace: bool = False
     include_dirty: bool = False
     call_read_only: bool = False

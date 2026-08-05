@@ -35,6 +35,8 @@ class ProfileResolution:
     env: dict[str, str] = field(default_factory=dict)
     codex_home: str | None = None
     codex_fallback_home: str | None = None
+    codex_failover_identity: str | None = None
+    codex_fallback_failover_identity: str | None = None
 
 
 def empty_profile_resolution() -> ProfileResolution:
@@ -134,6 +136,15 @@ def codex_fallback_profile(config: JsonObject) -> str | None:
     return None
 
 
+def codex_failover_identity(codex_home: str | None, codex: JsonObject) -> str | None:
+    if not codex_home:
+        return None
+    auth_file = _codex_auth_file(codex_home).resolve(strict=False)
+    profile_overlay = codex.get("profile")
+    profile = profile_overlay.strip() if isinstance(profile_overlay, str) else ""
+    return f"auth={auth_file}\0profile={profile}"
+
+
 def _warn_once(warnings: list[str], warning: str) -> None:
     if warning not in warnings:
         warnings.append(warning)
@@ -200,6 +211,7 @@ def resolve_active_profile(
     active_env = (
         profile_env(config, selected, expand_env=expand_env) if selected is not None else {}
     )
+    codex = codex_section(config)
     fallback_profile = codex_fallback_profile(config)
     fallback_home = None
     if fallback_profile is not None:
@@ -213,6 +225,8 @@ def resolve_active_profile(
         env=active_env,
         codex_home=active_env.get("CODEX_HOME"),
         codex_fallback_home=fallback_home,
+        codex_failover_identity=codex_failover_identity(active_env.get("CODEX_HOME"), codex),
+        codex_fallback_failover_identity=codex_failover_identity(fallback_home, codex),
     )
 
 

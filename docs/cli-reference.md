@@ -1116,7 +1116,12 @@ Persistent worktree completions also include `branch`, `worktree`, a
 state, changed file count, diff stat, and commits created by the child. When a
 Codex usage-limit fallback fires, the completion payload also includes
 `codexAuthFallback` metadata (reason, the primary and fallback profile names,
-both exit codes, and a redacted primary stderr tail).
+both exit codes, and a redacted primary stderr tail). The fallback is Codex-only
+and is enabled only by `codex.fallbackProfile`; Delegate remembers temporary
+blocks by hashed credential namespace (`CODEX_HOME/auth.json` plus
+`codex.profile`) as canonical state. Default work/personal credential homes
+also mirror compatible legacy alias keys so existing launchers share blocks;
+remapped aliases remain isolated.
 
 Snapshot JSON uses schema `delegate.snapshot.v1` and includes fields such as `alias`, `runId`, `harness`, `status`, `rawStatus`, `effectiveStatus`, `staleReason`, `nextActions`, `cwd`, `executionCwd`, `workspaceRoot`, `assistantText`, `recentEvents`, `warnings`, `exitCode`, reasoning metadata, terminal metadata, and isolation/worktree metadata when applicable. `workspaceRoot` is also exported to the child as `WORKSPACE_ROOT`, so commands can anchor workspace-relative paths after changing directories. Inspection commands do not rewrite a stale run's recorded state; they expose the raw recorded status plus the effective status computed from the current PID check. Run-output and worktree show output include `requestedHandle`, `resolvedHandle`, and `resolutionKind` (`literal`, `latest`, or `latest_model`) when a handle resolves indirectly. For bare harness handles, snapshot, run-output, and wait also report `resolvedRunId`, `resolvedAlias`, `resolvedWorkspace`, `resolvedAge`, and `resolvedAgeSeconds`. Resolutions older than 24 hours add a `bare_handle_stale` warning suggesting `--cwd` or an explicit handle.
 

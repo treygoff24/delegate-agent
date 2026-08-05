@@ -1,4 +1,5 @@
 import contextlib
+import datetime
 import gc
 import importlib.util
 import io
@@ -2645,7 +2646,7 @@ class RunnerCaptureTests(unittest.TestCase):
             )
 
     def test_second_attempt_launch_failure_preserves_primary_capture(self):
-        with tempfile.TemporaryDirectory() as workspace:
+        with tempfile.TemporaryDirectory() as workspace, tempfile.TemporaryDirectory() as home:
             script = Path(workspace) / "codex"
             script.write_text(
                 '#!/usr/bin/env bash\nprintf "usage limit\\n" >&2\nchmod 000 "$0"\nexit 1\n',
@@ -2667,10 +2668,15 @@ class RunnerCaptureTests(unittest.TestCase):
                 workspace_kind="directory",
                 isolated_workspace=False,
                 started_at="2026-07-16T12:00:00Z",
+                codex_failover_identity=f"auth={workspace}/primary/auth.json\0profile=",
+                codex_fallback_failover_identity=f"auth={workspace}/fallback/auth.json\0profile=",
                 fallback_env_overrides={"ATTEMPT": "fallback"},
             )
 
-            with self.assertRaises(self.runner.RunnerLaunchError) as caught:
+            with (
+                mock.patch.dict(os.environ, {"HOME": home}, clear=False),
+                self.assertRaises(self.runner.RunnerLaunchError) as caught,
+            ):
                 self.runner.execute_tracked(
                     [str(script), "task"],
                     workspace,
@@ -2706,6 +2712,8 @@ class RunnerCaptureTests(unittest.TestCase):
                 workspace_kind="directory",
                 isolated_workspace=False,
                 started_at="2026-07-16T12:00:00Z",
+                codex_failover_identity=f"auth={workspace}/primary/auth.json\0profile=",
+                codex_fallback_failover_identity=f"auth={workspace}/fallback/auth.json\0profile=",
                 fallback_env_overrides={"ATTEMPT": "fallback"},
             )
             accumulator = self.runner.harness_events.StreamAccumulator(harness="codex")
@@ -2900,7 +2908,7 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertFalse((run_path / self.registry.STDERR_LOG).exists())
 
     def test_fallback_launch_failure_after_cancel_preserves_cancelled_outcome(self):
-        with tempfile.TemporaryDirectory() as workspace:
+        with tempfile.TemporaryDirectory() as workspace, tempfile.TemporaryDirectory() as home:
             root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
             run_id, alias = self.registry.register_run(root, harness="codex")
             ctx = self.runner.RunContext(
@@ -2916,6 +2924,8 @@ class RunnerCaptureTests(unittest.TestCase):
                 workspace_kind="directory",
                 isolated_workspace=False,
                 started_at="2026-07-16T12:00:00Z",
+                codex_failover_identity=f"auth={workspace}/primary/auth.json\0profile=",
+                codex_fallback_failover_identity=f"auth={workspace}/fallback/auth.json\0profile=",
                 fallback_env_overrides={"ATTEMPT": "fallback"},
             )
             accumulator = self.runner.harness_events.StreamAccumulator(harness="codex")
@@ -2965,6 +2975,7 @@ class RunnerCaptureTests(unittest.TestCase):
                     side_effect=cancel_during_fallback_launch,
                 ),
                 mock.patch.object(self.runner, "_should_retry_profiles", return_value=True),
+                mock.patch.dict(os.environ, {"HOME": home}, clear=False),
             ):
                 code, payload = self.runner.execute_tracked(
                     ["codex", "task"],
@@ -3432,7 +3443,7 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertEqual(stderr_log, "single attempt\n")
 
     def test_fallback_retry_writes_both_attempt_delimiters(self):
-        with tempfile.TemporaryDirectory() as workspace:
+        with tempfile.TemporaryDirectory() as workspace, tempfile.TemporaryDirectory() as home:
             script = Path(workspace) / "codex"
             script.write_text(
                 "#!/usr/bin/env bash\n"
@@ -3462,22 +3473,25 @@ class RunnerCaptureTests(unittest.TestCase):
                 isolated_workspace=False,
                 started_at="2026-07-16T12:00:00Z",
                 env_overrides={"ATTEMPT": "primary"},
+                codex_failover_identity=f"auth={workspace}/primary/auth.json\0profile=",
+                codex_fallback_failover_identity=f"auth={workspace}/fallback/auth.json\0profile=",
                 fallback_env_overrides={"ATTEMPT": "fallback"},
             )
-            self.runner.execute_tracked(
-                [str(script), "task"],
-                workspace,
-                ctx,
-                json_mode=True,
-                stdout=io.StringIO(),
-                stderr=io.StringIO(),
-            )
+            with mock.patch.dict(os.environ, {"HOME": home}, clear=False):
+                self.runner.execute_tracked(
+                    [str(script), "task"],
+                    workspace,
+                    ctx,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
             stderr_log = (root / "runs" / run_id / "stderr.log").read_text(encoding="utf-8")
             self.assertIn("--- delegate attempt: primary ---", stderr_log)
             self.assertIn("--- delegate codex auth attempt: fallback ---", stderr_log)
 
     def test_successful_auth_fallback_aggregates_primary_capture(self):
-        with tempfile.TemporaryDirectory() as workspace:
+        with tempfile.TemporaryDirectory() as workspace, tempfile.TemporaryDirectory() as home:
             script = Path(workspace) / "codex"
             primary_stdout = b'{"type":"error","message":"usage limit"}\n'
             fallback_lines = (
@@ -3514,17 +3528,20 @@ class RunnerCaptureTests(unittest.TestCase):
                 isolated_workspace=False,
                 started_at="2026-07-16T12:00:00Z",
                 env_overrides={"ATTEMPT": "primary"},
+                codex_failover_identity=f"auth={workspace}/primary/auth.json\0profile=",
+                codex_fallback_failover_identity=f"auth={workspace}/fallback/auth.json\0profile=",
                 fallback_env_overrides={"ATTEMPT": "fallback"},
             )
 
-            code, payload = self.runner.execute_tracked(
-                [str(script), "task"],
-                workspace,
-                ctx,
-                json_mode=True,
-                stdout=io.StringIO(),
-                stderr=io.StringIO(),
-            )
+            with mock.patch.dict(os.environ, {"HOME": home}, clear=False):
+                code, payload = self.runner.execute_tracked(
+                    [str(script), "task"],
+                    workspace,
+                    ctx,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
 
             self.assertEqual(code, 0)
             assert payload is not None
@@ -3539,8 +3556,320 @@ class RunnerCaptureTests(unittest.TestCase):
                 any(event.get("message") == "usage limit" for event in snapshot["recentEvents"])
             )
 
+    def test_auth_fallback_persists_stdout_event_reset_time(self):
+        with tempfile.TemporaryDirectory() as workspace, tempfile.TemporaryDirectory() as home:
+            target = (datetime.datetime.now() + datetime.timedelta(hours=3)).replace(
+                second=0, microsecond=0
+            )
+            hour = target.hour % 12 or 12
+            reset_text = f"{hour}:{target.minute:02d} {'AM' if target.hour < 12 else 'PM'}"
+            script = Path(workspace) / "codex"
+            script.write_text(
+                "#!/usr/bin/env bash\n"
+                'if [ "${ATTEMPT}" = primary ]; then\n'
+                "  printf '%s\\n' "
+                f'\'{{"type":"error","message":"You have hit your usage limit. Try again at {reset_text}."}}\'\n'
+                "  exit 1\n"
+                "fi\n"
+                'printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}\'\n'
+                "printf '%s\\n' '{\"type\":\"turn.completed\"}'\n",
+                encoding="utf-8",
+            )
+            script.chmod(0o755)
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            primary_identity = "auth=/primary/auth.json\0profile="
+            fallback_identity = "auth=/fallback/auth.json\0profile="
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-07-16T12:00:00Z",
+                auth_profile="primary",
+                fallback_auth_profile="fallback",
+                codex_failover_identity=primary_identity,
+                codex_fallback_failover_identity=fallback_identity,
+                env_overrides={"ATTEMPT": "primary"},
+                fallback_env_overrides={"ATTEMPT": "fallback"},
+            )
+
+            with mock.patch.dict(os.environ, {"HOME": home}, clear=False):
+                code, _payload = self.runner.execute_tracked(
+                    [str(script), "task"],
+                    workspace,
+                    ctx,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+                blocked, blocked_until = self.runner.failover_state.check_blocked(
+                    "codex", primary_identity
+                )
+                fallback_blocked, _ = self.runner.failover_state.check_blocked(
+                    "codex", fallback_identity
+                )
+
+            self.assertEqual(code, 0)
+            self.assertTrue(blocked)
+            self.assertEqual(blocked_until, int(target.timestamp()))
+            self.assertFalse(fallback_blocked)
+
+    def test_preflight_fallback_failure_records_fallback_block(self):
+        with tempfile.TemporaryDirectory() as workspace, tempfile.TemporaryDirectory() as home:
+            target = (datetime.datetime.now() + datetime.timedelta(hours=4)).replace(
+                second=0, microsecond=0
+            )
+            hour = target.hour % 12 or 12
+            reset_text = f"{hour}:{target.minute:02d} {'AM' if target.hour < 12 else 'PM'}"
+            script = Path(workspace) / "codex"
+            script.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf '%s\\n' "
+                f'\'{{"type":"error","message":"You have hit your usage limit. Try again at {reset_text}."}}\'\n'
+                "exit 1\n",
+                encoding="utf-8",
+            )
+            script.chmod(0o755)
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            primary_identity = "auth=/primary/auth.json\0profile="
+            fallback_identity = "auth=/fallback/auth.json\0profile="
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-07-16T12:00:00Z",
+                auth_profile="primary",
+                fallback_auth_profile="fallback",
+                codex_failover_identity=primary_identity,
+                codex_fallback_failover_identity=fallback_identity,
+                env_overrides={"ATTEMPT": "primary"},
+                fallback_env_overrides={"ATTEMPT": "fallback"},
+            )
+
+            with mock.patch.dict(os.environ, {"HOME": home}, clear=False):
+                self.runner.failover_state.write_block(
+                    "codex", primary_identity, int(time.time()) + 60
+                )
+                code, payload = self.runner.execute_tracked(
+                    [str(script), "task"],
+                    workspace,
+                    ctx,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+                blocked, blocked_until = self.runner.failover_state.check_blocked(
+                    "codex", fallback_identity
+                )
+
+            self.assertEqual(code, 1)
+            self.assertEqual(payload["codexAuthFallback"]["reason"], "usage_limit_preflight")
+            self.assertTrue(blocked)
+            self.assertEqual(blocked_until, int(target.timestamp()))
+
+    def test_preflight_fallback_honors_legacy_profile_block(self):
+        with tempfile.TemporaryDirectory() as workspace, tempfile.TemporaryDirectory() as home:
+            attempts = Path(workspace) / "attempts.txt"
+            script = Path(workspace) / "codex"
+            script.write_text(
+                "#!/usr/bin/env bash\n"
+                f'echo "${{ATTEMPT:-}}" >> "{attempts}"\n'
+                'printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}\'\n'
+                "printf '%s\\n' '{\"type\":\"turn.completed\"}'\n",
+                encoding="utf-8",
+            )
+            script.chmod(0o755)
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            work_identity = (
+                f"auth={(Path(home) / '.codex/auth.json').resolve(strict=False)}\0profile="
+            )
+            personal_identity = (
+                "auth="
+                f"{(Path(home) / '.ai-profiles/runtime/codex/personal/auth.json').resolve(strict=False)}"
+                "\0profile="
+            )
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-07-16T12:00:00Z",
+                auth_profile="work",
+                fallback_auth_profile="personal",
+                codex_failover_identity=work_identity,
+                codex_fallback_failover_identity=personal_identity,
+                env_overrides={"ATTEMPT": "primary"},
+                fallback_env_overrides={"ATTEMPT": "fallback"},
+            )
+
+            with mock.patch.dict(os.environ, {"HOME": home}, clear=False):
+                state_dir = Path(home) / ".ai-profiles/runtime/failover"
+                state_dir.mkdir(parents=True)
+                (state_dir / "codex-work.blocked-until").write_text(
+                    f"{int(time.time()) + 60}\n", encoding="utf-8"
+                )
+                code, payload = self.runner.execute_tracked(
+                    [str(script), "task"],
+                    workspace,
+                    ctx,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+
+            self.assertEqual(code, 0)
+            self.assertTrue(payload["codexAuthFallback"]["failoverPreflight"])
+            self.assertEqual(attempts.read_text(encoding="utf-8").splitlines(), ["fallback"])
+
+    def test_preflight_fallback_thread_ephemeral_stays_on_fallback_env(self):
+        with tempfile.TemporaryDirectory() as workspace, tempfile.TemporaryDirectory() as home:
+            attempts = Path(workspace) / "attempts.txt"
+            script = Path(workspace) / "codex"
+            script.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, os, pathlib, sys\n"
+                f"attempts = pathlib.Path({str(attempts)!r})\n"
+                "prior = attempts.read_text() if attempts.exists() else ''\n"
+                "count = len(prior.splitlines()) + 1 if prior else 1\n"
+                "attempts.write_text(prior + os.environ.get('ATTEMPT', '') + '\\n')\n"
+                "if count < 3:\n"
+                "    print(json.dumps({'type': 'error', 'message': 'no thread with id: synthetic-thread'}))\n"
+                "    raise SystemExit(1)\n"
+                "assert os.environ.get('ATTEMPT') == 'fallback'\n"
+                "assert '--ignore-user-config' in sys.argv\n"
+                "print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'ok'}}))\n"
+                "print(json.dumps({'type':'turn.completed'}))\n",
+                encoding="utf-8",
+            )
+            script.chmod(0o755)
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            primary_identity = "auth=/primary/auth.json\0profile="
+            fallback_identity = "auth=/fallback/auth.json\0profile="
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-07-16T12:00:00Z",
+                auth_profile="primary",
+                fallback_auth_profile="fallback",
+                codex_failover_identity=primary_identity,
+                codex_fallback_failover_identity=fallback_identity,
+                env_overrides={"ATTEMPT": "primary"},
+                fallback_env_overrides={"ATTEMPT": "fallback"},
+            )
+
+            with mock.patch.dict(os.environ, {"HOME": home}, clear=False):
+                self.runner.failover_state.write_block(
+                    "codex", primary_identity, int(time.time()) + 60
+                )
+                code, payload = self.runner.execute_tracked(
+                    [str(script), "exec", "--json", "-"],
+                    workspace,
+                    ctx,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                    stdin_text="task",
+                )
+
+            self.assertEqual(code, 0)
+            self.assertTrue(payload["codexThreadFallback"]["engaged"])
+            self.assertEqual(attempts.read_text(encoding="utf-8").splitlines(), ["fallback"] * 3)
+
+    def test_auth_fallback_skips_when_fallback_identity_is_blocked(self):
+        with tempfile.TemporaryDirectory() as workspace, tempfile.TemporaryDirectory() as home:
+            attempts = Path(workspace) / "attempts.txt"
+            script = Path(workspace) / "codex"
+            script.write_text(
+                "#!/usr/bin/env bash\n"
+                f'echo "${{ATTEMPT:-}}" >> "{attempts}"\n'
+                'if [ "${ATTEMPT}" = primary ]; then\n'
+                "  printf 'You exceeded your current quota usage limit\\n' >&2\n"
+                "  exit 1\n"
+                "fi\n"
+                'printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"should not run"}}\'\n',
+                encoding="utf-8",
+            )
+            script.chmod(0o755)
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            primary_identity = "auth=/primary/auth.json\0profile="
+            fallback_identity = "auth=/fallback/auth.json\0profile="
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-07-16T12:00:00Z",
+                auth_profile="primary",
+                fallback_auth_profile="fallback",
+                codex_failover_identity=primary_identity,
+                codex_fallback_failover_identity=fallback_identity,
+                env_overrides={"ATTEMPT": "primary"},
+                fallback_env_overrides={"ATTEMPT": "fallback"},
+            )
+
+            with mock.patch.dict(os.environ, {"HOME": home}, clear=False):
+                self.runner.failover_state.write_block(
+                    "codex", fallback_identity, int(time.time()) + 60
+                )
+                code, payload = self.runner.execute_tracked(
+                    [str(script), "task"],
+                    workspace,
+                    ctx,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+
+            self.assertEqual(code, 1)
+            self.assertNotIn("codexAuthFallback", payload)
+            self.assertIn("fallback profile is also blocked", " ".join(payload["warnings"]))
+            self.assertEqual(attempts.read_text(encoding="utf-8").splitlines(), ["primary"])
+
     def test_auth_fallback_empty_retry_keeps_all_byte_counts(self):
-        with tempfile.TemporaryDirectory() as workspace:
+        with tempfile.TemporaryDirectory() as workspace, tempfile.TemporaryDirectory() as home:
             script = Path(workspace) / "codex"
             script.write_text(
                 "#!/usr/bin/env bash\n"
@@ -3572,17 +3901,20 @@ class RunnerCaptureTests(unittest.TestCase):
                 group="workflow",
                 call_read_only=True,
                 env_overrides={"ATTEMPT": "primary"},
+                codex_failover_identity=f"auth={workspace}/primary/auth.json\0profile=",
+                codex_fallback_failover_identity=f"auth={workspace}/fallback/auth.json\0profile=",
                 fallback_env_overrides={"ATTEMPT": "fallback"},
             )
-            code, payload = self.runner.execute_tracked(
-                [str(script), "task"],
-                workspace,
-                ctx,
-                json_mode=True,
-                stdout=io.StringIO(),
-                stderr=io.StringIO(),
-                manifest_argv=[str(script), "<prompt>"],
-            )
+            with mock.patch.dict(os.environ, {"HOME": home}, clear=False):
+                code, payload = self.runner.execute_tracked(
+                    [str(script), "task"],
+                    workspace,
+                    ctx,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                    manifest_argv=[str(script), "<prompt>"],
+                )
 
             self.assertEqual(code, 0)
             self.assertEqual(

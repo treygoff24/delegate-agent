@@ -230,6 +230,52 @@ class InspectionCommandTests(unittest.TestCase):
         self.assertFalse({"current", "message", "error", "nextActions"} & summary.keys())
         self.assertLessEqual(set(summary), set(inspection_commands.STRUCTURAL_RUN_KEYS))
 
+    def test_emit_runs_structural_omits_terminal_event_content_and_redacts_projection(self):
+        run_id, _alias = self.write_run(harness="codex", assistant_text="included")
+        index = run_registry.load_index(self.registry_root)
+        index["runs"][run_id]["initiatorRoot"] = "codex:root-thread"
+        run_registry.save_index(self.registry_root, index)
+        state = run_registry.load_run_state(self.registry_root, run_id)
+        state.update(
+            {
+                "status": "failed",
+                "terminalStatus": "failed",
+                "terminalEvent": {
+                    "event": "turn.failed",
+                    "status": "failed",
+                    "reason": (
+                        "provider rejected Authorization: Bearer raw-provider-token-1234567890"
+                    ),
+                },
+            }
+        )
+        run_path = run_registry.run_directory(self.registry_root, run_id)
+        run_registry.write_json_atomic(run_path / "state.json", state)
+        manifest = run_registry.load_run_manifest(self.registry_root, run_id)
+        manifest["modelResolved"] = "model with token=structural-secret-value"
+        run_registry.write_json_atomic(run_path / "manifest.json", manifest)
+        stdout = io.StringIO()
+
+        code = inspection_commands.emit_runs(
+            inspection_commands.RunsCommand(structural=True, json_mode=True),
+            workspace_path=str(self.workspace),
+            stdout=stdout,
+        )
+
+        output = stdout.getvalue()
+        payload = json.loads(output)
+        self.assertEqual(code, 0)
+        summary = payload["runs"][0]
+        self.assertEqual(summary["initiatorRoot"], "codex:root-thread")
+        self.assertEqual(summary["rawStatus"], "failed")
+        self.assertEqual(summary["effectiveStatus"], "failed")
+        self.assertEqual(summary["status"], "failed")
+        self.assertEqual(summary["terminalStatus"], "failed")
+        self.assertNotIn("terminalEvent", summary)
+        self.assertNotIn("provider rejected", output)
+        self.assertNotIn("raw-provider-token-1234567890", output)
+        self.assertNotIn("structural-secret-value", output)
+
     def test_emit_snapshot_literal_handle_omits_resolution_fields(self):
         run_id, alias = self.write_run(harness="cursor", assistant_text="literal run")
         stdout = io.StringIO()

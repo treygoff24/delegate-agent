@@ -1107,13 +1107,20 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
     "ps": CommandSpec(
         name="ps",
         summary="List active tracked runs (alias for runs --active).",
-        usage=("delegate [--json] ps [--harness HARNESS] [--group NAME] [--limit N]",),
+        usage=(
+            "delegate [--json] ps [--harness HARNESS] [--group NAME] [--limit N] [--structural]",
+        ),
         options=(
             OptionSpec("--harness", "HARNESS", f"Filter by harness: {ENGINES_PROSE}."),
             OptionSpec("--limit", "N", "Cap the number of runs listed (positive integer)."),
             OptionSpec("--group", "NAME", "Filter by launch group."),
+            OptionSpec(
+                "--structural",
+                None,
+                "Emit only lifecycle, model, provenance, and identity metadata; omit run content.",
+            ),
         ),
-        examples=("delegate ps", "delegate ps --harness codex"),
+        examples=("delegate ps", "delegate ps --harness codex", "delegate --json ps --structural"),
         notes=("Equivalent to delegate runs --active.",),
         see_also=("runs", "snapshot", "run-output"),
         unsupported_global_options=("--auth-profile",),
@@ -2107,7 +2114,7 @@ def render_overview_text() -> str:
         "[--active|--running|--stale|--recent] [--harness HARNESS] [--limit N]",
         "delegate [--cwd PATH] [--json] runs prune [--older-than DAYS] [--dry-run]",
         "delegate [--cwd PATH] [--json] mail {send,inbox,read,status,watch,prune} ...",
-        "delegate [--cwd PATH] [--json] ps [--harness HARNESS] [--group NAME] [--limit N]",
+        "delegate [--cwd PATH] [--json] ps [--harness HARNESS] [--group NAME] [--limit N] [--structural]",
         "delegate [--cwd PATH] [--json] run-output <handle> "
         "[--completion-report] [--stdout] [--stderr] [--tail N] [--max-chars N] "
         "[--raw] [--no-redact]",

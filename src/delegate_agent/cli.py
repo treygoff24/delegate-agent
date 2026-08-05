@@ -635,6 +635,8 @@ def make_run_context(
         ),
         auth_profile=request.auth_profile,
         fallback_auth_profile=request.fallback_auth_profile,
+        codex_failover_identity=request.codex_failover_identity,
+        codex_fallback_failover_identity=request.codex_fallback_failover_identity,
         include_dirty=request.include_dirty,
         mail_push=request.mail_push,
         group=request.group,

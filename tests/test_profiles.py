@@ -237,6 +237,39 @@ class ProfileResolutionTests(unittest.TestCase):
                 )
                 self.assertEqual(child["CODEX_HOME"], str(Path(tmp) / "codex"))
 
+    def test_codex_failover_identity_tracks_credentials_not_alias(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = write_codex_home(Path(tmp), "shared")
+            config = base_config()
+            config["profiles"] = {
+                "detectFrom": ["DELEGATE_PROFILE"],
+                "default": None,
+                "definitions": {
+                    "primary": {"env": {"CODEX_HOME": home}},
+                    "renamed": {"env": {"CODEX_HOME": home}},
+                },
+            }
+
+            primary = self.profiles.resolve_active_profile(config, {"DELEGATE_PROFILE": "primary"})
+            renamed = self.profiles.resolve_active_profile(config, {"DELEGATE_PROFILE": "renamed"})
+
+            self.assertEqual(primary.codex_failover_identity, renamed.codex_failover_identity)
+
+    def test_codex_failover_identity_separates_config_profile_overlay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = write_codex_home(Path(tmp), "shared")
+            config = base_config(work=home)
+            config["profiles"]["default"] = "work"
+
+            default_overlay = self.profiles.resolve_active_profile(config, {})
+            config["codex"] = dict(config["codex"], profile="delegate")
+            named_overlay = self.profiles.resolve_active_profile(config, {})
+
+            self.assertNotEqual(
+                default_overlay.codex_failover_identity,
+                named_overlay.codex_failover_identity,
+            )
+
 
 class InitiatorRootResolutionTests(unittest.TestCase):
     def test_initiator_root_resolution_prefers_existing_root_and_single_native_ids(self):

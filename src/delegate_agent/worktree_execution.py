@@ -318,6 +318,8 @@ def _build_persistent_worktree_run_context(
         ),
         auth_profile=request.auth_profile,
         fallback_auth_profile=request.fallback_auth_profile,
+        codex_failover_identity=request.codex_failover_identity,
+        codex_fallback_failover_identity=request.codex_fallback_failover_identity,
         include_dirty=bool(creation_context.get("includeDirty")),
         synced_files=int(creation_context.get("syncedFiles") or 0),
         mail_push=request.mail_push,
