@@ -194,12 +194,13 @@ class UtilityModuleTests(unittest.TestCase):
                 reasoning.normalize_effort(value)
 
     def test_cli_parse_runs_json_mode(self):
-        parsed = cli.parse_cli(["--json", "runs", "--limit", "1"])
+        parsed = cli.parse_cli(["--json", "runs", "--limit", "1", "--structural"])
 
         self.assertEqual(parsed.subcommand, "runs")
         self.assertTrue(parsed.global_options.json_mode)
         self.assertIsNotNone(parsed.runs)
         self.assertEqual(parsed.runs.limit, 1)
+        self.assertTrue(parsed.runs.structural)
 
     def test_worktree_management_error_normalizes_payload(self):
         error = worktree_mgmt.WorktreeManagementError(

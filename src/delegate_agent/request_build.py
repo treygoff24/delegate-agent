@@ -3305,6 +3305,8 @@ def _apply_profile_resolution(
         env_overrides=env_overrides or None,
         auth_profile=auth_profile,
         fallback_auth_profile=fallback_profile,
+        codex_failover_identity=resolution.codex_failover_identity,
+        codex_fallback_failover_identity=resolution.codex_fallback_failover_identity,
         profile_resolution=resolution,
     )
 

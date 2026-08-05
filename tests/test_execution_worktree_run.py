@@ -480,6 +480,45 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             self.assertNotEqual(observed["DELEGATE_RUN_ID"], "del_20260801T120000Z_abcdef")
             self.assertNotEqual(observed["DELEGATE_MAIL_SELF"], "cursor-99")
 
+    def test_persistent_worktree_persists_initiator_root_and_passes_child_env(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            repo, _git_cd = self._make_git_repo_with_commit()
+            observed_path = Path(fake_home) / "initiator.txt"
+            fake = Path(fake_home) / "fake-agent"
+            fake.write_text(
+                "#!/usr/bin/env bash\n"
+                f'printf "%s\\n" "${{DELEGATE_INITIATOR_ROOT:-}}" > "{observed_path}"\n',
+                encoding="utf-8",
+            )
+            fake.chmod(0o755)
+            config = dict(self.delegate.DEFAULT_CONFIG)
+            config["cursor"] = {**config["cursor"], "argvPrefix": [str(fake)]}
+            workspace = self.delegate.resolve_workspace(repo.name)
+            request = self._make_persistent_worktree_request("cursor", "work", repo.name, config)
+
+            with mock.patch.dict(
+                os.environ,
+                {"HOME": fake_home, "CLAUDE_CODE_SESSION_ID": "session-1", "CODEX_THREAD_ID": ""},
+                clear=False,
+            ):
+                code, _payload = self.delegate.execute_request(
+                    request,
+                    json_mode=True,
+                    config=config,
+                    pass_through=False,
+                    completion_report_mode="none",
+                    source_workspace=workspace,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+
+            self.assertEqual(code, 0)
+            registry_root = Path(repo.name) / ".delegate"
+            index = self.delegate.run_registry.load_index(registry_root)
+            run_id = next(iter(index["runs"]))
+            self.assertEqual(index["runs"][run_id]["initiatorRoot"], "claude:session-1")
+            self.assertEqual(observed_path.read_text(encoding="utf-8").strip(), "claude:session-1")
+
     # -- Safe + worktree passthrough allowed and cleans up --------------------
 
     def test_safe_worktree_passthrough_allowed_and_cleans_up(self):
@@ -683,6 +722,102 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             self.assertIn("plannedExecutionCwd", cc)
             self.assertTrue(cc["plannedBranch"].startswith("delegate/cursor-"))
             self.assertIn("/worktrees/", cc["plannedExecutionCwd"])
+
+    def test_persistent_worktree_context_carries_codex_failover_identities(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            repo, git_common_dir = self._make_git_repo_with_commit()
+            workspace = self.delegate.resolve_workspace(repo.name)
+            worktree_path = Path(fake_home) / "worktree"
+            worktree_path.mkdir()
+            attempts = Path(fake_home) / "attempts.txt"
+            script = Path(fake_home) / "codex"
+            script.write_text(
+                "#!/usr/bin/env bash\n"
+                f'printf "%s\\n" "${{CODEX_HOME:-}}" >> "{attempts}"\n'
+                'printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}\'\n'
+                "printf '%s\\n' '{\"type\":\"turn.completed\"}'\n",
+                encoding="utf-8",
+            )
+            script.chmod(0o755)
+            config = dict(self.delegate.DEFAULT_CONFIG)
+            request = self._make_persistent_worktree_request("codex", "work", repo.name, config)
+            request.argv = [str(script), "exec", "--json", "-"]
+            request.env_overrides = {"CODEX_HOME": "/primary"}
+            request.auth_profile = "primary"
+            request.fallback_auth_profile = "fallback"
+            request.codex_failover_identity = "auth=/primary/auth.json\0profile="
+            request.codex_fallback_failover_identity = "auth=/fallback/auth.json\0profile="
+            request.profile_resolution = self.delegate.profiles.ProfileResolution(
+                name="primary",
+                source="default",
+                env={"CODEX_HOME": "/primary"},
+                codex_home="/primary",
+                codex_fallback_home="/fallback",
+                codex_failover_identity=request.codex_failover_identity,
+                codex_fallback_failover_identity=request.codex_fallback_failover_identity,
+            )
+            registry_root = self.delegate.run_registry.ensure_registry(
+                Path(repo.name), workspace_kind="git"
+            )
+            preflight = self.delegate.worktree_execution.PersistentWorktreePreflight(
+                iso_ctx=request.isolation_context,
+                source_git_root=repo.name,
+                base_oid="base",
+                source_git_common_dir=git_common_dir,
+                source_head_oid="head",
+                source_head_ref=None,
+                source_branch=None,
+                registry_root=registry_root,
+                tracked_dirty_files=0,
+                untracked_files=0,
+                dirty_example_paths=(),
+                dirty_snapshot=None,
+            )
+            run_id, alias = self.delegate.run_registry.register_run(registry_root, harness="codex")
+            ctx = self.delegate.worktree_execution._build_persistent_worktree_run_context(
+                self.delegate.worktree_execution.PersistentWorktreeExecution(
+                    request=request,
+                    json_mode=True,
+                    config=config,
+                    pass_through=False,
+                    completion_report_mode="none",
+                    source_workspace=workspace,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                    binary_validator=lambda _argv, _engine: None,
+                ),
+                preflight,
+                run_id=run_id,
+                alias=alias,
+                branch="delegate/codex-test",
+                worktree_path=str(worktree_path),
+                creation_context={},
+            )
+
+            self.assertEqual(ctx.codex_failover_identity, request.codex_failover_identity)
+            self.assertEqual(
+                ctx.codex_fallback_failover_identity,
+                request.codex_fallback_failover_identity,
+            )
+            self.assertEqual(ctx.fallback_env_overrides["CODEX_HOME"], "/fallback")
+
+            with mock.patch.dict(os.environ, {"HOME": fake_home}, clear=False):
+                self.delegate.delegate_runner.failover_state.write_block(
+                    "codex", request.codex_failover_identity, 4_102_444_800
+                )
+                code, _payload = self.delegate.delegate_runner.execute_tracked(
+                    request.argv,
+                    str(worktree_path),
+                    ctx,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                    completion_report_mode="none",
+                    stdin_text="task",
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(attempts.read_text(encoding="utf-8").splitlines(), ["/fallback"])
 
     def _make_logging_fake_bin(self, name, log_file):
         """Make a fake binary that logs its argv to a file."""

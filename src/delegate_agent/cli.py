@@ -635,6 +635,8 @@ def make_run_context(
         ),
         auth_profile=request.auth_profile,
         fallback_auth_profile=request.fallback_auth_profile,
+        codex_failover_identity=request.codex_failover_identity,
+        codex_fallback_failover_identity=request.codex_fallback_failover_identity,
         include_dirty=request.include_dirty,
         mail_push=request.mail_push,
         group=request.group,
@@ -673,6 +675,12 @@ def _set_child_root_env(request: Request, source_workspace: ResolvedWorkspace) -
     else:
         env.pop("DELEGATE_EXECUTION_ROOT", None)
     request.env_overrides = env
+
+
+def _apply_initiator_root(request: Request) -> str | None:
+    initiator_root, env = run_metadata.apply_initiator_root_env(request.env_overrides)
+    request.env_overrides = env
+    return initiator_root
 
 
 def _artifact_files(root: Path) -> list[str]:
@@ -786,22 +794,26 @@ def _execute_attached_worktree(
     if request.mode == MODE_WORK and delegate_config.mail_enabled(config):
         mail.prepare_mail_storage(registry_root)
     mail.sanitize_inherited_mail_identity(request.env_overrides)
+    metadata = {
+        "mode": request.mode,
+        "model": request.model,
+        "modelAlias": request.model_alias,
+        "modelResolved": request.model,
+        "group": request.group,
+        "workflowAgentKey": request.workflow_agent_key,
+        "cwd": source_workspace.path,
+        "worktreeAttachment": {
+            **(iso.attachment or {}),
+            "startHeadOid": start_head_oid,
+        },
+    }
+    run_metadata.add_initiator_metadata(
+        metadata, run_metadata.resolve_initiator_root(request.env_overrides or {})
+    )
     run_id, alias = run_registry.register_run(
         registry_root,
         harness=request.engine,
-        metadata={
-            "mode": request.mode,
-            "model": request.model,
-            "modelAlias": request.model_alias,
-            "modelResolved": request.model,
-            "group": request.group,
-            "workflowAgentKey": request.workflow_agent_key,
-            "cwd": source_workspace.path,
-            "worktreeAttachment": {
-                **(iso.attachment or {}),
-                "startHeadOid": start_head_oid,
-            },
-        },
+        metadata=metadata,
     )
     child_env = request.env_overrides or {}
     if request.mode == MODE_WORK:
@@ -986,6 +998,7 @@ def execute_request(
     stderr: TextIO,
 ) -> tuple[int, JsonObject | None]:
     _set_child_root_env(request, source_workspace)
+    initiator_root = _apply_initiator_root(request)
     profiles.strip_mail_identity(request.env_overrides)
     if request.mode == MODE_CALL:
         call_response: tuple[int, JsonObject | None] | None = None
@@ -1013,18 +1026,20 @@ def execute_request(
                     workspace_kind=source_workspace.kind,
                 )
                 maybe_run_retention_pass(registry_root, config)
+                metadata = {
+                    "mode": request.mode,
+                    "model": request.model,
+                    "modelAlias": request.model_alias,
+                    "modelResolved": request.model,
+                    "group": request.group,
+                    "workflowAgentKey": request.workflow_agent_key,
+                    "cwd": source_workspace.path,
+                }
+                run_metadata.add_initiator_metadata(metadata, initiator_root)
                 run_id, alias = run_registry.register_run(
                     registry_root,
                     harness=request.engine,
-                    metadata={
-                        "mode": request.mode,
-                        "model": request.model,
-                        "modelAlias": request.model_alias,
-                        "modelResolved": request.model,
-                        "group": request.group,
-                        "workflowAgentKey": request.workflow_agent_key,
-                        "cwd": source_workspace.path,
-                    },
+                    metadata=metadata,
                 )
                 artifact_id = run_id
                 ctx_runner = make_run_context(
@@ -1282,22 +1297,24 @@ def execute_request(
         if isolated_request.mode == MODE_WORK and delegate_config.mail_enabled(config):
             mail.prepare_mail_storage(registry_root)
         mail.sanitize_inherited_mail_identity(isolated_request.env_overrides)
+        metadata = {
+            "mode": isolated_request.mode,
+            "model": isolated_request.model,
+            "modelAlias": isolated_request.model_alias,
+            "modelResolved": isolated_request.model,
+            "group": isolated_request.group,
+            "workflowAgentKey": isolated_request.workflow_agent_key,
+            "cwd": (
+                isolated_request.isolation_context.source_workspace
+                if isolated_request.isolation_context is not None
+                else source_workspace.path
+            ),
+        }
+        run_metadata.add_initiator_metadata(metadata, initiator_root)
         run_id, alias = run_registry.register_run(
             registry_root,
             harness=isolated_request.engine,
-            metadata={
-                "mode": isolated_request.mode,
-                "model": isolated_request.model,
-                "modelAlias": isolated_request.model_alias,
-                "modelResolved": isolated_request.model,
-                "group": isolated_request.group,
-                "workflowAgentKey": isolated_request.workflow_agent_key,
-                "cwd": (
-                    isolated_request.isolation_context.source_workspace
-                    if isolated_request.isolation_context is not None
-                    else source_workspace.path
-                ),
-            },
+            metadata=metadata,
         )
         child_env = isolated_request.env_overrides or {}
         if isolated_request.mode == MODE_WORK:

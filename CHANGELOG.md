@@ -5,7 +5,36 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.28.0] - 2026-08-05
+
+### Added
+
+- Added `delegate runs --structural` and `delegate ps --structural` for
+  content-free local status collection, including lifecycle, model, group,
+  status, timestamp, and root initiator provenance.
+- Tracked runs now retain a validated root initiator across nested Delegate
+  launches and persistent-worktree execution.
+
+### Changed
+
+- Codex quota fallback is now explicitly configured with
+  `codex.fallbackProfile`, supports arbitrary profile definitions, and keeps
+  temporary blocks by resolved credential identity rather than profile alias.
+  Default work/personal credential homes continue to interoperate with legacy
+  profile launchers without allowing remapped aliases to share state.
+- Codex-only failover no longer depends on private Claude shim names or hidden
+  runtime controls. Retry and persistent-worktree paths retain the account
+  that is actually serving the run.
+
+### Fixed
+
+- Structural run listings now exclude raw terminal/provider events and apply
+  normal secret redaction to retained fields.
+- Fallback failures persist the correct account block and provider-reported
+  reset time; a blocked fallback is skipped, and retries no longer return to a
+  blocked primary after a preflight swap.
+- Failover tests isolate their state from the user's home directory, and
+  `delegate ps --help` now advertises its supported structural view.
 
 ## [0.27.0] - 2026-08-01
 
@@ -888,6 +917,7 @@ Usage-audit fix wave: 82 sessions and 1,241 delegate invocations from one week o
 
 - Releases before 0.1.3 predate this changelog.
 
+[0.28.0]: https://github.com/treygoff24/delegate-agent/compare/v0.27.0...v0.28.0
 [0.27.0]: https://github.com/treygoff24/delegate-agent/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/treygoff24/delegate-agent/compare/v0.25.0...v0.26.0
 [0.25.0]: https://github.com/treygoff24/delegate-agent/compare/v0.24.0...v0.25.0

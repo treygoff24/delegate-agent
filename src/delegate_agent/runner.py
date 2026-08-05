@@ -19,6 +19,7 @@ from typing import BinaryIO, TextIO
 
 from delegate_agent import (
     child_failures,
+    failover_state,
     harness_events,
     mail,
     profiles,
@@ -144,6 +145,8 @@ class RunContext:
     fallback_env_overrides: dict[str, str] = field(default_factory=dict)
     auth_profile: str | None = None
     fallback_auth_profile: str | None = None
+    codex_failover_identity: str | None = None
+    codex_fallback_failover_identity: str | None = None
     include_dirty: bool = False
     synced_files: int = 0
     group: str | None = None
@@ -1907,6 +1910,11 @@ def _finalize_tracked_run(
         failure_message=failure_message,
         stderr_tail=stderr_tail,
     )
+    failover_notice = merged_extra.get("failoverNotice")
+    if isinstance(failover_notice, str) and failover_notice.strip():
+        report_text = (
+            f"{failover_notice}\n\n{report_text}" if report_text.strip() else failover_notice
+        )
     report_written = write_completion_report(files.run_path, report_text)
     result_quality = _classify_result_quality(
         ctx=ctx,
@@ -2102,6 +2110,32 @@ def _capture_failure(
     return child_failures.classify(signal)
 
 
+def _codex_failure_signal_text(files: TrackedRunFiles, capture: TrackedCaptureResult) -> str:
+    return "\n".join(
+        part
+        for part in (
+            _attempt_log_tail(files.stderr_log, capture.stderr_bytes),
+            _accumulator_failure_signal_text(capture.accumulator),
+        )
+        if part
+    )
+
+
+def _record_codex_usage_block(
+    files: TrackedRunFiles,
+    capture: TrackedCaptureResult,
+    identity: str | None,
+    *,
+    profile_alias: str | None = None,
+) -> int | None:
+    signal = _codex_failure_signal_text(files, capture)
+    if not profiles.classify_codex_usage_limit(signal):
+        return None
+    reset_epoch = failover_state.parse_reset_epoch(signal)
+    failover_state.write_block("codex", identity, reset_epoch, profile_alias=profile_alias)
+    return reset_epoch
+
+
 def _codex_ephemeral_fallback_argv(argv: list[str]) -> list[str]:
     updated: list[str] = []
     i = 0
@@ -2131,7 +2165,12 @@ def _should_retry_profiles(
     stderr_log: Path,
     workspace_baseline: profiles.WorkspaceBaseline | None,
 ) -> bool:
-    if ctx.engine != "codex" or not ctx.fallback_env_overrides:
+    if (
+        ctx.engine != "codex"
+        or not ctx.fallback_env_overrides
+        or ctx.codex_failover_identity is None
+        or ctx.codex_fallback_failover_identity is None
+    ):
         return False
     if capture.error is not None or capture.exit_code == 0:
         return False
@@ -2143,6 +2182,32 @@ def _should_retry_profiles(
     if not profiles.classify_codex_usage_limit(signal_text):
         return False
     return _retry_is_safe(ctx, capture, cwd=cwd, workspace_baseline=workspace_baseline)
+
+
+def _build_failover_notice(
+    ctx: RunContext,
+    *,
+    blocked_profile: str | None,
+    serving_profile: str | None,
+    blocked_until: int | None = None,
+    preflight: bool = False,
+) -> str:
+    primary = (blocked_profile or "unknown").upper()
+    fallback = (serving_profile or "unknown").upper()
+    trigger = (
+        f"{primary} {ctx.engine.upper()} was already blocked (preflight)"
+        if preflight
+        else f"{primary} {ctx.engine.upper()} hit its usage limit"
+    )
+    until = (
+        f"until ~{failover_state.epoch_to_human(blocked_until)}"
+        if blocked_until is not None
+        else "until the limit resets"
+    )
+    return (
+        f"[ai-failover] {trigger}; this run was served by {fallback}; "
+        f"future runs use {fallback} {until}; continue normally."
+    )
 
 
 def _retry_is_safe(
@@ -2494,6 +2559,25 @@ def _execute_tracked(
     retry_prompt_temp_dir: str | None = None
     attempt_env = ctx.env_overrides or None
     capture: TrackedCaptureResult | None = None
+    preflight_swap = False
+    blocked_until: int | None = None
+    if (
+        ctx.engine == "codex"
+        and ctx.codex_failover_identity is not None
+        and ctx.codex_fallback_failover_identity is not None
+        and ctx.fallback_env_overrides
+    ):
+        primary_blocked, blocked_until = failover_state.check_blocked(
+            "codex", ctx.codex_failover_identity, profile_alias=ctx.auth_profile
+        )
+        fallback_blocked, _ = failover_state.check_blocked(
+            "codex",
+            ctx.codex_fallback_failover_identity,
+            profile_alias=ctx.fallback_auth_profile,
+        )
+        if primary_blocked and not fallback_blocked:
+            attempt_env = ctx.fallback_env_overrides
+            preflight_swap = True
 
     def run_attempt(
         attempt_argv: list[str],
@@ -2522,7 +2606,38 @@ def _execute_tracked(
         )
 
     try:
-        capture = run_attempt(launch_argv, env_overrides=ctx.env_overrides or None)
+        capture = run_attempt(
+            launch_argv,
+            env_overrides=attempt_env,
+            attempt_label="preflight-fallback" if preflight_swap else None,
+        )
+        if preflight_swap:
+            _record_codex_usage_block(
+                files,
+                capture,
+                ctx.codex_fallback_failover_identity,
+                profile_alias=ctx.fallback_auth_profile,
+            )
+            fallback_extra = {
+                "codexAuthFallback": {
+                    **profiles.codex_auth_fallback_metadata(
+                        reason="usage_limit_preflight",
+                        primary_auth_profile=ctx.auth_profile,
+                        fallback_auth_profile=ctx.fallback_auth_profile,
+                        primary_exit_code=-1,
+                        fallback_exit_code=capture.exit_code,
+                        primary_stderr_tail="",
+                    ),
+                    "failoverPreflight": True,
+                },
+                "failoverNotice": _build_failover_notice(
+                    ctx,
+                    blocked_profile=ctx.auth_profile,
+                    serving_profile=ctx.fallback_auth_profile,
+                    blocked_until=blocked_until,
+                    preflight=True,
+                ),
+            }
         if (
             ctx.engine == "codex"
             and not _cancel_requested_or_cancelled(ctx)
@@ -2538,7 +2653,7 @@ def _execute_tracked(
             _prepend_attempt_delimiter(files.stderr_log, label="primary")
             retry_capture = run_attempt(
                 launch_argv,
-                env_overrides=ctx.env_overrides or None,
+                env_overrides=attempt_env,
                 attempt_label="thread-retry",
                 prior_capture=capture,
             )
@@ -2571,7 +2686,7 @@ def _execute_tracked(
                 )
                 fallback_capture = run_attempt(
                     _codex_ephemeral_fallback_argv(launch_argv),
-                    env_overrides=ctx.env_overrides or None,
+                    env_overrides=attempt_env,
                     attempt_label="thread-ephemeral-fallback",
                     prior_capture=capture,
                 )
@@ -2609,34 +2724,78 @@ def _execute_tracked(
                     error=final_failure.code,
                     message=final_failure.message,
                 )
-        if not _cancel_requested_or_cancelled(ctx) and _should_retry_profiles(
-            ctx,
-            capture,
-            cwd=retry_workspace,
-            stderr_log=files.stderr_log,
-            workspace_baseline=workspace_baseline,
+        if (
+            not preflight_swap
+            and not _cancel_requested_or_cancelled(ctx)
+            and _should_retry_profiles(
+                ctx,
+                capture,
+                cwd=retry_workspace,
+                stderr_log=files.stderr_log,
+                workspace_baseline=workspace_baseline,
+            )
         ):
             primary_exit_code = capture.exit_code
             primary_stderr_tail = profiles.read_bounded_stderr_tail(files.stderr_log)
-            _prepend_attempt_delimiter(files.stderr_log, label="primary")
-            fallback_capture = run_attempt(
-                launch_argv,
-                env_overrides=ctx.fallback_env_overrides,
-                attempt_label="fallback",
-                prior_capture=capture,
+            _record_codex_usage_block(
+                files, capture, ctx.codex_failover_identity, profile_alias=ctx.auth_profile
             )
-            capture = _merge_tracked_attempt_captures(capture, fallback_capture)
-            attempt_env = ctx.fallback_env_overrides
-            fallback_extra = {
-                "codexAuthFallback": profiles.codex_auth_fallback_metadata(
-                    reason="usage_limit",
-                    primary_auth_profile=ctx.auth_profile,
-                    fallback_auth_profile=ctx.fallback_auth_profile,
-                    primary_exit_code=primary_exit_code,
-                    fallback_exit_code=fallback_capture.exit_code,
-                    primary_stderr_tail=primary_stderr_tail,
+            fallback_blocked, _ = failover_state.check_blocked(
+                "codex",
+                ctx.codex_fallback_failover_identity,
+                profile_alias=ctx.fallback_auth_profile,
+            )
+            if fallback_blocked:
+                fallback_extra = {
+                    "warnings": [
+                        "codex_auth_fallback: skipped because the fallback profile is also blocked."
+                    ],
+                }
+            else:
+                _prepend_attempt_delimiter(files.stderr_log, label="primary")
+                fallback_capture = run_attempt(
+                    launch_argv,
+                    env_overrides=ctx.fallback_env_overrides,
+                    attempt_label="fallback",
+                    prior_capture=capture,
                 )
-            }
+                _record_codex_usage_block(
+                    files,
+                    fallback_capture,
+                    ctx.codex_fallback_failover_identity,
+                    profile_alias=ctx.fallback_auth_profile,
+                )
+                capture = _merge_tracked_attempt_captures(capture, fallback_capture)
+                attempt_env = ctx.fallback_env_overrides
+                fallback_extra = {
+                    "codexAuthFallback": profiles.codex_auth_fallback_metadata(
+                        reason="usage_limit",
+                        primary_auth_profile=ctx.auth_profile,
+                        fallback_auth_profile=ctx.fallback_auth_profile,
+                        primary_exit_code=primary_exit_code,
+                        fallback_exit_code=fallback_capture.exit_code,
+                        primary_stderr_tail=primary_stderr_tail,
+                    ),
+                    "failoverNotice": _build_failover_notice(
+                        ctx,
+                        blocked_profile=ctx.auth_profile,
+                        serving_profile=ctx.fallback_auth_profile,
+                        blocked_until=failover_state.check_blocked(
+                            "codex",
+                            ctx.codex_failover_identity,
+                            profile_alias=ctx.auth_profile,
+                        )[1],
+                    ),
+                }
+        elif (
+            not preflight_swap
+            and ctx.engine == "codex"
+            and ctx.codex_failover_identity is not None
+            and capture.exit_code != 0
+        ):
+            _record_codex_usage_block(
+                files, capture, ctx.codex_failover_identity, profile_alias=ctx.auth_profile
+            )
         retry_supported = (
             stdin_text is not None or prompt_file_text is not None or manifest_argv is not None
         )

@@ -279,6 +279,22 @@ class OverviewTests(unittest.TestCase):
                 with self.subTest(line=line, option=option):
                     self.assertNotIn(option, line)
 
+    def test_overview_advertises_ps_structural(self):
+        ps_lines = [line for line in self.overview.splitlines() if " ps " in line]
+        self.assertEqual(len(ps_lines), 1)
+        self.assertIn("--structural", ps_lines[0])
+
+
+class PsHelpContractTests(unittest.TestCase):
+    def test_ps_help_advertises_structural_filter(self):
+        spec = command_help.COMMAND_SPECS["ps"]
+        text = command_help.render_command_help_text(spec)
+        payload = command_help.command_help_payload(spec)
+
+        self.assertIn("--structural", text)
+        self.assertIn("[--structural]", payload["usage"][0])
+        self.assertIn("--structural", {option["flag"] for option in payload["options"]})
+
 
 class PureCallHelpIntegrationTests(unittest.TestCase):
     def test_call_help_advertises_pure_only_for_eligible_engines(self):

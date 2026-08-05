@@ -1008,7 +1008,7 @@ repo copy or persistent worktree itself.
 Tracked runs return bounded parent-facing output and store local metadata under `.delegate/` in the source workspace.
 
 ```bash
-delegate runs [--active|--running|--stale|--recent] [--harness HARNESS] [--group NAME] [--limit N]
+delegate runs [--active|--running|--stale|--recent] [--harness HARNESS] [--group NAME] [--limit N] [--structural]
 delegate runs prune [--older-than DAYS] [--dry-run]
 delegate ps [--harness HARNESS] [--group NAME] [--limit N]
 delegate snapshot [--latest HARNESS] [--no-redact] <handle>
@@ -1055,8 +1055,10 @@ creating a Run or writing a prompt record.
 | Include dirty | `includeDirty` | `--include-dirty` | Source and explicit values are creation-only and are dropped for ordinary resume with a note. | Retained only as a drop decision; on a persistent/attached source, explicit `--include-dirty` is rejected because attachment does not create or sync a worktree. |
 
 `delegate runs` defaults to recent runs. `--active` preserves the legacy active view and includes both live `running` runs and `stale` runs. Use `--running` for only live tracked processes and `--stale` for runs recorded as running whose PID is missing or dead. `--active`, `--running`, `--stale`, and `--recent` are mutually exclusive. `--group NAME` filters by launch group and the runs table shows a `group` column when any visible run has one.
+`--structural` omits content-bearing run fields and emits only identity, lifecycle, model,
+timestamp, group/mode, and `initiatorRoot` metadata. It is intended for local status collectors.
 `delegate ps` is the shorter first-class form of `delegate runs --active` and
-accepts the same harness, group, and limit selectors.
+accepts the same harness, group, limit, and structural selectors.
 
 `delegate runs prune` removes old terminal Run records from the workspace Registry so they stop accumulating forever. Only runs whose effective status is terminal (`succeeded`, `failed`, `cancelled`, or `stale` from a dead child) and whose last Registry activity is older than the threshold (default 30 days; override with `--older-than DAYS`) are eligible. Effectively running runs are always skipped, and persistent-worktree runs are skipped unless their worktree is recorded as removed or missing — pruning the record of a live worktree would orphan it from `worktree list`/`show`/`remove`. Pruning deletes the per-Run directory (Snapshot, Manifest, logs, events, Completion Report) and the retained raw-log archive; worktree paths on disk are never touched. `--dry-run` reports what would be removed without changing anything. JSON output uses schema `delegate.runs-prune.v1` with `planned`, `removed`, `skipped` (each entry carries a `reason`), and `errors` sections.
 
@@ -1114,7 +1116,12 @@ Persistent worktree completions also include `branch`, `worktree`, a
 state, changed file count, diff stat, and commits created by the child. When a
 Codex usage-limit fallback fires, the completion payload also includes
 `codexAuthFallback` metadata (reason, the primary and fallback profile names,
-both exit codes, and a redacted primary stderr tail).
+both exit codes, and a redacted primary stderr tail). The fallback is Codex-only
+and is enabled only by `codex.fallbackProfile`; Delegate remembers temporary
+blocks by hashed credential namespace (`CODEX_HOME/auth.json` plus
+`codex.profile`) as canonical state. Default work/personal credential homes
+also mirror compatible legacy alias keys so existing launchers share blocks;
+remapped aliases remain isolated.
 
 Snapshot JSON uses schema `delegate.snapshot.v1` and includes fields such as `alias`, `runId`, `harness`, `status`, `rawStatus`, `effectiveStatus`, `staleReason`, `nextActions`, `cwd`, `executionCwd`, `workspaceRoot`, `assistantText`, `recentEvents`, `warnings`, `exitCode`, reasoning metadata, terminal metadata, and isolation/worktree metadata when applicable. `workspaceRoot` is also exported to the child as `WORKSPACE_ROOT`, so commands can anchor workspace-relative paths after changing directories. Inspection commands do not rewrite a stale run's recorded state; they expose the raw recorded status plus the effective status computed from the current PID check. Run-output and worktree show output include `requestedHandle`, `resolvedHandle`, and `resolutionKind` (`literal`, `latest`, or `latest_model`) when a handle resolves indirectly. For bare harness handles, snapshot, run-output, and wait also report `resolvedRunId`, `resolvedAlias`, `resolvedWorkspace`, `resolvedAge`, and `resolvedAgeSeconds`. Resolutions older than 24 hours add a `bare_handle_stale` warning suggesting `--cwd` or an explicit handle.
 

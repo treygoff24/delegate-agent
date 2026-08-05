@@ -15,7 +15,10 @@ if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
 from delegate_agent import config as config_mod  # noqa: E402
-from delegate_agent import redaction  # noqa: E402
+from delegate_agent import (  # noqa: E402
+    redaction,
+    run_metadata,
+)
 from delegate_agent.errors import DelegateError  # noqa: E402
 
 MODULE_PATH = ROOT / "src" / "delegate_agent" / "cli.py"
@@ -234,6 +237,76 @@ class ProfileResolutionTests(unittest.TestCase):
                 )
                 self.assertEqual(child["CODEX_HOME"], str(Path(tmp) / "codex"))
 
+    def test_codex_failover_identity_tracks_credentials_not_alias(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = write_codex_home(Path(tmp), "shared")
+            config = base_config()
+            config["profiles"] = {
+                "detectFrom": ["DELEGATE_PROFILE"],
+                "default": None,
+                "definitions": {
+                    "primary": {"env": {"CODEX_HOME": home}},
+                    "renamed": {"env": {"CODEX_HOME": home}},
+                },
+            }
+
+            primary = self.profiles.resolve_active_profile(config, {"DELEGATE_PROFILE": "primary"})
+            renamed = self.profiles.resolve_active_profile(config, {"DELEGATE_PROFILE": "renamed"})
+
+            self.assertEqual(primary.codex_failover_identity, renamed.codex_failover_identity)
+
+    def test_codex_failover_identity_separates_config_profile_overlay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = write_codex_home(Path(tmp), "shared")
+            config = base_config(work=home)
+            config["profiles"]["default"] = "work"
+
+            default_overlay = self.profiles.resolve_active_profile(config, {})
+            config["codex"] = dict(config["codex"], profile="delegate")
+            named_overlay = self.profiles.resolve_active_profile(config, {})
+
+            self.assertNotEqual(
+                default_overlay.codex_failover_identity,
+                named_overlay.codex_failover_identity,
+            )
+
+
+class InitiatorRootResolutionTests(unittest.TestCase):
+    def test_initiator_root_resolution_prefers_existing_root_and_single_native_ids(self):
+        self.assertEqual(
+            run_metadata.resolve_initiator_root({"CODEX_THREAD_ID": "abc"}),
+            "codex:abc",
+        )
+        self.assertEqual(
+            run_metadata.resolve_initiator_root({"CLAUDE_CODE_SESSION_ID": "def"}),
+            "claude:def",
+        )
+        self.assertEqual(
+            run_metadata.resolve_initiator_root(
+                {"DELEGATE_INITIATOR_ROOT": "codex:root", "CODEX_THREAD_ID": "child"}
+            ),
+            "codex:root",
+        )
+        self.assertIsNone(
+            run_metadata.resolve_initiator_root(
+                {"CODEX_THREAD_ID": "abc", "CLAUDE_CODE_SESSION_ID": "def"}
+            )
+        )
+
+    def test_initiator_root_resolution_rejects_ambiguous_values(self):
+        for env in (
+            {"CODEX_THREAD_ID": ""},
+            {"CODEX_THREAD_ID": "   "},
+            {"CODEX_THREAD_ID": " padded "},
+            {"CODEX_THREAD_ID": "x" * 257},
+            {"CODEX_THREAD_ID": "has:colon"},
+            {"CLAUDE_CODE_SESSION_ID": "has\nnewline"},
+            {"DELEGATE_INITIATOR_ROOT": "codex:"},
+            {"DELEGATE_INITIATOR_ROOT": "native:abc"},
+        ):
+            with self.subTest(env=env):
+                self.assertIsNone(run_metadata.resolve_initiator_root(env))
+
 
 class ProfileConfigAndRedactionTests(unittest.TestCase):
     def test_default_config_still_validates(self):
@@ -348,6 +421,97 @@ class CodexProfileExecutionTests(unittest.TestCase):
         self.profiles = load_module(
             ROOT / "src" / "delegate_agent" / "profiles.py", "profiles_execution_under_test"
         )
+
+    def _env_probe_binary(self, root: Path, log_path: Path) -> Path:
+        fake = root / "agent"
+        fake.write_text(
+            "#!/usr/bin/env bash\n"
+            f'printf "%s\\n" "${{DELEGATE_INITIATOR_ROOT:-}}" > "{log_path}"\n'
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o755)
+        return fake
+
+    def _cursor_config(self, fake: Path) -> dict:
+        config = dict(self.delegate.DEFAULT_CONFIG)
+        config["cursor"] = {**config["cursor"], "argvPrefix": [str(fake)]}
+        config["tracking"] = {
+            **config["tracking"],
+            "completionReport": {"defaultMode": "none"},
+        }
+        return config
+
+    def test_tracked_work_persists_initiator_root_and_passes_child_env(self):
+        repo = make_git_repo()
+        self.addCleanup(repo.cleanup)
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "initiator.txt"
+            config = self._cursor_config(self._env_probe_binary(Path(tmp), log_path))
+            workspace = self.delegate.ResolvedWorkspace(repo.name, "git")
+            request = self.delegate.build_request(
+                "cursor", "work", None, workspace, "task", config, dry_run=False
+            )
+
+            with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-1"}, clear=False):
+                code, _payload = self.delegate.execute_request(
+                    request,
+                    json_mode=True,
+                    config=config,
+                    pass_through=False,
+                    completion_report_mode="none",
+                    source_workspace=workspace,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+
+            self.assertEqual(code, 0)
+            registry_root = Path(repo.name) / ".delegate"
+            index = self.registry.load_index(registry_root)
+            run_id = next(iter(index["runs"]))
+            self.assertEqual(index["runs"][run_id]["initiatorRoot"], "codex:thread-1")
+            self.assertEqual(log_path.read_text(encoding="utf-8").strip(), "codex:thread-1")
+
+    def test_grouped_call_persists_existing_initiator_root(self):
+        repo = make_git_repo()
+        self.addCleanup(repo.cleanup)
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "initiator.txt"
+            config = self._cursor_config(self._env_probe_binary(Path(tmp), log_path))
+            workspace = self.delegate.ResolvedWorkspace(repo.name, "git")
+            request = self.delegate.build_request(
+                "cursor",
+                "call",
+                None,
+                workspace,
+                "task",
+                config,
+                dry_run=False,
+                group="swarm",
+            )
+
+            with mock.patch.dict(
+                os.environ,
+                {"DELEGATE_INITIATOR_ROOT": "claude:root-session", "CODEX_THREAD_ID": "child"},
+                clear=False,
+            ):
+                code, _payload = self.delegate.execute_request(
+                    request,
+                    json_mode=True,
+                    config=config,
+                    pass_through=False,
+                    completion_report_mode="none",
+                    source_workspace=workspace,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+
+            self.assertEqual(code, 0)
+            registry_root = Path(repo.name) / ".delegate"
+            index = self.registry.load_index(registry_root)
+            run_id = next(iter(index["runs"]))
+            self.assertEqual(index["runs"][run_id]["initiatorRoot"], "claude:root-session")
+            self.assertEqual(log_path.read_text(encoding="utf-8").strip(), "claude:root-session")
 
     def test_codex_active_profile_requires_codex_home_before_launch(self):
         repo = make_git_repo()
@@ -1083,6 +1247,18 @@ class CodexUsageLimitClassifierTests(unittest.TestCase):
         self.assertFalse(self.profiles.classify_codex_usage_limit("   "))
         self.assertFalse(self.profiles.classify_codex_usage_limit("command failed: not found"))
         self.assertFalse(self.profiles.classify_codex_usage_limit("rate limit exceeded, try again"))
+        self.assertFalse(
+            self.profiles.classify_codex_usage_limit(
+                "Server is temporarily limiting requests (not your usage limit)"
+            )
+        )
+
+    def test_real_limit_survives_transient_guard_on_another_line(self):
+        self.assertTrue(
+            self.profiles.classify_codex_usage_limit(
+                "warning (not your usage limit)\nYou've hit your usage limit"
+            )
+        )
 
     def test_classify_codex_usage_limit_positive_cases(self):
         self.assertTrue(
