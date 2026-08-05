@@ -7,7 +7,7 @@ This guide covers both human setup and non-interactive setup for agents or CI jo
 1. Install Delegate from the source repository:
 
    ```bash
-   python3 -m pip install "delegate-agent @ git+https://github.com/treygoff24/delegate-agent.git"
+   python3 -m pip install "delegate-agent-cli @ git+https://github.com/treygoff24/delegate-agent.git"
    ```
 
    For a development checkout, prefer:

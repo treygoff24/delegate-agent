@@ -1058,7 +1058,7 @@ creating a Run or writing a prompt record.
 `--structural` omits content-bearing run fields and emits only identity, lifecycle, model,
 timestamp, group/mode, and `initiatorRoot` metadata. It is intended for local status collectors.
 `delegate ps` is the shorter first-class form of `delegate runs --active` and
-accepts the same harness, group, and limit selectors.
+accepts the same harness, group, limit, and structural selectors.
 
 `delegate runs prune` removes old terminal Run records from the workspace Registry so they stop accumulating forever. Only runs whose effective status is terminal (`succeeded`, `failed`, `cancelled`, or `stale` from a dead child) and whose last Registry activity is older than the threshold (default 30 days; override with `--older-than DAYS`) are eligible. Effectively running runs are always skipped, and persistent-worktree runs are skipped unless their worktree is recorded as removed or missing — pruning the record of a live worktree would orphan it from `worktree list`/`show`/`remove`. Pruning deletes the per-Run directory (Snapshot, Manifest, logs, events, Completion Report) and the retained raw-log archive; worktree paths on disk are never touched. `--dry-run` reports what would be removed without changing anything. JSON output uses schema `delegate.runs-prune.v1` with `planned`, `removed`, `skipped` (each entry carries a `reason`), and `errors` sections.
 
