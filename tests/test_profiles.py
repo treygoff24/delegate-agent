@@ -1214,6 +1214,18 @@ class CodexUsageLimitClassifierTests(unittest.TestCase):
         self.assertFalse(self.profiles.classify_codex_usage_limit("   "))
         self.assertFalse(self.profiles.classify_codex_usage_limit("command failed: not found"))
         self.assertFalse(self.profiles.classify_codex_usage_limit("rate limit exceeded, try again"))
+        self.assertFalse(
+            self.profiles.classify_codex_usage_limit(
+                "Server is temporarily limiting requests (not your usage limit)"
+            )
+        )
+
+    def test_real_limit_survives_transient_guard_on_another_line(self):
+        self.assertTrue(
+            self.profiles.classify_codex_usage_limit(
+                "warning (not your usage limit)\nYou've hit your usage limit"
+            )
+        )
 
     def test_classify_codex_usage_limit_positive_cases(self):
         self.assertTrue(

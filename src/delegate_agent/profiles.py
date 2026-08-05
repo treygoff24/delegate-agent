@@ -346,7 +346,10 @@ def codex_fallback_child_env_overrides(
 
 
 def classify_codex_usage_limit(stderr_text: str) -> bool:
-    return child_failures.is_usage_limit(stderr_text)
+    signal = "\n".join(
+        line for line in stderr_text.splitlines() if "not your usage limit" not in line.casefold()
+    )
+    return child_failures.is_usage_limit(signal)
 
 
 def read_bounded_stderr_tail(stderr_log: Path, *, limit: int = STDERR_TAIL_LIMIT) -> str:
