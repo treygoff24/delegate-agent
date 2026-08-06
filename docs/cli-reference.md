@@ -1143,6 +1143,13 @@ Work-mode attempts are never replayed after tool activity or a workspace change.
 
 Run-output JSON uses schema `delegate.run-output.v1` and returns selected completion report, stdout, and/or stderr content. By default, secret-like strings are redacted unless `--no-redact` is supplied. Tracked runs finish in one of the terminal statuses `succeeded`, `failed`, or `cancelled`; explicit harness cancellation/error terminal events override an exit-zero child status.
 
+Tracked stdout and stderr logs are capped independently at 16 MiB. Exceeding a
+cap terminates the child and records `output_limit_exceeded` plus an
+`outputLimit` object naming the stream and byte limit. After an explicit
+terminal-success event, Delegate gives the harness one second to exit and then
+stops a lingering process; successful envelopes disclose this as
+`stoppedAfterCompletion: true`.
+
 Safe runs and read-only call runs that exit successfully with `resultQuality=empty`
 retry once with the original prompt plus a plain-text final-answer instruction.
 Pure and slash pass-through prompts, and write-capable calls, do not retry. Retried

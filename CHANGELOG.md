@@ -5,6 +5,14 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Tracked runs now stop after an explicit harness terminal event and fail closed
+  when either raw output stream exceeds 16 MiB, preventing a completed or
+  runaway child from filling disk with cumulative stream payloads.
+
 ## [0.28.0] - 2026-08-05
 
 ### Added

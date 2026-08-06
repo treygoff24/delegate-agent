@@ -1955,7 +1955,12 @@ class RunnerCaptureTests(unittest.TestCase):
             thread = threading.Thread(
                 target=self.runner._drain_stream,
                 args=(read_fd, log_path, byte_counter),
-                kwargs={"on_line": None},
+                kwargs={
+                    "on_line": None,
+                    "max_bytes": self.runner.TRACKED_STREAM_MAX_BYTES,
+                    "limit_signal": self.runner.StreamLimitSignal(),
+                    "stream": "stdout",
+                },
                 daemon=True,
             )
             thread.start()

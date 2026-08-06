@@ -54,6 +54,10 @@ DRAIN_JOIN_TIMEOUT_SEC = 5.0
 MILLISECONDS_PER_SECOND = 1000
 CALL_STDOUT_MAX_BYTES = 16 * 1024 * 1024
 CALL_STDERR_MAX_BYTES = 16 * 1024 * 1024
+TRACKED_STREAM_MAX_BYTES = 16 * 1024 * 1024
+STREAM_READ_CHUNK_BYTES = 64 * 1024
+TRACKED_PROCESS_POLL_SEC = 0.05
+TERMINAL_EXIT_GRACE_SEC = 1.0
 PROGRESS_INITIAL_DELAY_SEC = delegate_config.default_progress_initial_delay_sec()
 PROGRESS_HEARTBEAT_INTERVAL_SEC = delegate_config.default_progress_interval_sec()
 PROGRESS_INITIAL_DELAY_ENV = "DELEGATE_PROGRESS_INITIAL_DELAY_SEC"
@@ -973,16 +977,26 @@ def _drain_stream(
     byte_counter: ByteCounter,
     *,
     on_line: Callable[[str], None] | None,
+    max_bytes: int,
+    limit_signal: StreamLimitSignal,
+    stream: str,
 ) -> None:
     with log_path.open("ab") as log_handle:
+        captured_bytes = log_handle.tell()
         while True:
-            chunk = pipe.readline()
+            chunk = pipe.readline(STREAM_READ_CHUNK_BYTES)
             if not chunk:
                 break
             byte_counter.total += len(chunk)
-            log_handle.write(chunk)
-            if on_line is not None:
-                on_line(chunk.decode("utf-8", errors="replace"))
+            remaining = max(max_bytes - captured_bytes, 0)
+            captured = chunk[:remaining]
+            if captured:
+                log_handle.write(captured)
+                captured_bytes += len(captured)
+                if on_line is not None:
+                    on_line(captured.decode("utf-8", errors="replace"))
+            if len(captured) < len(chunk):
+                limit_signal.trip(stream)
 
 
 def _join_drain_thread(thread: threading.Thread, pipe: BinaryIO | None) -> None:
@@ -1130,6 +1144,9 @@ class TrackedCaptureResult:
     mail_push_failure_reason: str | None = None
     error: str | None = None
     message: str | None = None
+    output_limit_stream: str | None = None
+    output_limit_bytes: int | None = None
+    stopped_after_completion: bool = False
 
 
 @dataclass(frozen=True)
@@ -1243,6 +1260,19 @@ def _final_extra(ctx: RunContext, capture_exit_code: int) -> tuple[int, JsonObje
 @dataclass
 class ByteCounter:
     total: int = 0
+
+
+@dataclass
+class StreamLimitSignal:
+    event: threading.Event = field(default_factory=threading.Event)
+    stream: str | None = None
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def trip(self, stream: str) -> None:
+        with self._lock:
+            if self.stream is None:
+                self.stream = stream
+            self.event.set()
 
 
 def _progress_interval_from_env(name: str, default: float) -> float:
@@ -1483,6 +1513,8 @@ def _capture_tracked_process(
     progress_dirty = False
     mail_push_failure_reason: str | None = None
     mail_push_nonce = _mail_push_failure_nonce(ctx)
+    terminal_signal = threading.Event()
+    limit_signal = StreamLimitSignal()
 
     def maybe_persist_running() -> None:
         nonlocal lines_since_persist, last_persist_at, progress_dirty
@@ -1514,6 +1546,8 @@ def _capture_tracked_process(
             while "\n" in line_buffer:
                 line, line_buffer = line_buffer.split("\n", 1)
                 accumulator.ingest_line(line)
+                if accumulator.terminal_status is not None:
+                    terminal_signal.set()
                 progress_dirty = True
                 append_event(
                     events_handle,
@@ -1540,13 +1574,23 @@ def _capture_tracked_process(
         stdout_thread = threading.Thread(
             target=_drain_stream,
             args=(process.stdout, files.stdout_log, stdout_bytes_counter),
-            kwargs={"on_line": handle_stdout_line},
+            kwargs={
+                "on_line": handle_stdout_line,
+                "max_bytes": TRACKED_STREAM_MAX_BYTES,
+                "limit_signal": limit_signal,
+                "stream": "stdout",
+            },
             daemon=True,
         )
         stderr_thread = threading.Thread(
             target=_drain_stream,
             args=(process.stderr, files.stderr_log, stderr_bytes_counter),
-            kwargs={"on_line": handle_stderr_line},
+            kwargs={
+                "on_line": handle_stderr_line,
+                "max_bytes": TRACKED_STREAM_MAX_BYTES,
+                "limit_signal": limit_signal,
+                "stream": "stderr",
+            },
             daemon=True,
         )
         stdout_thread.start()
@@ -1562,77 +1606,94 @@ def _capture_tracked_process(
             stdin_thread.start()
 
         timed_out = False
-
-        def wait_for_child(timeout: float | None = None) -> int:
-            nonlocal timed_out
+        output_limited = False
+        stopped_after_completion = False
+        emit_progress = progress_stderr is not None
+        if emit_progress:
             try:
-                return process.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                _terminate_call_process(process)
-                timed_out = True
-                return 1
-
-        if progress_stderr is not None:
-            emit_progress = True
-            try:
+                assert progress_stderr is not None
                 _emit_progress_started(ctx, progress_stderr)
             except OSError:
                 emit_progress = False
-            initial_delay = _progress_interval_from_env(
-                PROGRESS_INITIAL_DELAY_ENV,
-                progress_initial_delay_sec,
-            )
-            interval = _progress_interval_from_env(
-                PROGRESS_INTERVAL_ENV,
-                progress_interval_sec,
-            )
-            next_progress_at = time.monotonic() + initial_delay
-            while True:
-                if not emit_progress:
-                    exit_code = wait_for_child(
-                        None if deadline is None else max(deadline - time.monotonic(), 0)
-                    )
-                    break
-                timeout = max(next_progress_at - time.monotonic(), 0.01)
-                if deadline is not None:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
+        initial_delay = _progress_interval_from_env(
+            PROGRESS_INITIAL_DELAY_ENV,
+            progress_initial_delay_sec,
+        )
+        interval = _progress_interval_from_env(
+            PROGRESS_INTERVAL_ENV,
+            progress_interval_sec,
+        )
+        next_progress_at = time.monotonic() + initial_delay
+        terminal_seen_at: float | None = None
+        while True:
+            now = time.monotonic()
+            if limit_signal.event.is_set():
+                _terminate_call_process(process)
+                output_limited = True
+                exit_code = 1
+                break
+            if terminal_signal.is_set():
+                terminal_seen_at = terminal_seen_at or now
+                if now - terminal_seen_at >= TERMINAL_EXIT_GRACE_SEC:
+                    if process.poll() is None:
                         _terminate_call_process(process)
-                        timed_out = True
-                        exit_code = 1
-                        break
-                    timeout = min(timeout, remaining)
+                        stopped_after_completion = True
+                    exit_code = 0 if accumulator.terminal_status == "succeeded" else 1
+                    break
+            if deadline is not None and now >= deadline:
+                _terminate_call_process(process)
+                timed_out = True
+                exit_code = 1
+                break
+            return_code = process.poll()
+            if return_code is not None:
+                exit_code = return_code
+                break
+            if emit_progress and now >= next_progress_at:
+                assert progress_stderr is not None
                 try:
-                    exit_code = process.wait(timeout=timeout)
-                    break
-                except subprocess.TimeoutExpired:
-                    if deadline is not None and time.monotonic() >= deadline:
-                        _terminate_call_process(process)
-                        timed_out = True
-                        exit_code = 1
-                        break
-                    try:
-                        _emit_progress_heartbeat(
-                            ctx,
-                            accumulator,
-                            started=started,
-                            stderr=progress_stderr,
-                        )
-                    except OSError:
-                        emit_progress = False
+                    _emit_progress_heartbeat(
+                        ctx,
+                        accumulator,
+                        started=started,
+                        stderr=progress_stderr,
+                    )
+                except OSError:
+                    emit_progress = False
+                finally:
                     next_progress_at = time.monotonic() + interval
-        else:
-            exit_code = wait_for_child(
-                None if deadline is None else max(deadline - time.monotonic(), 0)
-            )
+            wait_for = TRACKED_PROCESS_POLL_SEC
+            if deadline is not None:
+                wait_for = min(wait_for, max(deadline - now, 0.01))
+            if terminal_seen_at is not None:
+                wait_for = min(
+                    wait_for,
+                    max(TERMINAL_EXIT_GRACE_SEC - (now - terminal_seen_at), 0.01),
+                )
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=wait_for)
         _cleanup_tracked_process_streams(
             process,
             stdin_thread=stdin_thread,
             stdout_thread=stdout_thread,
             stderr_thread=stderr_thread,
         )
-        if line_buffer.strip():
+        if limit_signal.event.is_set():
+            output_limited = True
+            exit_code = 1
+        if not output_limited and line_buffer.strip():
             accumulator.ingest_line(line_buffer)
+        error: str | None = None
+        message: str | None = None
+        if timed_out:
+            error = "call_timeout"
+            message = "Child command exceeded the configured timeout."
+        elif output_limited:
+            error = "output_limit_exceeded"
+            message = (
+                f"Child {limit_signal.stream or 'output'} exceeded the tracked output limit "
+                f"of {TRACKED_STREAM_MAX_BYTES} bytes."
+            )
     return TrackedCaptureResult(
         accumulator=accumulator,
         exit_code=exit_code,
@@ -1643,8 +1704,11 @@ def _capture_tracked_process(
         pid=process.pid,
         pgid=pgid,
         mail_push_failure_reason=mail_push_failure_reason,
-        error="call_timeout" if timed_out else None,
-        message="Child command exceeded the configured timeout." if timed_out else None,
+        error=error,
+        message=message,
+        output_limit_stream=limit_signal.stream if output_limited else None,
+        output_limit_bytes=TRACKED_STREAM_MAX_BYTES if output_limited else None,
+        stopped_after_completion=stopped_after_completion,
     )
 
 
@@ -2897,6 +2961,13 @@ def _execute_tracked(
                 _append_unique(final_warnings, warning)
     if final_warnings:
         final_extra["warnings"] = final_warnings
+    if capture.output_limit_stream is not None:
+        final_extra["outputLimit"] = {
+            "stream": capture.output_limit_stream,
+            "bytes": capture.output_limit_bytes,
+        }
+    if capture.stopped_after_completion:
+        final_extra["stoppedAfterCompletion"] = True
     if capture.error is not None:
         final_extra.update(
             error=capture.error,

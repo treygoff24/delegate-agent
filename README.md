@@ -324,6 +324,9 @@ selector explicitly. Tracked runs also carry a `resultQuality` classification
 (`ok` / `housekeeping_noop` / `empty` / `suspect_short` / `no_assistant_text`),
 and failed or cancelled runs always get a completion report — synthesized when
 the child produced none — so `--completion-report` never dead-ends.
+Each tracked raw stream is capped at 16 MiB. A child that exceeds the cap is
+terminated with `output_limit_exceeded`; a child that lingers after an explicit
+harness terminal event receives a short exit grace and is then stopped.
 
 Block on background runs instead of polling, and cancel them cleanly:
 
