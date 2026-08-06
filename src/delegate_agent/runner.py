@@ -987,12 +987,12 @@ def _drain_stream(
             chunk = pipe.readline(STREAM_READ_CHUNK_BYTES)
             if not chunk:
                 break
-            byte_counter.total += len(chunk)
             remaining = max(max_bytes - captured_bytes, 0)
             captured = chunk[:remaining]
             if captured:
                 log_handle.write(captured)
                 captured_bytes += len(captured)
+                byte_counter.total += len(captured)
                 if on_line is not None:
                     on_line(captured.decode("utf-8", errors="replace"))
             if len(captured) < len(chunk):
@@ -1640,7 +1640,7 @@ def _capture_tracked_process(
                         stopped_after_completion = True
                     exit_code = 0 if accumulator.terminal_status == "succeeded" else 1
                     break
-            if deadline is not None and now >= deadline:
+            if deadline is not None and now >= deadline and not terminal_signal.is_set():
                 _terminate_call_process(process)
                 timed_out = True
                 exit_code = 1

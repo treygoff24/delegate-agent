@@ -57,6 +57,7 @@ class TrackedOutputBoundsTests(unittest.TestCase):
             state = run_registry.load_run_state(context.registry_root, context.run_id)
             self.assertEqual(state["status"], "failed")
             self.assertEqual(state["failureReason"], "output_limit_exceeded")
+            self.assertEqual(state["stdoutBytes"], 8192)
             self.assertEqual(state["outputLimit"]["stream"], "stdout")
             self.assertEqual(state["outputLimit"]["bytes"], 8192)
 
@@ -95,6 +96,38 @@ class TrackedOutputBoundsTests(unittest.TestCase):
             state = run_registry.load_run_state(context.registry_root, context.run_id)
             self.assertEqual(state["status"], "succeeded")
             self.assertTrue(state["stoppedAfterCompletion"])
+
+    def test_terminal_success_grace_outlives_call_deadline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            context = self.context(workspace, harness="pi")
+            terminal = json.dumps(
+                {
+                    "type": "turn_end",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "Status: completed\n- done"}],
+                        "stopReason": "stop",
+                    },
+                }
+            )
+            script = f"import time\nprint({terminal!r}, flush=True)\ntime.sleep(30)\n"
+
+            with mock.patch.object(runner, "TERMINAL_EXIT_GRACE_SEC", 1.1):
+                code, payload = runner.execute_tracked(
+                    [sys.executable, "-c", script],
+                    str(workspace),
+                    context,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                    timeout=1,
+                )
+
+            self.assertEqual(code, 0)
+            self.assertIsNotNone(payload)
+            self.assertEqual(payload["status"], "succeeded")
+            self.assertNotIn("call_timeout", payload)
 
 
 if __name__ == "__main__":

@@ -1148,7 +1148,8 @@ cap terminates the child and records `output_limit_exceeded` plus an
 `outputLimit` object naming the stream and byte limit. After an explicit
 terminal-success event, Delegate gives the harness one second to exit and then
 stops a lingering process; successful envelopes disclose this as
-`stoppedAfterCompletion: true`.
+`stoppedAfterCompletion: true`. Harnesses must emit that terminal event only
+after flushing their final payload.
 
 Safe runs and read-only call runs that exit successfully with `resultQuality=empty`
 retry once with the original prompt plus a plain-text final-answer instruction.
