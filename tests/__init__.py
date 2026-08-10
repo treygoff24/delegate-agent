@@ -41,6 +41,12 @@ if _SRC not in sys.path:
 
 os.environ.pop("AI_PROFILE", None)
 os.environ.pop("DELEGATE_CONFIG", None)
+# Initiator-root provenance reads these from os.environ; a suite run inside a
+# Claude Code or Codex session would otherwise make every initiator resolution
+# ambiguous (two native keys present -> None) and fail provenance tests.
+os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
+os.environ.pop("CODEX_THREAD_ID", None)
+os.environ.pop("DELEGATE_INITIATOR_ROOT", None)
 
 _TEST_HOME = tempfile.mkdtemp(prefix="delegate-tests-home-")
 os.environ["HOME"] = _TEST_HOME
