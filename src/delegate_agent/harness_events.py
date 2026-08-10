@@ -149,6 +149,22 @@ ASSISTANT_TEXT_TAIL = 10_000
 EVENT_LIMIT = 500
 EVENT_HEAD = 100
 EVENT_TAIL = 400
+EVENT_TEXT_LIMIT = 500
+
+
+def bounded_event_text(text: str, limit: int = EVENT_TEXT_LIMIT) -> tuple[str, bool, int]:
+    """Bound retained event text for raw and normalized event surfaces.
+
+    Returns ``(bounded, truncated, original_chars)``. When truncated, the
+    bounded string keeps the first ``limit`` characters plus a ``…`` sentinel
+    so consumers can detect display clipping. Truncation metadata belongs on
+    the event payload only when ``truncated`` is true.
+    """
+    original_chars = len(text)
+    if original_chars <= limit:
+        return text, False, original_chars
+    return text[:limit] + "…", True, original_chars
+
 
 # Harnesses whose streams emit assistant messages that are safe to
 # surface as a recovered completion report when a run dies before its final
@@ -168,6 +184,8 @@ class NormalizedEvent:
     path: str | None = None
     status: str | None = None
     message: str | None = None
+    truncated: bool | None = None
+    text_chars: int | None = None
 
     def to_dict(self) -> JsonObject:
         payload: JsonObject = {"kind": self.kind}
@@ -181,6 +199,10 @@ class NormalizedEvent:
             payload["status"] = self.status
         if self.message is not None:
             payload["message"] = self.message
+        if self.truncated:
+            payload["truncated"] = True
+            if self.text_chars is not None:
+                payload["textChars"] = self.text_chars
         return payload
 
 
@@ -275,8 +297,12 @@ class StreamAccumulator:
         self._ingest_object(payload)
 
     def _ingest_text_fallback(self, text: str) -> None:
-        bounded = text if len(text) <= 500 else text[:500] + "…"
-        self.events.append(NormalizedEvent(kind="text", message=bounded))
+        bounded, truncated, original_chars = bounded_event_text(text)
+        event = NormalizedEvent(kind="text", message=bounded)
+        if truncated:
+            event.truncated = True
+            event.text_chars = original_chars
+        self.events.append(event)
         self.current = _bounded_current_line(bounded)
         if self.harness == "devin":
             self._record_devin_assistant_text(text)

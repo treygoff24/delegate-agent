@@ -1356,6 +1356,37 @@ class HarnessEventsTests(unittest.TestCase):
         acc.ingest_line("second plaintext progress")
         self.assertEqual(acc.current, "second plaintext progress")
 
+    def test_bounded_event_text_helper_and_fallback_metadata(self):
+        short = "short event text"
+        bounded, truncated, original = self.events.bounded_event_text(short)
+        self.assertEqual(bounded, short)
+        self.assertFalse(truncated)
+        self.assertEqual(original, len(short))
+
+        long = "x" * (self.events.EVENT_TEXT_LIMIT + 40)
+        bounded, truncated, original = self.events.bounded_event_text(long)
+        self.assertTrue(truncated)
+        self.assertEqual(original, len(long))
+        self.assertEqual(bounded, long[: self.events.EVENT_TEXT_LIMIT] + "…")
+        self.assertEqual(len(bounded), self.events.EVENT_TEXT_LIMIT + 1)
+
+        acc = self.events.StreamAccumulator()
+        acc.ingest_line(short)
+        short_event = acc.events[-1].to_dict()
+        self.assertEqual(short_event["kind"], "text")
+        self.assertEqual(short_event["message"], short)
+        self.assertNotIn("truncated", short_event)
+        self.assertNotIn("textChars", short_event)
+
+        acc.ingest_line(long)
+        long_event = acc.events[-1].to_dict()
+        self.assertEqual(long_event["kind"], "text")
+        self.assertTrue(long_event["truncated"])
+        self.assertEqual(long_event["textChars"], len(long))
+        self.assertEqual(long_event["message"], long[: self.events.EVENT_TEXT_LIMIT] + "…")
+        recent, _meta = acc.bounded_recent_events()
+        self.assertEqual(recent[-1], long_event)
+
     def test_explicit_completion_wins_over_assistant_recovery_quality(self):
         acc = self.events.StreamAccumulator()
         acc.ingest_line(

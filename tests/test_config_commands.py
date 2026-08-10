@@ -2,6 +2,7 @@ import importlib
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -230,6 +231,11 @@ class LauncherShimTests(unittest.TestCase):
                 ["models", "--live", "codex"],
                 # A refresh positional after a flag must still be caught, not just $1.
                 ["capabilities", "--verbose", "refresh"],
+                # workflow mutations stay gated; only the read-only actions
+                # (check/status/watch/events/result/wait/list) pass through.
+                ["workflow", "run", "scripts/hello.py"],
+                ["workflow", "run", "--resume", "wf_0123abcdef45"],
+                ["workflow", "resume"],
                 # Bare `list` is not a documented top-level subcommand (the Python
                 # parser silently aliases it to `runs`); the shim no longer special-
                 # cases it, so it falls through to the conservative default.
@@ -266,6 +272,18 @@ class LauncherShimTests(unittest.TestCase):
                 ["capabilities", "--help", "refresh"],
                 ["worktree", "show", "cursor-1"],
                 ["worktree", "list"],
+                ["workflow", "check", "scripts/hello.py"],
+                ["workflow", "status", "wf_0123abcdef45"],
+                ["workflow", "watch", "wf_0123abcdef45"],
+                ["workflow", "events", "wf_0123abcdef45"],
+                ["workflow", "result", "wf_0123abcdef45"],
+                ["workflow", "wait", "--timeout", "60"],
+                ["workflow", "list"],
+                # --json may sit between `workflow` and the action (the parser
+                # consumes it); globals may precede `workflow`; trailing
+                # flags/paths never affect classification.
+                ["workflow", "--json", "check", "scripts/hello.py"],
+                ["--json", "workflow", "result", "wf_0123abcdef45", "--field", "summary"],
                 ["cursor", "--help"],
                 ["cursor", "safe", "--help"],
                 ["droid", "opus", "safe", "-h"],
@@ -280,6 +298,28 @@ class LauncherShimTests(unittest.TestCase):
                     self.assertIsNone(payload["delegateConfig"])
                     self.assertIn("continuing because", result.stderr)
                     self.assertIn("read-only", result.stderr)
+
+    def test_workflow_readonly_actions_match_profile_guard(self):
+        # Drift guard: the shim's workflow allow-list must equal
+        # profile_guard.READ_ONLY_WORKFLOW_ACTIONS, or an unprofiled shell and
+        # a direct Python invocation would disagree about what passes through.
+        from delegate_agent import profile_guard
+
+        lines = (ROOT / "bin" / "delegate-profile-shim").read_text(encoding="utf-8").splitlines()
+        arms = [i for i, line in enumerate(lines) if line.strip() == "workflow)"]
+        self.assertTrue(arms, "workflow) case arm missing from bin/delegate-profile-shim")
+        tail = "\n".join(lines[arms[0] + 1 : arms[0] + 40])
+        match = re.search(r"^\s+([a-z|]+)\)\s*$", tail, re.M)
+        self.assertIsNotNone(
+            match, "workflow action allow-list line not found in bin/delegate-profile-shim"
+        )
+        shim_actions = frozenset(match.group(1).split("|"))
+        self.assertEqual(
+            profile_guard.READ_ONLY_WORKFLOW_ACTIONS,
+            shim_actions,
+            "bin/delegate-profile-shim workflow allow-list drifted from "
+            "profile_guard.READ_ONLY_WORKFLOW_ACTIONS; update both together",
+        )
 
     def test_help_inside_launch_prompt_cannot_bypass_missing_profile_guard(self):
         with tempfile.TemporaryDirectory() as home:

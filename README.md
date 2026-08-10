@@ -421,8 +421,9 @@ Delegate resolves the profile once per request and injects its env into every sp
 If `AI_PROFILE=work|personal` points at a missing profile overlay, Delegate
 blocks launch and mutation commands, but lets read-only diagnostics
 (`profiles`, `runs`, `run-output`, `snapshot`, cached `capabilities`,
-`worktree show`, `worktree list`, `describe`, `models`) continue with a
-warning. This guarantee is enforced in the Python CLI itself (`delegate_agent.cli:main`), so it holds no matter how you invoke Delegate: the
+`worktree show`, `worktree list`,
+`workflow check|status|watch|events|result|wait|list`, `describe`, `models`)
+continue with a warning. This guarantee is enforced in the Python CLI itself (`delegate_agent.cli:main`), so it holds no matter how you invoke Delegate: the
 pip console script, `python -m delegate_agent.cli`, `bin/delegate.py`, or a
 shell shim in front of any of those. The tracked launcher shim template,
 `bin/delegate-profile-shim`, applies the same check earlier, before Python

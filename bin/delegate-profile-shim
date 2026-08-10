@@ -199,6 +199,31 @@ _delegate_is_readonly_request() {
           ;;
       esac
       ;;
+    workflow)
+      # The parser consumes --json tokens before the action, so the action is
+      # the first non-option token after `workflow`; trailing flags/paths
+      # never decide classification.
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --json)
+            shift
+            ;;
+          *)
+            break
+            ;;
+        esac
+      done
+      # Parity with profile_guard.READ_ONLY_WORKFLOW_ACTIONS is enforced by
+      # tests; update both together.
+      case "${1:-}" in
+        check|status|watch|events|result|wait|list)
+          return 0
+          ;;
+        *)
+          return 1
+          ;;
+      esac
+      ;;
     *)
       return 1
       ;;

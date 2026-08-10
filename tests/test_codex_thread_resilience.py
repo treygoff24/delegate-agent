@@ -230,6 +230,12 @@ raise SystemExit(1)
         snapshot = json.loads((run_path / "snapshot.json").read_text(encoding="utf-8"))
         self.assertNotIn(secret, snapshot["message"])
         self.assertNotIn(secret, snapshot["current"])
+        # Retained event surfaces are a raw diagnostic mirror: secret-shaped
+        # text stays verbatim (no event-text redaction).
+        events_text = (run_path / "events.jsonl").read_text(encoding="utf-8")
+        self.assertIn(secret, events_text)
+        recent_blob = json.dumps(snapshot.get("recentEvents") or [])
+        self.assertIn(secret, recent_blob)
         report = (run_path / "completion-report.md").read_text(encoding="utf-8")
         self.assertIn("usage_limit", report)
         self.assertIn("2026-07-22 01:00 UTC", report)

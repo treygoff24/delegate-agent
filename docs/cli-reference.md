@@ -1158,6 +1158,16 @@ stops a lingering process; successful envelopes disclose this as
 `stoppedAfterCompletion: true`. Harnesses must emit that terminal event only
 after flushing their final payload.
 
+Each tracked Run also keeps `events.jsonl`, an append-only raw diagnostic mirror
+of child stdout lines as `{"kind":"stream.line","stream":"stdout","text":...}`
+records (including a final unterminated line when the child exits mid-line).
+Normalized progress events also appear in Snapshot `recentEvents`. Both
+surfaces bound retained event text at 500 characters and append a `…` sentinel
+when clipped. Only then do they add `truncated: true` and `textChars` (the
+original character count before bounding); short lines omit those fields.
+Retained event text is not redacted — treat `events.jsonl` and `recentEvents`
+as sensitive diagnostic artifacts.
+
 Safe runs and read-only call runs that exit successfully with `resultQuality=empty`
 retry once with the original prompt plus a plain-text final-answer instruction.
 Pure and slash pass-through prompts, and write-capable calls, do not retry. Retried

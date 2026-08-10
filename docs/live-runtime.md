@@ -28,7 +28,8 @@ When `AI_PROFILE=work|personal` is set and the matching
 `~/.delegate/config.<profile>.json` overlay is missing, Delegate blocks launch
 and mutation commands but allows read-only diagnostics (`profiles`, `runs`,
 `run-output`, `snapshot`, cached `capabilities`, `worktree show`,
-`worktree list`, `describe`, `models`) with a warning. This check runs inside
+`worktree list`, `workflow check|status|watch|events|result|wait|list`,
+`describe`, `models`) with a warning. This check runs inside
 `delegate_agent.cli:main` (`src/delegate_agent/profile_guard.py`), so it applies
 regardless of entrypoint: the installed pip console script, `python -m
 delegate_agent.cli`, or `bin/delegate.py`. Some local installs additionally put

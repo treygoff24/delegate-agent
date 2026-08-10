@@ -199,6 +199,15 @@ def append_event(handle: TextIO, event: JsonObject) -> None:
     handle.write(json.dumps(event, sort_keys=True) + "\n")
 
 
+def _stream_line_event(stream: str, text: str) -> JsonObject:
+    bounded, truncated, original_chars = harness_events.bounded_event_text(text)
+    event: JsonObject = {"kind": "stream.line", "stream": stream, "text": bounded}
+    if truncated:
+        event["truncated"] = True
+        event["textChars"] = original_chars
+    return event
+
+
 def completion_report_path(run_id: str) -> str:
     return f".delegate/runs/{run_id}/{COMPLETION_REPORT_FILE}"
 
@@ -1553,10 +1562,7 @@ def _capture_tracked_process(
                 if accumulator.terminal_status is not None:
                     terminal_signal.set()
                 progress_dirty = True
-                append_event(
-                    events_handle,
-                    {"kind": "stream.line", "stream": "stdout", "text": line[:500]},
-                )
+                append_event(events_handle, _stream_line_event("stdout", line))
                 lines_since_persist += 1
                 elapsed = time.monotonic() - last_persist_at
                 if (
@@ -1686,7 +1692,10 @@ def _capture_tracked_process(
             output_limited = True
             exit_code = 1
         if not output_limited and line_buffer.strip():
+            # Final unterminated stdout line: ingest and mirror into events.jsonl
+            # so the raw event log matches what the accumulator saw.
             accumulator.ingest_line(line_buffer)
+            append_event(events_handle, _stream_line_event("stdout", line_buffer))
         error: str | None = None
         message: str | None = None
         if timed_out:

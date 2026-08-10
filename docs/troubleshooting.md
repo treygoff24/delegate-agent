@@ -415,6 +415,23 @@ with `--tail` and `--max-chars`, may print very large output, and includes
 `rawOutputBytes` in JSON metadata so callers can see how much raw output was
 returned.
 
+## Parsing `events.jsonl` nested JSON
+
+Tracked Runs mirror each child stdout line into `.delegate/runs/<runId>/events.jsonl`
+as `stream.line` records. Lines longer than 500 characters are clipped with a
+`…` sentinel and marked `truncated: true` / `textChars: <original length>`.
+Clipped lines that contained nested JSON are no longer valid JSON payloads, so
+skip them when reconstructing structured child events:
+
+```bash
+jq -r 'select(.kind == "stream.line" and (.truncated != true)) | .text | fromjson' \
+  .delegate/runs/<runId>/events.jsonl
+```
+
+Prefer `delegate snapshot` / `run-output` for parent-facing summaries. Use the
+raw event log only for diagnostics, and treat it as sensitive: retained event
+text is not redacted.
+
 ## Structured / JSON-only final output
 
 For a bare machine-parseable final message on Codex, use `--output-schema FILE`.
