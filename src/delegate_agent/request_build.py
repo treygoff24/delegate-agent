@@ -3144,7 +3144,9 @@ def _build_request_for_workspace(
             raise DelegateError(
                 "prompt_too_large",
                 f"The fully framed prompt is {prompt_bytes} UTF-8 bytes, exceeding the "
-                f"{ARGV_PROMPT_GUARD_BYTES}-byte argv transport limit for {engine}.",
+                f"{ARGV_PROMPT_GUARD_BYTES}-byte argv transport limit for {engine}. "
+                "Shorten the prompt, or use an engine whose prompt rides a file/stdin "
+                "transport (codex, claude, grok, opencode) instead of argv.",
             )
     workspace_warning = wsl.drivefs_workspace_warning(resolved.path)
     if workspace_warning is not None:

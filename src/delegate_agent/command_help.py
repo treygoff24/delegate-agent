@@ -907,7 +907,14 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "delegate runs --group wave4",
             "delegate --json runs --recent --structural",
         ),
-        notes=("--active, --running, --stale, and --recent are mutually exclusive.",),
+        notes=(
+            "--active, --running, --stale, and --recent are mutually exclusive.",
+            "JSON includes total (pre-limit match count) and truncated "
+            "(true when total exceeds the returned rows); text mode prints "
+            "'showing N of M runs (raise --limit to see more)' when truncated.",
+            "An empty --group/--harness result warns that the Registry is "
+            "workspace-scoped; use --cwd PATH to inspect another workspace.",
+        ),
         see_also=("ps", "runs prune", "snapshot", "run-output"),
         unsupported_global_options=("--auth-profile",),
     ),
@@ -1121,7 +1128,14 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             ),
         ),
         examples=("delegate ps", "delegate ps --harness codex", "delegate --json ps --structural"),
-        notes=("Equivalent to delegate runs --active.",),
+        notes=(
+            "Equivalent to delegate runs --active.",
+            "JSON includes total (pre-limit match count) and truncated "
+            "(true when total exceeds the returned rows); text mode prints "
+            "'showing N of M runs (raise --limit to see more)' when truncated.",
+            "An empty --group/--harness result warns that the Registry is "
+            "workspace-scoped; use --cwd PATH to inspect another workspace.",
+        ),
         see_also=("runs", "snapshot", "run-output"),
         unsupported_global_options=("--auth-profile",),
     ),

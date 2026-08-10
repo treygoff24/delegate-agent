@@ -283,7 +283,7 @@ def list_run_summaries(
     harness: str | None = None,
     group: str | None = None,
     limit: int = DEFAULT_RUNS_LIMIT,
-) -> list[JsonObject]:
+) -> tuple[list[JsonObject], int]:
     if limit < 1:
         raise ValueError("limit must be at least 1")
     summaries: list[JsonObject] = []
@@ -304,7 +304,8 @@ def list_run_summaries(
             continue
         summaries.append(summary)
     summaries.sort(key=lambda item: item.get("activityAt", ""), reverse=True)
-    return summaries[:limit]
+    total = len(summaries)
+    return summaries[:limit], total
 
 
 # Deferred to the bottom to break the run_registry<->run_status facade cycle:

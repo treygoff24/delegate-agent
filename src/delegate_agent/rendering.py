@@ -204,17 +204,31 @@ def runs_json_payload(
     *,
     limit: int,
     mode: str,
+    total: int,
+    warnings: list[str] | None = None,
 ) -> JsonObject:
-    return {
+    payload: JsonObject = {
         "schema": run_registry.RUNS_SCHEMA,
         "ok": True,
         "mode": mode,
         "limit": limit,
+        "total": total,
+        "truncated": total > len(summaries),
         "runs": summaries,
     }
+    if warnings:
+        payload["warnings"] = warnings
+    return payload
 
 
-def render_runs_text(summaries: list[JsonObject], stdout: TextIO, *, mode: str) -> None:
+def render_runs_text(
+    summaries: list[JsonObject],
+    stdout: TextIO,
+    *,
+    mode: str,
+    total: int | None = None,
+    warnings: list[str] | None = None,
+) -> None:
     print(f"mode: {mode}", file=stdout)
     show_group = any(isinstance(summary.get("group"), str) for summary in summaries)
     if show_group:
@@ -250,6 +264,14 @@ def render_runs_text(summaries: list[JsonObject], stdout: TextIO, *, mode: str) 
                 f"{alias:<10} {status:<9} {harness:<8} {age:<8} {iso_label:<11} {current}",
                 file=stdout,
             )
+    if total is not None and total > len(summaries):
+        print(
+            f"showing {len(summaries)} of {total} runs (raise --limit to see more)",
+            file=stdout,
+        )
+    if warnings:
+        for warning in warnings:
+            print(f"warning: {warning}", file=stdout)
 
 
 def run_output_json_payload(

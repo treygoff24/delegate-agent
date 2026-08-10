@@ -127,9 +127,10 @@ def emit_runs(command: RunsCommand, *, workspace_path: str, stdout: TextIO) -> i
         status_filter = None
     if registry_root is None:
         summaries: list[JsonObject] = []
+        total = 0
     else:
         index = run_registry.load_index(registry_root)
-        summaries = run_registry.list_run_summaries(
+        summaries, total = run_registry.list_run_summaries(
             registry_root,
             index,
             active=command.active,
@@ -147,11 +148,30 @@ def emit_runs(command: RunsCommand, *, workspace_path: str, stdout: TextIO) -> i
         ]
     else:
         summaries = [redaction.redact_value(summary) for summary in summaries]
+    warnings: list[str] = []
+    if not summaries and (command.group is not None or command.harness is not None):
+        warnings.append(
+            "No matching runs in this workspace registry. "
+            "The run registry is workspace-scoped; use --cwd PATH to target another "
+            "workspace's registry."
+        )
     if command.json_mode:
         delegate_rendering.print_json(
-            delegate_rendering.runs_json_payload(summaries, limit=limit, mode=mode),
+            delegate_rendering.runs_json_payload(
+                summaries,
+                limit=limit,
+                mode=mode,
+                total=total,
+                warnings=warnings or None,
+            ),
             stdout,
         )
     else:
-        delegate_rendering.render_runs_text(summaries, stdout, mode=mode)
+        delegate_rendering.render_runs_text(
+            summaries,
+            stdout,
+            mode=mode,
+            total=total,
+            warnings=warnings or None,
+        )
     return 0

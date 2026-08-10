@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import io
 import json
 import math
@@ -1405,10 +1406,13 @@ def _launch_tracked_process(
 
 def _runner_launch_error(argv: list[str], cwd: str, exc: OSError) -> RunnerLaunchError:
     binary = argv[0] if argv else "<empty argv>"
-    return RunnerLaunchError(
-        "child_launch_failed",
-        f"Failed to launch child command {binary!r} in {cwd}: {exc}",
-    )
+    message = f"Failed to launch child command {binary!r} in {cwd}: {exc}"
+    if exc.errno == errno.EPERM:
+        message += (
+            " Sandboxed parent shells can forbid launching this harness binary; "
+            "retry the launch from an unsandboxed shell."
+        )
+    return RunnerLaunchError("child_launch_failed", message)
 
 
 def _record_tracked_launch_failure(
