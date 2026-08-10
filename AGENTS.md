@@ -21,11 +21,15 @@ repository change.
 Narrowest relevant check first, then the four commands CI runs:
 
 ```bash
-python3 -m unittest discover -s tests
+python3 -m unittest discover -s tests -t .
 python3 -m compileall -q src tests bin
 ruff check .
 ruff format --check .
 ```
+
+`-t .` makes discovery import `tests/__init__.py`, which shims `src` onto
+`sys.path` and strips ambient env. Unittest prints its `Ran N tests / OK`
+summary to stderr — pipe with `2>&1` when capturing output.
 
 `ruff` comes from the `dev` extra (`python3 -m pip install -e ".[dev]"`);
 `ruff format .` applies formatting.
@@ -36,6 +40,9 @@ ruff format --check .
   is edit-capable.
 - Temporary safe isolation protects the source checkout from ordinary
   relative-path edits, but it is not a complete host security sandbox.
+- Some harness sandboxes reject `rm` of even freshly created temp files; write
+  scratch output to unique `mktemp` paths and skip cleanup rather than retrying
+  deletion. Unique names make cleanup unnecessary.
 - Persistent worktree runs are orchestrator-managed: use `delegate worktree ...`,
   never delete or move a Delegate-created worktree by hand.
 

@@ -15,7 +15,7 @@ This guide covers both human setup and non-interactive setup for agents or CI jo
    ```bash
    python3 -m venv .venv
    . .venv/bin/activate
-   python -m pip install -e .
+   python3 -m pip install -e .
    python3 bin/delegate.py --json describe
    ```
 
@@ -243,7 +243,7 @@ where needed:
 
 ```bash
 python3 -m compileall -q src tests bin
-python3 -m unittest discover -s tests
+python3 -m unittest discover -s tests -t .
 ```
 
 Real runtime authentication is only required for integration smoke tests that intentionally launch a child agent.

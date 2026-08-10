@@ -59,8 +59,12 @@ Run focused tests first, then the broader checks before handoff:
 ```bash
 python3 -m compileall -q src tests bin
 git diff --check
-python3 -m unittest discover -s tests
+python3 -m unittest discover -s tests -t .
 ```
+
+`-t .` makes discovery import `tests/__init__.py`, which shims `src` onto
+`sys.path` and strips ambient env. Unittest prints its `Ran N tests / OK`
+summary to stderr — pipe with `2>&1` when capturing output.
 
 Required CI does not need real Cursor, Droid, Codex, Claude, Grok, Devin,
 OpenCode, Pi, Oh My Pi, or Kimi binaries.

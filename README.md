@@ -48,7 +48,7 @@ git clone https://github.com/treygoff24/delegate-agent.git
 cd delegate-agent
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install -e .
+python3 -m pip install -e .
 python3 bin/delegate.py --json describe
 ```
 
