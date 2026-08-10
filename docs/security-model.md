@@ -362,6 +362,9 @@ with a stderr warning that the check would otherwise fail closed. Once
 directly by a caller, the Python-layer guard does
 not re-check `AI_PROFILE`; it treats an explicit `DELEGATE_CONFIG` as already
 having answered the question.
+In profile-aware shell installs, profile selection still validates the matching
+overlay and loads that profile's credentials; an incoming `DELEGATE_CONFIG`
+then remains the runtime-policy config passed to Python.
 
 An `AI_PROFILE` value that is set, non-empty, and not exactly `work` or
 `personal` (a typo or an unrelated convention) is not a recognized profile, so

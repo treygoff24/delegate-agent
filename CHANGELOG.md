@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- An explicit `DELEGATE_CONFIG` now survives profile selection: the profile
+  shim and profile env resolution load the selected profile's credentials but
+  keep the incoming `DELEGATE_CONFIG` as the runtime-policy config instead of
+  replacing it, and codex quota fallback no longer forwards `DELEGATE_CONFIG`
+  into the fallback child environment.
 - Tracked runs now stop after an explicit harness terminal event and fail closed
   when either raw output stream exceeds 16 MiB, preventing a completed or
   runaway child from filling disk with cumulative stream payloads.

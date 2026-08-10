@@ -3269,6 +3269,9 @@ def _apply_profile_resolution(
 ) -> Request:
     env_overrides = dict(request.env_overrides or {})
     env_overrides.update(resolution.env)
+    explicit_delegate_config = os.environ.get(delegate_config.CONFIG_ENV)
+    if explicit_delegate_config and delegate_config.CONFIG_ENV in resolution.env:
+        env_overrides[delegate_config.CONFIG_ENV] = explicit_delegate_config
     if request.persona_transport == "agent-config" and request.persona_env_overrides:
         # Reassert the merged persona config after profile env expansion. This
         # preserves the profile's effective config while preventing a later

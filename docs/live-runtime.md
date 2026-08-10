@@ -40,6 +40,8 @@ base account rather than failing closed, since there is no config filename
 convention to check against. Fix a half-configured install with
 `env -u AI_PROFILE delegate config sync-profiles`, or bypass once with
 `env -u AI_PROFILE delegate ...` or an explicit `DELEGATE_CONFIG=...`.
+In profile-aware shell installs, profile selection loads credentials; an
+incoming explicit `DELEGATE_CONFIG` remains the runtime-policy config.
 
 ## Do not promote implicitly
 

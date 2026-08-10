@@ -347,6 +347,38 @@ class LauncherShimTests(unittest.TestCase):
         self.assertEqual(payload["delegateConfig"], str(config_path))
         self.assertEqual(result.stderr, "")
 
+    def test_existing_explicit_delegate_config_survives_profile_validation(self):
+        with tempfile.TemporaryDirectory() as home:
+            root = Path(home) / ".delegate"
+            root.mkdir()
+            profile_config = root / "config.work.json"
+            profile_config.write_text("{}\n", encoding="utf-8")
+            explicit_config = root / "explicit.json"
+            explicit_config.write_text("{}\n", encoding="utf-8")
+            probe = self.write_probe(Path(home))
+            env = self.shim_env(home, probe, "work")
+            env["DELEGATE_CONFIG"] = str(explicit_config)
+            result = self.run_shim(["profiles"], env=env)
+            payload = json.loads(result.stdout)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(payload["delegateConfig"], str(explicit_config))
+        self.assertEqual(result.stderr, "")
+
+    def test_explicit_delegate_config_does_not_bypass_missing_profile_overlay(self):
+        with tempfile.TemporaryDirectory() as home:
+            explicit_config = Path(home) / "explicit.json"
+            explicit_config.write_text("{}\n", encoding="utf-8")
+            probe = self.write_probe(Path(home))
+            env = self.shim_env(home, probe, "work")
+            env["DELEGATE_CONFIG"] = str(explicit_config)
+            result = self.run_shim(["codex", "safe", "hello"], env=env)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("AI_PROFILE=work", result.stderr)
+        self.assertIn("config.work.json", result.stderr)
+
 
 class ProfileGuardCliTests(unittest.TestCase):
     """Python-CLI-layer mirror of LauncherShimTests: the same fail-closed

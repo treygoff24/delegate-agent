@@ -376,7 +376,9 @@ def dry_run_payload(request: Request) -> JsonObject:
         payload["resumedFrom"] = request.resumed_from
     if request.auth_profile is not None:
         payload["authProfile"] = request.auth_profile
-    if request.fallback_auth_profile is not None:
+    if (
+        request.engine == "codex" and request.auth_profile is not None
+    ) or request.fallback_auth_profile is not None:
         payload["fallbackProfile"] = request.fallback_auth_profile
     if request.profile_resolution.name is not None:
         payload["profileEnv"] = redaction.redact_env_map(request.profile_resolution.env)

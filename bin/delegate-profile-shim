@@ -5,6 +5,7 @@
 # AI_PROFILE shells to matching ~/.delegate/config.<profile>.json files, while
 # letting known read-only diagnostics run when the profile config is missing.
 
+_delegate_incoming_config="${DELEGATE_CONFIG-}"
 _delegate_profile_config="${HOME}/.delegate/config.${AI_PROFILE:-}.json"
 
 _delegate_subcommand() {
@@ -212,7 +213,7 @@ Temporary bypasses: 'env -u AI_PROFILE delegate ...' uses the base config (work 
 EOF
 }
 
-if [ -z "${DELEGATE_CONFIG:-}" ] && [ -n "${AI_PROFILE:-}" ]; then
+if [ -n "${AI_PROFILE:-}" ]; then
   case "${AI_PROFILE}" in
     personal|work)
       if [ ! -r "$_delegate_profile_config" ]; then
@@ -229,6 +230,9 @@ if [ -z "${DELEGATE_CONFIG:-}" ] && [ -n "${AI_PROFILE:-}" ]; then
         # ponytail: current keys.zsh files are plain exports; switch to parsing if
         # they ever need zsh-only syntax.
         [ -f "$_delegate_keys" ] && . "$_delegate_keys"
+        if [ -n "$_delegate_incoming_config" ]; then
+          export DELEGATE_CONFIG="$_delegate_incoming_config"
+        fi
       fi
       ;;
     *)

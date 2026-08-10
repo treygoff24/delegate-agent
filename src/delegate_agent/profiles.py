@@ -347,6 +347,7 @@ def codex_fallback_child_env_overrides(
     if fallback is None:
         return {}
     fallback_excluded = {
+        "DELEGATE_CONFIG",
         "DELEGATE_SOURCE_ROOT",
         "DELEGATE_EXECUTION_ROOT",
         "WORKSPACE_ROOT",

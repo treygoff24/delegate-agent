@@ -930,6 +930,7 @@ class CodexProfileExecutionTests(unittest.TestCase):
             payload = self.delegate.dry_run_payload(request)
             payload_warnings = [w for w in payload.get("warnings", []) if "profile mismatch" in w]
             self.assertEqual(len(payload_warnings), 1)
+            self.assertIsNone(payload["fallbackProfile"])
 
     def _run_codex_fallback_scenario(
         self,
@@ -1318,6 +1319,51 @@ class ProfilePhase2CliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(payload["authProfile"], "work")
             self.assertEqual(env_out.read_text(encoding="utf-8").splitlines(), ["work-pointer"])
+
+    def test_auth_profile_env_does_not_replace_explicit_delegate_config(self):
+        repo = make_git_repo()
+        self.addCleanup(repo.cleanup)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            capture = root / "env.json"
+            child = root / "agent"
+            child.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, os, pathlib\n"
+                f"pathlib.Path({str(capture)!r}).write_text(json.dumps({{'config': os.environ.get('DELEGATE_CONFIG'), 'pointer': os.environ.get('DELEGATE_POINTER')}}))\n",
+                encoding="utf-8",
+            )
+            child.chmod(0o755)
+            explicit_config = root / "overlay.json"
+            profile_config = root / "profile.json"
+            config = make_pointer_config(cursor_binary=child)
+            config["profiles"]["definitions"]["work"]["env"]["DELEGATE_CONFIG"] = str(
+                profile_config
+            )
+            write_json_config(explicit_config, config)
+            profile_config.write_text("{}\n", encoding="utf-8")
+
+            code, payload, _stderr = main_json(
+                self.delegate,
+                [
+                    "--json",
+                    "--auth-profile",
+                    "work",
+                    "--cwd",
+                    repo.name,
+                    "cursor",
+                    "work",
+                    "task",
+                ],
+                env={"DELEGATE_CONFIG": str(explicit_config)},
+            )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(payload["authProfile"], "work")
+            self.assertEqual(
+                {"config": str(explicit_config), "pointer": "work-pointer"},
+                json.loads(capture.read_text(encoding="utf-8")),
+            )
 
     def test_auth_profile_override_reaches_passthrough_cursor_child(self):
         repo = make_git_repo()
