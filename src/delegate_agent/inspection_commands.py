@@ -150,11 +150,18 @@ def emit_runs(command: RunsCommand, *, workspace_path: str, stdout: TextIO) -> i
         summaries = [redaction.redact_value(summary) for summary in summaries]
     warnings: list[str] = []
     if not summaries and (command.group is not None or command.harness is not None):
-        warnings.append(
-            "No matching runs in this workspace registry. "
-            "The run registry is workspace-scoped; use --cwd PATH to target another "
-            "workspace's registry."
-        )
+        if command.running:
+            warnings.append("No running runs matched. Drop --running to include terminal runs.")
+        elif command.stale:
+            warnings.append("No stale runs matched. Drop --stale to include terminal runs.")
+        elif command.active:
+            warnings.append("No active runs matched. Drop --active to include terminal runs.")
+        else:
+            warnings.append(
+                "No matching runs in this workspace Registry. "
+                "The run Registry is workspace-scoped; use --cwd PATH to target another "
+                "workspace's Registry."
+            )
     if command.json_mode:
         delegate_rendering.print_json(
             delegate_rendering.runs_json_payload(

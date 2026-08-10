@@ -13,9 +13,9 @@ Dry-runs and unit tests do not require the real child binaries.
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install -e ".[dev]"
+python3 -m pip install -e ".[dev]"
 python3 bin/delegate.py --json describe
-python3 -m unittest discover -s tests
+python3 -m unittest discover -s tests -t .
 ```
 
 `CONTRIBUTING.md` and `AGENTS.md` both prefer `python3 bin/delegate.py` while developing in this checkout.
@@ -58,7 +58,7 @@ HOME="$clean_home" DELEGATE_CONFIG="$PWD/config.example.json" python3 bin/delega
 ```bash
 python3 -m compileall -q src tests bin
 git diff --check
-python3 -m unittest discover -s tests
+python3 -m unittest discover -s tests -t .
 ruff check .
 ruff format --check .
 ```

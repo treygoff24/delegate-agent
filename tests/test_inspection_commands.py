@@ -603,6 +603,55 @@ class InspectionCommandTests(unittest.TestCase):
         self.assertIn("warning:", output)
         self.assertIn("workspace-scoped", output)
         self.assertIn("--cwd PATH", output)
+        self.assertIn("Registry", warning)
+
+    def test_emit_runs_zero_row_status_filter_warns_drop_flag(self):
+        self.write_run(harness="codex", group="pc-w3", status="succeeded", pid=None)
+        self.write_run(harness="codex", group="pc-w3", status="failed", pid=None)
+
+        for flag_name, kwargs in (
+            ("running", {"running": True}),
+            ("stale", {"stale": True}),
+            ("active", {"active": True}),
+        ):
+            with self.subTest(flag=flag_name):
+                stdout = io.StringIO()
+                code = inspection_commands.emit_runs(
+                    inspection_commands.RunsCommand(group="pc-w3", json_mode=True, **kwargs),
+                    workspace_path=str(self.workspace),
+                    stdout=stdout,
+                )
+                payload = json.loads(stdout.getvalue())
+                self.assertEqual(code, 0)
+                self.assertEqual(payload["runs"], [])
+                self.assertEqual(len(payload["warnings"]), 1)
+                warning = payload["warnings"][0]
+                self.assertIn(f"No {flag_name} runs matched", warning)
+                self.assertIn(f"Drop --{flag_name}", warning)
+                self.assertNotIn("workspace-scoped", warning)
+                self.assertNotIn("--cwd", warning)
+
+                text = io.StringIO()
+                inspection_commands.emit_runs(
+                    inspection_commands.RunsCommand(group="pc-w3", **kwargs),
+                    workspace_path=str(self.workspace),
+                    stdout=text,
+                )
+                output = text.getvalue()
+                self.assertIn("warning:", output)
+                self.assertIn(f"Drop --{flag_name}", output)
+                self.assertNotIn("workspace-scoped", output)
+
+        populated = io.StringIO()
+        code = inspection_commands.emit_runs(
+            inspection_commands.RunsCommand(group="pc-w3", json_mode=True),
+            workspace_path=str(self.workspace),
+            stdout=populated,
+        )
+        populated_payload = json.loads(populated.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(len(populated_payload["runs"]), 2)
+        self.assertNotIn("warnings", populated_payload)
 
     def test_emit_ps_parity_for_total_truncated_and_empty_filter_warning(self):
         for index in range(3):
@@ -638,7 +687,10 @@ class InspectionCommandTests(unittest.TestCase):
         self.assertEqual(empty_payload["mode"], "active")
         self.assertEqual(empty_payload["runs"], [])
         self.assertEqual(empty_payload["total"], 0)
-        self.assertIn("workspace-scoped", empty_payload["warnings"][0])
+        self.assertEqual(len(empty_payload["warnings"]), 1)
+        self.assertIn("No active runs matched", empty_payload["warnings"][0])
+        self.assertIn("Drop --active", empty_payload["warnings"][0])
+        self.assertNotIn("workspace-scoped", empty_payload["warnings"][0])
 
 
 if __name__ == "__main__":

@@ -308,8 +308,14 @@ class LauncherShimTests(unittest.TestCase):
         lines = (ROOT / "bin" / "delegate-profile-shim").read_text(encoding="utf-8").splitlines()
         arms = [i for i, line in enumerate(lines) if line.strip() == "workflow)"]
         self.assertTrue(arms, "workflow) case arm missing from bin/delegate-profile-shim")
-        tail = "\n".join(lines[arms[0] + 1 : arms[0] + 40])
-        match = re.search(r"^\s+([a-z|]+)\)\s*$", tail, re.M)
+        arm_tail = lines[arms[0] + 1 : arms[0] + 40]
+        case_offsets = [i for i, line in enumerate(arm_tail) if 'case "${1:-}" in' in line]
+        self.assertTrue(
+            case_offsets,
+            'workflow arm case "${1:-}" in missing from bin/delegate-profile-shim',
+        )
+        after_case = "\n".join(arm_tail[case_offsets[0] + 1 :])
+        match = re.search(r"^\s+([a-z0-9_|-]+)\)\s*$", after_case, re.M)
         self.assertIsNotNone(
             match, "workflow action allow-list line not found in bin/delegate-profile-shim"
         )

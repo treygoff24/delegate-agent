@@ -421,10 +421,11 @@ Tracked Runs mirror each child stdout line into `.delegate/runs/<runId>/events.j
 as `stream.line` records. Lines longer than 500 characters are clipped with a
 `…` sentinel and marked `truncated: true` / `textChars: <original length>`.
 Clipped lines that contained nested JSON are no longer valid JSON payloads, so
-skip them when reconstructing structured child events:
+skip them when reconstructing structured child events; plaintext lines that
+never held JSON are skipped the same way:
 
 ```bash
-jq -r 'select(.kind == "stream.line" and (.truncated != true)) | .text | fromjson' \
+jq -r 'select(.kind == "stream.line" and (.truncated != true)) | .text | fromjson? // empty' \
   .delegate/runs/<runId>/events.jsonl
 ```
 

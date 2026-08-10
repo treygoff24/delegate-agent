@@ -198,7 +198,18 @@ class NormalizedEvent:
         if self.status is not None:
             payload["status"] = self.status
         if self.message is not None:
-            payload["message"] = self.message
+            # Keep the dataclass field unbounded; bound only at serialization.
+            # When truncated is already set (_ingest_text_fallback), the message
+            # is pre-bounded (limit+1 with …) — do not re-bound or textChars
+            # would disagree with the stored string.
+            if self.truncated:
+                payload["message"] = self.message
+            else:
+                bounded, truncated, original_chars = bounded_event_text(self.message)
+                payload["message"] = bounded
+                if truncated:
+                    payload["truncated"] = True
+                    payload["textChars"] = original_chars
         if self.truncated:
             payload["truncated"] = True
             if self.text_chars is not None:

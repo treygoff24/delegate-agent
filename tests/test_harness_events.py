@@ -1387,6 +1387,44 @@ class HarnessEventsTests(unittest.TestCase):
         recent, _meta = acc.bounded_recent_events()
         self.assertEqual(recent[-1], long_event)
 
+    def test_error_and_terminal_messages_bound_only_at_serialization(self):
+        long_error = "E" * 5000
+        acc = self.events.StreamAccumulator()
+        acc.ingest_line(json.dumps({"type": "error", "message": long_error}))
+        self.assertEqual(acc._last_error_message, long_error)
+        self.assertEqual(acc.events[-1].message, long_error)
+        error_payload = acc.events[-1].to_dict()
+        self.assertTrue(error_payload["truncated"])
+        self.assertEqual(error_payload["textChars"], 5000)
+        self.assertTrue(error_payload["message"].endswith("…"))
+        self.assertEqual(len(error_payload["message"]), self.events.EVENT_TEXT_LIMIT + 1)
+        recent, _meta = acc.bounded_recent_events()
+        self.assertEqual(recent[-1]["message"], error_payload["message"])
+        self.assertTrue(recent[-1]["truncated"])
+
+        short = "short error"
+        short_acc = self.events.StreamAccumulator()
+        short_acc.ingest_line(json.dumps({"type": "error", "message": short}))
+        short_payload = short_acc.events[-1].to_dict()
+        self.assertEqual(short_payload["message"], short)
+        self.assertNotIn("truncated", short_payload)
+        self.assertNotIn("textChars", short_payload)
+
+        long_reason = "R" * 5000
+        terminal_acc = self.events.StreamAccumulator()
+        terminal_acc._record_terminal_event(
+            event="turn.failed", status="failed", reason=long_reason
+        )
+        completed = [e for e in terminal_acc.events if e.kind == "run.completed"]
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(completed[0].message, long_reason)
+        self.assertEqual(terminal_acc.terminal_event["reason"], long_reason)
+        completed_payload = completed[0].to_dict()
+        self.assertTrue(completed_payload["truncated"])
+        self.assertEqual(completed_payload["textChars"], 5000)
+        self.assertTrue(completed_payload["message"].endswith("…"))
+        self.assertEqual(len(completed_payload["message"]), self.events.EVENT_TEXT_LIMIT + 1)
+
     def test_explicit_completion_wins_over_assistant_recovery_quality(self):
         acc = self.events.StreamAccumulator()
         acc.ingest_line(

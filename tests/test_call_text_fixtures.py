@@ -1,4 +1,11 @@
-"""Fixture-based call-mode text extraction pins for opencode and droid."""
+"""Fixture-based call-mode text extraction pins for opencode and droid.
+
+The opencode fixtures are real captures (see fixtures/opencode/README.md);
+the droid fixture is synthetic because droid call-mode text rides the
+harness-generic message/completion envelope, so a hand-written record suffices
+to pin that generic path staying green for droid call runs (see
+fixtures/droid/README.md).
+"""
 
 from __future__ import annotations
 
