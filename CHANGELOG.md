@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.29.0] - 2026-08-11
 
 ### Added
 
@@ -43,6 +43,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   variables), and the documented discovery command is
   `python3 -m unittest discover -s tests -t .` everywhere, including CI and
   the contributor wiki.
+- CI and publishing now use the official Node 24 GitHub Action releases, and
+  the public publishing checklist builds exported source in isolated temporary
+  environments instead of modifying the maintainer's ambient Python install.
 
 ### Fixed
 
@@ -978,6 +981,7 @@ Usage-audit fix wave: 82 sessions and 1,241 delegate invocations from one week o
 
 - Releases before 0.1.3 predate this changelog.
 
+[0.29.0]: https://github.com/treygoff24/delegate-agent/compare/v0.28.0...v0.29.0
 [0.28.0]: https://github.com/treygoff24/delegate-agent/compare/v0.27.0...v0.28.0
 [0.27.0]: https://github.com/treygoff24/delegate-agent/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/treygoff24/delegate-agent/compare/v0.25.0...v0.26.0
