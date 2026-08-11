@@ -156,6 +156,7 @@ class RunContext:
     include_dirty: bool = False
     synced_files: int = 0
     group: str | None = None
+    workflow_agent_key: str | None = None
     call_read_only: bool = False
     pure: bool = False
     prompt_instruction_mode: str = PROMPT_INSTRUCTION_MODE_WRAPPED
@@ -327,6 +328,8 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
         payload["fallbackProfile"] = ctx.fallback_auth_profile
     if ctx.group is not None:
         payload["group"] = ctx.group
+    if ctx.workflow_agent_key is not None:
+        payload["workflowAgentKey"] = ctx.workflow_agent_key
     if ctx.mail_push:
         payload["mailPush"] = True
     if ctx.include_dirty:
@@ -470,6 +473,11 @@ def build_snapshot(
     run_metadata.add_model_payload_fields(snapshot, ctx)
     reasoning.add_reasoning_payload_fields(snapshot, ctx)
     run_metadata.add_speed_payload_fields(snapshot, ctx)
+    snapshot["promptInstructionMode"] = ctx.prompt_instruction_mode
+    if ctx.auth_profile is not None:
+        snapshot["authProfile"] = ctx.auth_profile
+    if ctx.workflow_agent_key is not None:
+        snapshot["workflowAgentKey"] = ctx.workflow_agent_key
     cleanup = _worktree_cleanup_commands(ctx)
     if cleanup is not None:
         snapshot["worktreeCleanupCommands"] = cleanup

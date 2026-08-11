@@ -31,6 +31,11 @@ class WorkflowCommandTests(unittest.TestCase):
         self.workspace = Path(self.temp.name)
         self.home = self.workspace / "home"
         self.home.mkdir()
+        self.codex_home = self.home / "codex-work"
+        self.codex_home.mkdir()
+        (self.codex_home / "auth.json").write_text('{"token":"test"}\n', encoding="utf-8")
+        (self.home / ".delegate").mkdir()
+        (self.home / ".delegate" / "config.work.json").write_text("{}\n", encoding="utf-8")
         self.bin_dir = self.workspace / "bin"
         self.bin_dir.mkdir()
         self._write_fake_codex()
@@ -49,6 +54,11 @@ class WorkflowCommandTests(unittest.TestCase):
                         "models": {"gemini": "fake-gemini"},
                     },
                     "devin": {"binary": str(self.bin_dir / "devin")},
+                    "profiles": {
+                        "detectFrom": ["DELEGATE_PROFILE", "AI_PROFILE"],
+                        "default": None,
+                        "definitions": {"work": {"env": {"CODEX_HOME": str(self.codex_home)}}},
+                    },
                     "workflows": {"itemThreads": 4, "structuredOutputRetries": 1},
                 }
             ),
@@ -2447,7 +2457,9 @@ class WorkflowCommandTests(unittest.TestCase):
             return judges("grade this", SCHEMA, engines=["codex", "cursor"])
             """
         )
-        launch = self.run_delegate(["--json", "workflow", "run", str(script)])
+        launch = self.run_delegate(
+            ["--json", "workflow", "run", str(script)], env_extra={"AI_PROFILE": "work"}
+        )
         self.assertEqual(launch.returncode, 0, launch.stderr)
         wf_id = json.loads(launch.stdout)["wfId"]
         self.assertEqual(
@@ -2465,11 +2477,15 @@ class WorkflowCommandTests(unittest.TestCase):
         for run in runs:
             snap = json.loads(self.run_delegate(["--json", "snapshot", run["alias"]]).stdout)
             self.assertEqual(snap["mode"], "call")
+            self.assertEqual(snap["authProfile"], "work")
+            self.assertEqual(snap["promptInstructionMode"], "wrapped")
             manifest = json.loads(
                 (self.workspace / ".delegate" / "runs" / run["runId"] / "manifest.json").read_text(
                     encoding="utf-8"
                 )
             )
+            self.assertIsInstance(snap["workflowAgentKey"], str)
+            self.assertEqual(manifest["workflowAgentKey"], snap["workflowAgentKey"])
             argv = manifest.get("argv") or []
             if run["harness"] == "codex":
                 self.assertIn("--sandbox", argv)
