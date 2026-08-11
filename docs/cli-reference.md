@@ -536,6 +536,10 @@ delegate [--json] workflow save <script.py> --name NAME
   key, and continues from missing work. Resuming a completed `--dry-run` starts
   its planned agents live under the same workflow ID; simulated journal events
   remain visible for audit but are excluded from replay and live budget.
+- `events` returns the public workflow journal. For each tracked child launch,
+  an `agent_child` event binds `runId` to the structural `key` (also emitted as
+  `workflowAgentKey`) and includes `label` when the `agent()` call supplied one;
+  consumers can then inspect terminal child identity through `snapshot <runId>`.
 - `wait` and `result` accept an explicit workflow ID or, when omitted, resolve
   the latest eligible workflow. JSON output for implicit selection includes the
   selected `wfId` and `resolutionKind: "latest"`.

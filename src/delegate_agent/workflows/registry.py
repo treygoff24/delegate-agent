@@ -24,12 +24,14 @@ LOCK_FILE = "workflow.lock"
 WORKFLOW_ID_HEX = 12
 WORKFLOW_ID_RE = __import__("re").compile(r"^wf_[0-9a-f]{12}$")
 # Durable events are fsynced: result events, agent_started (resume adoption
-# anchor), agent_adopted / agent_adopt_rejected / agent_timeout audit lines
-# (adoption outcomes are resume anchors), and budget claims (idempotent-claim
-# set must survive crashes — status.spent alone is not enough to skip re-claim).
+# anchor), agent_child (public child run identity), agent_adopted /
+# agent_adopt_rejected / agent_timeout audit lines (adoption outcomes are
+# resume anchors), and budget claims (idempotent-claim set must survive crashes
+# — status.spent alone is not enough to skip re-claim).
 # Phase/log ticks stay unfsynced. There is no agent_result emitter.
 DURABLE_EVENT_TYPES = {
     "agent_started",
+    "agent_child",
     "agent_finished",
     "agent_adopted",
     "agent_adopt_rejected",

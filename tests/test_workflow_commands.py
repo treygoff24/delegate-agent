@@ -108,6 +108,9 @@ class WorkflowCommandTests(unittest.TestCase):
             "argv_log = os.environ.get('FAKE_CODEX_ARGV_LOG')\n"
             "if argv_log:\n"
             "    open(argv_log, 'w', encoding='utf-8').write(json.dumps(sys.argv[1:]))\n"
+            "if os.environ.get('FAKE_CODEX_REGISTERED_FAILURE'):\n"
+            "    print(json.dumps({'ok': False, 'runId': os.environ['FAKE_CODEX_REGISTERED_FAILURE']}))\n"
+            "    sys.exit(1)\n"
             "if os.environ.get('FAKE_CODEX_PREAMBLE_ONLY'):\n"
             '    preamble = \'{"ok": true, "value": "preamble"}\'\n'
             "    print(json.dumps({'type': 'message', 'role': 'assistant', 'content': [{'type': 'output_text', 'text': preamble}]}))\n"
@@ -421,6 +424,155 @@ class WorkflowCommandTests(unittest.TestCase):
         events = self.run_delegate(["--json", "workflow", "events", wf_id, "--since", "0"])
         event_types = {event["type"] for event in json.loads(events.stdout)["events"]}
         self.assertIn("agent_cache_hit", event_types)
+
+    def test_agent_child_events_bind_run_id_to_key_and_label(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "event-identity", "defaults": {"engine": "codex", "mode": "safe"}}
+            return parallel([
+                lambda: agent("one", label="alpha"),
+                lambda: agent("two", label="beta"),
+            ])
+            """
+        )
+        launch = self.run_delegate(["--json", "workflow", "run", str(script)])
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
+        self.assertEqual(waited.returncode, 0, waited.stderr)
+
+        events = json.loads(
+            self.run_delegate(["--json", "workflow", "events", wf_id, "--since", "0"]).stdout
+        )["events"]
+        children = [event for event in events if event["type"] == "agent_child"]
+        self.assertEqual(len(children), 2)
+        self.assertEqual({event["label"] for event in children}, {"alpha", "beta"})
+        self.assertEqual(len({event["runId"] for event in children}), 2)
+        self.assertEqual(len({event["key"] for event in children}), 2)
+        for event in children:
+            self.assertEqual(event["workflowAgentKey"], event["key"])
+            self.assertEqual(event["engine"], "codex")
+            snapshot = self.run_delegate(["--json", "snapshot", event["runId"]])
+            self.assertEqual(snapshot.returncode, 0, snapshot.stderr)
+            payload = json.loads(snapshot.stdout)
+            self.assertEqual(payload["runId"], event["runId"])
+            self.assertEqual(payload["group"], wf_id)
+
+    def test_failed_registered_child_emits_agent_child_identity(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "event-failed", "defaults": {"engine": "codex", "mode": "safe"}}
+            return agent("fail", label="bad-lane")
+            """
+        )
+        launch = self.run_delegate(
+            ["--json", "workflow", "run", str(script)],
+            env_extra={"FAKE_CODEX_REGISTERED_FAILURE": "1"},
+        )
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
+        self.assertEqual(waited.returncode, 0, waited.stderr)
+
+        runs = json.loads(self.run_delegate(["--json", "runs", "--group", wf_id]).stdout)["runs"]
+        self.assertEqual(len(runs), 1)
+        run_id = runs[0]["runId"]
+        events = json.loads(
+            self.run_delegate(["--json", "workflow", "events", wf_id, "--since", "0"]).stdout
+        )["events"]
+        children = [event for event in events if event["type"] == "agent_child"]
+        self.assertEqual(len(children), 1)
+        child = children[0]
+        self.assertEqual(child["runId"], run_id)
+        self.assertEqual(child["label"], "bad-lane")
+        self.assertEqual(child["workflowAgentKey"], child["key"])
+        snapshot = self.run_delegate(["--json", "snapshot", run_id])
+        self.assertEqual(snapshot.returncode, 0, snapshot.stderr)
+        self.assertEqual(json.loads(snapshot.stdout)["runId"], run_id)
+
+    def test_resume_backfills_missing_agent_child_identity_for_adopted_run(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "event-adopt", "defaults": {"engine": "codex", "mode": "safe"}}
+            return agent("one", label="adopt-me")
+            """
+        )
+        launch = self.run_delegate(["--json", "workflow", "run", str(script)])
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
+        self.assertEqual(waited.returncode, 0, waited.stderr)
+        run_id = json.loads(self.run_delegate(["--json", "runs", "--group", wf_id]).stdout)["runs"][
+            0
+        ]["runId"]
+        root = workflow_registry.workflow_dir(self.workspace, wf_id)
+        journal = root / "journal.jsonl"
+        events = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+        key = next(event["key"] for event in events if event["type"] == "agent_started")
+        journal.write_text(
+            "\n".join(
+                json.dumps(event)
+                for event in events
+                if event["type"] not in {"agent_child", "agent_finished", "workflow_finished"}
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        resumed = self.run_delegate(["--json", "workflow", "run", "--resume", wf_id])
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
+        self.assertEqual(waited.returncode, 0, waited.stderr)
+        after = json.loads(
+            self.run_delegate(["--json", "workflow", "events", wf_id, "--since", "0"]).stdout
+        )["events"]
+        children = [event for event in after if event["type"] == "agent_child"]
+        self.assertEqual(len(children), 1)
+        self.assertEqual(children[0]["runId"], run_id)
+        self.assertEqual(children[0]["key"], key)
+        self.assertEqual(children[0]["workflowAgentKey"], key)
+        self.assertEqual(children[0]["engine"], "codex")
+        self.assertEqual(children[0]["label"], "adopt-me")
+        self.assertEqual(
+            json.loads(self.run_delegate(["--json", "workflow", "result", wf_id]).stdout)["result"],
+            "fake completion",
+        )
+
+    def test_resume_does_not_duplicate_existing_agent_child_identity(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "event-adopt-dedup", "defaults": {"engine": "codex", "mode": "safe"}}
+            return agent("one", label="keep-me")
+            """
+        )
+        launch = self.run_delegate(["--json", "workflow", "run", str(script)])
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
+        self.assertEqual(waited.returncode, 0, waited.stderr)
+        root = workflow_registry.workflow_dir(self.workspace, wf_id)
+        journal = root / "journal.jsonl"
+        events = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+        original_child = next(event for event in events if event["type"] == "agent_child")
+        journal.write_text(
+            "\n".join(
+                json.dumps(event)
+                for event in events
+                if event["type"] not in {"agent_finished", "workflow_finished"}
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        resumed = self.run_delegate(["--json", "workflow", "run", "--resume", wf_id])
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
+        self.assertEqual(waited.returncode, 0, waited.stderr)
+        after = json.loads(
+            self.run_delegate(["--json", "workflow", "events", wf_id, "--since", "0"]).stdout
+        )["events"]
+        children = [event for event in after if event["type"] == "agent_child"]
+        self.assertEqual(children, [original_child])
 
     def test_resume_preserves_spent_budget_for_new_cache_misses(self) -> None:
         script = self.write_workflow(

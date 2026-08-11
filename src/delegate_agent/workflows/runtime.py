@@ -836,6 +836,7 @@ class WorkflowDsl:
                         candidate,
                         prompt,
                         key=key,
+                        label=label,
                         mode=resolved_mode,
                         model=resolved_model,
                         effort=resolved_effort,
@@ -882,7 +883,7 @@ class WorkflowDsl:
         key: str,
         *,
         scope: str,
-        label: str | None,
+        label: str | None = None,
         phase: str | None,
         schema: JsonObject | None,
         prefer_assistant: bool,
@@ -925,6 +926,7 @@ class WorkflowDsl:
                     error=str(exc),
                 )
                 return _MISSING
+        self._emit_adopted_child_identity(run_id, key=key, label=label)
         self.state.append_event(
             "agent_adopted",
             key=key,
@@ -937,12 +939,29 @@ class WorkflowDsl:
         )
         return result
 
+    def _emit_adopted_child_identity(self, run_id: str, *, key: str, label: str | None) -> None:
+        if _workflow_agent_child_event_exists(self.state.journal_path, run_id, key):
+            return
+        engine = _workflow_agent_run_engine(self.state.workspace, run_id)
+        if engine is None:
+            return
+        event: JsonObject = {
+            "engine": engine,
+            "key": key,
+            "workflowAgentKey": key,
+            "runId": run_id,
+        }
+        if label is not None:
+            event["label"] = label
+        self.state.append_event("agent_child", **event)
+
     def _run_agent_attempts(
         self,
         engine: str,
         prompt: str,
         *,
         key: str,
+        label: str | None = None,
         mode: str,
         model: str | None,
         effort: str | None,
@@ -984,6 +1003,7 @@ class WorkflowDsl:
                     timeout=timeout,
                     retries=retries,
                     key=key,
+                    label=label,
                     persona=persona,
                     allow_repo_persona=allow_repo_persona,
                 )
@@ -1001,6 +1021,7 @@ class WorkflowDsl:
                     timeout=timeout,
                     retries=retries,
                     key=key,
+                    label=label,
                     persona=persona,
                     allow_repo_persona=allow_repo_persona,
                 )
@@ -1020,6 +1041,7 @@ class WorkflowDsl:
         timeout: int | float | None,
         retries: int | None,
         key: str,
+        label: str | None = None,
         persona: personas.PersonaResolution | None = None,
         allow_repo_persona: bool = False,
     ) -> JsonValue:
@@ -1037,6 +1059,7 @@ class WorkflowDsl:
                 output_schema=None,
                 prefer_assistant=False,
                 workflow_agent_key=key,
+                label=label,
                 persona=persona,
                 allow_repo_persona=allow_repo_persona,
                 expected_persona_digest=persona.digest if persona is not None else None,
@@ -1067,6 +1090,7 @@ class WorkflowDsl:
                         output_schema=schema_path,
                         prefer_assistant=True,
                         workflow_agent_key=key,
+                        label=label,
                         persona=persona,
                         allow_repo_persona=allow_repo_persona,
                         expected_persona_digest=persona.digest if persona is not None else None,
@@ -1088,6 +1112,7 @@ class WorkflowDsl:
                     output_schema=None,
                     prefer_assistant=True,
                     workflow_agent_key=key,
+                    label=label,
                     persona=persona,
                     allow_repo_persona=allow_repo_persona,
                     expected_persona_digest=persona.digest if persona is not None else None,
@@ -1125,6 +1150,7 @@ class WorkflowDsl:
         output_schema: str | None,
         prefer_assistant: bool,
         workflow_agent_key: str,
+        label: str | None = None,
         persona: personas.PersonaResolution | None = None,
         allow_repo_persona: bool = False,
         expected_persona_digest: str | None = None,
@@ -1182,6 +1208,18 @@ class WorkflowDsl:
             result = json.loads(text)
         except json.JSONDecodeError:
             result = None
+        if isinstance(result, dict):
+            run_id = result.get("runId")
+            if isinstance(run_id, str):
+                event: JsonObject = {
+                    "engine": engine,
+                    "key": workflow_agent_key,
+                    "workflowAgentKey": workflow_agent_key,
+                    "runId": run_id,
+                }
+                if label is not None:
+                    event["label"] = label
+                self.state.append_event("agent_child", **event)
         if (
             expected_persona_digest is not None
             and isinstance(result, dict)
@@ -1208,9 +1246,6 @@ class WorkflowDsl:
             raise PersonaDigestMismatch(
                 "workflow child did not report the parent-pinned persona digest"
             )
-        run_id = result.get("runId")
-        if isinstance(run_id, str):
-            self.state.append_event("agent_child", engine=engine, runId=run_id)
         structured_codex = engine == "codex" and output_schema is not None
         if structured_codex:
             return _live_child_completion_report(result, self.state.workspace)
@@ -1448,6 +1483,37 @@ def _find_workflow_agent_run(workspace: Path, wf_id: str, workflow_agent_key: st
         return None
     matches.sort()
     return matches[-1][1]
+
+
+def _workflow_agent_run_engine(workspace: Path, run_id: str) -> str | None:
+    root = _run_registry_root(workspace)
+    index = run_registry.load_index(root)
+    entry = index.get("runs", {}).get(run_id)
+    if isinstance(entry, dict):
+        harness = entry.get("harness")
+        if isinstance(harness, str) and harness:
+            return harness
+    manifest = run_registry.load_run_manifest_or_none(root, run_id)
+    if isinstance(manifest, dict):
+        harness = manifest.get("harness")
+        if isinstance(harness, str) and harness:
+            return harness
+    snapshot = run_registry.load_run_snapshot_or_none(root, run_id)
+    if isinstance(snapshot, dict):
+        engine = snapshot.get("harness") or snapshot.get("engine")
+        if isinstance(engine, str) and engine:
+            return engine
+    return None
+
+
+def _workflow_agent_child_event_exists(journal_path: Path, run_id: str, key: str) -> bool:
+    for event in registry.iter_journal(journal_path):
+        if event.get("type") != "agent_child" or event.get("runId") != run_id:
+            continue
+        event_key = event.get("workflowAgentKey") or event.get("key")
+        if event_key == key:
+            return True
+    return False
 
 
 def _workflow_run_terminal(workspace: Path, run_id: str) -> bool:
