@@ -5,6 +5,8 @@ import stat
 import sys
 import tarfile
 import tempfile
+import threading
+import time
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -61,6 +63,73 @@ class RetentionTests(unittest.TestCase):
     def test_retention_enabled_ignores_non_bool_values(self):
         config = {"tracking": {"retention": {"enabled": "false"}}}
         self.assertTrue(self.retention.retention_enabled(config))
+
+    def test_retention_archiving_does_not_block_registry_or_concurrent_pass(self):
+        self.write_completed_run(finished_at="2000-01-01T00:00:00Z")
+        archive_started = threading.Event()
+        release_archive = threading.Event()
+        outcome = {}
+
+        def blocking_archive(*_args, **_kwargs):
+            archive_started.set()
+            release_archive.wait(timeout=2)
+            return False
+
+        def run_retention():
+            outcome["result"] = self.retention.run_retention_pass(
+                self.registry_root,
+                self.config,
+                now=datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC),
+            )
+
+        with mock.patch.object(
+            self.retention,
+            "archive_run_raw_logs",
+            side_effect=blocking_archive,
+        ):
+            thread = threading.Thread(target=run_retention)
+            thread.start()
+            self.assertTrue(archive_started.wait(timeout=1))
+            started = time.monotonic()
+            try:
+                with self.registry.registry_lock(self.registry_root, timeout_seconds=0.05):
+                    pass
+                concurrent = self.retention.run_retention_pass(
+                    self.registry_root,
+                    self.config,
+                )
+            finally:
+                release_archive.set()
+                thread.join(timeout=2)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(outcome["result"]["scanned"], 1)
+        self.assertLess(time.monotonic() - started, 0.5)
+        self.assertEqual(concurrent, {"scanned": 0, "archived": 0, "skipped": 0})
+
+    def test_run_prune_waits_for_active_retention(self):
+        run_id, _alias = self.write_completed_run(finished_at="2000-01-01T00:00:00Z")
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        outcome = {}
+
+        def prune():
+            outcome["result"] = self.registry.prune_runs(
+                self.registry_root,
+                older_than_days=0,
+                now=datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC),
+            )
+
+        with self.registry.file_lock(self.registry.retention_lock_path(self.registry_root)):
+            thread = threading.Thread(target=prune)
+            thread.start()
+            time.sleep(0.05)
+            self.assertTrue(thread.is_alive())
+            self.assertTrue(run_path.exists())
+        thread.join(timeout=2)
+
+        self.assertFalse(thread.is_alive())
+        self.assertTrue(outcome["result"]["ok"])
+        self.assertFalse(run_path.exists())
 
     def write_completed_run(
         self,
@@ -151,8 +220,14 @@ class RetentionTests(unittest.TestCase):
         state["lastActivityAt"] = old
         self.registry.write_json_atomic(run_path / "state.json", state)
         zero_day_config = {"tracking": {"retention": {"enabled": True, "rawLogDays": 0}}}
-        result = self.retention.run_retention_pass(self.registry_root, zero_day_config)
+        with mock.patch.object(
+            self.retention,
+            "_verify_archive_members",
+            wraps=self.retention._verify_archive_members,
+        ) as verify_archive:
+            result = self.retention.run_retention_pass(self.registry_root, zero_day_config)
         self.assertEqual(result["archived"], 1)
+        self.assertEqual(verify_archive.call_count, 1)
         archive_file = self.retention.archive_path(self.registry_root, run_id)
         self.assertTrue(archive_file.exists())
         self.assertFalse((run_path / "stdout.log").exists())
@@ -284,6 +359,45 @@ class RetentionTests(unittest.TestCase):
         self.assertEqual(result, {"scanned": 2, "archived": 0, "skipped": 2})
         self.assertTrue((state_corrupt_path / "stdout.log").exists())
         self.assertTrue((manifest_corrupt_path / "stdout.log").exists())
+
+    def test_retention_pass_skips_per_run_io_and_lock_timeouts(self):
+        for _ in range(3):
+            self.write_completed_run(finished_at="2000-01-01T00:00:00Z")
+
+        with mock.patch.object(
+            self.retention,
+            "archive_run_raw_logs",
+            side_effect=[True, FileNotFoundError("removed by older runtime"), TimeoutError("busy")],
+        ):
+            result = self.retention.run_retention_pass(
+                self.registry_root,
+                self.config,
+                now=datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC),
+            )
+
+        self.assertEqual(result, {"scanned": 3, "archived": 1, "skipped": 2})
+
+    def test_archive_refuses_changed_source_identity(self):
+        run_id, _alias = self.write_completed_run(finished_at="2000-01-01T00:00:00Z")
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        members = list(self.retention.ARCHIVE_MEMBER_NAMES)
+        original = self.retention._member_identities(run_path, members)
+        changed = dict(original)
+        first = members[0]
+        identity = list(changed[first])
+        identity[3] += 1
+        changed[first] = tuple(identity)
+
+        with mock.patch.object(
+            self.retention,
+            "_member_identities",
+            side_effect=[original, changed],
+        ):
+            archived = self.retention.archive_run_raw_logs(self.registry_root, run_id)
+
+        self.assertFalse(archived)
+        self.assertTrue((run_path / first).exists())
+        self.assertFalse(self.retention.archive_path(self.registry_root, run_id).exists())
 
     def test_retention_skips_hardlinked_and_oversized_unrelated_records(self):
         for kind in ("hardlinked", "oversized"):

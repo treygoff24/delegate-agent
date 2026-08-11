@@ -75,6 +75,23 @@ def _expected_member_sizes(run_path: Path, members: list[str]) -> dict[str, int]
     return {name: (run_path / name).stat().st_size for name in members}
 
 
+def _member_identities(
+    run_path: Path,
+    members: list[str],
+) -> dict[str, tuple[int, int, int, int, int]]:
+    identities = {}
+    for name in members:
+        info = (run_path / name).stat()
+        identities[name] = (
+            info.st_dev,
+            info.st_ino,
+            info.st_size,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
+        )
+    return identities
+
+
 def _verify_archive_members(archive_file: Path, expected_sizes: dict[str, int]) -> bool:
     if not expected_sizes:
         return False
@@ -168,12 +185,13 @@ def _complete_archival_after_archive(
     *,
     destination: Path,
     members: list[str],
+    archive_verified: bool = False,
 ) -> bool:
     run_path = run_registry.run_directory(registry_root, run_id)
     if not members:
         return False
     expected_sizes = _expected_member_sizes(run_path, members)
-    if not _verify_archive_members(destination, expected_sizes):
+    if not archive_verified and not _verify_archive_members(destination, expected_sizes):
         return False
     _remove_archived_raw_logs(run_path, members)
     _mark_raw_logs_archived(
@@ -191,13 +209,15 @@ def archive_run_raw_logs(registry_root: Path, run_id: str) -> bool:
         return False
     destination = archive_path(registry_root, run_id)
     if destination.exists():
-        return _complete_archival_after_archive(
-            registry_root,
-            run_id,
-            destination=destination,
-            members=members,
-        )
-    expected_sizes = _expected_member_sizes(run_path, members)
+        with run_registry.registry_lock(registry_root):
+            return _complete_archival_after_archive(
+                registry_root,
+                run_id,
+                destination=destination,
+                members=members,
+            )
+    source_identities = _member_identities(run_path, members)
+    expected_sizes = {name: identity[2] for name, identity in source_identities.items()}
     run_registry.ensure_private_dir(archive_dir(registry_root))
     temp_destination = destination.with_name(f"{destination.name}.tmp")
     if temp_destination.exists():
@@ -209,17 +229,28 @@ def archive_run_raw_logs(registry_root: Path, run_id: str) -> bool:
         run_registry.ensure_private_file(temp_destination)
         if not _verify_archive_members(temp_destination, expected_sizes):
             return False
-        os.replace(temp_destination, destination)
-        run_registry.ensure_private_file(destination)
+        with run_registry.registry_lock(registry_root):
+            if _member_identities(run_path, members) != source_identities:
+                return False
+            if not destination.exists():
+                os.replace(temp_destination, destination)
+                run_registry.ensure_private_file(destination)
+                return _complete_archival_after_archive(
+                    registry_root,
+                    run_id,
+                    destination=destination,
+                    members=members,
+                    archive_verified=True,
+                )
+            return _complete_archival_after_archive(
+                registry_root,
+                run_id,
+                destination=destination,
+                members=members,
+            )
     finally:
         if temp_destination.exists():
             temp_destination.unlink()
-    return _complete_archival_after_archive(
-        registry_root,
-        run_id,
-        destination=destination,
-        members=members,
-    )
 
 
 def run_retention_pass(
@@ -230,23 +261,37 @@ def run_retention_pass(
 ) -> dict[str, int]:
     if not retention_enabled(config):
         return {"scanned": 0, "archived": 0, "skipped": 0}
-    index = run_registry.load_index(registry_root)
-    scanned = 0
-    archived = 0
-    skipped = 0
-    with run_registry.registry_lock(registry_root):
-        for run_id in list(index.get("runs", {}).keys()):
-            if not isinstance(run_id, str):
-                continue
-            scanned += 1
-            if is_eligible_for_archival(registry_root, run_id, config=config, now=now):
-                if archive_run_raw_logs(registry_root, run_id):
-                    archived += 1
-                else:
+    try:
+        with run_registry.file_lock(
+            run_registry.retention_lock_path(registry_root),
+            timeout_seconds=0,
+        ):
+            index = run_registry.load_index(registry_root)
+            scanned = 0
+            archived = 0
+            skipped = 0
+            for run_id in list(index.get("runs", {}).keys()):
+                if not isinstance(run_id, str):
+                    continue
+                scanned += 1
+                try:
+                    if is_eligible_for_archival(
+                        registry_root,
+                        run_id,
+                        config=config,
+                        now=now,
+                    ):
+                        if archive_run_raw_logs(registry_root, run_id):
+                            archived += 1
+                        else:
+                            skipped += 1
+                    else:
+                        skipped += 1
+                except OSError:
                     skipped += 1
-            else:
-                skipped += 1
-    return {"scanned": scanned, "archived": archived, "skipped": skipped}
+            return {"scanned": scanned, "archived": archived, "skipped": skipped}
+    except TimeoutError:
+        return {"scanned": 0, "archived": 0, "skipped": 0}
 
 
 def read_archived_member(archive_file: Path, member_name: str) -> str:

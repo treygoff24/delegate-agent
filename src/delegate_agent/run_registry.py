@@ -60,6 +60,7 @@ LEGACY_RESUME_SCHEMA_MIN_AGE_SECONDS = 60 * 60
 LEGACY_RESUME_SCHEMA_RE = re.compile(r"^resume-schema-(?P<pid>[1-9][0-9]*)-[0-9a-f]{8,}\.json$")
 RUN_PRUNE_ERROR_EXIT_CODE = 1
 REGISTRY_LOCK_NAME = ".registry.lock"
+RETENTION_LOCK_NAME = ".retention.lock"
 REGISTRY_LOCK_TIMEOUT_SECONDS = 30.0
 REGISTRY_LOCK_POLL_SECONDS = 0.05
 PRIVATE_DIR_MODE = private_io.PRIVATE_DIR_MODE
@@ -247,15 +248,18 @@ def registry_lock_path(registry_root: Path) -> Path:
     return registry_root / REGISTRY_LOCK_NAME
 
 
+def retention_lock_path(registry_root: Path) -> Path:
+    return registry_root / RETENTION_LOCK_NAME
+
+
 @contextmanager
-def registry_lock(
-    registry_root: Path,
+def file_lock(
+    lock_path: Path,
     *,
     timeout_seconds: float = REGISTRY_LOCK_TIMEOUT_SECONDS,
 ) -> Iterator[None]:
-    """Serialize registry mutations. flock releases on process exit (no stale locks)."""
-    ensure_private_dir(registry_root)
-    lock_path = registry_lock_path(registry_root)
+    """Acquire a private advisory lock; flock releases it on process exit."""
+    ensure_private_dir(lock_path.parent)
     fd = open_private_file(lock_path, os.O_CREAT | os.O_RDWR)
     try:
         deadline = time.monotonic() + timeout_seconds
@@ -266,7 +270,7 @@ def registry_lock(
             except BlockingIOError:
                 if time.monotonic() >= deadline:
                     raise TimeoutError(
-                        f"timed out waiting for registry lock at {lock_path} after {timeout_seconds}s"
+                        f"timed out waiting for lock at {lock_path} after {timeout_seconds}s"
                     ) from None
                 time.sleep(REGISTRY_LOCK_POLL_SECONDS)
         yield
@@ -275,6 +279,17 @@ def registry_lock(
             fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             os.close(fd)
+
+
+@contextmanager
+def registry_lock(
+    registry_root: Path,
+    *,
+    timeout_seconds: float = REGISTRY_LOCK_TIMEOUT_SECONDS,
+) -> Iterator[None]:
+    """Serialize registry mutations."""
+    with file_lock(registry_lock_path(registry_root), timeout_seconds=timeout_seconds):
+        yield
 
 
 def register_run(
@@ -964,7 +979,10 @@ def prune_runs(
     stale_resume_schemas: list[str] = []
     index_changed = False
 
-    with registry_lock(registry_root):
+    with (
+        file_lock(retention_lock_path(registry_root)),
+        registry_lock(registry_root),
+    ):
         tmp_dir = registry_root / "tmp"
         if tmp_dir.is_dir() and not tmp_dir.is_symlink():
             for path in tmp_dir.iterdir():

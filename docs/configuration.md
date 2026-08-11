@@ -265,6 +265,11 @@ Controls local run recording.
 - `retention.enabled`: whether raw logs are eligible for archive-only retention.
 - `retention.rawLogDays`: non-negative number of days before bulky raw logs may be archived.
 
+Ambient retention is best-effort. Archive I/O is serialized separately from
+Registry mutations, so a slow archive cannot block run progress, inspection,
+or cancellation; if another retention pass is already active, a concurrent
+ambient pass returns immediately.
+
 ### `cursor`
 
 ```json
