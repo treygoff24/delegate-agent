@@ -10,10 +10,9 @@ a recognized ``AI_PROFILE`` (``work``/``personal``) with a missing overlay
 config must never silently fall through to the base account for a command
 that launches a child harness or mutates state. See docs/security-model.md.
 
-When the shim already validated and exported ``DELEGATE_CONFIG``, this guard
-does not re-fire: its trigger condition requires ``DELEGATE_CONFIG`` to be
-unset, so a successful shim run and a direct Python invocation compose
-without double warnings or a redundant check.
+The Python guard validates the overlay even when ``DELEGATE_CONFIG`` is set.
+An explicit config selects runtime policy; it does not replace the recognized
+``AI_PROFILE`` credential overlay or bypass its fail-closed validation.
 """
 
 from __future__ import annotations
@@ -90,22 +89,19 @@ def _fix_message(profile: str, config_path: Path) -> str:
         "refusing to run a launch or mutation command on the wrong account.\n"
         "Fix: create the profile config from config.example.json, or run "
         "'env -u AI_PROFILE delegate config sync-profiles' to materialize missing profile overlays.\n"
-        "Temporary bypasses: 'env -u AI_PROFILE delegate ...' uses the base config (work Claude, "
-        "ambient Codex), or set 'DELEGATE_CONFIG=/path/to/config.json delegate ...'."
+        "Temporary bypass: 'env -u AI_PROFILE delegate ...' uses the base config "
+        "(work Claude, ambient Codex)."
     )
 
 
 def enforce_profile_guard(parsed: ParsedCommand, *, stderr: TextIO) -> None:
     """Fail closed when AI_PROFILE names a profile whose overlay config is missing.
 
-    No-ops (silently) when: DELEGATE_CONFIG is already set (shim precedence,
-    or the user set it directly), or AI_PROFILE is unset/empty. Warns and
-    proceeds for an unrecognized non-empty AI_PROFILE, or for a read-only
-    command with a missing overlay. Raises DelegateError (fail closed) for a
-    launch/mutation command with a missing or unreadable overlay.
+    No-ops when AI_PROFILE is unset/empty. Warns and proceeds for an
+    unrecognized non-empty AI_PROFILE, or for a read-only command with a
+    missing overlay. Raises DelegateError (fail closed) for a launch/mutation
+    command with a missing or unreadable overlay.
     """
-    if os.environ.get(delegate_config.CONFIG_ENV):
-        return
     profile = os.environ.get("AI_PROFILE", "")
     if not profile:
         return

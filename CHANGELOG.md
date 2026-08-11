@@ -20,8 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   add `truncated: true` plus `textChars` (original length) only when the
   500-character bound actually clipped, and the final unterminated child
   stdout line is now written to `events.jsonl` instead of silently dropped.
-  All serialized normalized-event messages (including `error` and
-  `run.completed`) are bounded through the same helper.
+  All child-controlled normalized-event strings (including tool targets,
+  `error`, and `run.completed`) are bounded through the same helper.
 - The tracked launcher shim template (`bin/delegate-profile-shim`) passes
   through the read-only workflow actions
   (`check|status|watch|events|result|wait|list`) without a selected profile,
@@ -48,6 +48,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tracked runs now stop after an explicit harness terminal event and fail closed
   when either raw output stream exceeds 16 MiB, preventing a completed or
   runaway child from filling disk with cumulative stream payloads.
+- Tracked stream decoding preserves UTF-8 characters split across read chunks;
+  normalized events retain a bounded head/tail with an exact total, and raw
+  `events.jsonl` mirrors at most 500 stdout lines plus a truncation marker so
+  many short lines cannot amplify a bounded child stream into an unbounded
+  event journal or in-memory event list.
 
 ## [0.28.0] - 2026-08-05
 

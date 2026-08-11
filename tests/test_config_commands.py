@@ -249,7 +249,7 @@ class LauncherShimTests(unittest.TestCase):
                     self.assertIn("refusing to run a launch or mutation command", result.stderr)
                     self.assertIn("config sync-profiles", result.stderr)
                     self.assertIn("env -u AI_PROFILE", result.stderr)
-                    self.assertIn("DELEGATE_CONFIG=/path/to/config.json", result.stderr)
+                    self.assertNotIn("DELEGATE_CONFIG=/path/to/config.json", result.stderr)
 
     def test_missing_profile_read_only_commands_pass_with_warning(self):
         with tempfile.TemporaryDirectory() as home:
@@ -458,6 +458,19 @@ class ProfileGuardCliTests(unittest.TestCase):
         self.assertIn("config sync-profiles", stderr)
         self.assertIn("env -u AI_PROFILE", stderr)
 
+    def test_explicit_delegate_config_does_not_bypass_python_guard(self):
+        with tempfile.TemporaryDirectory() as home:
+            explicit_config = Path(home) / "explicit.json"
+            explicit_config.write_text("{}\n", encoding="utf-8")
+            env = self.base_env(home, profile="work")
+            env["DELEGATE_CONFIG"] = str(explicit_config)
+            code, stdout, stderr = self.run_main(["codex", "safe", "hello"], env=env)
+
+        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        self.assertEqual(stdout, "")
+        self.assertIn("AI_PROFILE=work", stderr)
+        self.assertIn("config.work.json", stderr)
+
     def test_guard_blocks_worktree_remove_for_personal_profile(self):
         with tempfile.TemporaryDirectory() as home:
             code, stdout, stderr = self.run_main(
@@ -562,12 +575,11 @@ class ProfileGuardCliTests(unittest.TestCase):
         self.assertNotIn("refusing to run a launch or mutation command", show_stderr)
         self.assertIn("continuing because 'worktree' is read-only", show_stderr)
 
-    def test_guard_does_not_refire_when_delegate_config_already_set(self):
-        # Mirrors shim precedence: once DELEGATE_CONFIG is exported (by the
-        # shim, or set directly), the Python-layer guard must not re-fire --
-        # it only cares that some config was explicitly selected, matching
-        # "the shim path must keep working unchanged" from the design brief.
+    def test_explicit_delegate_config_runs_after_profile_overlay_validation(self):
         with tempfile.TemporaryDirectory() as home:
+            profile_root = Path(home) / ".delegate"
+            profile_root.mkdir()
+            (profile_root / "config.work.json").write_text("{}\n", encoding="utf-8")
             config_path = Path(home) / "custom.json"
             config_path.write_text("{}\n", encoding="utf-8")
             env = {
@@ -578,8 +590,6 @@ class ProfileGuardCliTests(unittest.TestCase):
             }
             _code, stdout, stderr = self.run_main(["dry-run", "codex", "safe", "hello"], env=env)
 
-        # No profile_config_missing failure and no guard warning: DELEGATE_CONFIG
-        # being set short-circuits the guard before it inspects AI_PROFILE at all.
         self.assertNotIn("profile_config_missing", stdout)
         self.assertNotIn("AI_PROFILE", stderr)
         self.assertNotIn("is not a recognized profile", stderr)

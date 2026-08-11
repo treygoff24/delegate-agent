@@ -39,10 +39,11 @@ check even earlier, before Python starts. `AI_PROFILE` values other than
 `work`/`personal` are not recognized profiles; Delegate warns and runs on the
 base account rather than failing closed, since there is no config filename
 convention to check against. Fix a half-configured install with
-`env -u AI_PROFILE delegate config sync-profiles`, or bypass once with
-`env -u AI_PROFILE delegate ...` or an explicit `DELEGATE_CONFIG=...`.
+`env -u AI_PROFILE delegate config sync-profiles`, or bypass profile selection
+once with `env -u AI_PROFILE delegate ...`.
 In profile-aware shell installs, profile selection loads credentials; an
-incoming explicit `DELEGATE_CONFIG` remains the runtime-policy config.
+incoming explicit `DELEGATE_CONFIG` remains the runtime-policy config only
+after the selected profile overlay passes validation.
 
 ## Do not promote implicitly
 

@@ -61,6 +61,39 @@ class TrackedOutputBoundsTests(unittest.TestCase):
             self.assertEqual(state["outputLimit"]["stream"], "stdout")
             self.assertEqual(state["outputLimit"]["bytes"], 8192)
 
+    def test_many_short_lines_bound_derived_event_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            context = self.context(workspace, harness="cursor")
+            script = "import os\nfor _ in range(10000):\n    os.write(1, b'x\\n')\n"
+
+            with (
+                mock.patch.object(runner, "TRACKED_STREAM_MAX_BYTES", 8192),
+                self.assertRaises(runner.RunnerLaunchError),
+            ):
+                runner.execute_tracked(
+                    [sys.executable, "-c", script],
+                    str(workspace),
+                    context,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+
+            run_path = run_registry.run_directory(context.registry_root, context.run_id)
+            events = [
+                json.loads(line)
+                for line in (run_path / run_registry.EVENTS_JSONL)
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            stream_lines = [event for event in events if event["kind"] == "stream.line"]
+            markers = [event for event in events if event["kind"] == "stream.lines_truncated"]
+            self.assertEqual(len(stream_lines), runner.harness_events.EVENT_LIMIT)
+            self.assertEqual(
+                markers, [{"kind": "stream.lines_truncated", "limit": 500, "stream": "stdout"}]
+            )
+
     def test_explicit_terminal_success_stops_lingering_harness(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)

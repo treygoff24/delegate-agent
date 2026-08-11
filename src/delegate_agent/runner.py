@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import codecs
 import contextlib
 import errno
 import io
@@ -197,6 +198,29 @@ def open_events_log(run_path: Path) -> TextIO:
 
 def append_event(handle: TextIO, event: JsonObject) -> None:
     handle.write(json.dumps(event, sort_keys=True) + "\n")
+
+
+def _stream_line_event_state(events_path: Path) -> tuple[int, bool]:
+    written = 0
+    try:
+        handle = events_path.open(encoding="utf-8")
+    except OSError:
+        return written, False
+    with handle:
+        for line in handle:
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict) or event.get("stream") != "stdout":
+                continue
+            if event.get("kind") == "stream.lines_truncated":
+                return min(written, harness_events.EVENT_LIMIT), True
+            if event.get("kind") == "stream.line":
+                written += 1
+                if written > harness_events.EVENT_LIMIT:
+                    return harness_events.EVENT_LIMIT, True
+    return min(written, harness_events.EVENT_LIMIT), False
 
 
 def _stream_line_event(stream: str, text: str) -> JsonObject:
@@ -991,6 +1015,7 @@ def _drain_stream(
     limit_signal: StreamLimitSignal,
     stream: str,
 ) -> None:
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace") if on_line else None
     with log_path.open("ab") as log_handle:
         captured_bytes = log_handle.tell()
         while True:
@@ -1003,10 +1028,16 @@ def _drain_stream(
                 log_handle.write(captured)
                 captured_bytes += len(captured)
                 byte_counter.total += len(captured)
-                if on_line is not None:
-                    on_line(captured.decode("utf-8", errors="replace"))
+                if on_line is not None and decoder is not None:
+                    decoded = decoder.decode(captured, final=False)
+                    if decoded:
+                        on_line(decoded)
             if len(captured) < len(chunk):
                 limit_signal.trip(stream)
+        if on_line is not None and decoder is not None:
+            decoded = decoder.decode(b"", final=True)
+            if decoded:
+                on_line(decoded)
 
 
 def _join_drain_thread(thread: threading.Thread, pipe: BinaryIO | None) -> None:
@@ -1397,11 +1428,14 @@ def _launch_tracked_process(
     *,
     stdin_text: str | None,
     env_overrides: dict[str, str] | None = None,
+    drop_env: tuple[str, ...] = (),
     scratch_dir: Path | None = None,
 ) -> subprocess.Popen[bytes]:
     env = profiles.child_environment(
         overrides=_env_overrides_with_scratch(env_overrides, scratch_dir)
     )
+    for key in drop_env:
+        env.pop(key, None)
     return subprocess.Popen(  # nosec B603 - Delegate intentionally launches validated harness argv with shell=False.
         argv,
         cwd=cwd,
@@ -1528,6 +1562,9 @@ def _capture_tracked_process(
     mail_push_nonce = _mail_push_failure_nonce(ctx)
     terminal_signal = threading.Event()
     limit_signal = StreamLimitSignal()
+    stdout_line_events_written, stdout_line_events_truncated = _stream_line_event_state(
+        files.run_path / EVENTS_JSONL
+    )
 
     def maybe_persist_running() -> None:
         nonlocal lines_since_persist, last_persist_at, progress_dirty
@@ -1553,6 +1590,24 @@ def _capture_tracked_process(
         )
     with open_events_log(files.run_path) as events_handle:
 
+        def append_stdout_line_event(line: str) -> bool:
+            nonlocal stdout_line_events_written, stdout_line_events_truncated
+            if stdout_line_events_written < harness_events.EVENT_LIMIT:
+                append_event(events_handle, _stream_line_event("stdout", line))
+                stdout_line_events_written += 1
+                return True
+            if not stdout_line_events_truncated:
+                append_event(
+                    events_handle,
+                    {
+                        "kind": "stream.lines_truncated",
+                        "stream": "stdout",
+                        "limit": harness_events.EVENT_LIMIT,
+                    },
+                )
+                stdout_line_events_truncated = True
+            return False
+
         def handle_stdout_line(chunk_text: str) -> None:
             nonlocal line_buffer, lines_since_persist, last_persist_at, progress_dirty
             line_buffer += chunk_text
@@ -1562,8 +1617,8 @@ def _capture_tracked_process(
                 if accumulator.terminal_status is not None:
                     terminal_signal.set()
                 progress_dirty = True
-                append_event(events_handle, _stream_line_event("stdout", line))
-                lines_since_persist += 1
+                if append_stdout_line_event(line):
+                    lines_since_persist += 1
                 elapsed = time.monotonic() - last_persist_at
                 if (
                     lines_since_persist >= PROGRESS_PERSIST_LINE_INTERVAL
@@ -1695,7 +1750,7 @@ def _capture_tracked_process(
             # Final unterminated stdout line: ingest and mirror into events.jsonl
             # so the raw event log matches what the accumulator saw.
             accumulator.ingest_line(line_buffer)
-            append_event(events_handle, _stream_line_event("stdout", line_buffer))
+            append_stdout_line_event(line_buffer)
         error: str | None = None
         message: str | None = None
         if timed_out:
@@ -2149,10 +2204,15 @@ def _accumulator_failure_signal_text(accumulator: harness_events.StreamAccumulat
     # Redacted here rather than at each call site: this is the only classifier
     # input that is not already scrubbed, and the classified message reaches
     # state.json, the snapshot, and the completion report.
+    events = list(accumulator.events)
+    for kind in ("error", "run.completed"):
+        latest = accumulator.events.last_by_kind.get(kind)
+        if latest is not None and latest not in events:
+            events.append(latest)
     return redaction.redact_string(
         "\n".join(
             event.message
-            for event in accumulator.events
+            for event in events
             if event.message
             and (
                 event.kind == "error"
@@ -2361,6 +2421,9 @@ def _run_single_tracked_attempt(
                 cwd,
                 stdin_text=stdin_text,
                 env_overrides=env_overrides,
+                drop_env=(
+                    ("DELEGATE_CONFIG",) if env_overrides is ctx.fallback_env_overrides else ()
+                ),
                 scratch_dir=scratch_dir,
             )
         except OSError as exc:
@@ -2406,7 +2469,8 @@ def _merge_tracked_attempt_captures(
         *prior_capture.accumulator.assistant_chunks,
         *current_capture.accumulator.assistant_chunks,
     ]
-    accumulator.events = [*prior_capture.accumulator.events, *current_capture.accumulator.events]
+    accumulator.events.extend_buffer(prior_capture.accumulator.events)
+    accumulator.events.extend_buffer(current_capture.accumulator.events)
     accumulator.completion_text = (
         current_capture.accumulator.completion_text or prior_capture.accumulator.completion_text
     )

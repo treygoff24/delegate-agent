@@ -671,7 +671,11 @@ Typical dry-run JSON fields:
 
 `isolation` is a human-readable summary combining `effectiveIsolation` and `isolationLifecycle` (e.g. `"worktree temporary"`, `"worktree persistent"`, `"none"`). Depend on the structured fields rather than parsing it. A push dry-run also includes `mailPushAdapter` with the audit status and the internal hook command; unverified harnesses include the pull-degradation warning.
 
-When a profile is active, dry-run and completion payloads add `authProfile` (the resolved profile name) and, when a Codex fallback profile is configured, `fallbackProfile`. Dry-run also adds `profileEnv` (the injected env map, with values redacted). These keys are omitted when no profile is active.
+When a profile is active, dry-run and completion payloads add `authProfile`
+(the resolved profile name). Codex dry-runs also always add `fallbackProfile`
+(the configured profile name or `null`); completion payloads add it only when
+a fallback is configured. Dry-run also adds `profileEnv` (the injected env map,
+with values redacted). Profile metadata is omitted when no profile is active.
 
 For Cursor, Claude, Grok, OpenCode, Pi, Oh My Pi, Droid, and Kimi safe mode, an explicit `--isolation none`
 is normalized to `auto` with a warning because those safe contracts depend on
@@ -1162,10 +1166,14 @@ after flushing their final payload.
 Each tracked Run also keeps `events.jsonl`, an append-only raw diagnostic mirror
 of child stdout lines as `{"kind":"stream.line","stream":"stdout","text":...}`
 records (including a final unterminated line when the child exits mid-line).
-Normalized progress events also appear in Snapshot `recentEvents`. Both
-surfaces bound retained event text at 500 characters and append a `…` sentinel
-when clipped. Only then do they add `truncated: true` and `textChars` (the
-original character count before bounding); short lines omit those fields.
+The mirror retains at most 500 stdout-line records, followed by one
+`stream.lines_truncated` marker when additional lines are omitted. Normalized
+progress events also appear in Snapshot `recentEvents`; it retains the first
+100 and latest 400 events while reporting the full `eventsTotal`. Both surfaces
+bound child-controlled event strings to 500 characters, including the `…`
+sentinel when clipped. Truncated `message`/raw-line text adds `textChars`; other
+normalized fields add `<field>Chars` (for example `targetChars`). Short fields
+omit truncation metadata.
 Retained event text is not redacted — treat `events.jsonl` and `recentEvents`
 as sensitive diagnostic artifacts.
 

@@ -354,8 +354,10 @@ def codex_fallback_child_env_overrides(
         "DELEGATE_RUN_ID",
         "DELEGATE_MAIL_SELF",
     }
+    primary = dict(primary_overrides or {})
+    primary.pop("DELEGATE_CONFIG", None)
     return {
-        **{key: value for key, value in (primary_overrides or {}).items()},
+        **primary,
         **{key: value for key, value in fallback.items() if key not in fallback_excluded},
     }
 
@@ -380,7 +382,7 @@ def read_bounded_stderr_tail(stderr_log: Path, *, limit: int = STDERR_TAIL_LIMIT
 
 
 def accumulator_had_tool_events(accumulator: StreamAccumulator) -> bool:
-    return any(event.kind in {"tool.started", "tool.completed"} for event in accumulator.events)
+    return bool(accumulator.events.last_by_kind.keys() & {"tool.started", "tool.completed"})
 
 
 def capture_workspace_porcelain(cwd: str) -> str | None:

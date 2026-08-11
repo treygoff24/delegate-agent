@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import re
+from collections import deque
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -156,14 +158,24 @@ def bounded_event_text(text: str, limit: int = EVENT_TEXT_LIMIT) -> tuple[str, b
     """Bound retained event text for raw and normalized event surfaces.
 
     Returns ``(bounded, truncated, original_chars)``. When truncated, the
-    bounded string keeps the first ``limit`` characters plus a ``…`` sentinel
-    so consumers can detect display clipping. Truncation metadata belongs on
-    the event payload only when ``truncated`` is true.
+    bounded string fits within ``limit`` characters and ends with a ``…``
+    sentinel so consumers can detect display clipping. Truncation metadata
+    belongs on the event payload only when ``truncated`` is true.
     """
     original_chars = len(text)
     if original_chars <= limit:
         return text, False, original_chars
-    return text[:limit] + "…", True, original_chars
+    if limit <= 0:
+        return "", True, original_chars
+    return text[: limit - 1] + "…", True, original_chars
+
+
+def _add_bounded_event_field(payload: JsonObject, key: str, value: str) -> None:
+    bounded, truncated, original_chars = bounded_event_text(value)
+    payload[key] = bounded
+    if truncated:
+        payload["truncated"] = True
+        payload["textChars" if key == "message" else f"{key}Chars"] = original_chars
 
 
 # Harnesses whose streams emit assistant messages that are safe to
@@ -189,32 +201,66 @@ class NormalizedEvent:
 
     def to_dict(self) -> JsonObject:
         payload: JsonObject = {"kind": self.kind}
-        if self.tool is not None:
-            payload["tool"] = self.tool
-        if self.target is not None:
-            payload["target"] = self.target
-        if self.path is not None:
-            payload["path"] = self.path
-        if self.status is not None:
-            payload["status"] = self.status
+        for key, value in (
+            ("tool", self.tool),
+            ("target", self.target),
+            ("path", self.path),
+            ("status", self.status),
+        ):
+            if value is not None:
+                _add_bounded_event_field(payload, key, value)
         if self.message is not None:
-            # Keep the dataclass field unbounded; bound only at serialization.
-            # When truncated is already set (_ingest_text_fallback), the message
-            # is pre-bounded (limit+1 with …) — do not re-bound or textChars
-            # would disagree with the stored string.
+            # _ingest_text_fallback pre-bounds plain text before storing it.
             if self.truncated:
                 payload["message"] = self.message
             else:
-                bounded, truncated, original_chars = bounded_event_text(self.message)
-                payload["message"] = bounded
-                if truncated:
-                    payload["truncated"] = True
-                    payload["textChars"] = original_chars
+                _add_bounded_event_field(payload, "message", self.message)
         if self.truncated:
             payload["truncated"] = True
             if self.text_chars is not None:
                 payload["textChars"] = self.text_chars
         return payload
+
+
+class EventBuffer:
+    def __init__(self) -> None:
+        self._head: list[NormalizedEvent] = []
+        self._tail: deque[NormalizedEvent] = deque(maxlen=EVENT_TAIL)
+        self.last_by_kind: dict[str, NormalizedEvent] = {}
+        self.total = 0
+
+    def append(self, event: NormalizedEvent) -> None:
+        self.total += 1
+        self.last_by_kind[event.kind] = event
+        if len(self._head) < EVENT_HEAD:
+            self._head.append(event)
+        else:
+            self._tail.append(event)
+
+    def extend(self, events: Iterable[NormalizedEvent]) -> None:
+        for event in events:
+            self.append(event)
+
+    def extend_buffer(self, events: EventBuffer) -> None:
+        combined_total = self.total + events.total
+        self.extend(events)
+        self.last_by_kind.update(events.last_by_kind)
+        self.total = combined_total
+
+    def __iter__(self) -> Iterator[NormalizedEvent]:
+        yield from self._head
+        yield from self._tail
+
+    def __len__(self) -> int:
+        return len(self._head) + len(self._tail)
+
+    def __getitem__(self, index: int | slice) -> NormalizedEvent | list[NormalizedEvent]:
+        return list(self)[index]
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, EventBuffer):
+            other = list(other)
+        return list(self) == other
 
 
 _CANCELLED_REASONS = {"abort", "aborted", "cancel", "cancelled", "canceled", "interrupted"}
@@ -238,7 +284,7 @@ def _normalize_terminal_status(value: JsonValue) -> str | None:
 class StreamAccumulator:
     harness: str | None = None
     assistant_chunks: list[str] = field(default_factory=list)
-    events: list[NormalizedEvent] = field(default_factory=list)
+    events: EventBuffer = field(default_factory=EventBuffer)
     completion_text: str | None = None
     current: str | None = None
     _assistant_text_cache: str | None = field(default=None, repr=False)
@@ -265,7 +311,7 @@ class StreamAccumulator:
         self.terminal_status = status
         payload: JsonObject = {"event": event, "status": status}
         if reason:
-            payload["reason"] = reason
+            _add_bounded_event_field(payload, "reason", reason)
         self.terminal_event = payload
         self.events.append(NormalizedEvent(kind="run.completed", status=status, message=reason))
 
@@ -983,7 +1029,7 @@ class StreamAccumulator:
 
     def bounded_recent_events(self) -> tuple[list[JsonObject], JsonObject]:
         serialized = [event.to_dict() for event in self.events]
-        total = len(serialized)
+        total = self.events.total
         if total <= EVENT_LIMIT:
             meta = {
                 "eventsTotal": total,
@@ -992,17 +1038,14 @@ class StreamAccumulator:
                 "eventsOmittedMiddle": 0,
             }
             return serialized, meta
-        head = serialized[:EVENT_HEAD]
-        tail = serialized[-EVENT_TAIL:]
         omitted = total - EVENT_HEAD - EVENT_TAIL
-        recent_events = head + tail
         meta = {
             "eventsTotal": total,
             "eventsTruncated": True,
             "eventsLimit": EVENT_LIMIT,
             "eventsOmittedMiddle": max(omitted, 0),
         }
-        return recent_events, meta
+        return serialized, meta
 
 
 def _extract_text(content: JsonValue) -> str:

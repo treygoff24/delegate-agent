@@ -239,11 +239,10 @@ Fix the install:
 env -u AI_PROFILE delegate config sync-profiles
 ```
 
-Temporary bypasses:
+Temporary bypass:
 
 ```bash
 env -u AI_PROFILE delegate profiles
-DELEGATE_CONFIG=/path/to/config.json delegate profiles
 ```
 
 ## WSL path or Git warnings
@@ -418,8 +417,10 @@ returned.
 ## Parsing `events.jsonl` nested JSON
 
 Tracked Runs mirror each child stdout line into `.delegate/runs/<runId>/events.jsonl`
-as `stream.line` records. Lines longer than 500 characters are clipped with a
-`…` sentinel and marked `truncated: true` / `textChars: <original length>`.
+as `stream.line` records, up to 500 lines followed by a
+`stream.lines_truncated` marker. Lines longer than 500 characters are clipped
+with a `…` sentinel and marked `truncated: true` /
+`textChars: <original length>`.
 Clipped lines that contained nested JSON are no longer valid JSON payloads, so
 skip them when reconstructing structured child events; plaintext lines that
 never held JSON are skipped the same way:

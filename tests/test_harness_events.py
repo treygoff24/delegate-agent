@@ -1367,8 +1367,8 @@ class HarnessEventsTests(unittest.TestCase):
         bounded, truncated, original = self.events.bounded_event_text(long)
         self.assertTrue(truncated)
         self.assertEqual(original, len(long))
-        self.assertEqual(bounded, long[: self.events.EVENT_TEXT_LIMIT] + "…")
-        self.assertEqual(len(bounded), self.events.EVENT_TEXT_LIMIT + 1)
+        self.assertEqual(bounded, long[: self.events.EVENT_TEXT_LIMIT - 1] + "…")
+        self.assertEqual(len(bounded), self.events.EVENT_TEXT_LIMIT)
 
         acc = self.events.StreamAccumulator()
         acc.ingest_line(short)
@@ -1383,7 +1383,7 @@ class HarnessEventsTests(unittest.TestCase):
         self.assertEqual(long_event["kind"], "text")
         self.assertTrue(long_event["truncated"])
         self.assertEqual(long_event["textChars"], len(long))
-        self.assertEqual(long_event["message"], long[: self.events.EVENT_TEXT_LIMIT] + "…")
+        self.assertEqual(long_event["message"], long[: self.events.EVENT_TEXT_LIMIT - 1] + "…")
         recent, _meta = acc.bounded_recent_events()
         self.assertEqual(recent[-1], long_event)
 
@@ -1397,7 +1397,7 @@ class HarnessEventsTests(unittest.TestCase):
         self.assertTrue(error_payload["truncated"])
         self.assertEqual(error_payload["textChars"], 5000)
         self.assertTrue(error_payload["message"].endswith("…"))
-        self.assertEqual(len(error_payload["message"]), self.events.EVENT_TEXT_LIMIT + 1)
+        self.assertEqual(len(error_payload["message"]), self.events.EVENT_TEXT_LIMIT)
         recent, _meta = acc.bounded_recent_events()
         self.assertEqual(recent[-1]["message"], error_payload["message"])
         self.assertTrue(recent[-1]["truncated"])
@@ -1418,12 +1418,51 @@ class HarnessEventsTests(unittest.TestCase):
         completed = [e for e in terminal_acc.events if e.kind == "run.completed"]
         self.assertEqual(len(completed), 1)
         self.assertEqual(completed[0].message, long_reason)
-        self.assertEqual(terminal_acc.terminal_event["reason"], long_reason)
+        self.assertEqual(
+            terminal_acc.terminal_event["reason"],
+            long_reason[: self.events.EVENT_TEXT_LIMIT - 1] + "…",
+        )
+        self.assertEqual(terminal_acc.terminal_event["reasonChars"], len(long_reason))
         completed_payload = completed[0].to_dict()
         self.assertTrue(completed_payload["truncated"])
         self.assertEqual(completed_payload["textChars"], 5000)
         self.assertTrue(completed_payload["message"].endswith("…"))
-        self.assertEqual(len(completed_payload["message"]), self.events.EVENT_TEXT_LIMIT + 1)
+        self.assertEqual(len(completed_payload["message"]), self.events.EVENT_TEXT_LIMIT)
+
+    def test_event_buffer_retains_head_and_tail_with_exact_total(self):
+        acc = self.events.StreamAccumulator()
+        total = self.events.EVENT_LIMIT + 25
+        for index in range(total):
+            acc.events.append(self.events.NormalizedEvent(kind=f"event-{index}"))
+
+        recent, meta = acc.bounded_recent_events()
+
+        self.assertEqual(len(acc.events), self.events.EVENT_LIMIT)
+        self.assertEqual(meta["eventsTotal"], total)
+        self.assertTrue(meta["eventsTruncated"])
+        self.assertEqual(meta["eventsOmittedMiddle"], 25)
+        self.assertEqual(recent[0]["kind"], "event-0")
+        self.assertEqual(recent[self.events.EVENT_HEAD - 1]["kind"], "event-99")
+        self.assertEqual(recent[self.events.EVENT_HEAD]["kind"], "event-125")
+        self.assertEqual(recent[-1]["kind"], f"event-{total - 1}")
+
+        acc.events.append(self.events.NormalizedEvent(kind="tool.started", tool="shell"))
+        for index in range(self.events.EVENT_TAIL + 1):
+            acc.events.append(self.events.NormalizedEvent(kind=f"tail-{index}"))
+        self.assertIn("tool.started", acc.events.last_by_kind)
+        self.assertFalse(any(event.kind == "tool.started" for event in acc.events))
+
+    def test_normalized_event_bounds_tool_target_and_path(self):
+        target = "x" * 1500
+        payload = self.events.NormalizedEvent(
+            kind="tool.started", tool=target, target=target, path=target
+        ).to_dict()
+
+        for key in ("tool", "target", "path"):
+            self.assertEqual(len(payload[key]), self.events.EVENT_TEXT_LIMIT)
+            self.assertTrue(payload[key].endswith("…"))
+            self.assertEqual(payload[f"{key}Chars"], len(target))
+        self.assertTrue(payload["truncated"])
 
     def test_explicit_completion_wins_over_assistant_recovery_quality(self):
         acc = self.events.StreamAccumulator()

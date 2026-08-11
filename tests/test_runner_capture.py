@@ -474,7 +474,7 @@ class RunnerCaptureTests(unittest.TestCase):
             )
             self.assertTrue(long_event["truncated"])
             self.assertEqual(long_event["textChars"], len(long_body))
-            self.assertEqual(long_event["text"], long_body[:limit] + "…")
+            self.assertEqual(long_event["text"], long_body[: limit - 1] + "…")
             secret_event = next(event for event in stream_lines if secret in str(event.get("text")))
             self.assertIn(secret, secret_event["text"])
 
@@ -496,7 +496,7 @@ class RunnerCaptureTests(unittest.TestCase):
             )
             self.assertTrue(long_recent["truncated"])
             self.assertEqual(long_recent["textChars"], len(long_body))
-            self.assertEqual(long_recent["message"], long_body[:limit] + "…")
+            self.assertEqual(long_recent["message"], long_body[: limit - 1] + "…")
             secret_recent = next(
                 event
                 for event in recent
@@ -2062,6 +2062,26 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertFalse(thread.is_alive())
             self.assertEqual(byte_counter.total, len(b"line\n"))
 
+    def test_drain_stream_preserves_utf8_across_read_chunks(self):
+        payload = b"x" * (self.runner.STREAM_READ_CHUNK_BYTES - 1) + "😀\n".encode()
+        decoded: list[str] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "stdout.log"
+            counter = self.runner.ByteCounter()
+            self.runner._drain_stream(
+                io.BytesIO(payload),
+                log_path,
+                counter,
+                on_line=decoded.append,
+                max_bytes=self.runner.TRACKED_STREAM_MAX_BYTES,
+                limit_signal=self.runner.StreamLimitSignal(),
+                stream="stdout",
+            )
+
+            self.assertEqual(log_path.read_bytes(), payload)
+        self.assertEqual("".join(decoded), payload.decode())
+        self.assertNotIn("�", "".join(decoded))
+
     def test_tracked_run_batches_progress_persistence(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
@@ -3245,7 +3265,9 @@ class RunnerCaptureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as workspace:
             script = Path(workspace) / "codex"
             script.write_text(
-                "#!/usr/bin/env bash\nprintf 'empty-attempt:%s\\n' \"$*\" >&2\n",
+                "#!/usr/bin/env bash\n"
+                "for _ in $(seq 1 600); do printf 'noise\\n'; done\n"
+                "printf 'empty-attempt:%s\\n' \"$*\" >&2\n",
                 encoding="utf-8",
             )
             script.chmod(0o755)
@@ -3281,6 +3303,19 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertIn(self.runner.EMPTY_RETRY_WARNING, payload["warnings"])
             stderr_log = (root / "runs" / run_id / "stderr.log").read_text(encoding="utf-8")
             self.assertEqual(stderr_log.count("empty-attempt:"), 2)
+            events = [
+                json.loads(line)
+                for line in (root / "runs" / run_id / "events.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            self.assertEqual(
+                sum(event.get("kind") == "stream.line" for event in events),
+                self.runner.harness_events.EVENT_LIMIT,
+            )
+            self.assertEqual(
+                sum(event.get("kind") == "stream.lines_truncated" for event in events), 1
+            )
 
     def test_empty_retry_uses_retry_duration_as_total(self):
         with tempfile.TemporaryDirectory() as workspace:

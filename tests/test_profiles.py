@@ -101,6 +101,12 @@ def write_json_config(path: Path, config: dict) -> None:
     path.write_text(json.dumps(config), encoding="utf-8")
 
 
+def write_profile_overlay(root: Path, profile: str) -> None:
+    config_root = root / ".delegate"
+    config_root.mkdir(exist_ok=True)
+    (config_root / f"config.{profile}.json").write_text("{}\n", encoding="utf-8")
+
+
 def make_pointer_config(
     *,
     cursor_binary: Path | None = None,
@@ -867,6 +873,7 @@ class CodexProfileExecutionTests(unittest.TestCase):
             overrides = self.profiles.codex_fallback_child_env_overrides(
                 resolution,
                 {
+                    "DELEGATE_CONFIG": "/explicit.json",
                     "DELEGATE_SOURCE_ROOT": "/actual/source",
                     "DELEGATE_EXECUTION_ROOT": "/actual/run",
                     "WORKSPACE_ROOT": "/actual/workspace",
@@ -874,6 +881,7 @@ class CodexProfileExecutionTests(unittest.TestCase):
             )
 
         self.assertEqual(overrides["CODEX_HOME"], "/work")
+        self.assertNotIn("DELEGATE_CONFIG", overrides)
         self.assertEqual(overrides["DELEGATE_SOURCE_ROOT"], "/actual/source")
         self.assertEqual(overrides["DELEGATE_EXECUTION_ROOT"], "/actual/run")
         self.assertEqual(overrides["WORKSPACE_ROOT"], "/actual/workspace")
@@ -967,15 +975,16 @@ class CodexProfileExecutionTests(unittest.TestCase):
             alias=alias,
             source_workspace=self.delegate.ResolvedWorkspace(repo.name, "git"),
         )
-        exit_code, payload = self.runner.execute_tracked(
-            request.argv,
-            repo.name,
-            ctx,
-            json_mode=True,
-            stdout=io.StringIO(),
-            stderr=io.StringIO(),
-            stdin_text="task",
-        )
+        with mock.patch.dict(os.environ, build_env, clear=False):
+            exit_code, payload = self.runner.execute_tracked(
+                request.argv,
+                repo.name,
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+                stdin_text="task",
+            )
         return exit_code, payload
 
     def test_directory_baseline_detects_workspace_changes(self):
@@ -1125,6 +1134,45 @@ class CodexProfileExecutionTests(unittest.TestCase):
             self.assertEqual([row[2] for row in observed], [manifest["alias"], manifest["alias"]])
             self.assertNotEqual(manifest["runId"], "del_20260801T120000Z_abcdef")
             self.assertNotEqual(manifest["alias"], "codex-99")
+
+    def test_fallback_child_drops_ambient_delegate_config(self):
+        repo = make_git_repo()
+        self.addCleanup(repo.cleanup)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            personal = write_codex_home(root, "personal")
+            work = write_codex_home(root, "work")
+            observations = root / "child-env.tsv"
+            fake_script = (
+                "#!/usr/bin/env bash\n"
+                f'printf "%s\\t%s\\n" "${{CODEX_HOME:-}}" "${{DELEGATE_CONFIG-unset}}" >> "{observations}"\n'
+                f'if [ "${{CODEX_HOME}}" = "{work}" ]; then\n'
+                '  printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}\'\n'
+                "  exit 0\n"
+                "fi\n"
+                'echo "You exceeded your current quota usage limit" >&2\n'
+                "exit 1\n"
+            )
+            config = base_config(personal=personal, work=work)
+            config["codex"] = dict(config["codex"], fallbackProfile="work")
+            config["profiles"]["default"] = "personal"
+            config["profiles"]["detectFrom"] = []
+
+            exit_code, payload = self._run_codex_fallback_scenario(
+                mode="work",
+                fake_script=fake_script,
+                tmp=root,
+                repo=repo,
+                config=config,
+                env={"DELEGATE_CONFIG": "/explicit.json"},
+            )
+
+            self.assertEqual(exit_code, 0)
+            self.assertIn("codexAuthFallback", payload or {})
+            self.assertEqual(
+                observations.read_text(encoding="utf-8").splitlines(),
+                [f"{personal}\t/explicit.json", f"{work}\tunset"],
+            )
 
     def test_work_mode_dirty_baseline_skips_fallback_retry(self):
         repo = make_git_repo()
@@ -1297,6 +1345,7 @@ class ProfilePhase2CliTests(unittest.TestCase):
             config_path = root / "config.json"
             config = make_pointer_config(cursor_binary=make_env_probe_binary(root))
             write_json_config(config_path, config)
+            write_profile_overlay(root, "personal")
             code, payload, _stderr = main_json(
                 self.delegate,
                 [
@@ -1310,6 +1359,7 @@ class ProfilePhase2CliTests(unittest.TestCase):
                     "task",
                 ],
                 env={
+                    "HOME": str(root),
                     "DELEGATE_CONFIG": str(config_path),
                     "DELEGATE_ENV_OUT": str(env_out),
                     "DELEGATE_PROFILE": "",
@@ -1374,11 +1424,13 @@ class ProfilePhase2CliTests(unittest.TestCase):
             config_path = root / "config.json"
             config = make_pointer_config(cursor_binary=make_env_probe_binary(root))
             write_json_config(config_path, config)
+            write_profile_overlay(root, "personal")
             stdout = io.StringIO()
             stderr = io.StringIO()
             with mock.patch.dict(
                 os.environ,
                 {
+                    "HOME": str(root),
                     "DELEGATE_CONFIG": str(config_path),
                     "DELEGATE_ENV_OUT": str(env_out),
                     "DELEGATE_PROFILE": "",
@@ -1412,6 +1464,7 @@ class ProfilePhase2CliTests(unittest.TestCase):
             config_path = root / "config.json"
             config = make_pointer_config(cursor_binary=make_env_probe_binary(root))
             write_json_config(config_path, config)
+            write_profile_overlay(root, "personal")
             code, payload, _stderr = main_json(
                 self.delegate,
                 [
@@ -1425,6 +1478,7 @@ class ProfilePhase2CliTests(unittest.TestCase):
                     "review",
                 ],
                 env={
+                    "HOME": str(root),
                     "DELEGATE_CONFIG": str(config_path),
                     "DELEGATE_ENV_OUT": str(env_out),
                     "DELEGATE_PROFILE": "",
@@ -1452,6 +1506,7 @@ class ProfilePhase2CliTests(unittest.TestCase):
                 worktree_data_home=str(root / "worktrees"),
             )
             write_json_config(config_path, config)
+            write_profile_overlay(root, "personal")
             code, payload, _stderr = main_json(
                 self.delegate,
                 [
@@ -1467,6 +1522,7 @@ class ProfilePhase2CliTests(unittest.TestCase):
                     "task",
                 ],
                 env={
+                    "HOME": str(root),
                     "DELEGATE_CONFIG": str(config_path),
                     "DELEGATE_ENV_OUT": str(env_out),
                     "DELEGATE_PROFILE": "",
@@ -1487,7 +1543,9 @@ class ProfilePhase2CliTests(unittest.TestCase):
             config_path = root / "config.json"
             config = make_pointer_config(cursor_binary=make_env_probe_binary(root))
             write_json_config(config_path, config)
+            write_profile_overlay(root, "personal")
             env = {
+                "HOME": str(root),
                 "DELEGATE_CONFIG": str(config_path),
                 "DELEGATE_ENV_OUT": str(env_out),
                 "DELEGATE_PROFILE": "",
@@ -1621,10 +1679,12 @@ class ProfilePhase2CliTests(unittest.TestCase):
             config["codex"] = dict(config["codex"], binary=str(fake_codex))
             config_path = root / "config.json"
             write_json_config(config_path, config)
+            write_profile_overlay(root, "personal")
             code, payload, _stderr = main_json(
                 self.delegate,
                 ["--json", "--cwd", repo.name, "codex", "safe", "task"],
                 env={
+                    "HOME": str(root),
                     "DELEGATE_CONFIG": str(config_path),
                     "DELEGATE_PROFILE": "work",
                     "AI_PROFILE": "personal",

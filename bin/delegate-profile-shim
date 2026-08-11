@@ -234,7 +234,7 @@ _delegate_profile_fix_message() {
   cat >&2 <<EOF
 delegate: AI_PROFILE=${AI_PROFILE} but ${_delegate_profile_config} is missing/unreadable; refusing to run a launch or mutation command on the wrong account.
 Fix: create the profile config from config.example.json, or run 'env -u AI_PROFILE delegate config sync-profiles' to materialize missing profile overlays.
-Temporary bypasses: 'env -u AI_PROFILE delegate ...' uses the base config (work Claude, ambient Codex), or set 'DELEGATE_CONFIG=/path/to/config.json delegate ...'.
+Temporary bypass: 'env -u AI_PROFILE delegate ...' uses the base config (work Claude, ambient Codex).
 EOF
 }
 
