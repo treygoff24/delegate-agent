@@ -59,6 +59,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `events.jsonl` mirrors at most 500 stdout lines plus a truncation marker so
   many short lines cannot amplify a bounded child stream into an unbounded
   event journal or in-memory event list.
+- Tracked Cursor retries now report cumulative token usage, transient Devin
+  catalog failures retain the last-known-good catalog, and Devin help no longer
+  advertises unsupported reasoning effort.
 
 ## [0.28.0] - 2026-08-05
 

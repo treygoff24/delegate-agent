@@ -246,6 +246,8 @@ class SnapshotSchemaTests(unittest.TestCase):
                 self.assertTrue(all(isinstance(item, str) and item for item in entry["command"]))
                 self.assertIsInstance(entry["version"], str)
                 self.assertTrue(entry["version"])
+                captured_at = entry.get("capturedAt", provenance["capturedAt"])
+                self.assertRegex(captured_at, r"^\d{4}-\d{2}-\d{2}$")
 
 
 class ProbeRunnerTests(unittest.TestCase):
@@ -685,7 +687,7 @@ class AdapterOrchestrationTests(unittest.TestCase):
             devin = probe_harness(config, "devin", env=env)
             self.assertEqual(devin["probeStatus"], "ok")
             self.assertIn("gpt-5.6-sol", devin["models"])
-            self.assertIn("gpt-5.6-sol-high", devin["models"])
+            self.assertIn("gpt-5-6-sol-high", devin["models"])
 
             all_missing = probe_all_harnesses(config, env={"PATH": "", "HOME": env["HOME"]})
             self.assertEqual(len(all_missing), 10)
@@ -700,12 +702,12 @@ class AdapterOrchestrationTests(unittest.TestCase):
         self.assertEqual(fragment["modelScope"], "account")
         self.assertIsNone(fragment["harnessReasoning"])
         models = fragment["models"]
-        self.assertEqual(models["gpt-5.6-sol"]["displayName"], "GPT 5.6 Sol")
-        self.assertEqual(models["sol"]["displayName"], "GPT 5.6 Sol")
-        self.assertEqual(models["gpt-5.6-sol-high"]["displayName"], "GPT 5.6 Sol High")
-        self.assertNotIn("reasoning", models["gpt-5.6-sol-high"])
+        self.assertEqual(models["gpt-5.6-sol"]["displayName"], "GPT-5.6 Sol")
+        self.assertEqual(models["gpt"]["displayName"], "GPT-5.6 Terra")
+        self.assertEqual(models["gpt-5-6-sol-high"]["displayName"], "GPT-5.6 Sol High Thinking")
+        self.assertNotIn("reasoning", models["gpt-5-6-sol-high"])
 
-    def test_devin_catalog_skips_malformed_and_unsafe_model_ids(self):
+    def test_devin_catalog_skips_malformed_unsafe_and_blank_model_ids(self):
         from delegate_agent.harness_discovery import parse_devin_catalog
 
         fragment = parse_devin_catalog(
@@ -713,9 +715,12 @@ class AdapterOrchestrationTests(unittest.TestCase):
             '{"slug":"-unsafe","aliases":["-bad"],'
             '"variants":[{"model_uid":"-unsafe-high"}]},'
             '{"slug":"safe","aliases":["short"],'
-            '"variants":[null,{"model_uid":"safe-high"}]},null]}'
+            '"variants":[null,{"model_uid":"safe-high"}]},'
+            '{"slug":"ok","aliases":["-dash","   ","bad alias"],'
+            '"variants":[{"model_uid":"bad variant"}]},'
+            '{"slug":"bad slug","aliases":[],"variants":[]},null]}'
         )
-        self.assertEqual(set(fragment["models"]), {"safe", "short", "safe-high"})
+        self.assertEqual(set(fragment["models"]), {"safe", "short", "safe-high", "ok"})
 
     def test_devin_probe_failure_degrades_to_version_only(self):
         from delegate_agent.config import embedded_default_config
@@ -736,7 +741,8 @@ class AdapterOrchestrationTests(unittest.TestCase):
 
         self.assertEqual(record["probeStatus"], "partial")
         self.assertEqual(record["models"], {})
-        self.assertEqual(record["warnings"], ["Devin model catalog unavailable"])
+        self.assertEqual(record["warnings"][0], "Devin model catalog unavailable")
+        self.assertIn("probe_failed", record["warnings"][1])
 
 
 class DiscoveryCacheTests(unittest.TestCase):
@@ -976,6 +982,61 @@ class DiscoveryCacheTests(unittest.TestCase):
             self.assertEqual(result["staleHarnesses"], ["codex"])
             self.assertEqual(path.read_bytes(), before)
             self.assertEqual(result["snapshot"]["harnesses"]["codex"]["probeStatus"], "ok")
+
+    def test_devin_catalog_failure_preserves_last_good_catalog(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            existing = self._snapshot("work", "devin")
+            path = self.discovery.write_discovery_cache("work", existing, home=home)
+            before = path.read_bytes()
+            profile = self.profiles.ProfileResolution(name="work", source="test")
+            degraded = copy.deepcopy(existing["harnesses"]["devin"])
+            degraded.update(
+                probeStatus="partial",
+                modelScope="unknown",
+                defaultModel=None,
+                models={},
+                warnings=["Devin model catalog unavailable"],
+            )
+
+            with mock.patch.object(self.discovery, "probe_harness", return_value=degraded):
+                result = self.discovery.refresh_discovery(
+                    {}, profile=profile, engines=("devin",), home=home
+                )
+
+            self.assertFalse(result["wrote"])
+            self.assertEqual(result["updatedHarnesses"], [])
+            self.assertEqual(result["staleHarnesses"], ["devin"])
+            self.assertEqual(result["snapshot"], existing)
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_version_only_refresh_updates_an_existing_version_only_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            existing = self._snapshot("work", "devin")
+            old = existing["harnesses"]["devin"]
+            old.update(
+                version="devin 1.0",
+                probeStatus="partial",
+                modelScope="unknown",
+                defaultModel=None,
+                models={},
+                warnings=["old catalog failure"],
+            )
+            self.discovery.write_discovery_cache("work", existing, home=home)
+            profile = self.profiles.ProfileResolution(name="work", source="test")
+            refreshed = copy.deepcopy(old)
+            refreshed.update(version="devin 2.0", warnings=["new catalog failure"])
+
+            with mock.patch.object(self.discovery, "probe_harness", return_value=refreshed):
+                result = self.discovery.refresh_discovery(
+                    {}, profile=profile, engines=("devin",), home=home
+                )
+
+            self.assertTrue(result["wrote"])
+            self.assertEqual(result["updatedHarnesses"], ["devin"])
+            self.assertEqual(result["staleHarnesses"], [])
+            self.assertEqual(result["snapshot"]["harnesses"]["devin"], refreshed)
 
     def test_refresh_can_return_updates_without_persisting_them(self):
         with tempfile.TemporaryDirectory() as tmp:

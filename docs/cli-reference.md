@@ -334,6 +334,39 @@ delegate grok call "Summarize this context in three bullets."
 delegate --isolation worktree grok work "Implement the feature in a persistent worktree."
 ```
 
+### `delegate devin`
+
+Wraps Devin CLI print mode. Safe mode is unsupported because Devin may perform
+filesystem surveys through its generic `exec` tool, which Delegate cannot allow
+without weakening the read-only boundary.
+
+```bash
+delegate [--json] [--isolation auto|none|worktree] devin work [--model <alias-or-model>] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate [--json] devin call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--prompt-file PATH] [prompt...]
+```
+
+- `call --read-only` passes a Delegate-generated `--agent-config` deny-list for
+  edit, write, exec, and `mcp__*`, plus `--permission-mode auto`. Work and
+  default call use `--permission-mode dangerous` because non-interactive Devin
+  rejects unapproved edit/exec tools.
+- Prompt text is materialized in a private temporary file and passed with
+  Devin `--prompt-file` plus `-p`; dry-run argv and tracked manifests do not
+  contain the prompt.
+- Model selection uses `--model` (an alias from `devin.models` or a raw model
+  ID), the run-input JSON `model`, or `devin.defaultModel`. Unknown names are
+  left to Devin validation. `--reasoning-effort` is unsupported.
+- Setup, capability refresh, and `models devin --live` use the prompt-free
+  `devin models list --format json` catalog. Catalog failures degrade to
+  version-only metadata without prompting Devin.
+
+Examples:
+
+```bash
+delegate devin work "Implement the scoped task; report changed files and tests."
+delegate devin call --read-only "Score this answer against the rubric."
+delegate --isolation worktree devin work "Implement the feature in a persistent worktree."
+```
+
 ### `delegate opencode`
 
 Wraps OpenCode's non-interactive `run` command.

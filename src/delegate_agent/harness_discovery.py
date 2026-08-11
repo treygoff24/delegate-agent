@@ -652,6 +652,19 @@ def parse_codex_catalog(raw: str) -> JsonObject:
     return _fragment(model_scope="account", models=models)
 
 
+def _devin_model_selector(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    selector = value.strip()
+    if (
+        not selector
+        or selector.startswith("-")
+        or any(character.isspace() for character in selector)
+    ):
+        return None
+    return selector
+
+
 def parse_devin_catalog(raw: str) -> JsonObject:
     try:
         payload = json.loads(raw)
@@ -664,8 +677,8 @@ def parse_devin_catalog(raw: str) -> JsonObject:
     for family in families:
         if not isinstance(family, dict):
             continue
-        slug = family.get("slug")
-        if _nonempty_string(slug) and not slug.startswith("-"):
+        slug = _devin_model_selector(family.get("slug"))
+        if slug is not None:
             model: JsonObject = {}
             label = family.get("family_label")
             if _nonempty_string(label):
@@ -674,7 +687,8 @@ def parse_devin_catalog(raw: str) -> JsonObject:
             aliases = family.get("aliases")
             if isinstance(aliases, list):
                 for alias in aliases:
-                    if _nonempty_string(alias) and not alias.startswith("-"):
+                    alias = _devin_model_selector(alias)
+                    if alias is not None:
                         models.setdefault(alias, dict(model))
         variants = family.get("variants")
         if not isinstance(variants, list):
@@ -682,8 +696,8 @@ def parse_devin_catalog(raw: str) -> JsonObject:
         for variant in variants:
             if not isinstance(variant, dict):
                 continue
-            model_uid = variant.get("model_uid")
-            if not _nonempty_string(model_uid) or model_uid.startswith("-"):
+            model_uid = _devin_model_selector(variant.get("model_uid"))
+            if model_uid is None:
                 continue
             model = {}
             label = variant.get("label")
@@ -1427,12 +1441,17 @@ def probe_harness(
         return record
     except (OSError, ValueError) as exc:
         if harness == "devin":
+            diagnostic = _scrub_diagnostic(str(exc))
             return _empty_harness_record(
                 installed=True,
                 selector=resolution.selector,
                 version=resolution.version,
                 probe_status="partial",
-                warnings=[*warnings, "Devin model catalog unavailable"],
+                warnings=[
+                    *warnings,
+                    "Devin model catalog unavailable",
+                    *([diagnostic] if diagnostic else []),
+                ],
             )
         return _empty_harness_record(
             installed=True,
@@ -1787,7 +1806,17 @@ def refresh_discovery(
                 warnings=[diagnostic],
             )
         attempts[harness] = record
-        if record.get("installed") is True and record.get("probeStatus") in {"ok", "partial"}:
+        existing_record = snapshot["harnesses"].get(harness)
+        would_drop_catalog = (
+            isinstance(existing_record, dict)
+            and bool(existing_record.get("models"))
+            and not record.get("models")
+        )
+        if (
+            record.get("installed") is True
+            and record.get("probeStatus") in {"ok", "partial"}
+            and not would_drop_catalog
+        ):
             if not updated:
                 snapshot = {
                     **snapshot,

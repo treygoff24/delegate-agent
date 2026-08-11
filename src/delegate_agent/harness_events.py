@@ -657,9 +657,10 @@ class StreamAccumulator:
             self._record_successful_completion_text(final_text)
 
     def _ingest_result_event(self, payload: JsonObject) -> None:
-        usage = _normalize_reported_usage(payload.get("usage"))
-        if usage is not None:
-            self.usage = usage
+        if self.harness == "cursor":
+            usage = _normalize_reported_usage(payload.get("usage"))
+            if usage is not None:
+                self.usage = usage
         result = payload.get("result")
         if isinstance(result, str) and result.strip():
             if payload.get("is_error") is True:

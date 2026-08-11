@@ -760,6 +760,7 @@ class HarnessEventsTests(unittest.TestCase):
                     "type": "result",
                     "subtype": "success",
                     "result": "Status: completed\n- done",
+                    "usage": {"input_tokens": 21, "output_tokens": 8},
                 }
             )
         )
@@ -767,6 +768,7 @@ class HarnessEventsTests(unittest.TestCase):
         self.assertEqual(len(completed), 1)
         self.assertEqual(completed[0].status, "succeeded")
         self.assertEqual(acc.completion_text, "Status: completed\n- done")
+        self.assertIsNone(acc.usage)
 
     def test_result_usage_accepts_snake_case_and_keeps_missing_fields_null(self):
         acc = self.events.StreamAccumulator(harness="cursor")

@@ -273,11 +273,16 @@ class OverviewTests(unittest.TestCase):
         call_lines = [
             usage for usage in command_help.COMMAND_SPECS["dry-run"].usage if " call " in usage
         ]
-        self.assertEqual(len(call_lines), 3)
+        self.assertEqual(len(call_lines), 4)
         for line in call_lines:
             for option in ("--cwd", "--isolation", "--forbid-commit", "--include-dirty"):
                 with self.subTest(line=line, option=option):
                     self.assertNotIn(option, line)
+
+    def test_overview_devin_usage_omits_unsupported_reasoning_effort(self):
+        devin_lines = [line for line in self.overview.splitlines() if " devin " in line]
+        self.assertEqual(len(devin_lines), 4)
+        self.assertTrue(all("--reasoning-effort" not in line for line in devin_lines))
 
     def test_overview_advertises_ps_structural(self):
         ps_lines = [line for line in self.overview.splitlines() if " ps " in line]

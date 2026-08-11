@@ -190,6 +190,9 @@ Pi `call --read-only` uses the same read-only tool allowlist and discovery-disab
 flags as Pi safe mode. All Pi modes use `--no-session`.
 Oh My Pi `call --read-only` uses its fork-specific read-only tool allowlist and
 discovery-disable flags. All Oh My Pi modes use `--no-session`.
+Devin `call --read-only` passes a Delegate-generated agent-config deny-list for
+edit, write, exec, and `mcp__*`, plus `--permission-mode auto`. Default Devin
+call uses `--permission-mode dangerous`.
 
 `call --pure` is a separate, stronger completion boundary. It is currently
 supported on **Claude only**. Delegate sends the prompt verbatim on stdin, starts
@@ -317,8 +320,9 @@ profile environment, so the child CLI can still consult its own credentials or
 network according to that CLI's behavior, but Delegate does not submit a task
 prompt. Devin discovery uses `devin models list --format json`; if that command
 is unavailable or fails, Delegate retains a version-only partial record with a
-fixed warning. Like other account-scoped metadata probes, the Devin command may
-consult the harness's credentials or network even though it carries no task.
+fixed warning plus a scrubbed diagnostic. Like other account-scoped metadata
+probes, the Devin command may consult the harness's credentials or network even
+though it carries no task.
 
 Discovery caches are separated by resolved auth profile and stored under the
 user's `~/.delegate/cache/discovery/` directory. The normalized schema retains
