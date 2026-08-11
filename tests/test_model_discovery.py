@@ -928,20 +928,23 @@ class UnifiedDiscoveryProjectionTests(unittest.TestCase):
             stderr="",
             error=None,
         )
-        with mock.patch.object(
-            harness_discovery,
-            "run_metadata_probe",
-            side_effect=[
-                harness_discovery.ProbeResult(
-                    argv=("devin", "--version"),
-                    returncode=0,
-                    stdout="devin 3000.3.27\n",
-                    stderr="",
-                    error=None,
-                ),
-                completed,
-            ],
-        ) as run:
+        with (
+            mock.patch.object(harness_discovery.shutil, "which", return_value="/usr/bin/devin"),
+            mock.patch.object(
+                harness_discovery,
+                "run_metadata_probe",
+                side_effect=[
+                    harness_discovery.ProbeResult(
+                        argv=("devin", "--version"),
+                        returncode=0,
+                        stdout="devin 3000.3.27\n",
+                        stderr="",
+                        error=None,
+                    ),
+                    completed,
+                ],
+            ) as run,
+        ):
             payload = engine_models_payload(
                 self.config,
                 "devin",
