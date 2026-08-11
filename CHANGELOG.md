@@ -12,6 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The PyPI artifact handoff now uses the official Node 24 upload and download
   actions, removing the deprecation warnings emitted during the 0.29.0 publish.
 
+### Fixed
+
+- `workflow run --resume` now turns a completed workflow dry-run into live
+  execution under the same workflow ID. Simulated agent and budget events stay
+  in the journal for audit but never satisfy replay or consume live budget.
+
 ## [0.29.0] - 2026-08-11
 
 ### Added

@@ -153,6 +153,8 @@ class WorkflowState:
             seq = event.get("seq")
             if isinstance(seq, int):
                 self.sequence = max(self.sequence, seq)
+            if event.get("simulated") is True:
+                continue
             key = event.get("key")
             if not isinstance(key, str):
                 continue
@@ -770,10 +772,13 @@ class WorkflowDsl:
                 key=key,
                 scope=path,
                 dryRun=True,
+                simulated=True,
                 personaDigest=persona_resolution.digest if persona_resolution is not None else None,
                 personaSource=persona_resolution.source if persona_resolution is not None else None,
             )
-            self.state.append_event("agent_finished", key=key, scope=path, result=placeholder)
+            self.state.append_event(
+                "agent_finished", key=key, scope=path, result=placeholder, simulated=True
+            )
             return placeholder
         if already_claimed:
             spent = self.state.budget.spent()

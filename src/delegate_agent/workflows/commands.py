@@ -141,6 +141,7 @@ def emit_run(
                 previous_result_exists = True
             except FileNotFoundError:
                 pass
+            resume_from_dry_run = status.get("status") == "dry_run"
             gate_key = status.get("gateKey")
             if status.get("status") == "paused" and isinstance(gate_key, str):
                 registry.write_json(
@@ -157,7 +158,13 @@ def emit_run(
                     budget_total = budget_payload["total"]
             else:
                 budget_payload = status.get("budget")
-                spent = budget_payload.get("spent") if isinstance(budget_payload, dict) else 0
+                spent = (
+                    0
+                    if resume_from_dry_run
+                    else budget_payload.get("spent")
+                    if isinstance(budget_payload, dict)
+                    else 0
+                )
                 spent = spent if isinstance(spent, int) and spent >= 0 else 0
                 status["budget"] = {
                     "total": budget_total,
@@ -235,6 +242,11 @@ def emit_run(
                     "updatedAt": run_registry.utc_now_iso(),
                 }
             )
+            if resume_from_dry_run and isinstance(status.get("budget"), dict):
+                total = status["budget"].get("total")
+                status["budget"].update(
+                    {"spent": 0, "remaining": total if isinstance(total, int) else None}
+                )
             registry.write_status(root, status)
             with contextlib.suppress(FileNotFoundError):
                 result_path.unlink()

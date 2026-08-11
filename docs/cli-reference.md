@@ -533,7 +533,9 @@ delegate [--json] workflow save <script.py> --name NAME
   and UTF-8 `promptBytes`; Cursor/Kimi/OMP prompts over 102400 bytes add a warning
   before their argv transport limit can fail a real run.
 - `--resume` replays the journal, adopts matching child runs by workflow agent
-  key, and continues from missing work.
+  key, and continues from missing work. Resuming a completed `--dry-run` starts
+  its planned agents live under the same workflow ID; simulated journal events
+  remain visible for audit but are excluded from replay and live budget.
 - `wait` and `result` accept an explicit workflow ID or, when omitted, resolve
   the latest eligible workflow. JSON output for implicit selection includes the
   selected `wfId` and `resolutionKind: "latest"`.
