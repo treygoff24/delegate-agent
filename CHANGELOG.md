@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- The PyPI artifact handoff now uses the official Node 24 upload and download
+  actions, removing the deprecation warnings emitted during the 0.29.0 publish.
+
 ## [0.29.0] - 2026-08-11
 
 ### Added
@@ -981,6 +988,7 @@ Usage-audit fix wave: 82 sessions and 1,241 delegate invocations from one week o
 
 - Releases before 0.1.3 predate this changelog.
 
+[Unreleased]: https://github.com/treygoff24/delegate-agent/compare/v0.29.0...HEAD
 [0.29.0]: https://github.com/treygoff24/delegate-agent/compare/v0.28.0...v0.29.0
 [0.28.0]: https://github.com/treygoff24/delegate-agent/compare/v0.27.0...v0.28.0
 [0.27.0]: https://github.com/treygoff24/delegate-agent/compare/v0.26.0...v0.27.0
