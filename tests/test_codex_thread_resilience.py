@@ -180,7 +180,10 @@ raise SystemExit(1)
         self.assertIn("thread", payload["message"].lower())
         state = run_registry.load_run_state(root, run_id)
         self.assertEqual(state["failureReason"], "codex_thread_lost")
-        summary = run_registry.list_run_summaries(root, run_registry.load_index(root))[0]
+        summaries, _total, _scope_total = run_registry.list_run_summaries(
+            root, run_registry.load_index(root)
+        )
+        summary = summaries[0]
         self.assertEqual(summary["effectiveStatus"], "failed")
         self.assertEqual(summary["error"], "codex_thread_lost")
         self.assertIn("thread", summary["message"].lower())
@@ -229,6 +232,12 @@ raise SystemExit(1)
         snapshot = json.loads((run_path / "snapshot.json").read_text(encoding="utf-8"))
         self.assertNotIn(secret, snapshot["message"])
         self.assertNotIn(secret, snapshot["current"])
+        # Retained event surfaces are a raw diagnostic mirror: secret-shaped
+        # text stays verbatim (no event-text redaction).
+        events_text = (run_path / "events.jsonl").read_text(encoding="utf-8")
+        self.assertIn(secret, events_text)
+        recent_blob = json.dumps(snapshot.get("recentEvents") or [])
+        self.assertIn(secret, recent_blob)
         report = (run_path / "completion-report.md").read_text(encoding="utf-8")
         self.assertIn("usage_limit", report)
         self.assertIn("2026-07-22 01:00 UTC", report)

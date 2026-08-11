@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import codecs
 import contextlib
+import errno
 import io
 import json
 import math
@@ -54,6 +56,10 @@ DRAIN_JOIN_TIMEOUT_SEC = 5.0
 MILLISECONDS_PER_SECOND = 1000
 CALL_STDOUT_MAX_BYTES = 16 * 1024 * 1024
 CALL_STDERR_MAX_BYTES = 16 * 1024 * 1024
+TRACKED_STREAM_MAX_BYTES = 16 * 1024 * 1024
+STREAM_READ_CHUNK_BYTES = 64 * 1024
+TRACKED_PROCESS_POLL_SEC = 0.05
+TERMINAL_EXIT_GRACE_SEC = 1.0
 PROGRESS_INITIAL_DELAY_SEC = delegate_config.default_progress_initial_delay_sec()
 PROGRESS_HEARTBEAT_INTERVAL_SEC = delegate_config.default_progress_interval_sec()
 PROGRESS_INITIAL_DELAY_ENV = "DELEGATE_PROGRESS_INITIAL_DELAY_SEC"
@@ -192,6 +198,38 @@ def open_events_log(run_path: Path) -> TextIO:
 
 def append_event(handle: TextIO, event: JsonObject) -> None:
     handle.write(json.dumps(event, sort_keys=True) + "\n")
+
+
+def _stream_line_event_state(events_path: Path) -> tuple[int, bool]:
+    written = 0
+    try:
+        handle = events_path.open(encoding="utf-8")
+    except OSError:
+        return written, False
+    with handle:
+        for line in handle:
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict) or event.get("stream") != "stdout":
+                continue
+            if event.get("kind") == "stream.lines_truncated":
+                return min(written, harness_events.EVENT_LIMIT), True
+            if event.get("kind") == "stream.line":
+                written += 1
+                if written > harness_events.EVENT_LIMIT:
+                    return harness_events.EVENT_LIMIT, True
+    return min(written, harness_events.EVENT_LIMIT), False
+
+
+def _stream_line_event(stream: str, text: str) -> JsonObject:
+    bounded, truncated, original_chars = harness_events.bounded_event_text(text)
+    event: JsonObject = {"kind": "stream.line", "stream": stream, "text": bounded}
+    if truncated:
+        event["truncated"] = True
+        event["textChars"] = original_chars
+    return event
 
 
 def completion_report_path(run_id: str) -> str:
@@ -973,16 +1011,33 @@ def _drain_stream(
     byte_counter: ByteCounter,
     *,
     on_line: Callable[[str], None] | None,
+    max_bytes: int,
+    limit_signal: StreamLimitSignal,
+    stream: str,
 ) -> None:
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace") if on_line else None
     with log_path.open("ab") as log_handle:
+        captured_bytes = log_handle.tell()
         while True:
-            chunk = pipe.readline()
+            chunk = pipe.readline(STREAM_READ_CHUNK_BYTES)
             if not chunk:
                 break
-            byte_counter.total += len(chunk)
-            log_handle.write(chunk)
-            if on_line is not None:
-                on_line(chunk.decode("utf-8", errors="replace"))
+            remaining = max(max_bytes - captured_bytes, 0)
+            captured = chunk[:remaining]
+            if captured:
+                log_handle.write(captured)
+                captured_bytes += len(captured)
+                byte_counter.total += len(captured)
+                if on_line is not None and decoder is not None:
+                    decoded = decoder.decode(captured, final=False)
+                    if decoded:
+                        on_line(decoded)
+            if len(captured) < len(chunk):
+                limit_signal.trip(stream)
+        if on_line is not None and decoder is not None:
+            decoded = decoder.decode(b"", final=True)
+            if decoded:
+                on_line(decoded)
 
 
 def _join_drain_thread(thread: threading.Thread, pipe: BinaryIO | None) -> None:
@@ -1130,6 +1185,9 @@ class TrackedCaptureResult:
     mail_push_failure_reason: str | None = None
     error: str | None = None
     message: str | None = None
+    output_limit_stream: str | None = None
+    output_limit_bytes: int | None = None
+    stopped_after_completion: bool = False
 
 
 @dataclass(frozen=True)
@@ -1245,6 +1303,19 @@ class ByteCounter:
     total: int = 0
 
 
+@dataclass
+class StreamLimitSignal:
+    event: threading.Event = field(default_factory=threading.Event)
+    stream: str | None = None
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def trip(self, stream: str) -> None:
+        with self._lock:
+            if self.stream is None:
+                self.stream = stream
+            self.event.set()
+
+
 def _progress_interval_from_env(name: str, default: float) -> float:
     raw = os.environ.get(name)
     if raw is None:
@@ -1357,11 +1428,14 @@ def _launch_tracked_process(
     *,
     stdin_text: str | None,
     env_overrides: dict[str, str] | None = None,
+    drop_env: tuple[str, ...] = (),
     scratch_dir: Path | None = None,
 ) -> subprocess.Popen[bytes]:
     env = profiles.child_environment(
         overrides=_env_overrides_with_scratch(env_overrides, scratch_dir)
     )
+    for key in drop_env:
+        env.pop(key, None)
     return subprocess.Popen(  # nosec B603 - Delegate intentionally launches validated harness argv with shell=False.
         argv,
         cwd=cwd,
@@ -1375,10 +1449,13 @@ def _launch_tracked_process(
 
 def _runner_launch_error(argv: list[str], cwd: str, exc: OSError) -> RunnerLaunchError:
     binary = argv[0] if argv else "<empty argv>"
-    return RunnerLaunchError(
-        "child_launch_failed",
-        f"Failed to launch child command {binary!r} in {cwd}: {exc}",
-    )
+    message = f"Failed to launch child command {binary!r} in {cwd}: {exc}"
+    if exc.errno == errno.EPERM:
+        message += (
+            " Sandboxed parent shells can forbid launching this harness binary; "
+            "retry the launch from an unsandboxed shell."
+        )
+    return RunnerLaunchError("child_launch_failed", message)
 
 
 def _record_tracked_launch_failure(
@@ -1483,6 +1560,11 @@ def _capture_tracked_process(
     progress_dirty = False
     mail_push_failure_reason: str | None = None
     mail_push_nonce = _mail_push_failure_nonce(ctx)
+    terminal_signal = threading.Event()
+    limit_signal = StreamLimitSignal()
+    stdout_line_events_written, stdout_line_events_truncated = _stream_line_event_state(
+        files.run_path / EVENTS_JSONL
+    )
 
     def maybe_persist_running() -> None:
         nonlocal lines_since_persist, last_persist_at, progress_dirty
@@ -1508,18 +1590,35 @@ def _capture_tracked_process(
         )
     with open_events_log(files.run_path) as events_handle:
 
+        def append_stdout_line_event(line: str) -> bool:
+            nonlocal stdout_line_events_written, stdout_line_events_truncated
+            if stdout_line_events_written < harness_events.EVENT_LIMIT:
+                append_event(events_handle, _stream_line_event("stdout", line))
+                stdout_line_events_written += 1
+                return True
+            if not stdout_line_events_truncated:
+                append_event(
+                    events_handle,
+                    {
+                        "kind": "stream.lines_truncated",
+                        "stream": "stdout",
+                        "limit": harness_events.EVENT_LIMIT,
+                    },
+                )
+                stdout_line_events_truncated = True
+            return False
+
         def handle_stdout_line(chunk_text: str) -> None:
             nonlocal line_buffer, lines_since_persist, last_persist_at, progress_dirty
             line_buffer += chunk_text
             while "\n" in line_buffer:
                 line, line_buffer = line_buffer.split("\n", 1)
                 accumulator.ingest_line(line)
+                if accumulator.terminal_status is not None:
+                    terminal_signal.set()
                 progress_dirty = True
-                append_event(
-                    events_handle,
-                    {"kind": "stream.line", "stream": "stdout", "text": line[:500]},
-                )
-                lines_since_persist += 1
+                if append_stdout_line_event(line):
+                    lines_since_persist += 1
                 elapsed = time.monotonic() - last_persist_at
                 if (
                     lines_since_persist >= PROGRESS_PERSIST_LINE_INTERVAL
@@ -1540,13 +1639,23 @@ def _capture_tracked_process(
         stdout_thread = threading.Thread(
             target=_drain_stream,
             args=(process.stdout, files.stdout_log, stdout_bytes_counter),
-            kwargs={"on_line": handle_stdout_line},
+            kwargs={
+                "on_line": handle_stdout_line,
+                "max_bytes": TRACKED_STREAM_MAX_BYTES,
+                "limit_signal": limit_signal,
+                "stream": "stdout",
+            },
             daemon=True,
         )
         stderr_thread = threading.Thread(
             target=_drain_stream,
             args=(process.stderr, files.stderr_log, stderr_bytes_counter),
-            kwargs={"on_line": handle_stderr_line},
+            kwargs={
+                "on_line": handle_stderr_line,
+                "max_bytes": TRACKED_STREAM_MAX_BYTES,
+                "limit_signal": limit_signal,
+                "stream": "stderr",
+            },
             daemon=True,
         )
         stdout_thread.start()
@@ -1562,77 +1671,97 @@ def _capture_tracked_process(
             stdin_thread.start()
 
         timed_out = False
-
-        def wait_for_child(timeout: float | None = None) -> int:
-            nonlocal timed_out
+        output_limited = False
+        stopped_after_completion = False
+        emit_progress = progress_stderr is not None
+        if emit_progress:
             try:
-                return process.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                _terminate_call_process(process)
-                timed_out = True
-                return 1
-
-        if progress_stderr is not None:
-            emit_progress = True
-            try:
+                assert progress_stderr is not None
                 _emit_progress_started(ctx, progress_stderr)
             except OSError:
                 emit_progress = False
-            initial_delay = _progress_interval_from_env(
-                PROGRESS_INITIAL_DELAY_ENV,
-                progress_initial_delay_sec,
-            )
-            interval = _progress_interval_from_env(
-                PROGRESS_INTERVAL_ENV,
-                progress_interval_sec,
-            )
-            next_progress_at = time.monotonic() + initial_delay
-            while True:
-                if not emit_progress:
-                    exit_code = wait_for_child(
-                        None if deadline is None else max(deadline - time.monotonic(), 0)
-                    )
-                    break
-                timeout = max(next_progress_at - time.monotonic(), 0.01)
-                if deadline is not None:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
+        initial_delay = _progress_interval_from_env(
+            PROGRESS_INITIAL_DELAY_ENV,
+            progress_initial_delay_sec,
+        )
+        interval = _progress_interval_from_env(
+            PROGRESS_INTERVAL_ENV,
+            progress_interval_sec,
+        )
+        next_progress_at = time.monotonic() + initial_delay
+        terminal_seen_at: float | None = None
+        while True:
+            now = time.monotonic()
+            if limit_signal.event.is_set():
+                _terminate_call_process(process)
+                output_limited = True
+                exit_code = 1
+                break
+            if terminal_signal.is_set():
+                terminal_seen_at = terminal_seen_at or now
+                if now - terminal_seen_at >= TERMINAL_EXIT_GRACE_SEC:
+                    if process.poll() is None:
                         _terminate_call_process(process)
-                        timed_out = True
-                        exit_code = 1
-                        break
-                    timeout = min(timeout, remaining)
+                        stopped_after_completion = True
+                    exit_code = 0 if accumulator.terminal_status == "succeeded" else 1
+                    break
+            if deadline is not None and now >= deadline and not terminal_signal.is_set():
+                _terminate_call_process(process)
+                timed_out = True
+                exit_code = 1
+                break
+            return_code = process.poll()
+            if return_code is not None:
+                exit_code = return_code
+                break
+            if emit_progress and now >= next_progress_at:
+                assert progress_stderr is not None
                 try:
-                    exit_code = process.wait(timeout=timeout)
-                    break
-                except subprocess.TimeoutExpired:
-                    if deadline is not None and time.monotonic() >= deadline:
-                        _terminate_call_process(process)
-                        timed_out = True
-                        exit_code = 1
-                        break
-                    try:
-                        _emit_progress_heartbeat(
-                            ctx,
-                            accumulator,
-                            started=started,
-                            stderr=progress_stderr,
-                        )
-                    except OSError:
-                        emit_progress = False
+                    _emit_progress_heartbeat(
+                        ctx,
+                        accumulator,
+                        started=started,
+                        stderr=progress_stderr,
+                    )
+                except OSError:
+                    emit_progress = False
+                finally:
                     next_progress_at = time.monotonic() + interval
-        else:
-            exit_code = wait_for_child(
-                None if deadline is None else max(deadline - time.monotonic(), 0)
-            )
+            wait_for = TRACKED_PROCESS_POLL_SEC
+            if deadline is not None:
+                wait_for = min(wait_for, max(deadline - now, 0.01))
+            if terminal_seen_at is not None:
+                wait_for = min(
+                    wait_for,
+                    max(TERMINAL_EXIT_GRACE_SEC - (now - terminal_seen_at), 0.01),
+                )
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=wait_for)
         _cleanup_tracked_process_streams(
             process,
             stdin_thread=stdin_thread,
             stdout_thread=stdout_thread,
             stderr_thread=stderr_thread,
         )
-        if line_buffer.strip():
+        if limit_signal.event.is_set():
+            output_limited = True
+            exit_code = 1
+        if not output_limited and line_buffer.strip():
+            # Final unterminated stdout line: ingest and mirror into events.jsonl
+            # so the raw event log matches what the accumulator saw.
             accumulator.ingest_line(line_buffer)
+            append_stdout_line_event(line_buffer)
+        error: str | None = None
+        message: str | None = None
+        if timed_out:
+            error = "call_timeout"
+            message = "Child command exceeded the configured timeout."
+        elif output_limited:
+            error = "output_limit_exceeded"
+            message = (
+                f"Child {limit_signal.stream or 'output'} exceeded the tracked output limit "
+                f"of {TRACKED_STREAM_MAX_BYTES} bytes."
+            )
     return TrackedCaptureResult(
         accumulator=accumulator,
         exit_code=exit_code,
@@ -1643,8 +1772,11 @@ def _capture_tracked_process(
         pid=process.pid,
         pgid=pgid,
         mail_push_failure_reason=mail_push_failure_reason,
-        error="call_timeout" if timed_out else None,
-        message="Child command exceeded the configured timeout." if timed_out else None,
+        error=error,
+        message=message,
+        output_limit_stream=limit_signal.stream if output_limited else None,
+        output_limit_bytes=TRACKED_STREAM_MAX_BYTES if output_limited else None,
+        stopped_after_completion=stopped_after_completion,
     )
 
 
@@ -2072,10 +2204,15 @@ def _accumulator_failure_signal_text(accumulator: harness_events.StreamAccumulat
     # Redacted here rather than at each call site: this is the only classifier
     # input that is not already scrubbed, and the classified message reaches
     # state.json, the snapshot, and the completion report.
+    events = list(accumulator.events)
+    for kind in ("error", "run.completed"):
+        latest = accumulator.events.last_by_kind.get(kind)
+        if latest is not None and latest not in events:
+            events.append(latest)
     return redaction.redact_string(
         "\n".join(
             event.message
-            for event in accumulator.events
+            for event in events
             if event.message
             and (
                 event.kind == "error"
@@ -2284,6 +2421,9 @@ def _run_single_tracked_attempt(
                 cwd,
                 stdin_text=stdin_text,
                 env_overrides=env_overrides,
+                drop_env=(
+                    ("DELEGATE_CONFIG",) if env_overrides is ctx.fallback_env_overrides else ()
+                ),
                 scratch_dir=scratch_dir,
             )
         except OSError as exc:
@@ -2329,7 +2469,8 @@ def _merge_tracked_attempt_captures(
         *prior_capture.accumulator.assistant_chunks,
         *current_capture.accumulator.assistant_chunks,
     ]
-    accumulator.events = [*prior_capture.accumulator.events, *current_capture.accumulator.events]
+    accumulator.events.extend_buffer(prior_capture.accumulator.events)
+    accumulator.events.extend_buffer(current_capture.accumulator.events)
     accumulator.completion_text = (
         current_capture.accumulator.completion_text or prior_capture.accumulator.completion_text
     )
@@ -2897,6 +3038,13 @@ def _execute_tracked(
                 _append_unique(final_warnings, warning)
     if final_warnings:
         final_extra["warnings"] = final_warnings
+    if capture.output_limit_stream is not None:
+        final_extra["outputLimit"] = {
+            "stream": capture.output_limit_stream,
+            "bytes": capture.output_limit_bytes,
+        }
+    if capture.stopped_after_completion:
+        final_extra["stoppedAfterCompletion"] = True
     if capture.error is not None:
         final_extra.update(
             error=capture.error,

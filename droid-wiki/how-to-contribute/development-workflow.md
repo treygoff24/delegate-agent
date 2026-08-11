@@ -7,7 +7,7 @@ Use the repo-local CLI while developing. The installed `delegate` command may po
 ```bash
 python3 bin/delegate.py --json describe
 python3 bin/delegate.py --json dry-run codex safe "Review only."
-python3 -m unittest discover -s tests
+python3 -m unittest discover -s tests -t .
 ```
 
 For deterministic config output:
@@ -22,7 +22,7 @@ HOME="$clean_home" DELEGATE_CONFIG="$PWD/config.example.json" python3 bin/delega
 ```bash
 python3 -m compileall -q src tests bin
 git diff --check
-python3 -m unittest discover -s tests
+python3 -m unittest discover -s tests -t .
 ruff check .
 ruff format --check .
 ```

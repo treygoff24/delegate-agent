@@ -671,7 +671,11 @@ Typical dry-run JSON fields:
 
 `isolation` is a human-readable summary combining `effectiveIsolation` and `isolationLifecycle` (e.g. `"worktree temporary"`, `"worktree persistent"`, `"none"`). Depend on the structured fields rather than parsing it. A push dry-run also includes `mailPushAdapter` with the audit status and the internal hook command; unverified harnesses include the pull-degradation warning.
 
-When a profile is active, dry-run and completion payloads add `authProfile` (the resolved profile name) and, when a Codex fallback profile is configured, `fallbackProfile`. Dry-run also adds `profileEnv` (the injected env map, with values redacted). These keys are omitted when no profile is active.
+When a profile is active, dry-run and completion payloads add `authProfile`
+(the resolved profile name). Codex dry-runs also always add `fallbackProfile`
+(the configured profile name or `null`); completion payloads add it only when
+a fallback is configured. Dry-run also adds `profileEnv` (the injected env map,
+with values redacted). Profile metadata is omitted when no profile is active.
 
 For Cursor, Claude, Grok, OpenCode, Pi, Oh My Pi, Droid, and Kimi safe mode, an explicit `--isolation none`
 is normalized to `auto` with a warning because those safe contracts depend on
@@ -1057,8 +1061,16 @@ creating a Run or writing a prompt record.
 `delegate runs` defaults to recent runs. `--active` preserves the legacy active view and includes both live `running` runs and `stale` runs. Use `--running` for only live tracked processes and `--stale` for runs recorded as running whose PID is missing or dead. `--active`, `--running`, `--stale`, and `--recent` are mutually exclusive. `--group NAME` filters by launch group and the runs table shows a `group` column when any visible run has one.
 `--structural` omits content-bearing run fields and emits only identity, lifecycle, model,
 timestamp, group/mode, and `initiatorRoot` metadata. It is intended for local status collectors.
+JSON output (`delegate.runs.v1`) includes `total` (post-filter match count before `--limit`)
+and `truncated` (`true` when `total` exceeds the returned `runs` length). Text mode appends
+`showing N of M runs (raise --limit to see more)` when truncated. A zero-row result with
+`--group` or `--harness` adds a `warnings` entry (and a matching text `warning:` line): when
+the scope filters match Runs that `--active`/`--running`/`--stale` then excluded, it names
+the status flag to drop; otherwise it notes the Registry is workspace-scoped and `--cwd PATH`
+targets another workspace's Registry — it does not claim the filter matches elsewhere.
 `delegate ps` is the shorter first-class form of `delegate runs --active` and
-accepts the same harness, group, limit, and structural selectors.
+accepts the same harness, group, limit, and structural selectors (including `total`,
+`truncated`, and the empty-filter workspace-scope warning).
 
 `delegate runs prune` removes old terminal Run records from the workspace Registry so they stop accumulating forever. Only runs whose effective status is terminal (`succeeded`, `failed`, `cancelled`, or `stale` from a dead child) and whose last Registry activity is older than the threshold (default 30 days; override with `--older-than DAYS`) are eligible. Effectively running runs are always skipped, and persistent-worktree runs are skipped unless their worktree is recorded as removed or missing — pruning the record of a live worktree would orphan it from `worktree list`/`show`/`remove`. Pruning deletes the per-Run directory (Snapshot, Manifest, logs, events, Completion Report) and the retained raw-log archive; worktree paths on disk are never touched. `--dry-run` reports what would be removed without changing anything. JSON output uses schema `delegate.runs-prune.v1` with `planned`, `removed`, `skipped` (each entry carries a `reason`), and `errors` sections.
 
@@ -1142,6 +1154,28 @@ Work-mode attempts are never replayed after tool activity or a workspace change.
 `codexThreadFallback` and an event/warning disclose when that fallback engaged.
 
 Run-output JSON uses schema `delegate.run-output.v1` and returns selected completion report, stdout, and/or stderr content. By default, secret-like strings are redacted unless `--no-redact` is supplied. Tracked runs finish in one of the terminal statuses `succeeded`, `failed`, or `cancelled`; explicit harness cancellation/error terminal events override an exit-zero child status.
+
+Tracked stdout and stderr logs are capped independently at 16 MiB. Exceeding a
+cap terminates the child and records `output_limit_exceeded` plus an
+`outputLimit` object naming the stream and byte limit. After an explicit
+terminal-success event, Delegate gives the harness one second to exit and then
+stops a lingering process; successful envelopes disclose this as
+`stoppedAfterCompletion: true`. Harnesses must emit that terminal event only
+after flushing their final payload.
+
+Each tracked Run also keeps `events.jsonl`, an append-only raw diagnostic mirror
+of child stdout lines as `{"kind":"stream.line","stream":"stdout","text":...}`
+records (including a final unterminated line when the child exits mid-line).
+The mirror retains at most 500 stdout-line records, followed by one
+`stream.lines_truncated` marker when additional lines are omitted. Normalized
+progress events also appear in Snapshot `recentEvents`; it retains the first
+100 and latest 400 events while reporting the full `eventsTotal`. Both surfaces
+bound child-controlled event strings to 500 characters, including the `…`
+sentinel when clipped. Truncated `message`/raw-line text adds `textChars`; other
+normalized fields add `<field>Chars` (for example `targetChars`). Short fields
+omit truncation metadata.
+Retained event text is not redacted — treat `events.jsonl` and `recentEvents`
+as sensitive diagnostic artifacts.
 
 Safe runs and read-only call runs that exit successfully with `resultQuality=empty`
 retry once with the original prompt plus a plain-text final-answer instruction.

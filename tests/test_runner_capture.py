@@ -412,6 +412,99 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertIsInstance(state.get("pid"), int)
             self.assertEqual(state.get("pgid"), state.get("pid"))
 
+    def test_tracked_events_jsonl_truncation_metadata_and_final_line(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        script = Path(temp.name) / "child.py"
+        limit = self.runner.harness_events.EVENT_TEXT_LIMIT
+        long_body = "L" * (limit + 42)
+        secret = "sk-" + "abcdef1234567890"
+        script.write_text(
+            "import sys\n"
+            f"print('short-ok')\n"
+            f"print({long_body!r})\n"
+            f"print('token {secret} visible')\n"
+            "sys.stdout.write('unterminated-final')\n"
+            "sys.stdout.flush()\n",
+            encoding="utf-8",
+        )
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="cursor")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="cursor",
+                engine="cursor",
+                mode="safe",
+                model="model-id",
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-05-20T21:42:33Z",
+            )
+            code, payload = self.runner.execute_tracked(
+                [sys.executable, str(script)],
+                workspace,
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+            self.assertEqual(code, 0, payload)
+            run_path = self.registry.run_directory(root, run_id)
+            events = [
+                json.loads(line)
+                for line in (run_path / "events.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            stream_lines = [event for event in events if event.get("kind") == "stream.line"]
+            texts = [event.get("text") for event in stream_lines]
+            self.assertIn("short-ok", texts)
+            self.assertIn("unterminated-final", texts)
+            short_event = next(event for event in stream_lines if event.get("text") == "short-ok")
+            self.assertNotIn("truncated", short_event)
+            self.assertNotIn("textChars", short_event)
+            long_event = next(
+                event
+                for event in stream_lines
+                if isinstance(event.get("text"), str) and event["text"].startswith("L")
+            )
+            self.assertTrue(long_event["truncated"])
+            self.assertEqual(long_event["textChars"], len(long_body))
+            self.assertEqual(long_event["text"], long_body[: limit - 1] + "…")
+            secret_event = next(event for event in stream_lines if secret in str(event.get("text")))
+            self.assertIn(secret, secret_event["text"])
+
+            snapshot = json.loads((run_path / "snapshot.json").read_text(encoding="utf-8"))
+            recent = snapshot.get("recentEvents") or []
+            short_recent = next(
+                event
+                for event in recent
+                if event.get("kind") == "text" and event.get("message") == "short-ok"
+            )
+            self.assertNotIn("truncated", short_recent)
+            self.assertNotIn("textChars", short_recent)
+            long_recent = next(
+                event
+                for event in recent
+                if event.get("kind") == "text"
+                and isinstance(event.get("message"), str)
+                and event["message"].startswith("L")
+            )
+            self.assertTrue(long_recent["truncated"])
+            self.assertEqual(long_recent["textChars"], len(long_body))
+            self.assertEqual(long_recent["message"], long_body[: limit - 1] + "…")
+            secret_recent = next(
+                event
+                for event in recent
+                if event.get("kind") == "text" and secret in str(event.get("message"))
+            )
+            self.assertIn(secret, secret_recent["message"])
+            self.assertTrue(any(event.get("message") == "unterminated-final" for event in recent))
+
     def test_housekeeping_completion_report_is_classified_from_disk(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
@@ -1955,7 +2048,12 @@ class RunnerCaptureTests(unittest.TestCase):
             thread = threading.Thread(
                 target=self.runner._drain_stream,
                 args=(read_fd, log_path, byte_counter),
-                kwargs={"on_line": None},
+                kwargs={
+                    "on_line": None,
+                    "max_bytes": self.runner.TRACKED_STREAM_MAX_BYTES,
+                    "limit_signal": self.runner.StreamLimitSignal(),
+                    "stream": "stdout",
+                },
                 daemon=True,
             )
             thread.start()
@@ -1963,6 +2061,26 @@ class RunnerCaptureTests(unittest.TestCase):
             read_fd.close()
             self.assertFalse(thread.is_alive())
             self.assertEqual(byte_counter.total, len(b"line\n"))
+
+    def test_drain_stream_preserves_utf8_across_read_chunks(self):
+        payload = b"x" * (self.runner.STREAM_READ_CHUNK_BYTES - 1) + "😀\n".encode()
+        decoded: list[str] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "stdout.log"
+            counter = self.runner.ByteCounter()
+            self.runner._drain_stream(
+                io.BytesIO(payload),
+                log_path,
+                counter,
+                on_line=decoded.append,
+                max_bytes=self.runner.TRACKED_STREAM_MAX_BYTES,
+                limit_signal=self.runner.StreamLimitSignal(),
+                stream="stdout",
+            )
+
+            self.assertEqual(log_path.read_bytes(), payload)
+        self.assertEqual("".join(decoded), payload.decode())
+        self.assertNotIn("�", "".join(decoded))
 
     def test_tracked_run_batches_progress_persistence(self):
         temp = tempfile.TemporaryDirectory()
@@ -3147,7 +3265,9 @@ class RunnerCaptureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as workspace:
             script = Path(workspace) / "codex"
             script.write_text(
-                "#!/usr/bin/env bash\nprintf 'empty-attempt:%s\\n' \"$*\" >&2\n",
+                "#!/usr/bin/env bash\n"
+                "for _ in $(seq 1 600); do printf 'noise\\n'; done\n"
+                "printf 'empty-attempt:%s\\n' \"$*\" >&2\n",
                 encoding="utf-8",
             )
             script.chmod(0o755)
@@ -3183,6 +3303,19 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertIn(self.runner.EMPTY_RETRY_WARNING, payload["warnings"])
             stderr_log = (root / "runs" / run_id / "stderr.log").read_text(encoding="utf-8")
             self.assertEqual(stderr_log.count("empty-attempt:"), 2)
+            events = [
+                json.loads(line)
+                for line in (root / "runs" / run_id / "events.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            self.assertEqual(
+                sum(event.get("kind") == "stream.line" for event in events),
+                self.runner.harness_events.EVENT_LIMIT,
+            )
+            self.assertEqual(
+                sum(event.get("kind") == "stream.lines_truncated" for event in events), 1
+            )
 
     def test_empty_retry_uses_retry_duration_as_total(self):
         with tempfile.TemporaryDirectory() as workspace:

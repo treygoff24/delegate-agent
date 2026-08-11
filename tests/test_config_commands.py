@@ -2,6 +2,7 @@ import importlib
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -230,6 +231,11 @@ class LauncherShimTests(unittest.TestCase):
                 ["models", "--live", "codex"],
                 # A refresh positional after a flag must still be caught, not just $1.
                 ["capabilities", "--verbose", "refresh"],
+                # workflow mutations stay gated; only the read-only actions
+                # (check/status/watch/events/result/wait/list) pass through.
+                ["workflow", "run", "scripts/hello.py"],
+                ["workflow", "run", "--resume", "wf_0123abcdef45"],
+                ["workflow", "resume"],
                 # Bare `list` is not a documented top-level subcommand (the Python
                 # parser silently aliases it to `runs`); the shim no longer special-
                 # cases it, so it falls through to the conservative default.
@@ -243,7 +249,7 @@ class LauncherShimTests(unittest.TestCase):
                     self.assertIn("refusing to run a launch or mutation command", result.stderr)
                     self.assertIn("config sync-profiles", result.stderr)
                     self.assertIn("env -u AI_PROFILE", result.stderr)
-                    self.assertIn("DELEGATE_CONFIG=/path/to/config.json", result.stderr)
+                    self.assertNotIn("DELEGATE_CONFIG=/path/to/config.json", result.stderr)
 
     def test_missing_profile_read_only_commands_pass_with_warning(self):
         with tempfile.TemporaryDirectory() as home:
@@ -266,6 +272,18 @@ class LauncherShimTests(unittest.TestCase):
                 ["capabilities", "--help", "refresh"],
                 ["worktree", "show", "cursor-1"],
                 ["worktree", "list"],
+                ["workflow", "check", "scripts/hello.py"],
+                ["workflow", "status", "wf_0123abcdef45"],
+                ["workflow", "watch", "wf_0123abcdef45"],
+                ["workflow", "events", "wf_0123abcdef45"],
+                ["workflow", "result", "wf_0123abcdef45"],
+                ["workflow", "wait", "--timeout", "60"],
+                ["workflow", "list"],
+                # --json may sit between `workflow` and the action (the parser
+                # consumes it); globals may precede `workflow`; trailing
+                # flags/paths never affect classification.
+                ["workflow", "--json", "check", "scripts/hello.py"],
+                ["--json", "workflow", "result", "wf_0123abcdef45", "--field", "summary"],
                 ["cursor", "--help"],
                 ["cursor", "safe", "--help"],
                 ["droid", "opus", "safe", "-h"],
@@ -280,6 +298,34 @@ class LauncherShimTests(unittest.TestCase):
                     self.assertIsNone(payload["delegateConfig"])
                     self.assertIn("continuing because", result.stderr)
                     self.assertIn("read-only", result.stderr)
+
+    def test_workflow_readonly_actions_match_profile_guard(self):
+        # Drift guard: the shim's workflow allow-list must equal
+        # profile_guard.READ_ONLY_WORKFLOW_ACTIONS, or an unprofiled shell and
+        # a direct Python invocation would disagree about what passes through.
+        from delegate_agent import profile_guard
+
+        lines = (ROOT / "bin" / "delegate-profile-shim").read_text(encoding="utf-8").splitlines()
+        arms = [i for i, line in enumerate(lines) if line.strip() == "workflow)"]
+        self.assertTrue(arms, "workflow) case arm missing from bin/delegate-profile-shim")
+        arm_tail = lines[arms[0] + 1 : arms[0] + 40]
+        case_offsets = [i for i, line in enumerate(arm_tail) if 'case "${1:-}" in' in line]
+        self.assertTrue(
+            case_offsets,
+            'workflow arm case "${1:-}" in missing from bin/delegate-profile-shim',
+        )
+        after_case = "\n".join(arm_tail[case_offsets[0] + 1 :])
+        match = re.search(r"^\s+([a-z0-9_|-]+)\)\s*$", after_case, re.M)
+        self.assertIsNotNone(
+            match, "workflow action allow-list line not found in bin/delegate-profile-shim"
+        )
+        shim_actions = frozenset(match.group(1).split("|"))
+        self.assertEqual(
+            profile_guard.READ_ONLY_WORKFLOW_ACTIONS,
+            shim_actions,
+            "bin/delegate-profile-shim workflow allow-list drifted from "
+            "profile_guard.READ_ONLY_WORKFLOW_ACTIONS; update both together",
+        )
 
     def test_help_inside_launch_prompt_cannot_bypass_missing_profile_guard(self):
         with tempfile.TemporaryDirectory() as home:
@@ -347,6 +393,38 @@ class LauncherShimTests(unittest.TestCase):
         self.assertEqual(payload["delegateConfig"], str(config_path))
         self.assertEqual(result.stderr, "")
 
+    def test_existing_explicit_delegate_config_survives_profile_validation(self):
+        with tempfile.TemporaryDirectory() as home:
+            root = Path(home) / ".delegate"
+            root.mkdir()
+            profile_config = root / "config.work.json"
+            profile_config.write_text("{}\n", encoding="utf-8")
+            explicit_config = root / "explicit.json"
+            explicit_config.write_text("{}\n", encoding="utf-8")
+            probe = self.write_probe(Path(home))
+            env = self.shim_env(home, probe, "work")
+            env["DELEGATE_CONFIG"] = str(explicit_config)
+            result = self.run_shim(["profiles"], env=env)
+            payload = json.loads(result.stdout)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(payload["delegateConfig"], str(explicit_config))
+        self.assertEqual(result.stderr, "")
+
+    def test_explicit_delegate_config_does_not_bypass_missing_profile_overlay(self):
+        with tempfile.TemporaryDirectory() as home:
+            explicit_config = Path(home) / "explicit.json"
+            explicit_config.write_text("{}\n", encoding="utf-8")
+            probe = self.write_probe(Path(home))
+            env = self.shim_env(home, probe, "work")
+            env["DELEGATE_CONFIG"] = str(explicit_config)
+            result = self.run_shim(["codex", "safe", "hello"], env=env)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("AI_PROFILE=work", result.stderr)
+        self.assertIn("config.work.json", result.stderr)
+
 
 class ProfileGuardCliTests(unittest.TestCase):
     """Python-CLI-layer mirror of LauncherShimTests: the same fail-closed
@@ -379,6 +457,19 @@ class ProfileGuardCliTests(unittest.TestCase):
         self.assertIn("refusing to run a launch or mutation command", stderr)
         self.assertIn("config sync-profiles", stderr)
         self.assertIn("env -u AI_PROFILE", stderr)
+
+    def test_explicit_delegate_config_does_not_bypass_python_guard(self):
+        with tempfile.TemporaryDirectory() as home:
+            explicit_config = Path(home) / "explicit.json"
+            explicit_config.write_text("{}\n", encoding="utf-8")
+            env = self.base_env(home, profile="work")
+            env["DELEGATE_CONFIG"] = str(explicit_config)
+            code, stdout, stderr = self.run_main(["codex", "safe", "hello"], env=env)
+
+        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        self.assertEqual(stdout, "")
+        self.assertIn("AI_PROFILE=work", stderr)
+        self.assertIn("config.work.json", stderr)
 
     def test_guard_blocks_worktree_remove_for_personal_profile(self):
         with tempfile.TemporaryDirectory() as home:
@@ -484,12 +575,11 @@ class ProfileGuardCliTests(unittest.TestCase):
         self.assertNotIn("refusing to run a launch or mutation command", show_stderr)
         self.assertIn("continuing because 'worktree' is read-only", show_stderr)
 
-    def test_guard_does_not_refire_when_delegate_config_already_set(self):
-        # Mirrors shim precedence: once DELEGATE_CONFIG is exported (by the
-        # shim, or set directly), the Python-layer guard must not re-fire --
-        # it only cares that some config was explicitly selected, matching
-        # "the shim path must keep working unchanged" from the design brief.
+    def test_explicit_delegate_config_runs_after_profile_overlay_validation(self):
         with tempfile.TemporaryDirectory() as home:
+            profile_root = Path(home) / ".delegate"
+            profile_root.mkdir()
+            (profile_root / "config.work.json").write_text("{}\n", encoding="utf-8")
             config_path = Path(home) / "custom.json"
             config_path.write_text("{}\n", encoding="utf-8")
             env = {
@@ -500,8 +590,6 @@ class ProfileGuardCliTests(unittest.TestCase):
             }
             _code, stdout, stderr = self.run_main(["dry-run", "codex", "safe", "hello"], env=env)
 
-        # No profile_config_missing failure and no guard warning: DELEGATE_CONFIG
-        # being set short-circuits the guard before it inspects AI_PROFILE at all.
         self.assertNotIn("profile_config_missing", stdout)
         self.assertNotIn("AI_PROFILE", stderr)
         self.assertNotIn("is not a recognized profile", stderr)

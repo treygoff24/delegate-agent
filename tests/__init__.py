@@ -41,6 +41,24 @@ if _SRC not in sys.path:
 
 os.environ.pop("AI_PROFILE", None)
 os.environ.pop("DELEGATE_CONFIG", None)
+# Initiator-root provenance reads these from os.environ; a suite run inside a
+# Claude Code or Codex session would otherwise make every initiator resolution
+# ambiguous (two native keys present -> None) and fail provenance tests.
+os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
+os.environ.pop("CODEX_THREAD_ID", None)
+os.environ.pop("DELEGATE_INITIATOR_ROOT", None)
+# Mail identity binding reads DELEGATE_RUN_ID/DELEGATE_MAIL_SELF/DELEGATE_SOURCE_ROOT
+# from ambient env (mail_core.py); a suite run inside a live delegate lane would
+# otherwise bind to the outer run and fail with unknown_sender/conflicting_cwd.
+# WORKSPACE_ROOT is treated as authoritative in child-env derivation (cli.py) and
+# DELEGATE_PROFILE is read by config resolution (config.py). Tests that need these
+# set them explicitly via mock.patch.dict.
+os.environ.pop("DELEGATE_RUN_ID", None)
+os.environ.pop("DELEGATE_MAIL_SELF", None)
+os.environ.pop("DELEGATE_SOURCE_ROOT", None)
+os.environ.pop("DELEGATE_EXECUTION_ROOT", None)
+os.environ.pop("WORKSPACE_ROOT", None)
+os.environ.pop("DELEGATE_PROFILE", None)
 
 _TEST_HOME = tempfile.mkdtemp(prefix="delegate-tests-home-")
 os.environ["HOME"] = _TEST_HOME

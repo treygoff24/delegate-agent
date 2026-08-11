@@ -283,10 +283,11 @@ def list_run_summaries(
     harness: str | None = None,
     group: str | None = None,
     limit: int = DEFAULT_RUNS_LIMIT,
-) -> list[JsonObject]:
+) -> tuple[list[JsonObject], int, int]:
     if limit < 1:
         raise ValueError("limit must be at least 1")
     summaries: list[JsonObject] = []
+    scope_total = 0
     for run_id, entry in run_registry.index_run_entries(index):
         entry_harness = entry.get("harness")
         if harness is not None and entry_harness != harness:
@@ -294,6 +295,7 @@ def list_run_summaries(
         entry_group = entry.get("group")
         if group is not None and entry_group != group:
             continue
+        scope_total += 1
         summary = build_run_summary(registry_root, run_id, entry)
         status = summary.get("status")
         if active and status not in (STATUS_RUNNING, STATUS_STALE):
@@ -304,7 +306,8 @@ def list_run_summaries(
             continue
         summaries.append(summary)
     summaries.sort(key=lambda item: item.get("activityAt", ""), reverse=True)
-    return summaries[:limit]
+    total = len(summaries)
+    return summaries[:limit], total, scope_total
 
 
 # Deferred to the bottom to break the run_registry<->run_status facade cycle:

@@ -3141,10 +3141,16 @@ def _build_request_for_workspace(
     if frame_prompt and engine in ARGV_PROMPT_TRANSPORT_ENGINES:
         prompt_bytes = len(prompt.encode("utf-8"))
         if prompt_bytes > ARGV_PROMPT_GUARD_BYTES:
+            # Complement of ARGV_PROMPT_TRANSPORT_ENGINES (source of truth).
+            file_stdin_engines = ", ".join(
+                e for e in KNOWN_ENGINES if e not in ARGV_PROMPT_TRANSPORT_ENGINES
+            )
             raise DelegateError(
                 "prompt_too_large",
                 f"The fully framed prompt is {prompt_bytes} UTF-8 bytes, exceeding the "
-                f"{ARGV_PROMPT_GUARD_BYTES}-byte argv transport limit for {engine}.",
+                f"{ARGV_PROMPT_GUARD_BYTES}-byte argv transport limit for {engine}. "
+                "Shorten the prompt, or use an engine whose prompt rides a file/stdin "
+                f"transport ({file_stdin_engines}) instead of argv.",
             )
     workspace_warning = wsl.drivefs_workspace_warning(resolved.path)
     if workspace_warning is not None:
@@ -3269,6 +3275,9 @@ def _apply_profile_resolution(
 ) -> Request:
     env_overrides = dict(request.env_overrides or {})
     env_overrides.update(resolution.env)
+    explicit_delegate_config = os.environ.get(delegate_config.CONFIG_ENV)
+    if explicit_delegate_config and delegate_config.CONFIG_ENV in resolution.env:
+        env_overrides[delegate_config.CONFIG_ENV] = explicit_delegate_config
     if request.persona_transport == "agent-config" and request.persona_env_overrides:
         # Reassert the merged persona config after profile env expansion. This
         # preserves the profile's effective config while preventing a later

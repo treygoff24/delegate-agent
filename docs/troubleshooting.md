@@ -239,11 +239,10 @@ Fix the install:
 env -u AI_PROFILE delegate config sync-profiles
 ```
 
-Temporary bypasses:
+Temporary bypass:
 
 ```bash
 env -u AI_PROFILE delegate profiles
-DELEGATE_CONFIG=/path/to/config.json delegate profiles
 ```
 
 ## WSL path or Git warnings
@@ -415,6 +414,26 @@ with `--tail` and `--max-chars`, may print very large output, and includes
 `rawOutputBytes` in JSON metadata so callers can see how much raw output was
 returned.
 
+## Parsing `events.jsonl` nested JSON
+
+Tracked Runs mirror each child stdout line into `.delegate/runs/<runId>/events.jsonl`
+as `stream.line` records, up to 500 lines followed by a
+`stream.lines_truncated` marker. Lines longer than 500 characters are clipped
+with a `…` sentinel and marked `truncated: true` /
+`textChars: <original length>`.
+Clipped lines that contained nested JSON are no longer valid JSON payloads, so
+skip them when reconstructing structured child events; plaintext lines that
+never held JSON are skipped the same way:
+
+```bash
+jq -r 'select(.kind == "stream.line" and (.truncated != true)) | .text | fromjson? // empty' \
+  .delegate/runs/<runId>/events.jsonl
+```
+
+Prefer `delegate snapshot` / `run-output` for parent-facing summaries. Use the
+raw event log only for diagnostics, and treat it as sensitive: retained event
+text is not redacted.
+
 ## Structured / JSON-only final output
 
 For a bare machine-parseable final message on Codex, use `--output-schema FILE`.
@@ -479,7 +498,31 @@ Grok, Devin, OpenCode, Pi, Oh My Pi, or Kimi binaries:
 
 ```bash
 python3 -m compileall -q src tests bin
-python3 -m unittest discover -s tests
+python3 -m unittest discover -s tests -t .
 ```
 
 Integration tests that launch real child agents should be separate from required CI.
+
+## `spawn_agent` fails with "no thread with id" inside a delegate child
+
+Claude Code harness bug when forking session history in a delegate-launched
+session. Not a delegate defect. Workaround: spawn with `fork_turns: none`
+(loses inherited context but works).
+
+## kimi launch fails with an unknown-model error while `delegate models` lists the alias
+
+The kimi-code CLI's own `config.toml` is missing the model entry (machine
+config drift). Fix the harness config — delegate forwards the alias as
+configured.
+
+## Never run `npm link` from inside a delegate/codex worktree
+
+It repoints the machine-global package symlink at an ephemeral worktree path
+that later vanishes.
+
+## Node/tsx children fail with EINVAL on Unix IPC sockets
+
+Delegate gives each run a private scratch `TMPDIR` whose deep path can exceed
+the macOS `sun_path` limit for socket-creating tools. Workaround: have the
+child set `TMPDIR=/tmp` (or another short dir) for those tools. The private
+scratch dir is deliberate isolation, not a bug.

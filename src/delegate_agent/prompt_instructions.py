@@ -41,7 +41,8 @@ any operator-requested final payload:
 
 Keep it concise. Do not include raw logs unless explicitly relevant. If the
 operator requested an exact final payload such as bare JSON, put that payload
-last after the report, without wrapping it in the report.
+last after the report, without wrapping it in the report. After the final
+payload, stop; do not reopen artifacts or begin another pass.
 """
 
 

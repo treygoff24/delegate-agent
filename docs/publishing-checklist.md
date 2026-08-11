@@ -23,7 +23,7 @@ PyPI packaging is validated and live: `delegate-agent-cli` published 2026-07-06 
 - [ ] Run tests:
 
   ```bash
-  python3 -m unittest discover -s tests
+  python3 -m unittest discover -s tests -t .
   ```
 
 - [ ] Run whitespace check:

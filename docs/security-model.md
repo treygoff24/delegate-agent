@@ -350,18 +350,19 @@ The guarantee is enforced in **two places**, both fail-closed by default:
    front of the Python entrypoint. It applies the same check even earlier,
    before Python starts, as defense in depth.
 
-Both layers agree on the same rule: when `DELEGATE_CONFIG` is unset and
-`AI_PROFILE` is exactly `work` or `personal`, and the matching overlay config
-is missing or unreadable, launch and mutation commands (any engine, `run`,
+Both layers agree on the same rule: when `AI_PROFILE` is exactly `work` or
+`personal`, and the matching overlay config is missing or unreadable, launch
+and mutation commands (any engine, `run`,
 `dry-run`, `wait`, `cancel`, `config`, `worktree remove`/`prune`/`gc`,
 `setup`, `models <engine> --live`, `capabilities refresh`) are refused.
 Read-only diagnostics (`profiles`, `runs`, `ps`, `run-output`, `snapshot`, cached
 `capabilities`, `describe`, cached `models`, `worktree show`/`list`) still run,
-with a stderr warning that the check would otherwise fail closed. Once
-`DELEGATE_CONFIG` is set, either by the shim after it validates the overlay or
-directly by a caller, the Python-layer guard does
-not re-check `AI_PROFILE`; it treats an explicit `DELEGATE_CONFIG` as already
-having answered the question.
+with a stderr warning that the check would otherwise fail closed. An explicit
+`DELEGATE_CONFIG` selects runtime policy but does not replace the recognized
+profile's credential overlay or bypass its validation.
+In profile-aware shell installs, profile selection still validates the matching
+overlay and loads that profile's credentials; an incoming `DELEGATE_CONFIG`
+then remains the runtime-policy config passed to Python.
 
 An `AI_PROFILE` value that is set, non-empty, and not exactly `work` or
 `personal` (a typo or an unrelated convention) is not a recognized profile, so

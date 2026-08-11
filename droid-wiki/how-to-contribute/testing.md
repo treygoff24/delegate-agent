@@ -18,4 +18,4 @@ The test suite uses Python `unittest` and fake child runtimes. Required CI does 
 | `tests/test_reasoning_capabilities.py` | Reasoning-effort validation and capability reporting. |
 | `tests/test_command_help.py` | Text and JSON help contracts. |
 
-Run a focused file while iterating, then run `python3 -m unittest discover -s tests` before handoff. See [tracked execution](../systems/tracked-execution.md) for the runtime capture model that many tests exercise.
+Run a focused file while iterating, then run `python3 -m unittest discover -s tests -t .` before handoff. See [tracked execution](../systems/tracked-execution.md) for the runtime capture model that many tests exercise.

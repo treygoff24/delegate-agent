@@ -48,7 +48,7 @@ git clone https://github.com/treygoff24/delegate-agent.git
 cd delegate-agent
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install -e .
+python3 -m pip install -e .
 python3 bin/delegate.py --json describe
 ```
 
@@ -324,6 +324,9 @@ selector explicitly. Tracked runs also carry a `resultQuality` classification
 (`ok` / `housekeeping_noop` / `empty` / `suspect_short` / `no_assistant_text`),
 and failed or cancelled runs always get a completion report — synthesized when
 the child produced none — so `--completion-report` never dead-ends.
+Each tracked raw stream is capped at 16 MiB. A child that exceeds the cap is
+terminated with `output_limit_exceeded`; a child that lingers after an explicit
+harness terminal event receives a short exit grace and is then stopped.
 
 Block on background runs instead of polling, and cancel them cleanly:
 
@@ -418,8 +421,9 @@ Delegate resolves the profile once per request and injects its env into every sp
 If `AI_PROFILE=work|personal` points at a missing profile overlay, Delegate
 blocks launch and mutation commands, but lets read-only diagnostics
 (`profiles`, `runs`, `run-output`, `snapshot`, cached `capabilities`,
-`worktree show`, `worktree list`, `describe`, `models`) continue with a
-warning. This guarantee is enforced in the Python CLI itself (`delegate_agent.cli:main`), so it holds no matter how you invoke Delegate: the
+`worktree show`, `worktree list`,
+`workflow check|status|watch|events|result|wait|list`, `describe`, `models`)
+continue with a warning. This guarantee is enforced in the Python CLI itself (`delegate_agent.cli:main`), so it holds no matter how you invoke Delegate: the
 pip console script, `python -m delegate_agent.cli`, `bin/delegate.py`, or a
 shell shim in front of any of those. The tracked launcher shim template,
 `bin/delegate-profile-shim`, applies the same check earlier, before Python

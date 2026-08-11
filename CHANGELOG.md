@@ -5,6 +5,55 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `delegate runs` and `delegate ps` now report listing honesty: the JSON
+  payload gains `total` (pre-limit match count) and `truncated`, text mode
+  prints `showing N of M runs (raise --limit to see more)`, and a zero-row
+  result under `--group`/`--harness` explains itself — naming the status
+  filter to drop when `--running`/`--stale`/`--active` emptied the result, or
+  noting the run Registry is workspace-scoped otherwise.
+- Retained event text now carries truncation metadata on both surfaces: raw
+  `events.jsonl` `stream.line` records and normalized Snapshot `recentEvents`
+  add `truncated: true` plus `textChars` (original length) only when the
+  500-character bound actually clipped, and the final unterminated child
+  stdout line is now written to `events.jsonl` instead of silently dropped.
+  All child-controlled normalized-event strings (including tool targets,
+  `error`, and `run.completed`) are bounded through the same helper.
+- The tracked launcher shim template (`bin/delegate-profile-shim`) passes
+  through the read-only workflow actions
+  (`check|status|watch|events|result|wait|list`) without a selected profile,
+  mirroring the Python CLI's guard; a parity test fails on drift.
+
+### Changed
+
+- Child-launch failures with `EPERM` now hint that sandboxed parent shells can
+  forbid launching harness binaries; `prompt_too_large` names the engines
+  whose prompt rides a file/stdin transport, derived from the transport table.
+- The test suite hardens hermeticity against ambient delegate-lane
+  environment (`DELEGATE_RUN_ID`, mail identity, root-provenance and profile
+  variables), and the documented discovery command is
+  `python3 -m unittest discover -s tests -t .` everywhere, including CI and
+  the contributor wiki.
+
+### Fixed
+
+- An explicit `DELEGATE_CONFIG` now survives profile selection: the profile
+  shim and profile env resolution load the selected profile's credentials but
+  keep the incoming `DELEGATE_CONFIG` as the runtime-policy config instead of
+  replacing it, and codex quota fallback no longer forwards `DELEGATE_CONFIG`
+  into the fallback child environment.
+- Tracked runs now stop after an explicit harness terminal event and fail closed
+  when either raw output stream exceeds 16 MiB, preventing a completed or
+  runaway child from filling disk with cumulative stream payloads.
+- Tracked stream decoding preserves UTF-8 characters split across read chunks;
+  normalized events retain a bounded head/tail with an exact total, and raw
+  `events.jsonl` mirrors at most 500 stdout lines plus a truncation marker so
+  many short lines cannot amplify a bounded child stream into an unbounded
+  event journal or in-memory event list.
+
 ## [0.28.0] - 2026-08-05
 
 ### Added
