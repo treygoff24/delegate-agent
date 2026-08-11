@@ -705,6 +705,8 @@ class WorkflowCommandTests(unittest.TestCase):
         dry = self.run_delegate(["--json", "workflow", "run", str(script), "--dry-run"])
         self.assertEqual(dry.returncode, 0, dry.stderr)
         wf_id = json.loads(dry.stdout)["wfId"]
+        dry_status = json.loads(self.run_delegate(["--json", "workflow", "status", wf_id]).stdout)
+        dry_last_seq = dry_status["lastSeq"]
 
         resumed = self.run_delegate(["--json", "workflow", "run", "--resume", wf_id])
         self.assertEqual(resumed.returncode, 0, resumed.stderr)
@@ -728,6 +730,114 @@ class WorkflowCommandTests(unittest.TestCase):
                 for event in events
             )
         )
+        live_events = json.loads(
+            self.run_delegate(
+                ["--json", "workflow", "events", wf_id, "--since", str(dry_last_seq)]
+            ).stdout
+        )["events"]
+        self.assertGreater(min(event["seq"] for event in live_events), dry_last_seq)
+        self.assertTrue(
+            any(event["type"] == "budget" and not event.get("simulated") for event in live_events)
+        )
+        self.assertIn("agent_started", {event["type"] for event in live_events})
+        self.assertTrue(
+            any(
+                event["type"] == "agent_finished" and event.get("result") == "fake completion"
+                for event in live_events
+            )
+        )
+        self.assertNotIn("agent_cache_hit", {event["type"] for event in live_events})
+
+    def test_resume_from_dry_run_repeated_after_pre_supervisor_failure_goes_live(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "dry-resume-retry", "defaults": {"engine": "codex", "mode": "safe"}}
+            return agent("one")
+            """
+        )
+        dry = self.run_delegate(["--json", "workflow", "run", str(script), "--dry-run"])
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        wf_id = json.loads(dry.stdout)["wfId"]
+        root = workflow_registry.workflow_dir(self.workspace, wf_id)
+        status = workflow_registry.read_json(root / workflow_registry.STATUS_FILE) or {}
+        status.update({"status": "starting", "replayJournal": False})
+        workflow_registry.write_status(root, status)
+
+        resumed = self.run_delegate(["--json", "workflow", "run", "--resume", wf_id])
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
+        self.assertEqual(waited.returncode, 0, waited.stderr)
+        result = self.run_delegate(["--json", "workflow", "result", wf_id])
+        self.assertEqual(json.loads(result.stdout)["result"], "fake completion")
+        runs = self.run_delegate(["--json", "runs", "--group", wf_id])
+        self.assertEqual(len(json.loads(runs.stdout)["runs"]), 1)
+
+    def test_resume_from_dry_run_running_before_live_event_goes_live(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "dry-resume-running", "defaults": {"engine": "codex", "mode": "safe"}}
+            return agent("one")
+            """
+        )
+        dry = self.run_delegate(["--json", "workflow", "run", str(script), "--dry-run"])
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        wf_id = json.loads(dry.stdout)["wfId"]
+        root = workflow_registry.workflow_dir(self.workspace, wf_id)
+        status = workflow_registry.read_json(root / workflow_registry.STATUS_FILE) or {}
+        dry_last_seq = status["lastSeq"]
+        status.update({"status": "running", "replayJournal": False})
+        workflow_registry.write_status(root, status)
+
+        resumed = self.run_delegate(["--json", "workflow", "run", "--resume", wf_id])
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
+        self.assertEqual(waited.returncode, 0, waited.stderr)
+        result = self.run_delegate(["--json", "workflow", "result", wf_id])
+        self.assertEqual(json.loads(result.stdout)["result"], "fake completion")
+        events = json.loads(
+            self.run_delegate(
+                ["--json", "workflow", "events", wf_id, "--since", str(dry_last_seq)]
+            ).stdout
+        )["events"]
+        self.assertNotIn("agent_cache_hit", {event["type"] for event in events})
+
+    def test_resume_from_dry_run_replays_real_progress_not_simulated_placeholders(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "dry-resume-partial", "defaults": {"engine": "codex", "mode": "safe"}}
+            return [agent("one"), agent("two")]
+            """
+        )
+        dry = self.run_delegate(["--json", "workflow", "run", str(script), "--dry-run"])
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        wf_id = json.loads(dry.stdout)["wfId"]
+        root = workflow_registry.workflow_dir(self.workspace, wf_id)
+        journal = root / "journal.jsonl"
+        dry_events = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+        first_key = next(event["key"] for event in dry_events if event["type"] == "agent_started")
+        seq = max(event["seq"] for event in dry_events)
+        workflow_registry.append_jsonl(
+            journal, {"seq": seq + 1, "type": "budget", "key": first_key}
+        )
+        workflow_registry.append_jsonl(
+            journal, {"seq": seq + 2, "type": "agent_started", "key": first_key}
+        )
+        workflow_registry.append_jsonl(
+            journal,
+            {"seq": seq + 3, "type": "agent_finished", "key": first_key, "result": "real one"},
+        )
+        status = workflow_registry.read_json(root / workflow_registry.STATUS_FILE) or {}
+        status.update({"status": "running", "replayJournal": False, "lastSeq": seq + 3})
+        workflow_registry.write_status(root, status)
+
+        resumed = self.run_delegate(["--json", "workflow", "run", "--resume", wf_id])
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
+        self.assertEqual(waited.returncode, 0, waited.stderr)
+        result = self.run_delegate(["--json", "workflow", "result", wf_id])
+        self.assertEqual(json.loads(result.stdout)["result"], ["real one", "fake completion"])
+        runs = self.run_delegate(["--json", "runs", "--group", wf_id])
+        self.assertEqual(len(json.loads(runs.stdout)["runs"]), 1)
 
     def test_call_mode_agent_runs_without_workspace_cwd(self) -> None:
         script = self.write_workflow(

@@ -141,7 +141,9 @@ def emit_run(
                 previous_result_exists = True
             except FileNotFoundError:
                 pass
-            resume_from_dry_run = status.get("status") == "dry_run"
+            resume_from_dry_run = (
+                status.get("status") == "dry_run" or status.get("replayJournal") is False
+            )
             gate_key = status.get("gateKey")
             if status.get("status") == "paused" and isinstance(gate_key, str):
                 registry.write_json(
@@ -239,6 +241,7 @@ def emit_run(
                 {
                     "ok": True,
                     "status": "starting",
+                    "replayJournal": not resume_from_dry_run,
                     "updatedAt": run_registry.utc_now_iso(),
                 }
             )

@@ -117,6 +117,7 @@ class WorkflowState:
     args: JsonValue
     budget: Budget
     dry_run: bool = False
+    replay_journal: bool = True
     depth: int = 0
     namespace: str = "root"
     replay: dict[str, JsonValue] = field(default_factory=dict)
@@ -146,9 +147,21 @@ class WorkflowState:
         self.agent_semaphore = threading.Semaphore(_global_agent_cap())
         self.engine_semaphores = _engine_semaphores(self.config)
         self.item_semaphore = threading.Semaphore(_item_thread_cap(self.config))
-        self._load_replay()
+        self._load_sequence()
+        self._load_replay(include_simulated=self.replay_journal)
 
-    def _load_replay(self) -> None:
+    def _load_sequence(self) -> None:
+        status = registry.read_json(self.status_path) or {}
+        last_seq = status.get("lastSeq")
+        if isinstance(last_seq, int):
+            self.sequence = max(self.sequence, last_seq)
+        for event in registry.iter_journal(self.journal_path):
+            seq = event.get("seq")
+            if isinstance(seq, int):
+                self.sequence = max(self.sequence, seq)
+
+    def _load_replay(self, *, include_simulated: bool) -> None:
+        simulated_keys: set[str] = set()
         for event in registry.iter_journal(self.journal_path):
             seq = event.get("seq")
             if isinstance(seq, int):
@@ -158,6 +171,16 @@ class WorkflowState:
             key = event.get("key")
             if not isinstance(key, str):
                 continue
+            is_simulated = event.get("simulated") is True or event.get("dryRun") is True
+            if is_simulated:
+                simulated_keys.add(key)
+            if not include_simulated and is_simulated:
+                continue
+            if not include_simulated and key in simulated_keys:
+                if event.get("type") in {"budget", "agent_started"}:
+                    simulated_keys.discard(key)
+                else:
+                    continue
             if event.get("type") == "budget":
                 # Idempotent resume: keys already charged must not re-claim.
                 self.claimed_keys.add(key)
@@ -217,6 +240,8 @@ class WorkflowState:
             "supervisorToken": self.supervisor_token,
             "updatedAt": run_registry.utc_now_iso(),
         }
+        if not self.replay_journal:
+            payload["replayJournal"] = False
         if last_event is not None:
             payload["lastEvent"] = last_event
         if extra:
@@ -1542,6 +1567,7 @@ def run_supervisor(
         total = budget_payload.get("total") if isinstance(budget_payload, dict) else None
         spent = budget_payload.get("spent") if isinstance(budget_payload, dict) else None
         total_budget = total if isinstance(total, int) else None
+        replay_journal = status.get("replayJournal") is not False
         spent_budget = spent if isinstance(spent, int) and spent >= 0 else 0
         state = WorkflowState(
             wf_id=wf_id,
@@ -1552,6 +1578,7 @@ def run_supervisor(
             cli_argv=cli_argv,
             args=args,
             budget=Budget(total_budget, spent_budget),
+            replay_journal=replay_journal,
         )
         state.write_status("running")
         try:
