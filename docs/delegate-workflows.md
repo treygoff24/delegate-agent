@@ -110,6 +110,16 @@ resume against the first and fails with `workflow_locked`. Pick one.
 This preserves in-flight sibling results for replay while preventing unrelated
 siblings from starting after a human checkpoint has requested control.
 
+A completed dry-run can also become a live run without creating a second
+workflow record:
+
+```bash
+python3 bin/delegate.py workflow run --resume wf_0123abcdef45
+```
+
+Its simulated events remain in `journal.jsonl` for audit, but resume ignores
+them as cached results and resets simulated budget before launching live agents.
+
 ## Limits
 
 Workflow scripts are intentionally capped:

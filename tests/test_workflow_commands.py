@@ -695,6 +695,40 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertEqual(payload["result"], ["", ""])
         self.assertEqual(payload["runTree"]["counts"], {"codex:safe": 2})
 
+    def test_resume_from_dry_run_launches_live_agents_on_same_workflow(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "dry-resume", "defaults": {"engine": "codex", "mode": "safe"}}
+            return agent("one")
+            """
+        )
+        dry = self.run_delegate(["--json", "workflow", "run", str(script), "--dry-run"])
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        wf_id = json.loads(dry.stdout)["wfId"]
+
+        resumed = self.run_delegate(["--json", "workflow", "run", "--resume", wf_id])
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        self.assertEqual(json.loads(resumed.stdout)["wfId"], wf_id)
+        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
+        self.assertEqual(waited.returncode, 0, waited.stderr)
+        result = self.run_delegate(["--json", "workflow", "result", wf_id])
+        self.assertEqual(json.loads(result.stdout)["result"], "fake completion")
+        runs = self.run_delegate(["--json", "runs", "--group", wf_id])
+        self.assertEqual(len(json.loads(runs.stdout)["runs"]), 1)
+
+        journal = workflow_registry.workflow_dir(self.workspace, wf_id) / "journal.jsonl"
+        events = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+        self.assertTrue(any(event.get("simulated") for event in events))
+        self.assertTrue(
+            any(event["type"] == "budget" and not event.get("simulated") for event in events)
+        )
+        self.assertTrue(
+            any(
+                event["type"] == "agent_finished" and event.get("result") == "fake completion"
+                for event in events
+            )
+        )
+
     def test_call_mode_agent_runs_without_workspace_cwd(self) -> None:
         script = self.write_workflow(
             """
@@ -1658,6 +1692,45 @@ class WorkflowCommandTests(unittest.TestCase):
         finally:
             os.fsync = original  # type: ignore[assignment]
         self.assertEqual(len(fsynced), 6)
+
+    def test_workflow_replay_ignores_simulated_dry_run_events(self) -> None:
+        from delegate_agent.workflows import runtime as workflow_runtime
+
+        root = self.workspace / "simulated-replay"
+        root.mkdir()
+        events = [
+            {"seq": 1, "type": "budget", "key": "simulated", "simulated": True},
+            {"seq": 2, "type": "agent_started", "key": "simulated", "simulated": True},
+            {
+                "seq": 3,
+                "type": "agent_finished",
+                "key": "simulated",
+                "result": "",
+                "simulated": True,
+            },
+            {"seq": 4, "type": "budget", "key": "live"},
+            {"seq": 5, "type": "agent_started", "key": "live"},
+            {"seq": 6, "type": "agent_finished", "key": "live", "result": "done"},
+        ]
+        for event in events:
+            workflow_registry.append_jsonl(root / workflow_registry.JOURNAL_FILE, event)
+
+        state = workflow_runtime.WorkflowState(
+            wf_id="simulated-replay",
+            workspace=self.workspace,
+            root=root,
+            script_path=root / workflow_registry.SCRIPT_FILE,
+            config=json.loads(self.config_path.read_text(encoding="utf-8")),
+            cli_argv=[sys.executable, str(CLI)],
+            args=None,
+            budget=workflow_runtime.Budget(2),
+        )
+
+        self.assertEqual(state.sequence, 6)
+        self.assertEqual(state.claimed_keys, {"live"})
+        self.assertEqual(state.replay_keys, {"live"})
+        self.assertEqual(state.replay, {"live": "done"})
+        self.assertEqual(state.budget.spent(), 1)
 
     def test_resume_budget_override_does_not_mutate_while_locked(self) -> None:
         # R5: lock before budget mutation on resume.
