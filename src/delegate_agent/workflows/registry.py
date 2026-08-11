@@ -89,6 +89,10 @@ def write_status(root: Path, payload: JsonObject) -> None:
         candidate = payload.get("createdAt")
         created_at = candidate if isinstance(candidate, str) else run_registry.utc_now_iso()
     merged: JsonObject = {"schema": WORKFLOW_SCHEMA, **payload, "createdAt": created_at}
+    if isinstance(existing, dict):
+        for key in ("scriptSha256", "args"):
+            if key not in merged and key in existing:
+                merged[key] = existing[key]
     created_ordinal = existing.get("createdOrdinal") if isinstance(existing, dict) else None
     if isinstance(created_ordinal, int) and not isinstance(created_ordinal, bool):
         merged["createdOrdinal"] = created_ordinal

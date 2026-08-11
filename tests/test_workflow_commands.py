@@ -899,6 +899,11 @@ class WorkflowCommandTests(unittest.TestCase):
             )
         )
         self.assertNotIn("agent_cache_hit", {event["type"] for event in live_events})
+        terminal_status = json.loads(
+            self.run_delegate(["--json", "workflow", "status", wf_id]).stdout
+        )
+        self.assertEqual(terminal_status["scriptSha256"], dry_status["scriptSha256"])
+        self.assertEqual(terminal_status["args"], dry_status["args"])
 
     def test_resume_from_dry_run_repeated_after_pre_supervisor_failure_goes_live(self) -> None:
         script = self.write_workflow(
