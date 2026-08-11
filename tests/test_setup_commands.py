@@ -15,7 +15,7 @@ SRC = str(ROOT / "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
-from delegate_agent import cli, harness_discovery, model_discovery, setup_commands  # noqa: E402
+from delegate_agent import cli, harness_discovery, setup_commands  # noqa: E402
 from delegate_agent.constants import KNOWN_ENGINES  # noqa: E402
 
 
@@ -91,11 +91,6 @@ class SetupCommandTests(unittest.TestCase):
         with (
             mock.patch.dict(os.environ, env, clear=True),
             mock.patch.object(harness_discovery, "probe_harness", probe),
-            mock.patch.object(
-                model_discovery,
-                "_probe_devin_models",
-                side_effect=AssertionError("setup must not run legacy prompt probes"),
-            ),
         ):
             code = cli.main(argv, stdout=stdout, stderr=stderr)
         return code, stdout.getvalue(), stderr.getvalue(), probe

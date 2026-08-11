@@ -29,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Devin model discovery now uses the prompt-free, fingerprinted
+  `devin models list --format json` catalog for setup, capability refresh, and
+  one-off live queries. Older or unauthenticated CLIs degrade to a version-only
+  record instead of receiving a prompt-like invalid-model probe.
 - Child-launch failures with `EPERM` now hint that sandboxed parent shells can
   forbid launching harness binaries; `prompt_too_large` names the engines
   whose prompt rides a file/stdin transport, derived from the transport table.

@@ -683,14 +683,60 @@ class AdapterOrchestrationTests(unittest.TestCase):
                     self.assertTrue(record["installed"])
                     self.assertIn(record["probeStatus"], {"ok", "partial"})
             devin = probe_harness(config, "devin", env=env)
-            self.assertEqual(devin["probeStatus"], "partial")
-            self.assertEqual(devin["models"], {})
+            self.assertEqual(devin["probeStatus"], "ok")
+            self.assertIn("gpt-5.6-sol", devin["models"])
+            self.assertIn("gpt-5.6-sol-high", devin["models"])
 
             all_missing = probe_all_harnesses(config, env={"PATH": "", "HOME": env["HOME"]})
             self.assertEqual(len(all_missing), 10)
             self.assertTrue(
                 all(record["probeStatus"] == "missing" for record in all_missing.values())
             )
+
+    def test_devin_catalog_parses_family_slugs_and_variant_ids(self):
+        from delegate_agent.harness_discovery import parse_devin_catalog
+
+        fragment = parse_devin_catalog((FIXTURES / "devin_models.json").read_text())
+        self.assertEqual(fragment["modelScope"], "account")
+        self.assertIsNone(fragment["harnessReasoning"])
+        models = fragment["models"]
+        self.assertEqual(models["gpt-5.6-sol"]["displayName"], "GPT 5.6 Sol")
+        self.assertEqual(models["sol"]["displayName"], "GPT 5.6 Sol")
+        self.assertEqual(models["gpt-5.6-sol-high"]["displayName"], "GPT 5.6 Sol High")
+        self.assertNotIn("reasoning", models["gpt-5.6-sol-high"])
+
+    def test_devin_catalog_skips_malformed_and_unsafe_model_ids(self):
+        from delegate_agent.harness_discovery import parse_devin_catalog
+
+        fragment = parse_devin_catalog(
+            '{"families":['
+            '{"slug":"-unsafe","aliases":["-bad"],'
+            '"variants":[{"model_uid":"-unsafe-high"}]},'
+            '{"slug":"safe","aliases":["short"],'
+            '"variants":[null,{"model_uid":"safe-high"}]},null]}'
+        )
+        self.assertEqual(set(fragment["models"]), {"safe", "short", "safe-high"})
+
+    def test_devin_probe_failure_degrades_to_version_only(self):
+        from delegate_agent.config import embedded_default_config
+        from delegate_agent.harness_discovery import probe_harness
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = write_executable(
+                Path(tmp) / "devin",
+                "import sys\n"
+                "if sys.argv[1:] == ['--version']:\n"
+                "    print('devin 3000.3.27')\n"
+                "    raise SystemExit(0)\n"
+                "raise SystemExit(2)\n",
+            )
+            config = embedded_default_config()
+            config["devin"]["binary"] = str(fake)
+            record = probe_harness(config, "devin", env={"PATH": "", "HOME": tmp})
+
+        self.assertEqual(record["probeStatus"], "partial")
+        self.assertEqual(record["models"], {})
+        self.assertEqual(record["warnings"], ["Devin model catalog unavailable"])
 
 
 class DiscoveryCacheTests(unittest.TestCase):

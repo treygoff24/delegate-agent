@@ -169,7 +169,7 @@ matches an alias key; otherwise it is passed through verbatim as a raw model ID
 both. With neither, Droid uses `droid.defaultModel` when set. Discover aliases
 and advisory catalogs with `delegate models`, `delegate models <engine>`, and
 `delegate models <engine> --live`. Every harness except Claude exposes a live
-model probe; see [Discovery](#discovery) for the evidence and Devin caveats.
+model probe; see [Discovery](#discovery) for the evidence each probe records.
 
 `--reasoning-effort LEVEL` is optional and parsed only before prompt text begins.
 Engines with exact capability metadata reject unsupported model/effort pairs
@@ -853,7 +853,7 @@ Automatic setup and refresh use these evidence sources:
 | Kimi | Models in the active Kimi configuration | Provider metadata may advertise efforts, but Delegate has no Kimi effort transport and still rejects `--reasoning-effort`. |
 | Claude | No model enumeration | The native effort enum is harness-wide evidence. |
 | Grok | Models visible to the active account | Exact config, discovery, or bundled declarations win; otherwise the native effort enum is harness-wide compatibility evidence and model-specific support remains unknown. |
-| Devin | No prompt-free model enumeration | Automatic discovery records only installation/version; Delegate has no Devin effort transport. |
+| Devin | Family slugs, aliases, and concrete variants visible to the active account | The prompt-free JSON catalog carries display names; Delegate has no Devin effort transport. |
 | OpenCode | Harness catalog | Listed variants are `exact` for that model; models without exact variant evidence retain the documented unvalidated pass-through path. |
 | Pi | Harness catalog | Thinking support is model-specific, but available labels come from a harness-wide enum and are reported as partial model evidence. |
 | Oh My Pi | Harness catalog | A model's explicit `thinking` array is exact; missing arrays use harness-partial compatibility rather than fabricated model evidence. |
@@ -888,6 +888,8 @@ stale and ordinary launches ignore only that harness's record until refresh.
 Cached reads never run `--version` merely to test staleness, and neither does an
 ordinary launch: a cached record can only be short of what the harness now
 supports, never claim more, so one that satisfies the run is used as-is.
+Existing Devin version-only cache records therefore remain valid but contain no
+live catalog until `delegate capabilities refresh devin` is run.
 
 A launch re-probes `--version` for its own harness only when the cached record
 has already cost the run something: it refused an explicit `--reasoning-effort`,
@@ -913,11 +915,9 @@ policy to another. Dry runs never probe at all.
 
 All automatic probes run with `shell=False`, stdin closed, a neutral temporary
 working directory, bounded output, and a timeout. They pass the active profile
-environment but do not carry a task prompt. Devin is the explicit exception on
-the opt-in one-off surface: `models devin --live` uses a bounded invalid-model,
-prompt-like invocation to make Devin print its available-model error. Setup and
-`capabilities refresh` never use that Devin invocation; they run `--version`
-only.
+environment but do not carry a task prompt. Devin uses the same prompt-free
+`models list --format json` metadata command for setup, capability refresh, and
+`models devin --live`; failures degrade to a version-only partial record.
 
 Discovery output applies best-effort credential scrubbing, so secret-shaped
 model IDs or diagnostic values may appear as `***`. Exact values should come

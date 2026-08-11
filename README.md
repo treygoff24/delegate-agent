@@ -125,6 +125,7 @@ delegate --json describe
 delegate --json models
 delegate --json models codex          # per-engine advisory catalog
 delegate --json models cursor --live  # merge live harness probe when supported
+delegate --json models devin --live   # query Devin's prompt-free account catalog
 delegate --json models opencode --live # query every model visible to OpenCode
 delegate --json models pi --live       # query every model visible to Pi
 delegate --json models omp --live      # query every model visible to Oh My Pi

@@ -6,7 +6,6 @@ import re
 from pathlib import Path
 from typing import TextIO
 
-from delegate_agent import config as delegate_config
 from delegate_agent import harness_discovery, profiles, redaction
 from delegate_agent.bundled_models import BUNDLED_MODELS
 from delegate_agent.constants import ENGINES_PROSE, KNOWN_ENGINES
@@ -14,9 +13,7 @@ from delegate_agent.errors import DelegateError
 from delegate_agent.json_types import JsonObject, JsonValue
 
 ENGINE_MODELS_SCHEMA = "delegate.engine-models.v1"
-LIVE_PROBE_TIMEOUT_SEC = 10
 LIVE_WARNING_LIMIT = 8_000
-DEVIN_LIVE_SENTINEL = "delegate-live-probe-sentinel"
 LIVE_UNSUPPORTED_ENGINES = frozenset({"claude"})
 _SOURCE_RANK = {"bundled": 0, "cache": 1, "discovery": 2, "live": 2, "config": 3}
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -219,8 +216,6 @@ def _probe_live_models(
 ) -> tuple[list[JsonObject], str | None, str | None]:
     env = profiles.child_environment(overrides=profile.env if profile is not None else None)
     try:
-        if engine == "devin":
-            return _probe_devin_models(config, env=env), None, None
         del workspace  # Global discovery is intentionally repository-neutral.
         record = harness_discovery.probe_harness(
             config,
@@ -298,33 +293,6 @@ def parse_cursor_models_output(raw: str) -> list[JsonObject]:
 
 def parse_droid_custom_models(custom_models: list[object]) -> list[JsonObject]:
     return _legacy_models({"models": harness_discovery.parse_droid_settings_models(custom_models)})
-
-
-def _probe_devin_models(config: JsonObject, *, env: dict[str, str]) -> list[JsonObject]:
-    binary = delegate_config.harness_binary(config, "devin")
-    # The invalid sentinel makes devin fail fast pre-session; running from a
-    # neutral cwd metadata runner keeps the explicit prompt-like opt-in bounded
-    # without changing Devin's expected non-zero/Available-line parse behavior.
-    completed = harness_discovery.run_metadata_probe(
-        [binary, "--model", DEVIN_LIVE_SENTINEL, "-p", "--", "probe"],
-        env=env,
-        timeout_sec=LIVE_PROBE_TIMEOUT_SEC,
-    )
-    combined = f"{completed.stderr}\n{completed.stdout}"
-    return parse_devin_available_models(combined)
-
-
-def parse_devin_available_models(raw: str) -> list[JsonObject]:
-    for line in raw.splitlines():
-        stripped = line.strip()
-        if not stripped.lower().startswith("available:"):
-            continue
-        _, _, rest = stripped.partition(":")
-        ids = [part.strip() for part in rest.split(",") if part.strip()]
-        if not ids:
-            raise RuntimeError("devin Available line was empty")
-        return [{"id": model_id} for model_id in ids]
-    raise RuntimeError("devin output had no Available: line")
 
 
 def parse_opencode_models_output(raw: str) -> list[JsonObject]:

@@ -9,6 +9,7 @@
     "opencode_models_verbose.txt": {"command": ["opencode", "--pure", "models", "--verbose"], "version": "1.17.18"},
     "pi_models.txt": {"command": ["pi", "--offline", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-approve", "--list-models"], "version": "0.80.10"},
     "omp_models.json": {"command": ["omp", "models", "--json", "--no-extensions"], "version": "omp/17.0.4"},
-    "kimi_providers.json": {"command": ["kimi", "provider", "list", "--json"], "version": "0.26.0"}
+    "kimi_providers.json": {"command": ["kimi", "provider", "list", "--json"], "version": "0.26.0"},
+    "devin_models.json": {"capturedAt": "2026-08-09", "command": ["devin", "models", "list", "--format", "json"], "version": "devin 3000.3.27 (fixture)"}
   }
 }
