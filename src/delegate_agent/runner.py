@@ -512,8 +512,12 @@ def persist_progress(
     pid: int | None = None,
     completion_report_written: bool = False,
     extra: JsonObject | None = None,
+    lock_timeout_seconds: float = run_registry.REGISTRY_LOCK_TIMEOUT_SECONDS,
 ) -> None:
-    with run_registry.registry_lock(ctx.registry_root):
+    with run_registry.registry_lock(
+        ctx.registry_root,
+        timeout_seconds=lock_timeout_seconds,
+    ):
         current = run_registry.load_run_state_or_none(ctx.registry_root, ctx.run_id)
         current_status = current.get("status") if isinstance(current, dict) else None
         if current_status in run_registry.TERMINAL_STATUSES:
@@ -1584,18 +1588,22 @@ def _capture_tracked_process(
         nonlocal lines_since_persist, last_persist_at, progress_dirty
         if not progress_dirty:
             return
+        try:
+            persist_progress(
+                files.run_path,
+                ctx,
+                accumulator,
+                status="running",
+                pid=process.pid,
+                stdout_bytes=stdout_bytes_counter.total,
+                stderr_bytes=stderr_bytes_counter.total,
+                lock_timeout_seconds=0,
+            )
+        except TimeoutError:
+            return
         progress_dirty = False
         lines_since_persist = 0
         last_persist_at = time.monotonic()
-        persist_progress(
-            files.run_path,
-            ctx,
-            accumulator,
-            status="running",
-            pid=process.pid,
-            stdout_bytes=stdout_bytes_counter.total,
-            stderr_bytes=stderr_bytes_counter.total,
-        )
 
     if process.stdout is None or process.stderr is None:
         raise RunnerLaunchError(

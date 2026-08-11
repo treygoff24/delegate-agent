@@ -2234,6 +2234,55 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertGreater(len(running_persists), 0)
             self.assertLess(len(running_persists), 25)
 
+    def test_tracked_drain_survives_progress_registry_lock_timeout(self):
+        temp, fake_bin = make_streaming_fake_bin()
+        self.addCleanup(temp.cleanup)
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="droid")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="droid",
+                engine="droid",
+                mode="safe",
+                model="model-id",
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-05-20T21:42:33Z",
+            )
+            original_persist = self.runner.persist_progress
+            runner_thread = threading.current_thread()
+
+            def persist_or_contend(*args, **kwargs):
+                if threading.current_thread() is not runner_thread:
+                    raise TimeoutError("injected registry lock contention")
+                return original_persist(*args, **kwargs)
+
+            with (
+                mock.patch.object(self.runner, "PROGRESS_PERSIST_LINE_INTERVAL", 1),
+                mock.patch.object(
+                    self.runner,
+                    "persist_progress",
+                    side_effect=persist_or_contend,
+                ),
+            ):
+                code, payload = self.runner.execute_tracked(
+                    [str(fake_bin / "droid")],
+                    workspace,
+                    ctx,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+
+        self.assertEqual(code, 0, payload)
+        self.assertIn("HELLO", payload["assistantText"])
+        self.assertIn("DONE", payload["assistantText"])
+
     def test_running_persist_skips_when_no_new_lines_between_ticks(self):
         progress_dirty = True
         outcomes: list[str] = []

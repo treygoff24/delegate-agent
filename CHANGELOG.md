@@ -62,6 +62,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tracked Cursor retries now report cumulative token usage, transient Devin
   catalog failures retain the last-known-good catalog, and Devin help no longer
   advertises unsupported reasoning effort.
+- Slow raw-log archival no longer holds the Registry mutation lock, concurrent
+  ambient retention passes skip instead of waiting, and transient Registry-lock
+  contention can no longer crash a tracked run's stdout drain thread.
 
 ## [0.28.0] - 2026-08-05
 
