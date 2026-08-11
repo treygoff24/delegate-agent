@@ -38,7 +38,7 @@ from delegate_agent import (
 from delegate_agent import config as delegate_config
 from delegate_agent.constants import PROMPT_INSTRUCTION_MODE_SLASH, PROMPT_INSTRUCTION_MODE_WRAPPED
 from delegate_agent.errors import DelegateError
-from delegate_agent.json_types import JsonObject
+from delegate_agent.json_types import JsonObject, is_non_negative_int
 
 STDOUT_LOG = run_registry.STDOUT_LOG
 STDERR_LOG = run_registry.STDERR_LOG
@@ -641,17 +641,27 @@ def _append_unique(values: list[str], value: str) -> None:
         values.append(value)
 
 
-def _aggregate_call_usage(*usages: JsonObject) -> JsonObject:
-    if not all(usage.get("basis") == "exact" for usage in usages):
+def _aggregate_usage(*usages: JsonObject) -> JsonObject:
+    if not usages:
         return {"basis": "unavailable"}
-    keys = ("inputTokens", "outputTokens")
-    if not all(
-        isinstance(usage.get(key), int) and not isinstance(usage.get(key), bool)
-        for usage in usages
-        for key in keys
-    ):
+    basis = usages[0].get("basis")
+    if basis not in {"exact", "reported"} or any(usage.get("basis") != basis for usage in usages):
         return {"basis": "unavailable"}
-    return {key: sum(int(usage[key]) for usage in usages) for key in keys} | {"basis": "exact"}
+    required_keys = ("inputTokens", "outputTokens")
+    if not all(is_non_negative_int(usage.get(key)) for usage in usages for key in required_keys):
+        return {"basis": "unavailable"}
+    result: JsonObject = {
+        "basis": basis,
+        **{key: sum(int(usage[key]) for usage in usages) for key in required_keys},
+    }
+    if basis == "reported":
+        for key in ("cacheReadTokens", "cacheWriteTokens"):
+            result[key] = (
+                sum(int(usage[key]) for usage in usages)
+                if all(is_non_negative_int(usage.get(key)) for usage in usages)
+                else None
+            )
+    return result
 
 
 # Delegate to the shared helper in harness_events so the runner (write-time) and
@@ -928,6 +938,7 @@ def completion_json_payload(
     stderr_bytes: int,
     completion_report_written: bool = False,
     assistant_meta: JsonObject | None = None,
+    usage: JsonObject | None = None,
     extra: JsonObject | None = None,
 ) -> JsonObject:
     payload: JsonObject = {
@@ -981,6 +992,9 @@ def completion_json_payload(
     _add_persona_payload_fields(payload, ctx)
     if assistant_meta is not None:
         payload.update(assistant_meta)
+    if usage is not None:
+        payload["usage"] = usage
+
     cleanup = _worktree_cleanup_commands(ctx)
     if cleanup is not None:
         payload["worktreeCleanupCommands"] = cleanup
@@ -2157,6 +2171,7 @@ def _tracked_result(
             stderr_bytes=capture.stderr_bytes,
             completion_report_written=finalization.report_written,
             assistant_meta=assistant_meta,
+            usage=capture.accumulator.usage,
             extra=finalization.extra,
         )
         return finalization.exit_code, payload
@@ -2477,6 +2492,14 @@ def _merge_tracked_attempt_captures(
     accumulator.current = current_capture.accumulator.current or prior_capture.accumulator.current
     accumulator.terminal_event = current_capture.accumulator.terminal_event
     accumulator.terminal_status = current_capture.accumulator.terminal_status
+    prior_usage = prior_capture.accumulator.usage
+    current_usage = current_capture.accumulator.usage
+    if prior_usage is None and current_usage is None:
+        accumulator.usage = None
+    elif prior_usage is None or current_usage is None:
+        accumulator.usage = {"basis": "unavailable"}
+    else:
+        accumulator.usage = _aggregate_usage(prior_usage, current_usage)
     accumulator.structured_events_seen = (
         prior_capture.accumulator.structured_events_seen
         + current_capture.accumulator.structured_events_seen
@@ -3583,6 +3606,7 @@ def _execute_call_once(
         warnings=warnings,
         error=error,
         message=message,
+        usage=accumulator.usage or {"basis": "unavailable"},
         result_quality=(
             RESULT_QUALITY_NO_ASSISTANT_TEXT
             if process.returncode == 0
@@ -3608,7 +3632,7 @@ def _merge_call_attempts(first: CallResult, last: CallResult, label: str) -> Cal
         stderr_tail=stderr[-profiles.STDERR_TAIL_LIMIT :],
         warnings=tuple(warnings),
         text_truncated=first.text_truncated or last.text_truncated,
-        usage=_aggregate_call_usage(first.usage, last.usage),
+        usage=_aggregate_usage(first.usage, last.usage),
     )
 
 
@@ -3721,7 +3745,7 @@ def execute_call(
         ],
         warnings=tuple(warnings),
         text_truncated=result.text_truncated or retry.text_truncated,
-        usage=_aggregate_call_usage(result.usage, retry.usage),
+        usage=_aggregate_usage(result.usage, retry.usage),
         empty_retry_attempted=True,
         empty_retry_resolved=resolved,
     )

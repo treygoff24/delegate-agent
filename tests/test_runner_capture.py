@@ -94,6 +94,42 @@ class RunnerCaptureTests(unittest.TestCase):
         self.registry = load_module(REGISTRY_PATH, "delegate_registry_runner_test")
         self.run_output = load_module(RUN_OUTPUT_PATH, "delegate_run_output_under_test")
 
+    def _execute_cursor_result(self, event):
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="cursor")
+            script = Path(workspace) / "cursor_result.py"
+            script.write_text(
+                f"print({json.dumps(json.dumps(event))})\n",
+                encoding="utf-8",
+            )
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="cursor",
+                engine="cursor",
+                mode="work",
+                model="composer-2.5",
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at=self.registry.utc_now_iso(),
+            )
+            code, payload = self.runner.execute_tracked(
+                [sys.executable, str(script)],
+                workspace,
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+                completion_report_mode="off",
+            )
+        self.assertEqual(code, 0)
+        self.assertIsNotNone(payload)
+        return payload
+
     def test_execute_call_bounds_plain_stdout_fallback_text(self):
         with tempfile.TemporaryDirectory() as tmp:
             script = Path(tmp) / "plain_stdout.py"
@@ -1802,6 +1838,75 @@ class RunnerCaptureTests(unittest.TestCase):
         )
         self.assertEqual(snapshot["modelResolved"], "effective-model")
 
+    def test_cursor_result_usage_reaches_tracked_completion_payload(self):
+        payload = self._execute_cursor_result(
+            {
+                "type": "result",
+                "subtype": "success",
+                "result": "Status: completed\n- captured usage\n- finished",
+                "usage": {
+                    "inputTokens": 29957,
+                    "outputTokens": 12,
+                    "cacheReadTokens": 0,
+                    "cacheWriteTokens": 0,
+                },
+            }
+        )
+
+        self.assertEqual(
+            payload["usage"],
+            {
+                "basis": "reported",
+                "inputTokens": 29957,
+                "outputTokens": 12,
+                "cacheReadTokens": 0,
+                "cacheWriteTokens": 0,
+            },
+        )
+
+    def test_tracked_completion_payload_omits_usage_when_child_reports_none(self):
+        payload = self._execute_cursor_result(
+            {
+                "type": "result",
+                "subtype": "success",
+                "result": "Status: completed\n- no usage reported\n- finished",
+            }
+        )
+
+        self.assertNotIn("usage", payload)
+
+    def test_cursor_call_reports_result_usage(self):
+        event = {
+            "type": "result",
+            "result": "done",
+            "usage": {
+                "inputTokens": 21,
+                "outputTokens": 8,
+                "cacheReadTokens": 5,
+                "cacheWriteTokens": 3,
+            },
+        }
+        with tempfile.TemporaryDirectory() as workspace:
+            script = Path(workspace) / "cursor_result.py"
+            script.write_text(
+                f"print({json.dumps(json.dumps(event))})\n",
+                encoding="utf-8",
+            )
+            result = self.runner.execute_call(
+                [sys.executable, str(script)], workspace, harness="cursor"
+            )
+
+        self.assertEqual(
+            result.usage,
+            {
+                "basis": "reported",
+                "inputTokens": 21,
+                "outputTokens": 8,
+                "cacheReadTokens": 5,
+                "cacheWriteTokens": 3,
+            },
+        )
+
     def test_persistent_worktree_completion_payload_includes_force_cleanup_command(self):
         ctx = self.runner.RunContext(
             registry_root=Path("/tmp"),
@@ -3317,16 +3422,16 @@ class RunnerCaptureTests(unittest.TestCase):
                 sum(event.get("kind") == "stream.lines_truncated" for event in events), 1
             )
 
-    def test_empty_retry_uses_retry_duration_as_total(self):
+    def test_empty_retry_uses_retry_duration_and_cumulative_reported_usage(self):
         with tempfile.TemporaryDirectory() as workspace:
             root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
-            run_id, alias = self.registry.register_run(root, harness="codex")
+            run_id, alias = self.registry.register_run(root, harness="cursor")
             ctx = self.runner.RunContext(
                 registry_root=root,
                 run_id=run_id,
                 alias=alias,
-                harness="codex",
-                engine="codex",
+                harness="cursor",
+                engine="cursor",
                 mode="safe",
                 model=None,
                 source_cwd=workspace,
@@ -3335,9 +3440,16 @@ class RunnerCaptureTests(unittest.TestCase):
                 isolated_workspace=False,
                 started_at="2026-07-16T12:00:00Z",
             )
-            accumulator = self.runner.harness_events.StreamAccumulator(harness="codex")
+            primary_accumulator = self.runner.harness_events.StreamAccumulator(harness="cursor")
+            primary_accumulator.usage = {
+                "basis": "reported",
+                "inputTokens": 2,
+                "outputTokens": 3,
+                "cacheReadTokens": 4,
+                "cacheWriteTokens": 5,
+            }
             primary = self.runner.TrackedCaptureResult(
-                accumulator=accumulator,
+                accumulator=primary_accumulator,
                 exit_code=0,
                 duration_ms=40,
                 stdout_bytes=2,
@@ -3346,8 +3458,16 @@ class RunnerCaptureTests(unittest.TestCase):
                 pid=os.getpid(),
                 pgid=None,
             )
+            retry_accumulator = self.runner.harness_events.StreamAccumulator(harness="cursor")
+            retry_accumulator.usage = {
+                "basis": "reported",
+                "inputTokens": 7,
+                "outputTokens": 11,
+                "cacheReadTokens": 13,
+                "cacheWriteTokens": 17,
+            }
             retry = self.runner.TrackedCaptureResult(
-                accumulator=accumulator,
+                accumulator=retry_accumulator,
                 exit_code=0,
                 duration_ms=70,
                 stdout_bytes=5,
@@ -3379,6 +3499,16 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertEqual(payload["durationMs"], 70)
             self.assertEqual(payload["stdoutBytes"], 7)
             self.assertEqual(payload["stderrBytes"], 10)
+            self.assertEqual(
+                payload["usage"],
+                {
+                    "basis": "reported",
+                    "inputTokens": 9,
+                    "outputTokens": 14,
+                    "cacheReadTokens": 17,
+                    "cacheWriteTokens": 22,
+                },
+            )
 
     def test_work_empty_success_does_not_retry(self):
         with tempfile.TemporaryDirectory() as workspace:

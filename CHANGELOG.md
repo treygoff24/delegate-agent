@@ -26,9 +26,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   through the read-only workflow actions
   (`check|status|watch|events|result|wait|list`) without a selected profile,
   mirroring the Python CLI's guard; a parity test fails on drift.
+- Tracked Cursor completion JSON now includes the CLI-reported token `usage`
+  object when present.
 
 ### Changed
 
+- Devin model discovery now uses the prompt-free, fingerprinted
+  `devin models list --format json` catalog for setup, capability refresh, and
+  one-off live queries. Older or unauthenticated CLIs degrade to a version-only
+  record instead of receiving a prompt-like invalid-model probe.
 - Child-launch failures with `EPERM` now hint that sandboxed parent shells can
   forbid launching harness binaries; `prompt_too_large` names the engines
   whose prompt rides a file/stdin transport, derived from the transport table.
@@ -53,6 +59,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `events.jsonl` mirrors at most 500 stdout lines plus a truncation marker so
   many short lines cannot amplify a bounded child stream into an unbounded
   event journal or in-memory event list.
+- Tracked Cursor retries now report cumulative token usage, transient Devin
+  catalog failures retain the last-known-good catalog, and Devin help no longer
+  advertises unsupported reasoning effort.
 
 ## [0.28.0] - 2026-08-05
 

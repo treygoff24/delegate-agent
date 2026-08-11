@@ -652,6 +652,63 @@ def parse_codex_catalog(raw: str) -> JsonObject:
     return _fragment(model_scope="account", models=models)
 
 
+def _devin_model_selector(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    selector = value.strip()
+    if (
+        not selector
+        or selector.startswith("-")
+        or any(character.isspace() for character in selector)
+    ):
+        return None
+    return selector
+
+
+def parse_devin_catalog(raw: str) -> JsonObject:
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("devin catalog was not valid JSON") from exc
+    families = payload.get("families") if isinstance(payload, dict) else None
+    if not isinstance(families, list):
+        raise ValueError("devin catalog must contain a families array")
+    models: JsonObject = {}
+    for family in families:
+        if not isinstance(family, dict):
+            continue
+        slug = _devin_model_selector(family.get("slug"))
+        if slug is not None:
+            model: JsonObject = {}
+            label = family.get("family_label")
+            if _nonempty_string(label):
+                model["displayName"] = label
+            models[slug] = model
+            aliases = family.get("aliases")
+            if isinstance(aliases, list):
+                for alias in aliases:
+                    alias = _devin_model_selector(alias)
+                    if alias is not None:
+                        models.setdefault(alias, dict(model))
+        variants = family.get("variants")
+        if not isinstance(variants, list):
+            continue
+        for variant in variants:
+            if not isinstance(variant, dict):
+                continue
+            model_uid = _devin_model_selector(variant.get("model_uid"))
+            if model_uid is None:
+                continue
+            model = {}
+            label = variant.get("label")
+            if _nonempty_string(label):
+                model["displayName"] = label
+            models[model_uid] = model
+    if not models:
+        raise ValueError("devin catalog contained no models")
+    return _fragment(model_scope="account", models=models)
+
+
 def parse_omp_catalog(raw: str) -> JsonObject:
     try:
         payload = json.loads(raw)
@@ -1250,6 +1307,12 @@ def _probe_cursor(selector: tuple[str, ...], env: Mapping[str, str], _: Path | N
     return parse_cursor_catalog(_probe_output(selector, ("models",), env).stdout)
 
 
+def _probe_devin(selector: tuple[str, ...], env: Mapping[str, str], _: Path | None) -> JsonObject:
+    return parse_devin_catalog(
+        _probe_output(selector, ("models", "list", "--format", "json"), env).stdout
+    )
+
+
 def _probe_droid(
     selector: tuple[str, ...], env: Mapping[str, str], factory_settings_path: Path | None
 ) -> JsonObject:
@@ -1311,6 +1374,7 @@ def _probe_pi(selector: tuple[str, ...], env: Mapping[str, str], _: Path | None)
 
 ADAPTERS = {
     "cursor": _probe_cursor,
+    "devin": _probe_devin,
     "droid": _probe_droid,
     "codex": _probe_codex,
     "kimi": _probe_kimi,
@@ -1360,14 +1424,6 @@ def probe_harness(
             probe_status="missing" if resolution.error == "probe_missing" else "error",
             warnings=warnings + ([resolution.error] if resolution.error else []),
         )
-    if harness == "devin":
-        return _empty_harness_record(
-            installed=True,
-            selector=resolution.selector,
-            version=resolution.version,
-            probe_status="partial",
-            warnings=[*warnings, "Devin exposes no prompt-free model enumeration"],
-        )
     adapter = ADAPTERS[harness]
     try:
         fragment = adapter(resolution.selector, env, factory_settings_path)
@@ -1384,6 +1440,19 @@ def probe_harness(
         _validate_harness_record(harness, record)
         return record
     except (OSError, ValueError) as exc:
+        if harness == "devin":
+            diagnostic = _scrub_diagnostic(str(exc))
+            return _empty_harness_record(
+                installed=True,
+                selector=resolution.selector,
+                version=resolution.version,
+                probe_status="partial",
+                warnings=[
+                    *warnings,
+                    "Devin model catalog unavailable",
+                    *([diagnostic] if diagnostic else []),
+                ],
+            )
         return _empty_harness_record(
             installed=True,
             selector=resolution.selector,
@@ -1737,7 +1806,17 @@ def refresh_discovery(
                 warnings=[diagnostic],
             )
         attempts[harness] = record
-        if record.get("installed") is True and record.get("probeStatus") in {"ok", "partial"}:
+        existing_record = snapshot["harnesses"].get(harness)
+        would_drop_catalog = (
+            isinstance(existing_record, dict)
+            and bool(existing_record.get("models"))
+            and not record.get("models")
+        )
+        if (
+            record.get("installed") is True
+            and record.get("probeStatus") in {"ok", "partial"}
+            and not would_drop_catalog
+        ):
             if not updated:
                 snapshot = {
                     **snapshot,

@@ -169,7 +169,7 @@ matches an alias key; otherwise it is passed through verbatim as a raw model ID
 both. With neither, Droid uses `droid.defaultModel` when set. Discover aliases
 and advisory catalogs with `delegate models`, `delegate models <engine>`, and
 `delegate models <engine> --live`. Every harness except Claude exposes a live
-model probe; see [Discovery](#discovery) for the evidence and Devin caveats.
+model probe; see [Discovery](#discovery) for the evidence each probe records.
 
 `--reasoning-effort LEVEL` is optional and parsed only before prompt text begins.
 Engines with exact capability metadata reject unsupported model/effort pairs
@@ -332,6 +332,39 @@ delegate grok safe "Review this repo for regressions; report file/line/severity.
 delegate grok work "Implement the scoped task; report changed files and tests."
 delegate grok call "Summarize this context in three bullets."
 delegate --isolation worktree grok work "Implement the feature in a persistent worktree."
+```
+
+### `delegate devin`
+
+Wraps Devin CLI print mode. Safe mode is unsupported because Devin may perform
+filesystem surveys through its generic `exec` tool, which Delegate cannot allow
+without weakening the read-only boundary.
+
+```bash
+delegate [--json] [--isolation auto|none|worktree] devin work [--model <alias-or-model>] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate [--json] devin call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--prompt-file PATH] [prompt...]
+```
+
+- `call --read-only` passes a Delegate-generated `--agent-config` deny-list for
+  edit, write, exec, and `mcp__*`, plus `--permission-mode auto`. Work and
+  default call use `--permission-mode dangerous` because non-interactive Devin
+  rejects unapproved edit/exec tools.
+- Prompt text is materialized in a private temporary file and passed with
+  Devin `--prompt-file` plus `-p`; dry-run argv and tracked manifests do not
+  contain the prompt.
+- Model selection uses `--model` (an alias from `devin.models` or a raw model
+  ID), the run-input JSON `model`, or `devin.defaultModel`. Unknown names are
+  left to Devin validation. `--reasoning-effort` is unsupported.
+- Setup, capability refresh, and `models devin --live` use the prompt-free
+  `devin models list --format json` catalog. Catalog failures degrade to
+  version-only metadata without prompting Devin.
+
+Examples:
+
+```bash
+delegate devin work "Implement the scoped task; report changed files and tests."
+delegate devin call --read-only "Score this answer against the rubric."
+delegate --isolation worktree devin work "Implement the feature in a persistent worktree."
 ```
 
 ### `delegate opencode`
@@ -853,7 +886,7 @@ Automatic setup and refresh use these evidence sources:
 | Kimi | Models in the active Kimi configuration | Provider metadata may advertise efforts, but Delegate has no Kimi effort transport and still rejects `--reasoning-effort`. |
 | Claude | No model enumeration | The native effort enum is harness-wide evidence. |
 | Grok | Models visible to the active account | Exact config, discovery, or bundled declarations win; otherwise the native effort enum is harness-wide compatibility evidence and model-specific support remains unknown. |
-| Devin | No prompt-free model enumeration | Automatic discovery records only installation/version; Delegate has no Devin effort transport. |
+| Devin | Family slugs, aliases, and concrete variants visible to the active account | The prompt-free JSON catalog carries display names; Delegate has no Devin effort transport. |
 | OpenCode | Harness catalog | Listed variants are `exact` for that model; models without exact variant evidence retain the documented unvalidated pass-through path. |
 | Pi | Harness catalog | Thinking support is model-specific, but available labels come from a harness-wide enum and are reported as partial model evidence. |
 | Oh My Pi | Harness catalog | A model's explicit `thinking` array is exact; missing arrays use harness-partial compatibility rather than fabricated model evidence. |
@@ -888,6 +921,8 @@ stale and ordinary launches ignore only that harness's record until refresh.
 Cached reads never run `--version` merely to test staleness, and neither does an
 ordinary launch: a cached record can only be short of what the harness now
 supports, never claim more, so one that satisfies the run is used as-is.
+Existing Devin version-only cache records therefore remain valid but contain no
+live catalog until `delegate capabilities refresh devin` is run.
 
 A launch re-probes `--version` for its own harness only when the cached record
 has already cost the run something: it refused an explicit `--reasoning-effort`,
@@ -913,11 +948,9 @@ policy to another. Dry runs never probe at all.
 
 All automatic probes run with `shell=False`, stdin closed, a neutral temporary
 working directory, bounded output, and a timeout. They pass the active profile
-environment but do not carry a task prompt. Devin is the explicit exception on
-the opt-in one-off surface: `models devin --live` uses a bounded invalid-model,
-prompt-like invocation to make Devin print its available-model error. Setup and
-`capabilities refresh` never use that Devin invocation; they run `--version`
-only.
+environment but do not carry a task prompt. Devin uses the same prompt-free
+`models list --format json` metadata command for setup, capability refresh, and
+`models devin --live`; failures degrade to a version-only partial record.
 
 Discovery output applies best-effort credential scrubbing, so secret-shaped
 model IDs or diagnostic values may appear as `***`. Exact values should come
@@ -1125,12 +1158,14 @@ Common JSON fields for tracked run completion:
 
 Persistent worktree completions also include `branch`, `worktree`, a
 `workSummary`, and (when requested) `commitPolicy`. `workSummary` reports dirty
-state, changed file count, diff stat, and commits created by the child. When a
-Codex usage-limit fallback fires, the completion payload also includes
-`codexAuthFallback` metadata (reason, the primary and fallback profile names,
-both exit codes, and a redacted primary stderr tail). The fallback is Codex-only
-and is enabled only by `codex.fallbackProfile`; Delegate remembers temporary
-blocks by hashed credential namespace (`CODEX_HOME/auth.json` plus
+state, changed file count, diff stat, and commits created by the child. Tracked
+Cursor completions include `usage` when the Cursor CLI reports it, using
+`basis: "reported"` and camel-case token fields such as `inputTokens` and
+`outputTokens`. When a Codex usage-limit fallback fires, the completion payload
+also includes `codexAuthFallback` metadata (reason, the primary and fallback
+profile names, both exit codes, and a redacted primary stderr tail). The
+fallback is Codex-only and is enabled only by `codex.fallbackProfile`; Delegate
+remembers temporary blocks by hashed credential namespace (`CODEX_HOME/auth.json` plus
 `codex.profile`) as canonical state. Default work/personal credential homes
 also mirror compatible legacy alias keys so existing launchers share blocks;
 remapped aliases remain isolated.

@@ -56,7 +56,6 @@ def materialize_minimum_harnesses(target: Path, *, fixtures: Path = FIXTURES) ->
             0,
         )
     responses["agent"] = {("--version",): ("grok 0.2.101 (fixture) [alpha]\n", "", 0)}
-    responses["devin"] = {("--version",): ("devin 3000.1.27 (fixture)\n", "", 0)}
     responses["pi"][("--help",)] = (
         (fixtures / "pi_models.txt").read_text(encoding="utf-8"),
         "",

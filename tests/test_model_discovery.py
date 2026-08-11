@@ -178,23 +178,6 @@ class LiveProbeParseHelpersTests(unittest.TestCase):
             ],
         )
 
-    def test_parse_devin_available_line(self):
-        from delegate_agent.model_discovery import parse_devin_available_models
-
-        raw = (
-            "Error: Unknown model: 'delegate-live-probe-sentinel'\n"
-            "Available: adaptive, claude-fable-5, gpt-5.5\n"
-        )
-        models = parse_devin_available_models(raw)
-        self.assertEqual(
-            models,
-            [
-                {"id": "adaptive"},
-                {"id": "claude-fable-5"},
-                {"id": "gpt-5.5"},
-            ],
-        )
-
     def test_parse_opencode_models_output_skips_junk(self):
         from delegate_agent.model_discovery import parse_opencode_models_output
 
@@ -431,13 +414,15 @@ class LiveProbeIntegrationTests(unittest.TestCase):
                 Path(tmp) / "fake-devin",
                 "#!/usr/bin/env bash\n"
                 f'printf \'%s\\n\' "$@" > "{argv_log}"\n'
-                'if [ "$1" != "--model" ]; then\n'
-                "  echo 'unexpected argv' >&2\n"
-                "  exit 2\n"
+                'if [ "$1" = "--version" ]; then echo "devin 3000.3.27"; exit 0; fi\n'
+                'if [ "$1 $2 $3 $4" != "models list --format json" ]; then\n'
+                "  echo 'unexpected argv' >&2; exit 2\n"
                 "fi\n"
-                "echo \"Error: Unknown model: '$2'\" >&2\n"
-                "echo 'Available: adaptive, live-devin-model, gpt-5.5' >&2\n"
-                "exit 1\n",
+                "cat <<'JSON'\n"
+                '{"families":[{"family_label":"Live Devin","slug":"live-devin-model",'
+                '"variants":[{"model_uid":"live-devin-model-high","label":"Live Devin High"}]},'
+                '{"family_label":"GPT 5.5","slug":"gpt-5.5","variants":[]}]}\n'
+                "JSON\n",
             )
             config = self.embedded_default_config()
             config["devin"]["binary"] = str(fake)
@@ -445,46 +430,29 @@ class LiveProbeIntegrationTests(unittest.TestCase):
             self.assertIs(payload["live"], True)
             by_id = {item["id"]: item for item in payload["models"]}
             self.assertEqual(by_id["live-devin-model"]["source"], "live")
-            self.assertIn("adaptive", by_id)
-            from delegate_agent.model_discovery import DEVIN_LIVE_SENTINEL
+            self.assertEqual(by_id["live-devin-model-high"]["source"], "live")
+            self.assertIn("gpt-5.5", by_id)
 
             recorded = argv_log.read_text(encoding="utf-8").splitlines()
-            self.assertEqual(
-                recorded,
-                ["--model", DEVIN_LIVE_SENTINEL, "-p", "--", "probe"],
-            )
+            self.assertEqual(recorded, ["models", "list", "--format", "json"])
 
-    def test_devin_live_uses_bounded_metadata_runner_and_parses_nonzero_output(self):
+    def test_devin_live_uses_generic_metadata_runner(self):
         from delegate_agent import harness_discovery
-        from delegate_agent.model_discovery import (
-            DEVIN_LIVE_SENTINEL,
-            LIVE_PROBE_TIMEOUT_SEC,
-        )
 
         config = self.embedded_default_config()
-        config["devin"]["binary"] = "/configured/devin"
-        result = harness_discovery.ProbeResult(
-            argv=("/configured/devin",),
-            returncode=1,
-            stdout="",
-            stderr="Available: adaptive, bounded-devin",
-            error="probe_failed",
-        )
-        with mock.patch.object(harness_discovery, "run_metadata_probe", return_value=result) as run:
+        with mock.patch.object(
+            harness_discovery,
+            "probe_harness",
+            return_value={
+                "probeStatus": "ok",
+                "defaultModel": None,
+                "models": {"bounded-devin": {"displayName": "Bounded"}},
+                "warnings": [],
+            },
+        ) as probe:
             payload = self.engine_models_payload(config, "devin", live=True)
 
-        run.assert_called_once_with(
-            [
-                "/configured/devin",
-                "--model",
-                DEVIN_LIVE_SENTINEL,
-                "-p",
-                "--",
-                "probe",
-            ],
-            env=mock.ANY,
-            timeout_sec=LIVE_PROBE_TIMEOUT_SEC,
-        )
+        probe.assert_called_once()
         by_id = {item["id"]: item for item in payload["models"]}
         self.assertEqual(by_id["bounded-devin"]["source"], "live")
 
@@ -954,15 +922,29 @@ class UnifiedDiscoveryProjectionTests(unittest.TestCase):
             env={"DEVIN_ACCOUNT": "work"},
         )
         completed = harness_discovery.ProbeResult(
-            argv=(),
-            returncode=1,
-            stdout="",
-            stderr="Available: adaptive, profile-devin",
-            error="probe_failed",
+            argv=("devin", "models", "list", "--format", "json"),
+            returncode=0,
+            stdout='{"families":[{"family_label":"Profile","slug":"profile-devin","variants":[]}]}',
+            stderr="",
+            error=None,
         )
-        with mock.patch.object(
-            harness_discovery, "run_metadata_probe", return_value=completed
-        ) as run:
+        with (
+            mock.patch.object(harness_discovery.shutil, "which", return_value="/usr/bin/devin"),
+            mock.patch.object(
+                harness_discovery,
+                "run_metadata_probe",
+                side_effect=[
+                    harness_discovery.ProbeResult(
+                        argv=("devin", "--version"),
+                        returncode=0,
+                        stdout="devin 3000.3.27\n",
+                        stderr="",
+                        error=None,
+                    ),
+                    completed,
+                ],
+            ) as run,
+        ):
             payload = engine_models_payload(
                 self.config,
                 "devin",

@@ -472,6 +472,13 @@ class RunOutputHelpTests(HelpCliTestBase):
         self.assertIn("--max-chars", raw_option["description"])
 
 
+class DevinHelpTests(HelpCliTestBase):
+    def test_devin_help_omits_unsupported_reasoning_effort(self):
+        code, out, _err = self.run_main(["devin", "--help"])
+        self.assertEqual(code, self.delegate.EXIT_OK)
+        self.assertNotIn("--reasoning-effort", out)
+
+
 class UnknownTopicTests(HelpCliTestBase):
     """Unknown help topics error cleanly with exit 2 (m3)."""
 
