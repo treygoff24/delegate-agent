@@ -324,6 +324,7 @@ def _build_persistent_worktree_run_context(
         synced_files=int(creation_context.get("syncedFiles") or 0),
         mail_push=request.mail_push,
         group=request.group,
+        workflow_agent_key=request.workflow_agent_key,
         call_read_only=request.call_read_only or request.pure,
         pure=request.pure,
         prompt_instruction_mode=request.prompt_instruction_mode,
@@ -361,6 +362,7 @@ def _register_persistent_worktree_run(
         "modelResolved": request.model,
         "cwd": execution.source_workspace.path,
         "group": request.group,
+        "workflowAgentKey": request.workflow_agent_key,
     }
     run_metadata.add_initiator_metadata(
         metadata, run_metadata.resolve_initiator_root(request.env_overrides or {})

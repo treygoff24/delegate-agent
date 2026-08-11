@@ -195,6 +195,11 @@ def build_run_summary(
         "alias": alias if isinstance(alias, str) else None,
         "harness": harness if isinstance(harness, str) else None,
         "group": index_entry.get("group") if isinstance(index_entry.get("group"), str) else None,
+        "workflowAgentKey": (
+            index_entry.get("workflowAgentKey")
+            if isinstance(index_entry.get("workflowAgentKey"), str)
+            else None
+        ),
         "mode": index_entry.get("mode") if isinstance(index_entry.get("mode"), str) else None,
         "stdoutBytes": stdout_bytes,
         "stderrBytes": stderr_bytes,

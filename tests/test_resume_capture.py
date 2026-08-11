@@ -115,6 +115,8 @@ class ResumeCaptureTests(unittest.TestCase):
                 workspace_kind="git",
                 isolation_context=isolation,
                 source_prompt=source_prompt,
+                group="wf_test",
+                workflow_agent_key="root/agent@0",
             )
             execution = worktree_execution.PersistentWorktreeExecution(
                 request=request,
@@ -168,6 +170,36 @@ class ResumeCaptureTests(unittest.TestCase):
             self.assertEqual(prompt_path.stat().st_mode & 0o777, 0o600)
             manifest = json.loads((registration.run_path / "manifest.json").read_text())
             self.assertEqual(manifest["promptFile"], "prompt.txt")
+            self.assertEqual(manifest["workflowAgentKey"], "root/agent@0")
+            index = run_registry.load_index(registry_root)
+            run_entry = index["runs"][registration.run_id]
+            self.assertEqual(run_entry["group"], "wf_test")
+            self.assertEqual(run_entry["workflowAgentKey"], "root/agent@0")
+            runs_stdout = io.StringIO()
+            code = cli.main(
+                ["--json", "--cwd", str(workspace), "runs", "--group", "wf_test"],
+                stdout=runs_stdout,
+                stderr=io.StringIO(),
+            )
+            self.assertEqual(code, 0)
+            run = json.loads(runs_stdout.getvalue())["runs"][0]
+            self.assertEqual(run["workflowAgentKey"], "root/agent@0")
+            runner.write_snapshot(
+                registration.run_path,
+                runner.build_snapshot(
+                    registration.pre_ctx,
+                    accumulator=runner.harness_events.StreamAccumulator(harness="cursor"),
+                ),
+            )
+            snapshot_stdout = io.StringIO()
+            code = cli.main(
+                ["--json", "--cwd", str(workspace), "snapshot", registration.alias],
+                stdout=snapshot_stdout,
+                stderr=io.StringIO(),
+            )
+            self.assertEqual(code, 0)
+            snapshot = json.loads(snapshot_stdout.getvalue())
+            self.assertEqual(snapshot["workflowAgentKey"], manifest["workflowAgentKey"])
             self.assertNotIn("framed prompt", prompt_path.read_text())
             self.assertLess(events.index("prompt"), events.index("manifest"))
 
