@@ -1060,9 +1060,10 @@ timestamp, group/mode, and `initiatorRoot` metadata. It is intended for local st
 JSON output (`delegate.runs.v1`) includes `total` (post-filter match count before `--limit`)
 and `truncated` (`true` when `total` exceeds the returned `runs` length). Text mode appends
 `showing N of M runs (raise --limit to see more)` when truncated. A zero-row result with
-`--group` or `--harness` adds a `warnings` entry (and a matching text `warning:` line) that
-the Registry is workspace-scoped and `--cwd PATH` targets another workspace's Registry — it
-does not claim the filter matches elsewhere.
+`--group` or `--harness` adds a `warnings` entry (and a matching text `warning:` line): when
+the scope filters match Runs that `--active`/`--running`/`--stale` then excluded, it names
+the status flag to drop; otherwise it notes the Registry is workspace-scoped and `--cwd PATH`
+targets another workspace's Registry — it does not claim the filter matches elsewhere.
 `delegate ps` is the shorter first-class form of `delegate runs --active` and
 accepts the same harness, group, limit, and structural selectors (including `total`,
 `truncated`, and the empty-filter workspace-scope warning).

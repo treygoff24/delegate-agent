@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `delegate runs` and `delegate ps` now report listing honesty: the JSON
+  payload gains `total` (pre-limit match count) and `truncated`, text mode
+  prints `showing N of M runs (raise --limit to see more)`, and a zero-row
+  result under `--group`/`--harness` explains itself — naming the status
+  filter to drop when `--running`/`--stale`/`--active` emptied the result, or
+  noting the run Registry is workspace-scoped otherwise.
+- Retained event text now carries truncation metadata on both surfaces: raw
+  `events.jsonl` `stream.line` records and normalized Snapshot `recentEvents`
+  add `truncated: true` plus `textChars` (original length) only when the
+  500-character bound actually clipped, and the final unterminated child
+  stdout line is now written to `events.jsonl` instead of silently dropped.
+  All serialized normalized-event messages (including `error` and
+  `run.completed`) are bounded through the same helper.
+- The tracked launcher shim template (`bin/delegate-profile-shim`) passes
+  through the read-only workflow actions
+  (`check|status|watch|events|result|wait|list`) without a selected profile,
+  mirroring the Python CLI's guard; a parity test fails on drift.
+
+### Changed
+
+- Child-launch failures with `EPERM` now hint that sandboxed parent shells can
+  forbid launching harness binaries; `prompt_too_large` names the engines
+  whose prompt rides a file/stdin transport, derived from the transport table.
+- The test suite hardens hermeticity against ambient delegate-lane
+  environment (`DELEGATE_RUN_ID`, mail identity, root-provenance and profile
+  variables), and the documented discovery command is
+  `python3 -m unittest discover -s tests -t .` everywhere, including CI and
+  the contributor wiki.
+
 ### Fixed
 
 - An explicit `DELEGATE_CONFIG` now survives profile selection: the profile

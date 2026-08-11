@@ -912,8 +912,11 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "JSON includes total (pre-limit match count) and truncated "
             "(true when total exceeds the returned rows); text mode prints "
             "'showing N of M runs (raise --limit to see more)' when truncated.",
-            "An empty --group/--harness result warns that the Registry is "
-            "workspace-scoped; use --cwd PATH to inspect another workspace.",
+            "When --group/--harness matches no Runs, the empty result warns that "
+            "the Registry is workspace-scoped; use --cwd PATH to inspect another "
+            "workspace. When those filters match Runs that --active/--running/"
+            "--stale then excludes, the warning instead suggests dropping the "
+            "status flag.",
         ),
         see_also=("ps", "runs prune", "snapshot", "run-output"),
         unsupported_global_options=("--auth-profile",),
@@ -1133,8 +1136,10 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "JSON includes total (pre-limit match count) and truncated "
             "(true when total exceeds the returned rows); text mode prints "
             "'showing N of M runs (raise --limit to see more)' when truncated.",
-            "An empty --group/--harness result warns that the Registry is "
-            "workspace-scoped; use --cwd PATH to inspect another workspace.",
+            "When --group/--harness matches no Runs, the empty result warns that "
+            "the Registry is workspace-scoped; use --cwd PATH to inspect another "
+            "workspace. When those filters match Runs that --active then excludes, "
+            "the warning instead suggests dropping --active.",
         ),
         see_also=("runs", "snapshot", "run-output"),
         unsupported_global_options=("--auth-profile",),

@@ -653,6 +653,70 @@ class InspectionCommandTests(unittest.TestCase):
         self.assertEqual(len(populated_payload["runs"]), 2)
         self.assertNotIn("warnings", populated_payload)
 
+        # scope_total semantics: group matches N runs, status filter excludes all
+        index = run_registry.load_index(self.registry_root)
+        summaries, total, scope_total = run_registry.list_run_summaries(
+            self.registry_root,
+            index,
+            active=True,
+            group="pc-w3",
+        )
+        self.assertEqual(summaries, [])
+        self.assertEqual(total, 0)
+        self.assertEqual(scope_total, 2)
+
+    def test_emit_runs_absent_group_with_status_filter_warns_workspace_scoped(self):
+        self.write_run(harness="codex", group="other", assistant_text="elsewhere")
+
+        for flag_name, kwargs in (
+            ("running", {"running": True}),
+            ("stale", {"stale": True}),
+            ("active", {"active": True}),
+        ):
+            with self.subTest(flag=flag_name, command="runs"):
+                stdout = io.StringIO()
+                code = inspection_commands.emit_runs(
+                    inspection_commands.RunsCommand(
+                        group="definitely-absent", json_mode=True, **kwargs
+                    ),
+                    workspace_path=str(self.workspace),
+                    stdout=stdout,
+                )
+                payload = json.loads(stdout.getvalue())
+                self.assertEqual(code, 0)
+                self.assertEqual(payload["runs"], [])
+                self.assertEqual(payload["total"], 0)
+                self.assertEqual(len(payload["warnings"]), 1)
+                warning = payload["warnings"][0]
+                self.assertIn("workspace-scoped", warning)
+                self.assertIn("--cwd PATH", warning)
+                self.assertNotIn(f"No {flag_name} runs matched", warning)
+                self.assertNotIn(f"Drop --{flag_name}", warning)
+
+        # ps parity: absent group + --active → workspace-scope warning
+        empty = io.StringIO()
+        code = inspection_commands.emit_runs(
+            inspection_commands.RunsCommand(active=True, group="definitely-absent", json_mode=True),
+            workspace_path=str(self.workspace),
+            stdout=empty,
+        )
+        empty_payload = json.loads(empty.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(empty_payload["mode"], "active")
+        self.assertEqual(empty_payload["runs"], [])
+        self.assertEqual(len(empty_payload["warnings"]), 1)
+        self.assertIn("workspace-scoped", empty_payload["warnings"][0])
+        self.assertNotIn("No active runs matched", empty_payload["warnings"][0])
+
+        index = run_registry.load_index(self.registry_root)
+        _summaries, _total, scope_total = run_registry.list_run_summaries(
+            self.registry_root,
+            index,
+            active=True,
+            group="definitely-absent",
+        )
+        self.assertEqual(scope_total, 0)
+
     def test_emit_ps_parity_for_total_truncated_and_empty_filter_warning(self):
         for index in range(3):
             self.write_run(
@@ -674,6 +738,7 @@ class InspectionCommandTests(unittest.TestCase):
         self.assertTrue(payload["truncated"])
         self.assertEqual(len(payload["runs"]), 2)
 
+        # Absent group under --active (ps) must use workspace-scope warning, not status.
         empty = io.StringIO()
         code = inspection_commands.emit_runs(
             inspection_commands.RunsCommand(
@@ -688,9 +753,10 @@ class InspectionCommandTests(unittest.TestCase):
         self.assertEqual(empty_payload["runs"], [])
         self.assertEqual(empty_payload["total"], 0)
         self.assertEqual(len(empty_payload["warnings"]), 1)
-        self.assertIn("No active runs matched", empty_payload["warnings"][0])
-        self.assertIn("Drop --active", empty_payload["warnings"][0])
-        self.assertNotIn("workspace-scoped", empty_payload["warnings"][0])
+        self.assertIn("workspace-scoped", empty_payload["warnings"][0])
+        self.assertIn("--cwd PATH", empty_payload["warnings"][0])
+        self.assertNotIn("No active runs matched", empty_payload["warnings"][0])
+        self.assertNotIn("Drop --active", empty_payload["warnings"][0])
 
 
 if __name__ == "__main__":
