@@ -57,3 +57,9 @@ docs/dogfood/
 # uv release-tooling artifact, not a project dependency lock (stdlib-only)
 uv.lock
 docs/briefs/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
