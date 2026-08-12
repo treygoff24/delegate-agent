@@ -54,8 +54,8 @@ BUNDLED_MODELS: dict[str, tuple[BundledModelEntry, ...]] = {
     ),
     "cursor": (
         {"id": "composer-2.5"},
-        {"id": "grok-4.5-xhigh"},
-        {"id": "grok-4.5-fast-xhigh"},
+        {"id": "cursor-grok-4.6-xhigh"},
+        {"id": "cursor-grok-4.6-xhigh-fast"},
         {"id": "gpt-5.5-high"},
         {"id": "claude-opus-4-8-thinking-high"},
     ),
@@ -67,8 +67,8 @@ BUNDLED_MODELS: dict[str, tuple[BundledModelEntry, ...]] = {
     ),
     "grok": (
         {"id": "swe-1.7"},
+        {"id": "grok-4.6"},
         {"id": "grok-4.5"},
-        {"id": "grok-4.5-fast"},
     ),
     "kimi": (
         {"id": "kimi-code/k3"},
