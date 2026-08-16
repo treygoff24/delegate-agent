@@ -339,6 +339,7 @@ def _build_persistent_worktree_run_context(
         persona_digest=request.persona_digest,
         persona_file=request.persona_file,
         persona_text=request.persona_text,
+        account_binding_command=request.account_binding_command,
     )
 
 

@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import BinaryIO, TextIO
 
 from delegate_agent import (
+    account_binding,
     child_failures,
     failover_state,
     harness_events,
@@ -173,6 +174,7 @@ class RunContext:
     persona_file: str | None = None
     persona_text: str | None = None
     mail_push: bool = False
+    account_binding_command: tuple[str, ...] | None = None
 
 
 def write_manifest(run_path: Path, manifest: JsonObject) -> None:
@@ -1004,6 +1006,12 @@ def completion_json_payload(
         payload["worktreeCleanupCommands"] = cleanup
     if extra is not None:
         _merge_extra(payload, extra)
+    account_binding.add_account_fingerprint(
+        payload,
+        engine=ctx.engine,
+        command=ctx.account_binding_command,
+        env_overrides=ctx.env_overrides,
+    )
 
     if not ok:
         if status == run_registry.STATUS_CANCELLED and extra is not None:

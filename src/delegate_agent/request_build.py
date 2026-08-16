@@ -23,8 +23,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TextIO
 
-from delegate_agent import config as delegate_config
 from delegate_agent import (
+    account_binding,
     harness_discovery,
     mail,
     personas,
@@ -34,6 +34,7 @@ from delegate_agent import (
     structured_output,
     wsl,
 )
+from delegate_agent import config as delegate_config
 from delegate_agent import runner as delegate_runner
 from delegate_agent.argv_builders import (
     SAFE_REVIEW_PREFIX_BY_ENGINE,
@@ -3248,6 +3249,7 @@ def _build_request_for_workspace(
             allow_repo_persona=allow_repo_persona,
             persona_env_overrides=parts.persona_env_overrides or persona_env,
             completion_report_mode=completion_report_mode,
+            account_binding_command=account_binding.cursor_status_command(engine, config),
             persistent_worktree_notes_framed=framed_worktree_note is not None,
             mail_push=mail_push,
         ),

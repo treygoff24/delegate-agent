@@ -1368,7 +1368,10 @@ class ProfilePhase2CliTests(unittest.TestCase):
             )
             self.assertEqual(code, 0)
             self.assertEqual(payload["authProfile"], "work")
-            self.assertEqual(env_out.read_text(encoding="utf-8").splitlines(), ["work-pointer"])
+            self.assertEqual(
+                env_out.read_text(encoding="utf-8").splitlines(),
+                ["work-pointer", "work-pointer"],
+            )
 
     def test_auth_profile_env_does_not_replace_explicit_delegate_config(self):
         repo = make_git_repo()
@@ -1490,7 +1493,7 @@ class ProfilePhase2CliTests(unittest.TestCase):
             self.assertTrue(payload["isolatedWorkspace"])
             self.assertEqual(
                 env_out.read_text(encoding="utf-8").splitlines(),
-                ["work-pointer", "work-pointer"],
+                ["work-pointer", "work-pointer", "work-pointer"],
             )
             self.assertEqual(payload["emptyRetry"], {"attempted": True, "resolved": False})
 
@@ -1532,7 +1535,10 @@ class ProfilePhase2CliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(payload["authProfile"], "work")
             self.assertEqual(payload["isolationLifecycle"], "persistent")
-            self.assertEqual(env_out.read_text(encoding="utf-8").splitlines(), ["work-pointer"])
+            self.assertEqual(
+                env_out.read_text(encoding="utf-8").splitlines(),
+                ["work-pointer", "work-pointer"],
+            )
 
     def test_auth_profile_override_applies_to_dry_run_and_run_input_json(self):
         repo = make_git_repo()
@@ -1588,7 +1594,10 @@ class ProfilePhase2CliTests(unittest.TestCase):
             )
             self.assertEqual(run_code, 0)
             self.assertEqual(run_payload["authProfile"], "work")
-            self.assertEqual(env_out.read_text(encoding="utf-8").splitlines(), ["work-pointer"])
+            self.assertEqual(
+                env_out.read_text(encoding="utf-8").splitlines(),
+                ["work-pointer", "work-pointer", "work-pointer"],
+            )
 
     def test_auth_profile_rejected_for_inspection_and_worktree_commands(self):
         for argv in (

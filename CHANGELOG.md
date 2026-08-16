@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Cursor dry-run and terminal JSON now include a stable `accountFingerprint`
+  derived from `cursor-agent status --format json`. Raw account fields and
+  tokens are never emitted or persisted; unauthenticated or malformed status
+  output omits the fingerprint so consumers can fail closed.
+
 ## [0.29.1] - 2026-08-11
 
 ### Changed

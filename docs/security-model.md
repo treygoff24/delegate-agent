@@ -315,6 +315,12 @@ refresh, and every live adapter resolve only configured selectors and known
 `PATH` candidates, fingerprint the binary with `--version`, and never search the
 workspace for an executable.
 
+Cursor dry-run and terminal envelopes also run the configured Cursor argv
+prefix with `status --format json` in a neutral temporary directory. Delegate
+accepts only an authenticated status with access and refresh credentials, hashes
+the stable user ID and normalized email into `accountFingerprint`, and discards
+the raw response. Status failure or malformed output produces no fingerprint.
+
 Setup and refresh then use metadata-only commands. They carry the active
 profile environment, so the child CLI can still consult its own credentials or
 network according to that CLI's behavior, but Delegate does not submit a task

@@ -13,6 +13,7 @@ from typing import TextIO
 
 from delegate_agent import (
     VERSION,
+    account_binding,
     argv_utils,
     capability_commands,
     command_errors,
@@ -382,6 +383,12 @@ def dry_run_payload(request: Request) -> JsonObject:
         payload["fallbackProfile"] = request.fallback_auth_profile
     if request.profile_resolution.name is not None:
         payload["profileEnv"] = redaction.redact_env_map(request.profile_resolution.env)
+    account_binding.add_account_fingerprint(
+        payload,
+        engine=request.engine,
+        command=request.account_binding_command,
+        env_overrides=request.env_overrides,
+    )
 
     if request.isolation_context is not None:
         ctx = request.isolation_context
@@ -657,6 +664,7 @@ def make_run_context(
         persona_digest=request.persona_digest,
         persona_file=request.persona_file,
         persona_text=request.persona_text,
+        account_binding_command=request.account_binding_command,
     )
 
 
