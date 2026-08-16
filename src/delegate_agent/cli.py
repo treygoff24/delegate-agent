@@ -649,6 +649,7 @@ def make_run_context(
         include_dirty=request.include_dirty,
         mail_push=request.mail_push,
         group=request.group,
+        workflow_agent_key=request.workflow_agent_key,
         call_read_only=request.call_read_only or request.pure,
         pure=request.pure,
         prompt_instruction_mode=request.prompt_instruction_mode,

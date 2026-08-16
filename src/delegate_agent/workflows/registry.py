@@ -24,12 +24,14 @@ LOCK_FILE = "workflow.lock"
 WORKFLOW_ID_HEX = 12
 WORKFLOW_ID_RE = __import__("re").compile(r"^wf_[0-9a-f]{12}$")
 # Durable events are fsynced: result events, agent_started (resume adoption
-# anchor), agent_adopted / agent_adopt_rejected / agent_timeout audit lines
-# (adoption outcomes are resume anchors), and budget claims (idempotent-claim
-# set must survive crashes — status.spent alone is not enough to skip re-claim).
+# anchor), agent_child (public child run identity), agent_adopted /
+# agent_adopt_rejected / agent_timeout audit lines (adoption outcomes are
+# resume anchors), and budget claims (idempotent-claim set must survive crashes
+# — status.spent alone is not enough to skip re-claim).
 # Phase/log ticks stay unfsynced. There is no agent_result emitter.
 DURABLE_EVENT_TYPES = {
     "agent_started",
+    "agent_child",
     "agent_finished",
     "agent_adopted",
     "agent_adopt_rejected",
@@ -87,6 +89,10 @@ def write_status(root: Path, payload: JsonObject) -> None:
         candidate = payload.get("createdAt")
         created_at = candidate if isinstance(candidate, str) else run_registry.utc_now_iso()
     merged: JsonObject = {"schema": WORKFLOW_SCHEMA, **payload, "createdAt": created_at}
+    if isinstance(existing, dict):
+        for key in ("scriptSha256", "args"):
+            if key not in merged and key in existing:
+                merged[key] = existing[key]
     created_ordinal = existing.get("createdOrdinal") if isinstance(existing, dict) else None
     if isinstance(created_ordinal, int) and not isinstance(created_ordinal, bool):
         merged["createdOrdinal"] = created_ordinal
