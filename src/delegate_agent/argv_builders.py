@@ -416,7 +416,7 @@ def build_devin_argv(
         )
     if mode not in (MODE_WORK, MODE_CALL):
         validate_mode(mode)
-    argv = [str(devin["binary"])]
+    argv = [str(devin["binary"]), "--respect-workspace-trust", "false"]
     if model:
         argv.extend(["--model", model])
     read_only = mode == MODE_CALL and call_read_only

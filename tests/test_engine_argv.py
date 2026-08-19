@@ -2339,6 +2339,8 @@ class EngineArgvTests(CommandTestBase):
         self.assertIn("gpt-5.4", request.argv)
         self.assertIn("--permission-mode", request.argv)
         self.assertIn("dangerous", request.argv)
+        self.assertIn("--respect-workspace-trust", request.argv)
+        self.assertIn("false", request.argv)
         self.assertNotIn("--agent-config", request.argv)
         self.assertIsNone(request.agent_config_text)
 
@@ -2351,6 +2353,7 @@ class EngineArgvTests(CommandTestBase):
         )
         self.addCleanup(shutil.rmtree, default_req.workspace, ignore_errors=True)
         self.assertIn("dangerous", default_req.argv)
+        self.assertIn("--respect-workspace-trust", default_req.argv)
         self.assertIsNone(default_req.agent_config_text)
 
         ro_req = self.delegate.request_from_parsed(

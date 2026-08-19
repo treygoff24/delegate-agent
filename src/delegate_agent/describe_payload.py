@@ -1189,6 +1189,7 @@ def describe_payload(
                 "work": devin_work_argv,
                 "workNotes": [
                     "Work mode uses --permission-mode dangerous because non-interactive Devin rejects unapproved edit/exec tools.",
+                    "Non-interactive runs pass --respect-workspace-trust false because Delegate already selects the execution workspace and Devin cannot show its trust prompt in print mode.",
                     "Model selection uses --model (alias from devin.models or a raw model ID), optional JSON input model, or devin.defaultModel; Delegate does not validate model names.",
                     "Reasoning effort is unsupported for Devin in v1.",
                     "Prompt uses --prompt-file plus -p; tracked and call runs parse plain stdout.",
@@ -1590,6 +1591,7 @@ Grok:
 
 Devin:
   - Uses Devin CLI print mode with --prompt-file and -p; Delegate materializes the effective prompt in a temp file.
+  - Passes --respect-workspace-trust false because Delegate already selects the execution workspace and Devin cannot show its trust prompt in print mode.
   - Call --read-only passes a Delegate-generated --agent-config deny-list for edit/write/exec and mcp__* plus --permission-mode auto.
   - Work and default call mode use --permission-mode dangerous because Devin print mode rejects unapproved edit/exec tools.
   - Model selection uses --model (alias from devin.models or a raw model ID), optional JSON input model, or devin.defaultModel; Delegate lets Devin validate unknown model names.

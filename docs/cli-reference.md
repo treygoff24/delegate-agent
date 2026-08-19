@@ -352,6 +352,8 @@ delegate [--json] devin call [--read-only] [--timeout SECONDS] [--model <alias-o
 - Prompt text is materialized in a private temporary file and passed with
   Devin `--prompt-file` plus `-p`; dry-run argv and tracked manifests do not
   contain the prompt.
+- Delegate passes `--respect-workspace-trust false` because it already selects
+  the execution workspace and Devin cannot show a trust prompt in print mode.
 - Model selection uses `--model` (an alias from `devin.models` or a raw model
   ID), the run-input JSON `model`, or `devin.defaultModel`. Unknown names are
   left to Devin validation. `--reasoning-effort` is unsupported.
