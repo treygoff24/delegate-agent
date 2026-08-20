@@ -191,6 +191,16 @@ class CapabilityCommandTests(unittest.TestCase):
         self.assertFalse(capabilities["codex"]["pureTripwire"])
         self.assertTrue(capabilities["claude"]["structuredOutput"])
         self.assertTrue(capabilities["codex"]["structuredOutput"])
+        self.assertTrue(capabilities["codex"]["nativeSessionResume"])
+        self.assertTrue(capabilities["claude"]["nativeSessionResume"])
+        self.assertFalse(capabilities["cursor"]["nativeSessionResume"])
+        self.assertFalse(capabilities["droid"]["nativeSessionResume"])
+        self.assertFalse(capabilities["opencode"]["nativeSessionResume"])
+        self.assertFalse(capabilities["pi"]["nativeSessionResume"])
+        self.assertFalse(capabilities["omp"]["nativeSessionResume"])
+        self.assertFalse(capabilities["grok"]["nativeSessionResume"])
+        self.assertFalse(capabilities["devin"]["nativeSessionResume"])
+        self.assertFalse(capabilities["kimi"]["nativeSessionResume"])
         # Legacy outputSchema alias must mirror structuredOutput, not contradict it.
         for engine, caps in capabilities.items():
             self.assertEqual(

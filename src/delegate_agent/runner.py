@@ -195,6 +195,8 @@ class RunContext:
     persona_file: str | None = None
     persona_text: str | None = None
     mail_push: bool = False
+    resumable: bool = False
+    harness_session_id: str | None = None
     account_binding_command: tuple[str, ...] | None = None
     sandbox: JsonObject | None = None
 
@@ -372,6 +374,10 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
         payload["workflowAgentKey"] = ctx.workflow_agent_key
     if ctx.mail_push:
         payload["mailPush"] = True
+    if ctx.resumable:
+        payload["resumable"] = True
+    if ctx.harness_session_id is not None:
+        payload["harnessSessionId"] = ctx.harness_session_id
     if ctx.include_dirty:
         payload["includeDirty"] = True
         payload["syncedFiles"] = ctx.synced_files
@@ -517,6 +523,10 @@ def build_snapshot(
     run_metadata.add_model_payload_fields(snapshot, ctx)
     reasoning.add_reasoning_payload_fields(snapshot, ctx)
     run_metadata.add_speed_payload_fields(snapshot, ctx)
+    if ctx.resumable:
+        snapshot["resumable"] = True
+    if ctx.resumable and accumulator.harness_session_id is not None:
+        snapshot["harnessSessionId"] = accumulator.harness_session_id
     snapshot["promptInstructionMode"] = ctx.prompt_instruction_mode
     if ctx.auth_profile is not None:
         snapshot["authProfile"] = ctx.auth_profile
@@ -590,6 +600,9 @@ def persist_progress(
             current_pgid = current.get("pgid")
             if isinstance(current_pgid, int) and not isinstance(current_pgid, bool):
                 persisted_pgid = current_pgid
+        if ctx.resumable and accumulator.harness_session_id is not None:
+            persisted_extra["harnessSessionId"] = accumulator.harness_session_id
+            persisted_extra["resumable"] = True
         write_state(
             run_path,
             build_state(
@@ -655,6 +668,9 @@ def _persist_final_progress(
     """
     persisted_status = status
     persisted_extra = dict(extra)
+    if ctx.resumable and accumulator.harness_session_id is not None:
+        persisted_extra["harnessSessionId"] = accumulator.harness_session_id
+        persisted_extra["resumable"] = True
     with run_registry.registry_lock(ctx.registry_root):
         current = run_registry.load_run_state_or_none(ctx.registry_root, ctx.run_id)
         current_status = current.get("status") if isinstance(current, dict) else None

@@ -676,6 +676,7 @@ def make_run_context(
         codex_fallback_failover_identity=request.codex_fallback_failover_identity,
         include_dirty=request.include_dirty,
         mail_push=request.mail_push,
+        resumable=request.resumable,
         group=request.group,
         notify=request.notify,
         workflow_agent_key=request.workflow_agent_key,

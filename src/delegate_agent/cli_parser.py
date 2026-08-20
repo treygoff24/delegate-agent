@@ -1075,10 +1075,23 @@ def parse_modeless_engine(
     persona = tail.persona
     no_persona = tail.no_persona
     allow_repo_persona = tail.allow_repo_persona
+    resumable = tail.resumable
     if agent is not None and engine != "opencode":
         raise DelegateError("unsupported_agent", "--agent is only supported by opencode.")
     if fast is not None and engine != "codex":
         raise DelegateError("unsupported_fast", "--fast and --no-fast are only supported by codex.")
+    if resumable and mode == "call":
+        raise DelegateError(
+            "invalid_option_combination",
+            "--resumable is not supported with call mode; call runs execute in a throwaway workspace and cannot be followed up.",
+        )
+    if resumable and engine not in {"codex", "claude"}:
+        raise DelegateError(
+            "followup-unsupported",
+            f"--resumable is only supported by codex and claude; {engine} does not support native session resumption.",
+            diagnostics={"code": "followup-unsupported"},
+            next_actions=["Use --resumable with codex or claude."],
+        )
     _validate_pure_options(engine, mode, pure=pure, read_only=read_only, group=group)
     if timeout is not None and pass_through:
         raise DelegateError(
@@ -1140,6 +1153,7 @@ def parse_modeless_engine(
             persona=persona,
             no_persona=no_persona,
             allow_repo_persona=allow_repo_persona,
+            resumable=resumable,
         ),
     )
 
@@ -1211,10 +1225,23 @@ def parse_droid(
     persona = tail_result.persona
     no_persona = tail_result.no_persona
     allow_repo_persona = tail_result.allow_repo_persona
+    resumable = tail_result.resumable
     if agent is not None:
         raise DelegateError("unsupported_agent", "--agent is only supported by opencode.")
     if fast is not None:
         raise DelegateError("unsupported_fast", "--fast and --no-fast are only supported by codex.")
+    if resumable and mode == "call":
+        raise DelegateError(
+            "invalid_option_combination",
+            "--resumable is not supported with call mode; call runs execute in a throwaway workspace and cannot be followed up.",
+        )
+    if resumable:
+        raise DelegateError(
+            "followup-unsupported",
+            "--resumable is only supported by codex and claude; droid does not support native session resumption.",
+            diagnostics={"code": "followup-unsupported"},
+            next_actions=["Use --resumable with codex or claude."],
+        )
     _validate_pure_options("droid", mode, pure=pure, read_only=read_only, group=group)
     if timeout is not None and pass_through:
         raise DelegateError(
@@ -1277,6 +1304,7 @@ def parse_droid(
             persona=persona,
             no_persona=no_persona,
             allow_repo_persona=allow_repo_persona,
+            resumable=resumable,
         ),
     )
 
@@ -1557,6 +1585,7 @@ def parse_prompt_tail(
     include_dirty = False
     mail_push = False
     read_only = False
+    resumable = False
     pure = False
     timeout: int | None = None
     model: str | None = None
@@ -1793,6 +1822,14 @@ def parse_prompt_tail(
             mail_push = True
             i += 1
             continue
+        if token == "--resumable":
+            if resumable:
+                raise DelegateError(
+                    "invalid_option_combination", "Only one --resumable flag is allowed."
+                )
+            resumable = True
+            i += 1
+            continue
         if token == "--read-only":
             read_only = True
             i += 1
@@ -1881,6 +1918,7 @@ def parse_prompt_tail(
         persona,
         no_persona,
         allow_repo_persona,
+        resumable,
     )
 
 

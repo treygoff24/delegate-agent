@@ -73,6 +73,7 @@ class LaunchOptions:
     persona_record_digest: str | None = None
     persona_record_path: str | None = None
     mail_push: bool = False
+    resumable: bool = False
 
 
 @dataclass
@@ -196,6 +197,7 @@ class PromptTail(NamedTuple):
     persona: str | None
     no_persona: bool
     allow_repo_persona: bool
+    resumable: bool = False
 
 
 @dataclass
@@ -284,6 +286,7 @@ class Request:
     mail_push: bool = False
     preserve_safe_workspace: bool = False
     temporary_workspace_cleanup: JsonObject | None = None
+    resumable: bool = False
 
 
 @dataclass(frozen=True)
@@ -338,3 +341,4 @@ class EngineBuildInput:
     persona_env_overrides: dict[str, str] | None = None
     persist_session: bool = False
     resume_session_id: str | None = None
+    resumable: bool = False

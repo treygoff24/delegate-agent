@@ -1090,6 +1090,58 @@ class EngineArgvTests(CommandTestBase):
         self.assertGreater(schema_index, exec_index)
         self.assertEqual(argv[schema_index + 1], "/tmp/schema.json")
 
+    def test_codex_resumable_argv_omits_ephemeral(self):
+        policy = self.delegate.delegate_config.effective_policy(
+            self.delegate.DEFAULT_CONFIG,
+            engine="codex",
+            mode="work",
+        )
+        default_argv = self.delegate.build_codex_argv(
+            self.delegate.DEFAULT_CONFIG["codex"],
+            "work",
+            "/repo",
+            None,
+            "hello",
+            policy,
+            workspace_kind="git",
+        )
+        self.assertIn("--ephemeral", default_argv)
+
+        resumable_argv = self.delegate.build_codex_argv(
+            self.delegate.DEFAULT_CONFIG["codex"],
+            "work",
+            "/repo",
+            None,
+            "hello",
+            policy,
+            workspace_kind="git",
+            resumable=True,
+        )
+        self.assertNotIn("--ephemeral", resumable_argv)
+
+    def test_claude_resumable_argv_omits_no_session_persistence(self):
+        policy = self.delegate.delegate_config.effective_policy(
+            self.delegate.DEFAULT_CONFIG,
+            engine="claude",
+            mode="work",
+        )
+        default_argv = self.delegate.build_claude_argv(
+            self.delegate.DEFAULT_CONFIG["claude"],
+            "work",
+            None,
+            policy,
+        )
+        self.assertIn("--no-session-persistence", default_argv)
+
+        resumable_argv = self.delegate.build_claude_argv(
+            self.delegate.DEFAULT_CONFIG["claude"],
+            "work",
+            None,
+            policy,
+            resumable=True,
+        )
+        self.assertNotIn("--no-session-persistence", resumable_argv)
+
     def test_codex_dry_run_model_null_is_allowed(self):
         request = self.build_git_request(
             "codex",

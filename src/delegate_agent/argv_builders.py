@@ -253,6 +253,7 @@ def build_claude_argv(
     persona_file: bool = False,
     persist_session: bool = False,
     resume_session_id: str | None = None,
+    resumable: bool = False,
 ) -> list[str]:
     _reject_pure("claude", mode, pure, supported=True)
     if pure or output_schema is not None:
@@ -319,6 +320,7 @@ def build_claude_argv(
         not pure
         and not persist_session
         and resume_session_id is None
+        and not resumable
         and claude.get("noSessionPersistence", True) is True
     ):
         argv.append("--no-session-persistence")
@@ -592,6 +594,7 @@ def build_codex_argv(
     pure: bool = False,
     persist_session: bool = False,
     resume_session_id: str | None = None,
+    resumable: bool = False,
 ) -> list[str]:
     _reject_pure("codex", mode, pure)
     binary = str(codex["binary"])
@@ -620,7 +623,7 @@ def build_codex_argv(
             argv.extend(["--output-schema", output_schema])
         if stream_capture:
             argv.extend(["--color", "never", "--json"])
-            if codex.get("ephemeral", True) is True:
+            if not resumable and codex.get("ephemeral", True) is True:
                 argv.append("--ephemeral")
         argv.append("-")
         return argv
@@ -701,6 +704,7 @@ def build_codex_argv(
         if (
             not persist_session
             and resume_session_id is None
+            and not resumable
             and codex.get("ephemeral", True) is True
         ):
             argv.append("--ephemeral")

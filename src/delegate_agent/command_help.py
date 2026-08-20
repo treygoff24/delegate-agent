@@ -215,6 +215,11 @@ _MAIL_PUSH_OPTION = OptionSpec(
     None,
     "Enable opt-in stop-hook mail push (requires mail.enabled=true; unverified harnesses degrade to pull).",
 )
+_RESUMABLE_OPTION = OptionSpec(
+    "--resumable",
+    None,
+    "Codex and Claude only: preserve harness session for native session resumption.",
+)
 _READ_ONLY_OPTION = OptionSpec(
     "--read-only",
     None,
@@ -355,6 +360,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             _NO_PROGRESS_OPTION,
             _FORBID_COMMIT_OPTION,
             _INCLUDE_DIRTY_OPTION,
+            _RESUMABLE_OPTION,
             _READ_ONLY_OPTION,
             _CHILD_TIMEOUT_OPTION,
             _PROMPT_FILE_OPTION,
@@ -400,6 +406,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             _NO_PROGRESS_OPTION,
             _FORBID_COMMIT_OPTION,
             _INCLUDE_DIRTY_OPTION,
+            _RESUMABLE_OPTION,
             _READ_ONLY_OPTION,
             _PURE_OPTION,
             _OUTPUT_SCHEMA_OPTION,
@@ -1966,7 +1973,14 @@ for _mail_command in (
 
 
 _CALL_HIDDEN_OPTION_FLAGS = frozenset(
-    {"--progress", "--no-progress", "--forbid-commit", "--include-dirty", "--mail-push"}
+    {
+        "--progress",
+        "--no-progress",
+        "--forbid-commit",
+        "--include-dirty",
+        "--mail-push",
+        "--resumable",
+    }
 )
 _CALL_UNSUPPORTED_GLOBAL_OPTIONS = (
     "--isolation",

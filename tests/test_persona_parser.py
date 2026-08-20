@@ -45,7 +45,10 @@ class PersonaParserTests(unittest.TestCase):
             None,
             command_prefix=["cursor", "work"],
         )
-        self.assertEqual(parsed[-4:], (None, "editor", False, True))
+        self.assertEqual(
+            (parsed.agent, parsed.persona, parsed.no_persona, parsed.allow_repo_persona),
+            (None, "editor", False, True),
+        )
 
     def _input_json(self, root: Path, payload: dict) -> Path:
         path = root / "task.json"

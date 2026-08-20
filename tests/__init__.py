@@ -59,6 +59,10 @@ os.environ.pop("DELEGATE_SOURCE_ROOT", None)
 os.environ.pop("DELEGATE_EXECUTION_ROOT", None)
 os.environ.pop("WORKSPACE_ROOT", None)
 os.environ.pop("DELEGATE_PROFILE", None)
+os.environ.pop("TMPDIR", None)
+os.environ.pop("TMP", None)
+os.environ.pop("TEMP", None)
+tempfile.tempdir = None
 
 _TEST_HOME = tempfile.mkdtemp(prefix="delegate-tests-home-")
 os.environ["HOME"] = _TEST_HOME

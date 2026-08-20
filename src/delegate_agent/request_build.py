@@ -129,6 +129,7 @@ RUN_INPUT_KEYS = {
     "structuredRetryRunId",
     "structuredRetrySessionId",
     "structuredRetryBackend",
+    "resumable",
 }
 
 OUTPUT_SCHEMA_COMPLETION_REPORT_WARNING = (
@@ -1639,6 +1640,7 @@ def request_from_parsed(
         persona_digest_override=launch.persona_record_digest,
         persona_path_override=launch.persona_record_path,
         mail_push=launch.mail_push,
+        resumable=launch.resumable,
         frame_prompt=True,
     )
 
@@ -1853,6 +1855,21 @@ def request_from_input_json(
     raw_mail_push = raw.get("mailPush", False)
     if not isinstance(raw_mail_push, bool):
         raise DelegateError("invalid_mail_push", "mailPush must be true or false.")
+    raw_resumable = raw.get("resumable", False)
+    if not isinstance(raw_resumable, bool):
+        raise DelegateError("invalid_resumable", "resumable must be true or false.")
+    if raw_resumable and mode == MODE_CALL:
+        raise DelegateError(
+            "invalid_option_combination",
+            "resumable is not supported with call mode.",
+        )
+    if raw_resumable and engine not in {"codex", "claude"}:
+        raise DelegateError(
+            "followup-unsupported",
+            f"resumable is only supported by codex and claude; {engine} does not support native session resumption.",
+            diagnostics={"code": "followup-unsupported"},
+            next_actions=["Use resumable with codex or claude."],
+        )
     json_model_alias: str | None = model_alias if isinstance(model_alias, str) else None
     json_model_override: str | None = None
     if engine == "droid":
@@ -2215,6 +2232,7 @@ def request_from_input_json(
         pass_through=global_options.pass_through,
         stderr=stderr,
         mail_push=raw_mail_push,
+        resumable=raw_resumable,
         frame_prompt=raw_structured_retry_session_id is None,
         persist_session=raw_structured_session,
         resume_session_id=raw_structured_retry_session_id,
@@ -2268,6 +2286,7 @@ def build_request(
     persona_path_override: str | None = None,
     expected_persona_digest: str | None = None,
     mail_push: bool = False,
+    resumable: bool = False,
     frame_prompt: bool | None = None,
     persist_session: bool = False,
     resume_session_id: str | None = None,
@@ -2287,6 +2306,20 @@ def build_request(
     )
     if fast is not None and engine != "codex":
         raise DelegateError("unsupported_fast", "fast is only supported by codex.")
+    if not isinstance(resumable, bool):
+        raise DelegateError("invalid_resumable", "resumable must be a boolean.")
+    if resumable and mode == MODE_CALL:
+        raise DelegateError(
+            "invalid_option_combination",
+            "--resumable is not supported with call mode.",
+        )
+    if resumable and engine not in {"codex", "claude"}:
+        raise DelegateError(
+            "followup-unsupported",
+            f"--resumable is only supported by codex and claude; {engine} does not support native session resumption.",
+            diagnostics={"code": "followup-unsupported"},
+            next_actions=["Use --resumable with codex or claude."],
+        )
     _validate_output_schema_mode(engine, mode, output_schema or output_schema_text)
     if output_schema_text is not None:
         if not output_schema_text:
@@ -2444,6 +2477,7 @@ def build_request(
             completion_report_mode=completion_report_mode,
             mail_push=mail_push,
             persona_resolution=persona_resolution,
+            resumable=resumable,
             allow_repo_persona=allow_repo_persona,
             skip_skill_preamble=pass_through,
             frame_prompt=frame_prompt,
@@ -2801,6 +2835,7 @@ def _codex_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         output_schema=build.output_schema,
         call_read_only=build.call_read_only,
         pure=build.pure,
+        resumable=build.resumable,
         persist_session=build.persist_session,
         resume_session_id=build.resume_session_id,
     )
@@ -2857,6 +2892,7 @@ def _claude_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         pure=build.pure,
         output_schema=schema_contents,
         persona_file=build.persona_transport == "native-file",
+        resumable=build.resumable,
         persist_session=build.persist_session,
         resume_session_id=build.resume_session_id,
     )
@@ -3326,6 +3362,7 @@ def _build_request_for_workspace(
     allow_repo_persona: bool = False,
     skip_skill_preamble: bool = False,
     mail_push: bool = False,
+    resumable: bool = False,
     frame_prompt: bool = True,
     persist_session: bool = False,
     resume_session_id: str | None = None,
@@ -3445,6 +3482,7 @@ def _build_request_for_workspace(
             persona_digest=persona_resolution.digest if persona_resolution is not None else None,
             persona_transport=persona_transport,
             persona_env_overrides=persona_env,
+            resumable=resumable,
             persist_session=persist_session,
             resume_session_id=resume_session_id,
         ),
@@ -3528,6 +3566,7 @@ def _build_request_for_workspace(
             account_binding_command=account_binding.cursor_status_command(engine, config),
             persistent_worktree_notes_framed=framed_worktree_note is not None,
             mail_push=mail_push,
+            resumable=resumable,
             preserve_safe_workspace=preserve_safe_workspace,
         ),
         config,

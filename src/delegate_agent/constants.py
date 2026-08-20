@@ -85,6 +85,7 @@ ENGINE_CAPABILITIES = {
         "pureTripwire": engine == "claude",
         "structuredOutput": engine in {"codex", "claude"},
         "noSessionPersistence": engine in {"codex", "claude", "pi", "omp"},
+        "nativeSessionResume": engine in {"codex", "claude"},
         "usageEvents": engine == "claude",
         # These engines use stdin for all modes (not pure-only); keep the capability.
         "promptStdin": engine in {"codex", "claude", "opencode", "pi"},
