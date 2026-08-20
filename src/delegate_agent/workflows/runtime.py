@@ -906,16 +906,20 @@ class WorkflowDsl:
         prompt: str,
         schema: JsonObject,
         engines: list[str | JsonObject] | None = None,
+        *,
+        effort: str | None = None,
     ) -> list[object]:
         selected = engines or ["codex"]
         thunks = []
         for item in selected:
-            engine, model = _parse_engine_spec(item)
+            engine, model, item_effort = _parse_engine_spec(item)
+            judge_effort = item_effort if item_effort is not None else effort
             thunks.append(
-                lambda engine=engine, model=model: self.agent(
+                lambda engine=engine, model=model, judge_effort=judge_effort: self.agent(
                     prompt,
                     engine=engine,
                     model=model,
+                    effort=judge_effort,
                     mode=MODE_CALL,
                     schema=schema,
                     label=f"judge:{engine if model is None else model}",
@@ -2341,14 +2345,18 @@ def _structured_resume_prompt(prior_error: str) -> str:
     )
 
 
-def _parse_engine_spec(value: object) -> tuple[str, str | None]:
+def _parse_engine_spec(value: object) -> tuple[str, str | None, str | None]:
     if isinstance(value, dict):
-        return str(value.get("engine", DEFAULT_ENGINE)), value.get("model")
+        return (
+            str(value.get("engine", DEFAULT_ENGINE)),
+            value.get("model"),
+            value.get("effort"),
+        )
     if isinstance(value, str):
         if value in KNOWN_ENGINES:
-            return value, None
-        return "droid", value
-    return DEFAULT_ENGINE, None
+            return value, None, None
+        return "droid", value, None
+    return DEFAULT_ENGINE, None, None
 
 
 def _engine_chain(value: object) -> list[str]:

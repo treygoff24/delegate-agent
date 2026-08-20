@@ -543,6 +543,31 @@ class WorkflowCommandTests(unittest.TestCase):
             {"model": None, "effort": None, "fast": None, "isolation": None},
         )
 
+    def test_dry_run_reports_judges_effort_and_overrides(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "dry-judges-effort"}
+            SCHEMA = {"type": "object", "properties": {"ok": {"type": "boolean"}}}
+            return judges(
+                "grade this",
+                SCHEMA,
+                engines=[
+                    "codex",
+                    {"engine": "codex", "effort": "low", "model": "o3-mini"},
+                ],
+                effort="high",
+            )
+            """
+        )
+        result = self.run_delegate(["--json", "workflow", "run", str(script), "--dry-run"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = json.loads(result.stdout)["runTree"]["calls"]
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]["effort"], "high")
+        self.assertIsNone(calls[0]["model"])
+        self.assertEqual(calls[1]["effort"], "low")
+        self.assertEqual(calls[1]["model"], "o3-mini")
+
     def test_dry_run_warns_before_argv_transport_prompt_limit(self) -> None:
         from delegate_agent.workflows.runtime import PROMPT_ARGV_GUARD_BYTES
 
@@ -3511,6 +3536,56 @@ class WorkflowCommandTests(unittest.TestCase):
             else:
                 self.assertNotIn("--force", argv)
                 self.assertNotIn("--approve-mcps", argv)
+            self.assertNotIn("requestedReasoningEffort", manifest)
+
+    def test_judges_plumbs_effort_and_per_judge_override(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "judges-effort"}
+            SCHEMA = {
+                "type": "object",
+                "required": ["ok", "value"],
+                "properties": {
+                    "ok": {"type": "boolean"},
+                    "value": {"type": "string"},
+                },
+            }
+            return judges(
+                "grade this",
+                SCHEMA,
+                engines=[
+                    "codex",
+                    {"engine": "codex", "effort": "low"},
+                ],
+                effort="high",
+            )
+            """
+        )
+        launch = self.run_delegate(
+            ["--json", "workflow", "run", str(script)], env_extra={"AI_PROFILE": "work"}
+        )
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        self.assertEqual(
+            self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "15"]).returncode,
+            0,
+        )
+        votes = json.loads(self.run_delegate(["--json", "workflow", "result", wf_id]).stdout)[
+            "result"
+        ]
+        self.assertEqual(votes, [{"ok": True, "value": "structured"}] * 2)
+        runs = json.loads(self.run_delegate(["--json", "runs", "--group", wf_id]).stdout)["runs"]
+        self.assertEqual(len(runs), 2)
+        efforts = set()
+        for run in runs:
+            manifest = json.loads(
+                (self.workspace / ".delegate" / "runs" / run["runId"] / "manifest.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(manifest["reasoningEffortSource"], "input-json")
+            efforts.add(manifest["requestedReasoningEffort"])
+        self.assertEqual(efforts, {"high", "low"})
 
     def test_engine_caps_bound_concurrent_child_runs(self) -> None:
         # §2.5: workflows.engineCaps limits concurrent children for a fake engine.

@@ -71,7 +71,7 @@ workflow result in `result.json`. Injected globals are `agent`, `followup`,
 - `phase(title)` emits a progress event.
 - `log(message)` emits a JSON-safe log event.
 - `workflow(name_or_path, args=None, gate=False)` nests another workflow. Use `gate=True` or `gate="on-failure"` for approval checkpoints.
-- `judges(prompt, schema, engines=[...])` runs one `call --read-only` judge lane per engine and returns the votes.
+- `judges(prompt, schema, engines=[...], *, effort=None)` runs one `call --read-only` judge lane per engine and returns the votes. Pass `effort=` to select a uniform reasoning effort for the panel, or set `"effort"` per engine dict item in `engines` to override it.
 
 Workflow `engine` values and `workflows.engineCaps` keys accept `cursor`,
 `droid`, `codex`, `claude`, `grok`, `devin`, `opencode`, `pi`, `omp`, and
