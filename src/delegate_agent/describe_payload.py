@@ -1037,6 +1037,7 @@ def describe_payload(
             "dsl": {
                 "globals": [
                     "agent",
+                    "followup",
                     "pipeline",
                     "parallel",
                     "phase",
@@ -1067,6 +1068,7 @@ def describe_payload(
                 "parallel": "parallel([lambda: ...]) is a barrier and preserves order.",
                 "workflow": "workflow(name_or_path, args=None, gate=False) nests to depth 3; gate=True pauses through resume/approve.",
                 "judges": "judges(prompt, schema, engines=[...]) runs call --read-only judge lanes and returns votes.",
+                "followup": "followup(prior_label, prompt, label=None, phase=None, schema=None, timeout=None, retries=None) continues a resumable child run by label.",
                 "budget": "run-count budget: total, spent(), remaining().",
                 "schemaSubset": [
                     "type",

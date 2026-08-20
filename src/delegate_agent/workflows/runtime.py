@@ -296,6 +296,13 @@ class Budget:
                 self._spent = minimum
 
 
+@dataclass(frozen=True)
+class CompletedChild:
+    run_id: str
+    engine: str
+    resumable: bool
+
+
 @dataclass
 class WorkflowState:
     wf_id: str
@@ -333,6 +340,8 @@ class WorkflowState:
     )
     dry_runs: list[JsonObject] = field(default_factory=list)
     dry_run_budget_spent: int = 0
+    label_lock: threading.Lock = field(default_factory=threading.Lock)
+    completed_labels: dict[str, list[CompletedChild]] = field(default_factory=dict)
     supervisor_token: str = field(default_factory=lambda: os.urandom(8).hex())
 
     def __post_init__(self) -> None:
@@ -358,12 +367,32 @@ class WorkflowState:
 
     def _load_replay(self, *, include_simulated: bool) -> None:
         simulated_keys: set[str] = set()
+        child_info: dict[str, tuple[str, str, bool, str | None]] = {}
         for event in registry.iter_journal(self.journal_path):
             seq = event.get("seq")
             if isinstance(seq, int):
                 self.sequence = max(self.sequence, seq)
             if event.get("simulated") is True:
                 continue
+            etype = event.get("type")
+            if etype == "agent_child":
+                ckey = event.get("workflowAgentKey") or event.get("key")
+                crun_id = event.get("runId")
+                cengine = event.get("engine")
+                clabel = event.get("label")
+                cresumable = event.get("resumable") is True
+                if isinstance(ckey, str) and isinstance(crun_id, str) and isinstance(cengine, str):
+                    child_info[ckey] = (
+                        crun_id,
+                        cengine,
+                        cresumable,
+                        clabel if isinstance(clabel, str) else None,
+                    )
+            # agent_adopted events carry no engine/resumable metadata; the
+            # agent_child + agent_finished pair (always present for adopted
+            # runs via _emit_adopted_child_identity) registers the label with
+            # correct metadata, so a separate agent_adopted handler here would
+            # double-register the label and break followup() after a resume.
             key = event.get("key")
             if not isinstance(key, str):
                 continue
@@ -393,6 +422,10 @@ class WorkflowState:
                 self.replay_keys.add(key)
                 self.replay[key] = event.get("result")
                 self.started_without_result.discard(key)
+                if event.get("result") is not None and key in child_info:
+                    crun_id, cengine, cresumable, clabel = child_info[key]
+                    if clabel is not None:
+                        self.record_completed_child(clabel, crun_id, cengine, cresumable)
         # Budget events are fsynced but status.json is not, so after a hard
         # crash the seeded spent can lag the durable claim set. One claim per
         # key, so spent is at least len(claimed_keys); status can only lag
@@ -619,6 +652,39 @@ class WorkflowState:
             self.dry_run_budget_spent += 1
             return self.dry_run_budget_spent
 
+    def record_completed_child(
+        self, label: str | None, run_id: str, engine: str, resumable: bool
+    ) -> None:
+        if label is None:
+            return
+        with self.label_lock:
+            self.completed_labels.setdefault(label, []).append(
+                CompletedChild(run_id=run_id, engine=engine, resumable=resumable)
+            )
+
+    def get_prior_child(self, prior_label: str) -> CompletedChild:
+        with self.label_lock:
+            entries = self.completed_labels.get(prior_label)
+            if not entries:
+                known = sorted(self.completed_labels.keys())
+                known_str = ", ".join(repr(k) for k in known) if known else "none"
+                raise ValueError(
+                    f"unknown or incomplete prior child label {prior_label!r}; "
+                    f"known completed labels: {known_str}"
+                )
+            if len(entries) > 1:
+                raise ValueError(
+                    f"duplicate completed children with label {prior_label!r}; "
+                    "labels must be unique to be referenced by followup()"
+                )
+            child = entries[0]
+        if not child.resumable:
+            raise ValueError(
+                f"prior child with label {prior_label!r} was not launched with resumable=True; "
+                "add resumable=True to the prior agent() call to enable followup()"
+            )
+        return child
+
 
 def _global_agent_cap() -> int:
     cpus = os.cpu_count() or 2
@@ -669,6 +735,7 @@ def execute_workflow(state: WorkflowState) -> object:
     dsl = WorkflowDsl(state, meta)
     globals_dict: dict[str, object] = {
         "agent": dsl.agent,
+        "followup": dsl.followup,
         "pipeline": dsl.pipeline,
         "parallel": dsl.parallel,
         "phase": dsl.phase,
@@ -943,6 +1010,7 @@ class WorkflowDsl:
         fast: bool | None = None,
         persona: str | None = None,
         allow_repo_persona: bool = False,
+        resumable: bool = False,
     ) -> JsonValue:
         if not isinstance(prompt, str):
             prompt = str(prompt)
@@ -955,6 +1023,24 @@ class WorkflowDsl:
             )
         if passthrough and schema is not None:
             raise ValueError("passthrough=True is mutually exclusive with schema=")
+        if not isinstance(resumable, bool):
+            raise ValueError("resumable must be a boolean")
+        if resumable and resolved_mode == MODE_CALL:
+            raise ValueError(
+                "resumable=True with mode='call' is invalid; call mode runs execute in a "
+                "throwaway workspace and cannot be followed up"
+            )
+        if resumable and resolved_mode == MODE_SAFE:
+            raise ValueError(
+                "resumable=True with mode='safe' is invalid; safe workspaces are temporary "
+                "and cannot be followed up"
+            )
+        if resumable and any(candidate not in {"codex", "claude"} for candidate in engines):
+            raise ValueError(
+                f"resumable=True is only supported by codex and claude; "
+                f"{', '.join(e for e in engines if e not in {'codex', 'claude'})} does not support "
+                "native session resumption"
+            )
         resolved_model = model or self.defaults.get("model")
         resolved_effort = effort or self.defaults.get("effort")
         resolved_fast = fast if fast is not None else self.defaults.get("fast")
@@ -993,6 +1079,8 @@ class WorkflowDsl:
             "isolation": resolved_isolation,
             "personaDigest": persona_resolution.digest if persona_resolution is not None else None,
         }
+        if resumable:
+            opts["resumable"] = True
         path = self.state.next_agent_path()
         key = _agent_key(path, prompt, opts)
         if key in self.state.replay_keys:
@@ -1087,6 +1175,8 @@ class WorkflowDsl:
                 "label": label,
                 "schema": bool(schema),
             }
+            if resumable:
+                dry_run_entry["resumable"] = True
             if persona_resolution is not None:
                 dry_run_entry.update(
                     persona=persona_resolution.name,
@@ -1115,6 +1205,13 @@ class WorkflowDsl:
             self.state.append_event(
                 "agent_finished", key=key, scope=path, result=placeholder, simulated=True
             )
+            if label is not None:
+                self.state.record_completed_child(
+                    label=label,
+                    run_id=f"dry_run_{key}",
+                    engine=engines[0] if engines else "codex",
+                    resumable=resumable,
+                )
             return placeholder
         if already_claimed:
             spent = self.state.budget.spent()
@@ -1159,6 +1256,7 @@ class WorkflowDsl:
                         retries=retries,
                         persona=persona_resolution,
                         allow_repo_persona=allow_repo_persona,
+                        resumable=resumable,
                     )
                 except PersonaDigestMismatch:
                     raise
@@ -1181,6 +1279,9 @@ class WorkflowDsl:
                         engine=candidate,
                         result=result,
                     )
+                    run_id = getattr(self.state.thread_local, "last_run_id", None)
+                    if label is not None and isinstance(run_id, str):
+                        self.state.record_completed_child(label, run_id, candidate, resumable)
                     return result
             self.state.replay_keys.add(key)
             self.state.replay[key] = None
@@ -1258,7 +1359,11 @@ class WorkflowDsl:
                 _cleanup_workflow_agent_run_workspace(self.state.workspace, run_id)
                 return _MISSING
         _cleanup_workflow_agent_run_workspace(self.state.workspace, run_id)
-        self._emit_adopted_child_identity(run_id, key=key, label=label)
+        resumable = _workflow_agent_run_resumable(self.state.workspace, run_id)
+        self._emit_adopted_child_identity(run_id, key=key, label=label, resumable=resumable)
+        if label is not None:
+            engine = _workflow_agent_run_engine(self.state.workspace, run_id) or "codex"
+            self.state.record_completed_child(label, run_id, engine, resumable)
         self.state.append_event(
             "agent_adopted",
             key=key,
@@ -1271,7 +1376,9 @@ class WorkflowDsl:
         )
         return result
 
-    def _emit_adopted_child_identity(self, run_id: str, *, key: str, label: str | None) -> None:
+    def _emit_adopted_child_identity(
+        self, run_id: str, *, key: str, label: str | None, resumable: bool = False
+    ) -> None:
         if _workflow_agent_child_event_exists(self.state.journal_path, run_id, key):
             return
         engine = _workflow_agent_run_engine(self.state.workspace, run_id)
@@ -1285,6 +1392,8 @@ class WorkflowDsl:
         }
         if label is not None:
             event["label"] = label
+        if resumable:
+            event["resumable"] = True
         self.state.append_event("agent_child", **event)
 
     def _run_agent_attempts(
@@ -1305,6 +1414,7 @@ class WorkflowDsl:
         retries: int | None,
         persona: personas.PersonaResolution | None = None,
         allow_repo_persona: bool = False,
+        resumable: bool = False,
     ) -> JsonValue:
         if engine not in KNOWN_ENGINES:
             raise ValueError(f"engine must be one of {', '.join(KNOWN_ENGINES)}")
@@ -1338,6 +1448,7 @@ class WorkflowDsl:
                     label=label,
                     persona=persona,
                     allow_repo_persona=allow_repo_persona,
+                    resumable=resumable,
                 )
             with engine_sem:
                 return self._run_structured_or_text(
@@ -1356,6 +1467,7 @@ class WorkflowDsl:
                     label=label,
                     persona=persona,
                     allow_repo_persona=allow_repo_persona,
+                    resumable=resumable,
                 )
 
     def _run_structured_or_text(
@@ -1376,6 +1488,7 @@ class WorkflowDsl:
         label: str | None = None,
         persona: personas.PersonaResolution | None = None,
         allow_repo_persona: bool = False,
+        resumable: bool = False,
     ) -> JsonValue:
         if schema is None:
             return self._run_delegate(
@@ -1395,6 +1508,7 @@ class WorkflowDsl:
                 persona=persona,
                 allow_repo_persona=allow_repo_persona,
                 expected_persona_digest=persona.digest if persona is not None else None,
+                resumable=resumable,
             )
         workflow_schema.validate_schema_subset(schema)
         attempts = retries if retries is not None else _structured_retries(self.state.config)
@@ -1451,6 +1565,7 @@ class WorkflowDsl:
                             resume_session_id=resume_session_id,
                             preserve_retry_workspace=True,
                             structured_retry_backend=structured_retry_backend,
+                            resumable=resumable,
                         )
                     except BaseException:
                         _cleanup_structured_retry_workspace(workspace_cleanup)
@@ -1486,6 +1601,7 @@ class WorkflowDsl:
                         resume_session_id=resume_session_id,
                         preserve_retry_workspace=True,
                         structured_retry_backend=structured_retry_backend,
+                        resumable=resumable,
                     )
                 except BaseException:
                     _cleanup_structured_retry_workspace(workspace_cleanup)
@@ -1561,6 +1677,7 @@ class WorkflowDsl:
         resume_session_id: str | None = None,
         preserve_retry_workspace: bool = False,
         structured_retry_backend: str | None = None,
+        resumable: bool = False,
     ) -> str | _DelegateChildResult | None:
         payload: JsonObject = {
             "engine": engine,
@@ -1602,6 +1719,8 @@ class WorkflowDsl:
         )
         if mode == MODE_CALL:
             payload["readOnly"] = True
+        if resumable:
+            payload["resumable"] = True
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as handle:
             json.dump(payload, handle)
             input_path = handle.name
@@ -1670,6 +1789,7 @@ class WorkflowDsl:
         if isinstance(result, dict):
             run_id = result.get("runId")
             if isinstance(run_id, str):
+                self.state.thread_local.last_run_id = run_id
                 event: JsonObject = {
                     "engine": engine,
                     "key": workflow_agent_key,
@@ -1678,6 +1798,8 @@ class WorkflowDsl:
                 }
                 if label is not None:
                     event["label"] = label
+                if resumable:
+                    event["resumable"] = True
                 self.state.append_event("agent_child", **event)
         if (
             expected_persona_digest is not None
@@ -1772,6 +1894,349 @@ class WorkflowDsl:
             return answer
         child = _child_result_from_payload(result, text=answer)
         return child
+
+    def followup(
+        self,
+        prior_label: str,
+        prompt: str,
+        *,
+        label: str | None = None,
+        phase: str | None = None,
+        schema: JsonObject | None = None,
+        timeout: int | float | None = None,
+        retries: int | None = None,
+    ) -> JsonValue:
+        if not isinstance(prior_label, str) or not prior_label.strip():
+            raise ValueError("prior_label must be a non-empty string")
+        if not isinstance(prompt, str):
+            prompt = str(prompt)
+        if timeout is not None and (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout)
+            or not timeout > 0
+        ):
+            raise ValueError("timeout must be a positive number of seconds")
+        prior_child = self.state.get_prior_child(prior_label)
+        resolved_phase = phase or self.current_phase
+        opts: JsonObject = {}
+        if schema is not None:
+            opts["schema"] = schema
+        if timeout is not None:
+            opts["timeout"] = timeout
+        if retries is not None:
+            opts["retries"] = retries
+        path = self.state.next_agent_path()
+        key = _followup_key(path, prior_label, prompt, opts)
+        if key in self.state.replay_keys:
+            result = self.state.replay[key]
+            self.state.append_event(
+                "agent_cache_hit",
+                key=key,
+                scope=path,
+                label=label,
+                phase=resolved_phase,
+                result=result,
+            )
+            return result
+        if key in self.state.started_without_result:
+            adopted = self._adopt_existing_agent_run(
+                key,
+                scope=path,
+                label=label,
+                phase=resolved_phase,
+                schema=schema,
+                prefer_assistant=schema is not None,
+                timeout=timeout,
+            )
+            if adopted is not _MISSING:
+                self.state.replay_keys.add(key)
+                self.state.replay[key] = adopted
+                self.state.started_without_result.discard(key)
+                self.state.append_event(
+                    "agent_finished",
+                    key=key,
+                    scope=path,
+                    result=adopted,
+                    adopted=True,
+                )
+                return adopted
+        already_claimed = key in self.state.claimed_keys
+        if not already_claimed:
+            self.state.claim_agent_lifetime()
+        if self.state.dry_run:
+            if already_claimed:
+                spent = self.state.dry_run_budget_spent
+            else:
+                spent = self.state.dry_run_budget_tick()
+                self.state.claimed_keys.add(key)
+            remaining = (
+                None if self.state.budget.total is None else max(self.state.budget.total - spent, 0)
+            )
+            self.state.append_event(
+                "budget",
+                key=key,
+                spent=spent,
+                total=self.state.budget.total,
+                remaining=remaining,
+                simulated=True,
+            )
+            placeholder = workflow_schema.placeholder(schema) if schema else ""
+            prompt_bytes = len(prompt.encode("utf-8"))
+            dry_run_entry = {
+                "primitive": "followup",
+                "scope": path,
+                "priorLabel": prior_label,
+                "engine": prior_child.engine,
+                "mode": "work",
+                "promptBytes": prompt_bytes,
+                "phase": resolved_phase,
+                "label": label,
+                "schema": bool(schema),
+            }
+            self.state.dry_runs.append(dry_run_entry)
+            self.state.append_event(
+                "agent_started",
+                key=key,
+                scope=path,
+                dryRun=True,
+                simulated=True,
+            )
+            self.state.append_event(
+                "agent_finished", key=key, scope=path, result=placeholder, simulated=True
+            )
+            if label is not None:
+                self.state.record_completed_child(
+                    label=label,
+                    run_id=f"dry_run_{key}",
+                    engine=prior_child.engine,
+                    resumable=True,
+                )
+            return placeholder
+        if already_claimed:
+            spent = self.state.budget.spent()
+        else:
+            spent = self.state.budget.claim()
+            self.state.claimed_keys.add(key)
+        self.state.append_event(
+            "budget",
+            key=key,
+            spent=spent,
+            total=self.state.budget.total,
+            remaining=_budget_remaining_json(self.state.budget),
+        )
+        with self.state.active_agent():
+            self.state.append_event(
+                "agent_started",
+                key=key,
+                workflowAgentKey=key,
+                scope=path,
+                label=label,
+                phase=resolved_phase,
+                engine=prior_child.engine,
+                mode="work",
+                priorLabel=prior_label,
+            )
+            try:
+                result = self._run_followup_attempts(
+                    prior_child,
+                    prompt,
+                    key=key,
+                    label=label,
+                    schema=schema,
+                    timeout=timeout,
+                    retries=retries,
+                )
+            except Exception as exc:
+                self.state.append_event(
+                    "agent_failed",
+                    key=key,
+                    scope=path,
+                    engine=prior_child.engine,
+                    error=str(exc),
+                )
+                result = None
+            if result is not None:
+                self.state.replay_keys.add(key)
+                self.state.replay[key] = result
+                self.state.append_event(
+                    "agent_finished",
+                    key=key,
+                    scope=path,
+                    engine=prior_child.engine,
+                    result=result,
+                )
+                run_id = getattr(self.state.thread_local, "last_run_id", None)
+                if label is not None and isinstance(run_id, str):
+                    self.state.record_completed_child(
+                        label, run_id, prior_child.engine, resumable=True
+                    )
+                return result
+            self.state.replay_keys.add(key)
+            self.state.replay[key] = None
+            self.state.append_event(
+                "agent_finished", key=key, scope=path, result=None, exhausted=True
+            )
+            return None
+
+    def _run_followup_attempts(
+        self,
+        prior_child: CompletedChild,
+        prompt: str,
+        *,
+        key: str,
+        label: str | None = None,
+        schema: JsonObject | None,
+        timeout: int | float | None,
+        retries: int | None,
+    ) -> JsonValue:
+        engine = prior_child.engine
+        engine_sem = self.state.engine_semaphores.get(engine)
+        with self.state.agent_semaphore:
+            if engine_sem is None:
+                return self._run_followup_structured_or_text(
+                    prior_child,
+                    prompt,
+                    schema=schema,
+                    timeout=timeout,
+                    retries=retries,
+                    key=key,
+                    label=label,
+                )
+            with engine_sem:
+                return self._run_followup_structured_or_text(
+                    prior_child,
+                    prompt,
+                    schema=schema,
+                    timeout=timeout,
+                    retries=retries,
+                    key=key,
+                    label=label,
+                )
+
+    def _run_followup_structured_or_text(
+        self,
+        prior_child: CompletedChild,
+        prompt: str,
+        *,
+        schema: JsonObject | None,
+        timeout: int | float | None,
+        retries: int | None,
+        key: str,
+        label: str | None = None,
+    ) -> JsonValue:
+        if schema is None:
+            return self._run_delegate_followup(
+                prior_child.run_id,
+                prompt,
+                engine=prior_child.engine,
+                timeout=timeout,
+                prefer_assistant=False,
+                workflow_agent_key=key,
+                label=label,
+            )
+        workflow_schema.validate_schema_subset(schema)
+        attempts = retries if retries is not None else _structured_retries(self.state.config)
+        prior_output = ""
+        prior_error = ""
+        for attempt in range(attempts + 1):
+            attempt_prompt = _structured_prompt(prompt, schema, prior_output, prior_error)
+            text = self._run_delegate_followup(
+                prior_child.run_id,
+                attempt_prompt,
+                engine=prior_child.engine,
+                timeout=timeout,
+                prefer_assistant=True,
+                workflow_agent_key=key,
+                label=label,
+            )
+            try:
+                value = workflow_schema.parse_json_tolerant(text or "")
+                workflow_schema.validate_value(value, schema)
+                return value
+            except Exception as exc:
+                prior_output = text or ""
+                prior_error = str(exc)
+                self.state.append_event(
+                    "agent_structured_retry",
+                    engine=prior_child.engine,
+                    attempt=attempt,
+                    error=prior_error,
+                )
+        return None
+
+    def _run_delegate_followup(
+        self,
+        handle: str,
+        prompt: str,
+        *,
+        engine: str,
+        timeout: int | float | None,
+        prefer_assistant: bool,
+        workflow_agent_key: str,
+        label: str | None = None,
+    ) -> str | None:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as handle_file:
+            handle_file.write(prompt)
+            prompt_path = handle_file.name
+        try:
+            argv = [
+                *self.state.cli_argv,
+                "--json",
+                "--group",
+                self.state.wf_id,
+                "followup",
+            ]
+            if timeout is not None:
+                argv.extend(["--timeout", str(int(timeout))])
+            argv.extend(["--prompt-file", prompt_path, handle])
+            completed = _run_child_command(argv, cwd=str(self.state.workspace), timeout=timeout)
+        except subprocess.TimeoutExpired:
+            cancel_workflow_agent_child(self.state.workspace, self.state.wf_id, workflow_agent_key)
+            self.state.append_event("agent_timeout", engine=engine, timeout=timeout)
+            return None
+        finally:
+            Path(prompt_path).unlink(missing_ok=True)
+        text = completed.stdout.decode("utf-8", errors="replace")
+        try:
+            result = json.loads(text)
+        except json.JSONDecodeError:
+            result = None
+        if isinstance(result, dict):
+            run_id = result.get("runId")
+            if isinstance(run_id, str):
+                self.state.thread_local.last_run_id = run_id
+                event: JsonObject = {
+                    "engine": engine,
+                    "key": workflow_agent_key,
+                    "workflowAgentKey": workflow_agent_key,
+                    "runId": run_id,
+                    "resumable": True,
+                }
+                if label is not None:
+                    event["label"] = label
+                self.state.append_event("agent_child", **event)
+        if completed.returncode != 0:
+            stderr = completed.stderr.decode("utf-8", errors="replace")[-2000:]
+            raise RuntimeError(
+                stderr or text or f"delegate followup child failed with {completed.returncode}"
+            )
+        if result is None:
+            raise RuntimeError(f"delegate followup child returned invalid JSON: {text[:500]}")
+        if not isinstance(result, dict) or not result.get("ok", False):
+            return None
+        if isinstance(result.get("text"), str):
+            return result["text"]
+        assistant = result.get("assistantText")
+        if prefer_assistant and isinstance(assistant, str) and assistant.strip():
+            return assistant
+        report_path = result.get("completionReportPath")
+        report = _read_completion_report(report_path, self.state.workspace)
+        if report is not None:
+            return report
+        if isinstance(assistant, str):
+            return assistant
+        return ""
 
 
 def _run_child_command(
@@ -1898,6 +2363,11 @@ def _engine_chain(value: object) -> list[str]:
 def _agent_key(scope_path: str, prompt: str, opts: JsonObject) -> str:
     canonical_opts = _canonical_json(opts)
     return _stable_hash(f"v1:{scope_path}{prompt}{canonical_opts}")
+
+
+def _followup_key(scope_path: str, prior_label: str, prompt: str, opts: JsonObject) -> str:
+    canonical_opts = _canonical_json(opts)
+    return _stable_hash(f"followup-v1:{scope_path}{prior_label}{prompt}{canonical_opts}")
 
 
 def _stable_hash(value: str) -> str:
@@ -2033,6 +2503,18 @@ def _workflow_agent_run_engine(workspace: Path, run_id: str) -> str | None:
         if isinstance(engine, str) and engine:
             return engine
     return None
+
+
+def _workflow_agent_run_resumable(workspace: Path, run_id: str) -> bool:
+    root = _run_registry_root(workspace)
+    manifest = run_registry.load_run_manifest_or_none(root, run_id)
+    if isinstance(manifest, dict) and manifest.get("resumable") is True:
+        return True
+    snapshot = run_registry.load_run_snapshot_or_none(root, run_id)
+    if isinstance(snapshot, dict) and snapshot.get("resumable") is True:
+        return True
+    state = run_registry.load_run_state_or_none(root, run_id)
+    return bool(isinstance(state, dict) and state.get("resumable") is True)
 
 
 def _workflow_agent_child_event_exists(journal_path: Path, run_id: str, key: str) -> bool:

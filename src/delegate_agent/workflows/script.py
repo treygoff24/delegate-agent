@@ -158,7 +158,7 @@ def _validate_literal_schemas(tree: ast.AST) -> None:
         if not isinstance(node, ast.Call):
             continue
         call_name = _name_of(node.func)
-        if call_name not in {"agent", "judges"}:
+        if call_name not in {"agent", "judges", "followup"}:
             continue
         schema_value = _literal_keyword(node, "schema")
         if schema_value is None and call_name == "judges" and len(node.args) >= 2:
@@ -188,16 +188,27 @@ def _validate_literal_agent_modes(tree: ast.AST, meta: WorkflowMeta) -> None:
         if any(item is not None and item not in KNOWN_ENGINES for item in engines):
             raise WorkflowScriptError("agent engine must be a real delegate engine")
         passthrough = _literal_keyword(node, "passthrough") is True
-        if not passthrough:
-            continue
-        if mode == MODE_CALL:
-            raise WorkflowScriptError(
-                "passthrough=True with mode='call' is invalid; slash pass-through needs "
-                "a work or argv-enforced-safe lane"
-            )
-        if _has_keyword(node, "schema") and _literal_keyword(node, "schema") is not None:
-            raise WorkflowScriptError("passthrough=True is mutually exclusive with schema=")
-        if mode == MODE_SAFE and any(item in PROMPT_ENFORCED_SAFE_ENGINES for item in engines):
-            raise WorkflowScriptError(
-                "passthrough=True is not supported for prompt-enforced safe engines"
-            )
+        if passthrough:
+            if mode == MODE_CALL:
+                raise WorkflowScriptError(
+                    "passthrough=True with mode='call' is invalid; slash pass-through needs "
+                    "a work or argv-enforced-safe lane"
+                )
+            if _has_keyword(node, "schema") and _literal_keyword(node, "schema") is not None:
+                raise WorkflowScriptError("passthrough=True is mutually exclusive with schema=")
+            if mode == MODE_SAFE and any(item in PROMPT_ENFORCED_SAFE_ENGINES for item in engines):
+                raise WorkflowScriptError(
+                    "passthrough=True is not supported for prompt-enforced safe engines"
+                )
+        resumable = _literal_keyword(node, "resumable") is True
+        if resumable:
+            if mode == MODE_CALL:
+                raise WorkflowScriptError(
+                    "resumable=True with mode='call' is invalid; call mode runs execute in a "
+                    "throwaway workspace and cannot be followed up"
+                )
+            if any(item is not None and item not in {"codex", "claude"} for item in engines):
+                raise WorkflowScriptError(
+                    "resumable=True is only supported by codex and claude; other engines do "
+                    "not support native session resumption"
+                )

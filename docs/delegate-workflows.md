@@ -59,12 +59,13 @@ return {"confirmed": [item for item in findings if item]}
 ```
 
 `meta` must be a pure top-level dict literal. Top-level `return` becomes the
-workflow result in `result.json`. Injected globals are `agent`, `pipeline`,
-`parallel`, `phase`, `log`, `workflow`, `judges`, `args`, and `budget`.
+workflow result in `result.json`. Injected globals are `agent`, `followup`,
+`pipeline`, `parallel`, `phase`, `log`, `workflow`, `judges`, `args`, and `budget`.
 
 ## Core DSL
 
-- `agent(prompt, engine=None, mode=None, model=None, effort=None, schema=None, label=None, phase=None, isolation=None, passthrough=False, timeout=None, retries=None, fast=None, persona=None, allow_repo_persona=False)` launches a real Delegate child run and returns parent-facing output, a validated schema object, or `None`. `fast=True` requests Codex Fast, `fast=False` requests Standard, and `None` inherits; non-Codex fallback candidates ignore this Codex-only preference. `persona` resolves one named persona from the source workspace; `allow_repo_persona=True` opts into workspace-local personas in safe mode.
+- `agent(prompt, engine=None, mode=None, model=None, effort=None, schema=None, label=None, phase=None, isolation=None, passthrough=False, timeout=None, retries=None, fast=None, persona=None, allow_repo_persona=False, resumable=False)` launches a real Delegate child run and returns parent-facing output, a validated schema object, or `None`. `fast=True` requests Codex Fast, `fast=False` requests Standard, and `None` inherits; non-Codex fallback candidates ignore this Codex-only preference. `persona` resolves one named persona from the source workspace; `allow_repo_persona=True` opts into workspace-local personas in safe mode. `resumable=True` preserves the harness session for native session resumption with `followup()`.
+- `followup(prior_label, prompt, label=None, phase=None, schema=None, timeout=None, retries=None)` continues an earlier resumable child run by its label and returns parent-facing output, a validated schema object, or `None`.
 - `pipeline(items, stage1, ...)` runs per-item stage chains with no inter-stage barrier. A throwing stage drops that item to `None` and skips later stages for that item.
 - `parallel([lambda: ...])` is a barrier and preserves order. Ordinary item failures become `None` slots; gate checkpoints propagate to the supervisor.
 - `phase(title)` emits a progress event.

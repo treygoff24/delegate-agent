@@ -168,9 +168,13 @@ class WorkflowCommandTests(unittest.TestCase):
             "    open(log, 'a', encoding='utf-8').write(prompt + '\\n---\\n')\n"
             "argv_log = os.environ.get('FAKE_CODEX_ARGV_LOG')\n"
             "if argv_log:\n"
-            "    open(argv_log, 'w', encoding='utf-8').write(json.dumps(sys.argv[1:]))\n"
+            "    with open(argv_log, 'a', encoding='utf-8') as f:\n"
+            "        f.write(json.dumps(sys.argv[1:]) + '\\n')\n"
             "if session_id and not os.environ.get('FAKE_CODEX_SESSION_BEFORE_SLEEP'):\n"
             "    print(json.dumps({'type': 'thread.started', 'thread_id': session_id}))\n"
+            "thread_id = os.environ.get('FAKE_CODEX_THREAD_ID')\n"
+            "if thread_id:\n"
+            "    print(json.dumps({'type': 'thread.started', 'thread_id': thread_id}))\n"
             "if os.environ.get('FAKE_CODEX_REGISTERED_FAILURE'):\n"
             "    print(json.dumps({'ok': False, 'runId': os.environ['FAKE_CODEX_REGISTERED_FAILURE']}))\n"
             "    sys.exit(1)\n"
@@ -210,7 +214,12 @@ class WorkflowCommandTests(unittest.TestCase):
             "    else:\n"
             '        text = \'{"ok": true, "value": "structured"}\'\n'
             "else:\n"
-            '    text = \'{"ok": true, "value": "structured"}\' if structured else \'fake completion\'\n'
+            "    if 'round 2 findings' in prompt:\n"
+            "        text = 'round 2 output'\n"
+            "    elif structured:\n"
+            '        text = \'{"ok": true, "value": "structured"}\'\n'
+            "    else:\n"
+            "        text = 'fake completion'\n"
             "print(json.dumps({'type':'message','role':'assistant','content':[{'type':'output_text','text':text}]}))\n"
             "print(json.dumps({'type':'completion','finalText':text}))\n",
             encoding="utf-8",
@@ -1994,7 +2003,7 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertIn("Re-emit the StructuredOutput now", prompts[1])
         self.assertNotIn("review the entire repository", prompts[1])
         self.assertNotIn('{"ok": "wrong"}', prompts[1])
-        retry_argv = json.loads(argv_log.read_text(encoding="utf-8"))
+        retry_argv = json.loads(argv_log.read_text(encoding="utf-8").strip().splitlines()[-1])
         exec_index = retry_argv.index("exec")
         self.assertEqual(
             retry_argv[exec_index : exec_index + 3],
@@ -4097,6 +4106,259 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertEqual(status["status"], "failed")
         self.assertIn("traceback", status)
         self.assertIn("KeyError", status["traceback"])
+
+    def test_agent_replay_key_compatibility(self) -> None:
+        opts_without_resumable = {
+            "engine": "codex",
+            "mode": "work",
+            "model": None,
+            "effort": None,
+            "fast": None,
+            "schema": None,
+            "isolation": None,
+            "personaDigest": None,
+        }
+        key_plain = workflow_runtime._agent_key("root/seq#0", "do it", opts_without_resumable)
+        # Hard requirement: must remain byte-identical to original hash
+        self.assertEqual(
+            key_plain, "633463618573aeac26c13c7afb217f1f7c98d377797f1d379ed09882e42654a2"
+        )
+
+        opts_with_resumable = dict(opts_without_resumable)
+        opts_with_resumable["resumable"] = True
+        key_resumable = workflow_runtime._agent_key("root/seq#0", "do it", opts_with_resumable)
+        self.assertNotEqual(key_plain, key_resumable)
+
+        followup_key = workflow_runtime._followup_key("root/seq#1", "fix-r1", "do it", {})
+        self.assertTrue(followup_key.isalnum())
+        self.assertNotEqual(followup_key, key_plain)
+        self.assertNotEqual(followup_key, key_resumable)
+
+    def test_followup_happy_path_with_resumable_agent(self) -> None:
+        argv_log = self.home / "codex_argv.jsonl"
+        script = self.write_workflow(
+            """
+            meta = {"name": "followup-happy", "defaults": {"engine": "codex", "mode": "work"}}
+            r1 = agent("do it", label="fix-r1", resumable=True)
+            r2 = followup("fix-r1", "round 2 findings", label="fix-r2")
+            return {"r1": r1, "r2": r2}
+            """
+        )
+        env_extra = {
+            "FAKE_CODEX_ARGV_LOG": str(argv_log),
+            "FAKE_CODEX_THREAD_ID": "th_wf_fixed_12345",
+        }
+        launch = self.run_delegate(["--json", "workflow", "run", str(script)], env_extra=env_extra)
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
+        self.assertEqual(waited.returncode, 0, waited.stderr)
+        status = json.loads(self.run_delegate(["--json", "workflow", "status", wf_id]).stdout)
+        self.assertEqual(status["status"], "succeeded")
+        result = json.loads(self.run_delegate(["--json", "workflow", "result", wf_id]).stdout)
+        self.assertEqual(result["result"], {"r1": "fake completion", "r2": "round 2 output"})
+
+        lines = [
+            json.loads(line) for line in argv_log.read_text(encoding="utf-8").strip().splitlines()
+        ]
+        self.assertEqual(len(lines), 2)
+        r1_argv, r2_argv = lines[0], lines[1]
+        self.assertNotIn("--ephemeral", r1_argv)
+        self.assertNotIn("resume", r1_argv)
+
+        self.assertNotIn("--ephemeral", r2_argv)
+        self.assertIn("exec", r2_argv)
+        exec_idx = r2_argv.index("exec")
+        self.assertEqual(r2_argv[exec_idx + 1], "resume")
+        self.assertIn("th_wf_fixed_12345", r2_argv)
+
+    def test_followup_fails_on_unknown_prior_label(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "followup-unknown", "defaults": {"engine": "codex", "mode": "work"}}
+            r1 = agent("do it", label="fix-r1", resumable=True)
+            r2 = followup("nope", "round 2 findings")
+            return {"r1": r1, "r2": r2}
+            """
+        )
+        env_extra = {"FAKE_CODEX_THREAD_ID": "th_wf_fixed_12345"}
+        launch = self.run_delegate(["--json", "workflow", "run", str(script)], env_extra=env_extra)
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
+        self.assertNotEqual(waited.returncode, 0)
+        status = json.loads(self.run_delegate(["--json", "workflow", "status", wf_id]).stdout)
+        self.assertEqual(status["status"], "failed")
+        result = json.loads(self.run_delegate(["--json", "workflow", "result", wf_id]).stdout)
+        self.assertIn("unknown or incomplete prior child label 'nope'", result["traceback"])
+        self.assertIn("fix-r1", result["traceback"])
+
+    def test_followup_fails_when_prior_child_not_resumable(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "followup-not-resumable", "defaults": {"engine": "codex", "mode": "work"}}
+            r1 = agent("do it", label="fix-r1", resumable=False)
+            r2 = followup("fix-r1", "round 2 findings")
+            return {"r1": r1, "r2": r2}
+            """
+        )
+        env_extra = {"FAKE_CODEX_THREAD_ID": "th_wf_fixed_12345"}
+        launch = self.run_delegate(["--json", "workflow", "run", str(script)], env_extra=env_extra)
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
+        self.assertNotEqual(waited.returncode, 0)
+        status = json.loads(self.run_delegate(["--json", "workflow", "status", wf_id]).stdout)
+        self.assertEqual(status["status"], "failed")
+        result = json.loads(self.run_delegate(["--json", "workflow", "result", wf_id]).stdout)
+        self.assertIn(
+            "prior child with label 'fix-r1' was not launched with resumable=True",
+            result["traceback"],
+        )
+        self.assertIn("add resumable=True to the prior agent() call", result["traceback"])
+
+    def test_followup_dry_run_tree_and_simulated_budget(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "followup-dry-run", "defaults": {"engine": "codex", "mode": "work"}}
+            r1 = agent("do it", label="fix-r1", resumable=True)
+            r2 = followup("fix-r1", "round 2 findings", label="fix-r2")
+            return {"r1": r1, "r2": r2}
+            """
+        )
+        dry_run = self.run_delegate(
+            ["--json", "workflow", "run", str(script), "--dry-run", "--budget", "5"]
+        )
+        self.assertEqual(dry_run.returncode, 0, dry_run.stderr)
+        payload = json.loads(dry_run.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["dryRun"])
+        run_tree = payload["runTree"]
+        calls = run_tree["calls"]
+        self.assertEqual(len(calls), 2)
+
+        # Call 0: agent with resumable=True
+        self.assertEqual(calls[0]["scope"], "root/seq#0")
+        self.assertEqual(calls[0]["label"], "fix-r1")
+        self.assertTrue(calls[0].get("resumable"))
+
+        # Call 1: followup primitive
+        self.assertEqual(calls[1]["scope"], "root/seq#1")
+        self.assertEqual(calls[1]["primitive"], "followup")
+        self.assertEqual(calls[1]["priorLabel"], "fix-r1")
+        self.assertEqual(calls[1]["label"], "fix-r2")
+
+        # Check simulated budget events
+        wf_id = payload["wfId"]
+        events = json.loads(
+            self.run_delegate(["--json", "workflow", "events", wf_id, "--since", "0"]).stdout
+        )["events"]
+        budget_events = [e for e in events if e.get("type") == "budget"]
+        self.assertEqual(len(budget_events), 2)
+        self.assertEqual(budget_events[-1]["spent"], 2)
+
+    def test_followup_budget_exceeded_fails_workflow(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "followup-budget", "defaults": {"engine": "codex", "mode": "work"}}
+            r1 = agent("do it", label="fix-r1", resumable=True)
+            r2 = followup("fix-r1", "round 2 findings", label="fix-r2")
+            return {"r1": r1, "r2": r2}
+            """
+        )
+        env_extra = {"FAKE_CODEX_THREAD_ID": "th_wf_fixed_12345"}
+        launch = self.run_delegate(
+            ["--json", "workflow", "run", str(script), "--budget", "1"],
+            env_extra=env_extra,
+        )
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
+        self.assertNotEqual(waited.returncode, 0)
+        status = json.loads(self.run_delegate(["--json", "workflow", "status", wf_id]).stdout)
+        self.assertEqual(status["status"], "failed")
+        result = json.loads(self.run_delegate(["--json", "workflow", "result", wf_id]).stdout)
+        self.assertIn("BudgetExceeded", result["traceback"])
+
+    def test_resumable_and_followup_validation_checks(self) -> None:
+        # Mode call with resumable=True
+        script_call = self.write_workflow(
+            """
+            meta = {"name": "invalid-call-resumable"}
+            return agent("do it", mode="call", resumable=True)
+            """
+        )
+        check_call = self.run_delegate(["--json", "workflow", "check", str(script_call)])
+        self.assertNotEqual(check_call.returncode, 0)
+        self.assertIn("call mode", json.loads(check_call.stdout)["message"])
+
+        # Unsupported engine with resumable=True
+        script_droid = self.write_workflow(
+            """
+            meta = {"name": "invalid-droid-resumable"}
+            return agent("do it", engine="droid", resumable=True)
+            """
+        )
+        check_droid = self.run_delegate(["--json", "workflow", "check", str(script_droid)])
+        self.assertNotEqual(check_droid.returncode, 0)
+        self.assertIn(
+            "only supported by codex and claude", json.loads(check_droid.stdout)["message"]
+        )
+
+        # Duplicate label ambiguity
+        script_dup = self.write_workflow(
+            """
+            meta = {"name": "dup-label", "defaults": {"engine": "codex", "mode": "work"}}
+            r1 = agent("one", label="dup", resumable=True)
+            r2 = agent("two", label="dup", resumable=True)
+            r3 = followup("dup", "three")
+            return {"r1": r1, "r2": r2, "r3": r3}
+            """
+        )
+        env_extra = {"FAKE_CODEX_THREAD_ID": "th_wf_fixed_12345"}
+        launch = self.run_delegate(
+            ["--json", "workflow", "run", str(script_dup)], env_extra=env_extra
+        )
+        wf_id = json.loads(launch.stdout)["wfId"]
+        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
+        self.assertNotEqual(waited.returncode, 0)
+        status = json.loads(self.run_delegate(["--json", "workflow", "status", wf_id]).stdout)
+        self.assertEqual(status["status"], "failed")
+        result = json.loads(self.run_delegate(["--json", "workflow", "result", wf_id]).stdout)
+        self.assertIn("duplicate completed children with label 'dup'", result["traceback"])
+
+    def test_followup_structured_output_and_chaining(self) -> None:
+        argv_log = self.home / "codex_chain_argv.jsonl"
+        script = self.write_workflow(
+            """
+            meta = {"name": "followup-chain", "defaults": {"engine": "codex", "mode": "work"}}
+            r1 = agent("step 1", label="turn-1", resumable=True)
+            r2 = followup("turn-1", "step 2", label="turn-2")
+            SCHEMA = {"type": "object", "required": ["ok", "value"], "properties": {"ok": {"type": "boolean"}, "value": {"type": "string"}}, "additionalProperties": False}
+            r3 = followup("turn-2", "Return ONLY JSON", label="turn-3", schema=SCHEMA)
+            return {"r1": r1, "r2": r2, "r3": r3}
+            """
+        )
+        env_extra = {
+            "FAKE_CODEX_ARGV_LOG": str(argv_log),
+            "FAKE_CODEX_THREAD_ID": "th_wf_fixed_12345",
+        }
+        launch = self.run_delegate(["--json", "workflow", "run", str(script)], env_extra=env_extra)
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
+        self.assertEqual(waited.returncode, 0, waited.stderr)
+        status = json.loads(self.run_delegate(["--json", "workflow", "status", wf_id]).stdout)
+        self.assertEqual(status["status"], "succeeded")
+        result = json.loads(self.run_delegate(["--json", "workflow", "result", wf_id]).stdout)
+        self.assertEqual(result["result"]["r3"], {"ok": True, "value": "structured"})
+
+        lines = [
+            json.loads(line) for line in argv_log.read_text(encoding="utf-8").strip().splitlines()
+        ]
+        self.assertEqual(len(lines), 3)
+        self.assertIn("resume", lines[1])
+        self.assertIn("resume", lines[2])
 
 
 if __name__ == "__main__":
