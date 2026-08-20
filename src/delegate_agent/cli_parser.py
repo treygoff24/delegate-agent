@@ -41,6 +41,7 @@ from delegate_agent.constants import (
 )
 from delegate_agent.errors import DelegateError
 from delegate_agent.request_models import (
+    FollowupOptions,
     GlobalOptions,
     InspectionOptions,
     LaunchOptions,
@@ -66,10 +67,10 @@ VALUE_GLOBAL_OPTIONS = frozenset(
 GLOBAL_OPTIONS = FLAG_GLOBAL_OPTIONS | VALUE_GLOBAL_OPTIONS
 
 AUTH_PROFILE_SUBCOMMANDS = frozenset(KNOWN_ENGINES) | frozenset(
-    {"dry-run", "run", "profiles", "models", "capabilities", "setup", "resume"}
+    {"dry-run", "run", "profiles", "models", "capabilities", "setup", "resume", "followup"}
 )
 GROUP_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
-GROUP_SUBCOMMANDS = frozenset(KNOWN_ENGINES) | frozenset({"dry-run", "run", "resume"})
+GROUP_SUBCOMMANDS = frozenset(KNOWN_ENGINES) | frozenset({"dry-run", "run", "resume", "followup"})
 NOTIFY_SUBCOMMANDS = frozenset(KNOWN_ENGINES) | frozenset(
     {"droid", "dry-run", "run", "resume", "workflow"}
 )
@@ -653,6 +654,22 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             auth_profile=auth_profile,
             group=group,
             notify=notify,
+        )
+    if subcommand == "followup":
+        if isolation is not None:
+            raise DelegateError(
+                "invalid_option_combination",
+                "--isolation is not supported with delegate followup; "
+                "isolation is inherited from the source run.",
+            )
+        return parse_followup(
+            rest,
+            json_mode,
+            cwd,
+            pass_through=pass_through,
+            completion_report=completion_report,
+            auth_profile=auth_profile,
+            group=group,
         )
     if subcommand == "snapshot":
         return parse_snapshot(rest, json_mode, cwd)
@@ -1565,6 +1582,92 @@ def parse_resume(
             persona=persona,
             no_persona=no_persona,
             allow_repo_persona=allow_repo_persona,
+        ),
+    )
+
+
+def parse_followup(
+    rest: list[str],
+    json_mode: bool,
+    cwd: str | None,
+    *,
+    pass_through: bool,
+    completion_report: str | None,
+    auth_profile: str | None,
+    group: str | None,
+) -> ParsedCommand:
+    """Parse ``followup [followup-options] <alias|runId> [--prompt-file PATH] [prompt...]``.
+
+    Parser law: launch flags must appear BEFORE the handle — once positional
+    text starts, remaining tokens are prompt material.
+    """
+    if rest and command_help.is_help_token(rest[0]):
+        return help_command(json_mode, "followup")
+    prompt_file: str | None = None
+    timeout: int | None = None
+    dry_run = False
+    handle: str | None = None
+    prompt_parts: list[str] = []
+    i = 0
+    while i < len(rest):
+        token = rest[i]
+        if handle is None:
+            if token == "--json":
+                json_mode = True
+                i += 1
+                continue
+            if command_help.is_help_token(token):
+                return help_command(json_mode, "followup")
+            if token == "--timeout":
+                timeout, i = parse_required_positive_int_option(
+                    rest,
+                    i,
+                    option_label="--timeout",
+                    missing_error="missing_timeout",
+                    invalid_error="invalid_timeout",
+                )
+                continue
+            if token == "--prompt-file":
+                if i + 1 >= len(rest):
+                    raise DelegateError("missing_prompt_file", "--prompt-file requires a path.")
+                if prompt_file is not None:
+                    raise DelegateError(
+                        "ambiguous_prompt_source", "Only one --prompt-file is allowed."
+                    )
+                prompt_file = rest[i + 1]
+                i += 2
+                continue
+            if token == "--dry-run":
+                dry_run = True
+                i += 1
+                continue
+            if token in MISPLACED_GLOBAL_OPTIONS:
+                raise_misplaced_global_option("Global options must appear before the subcommand.")
+            if token.startswith("-"):
+                raise DelegateError("unknown_option", unknown_option_message("followup", token))
+            handle = token
+            i += 1
+            continue
+        prompt_parts = rest[i:]
+        break
+    if handle is None:
+        raise DelegateError("missing_handle", "followup requires a run handle (alias or run id).")
+    return ParsedCommand(
+        "followup",
+        global_options=GlobalOptions(
+            json_mode=json_mode,
+            cwd=cwd,
+            pass_through=pass_through,
+            completion_report=completion_report,
+            auth_profile=auth_profile,
+            group=group,
+        ),
+        followup=FollowupOptions(
+            handle=handle,
+            prompt_parts=list(prompt_parts),
+            prompt_file=prompt_file,
+            timeout=timeout,
+            dry_run=dry_run,
         ),
     )
 

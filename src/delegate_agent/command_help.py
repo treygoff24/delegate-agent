@@ -857,8 +857,53 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "replay).",
             "Resume options must appear before the handle; tokens after the handle "
             "are continuation instructions, including flag-like text.",
+            "For native harness session re-entry with preserved conversation context, "
+            "use `delegate followup`.",
         ),
-        see_also=("runs", "snapshot", "run-output", "worktree show"),
+        see_also=("followup", "runs", "snapshot", "run-output", "worktree show"),
+    ),
+    "followup": CommandSpec(
+        name="followup",
+        summary=(
+            "Re-enter a finished Run's native harness session with full conversation context."
+        ),
+        usage=(
+            "delegate [--json] [--cwd PATH] followup [options] <alias|runId> [--prompt-file PATH] [prompt...]",
+        ),
+        arguments=(
+            ArgSpec(
+                "handle",
+                True,
+                "Alias or run id of a finished (succeeded/failed/cancelled/stale) work-mode Run.",
+            ),
+            ArgSpec(
+                "prompt",
+                False,
+                "Followup instructions to continue the native conversation.",
+            ),
+        ),
+        options=(
+            OptionSpec("--timeout", "SEC", "Override the inherited run timeout."),
+            OptionSpec(
+                "--prompt-file", "PATH", "Read followup prompt text from a file or - for stdin."
+            ),
+            OptionSpec("--dry-run", None, "Show the resolved followup launch without executing."),
+        ),
+        examples=(
+            'delegate followup codex-3 "the tests now pass; finish the docs"',
+            "delegate followup --prompt-file follow.md claude-1",
+            "delegate followup --dry-run codex-2",
+        ),
+        notes=(
+            "Re-enters the completed child's harness-native session (Codex exec resume, Claude Code --resume), "
+            "preserving full conversation context. For cross-engine or plain-text prompt continuation, use `delegate resume`.",
+            "The followup run inherits engine, mode, model, effort, timeout, group, and "
+            "commit policy from the source Run's manifest (work mode only). Overrides are not supported in v1.",
+            "The source run must have been launched with --resumable to capture its native session ID.",
+            "A source Run that ran in a persistent worktree continues by ATTACHING to that worktree.",
+            "Followup options must appear before the handle; tokens after the handle are prompt instructions.",
+        ),
+        see_also=("resume", "runs", "snapshot", "run-output", "worktree show"),
     ),
     "snapshot": CommandSpec(
         name="snapshot",
@@ -2165,6 +2210,8 @@ def render_overview_text() -> str:
         f"delegate [--cwd PATH] [--json] {iso} dry-run kimi {{safe,work}} [--model <alias-or-model>] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]",
         "delegate [--json] dry-run kimi call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--prompt-file PATH] [prompt...]",
         f"delegate [--cwd PATH] [--json] {iso} run --input-json FILE",
+        'delegate [--cwd PATH] [--json] resume [resume-options] <alias|runId> ["extra instructions"...]',
+        "delegate [--cwd PATH] [--json] followup [options] <alias|runId> [--prompt-file PATH] [prompt...]",
         "delegate [--cwd PATH] [--json] snapshot [--latest HARNESS] [--no-redact] <handle>",
         "delegate [--cwd PATH] [--json] runs "
         "[--active|--running|--stale|--recent] [--harness HARNESS] [--limit N]",

@@ -196,6 +196,8 @@ class RunContext:
     persona_text: str | None = None
     mail_push: bool = False
     resumable: bool = False
+    followup_of: str | None = None
+    resume_session_id: str | None = None
     harness_session_id: str | None = None
     account_binding_command: tuple[str, ...] | None = None
     sandbox: JsonObject | None = None
@@ -394,6 +396,8 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
     _add_persona_payload_fields(payload, ctx)
     if ctx.resumed_from is not None:
         payload["resumedFrom"] = ctx.resumed_from
+    if ctx.followup_of is not None:
+        payload["followupOf"] = ctx.followup_of
     if ctx.worktree_attachment is not None:
         payload["worktreeAttachment"] = ctx.worktree_attachment
     return payload
@@ -1085,6 +1089,12 @@ def completion_json_payload(
         payload["fallbackProfile"] = ctx.fallback_auth_profile
     if ctx.group is not None:
         payload["group"] = ctx.group
+    if ctx.resumed_from is not None:
+        payload["resumedFrom"] = ctx.resumed_from
+    if ctx.followup_of is not None:
+        payload["followupOf"] = ctx.followup_of
+    if ctx.resumable:
+        payload["resumable"] = True
     if ctx.include_dirty:
         payload["includeDirty"] = True
         payload["syncedFiles"] = ctx.synced_files
@@ -3298,6 +3308,7 @@ def _execute_tracked(
                 and retry_failure is not None
                 and retry_failure.code == "codex_thread_lost"
                 and not _cancel_requested_or_cancelled(ctx)
+                and not ctx.followup_of
                 and _retry_is_safe(
                     ctx,
                     retry_capture,

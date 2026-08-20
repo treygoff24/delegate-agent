@@ -324,6 +324,8 @@ def build_claude_argv(
         and claude.get("noSessionPersistence", True) is True
     ):
         argv.append("--no-session-persistence")
+    if resume_session_id is not None:
+        argv.extend(["--resume", resume_session_id])
     if not pure and claude.get("bare", False) is True:
         argv.append("--bare")
     if output_schema is not None:
@@ -332,8 +334,6 @@ def build_claude_argv(
         argv.extend(["--model", model])
     if reasoning_effort is not None:
         argv.extend(["--effort", reasoning_effort])
-    if resume_session_id is not None:
-        argv.extend(["--resume", resume_session_id])
     if persona_file:
         argv.extend(["--append-system-prompt-file", PERSONA_FILE_ARG_PLACEHOLDER])
     return argv
@@ -609,9 +609,12 @@ def build_codex_argv(
             argv.extend(["-c", f'service_tier="{service_tier}"'])
             if fast:
                 argv.extend(["-c", "features.fast_mode=true"])
+        if resume_session_id is not None:
+            argv.extend(["exec", "resume"])
+        else:
+            argv.append("exec")
         argv.extend(
             [
-                "exec",
                 "--ignore-user-config",
                 "--ignore-rules",
                 "--skip-git-repo-check",
@@ -623,8 +626,10 @@ def build_codex_argv(
             argv.extend(["--output-schema", output_schema])
         if stream_capture:
             argv.extend(["--color", "never", "--json"])
-            if not resumable and codex.get("ephemeral", True) is True:
+            if not resumable and resume_session_id is None and codex.get("ephemeral", True) is True:
                 argv.append("--ephemeral")
+        if resume_session_id is not None:
+            argv.append(resume_session_id)
         argv.append("-")
         return argv
     argv = [binary]
@@ -660,7 +665,8 @@ def build_codex_argv(
             # Codex drops a "fast" tier silently when features.fast_mode is off
             # in the ambient config; enable it so --fast cannot no-op.
             argv.extend(["-c", "features.fast_mode=true"])
-    if resume_session_id is not None:
+    structured_resume = resume_session_id is not None and persist_session
+    if structured_resume:
         sandbox = codex["workSandbox"] if write_sandbox else "read-only"
         if bypass_sandbox:
             argv.append("--dangerously-bypass-approvals-and-sandbox")
@@ -674,18 +680,21 @@ def build_codex_argv(
                 argv.extend(["-c", "sandbox_workspace_write.network_access=true"])
         if bypass_hook_trust:
             argv.append("--dangerously-bypass-hook-trust")
-    argv.append("exec")
-    if resume_session_id is not None:
-        argv.extend(["resume", resume_session_id])
+    if resume_session_id is not None and not structured_resume:
+        argv.extend(["exec", "resume", "--cd", workspace])
     else:
-        argv.extend(["--cd", workspace])
+        argv.append("exec")
+        if resume_session_id is not None:
+            argv.extend(["resume", resume_session_id])
+        else:
+            argv.extend(["--cd", workspace])
     if output_schema is not None:
         argv.extend(["--output-schema", output_schema])
     if codex.get("ignoreUserConfig") is True:
         argv.append("--ignore-user-config")
     if workspace_kind != "git":
         argv.append("--skip-git-repo-check")
-    if resume_session_id is None:
+    if resume_session_id is None or not structured_resume:
         if bypass_sandbox:
             argv.append("--dangerously-bypass-approvals-and-sandbox")
         else:
@@ -708,6 +717,8 @@ def build_codex_argv(
             and codex.get("ephemeral", True) is True
         ):
             argv.append("--ephemeral")
+    if resume_session_id is not None and not structured_resume:
+        argv.append(resume_session_id)
     if prompt_transport == PROMPT_TRANSPORT_ARGV:
         argv.append(prompt)
     elif prompt_transport == PROMPT_TRANSPORT_STDIN:

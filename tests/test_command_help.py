@@ -46,6 +46,7 @@ TOP_LEVEL_COMMANDS = (
     "ps",
     "run-output",
     "resume",
+    "followup",
     "wait",
     "cancel",
     "worktree",

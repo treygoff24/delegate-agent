@@ -44,6 +44,7 @@ MODEL_METADATA_KEYS: MetadataKeyGroup = (
 SPEED_METADATA_KEYS: MetadataKeyGroup = ("requestedFast",)
 
 RESUME_METADATA_KEYS: MetadataKeyGroup = ("resumedFrom", "worktreeAttachment")
+FOLLOWUP_METADATA_KEYS: MetadataKeyGroup = ("followupOf",)
 INITIATOR_METADATA_KEYS: MetadataKeyGroup = ("initiatorRoot",)
 PERSONA_METADATA_KEYS: MetadataKeyGroup = (
     "personaName",
@@ -68,6 +69,7 @@ SNAPSHOT_MANIFEST_FALLBACK_KEYS: MetadataKeyGroup = (
     *REASONING_METADATA_KEYS,
     *SPEED_METADATA_KEYS,
     *RESUME_METADATA_KEYS,
+    *FOLLOWUP_METADATA_KEYS,
     *PERSONA_METADATA_KEYS,
     "processGroupTerminationGraceSec",
     *HARNESS_SESSION_METADATA_KEYS,

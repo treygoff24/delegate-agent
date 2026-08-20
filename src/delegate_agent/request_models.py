@@ -74,6 +74,7 @@ class LaunchOptions:
     persona_record_path: str | None = None
     mail_push: bool = False
     resumable: bool = False
+    resume_session_id: str | None = None
 
 
 @dataclass
@@ -102,6 +103,15 @@ class ResumeOptions:
 
 
 @dataclass
+class FollowupOptions:
+    handle: str
+    prompt_parts: list[str] = field(default_factory=list)
+    prompt_file: str | None = None
+    timeout: int | None = None
+    dry_run: bool = False
+
+
+@dataclass
 class InspectionOptions:
     summary: bool = False
     engine: str | None = None
@@ -127,6 +137,7 @@ class ParsedCommand:
     profiles_command: profile_commands.ProfilesCommand | None = None
     inspection: InspectionOptions | None = None
     resume: ResumeOptions | None = None
+    followup: FollowupOptions | None = None
     mail_command: mail.MailCommand | None = None
 
     def __init__(
@@ -149,6 +160,7 @@ class ParsedCommand:
         profiles_command: profile_commands.ProfilesCommand | None = None,
         inspection: InspectionOptions | None = None,
         resume: ResumeOptions | None = None,
+        followup: FollowupOptions | None = None,
         mail_command: mail.MailCommand | None = None,
     ) -> None:
         self.subcommand = subcommand
@@ -168,6 +180,7 @@ class ParsedCommand:
         self.profiles_command = profiles_command
         self.inspection = inspection
         self.resume = resume
+        self.followup = followup
         self.mail_command = mail_command
 
 
@@ -287,6 +300,8 @@ class Request:
     preserve_safe_workspace: bool = False
     temporary_workspace_cleanup: JsonObject | None = None
     resumable: bool = False
+    followup_of: str | None = None
+    resume_session_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -340,5 +355,5 @@ class EngineBuildInput:
     persona_transport: str | None = None
     persona_env_overrides: dict[str, str] | None = None
     persist_session: bool = False
-    resume_session_id: str | None = None
     resumable: bool = False
+    resume_session_id: str | None = None

@@ -1641,6 +1641,7 @@ def request_from_parsed(
         persona_path_override=launch.persona_record_path,
         mail_push=launch.mail_push,
         resumable=launch.resumable,
+        resume_session_id=launch.resume_session_id,
         frame_prompt=True,
     )
 
@@ -1862,6 +1863,11 @@ def request_from_input_json(
         raise DelegateError(
             "invalid_option_combination",
             "resumable is not supported with call mode.",
+        )
+    if raw_resumable and mode == MODE_SAFE:
+        raise DelegateError(
+            "invalid_option_combination",
+            "resumable is not supported with safe mode; safe workspaces are temporary and a captured session would have no re-entry path.",
         )
     if raw_resumable and engine not in {"codex", "claude"}:
         raise DelegateError(
@@ -2287,9 +2293,10 @@ def build_request(
     expected_persona_digest: str | None = None,
     mail_push: bool = False,
     resumable: bool = False,
+    resume_session_id: str | None = None,
+    followup_of: str | None = None,
     frame_prompt: bool | None = None,
     persist_session: bool = False,
-    resume_session_id: str | None = None,
     preserve_safe_workspace: bool = False,
 ) -> Request:
     _validate_agent_option(engine, agent)
@@ -2312,6 +2319,11 @@ def build_request(
         raise DelegateError(
             "invalid_option_combination",
             "--resumable is not supported with call mode.",
+        )
+    if resumable and mode == MODE_SAFE:
+        raise DelegateError(
+            "invalid_option_combination",
+            "--resumable is not supported with safe mode; safe workspaces are temporary and a captured session would have no re-entry path.",
         )
     if resumable and engine not in {"codex", "claude"}:
         raise DelegateError(
@@ -2478,11 +2490,12 @@ def build_request(
             mail_push=mail_push,
             persona_resolution=persona_resolution,
             resumable=resumable,
+            resume_session_id=resume_session_id,
+            followup_of=followup_of,
             allow_repo_persona=allow_repo_persona,
             skip_skill_preamble=pass_through,
             frame_prompt=frame_prompt,
             persist_session=persist_session,
-            resume_session_id=resume_session_id,
             preserve_safe_workspace=preserve_safe_workspace,
         )
 
@@ -3363,9 +3376,10 @@ def _build_request_for_workspace(
     skip_skill_preamble: bool = False,
     mail_push: bool = False,
     resumable: bool = False,
+    resume_session_id: str | None = None,
+    followup_of: str | None = None,
     frame_prompt: bool = True,
     persist_session: bool = False,
-    resume_session_id: str | None = None,
     preserve_safe_workspace: bool = False,
 ) -> Request:
     source_prompt = prompt if source_prompt is None else source_prompt
@@ -3568,6 +3582,8 @@ def _build_request_for_workspace(
             mail_push=mail_push,
             resumable=resumable,
             preserve_safe_workspace=preserve_safe_workspace,
+            followup_of=followup_of,
+            resume_session_id=resume_session_id,
         ),
         config,
         resolution=profile_resolution,

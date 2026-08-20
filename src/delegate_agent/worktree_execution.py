@@ -334,6 +334,8 @@ def _build_persistent_worktree_run_context(
         worktree_auto_prune_merged_older_than_days=auto_prune_days,
         mail_push=request.mail_push,
         resumable=request.resumable,
+        followup_of=request.followup_of,
+        resume_session_id=request.resume_session_id,
         group=request.group,
         notify=request.notify,
         workflow_agent_key=request.workflow_agent_key,
