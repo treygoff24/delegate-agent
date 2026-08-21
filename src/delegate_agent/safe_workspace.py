@@ -720,6 +720,60 @@ def git_head_exists(git_root: str) -> bool:
     return result.returncode == 0
 
 
+def safe_workspace_temp_base(source_root: str) -> str:
+    """Create a temp base outside the source root so isolation cannot recurse into itself."""
+    source_resolved = Path(source_root).resolve(strict=False)
+    cache_home = os.environ.get("XDG_CACHE_HOME")
+    if cache_home:
+        cache_candidate = Path(cache_home) / "delegate" / "safe-workspaces"
+    else:
+        home = os.environ.get("HOME") or str(Path.home())
+        cache_candidate = Path(home) / ".cache" / "delegate" / "safe-workspaces"
+
+    def outside_source(candidate: Path) -> bool:
+        try:
+            resolved = candidate.resolve(strict=False)
+        except OSError:
+            return False
+        return not resolved.is_relative_to(source_resolved)
+
+    for candidate in (Path(tempfile.gettempdir()), cache_candidate):
+        if outside_source(candidate):
+            candidate.mkdir(mode=0o700, parents=True, exist_ok=True)
+            return tempfile.mkdtemp(prefix="delegate-safe-", dir=candidate)
+    raise DelegateError(
+        "safe_workspace_source_too_broad",
+        (
+            f"Source root {source_root} contains every safe-workspace location "
+            "(the system temp directory and ~/.cache/delegate/safe-workspaces). "
+            "Run from a narrower directory or use --isolation worktree."
+        ),
+    )
+
+
+def _copytree_ignore_with_temp_base(temp_base_resolved: Path):
+    """Wrap the standard safe copytree ignore so the walk never enters temp_base."""
+
+    def _ignore(directory: str, names: list[str]) -> set[str]:
+        ignored = _copytree_ignore_safe_workspace(directory, names)
+        for name in names:
+            if name in ignored:
+                continue
+            path = Path(directory) / name
+            try:
+                # Only directories can contain the temp base; skip the resolve() on files.
+                if not path.is_dir():
+                    continue
+                resolved = path.resolve(strict=False)
+            except OSError:
+                continue
+            if resolved == temp_base_resolved:
+                ignored.add(name)
+        return ignored
+
+    return _ignore
+
+
 def discard_git_safe_workspace(
     git_root: str, worktree_path: str, temp_base: str, *, worktree_added: bool
 ) -> None:
@@ -733,7 +787,7 @@ def create_git_safe_workspace(
     *,
     include_warnings: bool = False,
 ) -> tuple[str, str] | tuple[str, str, tuple[str, ...]]:
-    temp_base = tempfile.mkdtemp(prefix="delegate-safe-")
+    temp_base = safe_workspace_temp_base(git_root)
     worktree_path = str(Path(temp_base) / "wt")
     worktree_added = False
     warnings: tuple[str, ...] = ()
@@ -765,14 +819,14 @@ def create_directory_safe_workspace(
     *,
     include_warnings: bool = False,
 ) -> tuple[str, str] | tuple[str, str, tuple[str, ...]]:
-    temp_base = tempfile.mkdtemp(prefix="delegate-safe-")
+    temp_base = safe_workspace_temp_base(source_workspace)
     copy_path = str(Path(temp_base) / "copy")
     warnings: tuple[str, ...] = ()
     try:
         shutil.copytree(
             source_workspace,
             copy_path,
-            ignore=_copytree_ignore_safe_workspace,
+            ignore=_copytree_ignore_with_temp_base(Path(temp_base).resolve(strict=False)),
             dirs_exist_ok=True,
             symlinks=True,
         )

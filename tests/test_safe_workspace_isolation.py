@@ -943,6 +943,42 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
         self.assertEqual(code, self.delegate.EXIT_OK)
         self.assertFalse(delegate_dir.exists())
 
+    def test_directory_safe_workspace_source_is_tempdir_uses_cache_fallback(self):
+        with tempfile.TemporaryDirectory() as cache_home, tempfile.TemporaryDirectory() as source:
+            fallback = Path(cache_home) / "delegate" / "safe-workspaces"
+            with (
+                mock.patch.object(tempfile, "gettempdir", return_value=source),
+                mock.patch.dict(os.environ, {"XDG_CACHE_HOME": cache_home}),
+            ):
+                copy_path, temp_base = self.delegate.create_directory_safe_workspace(source)
+            try:
+                self.assertEqual(Path(temp_base).parent.resolve(), fallback.resolve())
+                self.assertFalse(
+                    [name for name in os.listdir(copy_path) if name.startswith("delegate-safe-")]
+                )
+            finally:
+                shutil.rmtree(temp_base, ignore_errors=True)
+            self.assertFalse(list(fallback.glob("delegate-safe-*")))
+
+    def test_temp_base_refuses_source_containing_all_candidates(self):
+        with (
+            tempfile.TemporaryDirectory() as source,
+            mock.patch.object(tempfile, "gettempdir", return_value=str(Path(source) / "tmp")),
+            mock.patch.dict(os.environ, {"XDG_CACHE_HOME": str(Path(source) / "cache")}),
+            self.assertRaises(self.delegate.DelegateError) as ctx,
+        ):
+            safe_workspace.safe_workspace_temp_base(source)
+        self.assertEqual(ctx.exception.error, "safe_workspace_source_too_broad")
+
+    def test_temp_base_prefers_system_tempdir_outside_source(self):
+        with tempfile.TemporaryDirectory() as fake_temp:
+            source = Path(fake_temp) / "project"
+            source.mkdir()
+            with mock.patch.object(tempfile, "gettempdir", return_value=fake_temp):
+                temp_base = safe_workspace.safe_workspace_temp_base(str(source))
+            self.addCleanup(shutil.rmtree, temp_base, ignore_errors=True)
+            self.assertEqual(Path(temp_base).parent.resolve(), Path(fake_temp).resolve())
+
 
 if __name__ == "__main__":
     unittest.main()
