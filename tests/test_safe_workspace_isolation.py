@@ -970,6 +970,29 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
             safe_workspace.safe_workspace_temp_base(source)
         self.assertEqual(ctx.exception.error, "safe_workspace_source_too_broad")
 
+    def test_directory_safe_workspace_skips_unreadable_directories_with_warning(self):
+        if os.geteuid() == 0:
+            self.skipTest("root can read every directory")
+        with tempfile.TemporaryDirectory() as source:
+            (Path(source) / "keep.txt").write_text("kept", encoding="utf-8")
+            private = Path(source) / "private"
+            private.mkdir()
+            (private / "secret.txt").write_text("nope", encoding="utf-8")
+            private.chmod(0)
+            try:
+                copy_path, temp_base, warnings = self.delegate.create_directory_safe_workspace(
+                    source, include_warnings=True
+                )
+            finally:
+                private.chmod(0o700)
+            self.addCleanup(shutil.rmtree, temp_base, ignore_errors=True)
+            self.assertEqual((Path(copy_path) / "keep.txt").read_text(encoding="utf-8"), "kept")
+            self.assertFalse((Path(copy_path) / "private").exists())
+            self.assertEqual(
+                warnings,
+                ("skipped unreadable directories in the safe workspace copy: private",),
+            )
+
     def test_temp_base_prefers_system_tempdir_outside_source(self):
         with tempfile.TemporaryDirectory() as fake_temp:
             source = Path(fake_temp) / "project"

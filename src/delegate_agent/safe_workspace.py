@@ -553,7 +553,9 @@ def mirror_path_preserving_symlinks(
     shutil.copy2(source, destination)
 
 
-def _copytree_ignore_safe_workspace(directory: str, names: list[str]) -> set[str]:
+def _copytree_ignore_safe_workspace(
+    directory: str, names: list[str], *, unreadable: list[str] | None = None
+) -> set[str]:
     ignored = {".git", ".delegate"} & set(names)
     for name in names:
         path = Path(directory) / name
@@ -561,6 +563,13 @@ def _copytree_ignore_safe_workspace(directory: str, names: list[str]) -> set[str
             mode = path.lstat().st_mode
         except OSError:
             ignored.add(name)
+            continue
+        if stat.S_ISDIR(mode) and not os.access(path, os.R_OK | os.X_OK):
+            # Other users' private dirs (e.g. /tmp/systemd-private-*) would otherwise
+            # surface as a raw shutil.Error after the rest of the tree was copied.
+            ignored.add(name)
+            if unreadable is not None:
+                unreadable.append(str(path))
             continue
         if stat.S_ISREG(mode) or stat.S_ISDIR(mode) or stat.S_ISLNK(mode):
             continue
@@ -751,11 +760,11 @@ def safe_workspace_temp_base(source_root: str) -> str:
     )
 
 
-def _copytree_ignore_with_temp_base(temp_base_resolved: Path):
+def _copytree_ignore_with_temp_base(temp_base_resolved: Path, unreadable: list[str]):
     """Wrap the standard safe copytree ignore so the walk never enters temp_base."""
 
     def _ignore(directory: str, names: list[str]) -> set[str]:
-        ignored = _copytree_ignore_safe_workspace(directory, names)
+        ignored = _copytree_ignore_safe_workspace(directory, names, unreadable=unreadable)
         for name in names:
             if name in ignored:
                 continue
@@ -814,6 +823,24 @@ def create_git_safe_workspace(
     return worktree_path, temp_base
 
 
+def _unreadable_warnings(
+    unreadable: list[str], source_workspace: str, *, limit: int = 5
+) -> tuple[str, ...]:
+    if not unreadable:
+        return ()
+    root = Path(source_workspace)
+    shown = []
+    for entry in unreadable[:limit]:
+        with suppress(ValueError):
+            entry = Path(entry).relative_to(root).as_posix()
+        shown.append(entry)
+    more = len(unreadable) - len(shown)
+    suffix = f" (+{more} more)" if more > 0 else ""
+    return (
+        f"skipped unreadable directories in the safe workspace copy: {', '.join(shown)}{suffix}",
+    )
+
+
 def create_directory_safe_workspace(
     source_workspace: str,
     *,
@@ -822,15 +849,27 @@ def create_directory_safe_workspace(
     temp_base = safe_workspace_temp_base(source_workspace)
     copy_path = str(Path(temp_base) / "copy")
     warnings: tuple[str, ...] = ()
+    unreadable: list[str] = []
     try:
-        shutil.copytree(
-            source_workspace,
-            copy_path,
-            ignore=_copytree_ignore_with_temp_base(Path(temp_base).resolve(strict=False)),
-            dirs_exist_ok=True,
-            symlinks=True,
-        )
+        try:
+            shutil.copytree(
+                source_workspace,
+                copy_path,
+                ignore=_copytree_ignore_with_temp_base(
+                    Path(temp_base).resolve(strict=False), unreadable
+                ),
+                dirs_exist_ok=True,
+                symlinks=True,
+            )
+        except shutil.Error as exc:
+            failures = [str(err) for _src, _dst, err in exc.args[0][:5]]
+            raise DelegateError(
+                "safe_workspace_copy_failed",
+                f"Failed to copy {source_workspace} into the safe workspace: "
+                + "; ".join(failures),
+            ) from exc
         warnings = merge_warnings(
+            _unreadable_warnings(unreadable, source_workspace),
             external_symlink_warnings(source_workspace),
             block_external_symlinks(copy_path, source_workspace),
         )
