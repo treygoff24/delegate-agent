@@ -47,6 +47,7 @@ from delegate_agent.sandbox_bwrap import (
     SAFE_BACKEND_COPY,
     SAFE_BACKEND_ENV,
     BwrapMaskOverflow,
+    configured_bwrap_binds,
     ensure_bwrap_backend,
     parity_masks,
     requested_safe_backend,
@@ -1019,6 +1020,9 @@ def safe_isolated_request(
                 f"{SAFE_BACKEND_ENV}) to run this workspace.",
             ) from exc
         _ensure_no_bwrap_symlink_leaks(source_git_root)
+        binds = (
+            configured_bwrap_binds(config, workspace=source_git_root) if config is not None else ()
+        )
         isolation = IsolationContext(
             source_workspace=request.workspace,
             effective_isolation=effective,
@@ -1030,6 +1034,7 @@ def safe_isolated_request(
             sandbox={
                 "backend": "bwrap",
                 "masks": [{"path": mask.path, "kind": mask.kind} for mask in masks],
+                "binds": [{"path": bind.path, "mode": bind.mode} for bind in binds],
             },
             warnings=tuple(warnings_list),
         )

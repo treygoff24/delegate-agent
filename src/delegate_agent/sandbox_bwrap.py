@@ -78,6 +78,14 @@ class Mask(NamedTuple):
     kind: str  # MASK_KIND_TMPFS for directories, MASK_KIND_DEVNULL for files
 
 
+class Bind(NamedTuple):
+    path: str
+    mode: str  # "ro" or "rw"
+
+
+BIND_MODES = ("ro", "rw")
+
+
 class BwrapMaskOverflow(Exception):
     """Raised when parity masks exceed MASK_OVERFLOW_LIMIT."""
 
@@ -110,6 +118,51 @@ def requested_safe_backend(
             )
         return str(value)
     return SAFE_BACKEND_COPY
+
+
+def configured_bwrap_binds(config: Mapping[str, object], *, workspace: str) -> tuple[Bind, ...]:
+    """Resolve ``isolation.bwrapBinds`` into absolute host paths, fail closed.
+
+    Site-specific launch surfaces (an account broker socket, brokered engine
+    home trees, a managed-env contract file) cannot be guessed by the generic
+    boundary, so operators declare them. Every entry must exist on the host,
+    and a writable entry may never cover the workspace itself: a later rw
+    mount of the workspace or one of its ancestors would shadow the read-only
+    workspace bind and silently turn safe mode into work mode.
+    """
+    isolation = config.get("isolation")
+    entries = isolation.get("bwrapBinds") if isinstance(isolation, Mapping) else None
+    if not isinstance(entries, list):
+        return ()
+    resolved_workspace = Path(workspace).resolve()
+    binds: list[Bind] = []
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
+        raw_path = entry.get("path")
+        mode = entry.get("mode")
+        if not isinstance(raw_path, str) or mode not in BIND_MODES:
+            continue
+        expanded = os.path.expanduser(raw_path)
+        if not os.path.exists(expanded):
+            raise DelegateError(
+                "bwrap_bind_missing",
+                f"isolation.bwrapBinds entry {raw_path!r} does not exist on this host; "
+                "remove it or create the path before running with the bwrap backend.",
+            )
+        target = Path(expanded).resolve()
+        if mode == "rw" and (
+            target == resolved_workspace or resolved_workspace.is_relative_to(target)
+        ):
+            raise DelegateError(
+                "bwrap_bind_conflict",
+                f"isolation.bwrapBinds entry {raw_path!r} is writable and covers the "
+                f"workspace {workspace}; a rw bind may not include the read-only workspace.",
+            )
+        bind = Bind(path=expanded, mode=mode)
+        if bind not in binds:
+            binds.append(bind)
+    return tuple(binds)
 
 
 def ensure_bwrap_backend() -> None:
@@ -294,7 +347,8 @@ def build_bwrap_argv(
     Mount targets are deduplicated keep-first across every bind/tmpfs/mask so
     no mount point is declared twice. Engine homes named by the child env
     (``CODEX_HOME``, ``CLAUDE_CONFIG_DIR``) are appended to ``rw_roots``.
-    Emission order matters: system roots first, then ``$HOME`` tmpfs, then the
+    Emission order matters: core system roots first, then ``$HOME`` tmpfs,
+    then the optional read-only roots (several live under ``$HOME``), then the
     read-only workspace, then masks stacked on top of the workspace, then
     writable roots (run scratch, mail-push homes, engine homes) stacked last.
     """
@@ -320,12 +374,15 @@ def build_bwrap_argv(
         bind("--ro-bind", root, root)
     for link_target, link_path in _SYMLINK_PAIRS:
         argv.extend(("--symlink", link_target, link_path))
-    for root in ro_roots:
-        bind("--ro-bind", root, root)
     bind("--dev", "/dev")
     bind("--bind", "/proc", "/proc")
     bind("--tmpfs", "/tmp")
+    # The HOME tmpfs must precede every HOME-relative ro-bind: bwrap applies
+    # mounts in argv order, so a later tmpfs would shadow ~/.local, ~/.bun and
+    # the engine dot-dir (observed live: execvp estate-codex ENOENT).
     bind("--tmpfs", home)
+    for root in ro_roots:
+        bind("--ro-bind", root, root)
     bind("--ro-bind", workspace, workspace)
     for mask in masks:
         target = os.path.normpath(os.path.join(workspace, mask.path))
@@ -359,13 +416,15 @@ def wrap_engine_argv(
     masks: tuple[Mask, ...] = (),
     home: str | None = None,
     extra_rw_roots: list[str] | None = None,
+    extra_ro_roots: list[str] | None = None,
 ) -> list[str]:
     """Prefix ``engine_argv`` with the bwrap boundary using live filesystem facts.
 
     Pure assembly lives in ``build_bwrap_argv``; this wrapper resolves the
     host-dependent inputs: real HOME, existing optional ro-bind roots (home
     dirs, the per-engine dot-directory, system roots), the run scratch dir
-    (rw), and any extra rw roots (e.g. mail-push private homes).
+    (rw), and any extra ro/rw roots (configured ``isolation.bwrapBinds``,
+    mail-push private homes).
     """
     environment = env or {}
     resolved_home = home or environment.get("HOME") or str(Path.home())
@@ -382,6 +441,9 @@ def wrap_engine_argv(
     for candidate in candidates:
         if candidate not in ro_roots and os.path.isdir(candidate):
             ro_roots.append(candidate)
+    for root in extra_ro_roots or []:
+        if root not in ro_roots:
+            ro_roots.append(root)
     rw_roots = [scratch_dir] if scratch_dir else []
     for root in extra_rw_roots or []:
         if root not in rw_roots:

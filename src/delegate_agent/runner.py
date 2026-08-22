@@ -1492,6 +1492,21 @@ def _masks_from_sandbox(payload: JsonObject | None) -> tuple[sandbox_bwrap.Mask,
     return tuple(masks)
 
 
+def _binds_from_sandbox(payload: JsonObject | None, mode: str) -> list[str]:
+    if not payload:
+        return []
+    entries = payload.get("binds")
+    if not isinstance(entries, list):
+        return []
+    return [
+        entry["path"]
+        for entry in entries
+        if isinstance(entry, dict)
+        and entry.get("mode") == mode
+        and isinstance(entry.get("path"), str)
+    ]
+
+
 def _bwrap_mail_push_rw_roots(ctx: RunContext) -> list[str]:
     """Mail-push private homes must stay writable inside the bwrap boundary."""
     if not ctx.mail_push:
@@ -1534,7 +1549,8 @@ def _launch_tracked_process(
             engine=engine,
             scratch_dir=str(scratch_dir) if scratch_dir is not None else None,
             masks=_masks_from_sandbox(sandbox),
-            extra_rw_roots=extra_rw_roots,
+            extra_rw_roots=[*_binds_from_sandbox(sandbox, "rw"), *(extra_rw_roots or [])],
+            extra_ro_roots=_binds_from_sandbox(sandbox, "ro"),
         )
     return subprocess.Popen(  # nosec B603 - Delegate intentionally launches validated harness argv with shell=False.
         argv,

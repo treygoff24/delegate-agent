@@ -33,6 +33,7 @@ SAFE_ISOLATION_REQUIRED_ENGINES = frozenset(
 SAFE_BACKEND_COPY = "copy"
 SAFE_BACKEND_BWRAP = "bwrap"
 VALID_SAFE_BACKEND_VALUES = (SAFE_BACKEND_COPY, SAFE_BACKEND_BWRAP)
+VALID_BWRAP_BIND_MODES = ("ro", "rw")
 
 POLICY_PROFILES = ("safe", "trusted-hooks", "external-sandbox", "custom")
 POLICY_MODE_KEYS = frozenset(
@@ -371,6 +372,25 @@ def _validate_isolation_section(isolation: JsonValue) -> None:
             "invalid_isolation_config",
             f"isolation.safeBackend must be one of: {', '.join(VALID_SAFE_BACKEND_VALUES)}.",
         )
+    if "bwrapBinds" in isolation:
+        binds = isolation["bwrapBinds"]
+        if not isinstance(binds, list):
+            raise ConfigError(
+                "invalid_isolation_config",
+                "isolation.bwrapBinds must be a list of {path, mode} objects.",
+            )
+        for index, entry in enumerate(binds):
+            if (
+                not isinstance(entry, dict)
+                or not isinstance(entry.get("path"), str)
+                or not entry["path"].strip()
+                or entry.get("mode") not in VALID_BWRAP_BIND_MODES
+            ):
+                raise ConfigError(
+                    "invalid_isolation_config",
+                    f"isolation.bwrapBinds[{index}] must be an object with a non-empty "
+                    f"string path and mode one of: {', '.join(VALID_BWRAP_BIND_MODES)}.",
+                )
 
 
 def _validate_required_non_negative_int(

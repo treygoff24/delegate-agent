@@ -14,7 +14,7 @@ _delegate_subcommand() {
       --json|--pass-through|--no-completion-report)
         shift
         ;;
-      --cwd|--isolation|--completion-report|--auth-profile|--group)
+      --cwd|--isolation|--completion-report|--auth-profile|--group|--notify)
         [ "$#" -ge 2 ] || return 0
         shift 2
         ;;
@@ -109,7 +109,7 @@ _delegate_is_readonly_request() {
       --json|--pass-through|--no-completion-report)
         shift
         ;;
-      --cwd|--isolation|--completion-report|--auth-profile|--group)
+      --cwd|--isolation|--completion-report|--auth-profile|--group|--notify)
         [ "$#" -ge 2 ] || return 1
         shift 2
         ;;

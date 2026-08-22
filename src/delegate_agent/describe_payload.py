@@ -986,6 +986,7 @@ def describe_payload(
             },
             "configKeys": {
                 "config": "isolation.safeBackend",
+                "binds": "isolation.bwrapBinds",
                 "env": SAFE_BACKEND_ENV,
                 "note": (
                     "DELEGATE_SAFE_BACKEND overrides isolation.safeBackend; an invalid "
@@ -995,7 +996,10 @@ def describe_payload(
                     "paths are hidden with gitignore-parity masks. It fails closed when "
                     "bubblewrap is unavailable, an untracked symlink would leak host "
                     "paths, or masks exceed the 2000-entry overflow limit; Cursor safe "
-                    "always uses the copy backend."
+                    "always uses the copy backend. isolation.bwrapBinds declares extra "
+                    "host paths ({path, mode: ro|rw}) the engine launch needs inside the "
+                    "boundary (e.g. a broker socket or brokered engine home); a missing "
+                    "path or a rw bind covering the workspace fails closed."
                 ),
             },
         },

@@ -17,7 +17,9 @@ if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
 # Imported after the base (which bootstraps sys.path).
+from delegate_agent import config as delegate_config  # noqa: E402
 from delegate_agent import (  # noqa: E402
+    runner,
     safe_workspace,
     sandbox_bwrap,
 )
@@ -90,9 +92,6 @@ class BuildBwrapArgvTests(unittest.TestCase):
                 "--symlink",
                 "usr/sbin",
                 "sbin",
-                "--ro-bind",
-                "/opt",
-                "/opt",
                 "--dev",
                 "/dev",
                 "--bind",
@@ -102,6 +101,9 @@ class BuildBwrapArgvTests(unittest.TestCase):
                 "/tmp",
                 "--tmpfs",
                 "/home/fake",
+                "--ro-bind",
+                "/opt",
+                "/opt",
                 "--ro-bind",
                 "/ws",
                 "/ws",
@@ -589,6 +591,116 @@ class DryRunBwrapTests(CommandTestBase):
         self.assertEqual(code, 0)
         self.assertIn("safe workspace method: bwrap-ro-bind", out)
         self.assertIn("argv: bwrap '…' -- codex", out)
+
+
+class HomeRelativeRoBindOrderTests(unittest.TestCase):
+    def test_home_ro_binds_follow_the_home_tmpfs(self):
+        # bwrap mounts in argv order: a HOME tmpfs emitted after ~/.local would
+        # shadow it (live failure: execvp estate-codex ENOENT).
+        argv = sandbox_bwrap.build_bwrap_argv(
+            workspace="/ws",
+            engine_argv=["true"],
+            env={},
+            home="/home/fake",
+            rw_roots=[],
+            ro_roots=["/home/fake/.local", "/opt"],
+        )
+        tmpfs_home = argv.index("/home/fake")
+        self.assertEqual(argv[tmpfs_home - 1], "--tmpfs")
+        self.assertGreater(argv.index("/home/fake/.local"), tmpfs_home)
+
+    def test_wrap_engine_argv_extra_ro_roots_follow_the_home_tmpfs(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as ws:
+            extra = os.path.join(home, ".ai-profiles", "contract")
+            os.makedirs(extra)
+            argv = sandbox_bwrap.wrap_engine_argv(
+                engine_argv=["true"],
+                cwd=ws,
+                env={},
+                engine="codex",
+                home=home,
+                extra_ro_roots=[extra],
+            )
+            self.assertGreater(argv.index(extra), argv.index(home))
+            self.assertEqual(argv[argv.index(extra) - 1], "--ro-bind")
+
+
+class ConfiguredBwrapBindsTests(unittest.TestCase):
+    def test_absent_section_yields_nothing(self):
+        self.assertEqual(sandbox_bwrap.configured_bwrap_binds({}, workspace="/ws"), ())
+        config = {"isolation": {"safeBackend": "bwrap"}}
+        self.assertEqual(sandbox_bwrap.configured_bwrap_binds(config, workspace="/ws"), ())
+
+    def test_expands_home_dedupes_and_keeps_modes(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as ws:
+            sock = os.path.join(home, "broker.sock")
+            Path(sock).write_text("", encoding="utf-8")
+            os.makedirs(os.path.join(home, ".local", "bin"))
+            config = {
+                "isolation": {
+                    "bwrapBinds": [
+                        {"path": "~/.local/bin", "mode": "ro"},
+                        {"path": "~/broker.sock", "mode": "rw"},
+                        {"path": "~/.local/bin", "mode": "ro"},
+                    ]
+                }
+            }
+            with mock.patch.dict(os.environ, {"HOME": home}):
+                binds = sandbox_bwrap.configured_bwrap_binds(config, workspace=ws)
+            self.assertEqual(
+                binds,
+                (
+                    sandbox_bwrap.Bind(path=os.path.join(home, ".local", "bin"), mode="ro"),
+                    sandbox_bwrap.Bind(path=sock, mode="rw"),
+                ),
+            )
+
+    def test_missing_path_fails_closed(self):
+        with tempfile.TemporaryDirectory() as ws:
+            config = {"isolation": {"bwrapBinds": [{"path": "/nonexistent/xyz", "mode": "ro"}]}}
+            with self.assertRaises(DelegateError) as caught:
+                sandbox_bwrap.configured_bwrap_binds(config, workspace=ws)
+            self.assertEqual(caught.exception.error, "bwrap_bind_missing")
+
+    def test_rw_bind_covering_workspace_fails_closed(self):
+        with tempfile.TemporaryDirectory() as root:
+            ws = os.path.join(root, "repo")
+            os.makedirs(ws)
+            for covering in (root, ws):
+                config = {"isolation": {"bwrapBinds": [{"path": covering, "mode": "rw"}]}}
+                with self.assertRaises(DelegateError) as caught:
+                    sandbox_bwrap.configured_bwrap_binds(config, workspace=ws)
+                self.assertEqual(caught.exception.error, "bwrap_bind_conflict")
+            ro = {"isolation": {"bwrapBinds": [{"path": root, "mode": "ro"}]}}
+            self.assertEqual(
+                sandbox_bwrap.configured_bwrap_binds(ro, workspace=ws),
+                (sandbox_bwrap.Bind(path=root, mode="ro"),),
+            )
+
+    def test_config_validation_rejects_malformed_entries(self):
+        for bad in (
+            {"bwrapBinds": "nope"},
+            {"bwrapBinds": [{"path": "", "mode": "ro"}]},
+            {"bwrapBinds": [{"path": "/x", "mode": "rwx"}]},
+            {"bwrapBinds": [{"mode": "ro"}]},
+            {"bwrapBinds": ["/x"]},
+        ):
+            with self.assertRaises(delegate_config.ConfigError) as caught:
+                delegate_config._validate_isolation_section(bad)
+            self.assertEqual(caught.exception.error, "invalid_isolation_config")
+        delegate_config._validate_isolation_section(
+            {"bwrapBinds": [{"path": "/x", "mode": "ro"}, {"path": "~/y", "mode": "rw"}]}
+        )
+
+    def test_runner_splits_binds_by_mode(self):
+        payload = {
+            "backend": "bwrap",
+            "masks": [],
+            "binds": [{"path": "/a", "mode": "ro"}, {"path": "/b", "mode": "rw"}, {"x": 1}],
+        }
+        self.assertEqual(runner._binds_from_sandbox(payload, "ro"), ["/a"])
+        self.assertEqual(runner._binds_from_sandbox(payload, "rw"), ["/b"])
+        self.assertEqual(runner._binds_from_sandbox(None, "rw"), [])
 
 
 if __name__ == "__main__":

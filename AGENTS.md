@@ -53,8 +53,11 @@ as the source of truth when the two disagree.
 - Safe mode optionally runs zero-copy on Linux behind an experimental bubblewrap
   backend (`isolation.safeBackend` / `DELEGATE_SAFE_BACKEND=bwrap`): the workspace
   is read-only-bound with gitignore-parity masks, and every fail-closed condition
-  (bubblewrap unavailable, a leaking untracked symlink, mask overflow) aborts the
-  run instead of falling back to the copy backend.
+  (bubblewrap unavailable, a leaking untracked symlink, mask overflow, a missing
+  or workspace-covering `isolation.bwrapBinds` entry) aborts the run instead of
+  falling back to the copy backend. `$HOME` is a tmpfs inside the boundary; the
+  HOME tmpfs is emitted before every HOME-relative ro-bind (bwrap mounts in argv
+  order), and site launch surfaces are declared via `isolation.bwrapBinds`.
 - Some harness sandboxes reject `rm` of even freshly created temp files; write
   scratch output to unique `mktemp` paths and skip cleanup rather than retrying
   deletion. Unique names make cleanup unnecessary.

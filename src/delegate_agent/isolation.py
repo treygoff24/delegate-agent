@@ -59,7 +59,8 @@ class IsolationContext:
     # Populated only for lifecycle "attached" (resume into a live persistent
     # worktree): {"sourceRunId", "sourceAlias", "path"}.
     attachment: JsonObject | None = None
-    # bwrap safe backend only: {"backend": "bwrap", "masks": [{"path", "kind"}, ...]};
+    # bwrap safe backend only: {"backend": "bwrap", "masks": [{"path", "kind"}, ...],
+    # "binds": [{"path", "mode"}, ...]} (binds = resolved isolation.bwrapBinds);
     # None for the copy/worktree path.
     sandbox: JsonObject | None = None
 

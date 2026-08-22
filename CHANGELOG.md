@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tokens are never emitted or persisted; unauthenticated or malformed status
   output omits the fingerprint so consumers can fail closed.
 - Experimental zero-copy safe-mode isolation on Linux behind `isolation.safeBackend: "bwrap"` (environment override `DELEGATE_SAFE_BACKEND`). Instead of copying the workspace, the engine runs against the real workspace read-only-bound inside a bubblewrap boundary that hides gitignored paths with gitignore-parity masks. Opt-in only, applies to non-Cursor safe runs on Git workspaces, and fails closed — refusing to run — when bubblewrap is unavailable, an untracked symlink would leak host paths, or parity masks exceed 2000 entries.
+- `isolation.bwrapBinds` declares extra host paths (`{path, mode: ro|rw}`) that the engine launch needs inside the bubblewrap boundary (broker sockets, brokered engine homes, managed-env contracts); missing paths and `rw` entries covering the workspace fail closed.
 
 - `--notify room:<name>|channel:<name>` sends one metadata-only completion line through the `post` CLI when a tracked run reaches a terminal state, as the caller's own identity from the source workspace. post is optional: absence, refusal, or timeout degrades to a `notify.ok=false` manifest record and a stderr line without changing the run's result. Dry-run shows the target and argv; call mode rejects the flag.
 
