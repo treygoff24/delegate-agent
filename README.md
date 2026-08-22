@@ -440,8 +440,10 @@ appends `notify_degraded: <reason>` to the manifest warnings, prints one
 stderr line, and never changes the run's own status or exit code — the hook
 itself is guarded, and post runs in its own process group so a timeout kills
 everything it spawned. The ping also fires when the child fails to launch (including a refused
-bwrap mount plan), on persistent-worktree setup failures, and survives `resume`. `--dry-run` shows the target and the post argv; `call`
-mode (CLI or input JSON) and `--pass-through` reject `--notify`.
+bwrap mount plan), on persistent-worktree setup failures, and survives `resume`. Room sends pass `--allow-self`, so `room:<your-own-room>` is the quiet
+default for routine lanes (a `channel:` ping rings every member). `--dry-run`
+shows the target and the post argv; `call` mode (CLI or input JSON) and
+`--pass-through` reject `--notify`.
 
 ## Profile-aware auth and env
 

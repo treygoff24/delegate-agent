@@ -12,6 +12,7 @@ source workspace is the cwd and the inherited environment carries any
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import re
 import shutil
@@ -69,6 +70,26 @@ class NotifyOutcome:
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
+def _error_detail(stdout: str, stderr: str) -> str | None:
+    """post's structured error message when it printed one, else stderr."""
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            payload = json.loads(line)
+        except ValueError:
+            continue
+        error = payload.get("error") if isinstance(payload, dict) else None
+        if isinstance(error, dict):
+            code = error.get("code")
+            message = error.get("message")
+            text = f"{code}: {message}" if code and message else (message or code)
+            if isinstance(text, str) and text:
+                return _CONTROL_RE.sub("", text)[:DETAIL_LIMIT]
+    return _first_line(stderr)
+
+
 def _first_line(text: str) -> str | None:
     """post's first non-empty stderr line, control characters stripped, capped."""
     for line in text.splitlines():
@@ -115,6 +136,9 @@ def notify_argv(target: NotifyTarget, message: str) -> list[str]:
             "signal",
             "--subject",
             "delegate",
+            # A completion ping to the caller's own room is the doorbell case;
+            # post refuses from == to without this.
+            "--allow-self",
             "--body",
             message,
         ]
@@ -170,7 +194,7 @@ def send_notification(
             ok=False,
             target=target.spec,
             reason=REASON_FAILED,
-            detail=_first_line(stderr or "") or f"post exited {process.returncode}",
+            detail=_error_detail(stdout or "", stderr or "") or f"post exited {process.returncode}",
         )
     found = _MESSAGE_ID_RE.search(stdout or "")
     return NotifyOutcome(ok=True, target=target.spec, message_id=found.group(0) if found else None)

@@ -237,6 +237,14 @@ class RunnerHookTests(unittest.TestCase):
                     runner._record_tracked_launch_failure(files, ctx, error)
                 hook.assert_not_called()
 
+    def test_structured_post_error_wins_over_info_stderr(self) -> None:
+        detail = notify._error_detail(
+            '{"ok":false,"error":{"code":"invalid_argument","message":"refusing self"}}\n',
+            "post: sending as 'x' (identity inferred from cwd)\n",
+        )
+        self.assertEqual(detail, "invalid_argument: refusing self")
+        self.assertEqual(notify._error_detail("not json", "post: real error"), "post: real error")
+
     def test_detail_strips_control_characters(self) -> None:
         self.assertEqual(notify._first_line("\x1b[31mpost: boom\x07\nmore"), "[31mpost: boom")
         self.assertIsNone(notify._first_line("\n\x00\n"))
