@@ -990,7 +990,12 @@ def describe_payload(
                 "note": (
                     "DELEGATE_SAFE_BACKEND overrides isolation.safeBackend; an invalid "
                     "value on either channel fails closed. bwrap applies to non-cursor "
-                    "safe runs on Git workspaces with effective worktree isolation."
+                    "safe runs on Git workspaces with effective worktree isolation "
+                    "(experimental): the real workspace is read-only-bound and gitignored "
+                    "paths are hidden with gitignore-parity masks. It fails closed when "
+                    "bubblewrap is unavailable, an untracked symlink would leak host "
+                    "paths, or masks exceed the 2000-entry overflow limit; Cursor safe "
+                    "always uses the copy backend."
                 ),
             },
         },

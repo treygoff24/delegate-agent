@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   derived from `cursor-agent status --format json`. Raw account fields and
   tokens are never emitted or persisted; unauthenticated or malformed status
   output omits the fingerprint so consumers can fail closed.
+- Experimental zero-copy safe-mode isolation on Linux behind `isolation.safeBackend: "bwrap"` (environment override `DELEGATE_SAFE_BACKEND`). Instead of copying the workspace, the engine runs against the real workspace read-only-bound inside a bubblewrap boundary that hides gitignored paths with gitignore-parity masks. Opt-in only, applies to non-Cursor safe runs on Git workspaces, and fails closed — refusing to run — when bubblewrap is unavailable, an untracked symlink would leak host paths, or parity masks exceed 2000 entries.
 
 ### Changed
 

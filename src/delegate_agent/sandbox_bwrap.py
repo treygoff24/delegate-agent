@@ -322,15 +322,15 @@ def build_bwrap_argv(
         argv.extend(("--symlink", link_target, link_path))
     for root in ro_roots:
         bind("--ro-bind", root, root)
-    bind("--dev", "/dev", "/dev")
+    bind("--dev", "/dev")
     bind("--bind", "/proc", "/proc")
-    bind("--tmpfs", "/tmp", "/tmp")
-    bind("--tmpfs", home, home)
+    bind("--tmpfs", "/tmp")
+    bind("--tmpfs", home)
     bind("--ro-bind", workspace, workspace)
     for mask in masks:
         target = os.path.normpath(os.path.join(workspace, mask.path))
         if mask.kind == MASK_KIND_TMPFS:
-            bind("--tmpfs", target, target)
+            bind("--tmpfs", target)
         else:
             bind("--ro-bind", "/dev/null", target)
     engine_homes = [
