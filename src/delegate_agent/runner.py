@@ -2140,13 +2140,35 @@ def _finalize_tracked_run(
     # decision, so a marker that disappears between reads cannot corrupt state.
     pre_state = run_registry.load_run_state_or_none(ctx.registry_root, ctx.run_id)
     cancel_requested = isinstance(pre_state, dict) and pre_state.get("cancelRequested") is True
+    empty_result = False
     if cancel_requested:
         status = run_registry.STATUS_CANCELLED
         exit_code = 1
         _reconcile_cancel_extra(merged_extra)
     elif status == run_registry.STATUS_SUCCEEDED:
-        for key in ("failureReason", "error", "message"):
-            merged_extra.pop(key, None)
+        work_summary = merged_extra.get("workSummary")
+        empty_result = (
+            isinstance(work_summary, dict)
+            and work_summary.get("noChanges") is True
+            and _tracked_capture_quality(
+                files,
+                ctx,
+                capture,
+                completion_report_mode=completion_report_mode,
+            )
+            == RESULT_QUALITY_NO_ASSISTANT_TEXT
+        )
+        if empty_result:
+            merged_extra.update(
+                childExitCode=exit_code,
+                error="empty_result",
+                message="Child harness exited without assistant text or file changes.",
+            )
+            status = run_registry.STATUS_FAILED
+            exit_code = 1
+        else:
+            for key in ("failureReason", "error", "message"):
+                merged_extra.pop(key, None)
     failure = _failure_details(
         status=status,
         signal_text="\n".join(
@@ -2180,13 +2202,17 @@ def _finalize_tracked_run(
             f"{failover_notice}\n\n{report_text}" if report_text.strip() else failover_notice
         )
     report_written = write_completion_report(files.run_path, report_text)
-    result_quality = _classify_result_quality(
-        ctx=ctx,
-        exit_code=exit_code,
-        report_text=report_text,
-        report_written=report_written,
-        report_source=report_source,
-        accumulator=capture.accumulator,
+    result_quality = (
+        RESULT_QUALITY_NO_ASSISTANT_TEXT
+        if empty_result
+        else _classify_result_quality(
+            ctx=ctx,
+            exit_code=exit_code,
+            report_text=report_text,
+            report_written=report_written,
+            report_source=report_source,
+            accumulator=capture.accumulator,
+        )
     )
     merged_extra["completionReportWritten"] = report_written
     merged_extra["completionReportSource"] = report_source if report_written else None

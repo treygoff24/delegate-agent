@@ -79,7 +79,9 @@ WORKTREE_DIRTY_SYNC_NOTE = (
     "Persistent worktree work runs automatically include tracked edits and untracked, "
     "non-ignored files from a dirty source before the child starts; Delegate discloses "
     "the counts and example paths on stderr. Dirty submodules cannot be synced; commit "
-    "or stash them, or use --isolation none."
+    "or stash them, or use --isolation none. A work run whose structured stream contains "
+    "no assistant text and whose worktree has no changes reports failed/empty_result and "
+    "exits 1 instead of treating the child exit code as success."
 )
 
 
@@ -2223,6 +2225,9 @@ def render_overview_text() -> str:
         "Tracked runs return bounded summaries by default. Avoid piping launches through tail;"
     )
     lines.append("inspect runs with delegate snapshot, delegate runs, and delegate run-output.")
+    lines.append(
+        "A verified zero-change work run with no assistant text reports failed/empty_result and exits 1."
+    )
 
     return "\n".join(lines) + "\n"
 
