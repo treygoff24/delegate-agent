@@ -11,11 +11,13 @@ import shlex
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import BinaryIO, TextIO
 
@@ -26,6 +28,7 @@ from delegate_agent import (
     harness_events,
     mail,
     mail_push,
+    notify,
     profiles,
     prompt_instructions,
     reasoning,
@@ -159,6 +162,7 @@ class RunContext:
     include_dirty: bool = False
     synced_files: int = 0
     group: str | None = None
+    notify: str | None = None
     workflow_agent_key: str | None = None
     call_read_only: bool = False
     pure: bool = False
@@ -333,6 +337,8 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
         payload["fallbackProfile"] = ctx.fallback_auth_profile
     if ctx.group is not None:
         payload["group"] = ctx.group
+    if ctx.notify is not None:
+        payload["notify"] = {"target": ctx.notify}
     if ctx.workflow_agent_key is not None:
         payload["workflowAgentKey"] = ctx.workflow_agent_key
     if ctx.mail_push:
@@ -3174,9 +3180,46 @@ def _execute_tracked(
         completion_report_mode=completion_report_mode,
         extra=final_extra or None,
     )
+    _send_completion_notification(files, ctx, finalization.status)
     if capture.error is not None and finalization.status != run_registry.STATUS_CANCELLED:
         raise RunnerLaunchError(capture.error, capture.message or capture.error, 1)
     return _tracked_result(ctx, capture, finalization, json_mode=json_mode, stdout=stdout)
+
+
+def _send_completion_notification(files: TrackedRunFiles, ctx: RunContext, status: str) -> None:
+    """Fire the --notify ping exactly once, after the terminal state is persisted.
+
+    Degradation is recorded in the manifest (``notify.ok=false`` + reason) and
+    never alters the run's status or exit code.
+    """
+    if ctx.notify is None:
+        return
+    target = notify.parse_notify_target(ctx.notify)
+    elapsed: float | None = None
+    started = _parse_rfc3339(ctx.started_at) if ctx.started_at else None
+    if started is not None:
+        elapsed = max((datetime.now(UTC) - started).total_seconds(), 0.0)
+    message = notify.notify_message(
+        run_id=ctx.run_id,
+        status=status,
+        engine=ctx.engine,
+        model=ctx.model_resolved or ctx.model,
+        elapsed_sec=elapsed,
+        workspace=ctx.source_cwd,
+    )
+    outcome = notify.send_notification(target, message, cwd=ctx.source_cwd, env=os.environ)
+    manifest = run_registry.load_run_manifest_or_none(ctx.registry_root, ctx.run_id) or {}
+    manifest["notify"] = outcome.payload()
+    write_manifest(files.run_path, manifest)
+    if not outcome.ok:
+        print(f"delegate: notify degraded ({outcome.reason})", file=sys.stderr)
+
+
+def _parse_rfc3339(value: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def _kill_process_group(pgid: int, sig: signal.Signals) -> None:

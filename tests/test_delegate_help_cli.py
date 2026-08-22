@@ -322,6 +322,7 @@ class HelpSubcommandTests(HelpCliTestBase):
                 "--cwd",
                 "--isolation",
                 "--group",
+                "--notify",
                 "--pass-through",
                 "--completion-report",
                 "--no-completion-report",

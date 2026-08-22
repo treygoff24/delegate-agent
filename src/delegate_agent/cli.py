@@ -41,6 +41,9 @@ from delegate_agent import (
     wsl,
 )
 from delegate_agent import config as delegate_config
+from delegate_agent import (
+    notify as notify_module,
+)
 from delegate_agent import rendering as delegate_rendering
 from delegate_agent import retention as delegate_retention
 from delegate_agent import runner as delegate_runner
@@ -370,6 +373,12 @@ def dry_run_payload(request: Request, config: JsonObject | None = None) -> JsonO
         payload["includeDirty"] = True
     if request.group is not None:
         payload["group"] = request.group
+    if request.notify is not None:
+        target = notify_module.parse_notify_target(request.notify)
+        payload["notify"] = {
+            "target": target.spec,
+            "argv": notify_module.notify_argv(target, "<status line>"),
+        }
     if request.agent is not None:
         payload["agent"] = request.agent
     if request.persona_name is not None:
@@ -667,6 +676,7 @@ def make_run_context(
         include_dirty=request.include_dirty,
         mail_push=request.mail_push,
         group=request.group,
+        notify=request.notify,
         workflow_agent_key=request.workflow_agent_key,
         call_read_only=request.call_read_only or request.pure,
         pure=request.pure,
@@ -1736,6 +1746,8 @@ def main(
                     print(f"plannedExecutionCwd: {payload['plannedExecutionCwd']}", file=stdout)
                 if payload.get("safeWorkspaceMethod"):
                     print(f"safe workspace method: {payload['safeWorkspaceMethod']}", file=stdout)
+                if payload.get("notify"):
+                    print(f"notify: {payload['notify']['target']}", file=stdout)
                 # Use the payload's rewritten argv (which shows planned paths) when
                 # worktree isolation is active; otherwise use the source request.argv.
                 display_argv = payload.get("argv", request.argv)

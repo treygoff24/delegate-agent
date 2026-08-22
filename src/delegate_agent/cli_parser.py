@@ -28,6 +28,7 @@ from delegate_agent import (
     worktree_mgmt,
 )
 from delegate_agent import config as delegate_config
+from delegate_agent import notify as notify_module
 from delegate_agent.constants import (
     ENGINE_SUPPORTED_MODES,
     ENGINES_PROSE,
@@ -60,11 +61,12 @@ MISPLACED_GLOBAL_OPTIONS = frozenset(
         "--no-completion-report",
         "--auth-profile",
         "--group",
+        "--notify",
     }
 )
 
 VALUE_GLOBAL_OPTIONS = frozenset(
-    {"--cwd", "--isolation", "--completion-report", "--auth-profile", "--group"}
+    {"--cwd", "--isolation", "--completion-report", "--auth-profile", "--group", "--notify"}
 )
 
 AUTH_PROFILE_SUBCOMMANDS = frozenset(KNOWN_ENGINES) | frozenset(
@@ -72,6 +74,7 @@ AUTH_PROFILE_SUBCOMMANDS = frozenset(KNOWN_ENGINES) | frozenset(
 )
 GROUP_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 GROUP_SUBCOMMANDS = frozenset(KNOWN_ENGINES) | frozenset({"dry-run", "run", "resume"})
+NOTIFY_SUBCOMMANDS = frozenset(KNOWN_ENGINES) | frozenset({"droid", "dry-run", "run", "resume"})
 
 
 def validate_group(value: str, *, option: str = "--group") -> str:
@@ -373,6 +376,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
     isolation: str | None = None
     auth_profile: str | None = None
     group: str | None = None
+    notify: str | None = None
     i = 0
     while i < len(argv):
         token = argv[i]
@@ -430,6 +434,14 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
                 )
             i += 2
             continue
+        if token == "--notify":
+            if i + 1 >= len(argv):
+                raise DelegateError(
+                    "missing_notify", "--notify requires room:<name> or channel:<name>."
+                )
+            notify = notify_module.parse_notify_target(argv[i + 1]).spec
+            i += 2
+            continue
         if token == "--group":
             if i + 1 >= len(argv):
                 raise DelegateError("missing_group", "--group requires a group name.")
@@ -461,6 +473,12 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             f"--auth-profile is not supported with delegate {subcommand}; "
             "use it with launches, dry-run, run --input-json, profiles, models, capabilities, "
             "or setup.",
+        )
+    if notify is not None and subcommand not in NOTIFY_SUBCOMMANDS:
+        raise DelegateError(
+            "invalid_option_combination",
+            f"--notify is not supported with delegate {subcommand}; use it with a launch, "
+            "dry-run, run, or resume.",
         )
     if group is not None and subcommand not in GROUP_SUBCOMMANDS:
         raise DelegateError(
@@ -528,7 +546,15 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
         )
     if subcommand == "run":
         return parse_run(
-            rest, json_mode, cwd, pass_through, completion_report, isolation, auth_profile, group
+            rest,
+            json_mode,
+            cwd,
+            pass_through,
+            completion_report,
+            isolation,
+            auth_profile,
+            group,
+            notify,
         )
     if subcommand in MODELESS_ENGINES:
         return parse_modeless_engine(
@@ -542,6 +568,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             isolation=isolation,
             auth_profile=auth_profile,
             group=group,
+            notify=notify,
         )
     if subcommand == "droid":
         return parse_droid(
@@ -554,10 +581,19 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             isolation=isolation,
             auth_profile=auth_profile,
             group=group,
+            notify=notify,
         )
     if subcommand == "dry-run":
         return parse_dry_run(
-            rest, json_mode, cwd, pass_through, completion_report, isolation, auth_profile, group
+            rest,
+            json_mode,
+            cwd,
+            pass_through,
+            completion_report,
+            isolation,
+            auth_profile,
+            group,
+            notify,
         )
     if subcommand == "resume":
         if isolation is not None:
@@ -574,6 +610,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             completion_report=completion_report,
             auth_profile=auth_profile,
             group=group,
+            notify=notify,
         )
     if subcommand == "snapshot":
         return parse_snapshot(rest, json_mode, cwd)
@@ -929,6 +966,7 @@ def parse_run(
     isolation: str | None,
     auth_profile: str | None,
     group: str | None = None,
+    notify: str | None = None,
 ) -> ParsedCommand:
     # Help wins before required-arg validation: `run --help` needs no --input-json.
     if any(command_help.is_help_token(token) for token in rest):
@@ -947,6 +985,7 @@ def parse_run(
             isolation=isolation,
             auth_profile=auth_profile,
             group=group,
+            notify=notify,
         ),
         run_json=RunJsonOptions(rest[1]),
     )
@@ -963,6 +1002,7 @@ def parse_modeless_engine(
     isolation: str | None,
     auth_profile: str | None,
     group: str | None = None,
+    notify: str | None = None,
     *,
     help_topic: str | None = None,
 ) -> ParsedCommand:
@@ -1039,6 +1079,7 @@ def parse_modeless_engine(
             isolation=isolation,
             auth_profile=auth_profile,
             group=group,
+            notify=notify,
         ),
         launch=LaunchOptions(
             engine=engine,
@@ -1076,6 +1117,7 @@ def parse_droid(
     isolation: str | None,
     auth_profile: str | None,
     group: str | None = None,
+    notify: str | None = None,
     *,
     help_topic: str | None = None,
 ) -> ParsedCommand:
@@ -1174,6 +1216,7 @@ def parse_droid(
             isolation=isolation,
             auth_profile=auth_profile,
             group=group,
+            notify=notify,
         ),
         launch=LaunchOptions(
             engine="droid",
@@ -1211,6 +1254,7 @@ def parse_dry_run(
     isolation: str | None,
     auth_profile: str | None,
     group: str | None = None,
+    notify: str | None = None,
 ) -> ParsedCommand:
     # Help wins before the engine is consumed: `dry-run --help`.
     if rest and command_help.is_help_token(rest[0]):
@@ -1237,6 +1281,7 @@ def parse_dry_run(
             isolation=isolation,
             auth_profile=auth_profile,
             group=group,
+            notify=notify,
             help_topic="dry-run",
         )
     if engine == "droid":
@@ -1250,6 +1295,7 @@ def parse_dry_run(
             isolation=isolation,
             auth_profile=auth_profile,
             group=group,
+            notify=notify,
             help_topic="dry-run",
         )
     raise DelegateError(
@@ -1267,6 +1313,7 @@ def parse_resume(
     completion_report: str | None,
     auth_profile: str | None,
     group: str | None,
+    notify: str | None = None,
 ) -> ParsedCommand:
     """Parse ``resume [resume-options] <alias|runId> ["extra instructions"...]``.
 
@@ -1438,6 +1485,7 @@ def parse_resume(
             completion_report=completion_report,
             auth_profile=auth_profile,
             group=group,
+            notify=notify,
         ),
         resume=ResumeOptions(
             handle=handle,

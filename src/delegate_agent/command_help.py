@@ -108,6 +108,12 @@ GLOBAL_OPTIONS: tuple[OptionSpec, ...] = (
         "Tag a launched run for later runs/wait/worktree selectors ([A-Za-z0-9._-]{1,64}).",
     ),
     OptionSpec(
+        "--notify",
+        "TARGET",
+        "On completion send one metadata line via the post CLI to room:<name> or "
+        "channel:<name>; degrades to a manifest warning when post is absent or refuses.",
+    ),
+    OptionSpec(
         "--pass-through",
         None,
         "Stream raw child stdout/stderr (incompatible with --json).",
@@ -974,6 +980,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "--completion-report",
             "--auth-profile",
             "--group",
+            "--notify",
         ),
     ),
     "mail hook-pump": CommandSpec(
@@ -1015,6 +1022,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "--completion-report",
             "--auth-profile",
             "--group",
+            "--notify",
         ),
     ),
     "mail inbox": CommandSpec(
@@ -1031,6 +1039,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "--completion-report",
             "--auth-profile",
             "--group",
+            "--notify",
         ),
     ),
     "mail read": CommandSpec(
@@ -1050,6 +1059,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "--completion-report",
             "--auth-profile",
             "--group",
+            "--notify",
         ),
     ),
     "mail status": CommandSpec(
@@ -1066,6 +1076,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "--completion-report",
             "--auth-profile",
             "--group",
+            "--notify",
         ),
     ),
     "mail watch": CommandSpec(
@@ -1092,6 +1103,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "--completion-report",
             "--auth-profile",
             "--group",
+            "--notify",
         ),
     ),
     "mail prune": CommandSpec(
@@ -1113,6 +1125,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "--completion-report",
             "--auth-profile",
             "--group",
+            "--notify",
         ),
     ),
     "ps": CommandSpec(
@@ -1528,6 +1541,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "--cwd",
             "--isolation",
             "--group",
+            "--notify",
             "--pass-through",
             "--completion-report",
             "--no-completion-report",

@@ -38,6 +38,7 @@ class GlobalOptions:
     isolation: str | None = None
     auth_profile: str | None = None
     group: str | None = None
+    notify: str | None = None
 
 
 @dataclass
@@ -238,6 +239,7 @@ class Request:
     codex_failover_identity: str | None = None
     codex_fallback_failover_identity: str | None = None
     cleanup_workspace: bool = False
+    notify: str | None = None
     include_dirty: bool = False
     call_read_only: bool = False
     group: str | None = None

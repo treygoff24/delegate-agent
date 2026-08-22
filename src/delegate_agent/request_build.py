@@ -1272,6 +1272,8 @@ def _validate_call_cli_options(global_options: GlobalOptions, launch: LaunchOpti
     pure = launch.pure
     read_only = launch.read_only
     group = global_options.group
+    if global_options.notify is not None:
+        raise DelegateError("invalid_option_combination", "call mode does not use --notify.")
     # Grouped call runs may take --cwd so the run registers in the invocation
     # workspace registry; ungrouped call still rejects --cwd.
     if cwd is not None and group is None:
@@ -1448,6 +1450,7 @@ def request_from_parsed(
                 pure=pure,
                 timeout=launch.timeout,
                 group=global_options.group,
+                notify=global_options.notify,
                 agent=launch.agent,
                 model_override=cli_model_override,
                 source_prompt=raw_prompt,
@@ -1582,6 +1585,7 @@ def request_from_parsed(
         warnings=(*output_schema_warnings, *isolation_warnings),
         timeout=launch.timeout,
         group=global_options.group,
+        notify=global_options.notify,
         prompt_instruction_mode=instruction_mode,
         agent=launch.agent,
         model_override=cli_model_override,
@@ -1822,6 +1826,7 @@ def request_from_input_json(
                 pure=raw_pure,
                 timeout=raw_timeout,
                 group=global_options.group,
+                notify=global_options.notify,
                 workflow_agent_key=raw_workflow_agent_key,
                 prompt_instruction_mode=resolve_input_json_prompt_instruction_mode(
                     raw_instruction_mode,
@@ -1962,6 +1967,7 @@ def request_from_input_json(
         output_schema=output_schema,
         warnings=(*output_schema_warnings, *isolation_warnings),
         group=global_options.group,
+        notify=global_options.notify,
         workflow_agent_key=raw_workflow_agent_key,
         prompt_instruction_mode=instruction_mode,
         agent=json_agent,
@@ -2009,6 +2015,7 @@ def build_request(
     pure: bool = False,
     timeout: int | None = None,
     group: str | None = None,
+    notify: str | None = None,
     workflow_agent_key: str | None = None,
     prompt_instruction_mode: str = PROMPT_INSTRUCTION_MODE_WRAPPED,
     agent: str | None = None,
@@ -2189,6 +2196,7 @@ def build_request(
             pure=pure,
             timeout=timeout,
             group=group,
+            notify=notify,
             workflow_agent_key=workflow_agent_key,
             prompt_instruction_mode=prompt_instruction_mode,
             agent=agent,
@@ -3058,6 +3066,7 @@ def _build_request_for_workspace(
     pure: bool = False,
     timeout: int | None = None,
     group: str | None = None,
+    notify: str | None = None,
     workflow_agent_key: str | None = None,
     prompt_instruction_mode: str = PROMPT_INSTRUCTION_MODE_WRAPPED,
     agent: str | None = None,
@@ -3234,6 +3243,7 @@ def _build_request_for_workspace(
             env_overrides=parts.env_overrides,
             cleanup_workspace=cleanup_workspace,
             group=group,
+            notify=notify,
             workflow_agent_key=workflow_agent_key,
             prompt_instruction_mode=prompt_instruction_mode,
             source_prompt=source_prompt,

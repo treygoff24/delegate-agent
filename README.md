@@ -418,6 +418,21 @@ Safe isolation and `--include-dirty` recreate an untracked symlink only when it 
 
 Snapshots and `run-output` redact common credential shapes by default, including authorization headers, bearer/basic tokens, JWT-like strings, and common `token=` / `api_key=` / `password=` values. Use `--no-redact` only when exact output is necessary and safe to display.
 
+## Completion notifications (`--notify`)
+
+`delegate --notify room:<name> … ` or `--notify channel:<name>` sends one
+metadata line through the [post](https://github.com/treygoff/post) CLI when a
+tracked run reaches its terminal state (succeeded, failed, or cancelled):
+`delegate <runId> <status> <engine>/<model> <elapsed> — <workspace>`. Nothing
+from the prompt or the output is included, so the line is safe on bridged
+channels. The send runs from the run's source workspace with the caller's
+environment, so post resolves the caller's own room (a `POST_FROM` pin is
+honoured, never synthesized). post is optional: a missing binary, a refused
+send, or a timeout is recorded in the run manifest as
+`notify: {ok: false, reason}` plus one stderr line, and never changes the
+run's own status or exit code. `--dry-run` shows the target and the post argv;
+`call` mode does not take `--notify`.
+
 ## Profile-aware auth and env
 
 A **profile** selects which credentials and environment every delegated harness inherits, so one session can run under, say, a work account and another under a personal account without editing config between runs. Define profiles under the top-level `profiles` block, then either let Delegate detect the active one from an environment variable (`profiles.detectFrom`) or pin it explicitly with `--auth-profile NAME`:
