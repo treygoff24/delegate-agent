@@ -428,7 +428,10 @@ tracked run reaches its terminal state (succeeded, failed, or cancelled):
 from the prompt or the output is included, so the line is safe on bridged
 channels. The send runs from the run's source workspace with the caller's
 environment, so post resolves the caller's own room (a `POST_FROM` pin is
-honoured, never synthesized). post is optional: a missing binary, a refused
+honoured, never synthesized). `channel:` targets therefore need the source
+workspace (`--cwd` or the current directory) to be a registered post room —
+otherwise post refuses with `unknown_room` and the run records a degraded
+notify. post is optional: a missing binary, a refused
 send, or a timeout is recorded in the run manifest as
 `notify: {ok: false, reason}` plus one stderr line, and never changes the
 run's own status or exit code. `--dry-run` shows the target and the post argv;
