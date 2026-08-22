@@ -1159,6 +1159,7 @@ Common JSON fields for tracked run completion:
   "isolationMode": "auto",
   "effectiveIsolation": "worktree",
   "isolationLifecycle": "temporary",
+  "isolationBackend": "copy",
   "preservedWorkspace": false,
   "progressRequested": false,
   "assistantText": "final assistant text when recoverable",
@@ -1171,6 +1172,10 @@ Common JSON fields for tracked run completion:
   "completionReportCommand": "delegate run-output codex-1 --completion-report"
 }
 ```
+
+Safe tracked runs include `isolationBackend`, whose value is `copy` for the
+temporary copy/worktree path or `bwrap` for the Linux zero-copy sandbox. The
+same field is persisted in the run manifest and snapshot.
 
 Persistent worktree completions also include `branch`, `worktree`, a
 `workSummary`, and (when requested) `commitPolicy`. `workSummary` reports dirty

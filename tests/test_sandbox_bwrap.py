@@ -275,7 +275,10 @@ class ProbeTests(unittest.TestCase):
             calls.append(path)
             return len(calls) == 1
 
-        with mock.patch.object(sandbox_bwrap, "_run_probe", probe):
+        with (
+            mock.patch.object(sandbox_bwrap.sys, "platform", "linux"),
+            mock.patch.object(sandbox_bwrap, "_run_probe", probe),
+        ):
             self.assertTrue(sandbox_bwrap.bwrap_available("/fake/bwrap"))
             self.assertFalse(sandbox_bwrap.bwrap_available("/fake/bwrap"))
         self.assertEqual(calls, ["/fake/bwrap", "/fake/bwrap"])
@@ -661,8 +664,10 @@ class ConfiguredBwrapBindsTests(unittest.TestCase):
             self.assertEqual(
                 binds,
                 (
-                    sandbox_bwrap.Bind(path=os.path.join(home, ".local", "bin"), mode="ro"),
-                    sandbox_bwrap.Bind(path=sock, mode="rw"),
+                    sandbox_bwrap.Bind(
+                        path=os.path.realpath(os.path.join(home, ".local", "bin")), mode="ro"
+                    ),
+                    sandbox_bwrap.Bind(path=os.path.realpath(sock), mode="rw"),
                 ),
             )
 
@@ -685,7 +690,7 @@ class ConfiguredBwrapBindsTests(unittest.TestCase):
             ro = {"isolation": {"bwrapBinds": [{"path": root, "mode": "ro"}]}}
             self.assertEqual(
                 sandbox_bwrap.configured_bwrap_binds(ro, workspace=ws),
-                (sandbox_bwrap.Bind(path=root, mode="ro"),),
+                (sandbox_bwrap.Bind(path=os.path.realpath(root), mode="ro"),),
             )
 
     def test_rw_bind_inside_workspace_and_relative_paths_are_refused(self):
@@ -727,6 +732,43 @@ class ConfiguredBwrapBindsTests(unittest.TestCase):
         self.assertEqual(runner._binds_from_sandbox(payload, "ro"), ["/a"])
         self.assertEqual(runner._binds_from_sandbox(payload, "rw"), ["/b"])
         self.assertEqual(runner._binds_from_sandbox(None, "rw"), [])
+
+    def test_terminal_metadata_reports_effective_isolation_backend(self):
+        for backend, sandbox in (("copy", None), ("bwrap", {"backend": "bwrap"})):
+            with self.subTest(backend=backend):
+                ctx = runner.RunContext(
+                    registry_root=Path("/tmp"),
+                    run_id="run-1",
+                    alias="omp-1",
+                    harness="omp",
+                    engine="omp",
+                    mode="safe",
+                    model=None,
+                    source_cwd="/repo",
+                    execution_cwd="/repo",
+                    workspace_kind="git",
+                    isolated_workspace=True,
+                    started_at="2026-08-22T20:00:00Z",
+                    isolation_mode="auto",
+                    effective_isolation="worktree",
+                    isolation_lifecycle="temporary",
+                    safe_workspace_method=(
+                        "git-worktree" if backend == "copy" else "bwrap-ro-bind"
+                    ),
+                    sandbox=sandbox,
+                )
+                payload = runner.completion_json_payload(
+                    ctx,
+                    ok=True,
+                    status="succeeded",
+                    exit_code=0,
+                    duration_ms=1,
+                    stdout_bytes=0,
+                    stderr_bytes=0,
+                )
+
+                self.assertEqual(payload["isolationBackend"], backend)
+                self.assertEqual(runner.build_manifest(ctx, ["omp"])["isolationBackend"], backend)
 
 
 class RegistryMaskAndContainmentTests(unittest.TestCase):
@@ -798,13 +840,18 @@ class RegistryMaskAndContainmentTests(unittest.TestCase):
                 )
 
     def test_preflight_runs_the_final_plan(self):
-        argv = ["/bin/false", "--x", "--", "engine"]
+        true_path = shutil.which("true")
+        false_path = shutil.which("false")
+        self.assertIsNotNone(true_path)
+        self.assertIsNotNone(false_path)
+        assert true_path is not None and false_path is not None
+        argv = [false_path, "--x", "--", "engine"]
         with self.assertRaises(DelegateError) as caught:
             sandbox_bwrap.preflight_plan(argv)
         self.assertEqual(caught.exception.error, "bwrap_launch_failed")
-        sandbox_bwrap.preflight_plan(["/bin/true", "--", "engine"])
+        sandbox_bwrap.preflight_plan([true_path, "--", "engine"])
         with self.assertRaises(DelegateError):
-            sandbox_bwrap.preflight_plan(["/bin/true"])
+            sandbox_bwrap.preflight_plan([true_path])
 
     def test_missing_registry_is_not_masked(self):
         with tempfile.TemporaryDirectory() as ws:

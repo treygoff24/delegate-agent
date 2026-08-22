@@ -269,6 +269,7 @@ class UtilityModuleTests(unittest.TestCase):
             creation_context={"plannedBranch": "delegate/test"},
             worktree_status="present",
             safe_workspace_method="copytree",
+            sandbox={"backend": "bwrap"},
             warnings=("one", "two"),
         )
 
@@ -279,6 +280,7 @@ class UtilityModuleTests(unittest.TestCase):
         self.assertEqual(payload["effectiveIsolation"], "copy")
         self.assertEqual(payload["branch"], "delegate/test")
         self.assertEqual(payload["creationContext"], {"plannedBranch": "delegate/test"})
+        self.assertEqual(payload["isolationBackend"], "bwrap")
         self.assertEqual(payload["warnings"], ["one", "two"])
 
     def test_worktree_command_emit_requires_registry(self):

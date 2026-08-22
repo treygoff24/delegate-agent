@@ -388,6 +388,8 @@ Defaults are intentionally conservative for review paths:
   gitignored paths and the workspace run registry are masked, and `$HOME` and
   `/tmp` are private tmpfs. The backend preflights every mount plan and fails
   closed rather than falling back to a copy. Linked Git worktrees are supported.
+  Tracked terminal JSON, manifests, and snapshots expose the backend as
+  `isolationBackend` (`copy` or `bwrap`).
 - Use `isolation.bwrapBinds` for additional host paths the selected engine
   needs. Read the [configuration guide](docs/configuration.md#isolationsafebackend-and-isolationbwrapbinds-linux)
   for the config shape and the [security model](docs/security-model.md#zero-copy-safe-isolation-linux-isolationsafebackend-bwrap)

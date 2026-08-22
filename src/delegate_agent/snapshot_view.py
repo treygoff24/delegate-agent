@@ -46,6 +46,7 @@ class SnapshotView(TypedDict, total=False):
     effectiveIsolation: str
     isolationLifecycle: str
     preservedWorkspace: bool
+    isolationBackend: str
     sourceGitRoot: str
     branch: str
     creationContext: JsonObject

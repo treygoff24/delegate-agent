@@ -59,7 +59,9 @@ SAFE_WORKSPACE_SYNC_NOTE = (
     "(only gitignored paths are excluded), so you can review local changes without "
     "committing first or pasting a diff. Absolute source-workspace paths in the prompt "
     "are mapped into that copy; reports should cite workspace-relative paths rather than "
-    "temporary isolation paths. Verbatim slash pass-through prompts are not rewritten."
+    "temporary isolation paths. Tracked JSON reports the effective safe backend as "
+    "isolationBackend=copy or isolationBackend=bwrap. Verbatim slash pass-through prompts "
+    "are not rewritten."
 )
 CALL_MODE_NOTE = (
     "call mode runs the child in a throwaway temp cwd with no project tree, isolation, "
