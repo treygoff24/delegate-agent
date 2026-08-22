@@ -14,8 +14,10 @@ unit_skipped=${unit_skipped:-0}
 printf '%s\n' "$unit_out" | grep -q '^OK' || { printf 'unittest gate is red:\n%s\n' "$unit_out" >&2; exit 1; }
 
 py_out=$(uv run --extra dev pytest -n "${PARITY_WORKERS:-8}" --dist loadfile -q -p no:cacheprovider tests 2>&1 | tail -1)
-py_passed=$(printf '%s\n' "$py_out" | sed -n 's/.*[^0-9]\([0-9]*\) passed.*/\1/p')
-py_skipped=$(printf '%s\n' "$py_out" | sed -n 's/.*[^0-9]\([0-9]*\) skipped.*/\1/p')
+# Anchor on the count token: pytest also prints "N subtests passed", which a
+# greedy sed capture reads as an empty count.
+py_passed=$(printf '%s\n' "$py_out" | grep -oE '[0-9]+ passed' | head -1 | cut -d' ' -f1)
+py_skipped=$(printf '%s\n' "$py_out" | grep -oE '[0-9]+ skipped' | head -1 | cut -d' ' -f1)
 py_skipped=${py_skipped:-0}
 printf '%s\n' "$py_out" | grep -Eq '[0-9]+ passed' || { printf 'pytest run is red: %s\n' "$py_out" >&2; exit 1; }
 printf '%s\n' "$py_out" | grep -Eq 'failed|error' && { printf 'pytest run is red: %s\n' "$py_out" >&2; exit 1; }
