@@ -342,7 +342,7 @@ def build_bwrap_argv(
     bind("--tmpfs", "/tmp")
     # The HOME tmpfs must precede every HOME-relative ro-bind: bwrap applies
     # mounts in argv order, so a later tmpfs would shadow ~/.local, ~/.bun and
-    # the engine dot-dir (observed live: execvp estate-codex ENOENT).
+    # the engine dot-dir (observed live: execvp of a wrapper under ~/.local/bin failed with ENOENT).
     bind("--tmpfs", home)
     for root in ro_roots:
         bind("--ro-bind", root, root)

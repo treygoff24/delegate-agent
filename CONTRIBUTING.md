@@ -16,7 +16,7 @@ Use `python3 bin/delegate.py` from this repository when validating development c
 
 ## Supported platforms
 
-Required CI currently runs on Linux for Python 3.11, 3.12, 3.13, and 3.14. Contributions for macOS or Windows compatibility are welcome, but do not claim support for a platform until tests cover it.
+Required CI runs the suite on Linux for Python 3.11, 3.12, 3.13, and 3.14, and on macOS for Python 3.12. The bubblewrap safe backend is Linux-only and its live tests skip elsewhere. Contributions for Windows compatibility are welcome, but do not claim support for a platform until tests cover it.
 
 ## Development guidelines
 

@@ -607,7 +607,7 @@ class DryRunBwrapTests(CommandTestBase):
 class HomeRelativeRoBindOrderTests(unittest.TestCase):
     def test_home_ro_binds_follow_the_home_tmpfs(self):
         # bwrap mounts in argv order: a HOME tmpfs emitted after ~/.local would
-        # shadow it (live failure: execvp estate-codex ENOENT).
+        # shadow it (live failure: execvp of a ~/.local/bin wrapper returned ENOENT).
         argv = sandbox_bwrap.build_bwrap_argv(
             workspace="/ws",
             engine_argv=["true"],

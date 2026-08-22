@@ -24,17 +24,17 @@ class WslGuardrailTests(unittest.TestCase):
         self.wsl = importlib.reload(importlib.import_module("delegate_agent.wsl"))
 
     def test_windows_path_text_detection(self):
-        self.assertTrue(self.wsl.is_windows_path_text(r"C:\Users\trey\repo"))
-        self.assertTrue(self.wsl.is_windows_path_text("C:/Users/trey/repo"))
+        self.assertTrue(self.wsl.is_windows_path_text(r"C:\Users\user\repo"))
+        self.assertTrue(self.wsl.is_windows_path_text("C:/Users/user/repo"))
         self.assertTrue(self.wsl.is_windows_path_text(r"%USERPROFILE%\repo"))
-        self.assertFalse(self.wsl.is_windows_path_text("/mnt/c/Users/trey/repo"))
+        self.assertFalse(self.wsl.is_windows_path_text("/mnt/c/Users/user/repo"))
 
     def test_workspace_rejects_windows_style_cwd(self):
         with (
             mock.patch("delegate_agent.wsl.is_wsl", return_value=True),
             self.assertRaises(self.cli.DelegateError) as ctx,
         ):
-            self.request_build.workspace_for(r"C:\Users\trey\repo")
+            self.request_build.workspace_for(r"C:\Users\user\repo")
         self.assertEqual(ctx.exception.error, "windows_path")
         self.assertIn("wslpath", ctx.exception.message)
 
@@ -56,7 +56,7 @@ class WslGuardrailTests(unittest.TestCase):
     def test_config_rejects_windows_style_codex_home_in_wsl(self):
         config = self.config.embedded_default_config()
         config["profiles"]["definitions"] = {
-            "work": {"env": {"CODEX_HOME": r"C:\Users\trey\.codex"}}
+            "work": {"env": {"CODEX_HOME": r"C:\Users\user\.codex"}}
         }
         with (
             mock.patch("delegate_agent.wsl.is_wsl", return_value=True),
@@ -92,7 +92,7 @@ class WslGuardrailTests(unittest.TestCase):
                 "cursor",
                 "safe",
                 None,
-                self.cli.ResolvedWorkspace("/mnt/c/Users/trey/repo", "directory"),
+                self.cli.ResolvedWorkspace("/mnt/c/Users/user/repo", "directory"),
                 "review",
                 self.cli.DEFAULT_CONFIG,
                 dry_run=True,

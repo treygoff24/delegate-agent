@@ -176,7 +176,7 @@ class ConfigCommandTests(unittest.TestCase):
                     "HOME": home,
                     "PATH": os.environ.get("PATH", ""),
                     "WSL_DISTRO_NAME": "Ubuntu",
-                    "DELEGATE_CONFIG": r"C:\Users\trey\.delegate\config.json",
+                    "DELEGATE_CONFIG": r"C:\Users\user\.delegate\config.json",
                 },
             )
             payload = json.loads(stdout)

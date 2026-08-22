@@ -293,15 +293,14 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         summary="Run Kimi Code CLI in safe, work, or stateless call mode.",
         usage=(
             "delegate [--json] [--isolation auto|none|worktree] "
-            "kimi {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] "
+            "kimi {safe,work} [--model <alias-or-model>] [--progress] "
             "[--timeout SECONDS] [--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
-            "delegate [--json] kimi call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] "
+            "delegate [--json] kimi call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] "
             "[--prompt-file PATH] [prompt...]",
         ),
         arguments=(_MODE_ARG, _PROMPT_ARG),
         options=(
             _MODEL_OPTION,
-            _REASONING_EFFORT_OPTION,
             _PROGRESS_OPTION,
             _NO_PROGRESS_OPTION,
             _FORBID_COMMIT_OPTION,

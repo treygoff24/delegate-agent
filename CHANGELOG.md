@@ -39,6 +39,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The dev extra now ships `pytest` and `pytest-xdist`; `scripts/test-parity.sh`
   proves that the parallel accelerator runs the same suite as the unittest gate.
+- Bundled Grok declarations move to Grok 4.6: `grok-4.6` is the Grok CLI
+  default, and Cursor entries use the canonical `cursor-grok-*` IDs with the
+  full `cursor-grok-4.6` effort ladder (cursor-agent no longer accepts the
+  legacy `grok-4.5-fast-*` style).
+- Devin runs use the current noninteractive workspace-trust flow.
+
+### Fixed
+
+- `workflow run --resume` turns a completed workflow dry-run into live
+  execution under the same workflow ID. Simulated agent and budget events stay
+  in the journal for audit but never satisfy replay or consume live budget.
+  (Listed under 0.29.1 in earlier drafts; it landed after that tag.)
+- Workflow child runs keep their identity (workflow ID and child name)
+  through registration, journal events, and snapshots, including children
+  launched in isolated worktrees.
+- Safe mode never places its scratch copy inside the source workspace. When
+  the system temp directory is the source (for example `delegate ... safe` run
+  from `/tmp`), the copy goes to `$XDG_CACHE_HOME/delegate/safe-workspaces`
+  or `~/.cache/delegate/safe-workspaces`; a source that contains every
+  candidate is refused with `safe_workspace_source_too_broad`. Previously the
+  copy recursed into its own output until `ENAMETOOLONG`.
+- Safe-mode copies skip directories the caller cannot read (other users'
+  `/tmp/systemd-private-*`, for example) with a bounded warning, and any
+  residual copy failure is reported as `safe_workspace_copy_failed` instead of
+  a traceback.
 
 ## [0.29.1] - 2026-08-11
 
@@ -46,12 +71,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The PyPI artifact handoff now uses the official Node 24 upload and download
   actions, removing the deprecation warnings emitted during the 0.29.0 publish.
-
-### Fixed
-
-- `workflow run --resume` now turns a completed workflow dry-run into live
-  execution under the same workflow ID. Simulated agent and budget events stay
-  in the journal for audit but never satisfy replay or consume live budget.
 
 ## [0.29.0] - 2026-08-11
 
