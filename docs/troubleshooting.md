@@ -358,6 +358,46 @@ python3 bin/delegate.py --json dry-run codex safe "Review only."
 python3 bin/delegate.py codex safe "Review my uncommitted changes. Do not edit."
 ```
 
+## Bubblewrap safe backend refused
+
+The opt-in bwrap backend never falls back to a copy after it is selected. Its
+errors identify the failed check:
+
+- `bwrap_unavailable`: the host is not Linux, `bwrap` is missing or its
+  production probe failed, or linked-worktree Git metadata was unavailable.
+- `bwrap_symlink_leak`: an untracked symlink could expose a gitignored or host
+  path.
+- `bwrap_mask_overflow`: gitignore parity required more than 2000 masks.
+- `bwrap_submodules_unsupported`: a submodule is initialized or could not be
+  inspected.
+- `bwrap_bind_missing` or `bwrap_bind_conflict`: a configured path is absent,
+  or a writable bind covers or sits inside the read-only workspace.
+- `bwrap_launch_failed`: the final mount plan could not be preflighted.
+
+Fix the named condition, or explicitly select the copy backend for that run:
+
+```bash
+DELEGATE_SAFE_BACKEND=copy delegate codex safe "Review only. Do not edit."
+```
+
+`--pass-through` is also refused under bwrap because it bypasses the tracked
+launcher that applies the boundary.
+
+## Completion notification degraded
+
+`--notify` uses the optional `post` CLI after terminal run state is persisted.
+A send failure does not change the run result. Inspect only the notification
+fields in the manifest:
+
+```bash
+jq '{notify, warnings}' .delegate/runs/<runId>/manifest.json
+```
+
+Stable reasons are `post_not_found`, `post_launch_failed`, `post_timeout`,
+`post_failed`, and `notify_hook_failed`. Fix `post` availability or the target,
+then use `--notify` on a later launch or `resume`; Delegate does not retry a
+degraded send automatically.
+
 ## Persistent worktree run refused
 
 Work-mode persistent worktrees require a Git repository with a valid `HEAD`.

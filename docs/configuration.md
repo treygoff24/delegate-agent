@@ -341,10 +341,17 @@ ambient pass returns immediately.
 - `models`: optional map of local aliases to Codex model IDs for `--model` / JSON `model`. Alias keys must not collide with mode names, equal the engine's own name, or start with `-`.
 - `defaultReasoningEffort`: optional non-empty effort string. When a Codex model resolves (run input or `codex.defaultModel`) and supports the level, Delegate emits a Codex config override; otherwise the run proceeds without reasoning effort and records a warning. An explicit `--reasoning-effort` flag fails closed for unsupported levels, but can target the Codex harness default model when no model is configured.
 - `profile`: optional Codex CLI config overlay name. It is config-only; JSON run input cannot set it.
-- `fallbackProfile`: optional top-level `profiles.definitions` name for Codex-only quota fallback. The fallback profile must define `env.CODEX_HOME`. Tracked Codex runs persist temporary usage-limit blocks under `~/.ai-profiles/runtime/failover/`; hashed credential namespace (`CODEX_HOME/auth.json` plus `codex.profile`) is canonical, while default work/personal credential homes also mirror compatible legacy alias keys so existing launchers share blocks. Remapped aliases remain isolated. If both the primary and fallback credential namespaces are blocked, Delegate keeps the primary attempt and does not launch the known-blocked fallback.
+- `fallbackProfile`: optional top-level `profiles.definitions` name for Codex-only quota fallback. The profile must define `env.CODEX_HOME`; a known-blocked credential namespace is not launched.
 - `workSandbox`: `read-only`, `workspace-write`, or `danger-full-access` for Codex work mode when full bypass is not enabled.
 - `ephemeral`: include Codex `--ephemeral` in JSON-streaming runs.
 - `ignoreUserConfig`: include Codex `--ignore-user-config`.
+
+Temporary usage-limit blocks live in per-user runtime state and key on a hash
+of `CODEX_HOME/auth.json` plus `codex.profile`. Default work/personal homes also
+mirror compatible legacy alias keys; remapped aliases remain isolated. When
+both namespaces are blocked, Delegate keeps the primary attempt and skips the
+fallback.
+
 - Codex safe mode always uses `--sandbox read-only` in v1; `codex.safeSandbox` is rejected.
 - `codex.profile` is a Codex CLI config overlay. The top-level `profiles`
   block below is Delegate-injected auth/env and is a separate concept.
@@ -685,25 +692,26 @@ Embedded defaults:
   "isolation": {
     "safeBackend": "bwrap",
     "bwrapBinds": [
-      {"path": "/run/estate-broker.sock", "mode": "rw"},
-      {"path": "~/.ai-profiles/managed-env-vars.zsh", "mode": "ro"}
+      {"path": "/srv/example-agent/runtime", "mode": "ro"},
+      {"path": "/var/lib/example-agent/cache", "mode": "rw"}
     ]
   }
 }
 ```
 
 `safeBackend` is `copy` (default, every platform) or `bwrap` (Linux with
-bubblewrap): safe runs on Git workspaces then run zero-copy inside a
-bubblewrap boundary — the real workspace read-only-bound, gitignored paths
-hidden by parity masks, `$HOME` and `/tmp` private tmpfs, the workspace
-`.delegate/` registry masked. `DELEGATE_SAFE_BACKEND` overrides the key; an
-invalid value on either channel fails closed. `bwrapBinds` lists extra host
+bubblewrap): eligible non-Cursor safe runs on Git workspaces then run zero-copy
+inside a bubblewrap boundary. The real workspace is read-only-bound, gitignored
+paths are hidden by parity masks, `$HOME` and `/tmp` are private tmpfs, and the
+workspace `.delegate/` registry is masked. `DELEGATE_SAFE_BACKEND` overrides
+the key; an invalid value on either channel fails closed. `bwrapBinds` lists extra host
 paths (`{"path", "mode": "ro"|"rw"}`, tilde-expanded) the engine launch needs
 inside the boundary (absolute after `~` expansion); a missing path fails the
 run (`bwrap_bind_missing`) and a `rw` entry that intersects the workspace in
 either direction is refused (`bwrap_bind_conflict`). Cursor safe always uses the copy backend; the
-boundary refuses `--pass-through` and initialized submodules. See the README
-section on safe isolation for the full list of fail-closed conditions.
+boundary refuses `--pass-through` and initialized submodules. See the
+[security model](security-model.md#zero-copy-safe-isolation-linux-isolationsafebackend-bwrap)
+for the full boundary and fail-closed conditions.
 
 ### `worktrees`
 

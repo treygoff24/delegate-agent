@@ -79,6 +79,16 @@ When running on Windows through WSL, treat Delegate as a Linux CLI:
 - Use POSIX paths. Convert copied Windows paths with `wslpath -u` before using them in `--cwd`, `DELEGATE_CONFIG`, `CODEX_HOME`, or `worktrees.dataHome`.
 - If `command -v git` points to Windows `git.exe`, install WSL-native Git (`sudo apt install git`) or put it earlier in `PATH`.
 
+### Optional Linux zero-copy safe backend
+
+Linux users can opt eligible safe runs into bubblewrap instead of copying the
+workspace. Install `bwrap`, then set `isolation.safeBackend` to `"bwrap"` or
+export `DELEGATE_SAFE_BACKEND=bwrap`. The first real safe run probes the
+boundary and fails closed if the host or workspace cannot support it; Delegate
+does not silently switch back to the copy backend. See
+[Configuration](configuration.md#isolationsafebackend-and-isolationbwrapbinds-linux)
+and the [security model](security-model.md#zero-copy-safe-isolation-linux-isolationsafebackend-bwrap).
+
 5. Inspect loaded config and aliases:
 
    ```bash

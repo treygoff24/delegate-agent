@@ -13,8 +13,14 @@ Use `delegate --help` for the exact command list from the installed version. Glo
 --no-completion-report        Disable completion-report prompt injection.
 --auth-profile NAME           Override detected profiles for launches, dry-run, run --input-json, profiles, models, capabilities, and setup.
 --group NAME                  Tag a launch/run-input request with a lightweight group ([A-Za-z0-9._-]{1,64}).
---notify TARGET               room:<name> or channel:<name>: send one metadata line via `post` when the tracked run reaches a terminal state (launch, resume, dry-run; rejected by call and --pass-through).
+--notify TARGET               room:<name> or channel:<name>: send one metadata line via `post` after a tracked launch or resume; dry-run shows the plan. Rejected by call and --pass-through.
 ```
+
+The notification contains the run ID, terminal status, engine/model, elapsed
+time, and workspace basename, not prompt or output text. A missing, refused, or
+timed-out `post` send records `notify.ok=false` plus a `notify_degraded` warning
+without changing the run result. It also runs after child launch failures and
+persistent-worktree setup failures.
 
 ## Workspace mail
 
@@ -1074,8 +1080,8 @@ cross-engine resume. Resume options must appear before the handle; trailing
 tokens are continuation instructions.
 
 The new Run inherits source settings according to this table. `--engine` and
-the listed resume flags must precede the handle; `--group` and
-`--auth-profile` are global flags and therefore precede `resume`. A persistent
+the listed resume flags must precede the handle; `--group`, `--auth-profile`,
+and `--notify` are global flags and therefore precede `resume`. A persistent
 worktree source is resumed by attaching to its existing worktree rather than
 creating a second one. The attachment is a live lease: `worktree remove`,
 `worktree prune`, and `worktree gc` refuse or skip the worktree while the
@@ -1097,6 +1103,7 @@ creating a Run or writing a prompt record.
 | Isolation / lifecycle | `isolationMode`; persistent detection also reads `isolationLifecycle`, `preservedWorkspace`, `worktreeStatus`, and `worktreeAttachment` | None; `--isolation` is rejected for resume. | Missing ordinary `isolationMode` uses target isolation configuration and emits a note. | Retained. Persistent or attached sources become an `attached` execution lifecycle. |
 | Group | `group` | Global `--group` | Omitted uses the ungrouped target default and emits a note. | Retained. |
 | Auth profile | `authProfile` | Global `--auth-profile` | Omitted uses target profile detection/default and emits a note. | Retained. |
+| Completion notification | None | Global `--notify` | Omitted sends no notification; source notification targets are not inherited. | Applies to the resumed Run, including launch and attachment-setup failures. |
 | Forbid commit | `commitPolicy.forbidCommit` when exactly `true` | None | Omitted or any other value leaves commit prohibition off. | Retained. |
 | Include dirty | `includeDirty` | `--include-dirty` | Source and explicit values are creation-only and are dropped for ordinary resume with a note. | Retained only as a drop decision; on a persistent/attached source, explicit `--include-dirty` is rejected because attachment does not create or sync a worktree. |
 

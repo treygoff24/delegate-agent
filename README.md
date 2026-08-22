@@ -382,9 +382,16 @@ after changing into a toolchain directory. Source-backed runs also expose
 Defaults are intentionally conservative for review paths:
 
 - `delegate cursor safe`, `delegate codex safe`, `delegate claude safe`, `delegate grok safe`, `delegate opencode safe`, `delegate pi safe`, `delegate omp safe`, `delegate droid ALIAS safe`, and `delegate kimi safe` run in an isolated throwaway workspace. Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff.
-- On Linux, safe isolation can optionally run **zero-copy** inside an experimental bubblewrap boundary instead of copying the workspace: set `"safeBackend": "bwrap"` under the `isolation` config block or export `DELEGATE_SAFE_BACKEND=bwrap`. The real workspace stays in place, read-only-bound, while gitignored paths are hidden behind parity masks so the review sees the same tree shape a copy would produce. It fails closed rather than falling back: a missing or broken bubblewrap, an untracked symlink that would leak host paths, or more than 2000 gitignored paths all refuse to run, and Cursor safe mode always uses the copy/worktree path.
-- Inside the boundary: `$HOME` and `/tmp` are private tmpfs; the workspace's own `.delegate/` registry (prior runs' prompts, logs, manifests) is masked and only the current run's scratch directory is writable on top of it; only the selected engine's home override (`CODEX_HOME` for codex, `CLAUDE_CONFIG_DIR` for claude) is rw-bound, never a sibling engine's; the engine executable (and its realpath) is ro-bound as a file when it lives outside `/usr`, `/opt`, `~/.local`, `~/.cargo/bin`, `~/.bun`; a linked worktree's common git directory is ro-bound so `git` works. Availability is probed on every run with the production boundary (never cached), the launch uses the exact binary that passed, and the final per-run mount plan is preflighted with `/bin/true` so a refused mount is a clean `bwrap_launch_failed` launch failure (recorded and notified) rather than a half-started child. Fail-closed conditions: bubblewrap unavailable, a leaking untracked symlink, more than 2000 parity masks, an initialized submodule or a failed submodule/common-dir inspection (`bwrap_submodules_unsupported`), any writable root that intersects the workspace in either direction — ancestor, the workspace itself, or a descendant — other than the run's own directory under the masked registry (`bwrap_bind_conflict`), and `--pass-through` (which execs outside the tracked launcher). Delegate never falls back to the copy backend on its own.
-- Site-specific launch surfaces inside the bubblewrap boundary are declared with `"bwrapBinds"` under `isolation`: a list of `{"path": "...", "mode": "ro"|"rw"}` entries (tilde-expanded) that the engine launch needs but the generic boundary cannot guess — an account-broker socket, a brokered engine home tree, a managed-environment contract file. `$HOME` is a tmpfs inside the boundary, so anything under it that the engine wrapper reads must be listed (Delegate already ro-binds `~/.local`, `~/.cargo/bin`, `~/.bun`, and the engine's own dot-directory when they exist). Paths must be absolute after `~` expansion and are canonicalised; a listed path that is missing fails the run (`bwrap_bind_missing`), and a `rw` entry that intersects the workspace in either direction is refused (`bwrap_bind_conflict`) — an ancestor would shadow the read-only bind, a descendant would re-open that subtree for writes.
+- On Linux, eligible non-Cursor safe runs on Git workspaces can use an opt-in,
+  zero-copy bubblewrap backend. Set `isolation.safeBackend` to `"bwrap"` or
+  export `DELEGATE_SAFE_BACKEND=bwrap`. The real workspace is bound read-only,
+  gitignored paths and the workspace run registry are masked, and `$HOME` and
+  `/tmp` are private tmpfs. The backend preflights every mount plan and fails
+  closed rather than falling back to a copy. Linked Git worktrees are supported.
+- Use `isolation.bwrapBinds` for additional host paths the selected engine
+  needs. Read the [configuration guide](docs/configuration.md#isolationsafebackend-and-isolationbwrapbinds-linux)
+  for the config shape and the [security model](docs/security-model.md#zero-copy-safe-isolation-linux-isolationsafebackend-bwrap)
+  for the boundary and refusal conditions.
 - Grok safe mode uses Delegate isolated copy plus Grok read-only sandbox/permission controls (`--sandbox read-only`, `--permission-mode dontAsk` by default). It does not use Grok `plan` mode. Prompts are delivered via Grok `--prompt-file` from a Delegate temp file.
 - Devin safe mode is unsupported: Devin may implement filesystem surveys through the generic `exec` tool, which Delegate cannot permit without weakening the read-only boundary. Use another safe Harness for filesystem review. Devin work mode uses `--permission-mode dangerous` because Devin print mode rejects unapproved edit/exec tools.
 - OpenCode safe mode uses Delegate's isolated copy plus an `OPENCODE_CONFIG_CONTENT` permission lockdown that allows only read, glob, and grep operations. OpenCode merges this override last, so repository configuration cannot restore write-capable tools. `opencode call --read-only` uses the same lockdown; plain `call` does not.
@@ -422,28 +429,13 @@ Snapshots and `run-output` redact common credential shapes by default, including
 
 ## Completion notifications (`--notify`)
 
-`delegate --notify room:<name> … ` or `--notify channel:<name>` sends one
-metadata line through the [post](https://github.com/treygoff/post) CLI when a
-tracked run reaches its terminal state (succeeded, failed, or cancelled):
-`delegate <runId> <status> <engine>/<model> <elapsed> — <workspace>`. Nothing
-from the prompt or the output is included, so the line is safe on bridged
-channels. The send runs from the run's source workspace with the caller's
-environment, so post resolves the caller's own room (a `POST_FROM` pin is
-honoured, never synthesized). `channel:` targets therefore need the source
-workspace (`--cwd` or the current directory) to be a registered post room —
-otherwise post refuses with `unknown_room` and the run records a degraded
-notify. post is optional: a missing binary, a refused
-send, or a timeout is recorded in the run manifest as
-`notify: {ok: false, reason, detail?}` (stable reasons: `post_not_found`,
-`post_launch_failed`, `post_timeout`, `post_failed`, `notify_hook_failed`),
-appends `notify_degraded: <reason>` to the manifest warnings, prints one
-stderr line, and never changes the run's own status or exit code — the hook
-itself is guarded, and post runs in its own process group so a timeout kills
-everything it spawned. The ping also fires when the child fails to launch (including a refused
-bwrap mount plan), on persistent-worktree setup failures, and survives `resume`. Room sends pass `--allow-self`, so `room:<your-own-room>` is the quiet
-default for routine lanes (a `channel:` ping rings every member). `--dry-run`
-shows the target and the post argv; `call` mode (CLI or input JSON) and
-`--pass-through` reject `--notify`.
+`delegate --notify room:<name> ...` or `--notify channel:<name>` sends one
+metadata-only line through the optional [post](https://github.com/treygoff24/post)
+CLI when a tracked run finishes. Failed sends are recorded as `notify.ok=false`
+without changing the run result. Notifications also cover child launch and
+persistent-worktree setup failures, and `--notify` can be supplied to
+`resume`. Dry-run shows the planned target and argv; `call` and
+`--pass-through` reject the option. See the [CLI reference](docs/cli-reference.md#global-options).
 
 ## Profile-aware auth and env
 

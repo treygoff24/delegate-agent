@@ -7,27 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-08-22
+
 ### Added
 
+- Added an opt-in bubblewrap safe backend for eligible Linux safe runs. Set
+  `isolation.safeBackend` to `"bwrap"` or use `DELEGATE_SAFE_BACKEND` to run
+  zero-copy against the real workspace, bound read-only inside a bubblewrap
+  boundary with gitignore-parity masks. The workspace `.delegate/` registry is
+  hidden except for the current run's writable scratch, and `$HOME` is a private
+  tmpfs where only the selected engine's config home is made writable by
+  default. `isolation.bwrapBinds` adds explicit `{path, mode}` host paths. Each
+  run preflights its final mount plan and launches with the exact probed binary.
+  The backend fails closed when bubblewrap is unavailable, an untracked symlink
+  could expose a host path, parity needs more than 2000 masks, a submodule is
+  initialized, a writable bind covers or sits inside the workspace, or
+  `--pass-through` is requested. Linked Git worktrees are supported. See the
+  [security model](docs/security-model.md#zero-copy-safe-isolation-linux-isolationsafebackend-bwrap)
+  and [configuration guide](docs/configuration.md#isolationsafebackend-and-isolationbwrapbinds-linux).
+- Added `--notify room:<name>|channel:<name>` for one metadata-only completion
+  line through the optional `post` CLI. A missing, refused, or timed-out send
+  degrades to a manifest record without changing the run result. Notifications
+  also fire for child launch failures and persistent-worktree setup failures,
+  and the option works with `resume`; `call` and `--pass-through` reject it.
 - Cursor dry-run and terminal JSON now include a stable `accountFingerprint`
   derived from `cursor-agent status --format json`. Raw account fields and
   tokens are never emitted or persisted; unauthenticated or malformed status
   output omits the fingerprint so consumers can fail closed.
-- Experimental zero-copy safe-mode isolation on Linux behind `isolation.safeBackend: "bwrap"` (environment override `DELEGATE_SAFE_BACKEND`). Instead of copying the workspace, the engine runs against the real workspace read-only-bound inside a bubblewrap boundary that hides gitignored paths with gitignore-parity masks. Opt-in only, applies to non-Cursor safe runs on Git workspaces, and fails closed — refusing to run — when bubblewrap is unavailable, an untracked symlink would leak host paths, or parity masks exceed 2000 entries.
-- `isolation.bwrapBinds` declares extra host paths (`{path, mode: ro|rw}`) that the engine launch needs inside the bubblewrap boundary (broker sockets, brokered engine homes, managed-env contracts); missing paths and `rw` entries covering the workspace fail closed.
-- bwrap boundary hardening from the Sol diff review: the workspace `.delegate/` registry is always masked (prior runs invisible) with only the current scratch rw-bound on top; only the selected engine's home override is writable; writable roots that cover the workspace are refused; the availability probe runs the production boundary on every run (no cache) and the launch uses the exact binary that passed; the engine binary's directory is ro-bound when outside the core roots; linked worktrees get their common git dir ro-bound; initialized submodules and `--pass-through` fail closed.
-- `--notify` now fires on child launch failures and survives `resume`; `call` (CLI and input JSON) and `--pass-through` reject it; the hook is exception-guarded, uses stable reason codes plus a truncated `detail`, records `notify_degraded` in manifest warnings, and kills post's whole process group on timeout.
-- Second Sol pass: writable binds that are descendants of the workspace are refused too (only the run's own registry directory may be rw inside it); configured binds must be absolute and are canonicalised; the engine executable is bound as a file, not its directory; the final per-run mount plan is preflighted with `/bin/true` and a refused plan (or any boundary construction error) is recorded as a `bwrap_launch_failed` launch failure and notified; failed submodule/common-dir inspection fails closed; child-consumed artifacts (persona, agent config, resumed output schema) live under scratch inside the boundary; `--notify` reaches persistent-worktree runs and their setup failures; notify detail strips control characters and every diagnostic write is best-effort.
-- `scripts/test-parity.sh` is the receipt that the pytest-xdist accelerator executes exactly the unittest gate.
-
-- `--notify room:<name>|channel:<name>` sends one metadata-only completion line through the `post` CLI when a tracked run reaches a terminal state, as the caller's own identity from the source workspace. post is optional: absence, refusal, or timeout degrades to a `notify.ok=false` manifest record and a stderr line without changing the run's result. Dry-run shows the target and argv; call mode rejects the flag.
 
 ### Changed
 
-- The dev extra now ships `pytest` and `pytest-xdist`, so `pytest -n 8
-  --dist loadfile` works as a fast local test accelerator. Unittest discovery
-  remains the validation gate; safe-workspace tests were tightened to use
-  per-test temp dirs so they stay race-free under parallel workers.
+- The dev extra now ships `pytest` and `pytest-xdist`; `scripts/test-parity.sh`
+  proves that the parallel accelerator runs the same suite as the unittest gate.
 
 ## [0.29.1] - 2026-08-11
 
@@ -1018,6 +1029,8 @@ Usage-audit fix wave: 82 sessions and 1,241 delegate invocations from one week o
 
 - Releases before 0.1.3 predate this changelog.
 
+[Unreleased]: https://github.com/treygoff24/delegate-agent/compare/v0.30.0...HEAD
+[0.30.0]: https://github.com/treygoff24/delegate-agent/compare/v0.29.1...v0.30.0
 [0.29.1]: https://github.com/treygoff24/delegate-agent/compare/v0.29.0...v0.29.1
 [0.29.0]: https://github.com/treygoff24/delegate-agent/compare/v0.28.0...v0.29.0
 [0.28.0]: https://github.com/treygoff24/delegate-agent/compare/v0.27.0...v0.28.0
