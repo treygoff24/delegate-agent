@@ -11,8 +11,11 @@ source workspace is the cwd and the inherited environment carries any
 
 from __future__ import annotations
 
+import contextlib
+import os
 import re
 import shutil
+import signal
 import subprocess  # nosec B404 - fixed post argv, shell=False.
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -36,11 +39,20 @@ class NotifyTarget:
         return f"{self.kind}:{self.name}"
 
 
+REASON_NOT_FOUND = "post_not_found"
+REASON_TIMEOUT = "post_timeout"
+REASON_LAUNCH_FAILED = "post_launch_failed"
+REASON_FAILED = "post_failed"
+REASON_HOOK_FAILED = "notify_hook_failed"
+DETAIL_LIMIT = 200
+
+
 @dataclass(frozen=True)
 class NotifyOutcome:
     ok: bool
     target: str
     reason: str | None = None
+    detail: str | None = None
     message_id: str | None = None
 
     def payload(self) -> JsonObject:
@@ -49,7 +61,16 @@ class NotifyOutcome:
             result["messageId"] = self.message_id
         if self.reason is not None:
             result["reason"] = self.reason
+        if self.detail is not None:
+            result["detail"] = self.detail
         return result
+
+
+def _first_line(text: str) -> str | None:
+    for line in text.splitlines():
+        if line.strip():
+            return line.strip()[:DETAIL_LIMIT]
+    return None
 
 
 def parse_notify_target(value: str) -> NotifyTarget:
@@ -103,28 +124,48 @@ def send_notification(
     env: Mapping[str, str] | None = None,
     timeout: float = NOTIFY_TIMEOUT_SEC,
 ) -> NotifyOutcome:
-    """Send one metadata line; degrade (never raise) on every failure."""
+    """Send one metadata line; degrade (never raise) on every failure.
+
+    ``reason`` is a stable code; ``detail`` is post's first non-empty stderr
+    line, truncated. post runs in its own session so a timeout kills the whole
+    process group rather than only the direct child.
+    """
     binary = shutil.which("post", path=(env or {}).get("PATH") if env else None)
     if binary is None:
-        return NotifyOutcome(ok=False, target=target.spec, reason="post_not_found")
+        return NotifyOutcome(ok=False, target=target.spec, reason=REASON_NOT_FOUND)
     argv = [binary, *notify_argv(target, message)[1:]]
     try:
-        completed = subprocess.run(  # nosec B603 - fixed argv, shell=False.
+        process = subprocess.Popen(  # nosec B603 - fixed argv, shell=False.
             argv,
             cwd=cwd,
             env=dict(env) if env is not None else None,
-            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout,
-            check=False,
+            start_new_session=True,
         )
-    except subprocess.TimeoutExpired:
-        return NotifyOutcome(ok=False, target=target.spec, reason="post_timeout")
     except OSError as exc:
-        return NotifyOutcome(ok=False, target=target.spec, reason=f"post_launch_failed: {exc}")
-    if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout).strip().splitlines()
-        reason = detail[0][:200] if detail else f"post exited {completed.returncode}"
-        return NotifyOutcome(ok=False, target=target.spec, reason=reason)
-    found = _MESSAGE_ID_RE.search(completed.stdout or "")
+        return NotifyOutcome(
+            ok=False,
+            target=target.spec,
+            reason=REASON_LAUNCH_FAILED,
+            detail=str(exc)[:DETAIL_LIMIT],
+        )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+        with contextlib.suppress(Exception):
+            process.communicate(timeout=5)
+        return NotifyOutcome(ok=False, target=target.spec, reason=REASON_TIMEOUT)
+    if process.returncode != 0:
+        return NotifyOutcome(
+            ok=False,
+            target=target.spec,
+            reason=REASON_FAILED,
+            detail=_first_line(stderr or "") or f"post exited {process.returncode}",
+        )
+    found = _MESSAGE_ID_RE.search(stdout or "")
     return NotifyOutcome(ok=True, target=target.spec, message_id=found.group(0) if found else None)

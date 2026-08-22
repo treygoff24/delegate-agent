@@ -13,6 +13,7 @@ Use `delegate --help` for the exact command list from the installed version. Glo
 --no-completion-report        Disable completion-report prompt injection.
 --auth-profile NAME           Override detected profiles for launches, dry-run, run --input-json, profiles, models, capabilities, and setup.
 --group NAME                  Tag a launch/run-input request with a lightweight group ([A-Za-z0-9._-]{1,64}).
+--notify TARGET               room:<name> or channel:<name>: send one metadata line via `post` when the tracked run reaches a terminal state (launch, resume, dry-run; rejected by call and --pass-through).
 ```
 
 ## Workspace mail

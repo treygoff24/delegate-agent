@@ -1330,6 +1330,8 @@ def _validate_call_input_json_options(
             "invalid_option_combination",
             "--pass-through is not supported with call mode; call already returns synchronously.",
         )
+    if global_options.notify is not None:
+        raise DelegateError("invalid_option_combination", "call mode does not use --notify.")
     if global_options.completion_report == delegate_config.COMPLETION_REPORT_MODE_MARKDOWN:
         raise DelegateError(
             "invalid_option_combination",

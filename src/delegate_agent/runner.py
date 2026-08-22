@@ -1551,6 +1551,9 @@ def _launch_tracked_process(
             masks=_masks_from_sandbox(sandbox),
             extra_rw_roots=[*_binds_from_sandbox(sandbox, "rw"), *(extra_rw_roots or [])],
             extra_ro_roots=_binds_from_sandbox(sandbox, "ro"),
+            bwrap_path=sandbox.get("bwrapPath")
+            if isinstance(sandbox.get("bwrapPath"), str)
+            else None,
         )
     return subprocess.Popen(  # nosec B603 - Delegate intentionally launches validated harness argv with shell=False.
         argv,
@@ -1589,6 +1592,7 @@ def _record_tracked_launch_failure(
         "message": error.message,
         "resultQuality": None,
     }
+    recorded = False
     accumulator = (
         prior_capture.accumulator
         if prior_capture is not None
@@ -1603,6 +1607,7 @@ def _record_tracked_launch_failure(
             # particular, a fallback launch failure after cancel must not
             # replace cancelled with child_launch_failed.
             return
+        recorded = True
         write_state(
             files.run_path,
             build_state(
@@ -1623,6 +1628,10 @@ def _record_tracked_launch_failure(
         snapshot.pop("resultQuality", None)
         snapshot.update({"error": error.error, "message": error.message})
         write_snapshot(files.run_path, snapshot)
+    if recorded:
+        # A launch failure is a terminal state too; the --notify ping fires
+        # outside the registry lock so a slow post cannot hold it.
+        _send_completion_notification(files, ctx, "failed")
 
 
 def _mail_push_failure_nonce(ctx: RunContext) -> str | None:
@@ -3210,25 +3219,44 @@ def _send_completion_notification(files: TrackedRunFiles, ctx: RunContext, statu
     """
     if ctx.notify is None:
         return
-    target = notify.parse_notify_target(ctx.notify)
-    elapsed: float | None = None
-    started = _parse_rfc3339(ctx.started_at) if ctx.started_at else None
-    if started is not None:
-        elapsed = max((datetime.now(UTC) - started).total_seconds(), 0.0)
-    message = notify.notify_message(
-        run_id=ctx.run_id,
-        status=status,
-        engine=ctx.engine,
-        model=ctx.model_resolved or ctx.model,
-        elapsed_sec=elapsed,
-        workspace=ctx.source_cwd,
-    )
-    outcome = notify.send_notification(target, message, cwd=ctx.source_cwd, env=os.environ)
-    manifest = run_registry.load_run_manifest_or_none(ctx.registry_root, ctx.run_id) or {}
-    manifest["notify"] = outcome.payload()
-    write_manifest(files.run_path, manifest)
+    try:
+        target = notify.parse_notify_target(ctx.notify)
+        elapsed: float | None = None
+        started = _parse_rfc3339(ctx.started_at) if ctx.started_at else None
+        if started is not None:
+            elapsed = max((datetime.now(UTC) - started).total_seconds(), 0.0)
+        message = notify.notify_message(
+            run_id=ctx.run_id,
+            status=status,
+            engine=ctx.engine,
+            model=ctx.model_resolved or ctx.model,
+            elapsed_sec=elapsed,
+            workspace=ctx.source_cwd,
+        )
+        outcome = notify.send_notification(target, message, cwd=ctx.source_cwd, env=os.environ)
+    except Exception as exc:
+        outcome = notify.NotifyOutcome(
+            ok=False,
+            target=ctx.notify,
+            reason=notify.REASON_HOOK_FAILED,
+            detail=f"{type(exc).__name__}: {exc}"[: notify.DETAIL_LIMIT],
+        )
+    try:
+        with run_registry.registry_lock(ctx.registry_root):
+            manifest = run_registry.load_run_manifest_or_none(ctx.registry_root, ctx.run_id) or {}
+            manifest["notify"] = outcome.payload()
+            if not outcome.ok:
+                warnings = [w for w in manifest.get("warnings", []) if isinstance(w, str)]
+                warning = f"notify_degraded: {outcome.reason}"
+                if warning not in warnings:
+                    warnings.append(warning)
+                manifest["warnings"] = warnings
+            write_manifest(files.run_path, manifest)
+    except Exception as exc:
+        print(f"delegate: notify outcome not recorded ({type(exc).__name__})", file=sys.stderr)
     if not outcome.ok:
-        print(f"delegate: notify degraded ({outcome.reason})", file=sys.stderr)
+        suffix = f": {outcome.detail}" if outcome.detail else ""
+        print(f"delegate: notify degraded ({outcome.reason}{suffix})", file=sys.stderr)
 
 
 def _parse_rfc3339(value: str) -> datetime | None:

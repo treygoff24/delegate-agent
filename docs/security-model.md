@@ -261,6 +261,32 @@ Delegate recreates an untracked symlink during snapshot sync (directory-copy, sa
 
 This closes a leak where an untracked symlink whose absolute target pointed at the repo's own gitignored secret would otherwise be recreated verbatim inside an edit-capable worktree, exposing that secret read/write to the child. It does not defend against hardlinks, which are indistinguishable from ordinary files by path and are documented as an out-of-scope caveat. It is not a full host sandbox either: a child runtime may still read absolute paths, use credentials, call external tools, or perform network operations according to its own permissions.
 
+### Zero-copy safe isolation (Linux, `isolation.safeBackend: "bwrap"`)
+
+Opt-in on Linux, the temporary safe boundary can be a bubblewrap mount
+namespace instead of a copy: the real workspace is bind-mounted read-only,
+every gitignored path is hidden behind a tmpfs or `/dev/null` mask computed
+from `git ls-files -o -i --exclude-standard --directory` (so the engine sees
+the same tree shape a copy would), `$HOME` and `/tmp` are private tmpfs, the
+workspace `.delegate/` registry is masked (prior runs' prompts, logs and
+manifests are invisible) with only the current run's scratch rw-bound on top,
+and only the selected engine's home override (`CODEX_HOME` / `CLAUDE_CONFIG_DIR`)
+is writable. System roots (`/usr`, `/etc`, `/opt`), `~/.local`, `~/.cargo/bin`,
+`~/.bun`, the engine's dot-directory, the engine binary's own directory, a
+linked worktree's common git dir, and any configured `isolation.bwrapBinds`
+are bound read-only (or rw where declared). `/proc` is the host's (fresh proc
+mounts are refused inside some containers) and the pid namespace is shared;
+the boundary is a filesystem boundary, not a process sandbox, and it is
+layered under each engine's own read-only controls rather than replacing them.
+
+Everything that would weaken it fails closed instead of falling back to the
+copy backend: bubblewrap unavailable or the production probe failing, an
+untracked symlink that would leak host paths, more than 2000 parity masks, an
+initialized submodule (its ignored paths are outside the top-level scan), a
+configured bind that is missing or a writable bind that covers the workspace,
+and `--pass-through` (which execs outside the tracked launcher that applies
+the boundary).
+
 ### Persistent worktree isolation
 
 `--isolation worktree` with `work` mode creates a preserved Git worktree and local branch. The child edits that worktree, not the source checkout. The orchestrator can inspect and integrate the diff later.

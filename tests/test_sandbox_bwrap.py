@@ -59,6 +59,7 @@ class BuildBwrapArgvTests(unittest.TestCase):
             home="/home/fake",
             rw_roots=["/scratch"],
             ro_roots=["/opt"],
+            engine="codex",
             masks=(
                 sandbox_bwrap.Mask(path="node_modules", kind=sandbox_bwrap.MASK_KIND_TMPFS),
                 sandbox_bwrap.Mask(path="secret.env", kind=sandbox_bwrap.MASK_KIND_DEVNULL),
@@ -155,19 +156,40 @@ class BuildBwrapArgvTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("/dup") - 1], "--ro-bind")
         self.assertEqual(argv[argv.index("/shared") - 1], "--bind")
 
-    def test_engine_homes_from_env_appended_rw_after_rw_roots(self):
+    def test_only_the_selected_engine_home_is_rw_bound(self):
+        env = {"CODEX_HOME": "/eng/codex", "CLAUDE_CONFIG_DIR": "/eng/claude"}
+        for engine, expected, hidden in (
+            ("codex", "/eng/codex", "/eng/claude"),
+            ("claude", "/eng/claude", "/eng/codex"),
+            ("omp", None, "/eng/codex"),
+        ):
+            argv = sandbox_bwrap.build_bwrap_argv(
+                workspace="/ws",
+                engine_argv=["engine"],
+                env=env,
+                home="/home/fake",
+                rw_roots=["/scratch"],
+                ro_roots=[],
+                engine=engine,
+            )
+            self.assertNotIn(hidden, argv, engine)
+            chdir = argv.index("--chdir")
+            if expected is None:
+                self.assertEqual(argv[chdir - 3 : chdir], ["--bind", "/scratch", "/scratch"])
+            else:
+                self.assertEqual(argv[chdir - 3 : chdir], ["--bind", expected, expected])
+
+    def test_exact_bwrap_path_is_argv0(self):
         argv = sandbox_bwrap.build_bwrap_argv(
             workspace="/ws",
             engine_argv=["engine"],
-            env={"CODEX_HOME": "/eng/codex", "CLAUDE_CONFIG_DIR": "/eng/claude"},
+            env={},
             home="/home/fake",
-            rw_roots=["/scratch"],
+            rw_roots=[],
             ro_roots=[],
-            masks=(),
+            bwrap_path="/usr/bin/bwrap",
         )
-        homes = ["--bind", "/eng/codex", "/eng/codex", "--bind", "/eng/claude", "/eng/claude"]
-        chdir = argv.index("--chdir")
-        self.assertEqual(argv[chdir - len(homes) : chdir], homes)
+        self.assertEqual(argv[0], "/usr/bin/bwrap")
 
     def test_display_argv_is_truncated_prefix(self):
         display = sandbox_bwrap.bwrap_display_argv(["codex", "exec"])
@@ -230,52 +252,41 @@ class WrapEngineArgvTests(unittest.TestCase):
             self.assertNotIn(str(fake_home / ".codex"), argv)
 
 
-class ProbeCacheTests(unittest.TestCase):
-    def setUp(self):
-        cache_root = tempfile.TemporaryDirectory()
-        self.addCleanup(cache_root.cleanup)
-        self.cache_dir = Path(cache_root.name)
-        self.cache_file = self.cache_dir / "delegate" / "bwrap-probe.json"
-        self.boot = {"id": "boot-1"}
-        # A stable fake bwrap path so the cache key's mtime component never moves.
-        self.bwrap_path = str(self.cache_dir / "fake-bwrap")
-        Path(self.bwrap_path).write_text("", encoding="utf-8")
+class ProbeTests(unittest.TestCase):
+    def test_probe_is_the_production_boundary_with_the_exact_binary(self):
+        argv = sandbox_bwrap.probe_argv("/opt/bin/bwrap", home="/home/fake")
+        production = sandbox_bwrap.build_bwrap_argv(
+            workspace="/usr",
+            engine_argv=["/bin/true"],
+            env={},
+            home="/home/fake",
+            rw_roots=[],
+            ro_roots=[],
+            bwrap_path="/opt/bin/bwrap",
+        )
+        self.assertEqual(argv, production)
+        self.assertEqual(argv[0], "/opt/bin/bwrap")
+        self.assertEqual(argv[-1], "/bin/true")
 
-    def available(self, probe):
+    def test_availability_is_never_cached(self):
+        calls = []
+
+        def probe(path):
+            calls.append(path)
+            return len(calls) == 1
+
+        with mock.patch.object(sandbox_bwrap, "_run_probe", probe):
+            self.assertTrue(sandbox_bwrap.bwrap_available("/fake/bwrap"))
+            self.assertFalse(sandbox_bwrap.bwrap_available("/fake/bwrap"))
+        self.assertEqual(calls, ["/fake/bwrap", "/fake/bwrap"])
+
+    def test_ensure_returns_the_resolved_binary(self):
         with (
-            mock.patch.dict(os.environ, {"XDG_CACHE_HOME": str(self.cache_dir)}, clear=False),
-            mock.patch.object(sandbox_bwrap, "_boot_id", lambda: self.boot["id"]),
-            mock.patch.object(sandbox_bwrap, "_run_probe", probe),
+            mock.patch.object(sandbox_bwrap.sys, "platform", "linux"),
+            mock.patch.object(sandbox_bwrap.shutil, "which", return_value="/usr/bin/bwrap"),
+            mock.patch.object(sandbox_bwrap, "bwrap_available", return_value=True),
         ):
-            return sandbox_bwrap.bwrap_available(self.bwrap_path)
-
-    def test_miss_then_hit_then_boot_id_invalidation(self):
-        probe = mock.MagicMock(return_value=True)
-        self.assertTrue(self.available(probe))
-        self.assertEqual(probe.call_count, 1)
-        cached = json.loads(self.cache_file.read_text(encoding="utf-8"))
-        self.assertTrue(cached["available"])
-        self.assertTrue(self.available(probe))
-        self.assertEqual(probe.call_count, 1)
-        self.boot["id"] = "boot-2"
-        self.assertTrue(self.available(probe))
-        self.assertEqual(probe.call_count, 2)
-
-    def test_negative_result_is_cached_too(self):
-        probe = mock.MagicMock(return_value=False)
-        self.assertFalse(self.available(probe))
-        self.assertFalse(self.available(probe))
-        self.assertEqual(probe.call_count, 1)
-
-    def test_corrupt_cache_fails_open_to_probe(self):
-        probe = mock.MagicMock(return_value=True)
-        self.assertTrue(self.available(probe))
-        self.cache_file.write_text("{not json", encoding="utf-8")
-        self.assertTrue(self.available(probe))
-        self.assertEqual(probe.call_count, 2)
-        json.loads(self.cache_file.read_text(encoding="utf-8"))  # the rewrite healed it
-        self.assertTrue(self.available(probe))
-        self.assertEqual(probe.call_count, 2)
+            self.assertEqual(sandbox_bwrap.ensure_bwrap_backend(), "/usr/bin/bwrap")
 
 
 class RequestedSafeBackendTests(unittest.TestCase):
@@ -701,6 +712,182 @@ class ConfiguredBwrapBindsTests(unittest.TestCase):
         self.assertEqual(runner._binds_from_sandbox(payload, "ro"), ["/a"])
         self.assertEqual(runner._binds_from_sandbox(payload, "rw"), ["/b"])
         self.assertEqual(runner._binds_from_sandbox(None, "rw"), [])
+
+
+class RegistryMaskAndContainmentTests(unittest.TestCase):
+    def test_workspace_registry_is_masked_then_scratch_rebound(self):
+        with tempfile.TemporaryDirectory() as ws:
+            registry = Path(ws) / ".delegate"
+            scratch = registry / "runs" / "del_new" / "scratch"
+            scratch.mkdir(parents=True)
+            argv = sandbox_bwrap.wrap_engine_argv(
+                engine_argv=["true"], cwd=ws, env={}, engine="codex", scratch_dir=str(scratch)
+            )
+            mask_at = argv.index(str(registry))
+            self.assertEqual(argv[mask_at - 1], "--tmpfs")
+            self.assertGreater(mask_at, argv.index(ws))
+            self.assertGreater(argv.index(str(scratch)), mask_at)
+            self.assertEqual(argv[argv.index(str(scratch)) - 1], "--bind")
+
+    def test_engine_binary_dir_outside_core_roots_is_ro_bound(self):
+        with tempfile.TemporaryDirectory() as ws, tempfile.TemporaryDirectory() as bin_dir:
+            engine = Path(bin_dir) / "fake-engine"
+            engine.write_text("#!/bin/sh\n", encoding="utf-8")
+            engine.chmod(0o755)
+            argv = sandbox_bwrap.wrap_engine_argv(
+                engine_argv=[str(engine)], cwd=ws, env={}, engine="omp"
+            )
+            self.assertEqual(argv[argv.index(bin_dir) - 1], "--ro-bind")
+            self.assertGreater(argv.index(bin_dir), argv.index("/tmp"))
+            argv = sandbox_bwrap.wrap_engine_argv(
+                engine_argv=["/usr/bin/env"], cwd=ws, env={}, engine="omp"
+            )
+            self.assertNotIn("/usr/bin", argv)
+
+    def test_missing_registry_is_not_masked(self):
+        with tempfile.TemporaryDirectory() as ws:
+            argv = sandbox_bwrap.wrap_engine_argv(
+                engine_argv=["true"], cwd=ws, env={}, engine="omp"
+            )
+            self.assertNotIn(os.path.join(ws, ".delegate"), argv)
+
+    def test_rw_root_covering_workspace_is_refused(self):
+        with tempfile.TemporaryDirectory() as root:
+            ws = os.path.join(root, "repo")
+            os.makedirs(ws)
+            for covering in (root, ws):
+                with self.assertRaises(DelegateError) as caught:
+                    sandbox_bwrap.wrap_engine_argv(
+                        engine_argv=["true"],
+                        cwd=ws,
+                        env={},
+                        engine="omp",
+                        extra_rw_roots=[covering],
+                    )
+                self.assertEqual(caught.exception.error, "bwrap_bind_conflict")
+            with self.assertRaises(DelegateError) as caught:
+                sandbox_bwrap.wrap_engine_argv(
+                    engine_argv=["true"], cwd=ws, env={"CODEX_HOME": root}, engine="codex"
+                )
+            self.assertEqual(caught.exception.error, "bwrap_bind_conflict")
+
+
+class LinkedWorktreeAndSubmoduleTests(unittest.TestCase):
+    def _request(self, workspace: str):
+        from delegate_agent.request_models import Request
+
+        return Request(
+            engine="codex",
+            mode="safe",
+            model_alias=None,
+            workspace=workspace,
+            workspace_kind="git",
+            prompt="review",
+            argv=["codex", "exec"],
+            env_overrides={},
+        )
+
+    def test_linked_worktree_binds_common_dir_read_only(self):
+        repo = _make_committed_repo()
+        self.addCleanup(repo.cleanup)
+        linked = tempfile.mkdtemp(prefix="delegate-linked-")
+        self.addCleanup(shutil.rmtree, linked, True)
+        linked_ws = os.path.join(linked, "wt")
+        _git(repo.name, "worktree", "add", "--detach", linked_ws)
+        common = safe_workspace._bwrap_git_common_dir(linked_ws)
+        self.assertEqual(common, str((Path(repo.name) / ".git").resolve()))
+        self.assertIsNone(safe_workspace._bwrap_git_common_dir(repo.name))
+
+    def test_initialized_submodule_is_refused(self):
+        outer = _make_committed_repo()
+        self.addCleanup(outer.cleanup)
+        inner = _make_committed_repo()
+        self.addCleanup(inner.cleanup)
+        subprocess.run(
+            ["git", "-c", "protocol.file.allow=always", "submodule", "add", inner.name, "sub"],
+            cwd=outer.name,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        with self.assertRaises(DelegateError) as caught:
+            safe_workspace._refuse_bwrap_initialized_submodules(outer.name)
+        self.assertEqual(caught.exception.error, "bwrap_submodules_unsupported")
+        # no submodules: silently fine
+        plain = _make_committed_repo()
+        self.addCleanup(plain.cleanup)
+        safe_workspace._refuse_bwrap_initialized_submodules(plain.name)
+
+
+class PassThroughBwrapTests(CommandTestBase):
+    def test_pass_through_is_refused_under_bwrap(self):
+        repo = _make_committed_repo()
+        self.addCleanup(repo.cleanup)
+        fake_bin = self.write_fake_executable("codex")
+        with (
+            mock.patch.dict(os.environ, {"DELEGATE_SAFE_BACKEND": "bwrap"}, clear=False),
+            mock.patch.object(
+                safe_workspace, "ensure_bwrap_backend", return_value="/usr/bin/bwrap"
+            ),
+        ):
+            code, _out, err = self.run_main(
+                ["--cwd", repo.name, "--pass-through", "codex", "safe", "review"],
+                path_prefix=fake_bin,
+            )
+        self.assertNotEqual(code, 0)
+        self.assertIn("--pass-through cannot run inside the bwrap safe backend", err)
+
+
+@unittest.skipUnless(sys.platform.startswith("linux"), "bwrap boundary is Linux-only")
+class EndToEndBwrapRunTests(CommandTestBase):
+    """A tracked safe run through bin/delegate.py inside the real boundary."""
+
+    def test_tracked_safe_run_hides_registry_and_denies_writes(self):
+        if not sandbox_bwrap.bwrap_available():
+            self.skipTest("working bubblewrap unavailable on this host")
+        repo = _make_committed_repo()
+        self.addCleanup(repo.cleanup)
+        workspace = Path(repo.name)
+        old_prompt = workspace / ".delegate" / "runs" / "del_old" / "prompt.txt"
+        old_prompt.parent.mkdir(parents=True)
+        old_prompt.write_text("OLD-PROMPT-CANARY\n", encoding="utf-8")
+        fake_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(fake_dir.cleanup)
+        fake = Path(fake_dir.name) / "omp"
+        fake.write_text(
+            "#!/bin/sh\n"
+            "if touch leak.txt 2>/dev/null; then echo write=allowed; else echo write=denied; fi\n"
+            "if [ -e .delegate/runs/del_old/prompt.txt ]; then echo registry=visible; "
+            "else echo registry=hidden; fi\n"
+            "if grep -q OLD-PROMPT-CANARY .delegate/runs/*/prompt.txt 2>/dev/null; then echo canary=leaked; "
+            "else echo canary=clean; fi\n"
+            "git status --short >/dev/null 2>&1 && echo git=ok || echo git=error\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o755)
+        config_path = Path(self._config_env["DELEGATE_CONFIG"])
+        config_path.write_text(
+            json.dumps({"omp": {"binary": str(fake)}, "isolation": {"safeBackend": "bwrap"}}),
+            encoding="utf-8",
+        )
+        code, out, err = self.run_main(
+            ["--json", "--cwd", str(workspace), "--no-completion-report", "omp", "safe", "review"]
+        )
+        self.assertEqual(code, 0, out + err)
+        payload = json.loads(out)
+        self.assertEqual(payload["status"], "succeeded", payload)
+        self.assertEqual(payload["safeWorkspaceMethod"], sandbox_bwrap.BWRAP_METHOD)
+        # The fake engine's raw stdout is captured verbatim in the run registry
+        # (omp's assistant-text extraction expects its own event stream).
+        raw = (workspace / ".delegate" / "runs" / payload["runId"] / "stdout.log").read_text(
+            encoding="utf-8"
+        )
+        observed = dict(line.split("=", 1) for line in raw.splitlines() if "=" in line)
+        self.assertEqual(observed.get("write"), "denied", raw)
+        self.assertEqual(observed.get("registry"), "hidden")
+        self.assertEqual(observed.get("canary"), "clean")
+        self.assertEqual(observed.get("git"), "ok")
+        self.assertFalse((workspace / "leak.txt").exists())
 
 
 if __name__ == "__main__":

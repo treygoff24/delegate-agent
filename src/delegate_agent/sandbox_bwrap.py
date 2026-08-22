@@ -19,7 +19,6 @@ child env (``CODEX_HOME``, ``CLAUDE_CONFIG_DIR``) is rw-bound on top of it.
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import subprocess  # nosec B404 - Delegate launches a fixed bwrap probe argv with shell=False.
@@ -42,13 +41,11 @@ BWRAP_METHOD = "bwrap-ro-bind"
 MASK_OVERFLOW_LIMIT = 2000
 MASK_KIND_TMPFS = "tmpfs"
 MASK_KIND_DEVNULL = "devnull"
+REGISTRY_DIR_NAME = ".delegate"
 
-BWRAP_MASK_OVERFLOW_WARNING = (
-    "bwrap mask overflow: more than "
-    f"{MASK_OVERFLOW_LIMIT} gitignored paths; falling back to the copy backend."
-)
-
-_ENGINE_HOME_ENV_VARS = ("CODEX_HOME", "CLAUDE_CONFIG_DIR")
+# Engine home override per engine: only the SELECTED engine's home is rw-bound
+# (a Codex child must never receive Claude's credential home or vice versa).
+_ENGINE_HOME_ENV_VAR = {"codex": "CODEX_HOME", "claude": "CLAUDE_CONFIG_DIR"}
 
 # Engine config directories that live directly under $HOME. They are ro-bound
 # whenever they exist; an explicit env override (CODEX_HOME,
@@ -165,8 +162,15 @@ def configured_bwrap_binds(config: Mapping[str, object], *, workspace: str) -> t
     return tuple(binds)
 
 
-def ensure_bwrap_backend() -> None:
-    """Raise ``bwrap_unavailable`` unless this host can actually run bwrap."""
+def ensure_bwrap_backend() -> str:
+    """Return the absolute bwrap path, or raise ``bwrap_unavailable``.
+
+    The probe runs the production boundary (``build_bwrap_argv`` with
+    ``/bin/true`` as the engine) through the exact binary that the launch will
+    use. Results are never cached: a cached positive from a different process
+    context (another sandbox, a changed PATH) once green-lit a launch that then
+    failed, and the probe costs milliseconds.
+    """
     if not sys.platform.startswith("linux"):
         raise DelegateError(
             "bwrap_unavailable",
@@ -188,103 +192,48 @@ def ensure_bwrap_backend() -> None:
             "disabled); Delegate never falls back silently. Install a working "
             'bubblewrap or set isolation.safeBackend back to "copy".',
         )
+    return bwrap_path
 
 
-def _probe_cache_path() -> Path:
-    cache_root = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
-    return Path(cache_root) / "delegate" / "bwrap-probe.json"
+def probe_argv(bwrap_path: str, *, home: str) -> list[str]:
+    """The exact production boundary with ``/bin/true`` as the engine.
 
-
-def _boot_id() -> str:
-    try:
-        return Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
-
-
-def _cache_key(bwrap_path: str) -> str:
-    try:
-        mtime = os.stat(bwrap_path).st_mtime_ns
-    except OSError:
-        mtime = 0
-    return f"{bwrap_path}:{mtime}:{_boot_id()}"
-
-
-def _read_probe_cache(bwrap_path: str) -> bool | None:
-    try:
-        payload = json.loads(_probe_cache_path().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if not isinstance(payload, dict) or payload.get("key") != _cache_key(bwrap_path):
-        return None
-    available = payload.get("available")
-    return available if isinstance(available, bool) else None
-
-
-def _write_probe_cache(bwrap_path: str, *, available: bool) -> None:
-    # Best-effort cache write; probe correctness never depends on it.
-    try:
-        path = _probe_cache_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps({"key": _cache_key(bwrap_path), "available": available}),
-            encoding="utf-8",
-        )
-    except OSError:
-        pass
+    ``/usr`` doubles as the read-only workspace so the probe needs no
+    filesystem setup; the core ``/usr`` bind already covers it.
+    """
+    return build_bwrap_argv(
+        workspace="/usr",
+        engine_argv=["/bin/true"],
+        env={},
+        home=home,
+        rw_roots=[],
+        ro_roots=[],
+        bwrap_path=bwrap_path,
+    )
 
 
 def _run_probe(bwrap_path: str) -> bool:
     result = subprocess.run(  # nosec B603 - fixed probe argv, shell=False.
-        [
-            bwrap_path,
-            "--unshare-user",
-            "--die-with-parent",
-            "--ro-bind",
-            "/usr",
-            "/usr",
-            "--symlink",
-            "usr/lib",
-            "/lib",
-            "--symlink",
-            "usr/lib64",
-            "/lib64",
-            "--symlink",
-            "usr/bin",
-            "/bin",
-            "--bind",
-            "/proc",
-            "/proc",
-            "--dev",
-            "/dev",
-            "--tmpfs",
-            "/tmp",
-            "/bin/true",
-        ],
+        probe_argv(bwrap_path, home=str(Path.home())),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        timeout=5,
+        timeout=10,
         check=False,
     )
     return result.returncode == 0
 
 
 def bwrap_available(bwrap_path: str | None = None) -> bool:
-    """Return whether bwrap can build its boundary on this host (cached)."""
+    """Return whether bwrap can build the production boundary on this host now."""
     if not sys.platform.startswith("linux"):
         return False
     resolved = bwrap_path or shutil.which(BWRAP_BINARY)
     if resolved is None:
         return False
-    cached = _read_probe_cache(resolved)
-    if cached is not None:
-        return cached
     try:
-        available = _run_probe(resolved)
+        return _run_probe(resolved)
     except (OSError, subprocess.TimeoutExpired):
-        available = False
-    _write_probe_cache(resolved, available=available)
-    return available
+        return False
 
 
 def parity_masks(git_root: str) -> tuple[Mask, ...]:
@@ -293,9 +242,11 @@ def parity_masks(git_root: str) -> tuple[Mask, ...]:
     Uses ``git ls-files -o -i --exclude-standard --directory -z`` from the
     workspace root: untracked-and-ignored entries collapse to their top-level
     directory when a directory entry covers them. Directories become tmpfs
-    masks; files become ``/dev/null`` ro-binds. ``.delegate/`` is never masked
-    (the run scratch lives there and is rw-bound explicitly). Non-git
-    workspaces have no masks by construction (callers pass an empty tuple).
+    masks; files become ``/dev/null`` ro-binds. ``.delegate/`` is skipped here
+    because ``wrap_engine_argv`` always masks the whole registry with a tmpfs
+    (prior runs' prompts, logs and manifests must stay invisible) and then
+    rw-binds only the current run's scratch on top. Non-git workspaces have no
+    masks by construction (callers pass an empty tuple).
     """
     result = run_git_bytes(
         git_root,
@@ -341,12 +292,15 @@ def build_bwrap_argv(
     rw_roots: list[str],
     ro_roots: list[str],
     masks: tuple[Mask, ...] = (),
+    engine: str = "",
+    bwrap_path: str = BWRAP_BINARY,
 ) -> list[str]:
     """Build the full bwrap argv prefix for one launch. Pure: no filesystem access.
 
     Mount targets are deduplicated keep-first across every bind/tmpfs/mask so
-    no mount point is declared twice. Engine homes named by the child env
-    (``CODEX_HOME``, ``CLAUDE_CONFIG_DIR``) are appended to ``rw_roots``.
+    no mount point is declared twice. Only the selected ``engine``'s home
+    override from the child env (``CODEX_HOME`` for codex, ``CLAUDE_CONFIG_DIR``
+    for claude) is appended to ``rw_roots``; sibling engine homes stay hidden.
     Emission order matters: core system roots first, then ``$HOME`` tmpfs,
     then the optional read-only roots (several live under ``$HOME``), then the
     read-only workspace, then masks stacked on top of the workspace, then
@@ -354,7 +308,7 @@ def build_bwrap_argv(
     """
     mounted: set[str] = set()
     argv: list[str] = [
-        BWRAP_BINARY,
+        bwrap_path,
         "--unshare-user",
         "--unshare-ipc",
         "--unshare-uts",
@@ -390,9 +344,10 @@ def build_bwrap_argv(
             bind("--tmpfs", target)
         else:
             bind("--ro-bind", "/dev/null", target)
-    engine_homes = [
-        os.path.expanduser(env[name]) for name in _ENGINE_HOME_ENV_VARS if env.get(name, "").strip()
-    ]
+    home_var = _ENGINE_HOME_ENV_VAR.get(engine)
+    engine_homes = (
+        [os.path.expanduser(env[home_var])] if home_var and env.get(home_var, "").strip() else []
+    )
     for root in [*rw_roots, *engine_homes]:
         bind("--bind", root, root)
     argv.extend(("--chdir", workspace))
@@ -417,6 +372,7 @@ def wrap_engine_argv(
     home: str | None = None,
     extra_rw_roots: list[str] | None = None,
     extra_ro_roots: list[str] | None = None,
+    bwrap_path: str | None = None,
 ) -> list[str]:
     """Prefix ``engine_argv`` with the bwrap boundary using live filesystem facts.
 
@@ -424,7 +380,10 @@ def wrap_engine_argv(
     host-dependent inputs: real HOME, existing optional ro-bind roots (home
     dirs, the per-engine dot-directory, system roots), the run scratch dir
     (rw), and any extra ro/rw roots (configured ``isolation.bwrapBinds``,
-    mail-push private homes).
+    mail-push private homes). The workspace's ``.delegate/`` registry is always
+    masked with a tmpfs so prior runs' prompts and logs are invisible; the
+    current run's scratch (under it) is then rw-bound on top. Any rw root that
+    equals or contains the workspace is refused.
     """
     environment = env or {}
     resolved_home = home or environment.get("HOME") or str(Path.home())
@@ -444,10 +403,23 @@ def wrap_engine_argv(
     for root in extra_ro_roots or []:
         if root not in ro_roots:
             ro_roots.append(root)
+    for engine_dir in _engine_binary_dirs(engine_argv, environment):
+        if not _visible_inside(engine_dir, ro_roots) and engine_dir not in ro_roots:
+            ro_roots.append(engine_dir)
     rw_roots = [scratch_dir] if scratch_dir else []
     for root in extra_rw_roots or []:
         if root not in rw_roots:
             rw_roots.append(root)
+    home_var = _ENGINE_HOME_ENV_VAR.get(engine)
+    engine_home = (
+        os.path.expanduser(environment[home_var])
+        if home_var and environment.get(home_var, "").strip()
+        else None
+    )
+    _refuse_rw_roots_covering_workspace(cwd, [*rw_roots, *([engine_home] if engine_home else [])])
+    registry = os.path.join(cwd, REGISTRY_DIR_NAME)
+    if os.path.isdir(registry) and not any(mask.path == REGISTRY_DIR_NAME for mask in masks):
+        masks = (*masks, Mask(path=REGISTRY_DIR_NAME, kind=MASK_KIND_TMPFS))
     return build_bwrap_argv(
         workspace=cwd,
         engine_argv=engine_argv,
@@ -456,4 +428,51 @@ def wrap_engine_argv(
         rw_roots=rw_roots,
         ro_roots=ro_roots,
         masks=masks,
+        engine=engine,
+        bwrap_path=bwrap_path or BWRAP_BINARY,
     )
+
+
+def _engine_binary_dirs(engine_argv: list[str], env: Mapping[str, str]) -> list[str]:
+    """Directories holding the engine binary (as found on PATH, and its realpath).
+
+    An engine installed outside the core roots (a wrapper in a temp dir, a
+    per-user install under an unusual prefix) would otherwise be invisible:
+    the boundary replaces /tmp and $HOME with tmpfs.
+    """
+    if not engine_argv:
+        return []
+    resolved = shutil.which(engine_argv[0], path=env.get("PATH") or None)
+    if resolved is None:
+        return []
+    dirs: list[str] = []
+    for candidate in (resolved, os.path.realpath(resolved)):
+        directory = os.path.dirname(candidate)
+        if directory and directory not in dirs:
+            dirs.append(directory)
+    return dirs
+
+
+_ALWAYS_VISIBLE_PREFIXES = tuple(f"{root}/" for root in _CORE_RO_BINDS) + tuple(
+    f"/{link_path}/" for _target, link_path in _SYMLINK_PAIRS
+)
+
+
+def _visible_inside(directory: str, ro_roots: list[str]) -> bool:
+    path = directory.rstrip("/") + "/"
+    if path.startswith(_ALWAYS_VISIBLE_PREFIXES):
+        return True
+    return any(path.startswith(root.rstrip("/") + "/") for root in ro_roots)
+
+
+def _refuse_rw_roots_covering_workspace(workspace: str, rw_roots: list[str]) -> None:
+    """A rw mount equal to or above the workspace would shadow its ro bind."""
+    resolved_workspace = Path(workspace).resolve()
+    for root in rw_roots:
+        target = Path(root).resolve()
+        if target == resolved_workspace or resolved_workspace.is_relative_to(target):
+            raise DelegateError(
+                "bwrap_bind_conflict",
+                f"writable root {root} covers the read-only workspace {workspace}; "
+                "refusing to build a boundary that would expose the checkout to writes.",
+            )

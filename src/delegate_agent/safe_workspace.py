@@ -46,6 +46,7 @@ from delegate_agent.sandbox_bwrap import (
     BWRAP_METHOD,
     SAFE_BACKEND_COPY,
     SAFE_BACKEND_ENV,
+    Bind,
     BwrapMaskOverflow,
     configured_bwrap_binds,
     ensure_bwrap_backend,
@@ -936,6 +937,43 @@ def cleanup_safe_isolated_workspace(
     shutil.rmtree(temp_base, ignore_errors=True)
 
 
+def _refuse_bwrap_initialized_submodules(git_root: str) -> None:
+    """Fail closed on initialized submodules: their ignored paths and symlinks
+    sit outside the single top-level parity scan, so a ro-bind would expose
+    what the copy backend hides."""
+    result = _run_git(git_root, ["submodule", "status"], timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS)
+    if result.returncode != 0:
+        return
+    initialized = [
+        line.split()[1]
+        for line in result.stdout.splitlines()
+        if line.strip() and not line.startswith("-") and len(line.split()) > 1
+    ]
+    if initialized:
+        preview = ", ".join(initialized[:5])
+        raise DelegateError(
+            "bwrap_submodules_unsupported",
+            f"the bwrap safe backend does not cover initialized submodules ({preview}); "
+            'set isolation.safeBackend to "copy" for this workspace.',
+        )
+
+
+def _bwrap_git_common_dir(git_root: str) -> str | None:
+    """Resolved common git dir when it lives OUTSIDE the workspace (linked worktree)."""
+    result = _run_git(
+        git_root, ["rev-parse", "--git-common-dir"], timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    common = Path(result.stdout.strip())
+    if not common.is_absolute():
+        common = Path(git_root) / common
+    resolved = common.resolve()
+    if resolved.is_relative_to(Path(git_root).resolve()):
+        return None
+    return str(resolved)
+
+
 def _ensure_no_bwrap_symlink_leaks(git_root: str) -> None:
     """Fail closed before a bwrap run when untracked symlinks would leak.
 
@@ -1010,7 +1048,9 @@ def safe_isolated_request(
     if backend == SAFE_BACKEND_BWRAP and request.engine != "cursor" and source_git_root is not None:
         # Hard requirements, no fallback: Delegate never switches backends
         # after deciding.
-        ensure_bwrap_backend()
+        bwrap_path = ensure_bwrap_backend()
+        _refuse_bwrap_initialized_submodules(source_git_root)
+        git_common_dir = _bwrap_git_common_dir(source_git_root)
         try:
             masks = parity_masks(source_git_root)
         except BwrapMaskOverflow as exc:
@@ -1020,9 +1060,13 @@ def safe_isolated_request(
                 f"{SAFE_BACKEND_ENV}) to run this workspace.",
             ) from exc
         _ensure_no_bwrap_symlink_leaks(source_git_root)
-        binds = (
+        binds = list(
             configured_bwrap_binds(config, workspace=source_git_root) if config is not None else ()
         )
+        if git_common_dir is not None:
+            # A linked worktree keeps its .git as a pointer into a common dir
+            # outside the workspace; without it every git read fails inside.
+            binds.append(Bind(path=git_common_dir, mode="ro"))
         isolation = IsolationContext(
             source_workspace=request.workspace,
             effective_isolation=effective,
@@ -1030,9 +1074,11 @@ def safe_isolated_request(
             isolation_lifecycle="temporary",
             preserved_workspace=False,
             source_git_root=source_git_root,
+            source_git_common_dir=git_common_dir,
             safe_workspace_method=BWRAP_METHOD,
             sandbox={
                 "backend": "bwrap",
+                "bwrapPath": bwrap_path,
                 "masks": [{"path": mask.path, "kind": mask.kind} for mask in masks],
                 "binds": [{"path": bind.path, "mode": bind.mode} for bind in binds],
             },

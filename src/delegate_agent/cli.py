@@ -1313,6 +1313,21 @@ def execute_request(
                     "invalid_option_combination",
                     "--pass-through is incompatible with --json.",
                 )
+            iso_ctx = isolated_request.isolation_context
+            if iso_ctx is not None and iso_ctx.sandbox:
+                # Pass-through execs the child directly; the bwrap boundary is
+                # applied only by the tracked launcher. Refuse rather than run
+                # a "safe" harness against the real checkout unsandboxed.
+                raise DelegateError(
+                    "invalid_option_combination",
+                    "--pass-through cannot run inside the bwrap safe backend; drop "
+                    '--pass-through or set isolation.safeBackend to "copy".',
+                )
+            if isolated_request.notify is not None:
+                raise DelegateError(
+                    "invalid_option_combination",
+                    "--pass-through does not support --notify (no tracked run to report).",
+                )
             try:
                 exit_code = delegate_runner.execute_passthrough(
                     isolated_request.argv,

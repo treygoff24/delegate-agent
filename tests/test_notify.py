@@ -47,13 +47,16 @@ class NotifyArgvTests(unittest.TestCase):
         self.assertEqual(text, "delegate del_x succeeded omp/ox 12s — proj")
 
 
-def _fake_post(directory: Path, *, exit_code: int, stdout: str = "", sleep: float = 0.0) -> str:
+def _fake_post(
+    directory: Path, *, exit_code: int, stdout: str = "", stderr: str = "", sleep: float = 0.0
+) -> str:
     """Install a fake `post` and return a PATH that finds it (plus /bin for sh builtins)."""
     script = directory / "post"
     script.write_text(
         "#!/bin/sh\n"
         f"/bin/sleep {sleep}\n"
         f"printf '%s\\n' \"{stdout}\"\n"
+        f"printf '%b' \"{stderr}\" >&2\n"
         f'echo "$@" > "{directory}/argv.txt"\n'
         f"exit {exit_code}\n"
     )
@@ -92,7 +95,22 @@ class SendNotificationTests(unittest.TestCase):
         path = _fake_post(self.dir, exit_code=65, stdout="post: not_a_member")
         outcome = notify.send_notification(self.target, "m", cwd=self.temp.name, env={"PATH": path})
         self.assertFalse(outcome.ok)
-        self.assertEqual(outcome.reason, "post: not_a_member")
+        self.assertEqual(outcome.reason, "post_failed")
+        self.assertEqual(outcome.detail, "post exited 65")
+        self.assertEqual(
+            outcome.payload(),
+            {
+                "target": self.target.spec,
+                "ok": False,
+                "reason": "post_failed",
+                "detail": "post exited 65",
+            },
+        )
+
+    def test_nonzero_exit_with_stderr_keeps_first_line_as_detail(self) -> None:
+        path = _fake_post(self.dir, exit_code=65, stderr="post: not_a_member\nmore")
+        outcome = notify.send_notification(self.target, "m", cwd=self.temp.name, env={"PATH": path})
+        self.assertEqual((outcome.reason, outcome.detail), ("post_failed", "post: not_a_member"))
 
     def test_timeout_degrades(self) -> None:
         path = _fake_post(self.dir, exit_code=0, sleep=2)
@@ -104,11 +122,12 @@ class SendNotificationTests(unittest.TestCase):
 
     def test_never_sets_post_from(self) -> None:
         path = _fake_post(self.dir, exit_code=0)
-        with mock.patch.object(notify.subprocess, "run", wraps=notify.subprocess.run) as run:
+        with mock.patch.object(notify.subprocess, "Popen", wraps=notify.subprocess.Popen) as popen:
             notify.send_notification(self.target, "m", cwd=self.temp.name, env={"PATH": path})
-        env = run.call_args.kwargs["env"]
+        env = popen.call_args.kwargs["env"]
         self.assertNotIn("POST_FROM", env)
-        self.assertEqual(run.call_args.kwargs["cwd"], self.temp.name)
+        self.assertEqual(popen.call_args.kwargs["cwd"], self.temp.name)
+        self.assertTrue(popen.call_args.kwargs["start_new_session"])
 
 
 class RunnerHookTests(unittest.TestCase):
@@ -149,6 +168,75 @@ class RunnerHookTests(unittest.TestCase):
                 manifest["notify"], {"target": "room:r", "ok": True, "messageId": "id"}
             )
 
+    def test_hook_failure_is_recorded_and_never_raises(self) -> None:
+        from delegate_agent import runner
+
+        with tempfile.TemporaryDirectory() as temp:
+            registry = Path(temp) / "registry"
+            run_path = registry / "runs" / "del_test"
+            run_path.mkdir(parents=True)
+            (run_path / "manifest.json").write_text(json.dumps({"runId": "del_test"}))
+            ctx = mock.Mock()
+            ctx.notify = "room:r"
+            ctx.run_id = "del_test"
+            ctx.registry_root = registry
+            ctx.engine = "omp"
+            ctx.model = "ox"
+            ctx.model_resolved = None
+            ctx.started_at = "not-a-timestamp"
+            ctx.source_cwd = temp
+            files = mock.Mock()
+            files.run_path = run_path
+            with (
+                mock.patch.object(notify, "send_notification", side_effect=RuntimeError("boom")),
+                mock.patch.object(
+                    runner.run_registry,
+                    "load_run_manifest_or_none",
+                    return_value={"runId": "del_test", "warnings": ["earlier"]},
+                ),
+            ):
+                runner._send_completion_notification(files, ctx, "succeeded")
+            manifest = json.loads((run_path / "manifest.json").read_text())
+            self.assertEqual(manifest["notify"]["reason"], "notify_hook_failed")
+            self.assertIn("RuntimeError: boom", manifest["notify"]["detail"])
+            self.assertEqual(
+                manifest["warnings"], ["earlier", "notify_degraded: notify_hook_failed"]
+            )
+
+    def test_launch_failure_fires_the_hook_once(self) -> None:
+        from delegate_agent import runner
+
+        with tempfile.TemporaryDirectory() as temp:
+            registry = Path(temp) / "registry"
+            run_path = registry / "runs" / "del_test"
+            run_path.mkdir(parents=True)
+            ctx = mock.Mock()
+            ctx.notify = "room:r"
+            ctx.run_id = "del_test"
+            ctx.registry_root = registry
+            ctx.harness = "omp"
+            files = mock.Mock()
+            files.run_path = run_path
+            error = runner.RunnerLaunchError("child_launch_failed", "nope")
+            with (
+                mock.patch.object(runner.run_registry, "load_run_state_or_none", return_value=None),
+                mock.patch.object(runner, "write_state"),
+                mock.patch.object(runner, "build_state", return_value={}),
+                mock.patch.object(runner, "build_snapshot", return_value={}),
+                mock.patch.object(runner, "write_snapshot"),
+                mock.patch.object(runner, "_send_completion_notification") as hook,
+            ):
+                runner._record_tracked_launch_failure(files, ctx, error)
+                hook.assert_called_once_with(files, ctx, "failed")
+                hook.reset_mock()
+                with mock.patch.object(
+                    runner.run_registry,
+                    "load_run_state_or_none",
+                    return_value={"status": "cancelled"},
+                ):
+                    runner._record_tracked_launch_failure(files, ctx, error)
+                hook.assert_not_called()
+
     def test_hook_is_a_no_op_without_notify(self) -> None:
         from delegate_agent import runner
 
@@ -159,15 +247,26 @@ class RunnerHookTests(unittest.TestCase):
         send.assert_not_called()
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class ParserAndDryRunTests(unittest.TestCase):
     def setUp(self) -> None:
         from tests.execution_test_base import load_delegate
 
         self.delegate = load_delegate()
+
+    def test_call_input_json_rejects_notify(self) -> None:
+        from delegate_agent import request_build
+        from delegate_agent.request_models import GlobalOptions
+
+        opts = GlobalOptions(json_mode=True, notify="room:r")
+        with self.assertRaises(Exception) as caught:
+            request_build._validate_call_input_json_options(
+                opts,
+                {},
+                raw_progress_intent=None,
+                raw_forbid_commit=False,
+                raw_include_dirty=False,
+            )
+        self.assertIn("call mode does not use --notify", str(caught.exception))
 
     def test_notify_threads_into_global_options_for_launches(self) -> None:
         parsed = self.delegate.parse_cli(
@@ -200,3 +299,7 @@ class ParserAndDryRunTests(unittest.TestCase):
         payload = self.delegate.dry_run_payload(request)
         self.assertEqual(payload["notify"]["target"], "room:devbox")
         self.assertEqual(payload["notify"]["argv"][:4], ["post", "send", "--to", "devbox"])
+
+
+if __name__ == "__main__":
+    unittest.main()

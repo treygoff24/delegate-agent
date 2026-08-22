@@ -383,6 +383,7 @@ Defaults are intentionally conservative for review paths:
 
 - `delegate cursor safe`, `delegate codex safe`, `delegate claude safe`, `delegate grok safe`, `delegate opencode safe`, `delegate pi safe`, `delegate omp safe`, `delegate droid ALIAS safe`, and `delegate kimi safe` run in an isolated throwaway workspace. Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff.
 - On Linux, safe isolation can optionally run **zero-copy** inside an experimental bubblewrap boundary instead of copying the workspace: set `"safeBackend": "bwrap"` under the `isolation` config block or export `DELEGATE_SAFE_BACKEND=bwrap`. The real workspace stays in place, read-only-bound, while gitignored paths are hidden behind parity masks so the review sees the same tree shape a copy would produce. It fails closed rather than falling back: a missing or broken bubblewrap, an untracked symlink that would leak host paths, or more than 2000 gitignored paths all refuse to run, and Cursor safe mode always uses the copy/worktree path.
+- Inside the boundary: `$HOME` and `/tmp` are private tmpfs; the workspace's own `.delegate/` registry (prior runs' prompts, logs, manifests) is masked and only the current run's scratch directory is writable on top of it; only the selected engine's home override (`CODEX_HOME` for codex, `CLAUDE_CONFIG_DIR` for claude) is rw-bound, never a sibling engine's; the engine binary's directory is ro-bound when it lives outside `/usr`, `/opt`, `~/.local`, `~/.cargo/bin`, `~/.bun`; a linked worktree's common git directory is ro-bound so `git` works. Availability is probed on every run with the production boundary (never cached) and the launch uses the exact binary that passed. Fail-closed conditions: bubblewrap unavailable, a leaking untracked symlink, more than 2000 parity masks, an initialized submodule (`bwrap_submodules_unsupported`), any writable root that equals or contains the workspace (`bwrap_bind_conflict`), and `--pass-through` (which execs outside the tracked launcher). Delegate never falls back to the copy backend on its own.
 - Site-specific launch surfaces inside the bubblewrap boundary are declared with `"bwrapBinds"` under `isolation`: a list of `{"path": "...", "mode": "ro"|"rw"}` entries (tilde-expanded) that the engine launch needs but the generic boundary cannot guess — an account-broker socket, a brokered engine home tree, a managed-environment contract file. `$HOME` is a tmpfs inside the boundary, so anything under it that the engine wrapper reads must be listed (Delegate already ro-binds `~/.local`, `~/.cargo/bin`, `~/.bun`, and the engine's own dot-directory when they exist). A listed path that is missing fails the run (`bwrap_bind_missing`), and a `rw` entry that equals or contains the workspace is refused (`bwrap_bind_conflict`) because it would shadow the read-only workspace bind.
 - Grok safe mode uses Delegate isolated copy plus Grok read-only sandbox/permission controls (`--sandbox read-only`, `--permission-mode dontAsk` by default). It does not use Grok `plan` mode. Prompts are delivered via Grok `--prompt-file` from a Delegate temp file.
 - Devin safe mode is unsupported: Devin may implement filesystem surveys through the generic `exec` tool, which Delegate cannot permit without weakening the read-only boundary. Use another safe Harness for filesystem review. Devin work mode uses `--permission-mode dangerous` because Devin print mode rejects unapproved edit/exec tools.
@@ -433,9 +434,14 @@ workspace (`--cwd` or the current directory) to be a registered post room —
 otherwise post refuses with `unknown_room` and the run records a degraded
 notify. post is optional: a missing binary, a refused
 send, or a timeout is recorded in the run manifest as
-`notify: {ok: false, reason}` plus one stderr line, and never changes the
-run's own status or exit code. `--dry-run` shows the target and the post argv;
-`call` mode does not take `--notify`.
+`notify: {ok: false, reason, detail?}` (stable reasons: `post_not_found`,
+`post_launch_failed`, `post_timeout`, `post_failed`, `notify_hook_failed`),
+appends `notify_degraded: <reason>` to the manifest warnings, prints one
+stderr line, and never changes the run's own status or exit code — the hook
+itself is guarded, and post runs in its own process group so a timeout kills
+everything it spawned. The ping also fires when the child fails to launch,
+and survives `resume`. `--dry-run` shows the target and the post argv; `call`
+mode (CLI or input JSON) and `--pass-through` reject `--notify`.
 
 ## Profile-aware auth and env
 

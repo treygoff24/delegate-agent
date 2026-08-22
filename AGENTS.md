@@ -39,6 +39,10 @@ pytest-xdist, so the same suite can run in parallel with
 
 ```bash
 uv run --extra dev pytest -n 8 --dist loadfile
+
+`scripts/test-parity.sh` is the receipt that both runners execute the same
+suite (ran == passed + skipped, skips equal); run it after adding tests that
+use process-global state or skip conditions.
 ```
 
 Use an explicit `-n` (never `-n auto`) on shared machines, and treat unittest
@@ -54,10 +58,16 @@ as the source of truth when the two disagree.
   backend (`isolation.safeBackend` / `DELEGATE_SAFE_BACKEND=bwrap`): the workspace
   is read-only-bound with gitignore-parity masks, and every fail-closed condition
   (bubblewrap unavailable, a leaking untracked symlink, mask overflow, a missing
-  or workspace-covering `isolation.bwrapBinds` entry) aborts the run instead of
-  falling back to the copy backend. `$HOME` is a tmpfs inside the boundary; the
-  HOME tmpfs is emitted before every HOME-relative ro-bind (bwrap mounts in argv
-  order), and site launch surfaces are declared via `isolation.bwrapBinds`.
+  or workspace-covering `isolation.bwrapBinds` entry, an initialized submodule)
+  aborts the run instead of falling back to the copy backend. Inside the
+  boundary `$HOME` and `/tmp` are tmpfs (emitted before every HOME-relative
+  ro-bind, since bwrap mounts in argv order); the workspace `.delegate/`
+  registry is masked and only the current run's scratch is rw-bound on top;
+  only the selected engine's home override (`CODEX_HOME` / `CLAUDE_CONFIG_DIR`)
+  is writable; the engine binary's own directory is ro-bound when it lives
+  outside the core roots; a linked worktree's common git dir is ro-bound; and
+  `--pass-through` is refused because it execs outside the tracked launcher.
+  Site launch surfaces are declared via `isolation.bwrapBinds`.
 - Some harness sandboxes reject `rm` of even freshly created temp files; write
   scratch output to unique `mktemp` paths and skip cleanup rather than retrying
   deletion. Unique names make cleanup unnecessary.
