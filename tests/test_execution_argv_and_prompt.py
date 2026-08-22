@@ -24,7 +24,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
     def assert_tracked_child_exited_and_safe_temp_dirs_cleaned(
         self,
         payload: dict,
-        temp_dirs_before: set[Path],
+        base: Path,
     ) -> None:
         pid = payload.get("pid")
         self.assertIsInstance(pid, int)
@@ -39,11 +39,11 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
             self.fail(f"tracked child process {pid} is still running")
 
         while time.monotonic() < deadline:
-            remaining = safe_temp_dirs() - temp_dirs_before
+            remaining = safe_temp_dirs(base)
             if not remaining:
                 return
             time.sleep(0.02)
-        self.assertEqual(safe_temp_dirs() - temp_dirs_before, set())
+        self.assertEqual(safe_temp_dirs(base), set())
 
     def test_call_json_returns_text_without_registry(self):
         fake_bin = self.make_fake_bin()
@@ -613,7 +613,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         env = os.environ.copy()
         env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
         env["DELEGATE_CONFIG"] = str(config)
-        temp_dirs_before = safe_temp_dirs()
+        base = self.private_tmp_env(env)
 
         completed = subprocess.run(
             [
@@ -639,10 +639,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertIn("executionCwd", payload)
         self.assertNotEqual(payload["executionCwd"], payload["cwd"])
         self.assertTrue(payload.get("isolatedWorkspace"))
-        self.assert_tracked_child_exited_and_safe_temp_dirs_cleaned(
-            payload,
-            temp_dirs_before,
-        )
+        self.assert_tracked_child_exited_and_safe_temp_dirs_cleaned(payload, base)
 
     def test_cursor_safe_git_execution_does_not_mutate_original_workspace(self):
         repo = make_git_repo()
@@ -671,7 +668,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         env = os.environ.copy()
         env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
         env["DELEGATE_CONFIG"] = str(config)
-        temp_dirs_before = safe_temp_dirs()
+        base = self.private_tmp_env(env)
 
         completed = subprocess.run(
             [sys.executable, str(SCRIPT_PATH), "--cwd", repo.name, "cursor", "safe", "review"],
@@ -686,10 +683,10 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertEqual(untracked.read_text(), "local-only\n")
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
-            if not safe_temp_dirs() - temp_dirs_before:
+            if not safe_temp_dirs(base):
                 break
             time.sleep(0.02)
-        self.assertEqual(safe_temp_dirs() - temp_dirs_before, set())
+        self.assertEqual(safe_temp_dirs(base), set())
 
     def test_cursor_safe_directory_execution_does_not_mutate_original_workspace(self):
         with tempfile.TemporaryDirectory() as workspace:
@@ -701,7 +698,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
             env = os.environ.copy()
             env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
             env["DELEGATE_CONFIG"] = str(config)
-            temp_dirs_before = safe_temp_dirs()
+            base = self.private_tmp_env(env)
 
             completed = subprocess.run(
                 [sys.executable, str(SCRIPT_PATH), "--cwd", workspace, "cursor", "safe", "review"],
@@ -715,10 +712,10 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
             self.assertEqual(source.read_text(), "keep-me\n")
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
-                if not safe_temp_dirs() - temp_dirs_before:
+                if not safe_temp_dirs(base):
                     break
                 time.sleep(0.02)
-            self.assertEqual(safe_temp_dirs() - temp_dirs_before, set())
+            self.assertEqual(safe_temp_dirs(base), set())
 
     def make_codex_safe_fake(self):
         temp = tempfile.TemporaryDirectory()
@@ -970,7 +967,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         env = os.environ.copy()
         env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
         env["DELEGATE_CONFIG"] = str(config)
-        temp_dirs_before = safe_temp_dirs()
+        base = self.private_tmp_env(env)
 
         completed = subprocess.run(
             [
@@ -998,7 +995,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         # argv structure assertions live in the dry-run and unit tests; the tracked
         # run JSON summary does not surface argv at the top level (matches Cursor's
         # safe-mutation test).
-        self.assertEqual(safe_temp_dirs() - temp_dirs_before, set())
+        self.assertEqual(safe_temp_dirs(base), set())
 
     def test_claude_safe_git_execution_does_not_mutate_original_workspace(self):
         repo = make_git_repo()
@@ -1015,7 +1012,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         env = os.environ.copy()
         env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
         env["DELEGATE_CONFIG"] = str(config)
-        temp_dirs_before = safe_temp_dirs()
+        base = self.private_tmp_env(env)
 
         completed = subprocess.run(
             [
@@ -1040,10 +1037,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertEqual(Path(payload["cwd"]).resolve(), Path(repo.name).resolve())
         self.assertIn("executionCwd", payload)
         self.assertNotEqual(payload["executionCwd"], payload["cwd"])
-        self.assert_tracked_child_exited_and_safe_temp_dirs_cleaned(
-            payload,
-            temp_dirs_before,
-        )
+        self.assert_tracked_child_exited_and_safe_temp_dirs_cleaned(payload, base)
 
     def make_kimi_safe_fake(self):
         temp = tempfile.TemporaryDirectory()
@@ -1074,7 +1068,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         env = os.environ.copy()
         env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
         env["DELEGATE_CONFIG"] = str(config)
-        temp_dirs_before = safe_temp_dirs()
+        base = self.private_tmp_env(env)
 
         completed = subprocess.run(
             [
@@ -1099,7 +1093,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertEqual(Path(payload["cwd"]).resolve(), Path(repo.name).resolve())
         self.assertIn("executionCwd", payload)
         self.assertNotEqual(payload["executionCwd"], payload["cwd"])
-        self.assert_tracked_child_exited_and_safe_temp_dirs_cleaned(payload, temp_dirs_before)
+        self.assert_tracked_child_exited_and_safe_temp_dirs_cleaned(payload, base)
 
     def test_effective_prompt_codex_safe_order(self):
         user = "review the diff"

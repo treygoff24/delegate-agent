@@ -30,6 +30,10 @@ SAFE_ISOLATION_REQUIRED_ENGINES = frozenset(
     {"cursor", "droid", "kimi", "claude", "grok", "devin", "opencode", "pi", "omp"}
 )
 
+SAFE_BACKEND_COPY = "copy"
+SAFE_BACKEND_BWRAP = "bwrap"
+VALID_SAFE_BACKEND_VALUES = (SAFE_BACKEND_COPY, SAFE_BACKEND_BWRAP)
+
 POLICY_PROFILES = ("safe", "trusted-hooks", "external-sandbox", "custom")
 POLICY_MODE_KEYS = frozenset(
     {
@@ -355,6 +359,18 @@ def _validate_isolation_section(isolation: JsonValue) -> None:
                 "invalid_isolation_config",
                 f"isolation.{mode} must be one of: {', '.join(VALID_ISOLATION_VALUES)}.",
             )
+    backend = isolation.get("safeBackend")
+    if "safeBackend" in isolation and backend is None:
+        raise ConfigError(
+            "invalid_isolation_config",
+            "isolation.safeBackend must not be null; "
+            f"use one of: {', '.join(VALID_SAFE_BACKEND_VALUES)}.",
+        )
+    if backend is not None and backend not in VALID_SAFE_BACKEND_VALUES:
+        raise ConfigError(
+            "invalid_isolation_config",
+            f"isolation.safeBackend must be one of: {', '.join(VALID_SAFE_BACKEND_VALUES)}.",
+        )
 
 
 def _validate_required_non_negative_int(

@@ -34,6 +34,16 @@ summary to stderr — pipe with `2>&1` when capturing output.
 `ruff` comes from the `dev` extra (`python3 -m pip install -e ".[dev]"`);
 `ruff format .` applies formatting.
 
+Fast local accelerator (not a gate): the dev extra also ships pytest +
+pytest-xdist, so the same suite can run in parallel with
+
+```bash
+uv run --extra dev pytest -n 8 --dist loadfile
+```
+
+Use an explicit `-n` (never `-n auto`) on shared machines, and treat unittest
+as the source of truth when the two disagree.
+
 ## Runtime boundaries
 
 - `safe` mode is for review/investigation and must not edit files; `work` mode

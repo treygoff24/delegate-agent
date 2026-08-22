@@ -25,6 +25,7 @@ from delegate_agent import (
     failover_state,
     harness_events,
     mail,
+    mail_push,
     profiles,
     prompt_instructions,
     reasoning,
@@ -33,6 +34,7 @@ from delegate_agent import (
     resume_command,
     run_metadata,
     run_registry,
+    sandbox_bwrap,
     seatbelt,
     worktree_summary,
 )
@@ -176,6 +178,7 @@ class RunContext:
     persona_text: str | None = None
     mail_push: bool = False
     account_binding_command: tuple[str, ...] | None = None
+    sandbox: JsonObject | None = None
 
 
 def write_manifest(run_path: Path, manifest: JsonObject) -> None:
@@ -1103,6 +1106,14 @@ def _join_stdin_thread(thread: threading.Thread | None, pipe: BinaryIO | None) -
         _join_drain_thread(thread, pipe)
 
 
+def _mkdtemp_under(prefix: str, temp_base: Path | None) -> Path:
+    # Under the bwrap backend /tmp is a private tmpfs, so prompt/schema temp
+    # files must live under the run scratch dir (rw-bound) to be child-visible.
+    if temp_base is None:
+        return Path(tempfile.mkdtemp(prefix=prefix))
+    return Path(tempfile.mkdtemp(prefix=prefix, dir=temp_base))
+
+
 def _materialize_prompt_file_argv(
     argv: list[str],
     *,
@@ -1113,6 +1124,7 @@ def _materialize_prompt_file_argv(
     persona_file_text: str | None = None,
     persona_file_placeholder: str | None = None,
     agent_config_dir: Path | None = None,
+    temp_base: Path | None = None,
 ) -> tuple[list[str], Path | None]:
     if prompt_file_text is None and agent_config_text is None and persona_file_text is None:
         return list(argv), None
@@ -1121,7 +1133,7 @@ def _materialize_prompt_file_argv(
     if prompt_file_text is not None:
         if prompt_file_placeholder is None or prompt_file_placeholder not in argv:
             raise ValueError("prompt_file_placeholder must be present in argv")
-        temp_dir = Path(tempfile.mkdtemp(prefix="delegate-prompt-"))
+        temp_dir = _mkdtemp_under("delegate-prompt-", temp_base)
         os.chmod(temp_dir, run_registry.PRIVATE_DIR_MODE)
         prompt_path = temp_dir / "prompt.txt"
         fd = os.open(
@@ -1137,7 +1149,7 @@ def _materialize_prompt_file_argv(
             raise ValueError("agent_config_placeholder must be present in argv")
         if agent_config_dir is None:
             if temp_dir is None:
-                temp_dir = Path(tempfile.mkdtemp(prefix="delegate-prompt-"))
+                temp_dir = _mkdtemp_under("delegate-prompt-", temp_base)
                 os.chmod(temp_dir, run_registry.PRIVATE_DIR_MODE)
             agent_config_dir = temp_dir
         path = agent_config_dir / "agent-config.json"
@@ -1155,7 +1167,7 @@ def _materialize_prompt_file_argv(
             raise ValueError("persona_file_placeholder must be present in argv")
         if agent_config_dir is None:
             if temp_dir is None:
-                temp_dir = Path(tempfile.mkdtemp(prefix="delegate-prompt-"))
+                temp_dir = _mkdtemp_under("delegate-prompt-", temp_base)
                 os.chmod(temp_dir, run_registry.PRIVATE_DIR_MODE)
             persona_path = temp_dir / PERSONA_TXT_FILE
         else:
@@ -1172,6 +1184,7 @@ def _materialize_output_schema_argv(
     output_schema_text: str | None,
     output_schema_path: str | None,
     destination_dir: Path | None = None,
+    temp_base: Path | None = None,
 ) -> tuple[list[str], Path | None]:
     if output_schema_text is None:
         return list(argv), None
@@ -1179,7 +1192,7 @@ def _materialize_output_schema_argv(
         raise ValueError("output_schema_path must be present in argv")
     temp_dir: Path | None = None
     if destination_dir is None:
-        temp_dir = Path(tempfile.mkdtemp(prefix="delegate-schema-"))
+        temp_dir = _mkdtemp_under("delegate-schema-", temp_base)
         os.chmod(temp_dir, run_registry.PRIVATE_DIR_MODE)
         schema_path = temp_dir / "schema.json"
     else:
@@ -1456,6 +1469,38 @@ def _codex_argv_with_scratch(argv: list[str], scratch_dir: Path | None) -> list[
     return updated
 
 
+def _masks_from_sandbox(payload: JsonObject | None) -> tuple[sandbox_bwrap.Mask, ...]:
+    if not payload:
+        return ()
+    entries = payload.get("masks")
+    if not isinstance(entries, list):
+        return ()
+    masks: list[sandbox_bwrap.Mask] = []
+    for entry in entries:
+        if (
+            isinstance(entry, dict)
+            and isinstance(entry.get("path"), str)
+            and isinstance(entry.get("kind"), str)
+        ):
+            masks.append(sandbox_bwrap.Mask(path=entry["path"], kind=entry["kind"]))
+    return tuple(masks)
+
+
+def _bwrap_mail_push_rw_roots(ctx: RunContext) -> list[str]:
+    """Mail-push private homes must stay writable inside the bwrap boundary."""
+    if not ctx.mail_push:
+        return []
+    run_path = run_registry.run_directory(ctx.registry_root, ctx.run_id)
+    return [
+        str(run_path / name)
+        for name in (
+            mail_push.MAIL_PUSH_CODEX_HOME_NAME,
+            mail_push.MAIL_PUSH_FALLBACK_CODEX_HOME_NAME,
+        )
+        if (run_path / name).is_dir()
+    ]
+
+
 def _launch_tracked_process(
     argv: list[str],
     cwd: str,
@@ -1464,12 +1509,27 @@ def _launch_tracked_process(
     env_overrides: dict[str, str] | None = None,
     drop_env: tuple[str, ...] = (),
     scratch_dir: Path | None = None,
+    sandbox: JsonObject | None = None,
+    engine: str = "",
+    extra_rw_roots: list[str] | None = None,
 ) -> subprocess.Popen[bytes]:
     env = profiles.child_environment(
         overrides=_env_overrides_with_scratch(env_overrides, scratch_dir)
     )
     for key in drop_env:
         env.pop(key, None)
+    if sandbox:
+        # Child env is final here (CODEX_HOME / mail-push homes / TMPDIR all
+        # resolved), mirroring where the codex-pure seatbelt prefix is applied.
+        argv = sandbox_bwrap.wrap_engine_argv(
+            engine_argv=argv,
+            cwd=cwd,
+            env=env,
+            engine=engine,
+            scratch_dir=str(scratch_dir) if scratch_dir is not None else None,
+            masks=_masks_from_sandbox(sandbox),
+            extra_rw_roots=extra_rw_roots,
+        )
     return subprocess.Popen(  # nosec B603 - Delegate intentionally launches validated harness argv with shell=False.
         argv,
         cwd=cwd,
@@ -2464,6 +2524,9 @@ def _run_single_tracked_attempt(
                     ("DELEGATE_CONFIG",) if env_overrides is ctx.fallback_env_overrides else ()
                 ),
                 scratch_dir=scratch_dir,
+                sandbox=ctx.sandbox,
+                engine=ctx.engine,
+                extra_rw_roots=_bwrap_mail_push_rw_roots(ctx) if ctx.sandbox else None,
             )
         except OSError as exc:
             launch_exc = exc
@@ -2592,6 +2655,7 @@ def _materialize_empty_retry(
     agent_config_dir: Path | None = None,
     persona_file_text: str | None = None,
     persona_file_placeholder: str | None = None,
+    temp_base: Path | None = None,
 ) -> tuple[list[str], str | None, str | None]:
     if stdin_text is not None:
         return list(argv), _append_empty_retry_instruction(stdin_text), None
@@ -2605,6 +2669,7 @@ def _materialize_empty_retry(
             agent_config_dir=agent_config_dir,
             persona_file_text=persona_file_text,
             persona_file_placeholder=persona_file_placeholder,
+            temp_base=temp_base,
         )
         return retry_argv, None, retry_dir
     retry_argv = list(argv)
@@ -2708,6 +2773,7 @@ def _execute_tracked(
     )
     if ctx.engine == "codex" and files.scratch_dir is not None:
         write_manifest(files.run_path, build_manifest(ctx, run_manifest_argv or run_argv))
+    sandbox_temp_base = files.scratch_dir if ctx.sandbox else None
     launch_argv, prompt_temp_dir = _materialize_prompt_file_argv(
         run_argv,
         prompt_file_text=prompt_file_text,
@@ -2717,12 +2783,14 @@ def _execute_tracked(
         persona_file_text=persona_file_text,
         persona_file_placeholder=persona_file_placeholder,
         agent_config_dir=files.run_path,
+        temp_base=sandbox_temp_base,
     )
     launch_argv, schema_temp_dir = _materialize_output_schema_argv(
         launch_argv,
         output_schema_text=output_schema_text,
         output_schema_path=output_schema_path,
         destination_dir=files.run_path if ctx.resumed_from is not None else None,
+        temp_base=sandbox_temp_base,
     )
     retry_workspace = ctx.execution_cwd if ctx.isolated_workspace else cwd
     workspace_baseline = (
@@ -3011,6 +3079,7 @@ def _execute_tracked(
                     agent_config_dir=files.run_path,
                     persona_file_text=persona_file_text,
                     persona_file_placeholder=persona_file_placeholder,
+                    temp_base=sandbox_temp_base,
                 )
                 if (
                     ctx.resumed_from is not None

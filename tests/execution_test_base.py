@@ -39,8 +39,10 @@ def make_git_repo():
 GIT_TEST_IDENTITY = ("-c", "user.name=Delegate Test", "-c", "user.email=delegate-test@example.com")
 
 
-def safe_temp_dirs() -> set[Path]:
-    return set(Path(tempfile.gettempdir()).glob("delegate-safe-*"))
+def safe_temp_dirs(base=None):
+    """delegate-safe-* dirs under ``base``, or the ambient temp dir when None."""
+    root = Path(base) if base is not None else Path(tempfile.gettempdir())
+    return set(root.glob("delegate-safe-*"))
 
 
 class ExecutionTestBase(unittest.TestCase):
@@ -49,6 +51,18 @@ class ExecutionTestBase(unittest.TestCase):
         home = tempfile.TemporaryDirectory()
         self.addCleanup(home.cleanup)
         self._test_home = home.name
+
+    def private_tmp_env(self, env) -> str:
+        """Point env's TMPDIR/TMP/TEMP at a fresh per-test dir.
+
+        The delegate subprocess then creates its delegate-safe-* workspace inside a
+        directory no other xdist worker can see, so cleanup assertions are race-free.
+        """
+        temp = tempfile.TemporaryDirectory(prefix="delegate-test-tmp-")
+        self.addCleanup(temp.cleanup)
+        for var in ("TMPDIR", "TMP", "TEMP"):
+            env[var] = temp.name
+        return temp.name
 
     def build_git_request(
         self,

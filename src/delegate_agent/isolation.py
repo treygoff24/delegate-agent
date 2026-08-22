@@ -59,6 +59,9 @@ class IsolationContext:
     # Populated only for lifecycle "attached" (resume into a live persistent
     # worktree): {"sourceRunId", "sourceAlias", "path"}.
     attachment: JsonObject | None = None
+    # bwrap safe backend only: {"backend": "bwrap", "masks": [{"path", "kind"}, ...]};
+    # None for the copy/worktree path.
+    sandbox: JsonObject | None = None
 
 
 def compute_repo_fingerprint_from_common_dir(git_common_dir: str) -> str:

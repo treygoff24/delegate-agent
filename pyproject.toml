@@ -44,6 +44,8 @@ dev = [
   "ruff==0.15.15",
   "build>=1.0",
   "twine>=5.0",
+  "pytest>=8",
+  "pytest-xdist>=3",
 ]
 
 [tool.setuptools]

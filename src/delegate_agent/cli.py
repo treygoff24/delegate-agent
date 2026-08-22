@@ -32,6 +32,7 @@ from delegate_agent import (
     run_metadata,
     run_output_commands,
     run_registry,
+    sandbox_bwrap,
     setup_commands,
     wait_cancel_commands,
     worktree_commands,
@@ -145,6 +146,10 @@ from delegate_agent.safe_workspace import (  # noqa: F401  # re-exported for tes
     read_git_tracked_diff,
     safe_isolated_request,
     write_cursor_safe_project_config,
+)
+from delegate_agent.sandbox_bwrap import (  # re-exported for tests
+    BWRAP_METHOD,
+    requested_safe_backend,
 )
 from delegate_agent.workflows import commands as workflow_commands
 
@@ -317,7 +322,7 @@ def emit_personas(workspace: ResolvedWorkspace, *, json_mode: bool, stdout: Text
     return EXIT_OK
 
 
-def dry_run_payload(request: Request) -> JsonObject:
+def dry_run_payload(request: Request, config: JsonObject | None = None) -> JsonObject:
     payload: JsonObject = {
         "ok": True,
         "dryRun": True,
@@ -430,6 +435,16 @@ def dry_run_payload(request: Request) -> JsonObject:
             "persistent",
             "attached",
         )
+        if (
+            config is not None
+            and ctx.isolation_lifecycle == "temporary"
+            and ctx.effective_isolation == "worktree"
+            and request.engine != "cursor"
+            and request.workspace_kind == "git"
+            and requested_safe_backend(config) == delegate_config.SAFE_BACKEND_BWRAP
+        ):
+            payload["safeWorkspaceMethod"] = BWRAP_METHOD
+            payload["argv"] = sandbox_bwrap.bwrap_display_argv(payload["argv"])
     else:
         # Fallback when no isolation context is provided (e.g. direct build_request calls in tests).
         # Use embedded-default logic: safe local harnesses -> worktree temporary, others -> none.
@@ -589,6 +604,7 @@ def make_run_context(
         source_git_root = iso_ctx.source_git_root
         safe_workspace_method = iso_ctx.safe_workspace_method
         warnings = iso_ctx.warnings
+        sandbox = iso_ctx.sandbox
     else:
         isolation_mode = "none"
         effective_isolation = "none"
@@ -598,6 +614,7 @@ def make_run_context(
         source_git_root = None
         safe_workspace_method = None
         warnings = ()
+        sandbox = None
 
     return delegate_runner.RunContext(
         registry_root=registry_root,
@@ -625,6 +642,7 @@ def make_run_context(
         preserved_workspace=preserved_workspace,
         branch=branch,
         safe_workspace_method=safe_workspace_method,
+        sandbox=sandbox,
         warnings=(*warnings, *request.warnings),
         reasoning_effort=request.reasoning_effort,
         requested_reasoning_effort=request.requested_reasoning_effort,
@@ -1267,8 +1285,7 @@ def execute_request(
             )
         except worktree_execution.PersistentWorktreeError as exc:
             raise DelegateError(exc.error, exc.message, exc.exit_code) from exc
-
-    with safe_isolated_request(request) as isolated_request:
+    with safe_isolated_request(request, config=config) as isolated_request:
         _set_child_root_env(isolated_request, source_workspace)
         if isolated_request.resumed_from is not None and isolated_request.argv:
             resume_command.enforce_resume_prompt_size(
@@ -1703,7 +1720,7 @@ def main(
         if resume_plan is not None:
             request = resume_command.apply_resume_to_request(request, resume_plan)
         if request.dry_run:
-            payload = dry_run_payload(request)
+            payload = dry_run_payload(request, config=config)
             if global_options.json_mode:
                 delegate_rendering.print_json(payload, stdout)
             else:
@@ -1717,6 +1734,8 @@ def main(
                     print(f"plannedBranch: {payload['plannedBranch']}", file=stdout)
                 if payload.get("plannedExecutionCwd"):
                     print(f"plannedExecutionCwd: {payload['plannedExecutionCwd']}", file=stdout)
+                if payload.get("safeWorkspaceMethod"):
+                    print(f"safe workspace method: {payload['safeWorkspaceMethod']}", file=stdout)
                 # Use the payload's rewritten argv (which shows planned paths) when
                 # worktree isolation is active; otherwise use the source request.argv.
                 display_argv = payload.get("argv", request.argv)

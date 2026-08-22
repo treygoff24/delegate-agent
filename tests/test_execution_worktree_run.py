@@ -1653,7 +1653,8 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
                 workspace_kind="git",
                 isolation_context=isolation_context,
             )
-            temp_dirs_before = safe_temp_dirs()
+            tmp_base = tempfile.TemporaryDirectory(prefix="delegate-test-tmp-")
+            self.addCleanup(tmp_base.cleanup)
             branches_before = subprocess.run(
                 ["git", "-C", repo.name, "branch", "--list", "delegate/*"],
                 capture_output=True,
@@ -1661,12 +1662,16 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
                 check=False,
             ).stdout.strip()
 
-            with mock.patch.dict(
-                os.environ,
-                {
-                    "PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", ""),
-                    "FAKE_EXIT": "7",
-                },
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", ""),
+                        "FAKE_EXIT": "7",
+                    },
+                ),
+                # Redirect tempfile so delegate-safe-* lands in a worker-unique dir.
+                mock.patch.object(tempfile, "tempdir", tmp_base.name),
             ):
                 code, _ = self.delegate.execute_request(
                     request,
@@ -1685,7 +1690,7 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
             # 2. Temporary worktree directory must NOT exist after exit
             #    (cleaned up by the finally block).
             self.assertEqual(
-                safe_temp_dirs() - temp_dirs_before,
+                safe_temp_dirs(Path(tmp_base.name)),
                 set(),
                 "No new delegate-safe-* temp dirs should remain after cleanup",
             )

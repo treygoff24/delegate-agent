@@ -14,6 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tokens are never emitted or persisted; unauthenticated or malformed status
   output omits the fingerprint so consumers can fail closed.
 
+### Changed
+
+- The dev extra now ships `pytest` and `pytest-xdist`, so `pytest -n 8
+  --dist loadfile` works as a fast local test accelerator. Unittest discovery
+  remains the validation gate; safe-workspace tests were tightened to use
+  per-test temp dirs so they stay race-free under parallel workers.
+
 ## [0.29.1] - 2026-08-11
 
 ### Changed

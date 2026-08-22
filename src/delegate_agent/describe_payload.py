@@ -57,6 +57,7 @@ from delegate_agent.prompt_transport import (
     prompt_file_display_argv,
 )
 from delegate_agent.request_build import OPENCODE_SAFE_AGENT, _resolve_default_model
+from delegate_agent.sandbox_bwrap import SAFE_BACKEND_ENV, bwrap_available
 
 CONFIG_ENV = delegate_config.CONFIG_ENV
 
@@ -975,6 +976,22 @@ def describe_payload(
                 "opencode": False,
                 "pi": False,
                 "omp": False,
+            },
+        },
+        "safeBackends": {
+            "values": list(delegate_config.VALID_SAFE_BACKEND_VALUES),
+            "availability": {
+                "copy": {"available": True, "platforms": ["darwin", "linux"]},
+                "bwrap": {"available": bwrap_available(), "platforms": ["linux"]},
+            },
+            "configKeys": {
+                "config": "isolation.safeBackend",
+                "env": SAFE_BACKEND_ENV,
+                "note": (
+                    "DELEGATE_SAFE_BACKEND overrides isolation.safeBackend; an invalid "
+                    "value on either channel fails closed. bwrap applies to non-cursor "
+                    "safe runs on Git workspaces with effective worktree isolation."
+                ),
             },
         },
         "worktrees": {

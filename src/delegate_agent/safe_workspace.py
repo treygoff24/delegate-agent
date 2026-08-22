@@ -22,13 +22,14 @@ import shutil
 import stat
 import subprocess  # nosec B404 - Delegate launches configured git/harness commands with shell=False.
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 from delegate_agent.argv_utils import public_argv
 from delegate_agent.argv_utils import replace_workspace_arg_in_argv as _replace_ws_by_engine
+from delegate_agent.config import SAFE_BACKEND_BWRAP
 from delegate_agent.constants import PROMPT_INSTRUCTION_MODE_SLASH
 from delegate_agent.errors import DelegateError
 from delegate_agent.git_utils import (
@@ -41,6 +42,15 @@ from delegate_agent.isolation import IsolationContext, target_contains_source_ro
 from delegate_agent.json_types import JsonObject
 from delegate_agent.prompt_transport import PROMPT_TRANSPORT_ARGV
 from delegate_agent.request_models import Request
+from delegate_agent.sandbox_bwrap import (
+    BWRAP_METHOD,
+    SAFE_BACKEND_COPY,
+    SAFE_BACKEND_ENV,
+    BwrapMaskOverflow,
+    ensure_bwrap_backend,
+    parity_masks,
+    requested_safe_backend,
+)
 
 # Project .cursor/cli.json is permissions-only; global cli-config examples may
 # include other top-level keys such as "version", but Cursor rejects them here.
@@ -73,6 +83,15 @@ CURSOR_SAFE_CLI_CONFIG: JsonObject = {
 SAFE_UNBORN_GIT_WARNING = (
     "Git repository has no commits; safe isolation used a directory copy instead "
     "of a detached git worktree."
+)
+
+BWRAP_CURSOR_COPY_NOTE = (
+    "isolation.safeBackend=bwrap requested, but Cursor safe mode always uses "
+    "the copy/worktree isolation path."
+)
+BWRAP_NON_GIT_COPY_NOTE = (
+    "isolation.safeBackend=bwrap requested, but the workspace is not a Git "
+    "repository; using copy isolation."
 )
 
 SAFE_EXTERNAL_SYMLINK_WARNING_PREFIX = (
@@ -916,15 +935,57 @@ def cleanup_safe_isolated_workspace(
     shutil.rmtree(temp_base, ignore_errors=True)
 
 
-@contextmanager
-def safe_isolated_request(request: Request) -> Iterator[Request]:
-    """Context manager that creates a temporary isolated workspace for safe-mode runs.
+def _ensure_no_bwrap_symlink_leaks(git_root: str) -> None:
+    """Fail closed before a bwrap run when untracked symlinks would leak.
 
+    Runs the same leak classification the copy backend applies during sync
+    (``_classify_untracked_symlink_leaks``). A ro-bound real workspace cannot
+    have symlinks replaced with inert placeholders, so any leak-blocked
+    symlink is a hard error here instead of a placeholder + warning.
+    """
+    untracked = _git_paths(
+        git_root,
+        ["ls-files", "--others", "--exclude-standard"],
+        error="Failed to list untracked files",
+    )
+    root = Path(git_root)
+    try:
+        root_resolved = root.resolve(strict=True)
+    except OSError:
+        root_resolved = root
+    leak_blocked, _warnings = _classify_untracked_symlink_leaks(
+        git_root,
+        untracked,
+        root,
+        root_resolved,
+    )
+    if not leak_blocked:
+        return
+    preview = ", ".join(sorted(leak_blocked)[:5])
+    raise DelegateError(
+        "bwrap_symlink_leak",
+        "bwrap isolation refuses to run: untracked symlink(s) resolve to "
+        f"gitignored or host-path targets ({preview}). Remove the symlink(s) "
+        'or set isolation.safeBackend to "copy".',
+    )
+
+
+@contextmanager
+def safe_isolated_request(
+    request: Request,
+    *,
+    config: Mapping[str, object] | None = None,
+    env: Mapping[str, str] | None = None,
+) -> Iterator[Request]:
+    """Context manager that creates a temporary isolated workspace for safe-mode runs.
     Respects the isolation context:
     - effective_isolation == "none": skip isolation, yield original request.
     - effective_isolation == "worktree": create temp git worktree (or dir copy
       for auto legacy fallback). For cursor, writes .cursor/cli.json in the
-      isolated workspace only.
+      isolated workspace only. When the configured safe backend is ``bwrap``
+      (and the engine/workspace allow it), skip the copy entirely: the
+      workspace stays in place and the launch wraps the engine argv in a
+      bubblewrap boundary carrying the gitignore parity masks.
     """
     ctx = request.isolation_context
     effective = ctx.effective_isolation if ctx is not None else None
@@ -938,6 +999,42 @@ def safe_isolated_request(request: Request) -> Iterator[Request]:
     safe_workspace_method: str | None = None
     warnings_list: list[str] = []
     safe_workspace_warnings: tuple[str, ...] = ()
+
+    backend = requested_safe_backend(config, env) if config is not None else SAFE_BACKEND_COPY
+    if backend == SAFE_BACKEND_BWRAP:
+        if request.engine == "cursor":
+            warnings_list.append(BWRAP_CURSOR_COPY_NOTE)
+        elif request.workspace_kind != "git":
+            warnings_list.append(BWRAP_NON_GIT_COPY_NOTE)
+    if backend == SAFE_BACKEND_BWRAP and request.engine != "cursor" and source_git_root is not None:
+        # Hard requirements, no fallback: Delegate never switches backends
+        # after deciding.
+        ensure_bwrap_backend()
+        try:
+            masks = parity_masks(source_git_root)
+        except BwrapMaskOverflow as exc:
+            raise DelegateError(
+                "bwrap_mask_overflow",
+                f'{exc} Set isolation.safeBackend to "copy" (or clear '
+                f"{SAFE_BACKEND_ENV}) to run this workspace.",
+            ) from exc
+        _ensure_no_bwrap_symlink_leaks(source_git_root)
+        isolation = IsolationContext(
+            source_workspace=request.workspace,
+            effective_isolation=effective,
+            isolation_mode=isolation_mode,
+            isolation_lifecycle="temporary",
+            preserved_workspace=False,
+            source_git_root=source_git_root,
+            safe_workspace_method=BWRAP_METHOD,
+            sandbox={
+                "backend": "bwrap",
+                "masks": [{"path": mask.path, "kind": mask.kind} for mask in masks],
+            },
+            warnings=tuple(warnings_list),
+        )
+        yield replace(request, isolation_context=isolation)
+        return
 
     if source_git_root is not None and git_head_exists(source_git_root):
         isolated_workspace, temp_base, safe_workspace_warnings = create_git_safe_workspace(
