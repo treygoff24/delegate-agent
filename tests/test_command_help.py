@@ -273,7 +273,7 @@ class OverviewTests(unittest.TestCase):
         call_lines = [
             usage for usage in command_help.COMMAND_SPECS["dry-run"].usage if " call " in usage
         ]
-        self.assertEqual(len(call_lines), 4)
+        self.assertEqual(len(call_lines), 5)
         for line in call_lines:
             for option in ("--cwd", "--isolation", "--forbid-commit", "--include-dirty"):
                 with self.subTest(line=line, option=option):
