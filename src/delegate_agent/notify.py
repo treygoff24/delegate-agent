@@ -1,9 +1,9 @@
 """Completion notification over the ``post`` CLI (``--notify``).
 
 Delegate is an OSS tool; ``post`` is an optional sibling. Everything here is
-probe-and-degrade: a missing binary, a refused send, or a timeout becomes a
-``notifyDegraded`` record in the run manifest and never changes the run's own
-result. The message is metadata only (never prompt or output text), and the
+probe-and-degrade: a missing binary, a refused send, or a timeout becomes
+``notify: {ok: false, reason, detail?}`` in the run manifest plus a
+``notify_degraded`` warning, and never changes the run's own result. The message is metadata only (never prompt or output text), and the
 sender identity is whatever ``post`` resolves for the CALLER — the run's
 source workspace is the cwd and the inherited environment carries any
 ``POST_FROM`` pin; Delegate never synthesizes a sender.
@@ -66,10 +66,15 @@ class NotifyOutcome:
         return result
 
 
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
 def _first_line(text: str) -> str | None:
+    """post's first non-empty stderr line, control characters stripped, capped."""
     for line in text.splitlines():
-        if line.strip():
-            return line.strip()[:DETAIL_LIMIT]
+        cleaned = _CONTROL_RE.sub("", line).strip()
+        if cleaned:
+            return cleaned[:DETAIL_LIMIT]
     return None
 
 

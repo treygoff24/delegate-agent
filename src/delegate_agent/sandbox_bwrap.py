@@ -122,10 +122,13 @@ def configured_bwrap_binds(config: Mapping[str, object], *, workspace: str) -> t
 
     Site-specific launch surfaces (an account broker socket, brokered engine
     home trees, a managed-env contract file) cannot be guessed by the generic
-    boundary, so operators declare them. Every entry must exist on the host,
-    and a writable entry may never cover the workspace itself: a later rw
-    mount of the workspace or one of its ancestors would shadow the read-only
-    workspace bind and silently turn safe mode into work mode.
+    boundary, so operators declare them. Every entry must be absolute (after
+    ``~`` expansion) and exist on the host; paths are canonicalised. A writable
+    entry may never intersect the workspace in either direction: a rw mount of
+    the workspace or an ancestor would shadow the read-only bind, and a rw
+    mount of a descendant would re-open that subtree (or the masked registry)
+    for writes. Only the tracked launcher's own run directory is ever rw-bound
+    inside the workspace.
     """
     isolation = config.get("isolation")
     entries = isolation.get("bwrapBinds") if isinstance(isolation, Mapping) else None
@@ -141,20 +144,26 @@ def configured_bwrap_binds(config: Mapping[str, object], *, workspace: str) -> t
         if not isinstance(raw_path, str) or mode not in BIND_MODES:
             continue
         expanded = os.path.expanduser(raw_path)
+        if not os.path.isabs(expanded):
+            raise DelegateError(
+                "invalid_isolation_config",
+                f"isolation.bwrapBinds entry {raw_path!r} must be an absolute path "
+                "(a leading ~ is expanded).",
+            )
         if not os.path.exists(expanded):
             raise DelegateError(
                 "bwrap_bind_missing",
                 f"isolation.bwrapBinds entry {raw_path!r} does not exist on this host; "
                 "remove it or create the path before running with the bwrap backend.",
             )
-        target = Path(expanded).resolve()
-        if mode == "rw" and (
-            target == resolved_workspace or resolved_workspace.is_relative_to(target)
-        ):
+        expanded = os.path.realpath(expanded)
+        target = Path(expanded)
+        if mode == "rw" and _paths_intersect(target, resolved_workspace):
             raise DelegateError(
                 "bwrap_bind_conflict",
-                f"isolation.bwrapBinds entry {raw_path!r} is writable and covers the "
-                f"workspace {workspace}; a rw bind may not include the read-only workspace.",
+                f"isolation.bwrapBinds entry {raw_path!r} is writable and intersects the "
+                f"workspace {workspace}; a rw bind may neither contain nor live inside the "
+                "read-only workspace.",
             )
         bind = Bind(path=expanded, mode=mode)
         if bind not in binds:
@@ -403,9 +412,9 @@ def wrap_engine_argv(
     for root in extra_ro_roots or []:
         if root not in ro_roots:
             ro_roots.append(root)
-    for engine_dir in _engine_binary_dirs(engine_argv, environment):
-        if not _visible_inside(engine_dir, ro_roots) and engine_dir not in ro_roots:
-            ro_roots.append(engine_dir)
+    for engine_file in _engine_binary_files(engine_argv, environment):
+        if not _visible_inside(engine_file, ro_roots) and engine_file not in ro_roots:
+            ro_roots.append(engine_file)
     rw_roots = [scratch_dir] if scratch_dir else []
     for root in extra_rw_roots or []:
         if root not in rw_roots:
@@ -416,8 +425,18 @@ def wrap_engine_argv(
         if home_var and environment.get(home_var, "").strip()
         else None
     )
-    _refuse_rw_roots_covering_workspace(cwd, [*rw_roots, *([engine_home] if engine_home else [])])
     registry = os.path.join(cwd, REGISTRY_DIR_NAME)
+    run_dir = (
+        os.path.dirname(os.path.realpath(scratch_dir))
+        if scratch_dir
+        and Path(os.path.realpath(scratch_dir)).is_relative_to(Path(registry).resolve())
+        else None
+    )
+    _refuse_rw_roots_intersecting_workspace(
+        cwd,
+        [*rw_roots, *([engine_home] if engine_home else [])],
+        internal_allowed=run_dir,
+    )
     if os.path.isdir(registry) and not any(mask.path == REGISTRY_DIR_NAME for mask in masks):
         masks = (*masks, Mask(path=REGISTRY_DIR_NAME, kind=MASK_KIND_TMPFS))
     return build_bwrap_argv(
@@ -433,24 +452,24 @@ def wrap_engine_argv(
     )
 
 
-def _engine_binary_dirs(engine_argv: list[str], env: Mapping[str, str]) -> list[str]:
-    """Directories holding the engine binary (as found on PATH, and its realpath).
+def _engine_binary_files(engine_argv: list[str], env: Mapping[str, str]) -> list[str]:
+    """The engine executable (as found on PATH) and its realpath.
 
     An engine installed outside the core roots (a wrapper in a temp dir, a
     per-user install under an unusual prefix) would otherwise be invisible:
-    the boundary replaces /tmp and $HOME with tmpfs.
+    the boundary replaces /tmp and $HOME with tmpfs. Only the files themselves
+    are bound, never their directories.
     """
     if not engine_argv:
         return []
     resolved = shutil.which(engine_argv[0], path=env.get("PATH") or None)
     if resolved is None:
         return []
-    dirs: list[str] = []
+    files: list[str] = []
     for candidate in (resolved, os.path.realpath(resolved)):
-        directory = os.path.dirname(candidate)
-        if directory and directory not in dirs:
-            dirs.append(directory)
-    return dirs
+        if candidate not in files:
+            files.append(candidate)
+    return files
 
 
 _ALWAYS_VISIBLE_PREFIXES = tuple(f"{root}/" for root in _CORE_RO_BINDS) + tuple(
@@ -465,14 +484,56 @@ def _visible_inside(directory: str, ro_roots: list[str]) -> bool:
     return any(path.startswith(root.rstrip("/") + "/") for root in ro_roots)
 
 
-def _refuse_rw_roots_covering_workspace(workspace: str, rw_roots: list[str]) -> None:
-    """A rw mount equal to or above the workspace would shadow its ro bind."""
+def preflight_plan(argv: list[str], *, timeout: float = 10.0) -> None:
+    """Run the exact final boundary with ``/bin/true`` as the engine.
+
+    A missing bind source or a mount the kernel refuses surfaces here as a
+    clean ``bwrap_launch_failed`` instead of a half-started child.
+    """
+    try:
+        separator = argv.index("--")
+    except ValueError as exc:
+        raise DelegateError("bwrap_launch_failed", "malformed bwrap argv (no --)") from exc
+    probe = [*argv[: separator + 1], "/bin/true"]
+    try:
+        result = subprocess.run(  # nosec B603 - the plan under test, shell=False.
+            probe,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise DelegateError("bwrap_launch_failed", f"bwrap preflight could not run: {exc}") from exc
+    if result.returncode != 0:
+        detail = os.fsdecode(result.stderr or b"").strip().splitlines()
+        first = detail[0][:200] if detail else f"exit {result.returncode}"
+        raise DelegateError("bwrap_launch_failed", f"bwrap preflight failed: {first}")
+
+
+def _paths_intersect(a: Path, b: Path) -> bool:
+    return a == b or a.is_relative_to(b) or b.is_relative_to(a)
+
+
+def _refuse_rw_roots_intersecting_workspace(
+    workspace: str, rw_roots: list[str], *, internal_allowed: str | None
+) -> None:
+    """Refuse any rw mount that intersects the workspace in either direction.
+
+    The one permitted exception is the current run's own directory under the
+    masked ``.delegate/`` registry (``internal_allowed``): scratch and the
+    mail-push private homes live there and must stay writable on top of the
+    registry tmpfs.
+    """
     resolved_workspace = Path(workspace).resolve()
+    allowed = Path(internal_allowed).resolve() if internal_allowed else None
     for root in rw_roots:
         target = Path(root).resolve()
-        if target == resolved_workspace or resolved_workspace.is_relative_to(target):
+        if allowed is not None and (target == allowed or target.is_relative_to(allowed)):
+            continue
+        if _paths_intersect(target, resolved_workspace):
             raise DelegateError(
                 "bwrap_bind_conflict",
-                f"writable root {root} covers the read-only workspace {workspace}; "
+                f"writable root {root} intersects the read-only workspace {workspace}; "
                 "refusing to build a boundary that would expose the checkout to writes.",
             )

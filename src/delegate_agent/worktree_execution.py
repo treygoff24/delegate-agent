@@ -324,6 +324,7 @@ def _build_persistent_worktree_run_context(
         synced_files=int(creation_context.get("syncedFiles") or 0),
         mail_push=request.mail_push,
         group=request.group,
+        notify=request.notify,
         workflow_agent_key=request.workflow_agent_key,
         call_read_only=request.call_read_only or request.pure,
         pure=request.pure,
@@ -496,6 +497,9 @@ def _record_persistent_worktree_failure(
         for key in ("executionCwd", "worktreeStatus", "worktreeCleanupCommands", "branch"):
             failed_snapshot.pop(key, None)
     delegate_runner.write_snapshot(registration.run_path, failed_snapshot)
+    delegate_runner._send_completion_notification(
+        registration.run_path, registration.pre_ctx, "failed"
+    )
 
 
 def _create_persistent_worktree_or_record_failure(

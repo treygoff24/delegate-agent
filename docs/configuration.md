@@ -699,9 +699,9 @@ hidden by parity masks, `$HOME` and `/tmp` private tmpfs, the workspace
 `.delegate/` registry masked. `DELEGATE_SAFE_BACKEND` overrides the key; an
 invalid value on either channel fails closed. `bwrapBinds` lists extra host
 paths (`{"path", "mode": "ro"|"rw"}`, tilde-expanded) the engine launch needs
-inside the boundary; a missing path fails the run (`bwrap_bind_missing`) and
-a `rw` entry equal to or containing the workspace is refused
-(`bwrap_bind_conflict`). Cursor safe always uses the copy backend; the
+inside the boundary (absolute after `~` expansion); a missing path fails the
+run (`bwrap_bind_missing`) and a `rw` entry that intersects the workspace in
+either direction is refused (`bwrap_bind_conflict`). Cursor safe always uses the copy backend; the
 boundary refuses `--pass-through` and initialized submodules. See the README
 section on safe isolation for the full list of fail-closed conditions.
 

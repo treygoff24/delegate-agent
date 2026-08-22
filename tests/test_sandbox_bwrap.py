@@ -688,6 +688,21 @@ class ConfiguredBwrapBindsTests(unittest.TestCase):
                 (sandbox_bwrap.Bind(path=root, mode="ro"),),
             )
 
+    def test_rw_bind_inside_workspace_and_relative_paths_are_refused(self):
+        with tempfile.TemporaryDirectory() as ws:
+            inside = Path(ws) / "vendor"
+            inside.mkdir()
+            config = {"isolation": {"bwrapBinds": [{"path": str(inside), "mode": "rw"}]}}
+            with self.assertRaises(DelegateError) as caught:
+                sandbox_bwrap.configured_bwrap_binds(config, workspace=ws)
+            self.assertEqual(caught.exception.error, "bwrap_bind_conflict")
+            ro = {"isolation": {"bwrapBinds": [{"path": str(inside), "mode": "ro"}]}}
+            self.assertEqual(len(sandbox_bwrap.configured_bwrap_binds(ro, workspace=ws)), 1)
+            rel = {"isolation": {"bwrapBinds": [{"path": "vendor", "mode": "ro"}]}}
+            with self.assertRaises(DelegateError) as caught:
+                sandbox_bwrap.configured_bwrap_binds(rel, workspace=ws)
+            self.assertEqual(caught.exception.error, "invalid_isolation_config")
+
     def test_config_validation_rejects_malformed_entries(self):
         for bad in (
             {"bwrapBinds": "nope"},
@@ -729,20 +744,67 @@ class RegistryMaskAndContainmentTests(unittest.TestCase):
             self.assertGreater(argv.index(str(scratch)), mask_at)
             self.assertEqual(argv[argv.index(str(scratch)) - 1], "--bind")
 
-    def test_engine_binary_dir_outside_core_roots_is_ro_bound(self):
+    def test_engine_binary_outside_core_roots_is_ro_bound_as_a_file(self):
         with tempfile.TemporaryDirectory() as ws, tempfile.TemporaryDirectory() as bin_dir:
             engine = Path(bin_dir) / "fake-engine"
             engine.write_text("#!/bin/sh\n", encoding="utf-8")
             engine.chmod(0o755)
+            (Path(bin_dir) / "sibling-secret").write_text("x", encoding="utf-8")
             argv = sandbox_bwrap.wrap_engine_argv(
                 engine_argv=[str(engine)], cwd=ws, env={}, engine="omp"
             )
-            self.assertEqual(argv[argv.index(bin_dir) - 1], "--ro-bind")
-            self.assertGreater(argv.index(bin_dir), argv.index("/tmp"))
+            self.assertEqual(argv[argv.index(str(engine)) - 1], "--ro-bind")
+            self.assertNotIn(bin_dir, argv)  # the directory itself is never bound
+            self.assertGreater(argv.index(str(engine)), argv.index("/tmp"))
             argv = sandbox_bwrap.wrap_engine_argv(
                 engine_argv=["/usr/bin/env"], cwd=ws, env={}, engine="omp"
             )
-            self.assertNotIn("/usr/bin", argv)
+            self.assertNotIn("/usr/bin/env", argv[: argv.index("--")])
+
+    def test_rw_root_inside_workspace_is_refused_except_the_run_dir(self):
+        with tempfile.TemporaryDirectory() as ws:
+            run_dir = Path(ws) / ".delegate" / "runs" / "del_x"
+            scratch = run_dir / "scratch"
+            scratch.mkdir(parents=True)
+            mail_home = run_dir / "mail-push-home"
+            mail_home.mkdir()
+            (Path(ws) / "src").mkdir()
+            argv = sandbox_bwrap.wrap_engine_argv(
+                engine_argv=["true"],
+                cwd=ws,
+                env={},
+                engine="omp",
+                scratch_dir=str(scratch),
+                extra_rw_roots=[str(mail_home)],
+            )
+            self.assertIn(str(mail_home), argv)
+            for inside in (str(Path(ws) / "src"), str(Path(ws) / ".delegate")):
+                with self.assertRaises(DelegateError) as caught:
+                    sandbox_bwrap.wrap_engine_argv(
+                        engine_argv=["true"],
+                        cwd=ws,
+                        env={},
+                        engine="omp",
+                        scratch_dir=str(scratch),
+                        extra_rw_roots=[inside],
+                    )
+                self.assertEqual(caught.exception.error, "bwrap_bind_conflict", inside)
+            with self.assertRaises(DelegateError):
+                sandbox_bwrap.wrap_engine_argv(
+                    engine_argv=["true"],
+                    cwd=ws,
+                    env={"CODEX_HOME": str(Path(ws) / "src")},
+                    engine="codex",
+                )
+
+    def test_preflight_runs_the_final_plan(self):
+        argv = ["/bin/false", "--x", "--", "engine"]
+        with self.assertRaises(DelegateError) as caught:
+            sandbox_bwrap.preflight_plan(argv)
+        self.assertEqual(caught.exception.error, "bwrap_launch_failed")
+        sandbox_bwrap.preflight_plan(["/bin/true", "--", "engine"])
+        with self.assertRaises(DelegateError):
+            sandbox_bwrap.preflight_plan(["/bin/true"])
 
     def test_missing_registry_is_not_masked(self):
         with tempfile.TemporaryDirectory() as ws:
@@ -818,6 +880,15 @@ class LinkedWorktreeAndSubmoduleTests(unittest.TestCase):
         self.addCleanup(plain.cleanup)
         safe_workspace._refuse_bwrap_initialized_submodules(plain.name)
 
+    def test_failed_inspection_fails_closed(self):
+        with tempfile.TemporaryDirectory() as not_a_repo:
+            with self.assertRaises(DelegateError) as caught:
+                safe_workspace._refuse_bwrap_initialized_submodules(not_a_repo)
+            self.assertEqual(caught.exception.error, "bwrap_submodules_unsupported")
+            with self.assertRaises(DelegateError) as caught:
+                safe_workspace._bwrap_git_common_dir(not_a_repo)
+            self.assertEqual(caught.exception.error, "bwrap_unavailable")
+
 
 class PassThroughBwrapTests(CommandTestBase):
     def test_pass_through_is_refused_under_bwrap(self):
@@ -888,6 +959,36 @@ class EndToEndBwrapRunTests(CommandTestBase):
         self.assertEqual(observed.get("canary"), "clean")
         self.assertEqual(observed.get("git"), "ok")
         self.assertFalse((workspace / "leak.txt").exists())
+
+    def test_boundary_construction_error_is_a_recorded_launch_failure(self):
+        if not sandbox_bwrap.bwrap_available():
+            self.skipTest("working bubblewrap unavailable on this host")
+        repo = _make_committed_repo()
+        self.addCleanup(repo.cleanup)
+        workspace = Path(repo.name)
+        fake_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(fake_dir.cleanup)
+        fake = Path(fake_dir.name) / "omp"
+        fake.write_text("#!/bin/sh\necho ran\n", encoding="utf-8")
+        fake.chmod(0o755)
+        config_path = Path(self._config_env["DELEGATE_CONFIG"])
+        config_path.write_text(
+            json.dumps({"omp": {"binary": str(fake)}, "isolation": {"safeBackend": "bwrap"}}),
+            encoding="utf-8",
+        )
+        failure = DelegateError("bwrap_launch_failed", "bwrap preflight failed: synthetic")
+        with mock.patch.object(sandbox_bwrap, "preflight_plan", side_effect=failure):
+            code, out, _err = self.run_main(
+                ["--json", "--cwd", str(workspace), "--no-completion-report", "omp", "safe", "x"]
+            )
+        self.assertNotEqual(code, 0)
+        payload = json.loads(out)
+        self.assertEqual(payload.get("error"), "bwrap_launch_failed", out)
+        runs = [d for d in (workspace / ".delegate" / "runs").iterdir() if d.is_dir()]
+        self.assertEqual(len(runs), 1, runs)
+        state = json.loads((runs[0] / "state.json").read_text())
+        self.assertEqual(state["status"], "failed")
+        self.assertEqual(state.get("error"), "bwrap_launch_failed")
 
 
 if __name__ == "__main__":

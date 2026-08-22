@@ -159,7 +159,7 @@ class RunnerHookTests(unittest.TestCase):
                     return_value={"runId": "del_test"},
                 ),
             ):
-                runner._send_completion_notification(files, ctx, "failed")
+                runner._send_completion_notification(run_path, ctx, "failed")
             self.assertEqual(send.call_count, 1)
             message = send.call_args.args[1]
             self.assertTrue(message.startswith("delegate del_test failed omp/ox "))
@@ -195,7 +195,7 @@ class RunnerHookTests(unittest.TestCase):
                     return_value={"runId": "del_test", "warnings": ["earlier"]},
                 ),
             ):
-                runner._send_completion_notification(files, ctx, "succeeded")
+                runner._send_completion_notification(run_path, ctx, "succeeded")
             manifest = json.loads((run_path / "manifest.json").read_text())
             self.assertEqual(manifest["notify"]["reason"], "notify_hook_failed")
             self.assertIn("RuntimeError: boom", manifest["notify"]["detail"])
@@ -227,7 +227,7 @@ class RunnerHookTests(unittest.TestCase):
                 mock.patch.object(runner, "_send_completion_notification") as hook,
             ):
                 runner._record_tracked_launch_failure(files, ctx, error)
-                hook.assert_called_once_with(files, ctx, "failed")
+                hook.assert_called_once_with(files.run_path, ctx, "failed")
                 hook.reset_mock()
                 with mock.patch.object(
                     runner.run_registry,
@@ -237,13 +237,42 @@ class RunnerHookTests(unittest.TestCase):
                     runner._record_tracked_launch_failure(files, ctx, error)
                 hook.assert_not_called()
 
+    def test_detail_strips_control_characters(self) -> None:
+        self.assertEqual(notify._first_line("\x1b[31mpost: boom\x07\nmore"), "[31mpost: boom")
+        self.assertIsNone(notify._first_line("\n\x00\n"))
+
+    def test_persistent_worktree_setup_failure_fires_the_hook(self) -> None:
+        from delegate_agent import runner, worktree_execution
+
+        with tempfile.TemporaryDirectory() as temp:
+            run_path = Path(temp) / "runs" / "del_p"
+            run_path.mkdir(parents=True)
+            pre_ctx = mock.Mock()
+            pre_ctx.harness = "codex"
+            registration = mock.Mock()
+            registration.run_path = run_path
+            registration.pre_ctx = pre_ctx
+            registration.branch = "b"
+            registration.worktree_path = str(Path(temp) / "wt")
+            with (
+                mock.patch.object(runner, "build_state", return_value={}),
+                mock.patch.object(runner, "write_state"),
+                mock.patch.object(runner, "build_snapshot", return_value={}),
+                mock.patch.object(runner, "write_snapshot"),
+                mock.patch.object(runner, "_send_completion_notification") as hook,
+            ):
+                worktree_execution._record_persistent_worktree_failure(
+                    registration, error="worktree_create_failed", message="nope"
+                )
+            hook.assert_called_once_with(run_path, pre_ctx, "failed")
+
     def test_hook_is_a_no_op_without_notify(self) -> None:
         from delegate_agent import runner
 
         ctx = mock.Mock()
         ctx.notify = None
         with mock.patch.object(notify, "send_notification") as send:
-            runner._send_completion_notification(mock.Mock(), ctx, "succeeded")
+            runner._send_completion_notification(Path("/nonexistent"), ctx, "succeeded")
         send.assert_not_called()
 
 

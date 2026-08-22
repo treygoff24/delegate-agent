@@ -272,7 +272,7 @@ workspace `.delegate/` registry is masked (prior runs' prompts, logs and
 manifests are invisible) with only the current run's scratch rw-bound on top,
 and only the selected engine's home override (`CODEX_HOME` / `CLAUDE_CONFIG_DIR`)
 is writable. System roots (`/usr`, `/etc`, `/opt`), `~/.local`, `~/.cargo/bin`,
-`~/.bun`, the engine's dot-directory, the engine binary's own directory, a
+`~/.bun`, the engine's dot-directory, the engine executable itself, a
 linked worktree's common git dir, and any configured `isolation.bwrapBinds`
 are bound read-only (or rw where declared). `/proc` is the host's (fresh proc
 mounts are refused inside some containers) and the pid namespace is shared;
@@ -283,8 +283,9 @@ Everything that would weaken it fails closed instead of falling back to the
 copy backend: bubblewrap unavailable or the production probe failing, an
 untracked symlink that would leak host paths, more than 2000 parity masks, an
 initialized submodule (its ignored paths are outside the top-level scan), a
-configured bind that is missing or a writable bind that covers the workspace,
-and `--pass-through` (which execs outside the tracked launcher that applies
+configured bind that is missing or a writable bind that intersects the
+workspace in either direction, a mount plan the kernel refuses (preflighted
+with `/bin/true` before every launch), and `--pass-through` (which execs outside the tracked launcher that applies
 the boundary).
 
 ### Persistent worktree isolation

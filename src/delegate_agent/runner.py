@@ -1542,6 +1542,8 @@ def _launch_tracked_process(
     if sandbox:
         # Child env is final here (CODEX_HOME / mail-push homes / TMPDIR all
         # resolved), mirroring where the codex-pure seatbelt prefix is applied.
+        # Boundary construction and the preflight of the final plan raise
+        # DelegateError; the caller records them as launch failures.
         argv = sandbox_bwrap.wrap_engine_argv(
             engine_argv=argv,
             cwd=cwd,
@@ -1555,6 +1557,7 @@ def _launch_tracked_process(
             if isinstance(sandbox.get("bwrapPath"), str)
             else None,
         )
+        sandbox_bwrap.preflight_plan(argv)
     return subprocess.Popen(  # nosec B603 - Delegate intentionally launches validated harness argv with shell=False.
         argv,
         cwd=cwd,
@@ -1631,7 +1634,7 @@ def _record_tracked_launch_failure(
     if recorded:
         # A launch failure is a terminal state too; the --notify ping fires
         # outside the registry lock so a slow post cannot hold it.
-        _send_completion_notification(files, ctx, "failed")
+        _send_completion_notification(files.run_path, ctx, "failed")
 
 
 def _mail_push_failure_nonce(ctx: RunContext) -> str | None:
@@ -2528,6 +2531,7 @@ def _run_single_tracked_attempt(
 ) -> TrackedCaptureResult:
     process: subprocess.Popen[bytes] | None = None
     launch_exc: OSError | None = None
+    boundary_exc: DelegateError | None = None
     # Admission, launch, and pid/pgid publication are one locked generation
     # transition for both the primary attempt and retries. Cancel therefore
     # observes either its marker blocking a retry or a complete live generation;
@@ -2561,6 +2565,10 @@ def _run_single_tracked_attempt(
             )
         except OSError as exc:
             launch_exc = exc
+        except DelegateError as exc:
+            # bwrap boundary construction or preflight refused the plan: the
+            # child never ran. Recorded below, outside the registry lock.
+            boundary_exc = exc
         else:
             write_state(
                 files.run_path,
@@ -2570,6 +2578,10 @@ def _run_single_tracked_attempt(
                     pid=process.pid,
                 ),
             )
+    if boundary_exc is not None:
+        boundary_error = RunnerLaunchError(boundary_exc.error, boundary_exc.message)
+        _record_tracked_launch_failure(files, ctx, boundary_error, prior_capture=prior_capture)
+        raise boundary_error from boundary_exc
     if launch_exc is not None:
         exc = launch_exc
         error = _runner_launch_error(argv, cwd, exc)
@@ -2813,14 +2825,20 @@ def _execute_tracked(
         agent_config_placeholder=agent_config_placeholder,
         persona_file_text=persona_file_text,
         persona_file_placeholder=persona_file_placeholder,
-        agent_config_dir=files.run_path,
+        # Inside the bwrap boundary the run directory is hidden behind the
+        # registry tmpfs; every child-consumed artifact must live under scratch.
+        agent_config_dir=sandbox_temp_base if ctx.sandbox else files.run_path,
         temp_base=sandbox_temp_base,
     )
     launch_argv, schema_temp_dir = _materialize_output_schema_argv(
         launch_argv,
         output_schema_text=output_schema_text,
         output_schema_path=output_schema_path,
-        destination_dir=files.run_path if ctx.resumed_from is not None else None,
+        destination_dir=(
+            (sandbox_temp_base if ctx.sandbox else files.run_path)
+            if ctx.resumed_from is not None
+            else None
+        ),
         temp_base=sandbox_temp_base,
     )
     retry_workspace = ctx.execution_cwd if ctx.isolated_workspace else cwd
@@ -3205,13 +3223,18 @@ def _execute_tracked(
         completion_report_mode=completion_report_mode,
         extra=final_extra or None,
     )
-    _send_completion_notification(files, ctx, finalization.status)
+    _send_completion_notification(files.run_path, ctx, finalization.status)
     if capture.error is not None and finalization.status != run_registry.STATUS_CANCELLED:
         raise RunnerLaunchError(capture.error, capture.message or capture.error, 1)
     return _tracked_result(ctx, capture, finalization, json_mode=json_mode, stdout=stdout)
 
 
-def _send_completion_notification(files: TrackedRunFiles, ctx: RunContext, status: str) -> None:
+def _best_effort_stderr(line: str) -> None:
+    with contextlib.suppress(OSError, ValueError):
+        print(line, file=sys.stderr)
+
+
+def _send_completion_notification(run_path: Path, ctx: RunContext, status: str) -> None:
     """Fire the --notify ping exactly once, after the terminal state is persisted.
 
     Degradation is recorded in the manifest (``notify.ok=false`` + reason) and
@@ -3251,12 +3274,12 @@ def _send_completion_notification(files: TrackedRunFiles, ctx: RunContext, statu
                 if warning not in warnings:
                     warnings.append(warning)
                 manifest["warnings"] = warnings
-            write_manifest(files.run_path, manifest)
+            write_manifest(run_path, manifest)
     except Exception as exc:
-        print(f"delegate: notify outcome not recorded ({type(exc).__name__})", file=sys.stderr)
+        _best_effort_stderr(f"delegate: notify outcome not recorded ({type(exc).__name__})")
     if not outcome.ok:
         suffix = f": {outcome.detail}" if outcome.detail else ""
-        print(f"delegate: notify degraded ({outcome.reason}{suffix})", file=sys.stderr)
+        _best_effort_stderr(f"delegate: notify degraded ({outcome.reason}{suffix})")
 
 
 def _parse_rfc3339(value: str) -> datetime | None:

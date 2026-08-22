@@ -943,7 +943,12 @@ def _refuse_bwrap_initialized_submodules(git_root: str) -> None:
     what the copy backend hides."""
     result = _run_git(git_root, ["submodule", "status"], timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS)
     if result.returncode != 0:
-        return
+        raise DelegateError(
+            "bwrap_submodules_unsupported",
+            "the bwrap safe backend could not inspect submodules "
+            f"(git submodule status exited {result.returncode}); "
+            'set isolation.safeBackend to "copy" for this workspace.',
+        )
     initialized = [
         line.split()[1]
         for line in result.stdout.splitlines()
@@ -964,7 +969,12 @@ def _bwrap_git_common_dir(git_root: str) -> str | None:
         git_root, ["rev-parse", "--git-common-dir"], timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS
     )
     if result.returncode != 0 or not result.stdout.strip():
-        return None
+        raise DelegateError(
+            "bwrap_unavailable",
+            "the bwrap safe backend could not determine the workspace's git common "
+            "directory (git rev-parse --git-common-dir failed); set "
+            'isolation.safeBackend to "copy" for this workspace.',
+        )
     common = Path(result.stdout.strip())
     if not common.is_absolute():
         common = Path(git_root) / common
