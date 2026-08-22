@@ -684,14 +684,19 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
         summary="Resolve a cursor/codex/droid/kimi/claude/grok/devin/opencode/pi/omp invocation and print the planned argv without running it.",
         usage=(
             "delegate [--json] [--isolation auto|none|worktree] "
-            "dry-run {cursor,kimi,claude,grok,opencode,pi,omp} {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] "
+            "dry-run {cursor,claude,grok,opencode,pi,omp} {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] "
+            "[--progress] [--timeout SECONDS] [--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
+            "delegate [--json] [--isolation auto|none|worktree] "
+            "dry-run kimi {safe,work} [--model <alias-or-model>] "
             "[--progress] [--timeout SECONDS] [--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
             "delegate [--json] [--isolation auto|none|worktree] "
             "dry-run devin work [--model <alias-or-model>] "
             "[--progress] [--timeout SECONDS] [--forbid-commit] [--include-dirty] [--prompt-file PATH] [prompt...]",
-            "delegate [--json] dry-run {cursor,kimi,claude,grok,opencode,pi,omp} call "
+            "delegate [--json] dry-run {cursor,claude,grok,opencode,pi,omp} call "
             "[--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] "
             "[--prompt-file PATH] [prompt...]",
+            "delegate [--json] dry-run kimi call [--read-only] [--timeout SECONDS] "
+            "[--model <alias-or-model>] [--prompt-file PATH] [prompt...]",
             "delegate [--json] dry-run devin call [--read-only] [--timeout SECONDS] "
             "[--model <alias-or-model>] [--prompt-file PATH] [prompt...]",
             "delegate [--json] [--isolation auto|none|worktree] "

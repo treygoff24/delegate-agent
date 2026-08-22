@@ -59,14 +59,14 @@ as the source of truth when the two disagree.
   backend (`isolation.safeBackend` / `DELEGATE_SAFE_BACKEND=bwrap`): the workspace
   is read-only-bound with gitignore-parity masks, and every fail-closed condition
   (bubblewrap unavailable, a leaking untracked symlink, mask overflow, a missing
-  or workspace-covering `isolation.bwrapBinds` entry, an initialized submodule)
+  or workspace-intersecting `isolation.bwrapBinds` entry, an initialized submodule)
   aborts the run instead of falling back to the copy backend. Inside the
   boundary `$HOME` and `/tmp` are tmpfs (emitted before every HOME-relative
   ro-bind, since bwrap mounts in argv order); the workspace `.delegate/`
   registry is masked and only the current run's scratch is rw-bound on top;
   only the selected engine's home override (`CODEX_HOME` / `CLAUDE_CONFIG_DIR`)
-  is writable; the engine binary's own directory is ro-bound when it lives
-  outside the core roots; a linked worktree's common git dir is ro-bound; and
+  is writable; the engine executable and its resolved target are ro-bound as
+  files when they live outside the core roots; a linked worktree's common git dir is ro-bound; and
   `--pass-through` is refused because it execs outside the tracked launcher.
   Site launch surfaces are declared via `isolation.bwrapBinds`.
 - Some harness sandboxes reject `rm` of even freshly created temp files; write
