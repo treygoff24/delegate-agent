@@ -41,9 +41,10 @@ pytest-xdist, so the same suite can run in parallel with
 uv run --extra dev pytest -n 8 --dist loadfile
 ```
 
-`scripts/test-parity.sh` is the receipt that both runners execute the same
-suite (ran == passed + skipped, skips equal); run it after adding tests that
-use process-global state or skip conditions.
+`scripts/test-parity.sh` checks that both runners agree on the executed and
+skipped counts (ran == passed + skipped, skips equal) — a drift receipt, not a
+proof of identical collection; run it after adding tests that use
+process-global state or skip conditions.
 
 Use an explicit `-n` (never `-n auto`) on shared machines, and treat unittest
 as the source of truth when the two disagree.

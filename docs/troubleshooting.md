@@ -360,8 +360,9 @@ python3 bin/delegate.py codex safe "Review my uncommitted changes. Do not edit."
 
 ## Bubblewrap safe backend refused
 
-The opt-in bwrap backend never falls back to a copy after it is selected. Its
-errors identify the failed check:
+For eligible runs (non-Cursor safe mode on a Git workspace), the opt-in bwrap
+backend never falls back to a copy once selected; Cursor and non-Git workspaces
+use the copy path with a warning. Its errors identify the failed check:
 
 - `bwrap_unavailable`: the host is not Linux, `bwrap` is missing or its
   production probe failed, or linked-worktree Git metadata was unavailable.

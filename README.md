@@ -61,7 +61,7 @@ python3 -m unittest discover -s tests -t .   # gate
 pytest -n 8 --dist loadfile                  # fast accelerator, not a gate
 ```
 
-CI currently validates on Linux with Python 3.11, 3.12, 3.13, and 3.14. Windows support is not claimed until it is covered by tests.
+CI validates on Linux with Python 3.11, 3.12, 3.13, and 3.14, and on macOS with Python 3.12. Windows support is not claimed until it is covered by tests.
 
 ## Prerequisites
 

@@ -38,12 +38,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - The dev extra now ships `pytest` and `pytest-xdist`; `scripts/test-parity.sh`
-  proves that the parallel accelerator runs the same suite as the unittest gate.
+  checks that the parallel accelerator and the unittest gate agree on executed
+  and skipped counts.
 - Bundled Grok declarations move to Grok 4.6: `grok-4.6` is the Grok CLI
   default, and Cursor entries use the canonical `cursor-grok-*` IDs with the
   full `cursor-grok-4.6` effort ladder (cursor-agent no longer accepts the
   legacy `grok-4.5-fast-*` style).
 - Devin runs use the current noninteractive workspace-trust flow.
+- Release hygiene: CI also runs the suite on macOS (Python 3.12), the
+  repository has one canonical pull-request template, and the sdist ships
+  `scripts/test-parity.sh`.
 
 ### Fixed
 

@@ -136,9 +136,9 @@ delegate omp safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progr
 delegate omp work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
 delegate omp call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
 
-delegate kimi safe [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate kimi work [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate kimi call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+delegate kimi safe [--model <alias-or-model>] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate kimi work [--model <alias-or-model>] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate kimi call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--prompt-file PATH] [prompt...]
 ```
 
 Prompt sources are direct arguments, `--prompt-file`, or Delegate stdin. Raw C0 control characters other than newline, carriage return, and tab are stripped before launch; a prompt that becomes empty fails fast. After
@@ -490,8 +490,8 @@ delegate omp call --read-only --prompt-file rubric.md
 Usage:
 
 ```bash
-delegate [--json] [--isolation auto|none|worktree] kimi {safe,work} [--model <alias-or-model>] [--reasoning-effort LEVEL] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
-delegate [--json] kimi call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--reasoning-effort LEVEL] [--prompt-file PATH] [prompt...]
+delegate [--json] [--isolation auto|none|worktree] kimi {safe,work} [--model <alias-or-model>] [--progress] [--timeout SECONDS] [--forbid-commit] [--prompt-file PATH] [prompt...]
+delegate [--json] kimi call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--prompt-file PATH] [prompt...]
 ```
 
 - Safe mode reviews your **current working tree** — uncommitted tracked edits and untracked, non-ignored files are mirrored into an isolated throwaway copy (only gitignored paths are excluded), so you can review local changes without committing first or pasting a diff. Under `--isolation auto`, Kimi safe uses a read-only safety prompt. Delegate intentionally avoids Kimi `--plan` in safe mode. Kimi prompt mode auto-approves tool actions, so the isolation is the effective write boundary; the safety prompt is advisory.

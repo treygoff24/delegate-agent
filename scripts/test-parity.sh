@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Receipt that the pytest-xdist accelerator executes exactly the unittest gate:
-# compares "Ran N tests (skipped=S)" from unittest discover against
+# Receipt that the pytest-xdist accelerator and the unittest gate agree on
+# executed and skipped counts (not a proof of identical collection): compares "Ran N tests (skipped=S)" from unittest discover against
 # "P passed, S skipped" from pytest -n. Any drift (a test pytest never
 # collects, a skip that only one runner sees) fails here instead of hiding
 # behind a green parallel run.
