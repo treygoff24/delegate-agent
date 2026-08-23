@@ -355,6 +355,16 @@ class FocusedGlobalOptionsTests(unittest.TestCase):
         self.assertIn("--output-schema", text)
         self.assertIn("JSON Schema", text)
 
+    def test_safe_help_documents_effective_isolation_backend(self):
+        text = command_help.render_command_help_text(command_help.COMMAND_SPECS["omp"])
+        self.assertIn("isolationBackend=copy", text)
+        self.assertIn("isolationBackend=bwrap", text)
+
+    def test_work_help_documents_empty_result_failure(self):
+        text = command_help.render_command_help_text(command_help.COMMAND_SPECS["omp"])
+        self.assertIn("failed/empty_result", text)
+        self.assertIn("exits 1", text)
+
     def test_focused_call_specs_hide_work_only_options(self):
         for key, spec in command_help.COMMAND_SPECS.items():
             if not key.endswith(" call"):

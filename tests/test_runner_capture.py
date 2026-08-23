@@ -1593,6 +1593,71 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertEqual(result.exit_code, 0)
             self.assertEqual(result.text, "OMP_OK")
 
+    def test_work_no_assistant_text_and_no_changes_fails_honestly(self):
+        stream = json.dumps(
+            {
+                "type": "turn_end",
+                "message": {
+                    "role": "assistant",
+                    "content": [],
+                    "stopReason": "stop",
+                },
+            }
+        )
+        command = [sys.executable, "-c", f"print({stream!r})"]
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="git")
+            run_id, alias = self.registry.register_run(root, harness="omp")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="omp",
+                engine="omp",
+                mode="work",
+                model="openrouter/stealth/ox-alpha",
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="git",
+                isolated_workspace=True,
+                started_at="2026-08-22T20:00:00Z",
+                source_git_root=workspace,
+                isolation_lifecycle="persistent",
+                branch="delegate/omp-1",
+            )
+            with mock.patch.object(
+                self.runner,
+                "_persistent_work_summary",
+                return_value={
+                    "noChanges": True,
+                    "changedFilesCount": 0,
+                    "commitsCreatedCount": 0,
+                },
+            ):
+                code, payload = self.runner.execute_tracked(
+                    command,
+                    workspace,
+                    ctx,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+
+            assert payload is not None
+            self.assertEqual(code, 1)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["status"], "failed")
+            self.assertEqual(payload["exitCode"], 1)
+            self.assertEqual(payload["error"], "empty_result")
+            self.assertEqual(payload["resultQuality"], "no_assistant_text")
+            run_path = self.registry.run_directory(root, run_id)
+            state = json.loads((run_path / "state.json").read_text(encoding="utf-8"))
+            snapshot = json.loads((run_path / "snapshot.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["status"], "failed")
+            self.assertEqual(snapshot["status"], "failed")
+            self.assertEqual(state["resultQuality"], "no_assistant_text")
+            self.assertTrue(payload["completionReportWritten"])
+
     def test_tracked_codex_progress_message_before_command_does_not_write_report(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)

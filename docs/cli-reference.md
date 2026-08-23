@@ -1159,6 +1159,7 @@ Common JSON fields for tracked run completion:
   "isolationMode": "auto",
   "effectiveIsolation": "worktree",
   "isolationLifecycle": "temporary",
+  "isolationBackend": "copy",
   "preservedWorkspace": false,
   "progressRequested": false,
   "assistantText": "final assistant text when recoverable",
@@ -1171,6 +1172,10 @@ Common JSON fields for tracked run completion:
   "completionReportCommand": "delegate run-output codex-1 --completion-report"
 }
 ```
+
+Safe tracked runs include `isolationBackend`, whose value is `copy` for the
+temporary copy/worktree path or `bwrap` for the Linux zero-copy sandbox. The
+same field is persisted in the run manifest and snapshot.
 
 Persistent worktree completions also include `branch`, `worktree`, a
 `workSummary`, and (when requested) `commitPolicy`. `workSummary` reports dirty
@@ -1191,8 +1196,12 @@ Snapshot JSON uses schema `delegate.snapshot.v1` and includes fields such as `al
 Tracked run envelopes include `completionReportWritten`, `completionReportSource`
 (`child`, `delegate_synthesized`, `stdout_recovery`, or `null`), and
 `resultQuality` (`ok`, `housekeeping_noop`, `empty`, `suspect_short`, or
-`no_assistant_text`). Non-`ok` quality adds a warning rather than changing
-exit-code-derived status.
+`no_assistant_text`). Non-`ok` quality normally adds a warning without changing
+exit-code-derived status. One case fails closed: when persistent-worktree
+accounting verifies that a work run made no file changes or commits and its
+structured stream produced `resultQuality=no_assistant_text`, Delegate reports
+`status=failed`, `error=empty_result`, and exit code `1` while retaining the
+child's `0` as `childExitCode`.
 
 Failed runs classify recognized child output as `usage_limit`, `auth_failed`,
 or `codex_thread_lost`; the envelope, persisted effective-status views, and

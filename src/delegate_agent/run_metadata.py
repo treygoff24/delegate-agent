@@ -14,6 +14,7 @@ ISOLATION_METADATA_KEYS: MetadataKeyGroup = (
     "effectiveIsolation",
     "isolationLifecycle",
     "preservedWorkspace",
+    "isolationBackend",
 )
 
 PERSISTENT_WORKTREE_METADATA_KEYS: MetadataKeyGroup = (
@@ -162,6 +163,7 @@ class RunMetadataCarrier(Protocol):
     creation_context: JsonObject | None
     worktree_status: str | None
     safe_workspace_method: str | None
+    sandbox: JsonObject | None
     warnings: tuple[str, ...]
 
 
@@ -171,6 +173,12 @@ def add_run_metadata_payload_fields(payload: JsonObject, carrier: RunMetadataCar
     payload["effectiveIsolation"] = carrier.effective_isolation
     payload["isolationLifecycle"] = carrier.isolation_lifecycle
     payload["preservedWorkspace"] = carrier.preserved_workspace
+    sandbox = getattr(carrier, "sandbox", None)
+    sandbox_backend = sandbox.get("backend") if isinstance(sandbox, dict) else None
+    if sandbox_backend in {"bwrap", "copy"}:
+        payload["isolationBackend"] = sandbox_backend
+    elif carrier.effective_isolation == "worktree" and carrier.isolation_lifecycle == "temporary":
+        payload["isolationBackend"] = "copy"
 
     if carrier.source_git_root is not None:
         payload["sourceGitRoot"] = carrier.source_git_root
