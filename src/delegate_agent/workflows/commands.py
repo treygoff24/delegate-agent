@@ -146,9 +146,7 @@ def emit_run(
             )
             gate_key = status.get("gateKey")
             if status.get("status") == "paused" and isinstance(gate_key, str):
-                registry.write_json(
-                    root / registry.APPROVAL_FILE, {"approved": True, "gateKey": gate_key}
-                )
+                registry.record_approval(root, gate_key)
             script_path = root / registry.SCRIPT_FILE
             args_value = status.get("args")
             budget_total = command.budget

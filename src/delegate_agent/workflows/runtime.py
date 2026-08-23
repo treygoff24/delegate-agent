@@ -636,7 +636,7 @@ class WorkflowDsl:
         should_gate = gate is True or (gate == "on-failure" and _gate_failed(result))
         if should_gate:
             gate_key = _stable_hash(f"gate:{scope}:{_canonical_json(args)}")
-            approved = _approval_allows(self.state.root, gate_key)
+            approved = registry.approval_allows(self.state.root, gate_key)
             if not approved:
                 self.state.close_gate_and_wait()
                 self.state.append_event("gate", key=gate_key, child=name, result=result)
@@ -1427,15 +1427,6 @@ def _canonical_json(value: object) -> str:
 
 def _gate_failed(result: object) -> bool:
     return result is None or (isinstance(result, dict) and result.get("ok") is False)
-
-
-def _approval_allows(root: Path, key: str) -> bool:
-    payload = registry.read_json(root / registry.APPROVAL_FILE)
-    return (
-        isinstance(payload, dict)
-        and payload.get("gateKey") == key
-        and payload.get("approved") is True
-    )
 
 
 def resolve_workflow_reference(name_or_path: str, parent_script_dir: Path) -> Path:

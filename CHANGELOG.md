@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
-
+- `workflow approve` now accumulates approvals (`approvedKeys` in `approval.json`) instead of overwriting the single `gateKey`, so a resume that replays an earlier approved gate no longer re-pauses the run there.
 - Workflow `agent(schema=...)` on Codex no longer dies before launch when the
   schema has optional fields or a typed `additionalProperties` map: native
   `--output-schema` is used only for strict-compatible schemas, everything else

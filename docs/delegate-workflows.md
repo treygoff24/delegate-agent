@@ -13,7 +13,7 @@ Workflow registries use this file set as needed:
 - `journal.jsonl`: append-only workflow events.
 - `status.json`: current supervisor/status snapshot.
 - `result.json`: final workflow result, present only after success.
-- `approval.json`: gate approval state, present after `workflow approve`.
+- `approval.json`: gate approval state, present after `workflow approve`. `approvedKeys` accumulates every gate approved so far (a resume replays the whole script and re-fires each passed gate with the same key); `gateKey` is the latest.
 - `workflow.lock`: process lock held while a supervisor is active.
 
 ## Terminology

@@ -78,6 +78,36 @@ def write_json(path: Path, payload: JsonObject) -> None:
     run_registry.write_json_atomic(path, payload)
 
 
+def record_approval(root: Path, gate_key: str) -> JsonObject:
+    """Approve ``gate_key`` without forgetting earlier approvals.
+
+    A resume replays the whole script, so every gate the run already passed
+    fires again with the same deterministic key; if the file only held the
+    latest key, approving gate N would re-pause the run at gate N-1.
+    """
+    path = root / APPROVAL_FILE
+    previous = read_json(path) or {}
+    keys = [key for key in previous.get("approvedKeys", []) if isinstance(key, str)]
+    earlier = previous.get("gateKey")
+    if isinstance(earlier, str) and earlier not in keys:
+        keys.append(earlier)
+    if gate_key not in keys:
+        keys.append(gate_key)
+    payload: JsonObject = {"approved": True, "gateKey": gate_key, "approvedKeys": keys}
+    write_json(path, payload)
+    return payload
+
+
+def approval_allows(root: Path, gate_key: str) -> bool:
+    payload = read_json(root / APPROVAL_FILE)
+    if not isinstance(payload, dict) or payload.get("approved") is not True:
+        return False
+    if payload.get("gateKey") == gate_key:
+        return True
+    keys = payload.get("approvedKeys")
+    return isinstance(keys, list) and gate_key in keys
+
+
 def read_json(path: Path) -> JsonObject | None:
     return run_registry.read_json_object_or_none(path)
 

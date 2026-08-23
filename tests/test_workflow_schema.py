@@ -142,3 +142,32 @@ class JournalPreservesResultOrder(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ApprovalAccumulates(unittest.TestCase):
+    def test_second_approval_keeps_the_first_gate_open(self) -> None:
+        import tempfile
+        from delegate_agent.workflows import registry
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry.record_approval(root, "gate-one")
+            self.assertTrue(registry.approval_allows(root, "gate-one"))
+            registry.record_approval(root, "gate-two")
+            self.assertTrue(registry.approval_allows(root, "gate-one"))
+            self.assertTrue(registry.approval_allows(root, "gate-two"))
+            self.assertFalse(registry.approval_allows(root, "gate-three"))
+            payload = registry.read_json(root / registry.APPROVAL_FILE)
+            self.assertEqual(payload["approvedKeys"], ["gate-one", "gate-two"])
+
+    def test_legacy_single_key_file_is_honoured_and_upgraded(self) -> None:
+        import tempfile
+        from delegate_agent.workflows import registry
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry.write_json(root / registry.APPROVAL_FILE, {"approved": True, "gateKey": "legacy"})
+            self.assertTrue(registry.approval_allows(root, "legacy"))
+            registry.record_approval(root, "next")
+            self.assertTrue(registry.approval_allows(root, "legacy"))
+            self.assertTrue(registry.approval_allows(root, "next"))
