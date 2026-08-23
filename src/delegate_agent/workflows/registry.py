@@ -217,7 +217,10 @@ def latest_workflow_dir(
 def append_jsonl(path: Path, event: JsonObject) -> None:
     fd = run_registry.open_private_file(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY)
     with os.fdopen(fd, "a", encoding="utf-8") as handle:
-        handle.write(json.dumps(event, sort_keys=True) + "\n")
+        # Key order is part of the data: scripts embed prior results via repr()
+        # in later prompts, and the agent cache key hashes that prompt. A
+        # sorted replay would miss every downstream key after a resume.
+        handle.write(json.dumps(event) + "\n")
         if event.get("type") in DURABLE_EVENT_TYPES:
             handle.flush()
             os.fsync(handle.fileno())

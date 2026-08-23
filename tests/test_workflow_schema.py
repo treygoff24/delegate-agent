@@ -127,5 +127,18 @@ class ResumeExhaustedKeys(unittest.TestCase):
         self.assertEqual(state.replay["k2"], {"ok": True})
 
 
+class JournalPreservesResultOrder(unittest.TestCase):
+    def test_result_key_order_survives_round_trip(self) -> None:
+        result = {"summary": "s", "changed_files": [], "branch": "b", "head": "h"}
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / workflow_registry.JOURNAL_FILE
+            workflow_registry.append_jsonl(
+                journal, {"seq": 1, "type": "agent_finished", "key": "k", "result": result}
+            )
+            (event,) = list(workflow_registry.iter_journal(journal))
+        self.assertEqual(list(event["result"]), list(result))
+        self.assertEqual(repr(event["result"]), repr(result))
+
+
 if __name__ == "__main__":
     unittest.main()

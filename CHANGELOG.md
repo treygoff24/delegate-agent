@@ -23,6 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retryable: a finished child run is adopted, otherwise the agent re-runs,
   instead of replaying the cached failure straight back into the same gate.
 
+- The workflow journal no longer sorts event keys: a structured result's key
+  order is part of the data (scripts embed prior results via `repr()` in later
+  prompts, which the agent cache key hashes), so a sorted replay missed every
+  downstream key after a resume and re-ran the whole wave.
+
 ### Added
 
 - Workflow schema subset: `additionalProperties` may be a schema, typing a map
