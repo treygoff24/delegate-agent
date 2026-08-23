@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Workflow `agent(schema=...)` on Codex no longer dies before launch when the
+  schema has optional fields or a typed `additionalProperties` map: native
+  `--output-schema` is used only for strict-compatible schemas, everything else
+  falls back to the prompt-and-parse path the other engines use.
+- `parse_json_tolerant` now returns the last JSON value that validates against
+  the schema instead of decoding from the first `{`/`[` in the text, so a
+  markdown completion report with decoy brackets (`[T1]`, `{run, exit, note}`)
+  no longer burns structured-output retries.
+- Workflow child failures report the child's JSON `error`/`message`/`runId`
+  instead of only stderr (which was often just the persona preface).
+- `workflow run --resume` treats a key whose retries were exhausted as
+  retryable: a finished child run is adopted, otherwise the agent re-runs,
+  instead of replaying the cached failure straight back into the same gate.
+
+### Added
+
+- Workflow schema subset: `additionalProperties` may be a schema, typing a map
+  with unknown keys.
+
 ## [0.30.0] - 2026-08-22
 
 ### Added

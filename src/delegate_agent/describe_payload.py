@@ -1075,7 +1075,10 @@ def describe_payload(
                     "items",
                     "enum",
                     "additionalProperties",
+                    "minLength",
+                    "minItems",
                 ],
+                "schemaNotes": "additionalProperties may be false or a schema (typed map). Codex uses native --output-schema only for strict-compatible schemas (all properties required, no typed maps); otherwise prompt-and-parse like other engines.",
             },
         },
         "modeMapping": {

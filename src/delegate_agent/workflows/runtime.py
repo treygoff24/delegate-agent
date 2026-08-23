@@ -17,7 +17,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from delegate_agent import personas, run_registry, wait_cancel_commands
+from delegate_agent import personas, run_registry, structured_output, wait_cancel_commands
 from delegate_agent.constants import (
     KNOWN_ENGINES,
     MODE_CALL,
@@ -123,6 +123,7 @@ class WorkflowState:
     replay: dict[str, JsonValue] = field(default_factory=dict)
     replay_keys: set[str] = field(default_factory=set)
     started_without_result: set[str] = field(default_factory=set)
+    exhausted_keys: set[str] = field(default_factory=set)
     claimed_keys: set[str] = field(default_factory=set)
     sequence: int = 0
     journal_lock: threading.Lock = field(default_factory=threading.Lock)
@@ -187,6 +188,13 @@ class WorkflowState:
             elif event.get("type") == "agent_started":
                 self.started_without_result.add(key)
             elif event.get("type") == "agent_finished":
+                # An exhausted key replays its None without respawning, but a
+                # child run that did finish gets one adoption attempt first —
+                # a resume after a parser or schema fix should pick it up.
+                if event.get("exhausted") is True:
+                    self.exhausted_keys.add(key)
+                else:
+                    self.exhausted_keys.discard(key)
                 self.replay_keys.add(key)
                 self.replay[key] = event.get("result")
                 self.started_without_result.discard(key)
@@ -707,6 +715,27 @@ class WorkflowDsl:
         key = _agent_key(path, prompt, opts)
         if key in self.state.replay_keys:
             result = self.state.replay[key]
+            if key in self.state.exhausted_keys:
+                self.state.exhausted_keys.discard(key)
+                adopted = self._adopt_existing_agent_run(
+                    key,
+                    scope=path,
+                    label=label,
+                    phase=resolved_phase,
+                    schema=schema,
+                    prefer_assistant=schema is not None,
+                    timeout=timeout,
+                )
+                if adopted is not _MISSING and adopted is not None:
+                    self.state.replay[key] = adopted
+                    self.state.append_event(
+                        "agent_finished",
+                        key=key,
+                        scope=path,
+                        result=adopted,
+                        adopted=True,
+                    )
+                    return adopted
             self.state.append_event(
                 "agent_cache_hit",
                 key=key,
@@ -913,7 +942,7 @@ class WorkflowDsl:
             result: JsonValue = text
         else:
             try:
-                value = workflow_schema.parse_json_tolerant(text)
+                value = workflow_schema.parse_json_tolerant(text, schema)
                 workflow_schema.validate_value(value, schema)
                 result = value
             # Child output is untrusted; parse/validation blowups must not kill the supervisor.
@@ -1066,15 +1095,16 @@ class WorkflowDsl:
             )
         workflow_schema.validate_schema_subset(schema)
         attempts = retries if retries is not None else _structured_retries(self.state.config)
+        native_schema = _codex_native_schema(schema) if engine == "codex" else None
         prior_output = ""
         prior_error = ""
         for attempt in range(attempts + 1):
             attempt_prompt = _correction_prompt(prompt, prior_output, prior_error)
-            if engine == "codex":
+            if native_schema is not None:
                 with tempfile.NamedTemporaryFile(
                     "w", encoding="utf-8", delete=False
                 ) as schema_file:
-                    json.dump(schema, schema_file)
+                    json.dump(native_schema, schema_file)
                     schema_path = schema_file.name
                 try:
                     text = self._run_delegate(
@@ -1118,7 +1148,7 @@ class WorkflowDsl:
                     expected_persona_digest=persona.digest if persona is not None else None,
                 )
             try:
-                value = workflow_schema.parse_json_tolerant(text or "")
+                value = workflow_schema.parse_json_tolerant(text or "", schema)
                 workflow_schema.validate_value(value, schema)
                 return value
             except PersonaDigestMismatch:
@@ -1232,9 +1262,18 @@ class WorkflowDsl:
             stderr = completed.stderr.decode("utf-8", errors="replace")[-2000:]
             if expected_persona_digest is not None and "workflow_persona_digest_mismatch" in text:
                 raise PersonaDigestMismatch("workflow child rejected changed persona bytes")
-            raise RuntimeError(
-                stderr or text or f"delegate child failed with {completed.returncode}"
-            )
+            # The child's JSON error is the real diagnosis; stderr alone is
+            # often just the persona preface and pool warnings.
+            parts = [f"delegate child exited {completed.returncode}"]
+            if isinstance(result, dict):
+                for field in ("error", "message", "runId"):
+                    if isinstance(result.get(field), str) and result[field]:
+                        parts.append(f"{field}={result[field]}")
+            elif text.strip():
+                parts.append(text.strip()[:500])
+            if stderr.strip():
+                parts.append(stderr.strip())
+            raise RuntimeError("; ".join(parts))
         if result is None:
             raise RuntimeError(f"delegate child returned invalid JSON: {text[:500]}")
         if not isinstance(result, dict) or not result.get("ok", False):
@@ -1299,6 +1338,22 @@ def _run_child_command(
 def _terminate_process_group(process: subprocess.Popen[bytes], sig: signal.Signals) -> None:
     with contextlib.suppress(OSError):
         os.killpg(os.getpgid(process.pid), sig)
+
+
+def _codex_native_schema(schema: JsonObject) -> JsonObject | None:
+    """Codex strict output only accepts fully-required, closed objects.
+
+    Return the schema when it qualifies (the child injects the strict-mode
+    defaults itself and warns, as for any direct run); otherwise None,
+    and the caller falls back to the prompt-and-parse path the other engines
+    use. Handing an optional-field schema to `--output-schema` would make the
+    child fail its preflight before launch.
+    """
+    try:
+        structured_output.normalize_codex_schema(json.loads(json.dumps(schema)))
+    except structured_output.SchemaPreflightError:
+        return None
+    return schema
 
 
 def _structured_prompt(prompt: str, schema: JsonObject, prior_output: str, prior_error: str) -> str:

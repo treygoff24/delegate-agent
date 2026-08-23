@@ -55,8 +55,10 @@ def validate_schema_subset(schema: object, *, path: str = "schema") -> None:
     if enum is not None and not isinstance(enum, list):
         raise SchemaError(f"{path}.enum must be an array.")
     additional = schema.get("additionalProperties")
-    if additional is not None and not isinstance(additional, bool):
-        raise SchemaError(f"{path}.additionalProperties must be a boolean.")
+    if isinstance(additional, dict):
+        validate_schema_subset(additional, path=f"{path}.additionalProperties")
+    elif additional is not None and not isinstance(additional, bool):
+        raise SchemaError(f"{path}.additionalProperties must be a boolean or a schema.")
     for keyword, applicable_type in (("minLength", "string"), ("minItems", "array")):
         if keyword not in schema:
             continue
@@ -91,10 +93,13 @@ def validate_value(value: object, schema: JsonObject, *, path: str = "value") ->
             for key, child in properties.items():
                 if key in value:
                     validate_value(value[key], child, path=f"{path}.{key}")
-            if schema.get("additionalProperties") is False:
-                extra = set(value) - set(properties)
-                if extra:
-                    raise SchemaError(f"{path} has additional keys: {', '.join(sorted(extra))}.")
+            additional = schema.get("additionalProperties")
+            extra = sorted(set(value) - set(properties))
+            if additional is False and extra:
+                raise SchemaError(f"{path} has additional keys: {', '.join(extra)}.")
+            if isinstance(additional, dict):
+                for key in extra:
+                    validate_value(value[key], additional, path=f"{path}.{key}")
     if isinstance(value, list) and isinstance(schema.get("items"), dict):
         for index, item in enumerate(value):
             validate_value(item, schema["items"], path=f"{path}[{index}]")
@@ -120,7 +125,16 @@ def _matches_type(value: object, schema_type: object) -> bool:
     return False
 
 
-def parse_json_tolerant(text: str) -> JsonValue:
+def parse_json_tolerant(text: str, schema: JsonObject | None = None) -> JsonValue:
+    """Pull the JSON value out of child output that may be wrapped in prose.
+
+    Children routinely answer with a markdown report whose final fenced block
+    is the structured result, and that prose can contain decoy brackets (a
+    `[T1]` task tag, a `{run, exit, note}` contract line). Every top-level
+    decodable value is collected in text order; the last one that validates
+    against ``schema`` wins, then the last decodable value, so a trailing
+    report block beats any earlier fragment.
+    """
     stripped = text.strip()
     if stripped.startswith("```"):
         lines = stripped.splitlines()
@@ -131,17 +145,33 @@ def parse_json_tolerant(text: str) -> JsonValue:
         stripped = "\n".join(lines).strip()
     decoder = json.JSONDecoder()
     try:
-        value, end = decoder.raw_decode(stripped)
-        if stripped[end:].strip():
-            return value
+        value, _end = decoder.raw_decode(stripped)
         return value
-    except json.JSONDecodeError:
-        start_candidates = [idx for idx in (stripped.find("{"), stripped.find("[")) if idx >= 0]
-        if not start_candidates:
-            raise
-        start = min(start_candidates)
-        value, _end = decoder.raw_decode(stripped[start:])
-        return value
+    except json.JSONDecodeError as first_error:
+        candidates: list[JsonValue] = []
+        position = 0
+        while True:
+            starts = [idx for idx in (stripped.find("{", position), stripped.find("[", position)) if idx >= 0]
+            if not starts:
+                break
+            start = min(starts)
+            try:
+                value, end = decoder.raw_decode(stripped[start:])
+            except json.JSONDecodeError:
+                position = start + 1
+                continue
+            candidates.append(value)
+            position = start + end
+        if not candidates:
+            raise first_error
+        if schema is not None:
+            for value in reversed(candidates):
+                try:
+                    validate_value(value, schema)
+                except SchemaError:
+                    continue
+                return value
+        return candidates[-1]
 
 
 def placeholder(schema: JsonObject) -> JsonValue:
