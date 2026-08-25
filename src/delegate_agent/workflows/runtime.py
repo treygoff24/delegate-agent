@@ -1337,10 +1337,8 @@ class WorkflowDsl:
             # key and label were both in scope here and neither was recorded, so
             # a timeout row said which engine died and not which task, and the
             # only way to find out was cross-referencing agent_started by time.
-            # The sibling timeout site at agent_timeout(key=..., scope=...)
-            # already did this correctly, which is how the gap survived.
-            # Two sites reporting a timeout differently is how the first gap
-            # survived unnoticed, so they carry the union of their fields.
+            # Two sites reporting a timeout differently is how that survived, so
+            # both now carry every identifier each can honestly produce.
             self.state.append_event(
                 "agent_timeout",
                 engine=engine,
