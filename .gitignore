@@ -63,3 +63,6 @@ docs/briefs/
 *.db
 .beads-credential-key
 .beads/proxieddb/
+
+# Agent complaint-box ledger; local only, never committed (estate convention).
+.papercuts.jsonl
