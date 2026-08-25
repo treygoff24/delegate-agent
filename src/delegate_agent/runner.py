@@ -816,8 +816,29 @@ def _completion_report_text_and_source(
             f"Status: {status}",
             f"Failure reason: {reason}",
         ]
+        terminal = accumulator.terminal_event or {}
+        terminal_reason = terminal.get("reason")
+        if isinstance(terminal_reason, str) and terminal_reason.strip():
+            lines.append(f"Harness error: {redaction.redact_string(terminal_reason.strip())}")
         if stderr_tail.strip():
             lines.extend(["", "Redacted stderr tail:", "```text", stderr_tail.rstrip(), "```"])
+        # Whatever the child said before it stopped is still the most useful
+        # thing here, and it was being dropped: a harness that cancels itself
+        # mid-turn has usually produced real work first, and pointing at
+        # run-output instead left "no partial report worth reading". Quoted,
+        # never returned as the child's own report, so nothing downstream can
+        # mistake a truncated turn for a completed one.
+        if child_text:
+            lines.extend(
+                [
+                    "",
+                    "Partial output recovered before the run stopped."
+                    " This is not a completion report:",
+                    "```text",
+                    redaction.redact_string(child_text).rstrip(),
+                    "```",
+                ]
+            )
         lines.extend(["", "Next actions:", *(f"- {action}" for action in next_actions)])
         return "\n".join(lines), COMPLETION_REPORT_SOURCE_SYNTHESIZED
     if accumulator.completion_text and child_text:

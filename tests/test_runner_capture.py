@@ -856,6 +856,13 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertIn("Failure reason: harness_cancelled", report)
             self.assertIn("run-output", report)
             self.assertIn("partial output", report)
+            # What the harness produced before cancelling itself is the most
+            # useful thing in the report, and it used to be dropped entirely --
+            # the run read as "no partial report worth reading".
+            self.assertIn("partial", report)
+            self.assertIn("Partial output recovered before the run stopped", report)
+            # Still never presented as the child's own completed report.
+            self.assertEqual(payload["completionReportSource"], "delegate_synthesized")
 
             out = io.StringIO()
             command = self.run_output.RunOutputCommand(
