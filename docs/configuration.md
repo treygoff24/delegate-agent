@@ -8,10 +8,21 @@ From lowest to highest precedence:
 
 1. Embedded defaults in the package.
 2. User config: `~/.delegate/config.json`.
-3. `DELEGATE_CONFIG=/path/to/config.json`, when set.
-4. Internal CLI overrides used by some commands.
+3. Machine-local overlay: `~/.delegate/config.local.json`.
+4. `DELEGATE_CONFIG=/path/to/config.json`, when set.
+5. Internal CLI overrides used by some commands.
 
 If `DELEGATE_CONFIG` is set, the file must exist. Delegate fails closed instead of silently falling back to another config.
+
+### The machine-local overlay
+
+`~/.delegate/config.local.json` is deep-merged over the user config and is the
+right home for anything that must survive a reprovisioned `config.json`. On a
+managed fleet the user config is frequently *copied* onto each machine by an
+installer that has no way to learn about edits made there, so a model alias or
+reasoning block added directly to `config.json` is reverted on the next apply.
+Put those in the overlay instead: no installer writes it, and it outranks the
+file that gets replaced. The file is optional — absent, nothing changes.
 
 Repository-local `.delegate/config.json` is never merged automatically. A cloned
 repository must not be able to select provider binaries, environment variables,

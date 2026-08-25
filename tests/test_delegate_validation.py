@@ -442,6 +442,96 @@ class ValidationTests(unittest.TestCase):
             self.assertEqual(loaded["cursor"]["defaultModel"], "explicit-model")
             self.assertEqual(source, str(explicit))
 
+    def test_local_overlay_wins_over_global_and_survives_a_reprovisioned_global(self):
+        config_mod = load_config_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / ".delegate"
+            config_dir.mkdir()
+            global_cfg = config_dir / "config.json"
+            global_cfg.write_text(json.dumps({"cursor": {"defaultModel": "provisioned"}}))
+            (config_dir / "config.local.json").write_text(
+                json.dumps({"cursor": {"defaultModel": "operator-added"}})
+            )
+            env = {config_mod.CONFIG_ENV: ""}
+            with (
+                mock.patch.object(config_mod, "DEFAULT_CONFIG_PATH", global_cfg),
+                mock.patch.dict(os.environ, env, clear=False),
+            ):
+                loaded, source = config_mod.load_config()
+                self.assertEqual(loaded["cursor"]["defaultModel"], "operator-added")
+                self.assertEqual(source, str(config_dir / "config.local.json"))
+
+                # The failure this overlay exists for: a fleet installer
+                # rewrites the global config wholesale, knowing nothing about
+                # what was added on this machine.
+                global_cfg.write_text(json.dumps({"cursor": {"defaultModel": "reprovisioned"}}))
+                reloaded, _ = config_mod.load_config()
+            self.assertEqual(reloaded["cursor"]["defaultModel"], "operator-added")
+
+    def test_local_overlay_merges_rather_than_replaces_global(self):
+        config_mod = load_config_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / ".delegate"
+            config_dir.mkdir()
+            global_cfg = config_dir / "config.json"
+            global_cfg.write_text(
+                json.dumps({"cursor": {"defaultModel": "global-model", "argvPrefix": ["agent"]}})
+            )
+            (config_dir / "config.local.json").write_text(
+                json.dumps({"codex": {"defaultModel": "local-only"}})
+            )
+            with (
+                mock.patch.object(config_mod, "DEFAULT_CONFIG_PATH", global_cfg),
+                mock.patch.dict(os.environ, {config_mod.CONFIG_ENV: ""}, clear=False),
+            ):
+                loaded, _ = config_mod.load_config()
+            self.assertEqual(loaded["cursor"]["defaultModel"], "global-model")
+            self.assertEqual(loaded["cursor"]["argvPrefix"], ["agent"])
+            self.assertEqual(loaded["codex"]["defaultModel"], "local-only")
+
+    def test_explicit_delegate_config_still_outranks_the_local_overlay(self):
+        config_mod = load_config_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / ".delegate"
+            config_dir.mkdir()
+            global_cfg = config_dir / "config.json"
+            global_cfg.write_text(json.dumps({"cursor": {"defaultModel": "global-model"}}))
+            (config_dir / "config.local.json").write_text(
+                json.dumps({"cursor": {"defaultModel": "operator-added"}})
+            )
+            explicit = Path(tmp) / "explicit.json"
+            explicit.write_text(json.dumps({"cursor": {"defaultModel": "explicit-model"}}))
+            with (
+                mock.patch.object(config_mod, "DEFAULT_CONFIG_PATH", global_cfg),
+                mock.patch.dict(os.environ, {config_mod.CONFIG_ENV: str(explicit)}, clear=False),
+            ):
+                loaded, source = config_mod.load_config()
+            self.assertEqual(loaded["cursor"]["defaultModel"], "explicit-model")
+            self.assertEqual(source, str(explicit))
+
+    def test_absent_local_overlay_changes_nothing(self):
+        config_mod = load_config_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / ".delegate"
+            config_dir.mkdir()
+            global_cfg = config_dir / "config.json"
+            global_cfg.write_text(json.dumps({"cursor": {"defaultModel": "global-model"}}))
+            self.assertFalse((config_dir / "config.local.json").exists())
+            with (
+                mock.patch.object(config_mod, "DEFAULT_CONFIG_PATH", global_cfg),
+                mock.patch.dict(os.environ, {config_mod.CONFIG_ENV: ""}, clear=False),
+            ):
+                loaded, source = config_mod.load_config()
+            self.assertEqual(loaded["cursor"]["defaultModel"], "global-model")
+            self.assertEqual(source, str(global_cfg))
+
+    def test_local_config_path_sits_beside_its_base(self):
+        config_mod = load_config_module()
+        self.assertEqual(
+            config_mod.local_config_path(Path("/tmp/x/.delegate/config.json")),
+            Path("/tmp/x/.delegate/config.local.json"),
+        )
+
     def test_no_workspace_local_preserves_global_only_behavior(self):
         config_mod = load_config_module()
         with tempfile.TemporaryDirectory() as tmp:

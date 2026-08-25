@@ -1292,6 +1292,21 @@ def profile_config_path(base_path: Path, profile: str) -> Path:
     return base_path.with_name(f"{base_path.stem}.{profile}{base_path.suffix}")
 
 
+LOCAL_CONFIG_NAME = "local"
+
+
+def local_config_path(base_path: Path) -> Path:
+    """Path to the machine-local overlay next to ``base_path``.
+
+    ``~/.delegate/config.json`` is frequently provisioned — copied onto a
+    machine by a fleet installer that has no way to learn about edits made on
+    that machine, so an alias added here is reverted on the next apply. This
+    overlay is the durable home for those additions: it merges over the global
+    config and no provisioning step writes it.
+    """
+    return base_path.with_name(f"{base_path.stem}.{LOCAL_CONFIG_NAME}{base_path.suffix}")
+
+
 def workspace_config_path(workspace: Path) -> Path:
     return workspace / WORKSPACE_CONFIG_RELATIVE
 
@@ -1312,7 +1327,7 @@ def load_config(
     workspace: Path | None = None,
     cli_overrides: JsonObject | None = None,
 ) -> tuple[JsonObject, str]:
-    """Load config with precedence: cli > DELEGATE_CONFIG > global > embedded.
+    """Load config with precedence: cli > DELEGATE_CONFIG > local > global > embedded.
 
     When DELEGATE_CONFIG is set, the path must exist; a missing file raises ConfigError
     instead of discarding lower-precedence layers. Workspace config is never merged
@@ -1325,6 +1340,11 @@ def load_config(
     if global_path.exists():
         merged = merge_config_layer(merged, read_config_file(global_path))
         primary_source = str(global_path)
+
+    local_path = local_config_path(global_path)
+    if local_path.exists():
+        merged = merge_config_layer(merged, read_config_file(local_path))
+        primary_source = str(local_path)
 
     explicit = os.environ.get(CONFIG_ENV)
     if explicit:
