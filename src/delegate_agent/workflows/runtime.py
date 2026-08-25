@@ -47,6 +47,7 @@ DEFAULT_MODE = "safe"
 DEFAULT_STRUCTURED_RETRIES = 2
 DEFAULT_ITEM_THREADS = 64
 ENGINE_ARGV_TRANSPORT = ARGV_PROMPT_TRANSPORT_ENGINES
+STRUCTURED_RESUME_ENGINES = frozenset({"codex", "claude", "cursor", "omp"})
 PERSONA_RESOLUTION_ERRORS = frozenset(
     {
         "persona_not_found",
@@ -73,6 +74,25 @@ _MISSING = _MissingType()
 
 class PersonaDigestMismatch(RuntimeError):
     """A workflow child resolved different persona bytes than its parent pinned."""
+
+
+@dataclass(frozen=True)
+class _DelegateChildResult:
+    text: str | None
+    run_id: str | None
+    execution_cwd: str | None
+    session_id: str | None
+
+
+def _delegate_child_result(value: object) -> _DelegateChildResult:
+    if isinstance(value, _DelegateChildResult):
+        return value
+    return _DelegateChildResult(
+        text=value if isinstance(value, str) else None,
+        run_id=None,
+        execution_cwd=None,
+        session_id=None,
+    )
 
 
 class BudgetExceeded(RuntimeError):
@@ -1209,8 +1229,21 @@ class WorkflowDsl:
         native_schema = _codex_native_schema(schema) if engine == "codex" else None
         prior_output = ""
         prior_error = ""
+        prior_child: _DelegateChildResult | None = None
+        retry_workspace_run_id: str | None = None
         for attempt in range(attempts + 1):
-            attempt_prompt = _correction_prompt(prompt, prior_output, prior_error)
+            resume_session_id = (
+                prior_child.session_id
+                if prior_child is not None and engine in STRUCTURED_RESUME_ENGINES
+                else None
+            )
+            if attempt == 0:
+                attempt_prompt = prompt
+            elif resume_session_id is not None:
+                attempt_prompt = _structured_resume_prompt(prior_error)
+            else:
+                attempt_prompt = _correction_prompt(prompt, prior_output, prior_error)
+            attempt_persona = persona if resume_session_id is None else None
             if native_schema is not None:
                 with tempfile.NamedTemporaryFile(
                     "w", encoding="utf-8", delete=False
@@ -1218,7 +1251,7 @@ class WorkflowDsl:
                     json.dump(native_schema, schema_file)
                     schema_path = schema_file.name
                 try:
-                    text = self._run_delegate(
+                    raw_child = self._run_delegate(
                         engine,
                         attempt_prompt,
                         mode=mode,
@@ -1232,15 +1265,22 @@ class WorkflowDsl:
                         prefer_assistant=True,
                         workflow_agent_key=key,
                         label=label,
-                        persona=persona,
+                        persona=attempt_persona,
                         allow_repo_persona=allow_repo_persona,
-                        expected_persona_digest=persona.digest if persona is not None else None,
+                        expected_persona_digest=(
+                            attempt_persona.digest if attempt_persona is not None else None
+                        ),
+                        return_metadata=True,
+                        structured_session=engine in STRUCTURED_RESUME_ENGINES,
+                        structured_retry_run_id=retry_workspace_run_id,
+                        resume_session_id=resume_session_id,
                     )
                 finally:
                     Path(schema_path).unlink(missing_ok=True)
             else:
-                attempt_prompt = _structured_prompt(prompt, schema, prior_output, prior_error)
-                text = self._run_delegate(
+                if attempt == 0 or resume_session_id is None:
+                    attempt_prompt = _structured_prompt(prompt, schema, prior_output, prior_error)
+                raw_child = self._run_delegate(
                     engine,
                     attempt_prompt,
                     mode=mode,
@@ -1254,10 +1294,18 @@ class WorkflowDsl:
                     prefer_assistant=True,
                     workflow_agent_key=key,
                     label=label,
-                    persona=persona,
+                    persona=attempt_persona,
                     allow_repo_persona=allow_repo_persona,
-                    expected_persona_digest=persona.digest if persona is not None else None,
+                    expected_persona_digest=(
+                        attempt_persona.digest if attempt_persona is not None else None
+                    ),
+                    return_metadata=True,
+                    structured_session=engine in STRUCTURED_RESUME_ENGINES,
+                    structured_retry_run_id=retry_workspace_run_id,
+                    resume_session_id=resume_session_id,
                 )
+            child = _delegate_child_result(raw_child)
+            text = child.text
             try:
                 value = workflow_schema.parse_json_tolerant(text or "", schema)
                 workflow_schema.validate_value(value, schema)
@@ -1271,14 +1319,24 @@ class WorkflowDsl:
                 # Same defect the timeout rows had: engine and attempt without
                 # key or label means learning which task burned its retries
                 # still costs a cross-reference against agent_started by time.
-                self.state.append_event(
-                    "agent_structured_retry",
-                    engine=engine,
-                    attempt=attempt,
-                    error=prior_error,
-                    key=key,
-                    label=label,
-                )
+                event: JsonObject = {
+                    "engine": engine,
+                    "attempt": attempt,
+                    "error": prior_error,
+                    "key": key,
+                    "label": label,
+                    "strategy": (
+                        "resume"
+                        if child.session_id is not None and engine in STRUCTURED_RESUME_ENGINES
+                        else "relaunch"
+                    ),
+                }
+                if event["strategy"] == "resume":
+                    event["sessionId"] = child.session_id
+                self.state.append_event("agent_structured_retry", **event)
+                if retry_workspace_run_id is None:
+                    retry_workspace_run_id = child.run_id
+                prior_child = child
         return None
 
     def _run_delegate(
@@ -1300,7 +1358,11 @@ class WorkflowDsl:
         persona: personas.PersonaResolution | None = None,
         allow_repo_persona: bool = False,
         expected_persona_digest: str | None = None,
-    ) -> str | None:
+        return_metadata: bool = False,
+        structured_session: bool = False,
+        structured_retry_run_id: str | None = None,
+        resume_session_id: str | None = None,
+    ) -> str | _DelegateChildResult | None:
         payload: JsonObject = {
             "engine": engine,
             "mode": mode,
@@ -1314,7 +1376,9 @@ class WorkflowDsl:
             payload["reasoningEffort"] = effort
         if fast is not None and engine == "codex":
             payload["fast"] = fast
-        if isolation is not None:
+        if structured_retry_run_id is not None:
+            payload["isolation"] = "none"
+        elif isolation is not None:
             payload["isolation"] = isolation
         if output_schema is not None:
             payload["outputSchema"] = output_schema
@@ -1323,6 +1387,12 @@ class WorkflowDsl:
             payload["allowRepoPersona"] = allow_repo_persona
         if expected_persona_digest is not None:
             payload["expectedPersonaDigest"] = expected_persona_digest
+        if structured_session:
+            payload["structuredSession"] = True
+        if structured_retry_run_id is not None:
+            payload["structuredRetryRunId"] = structured_retry_run_id
+        if resume_session_id is not None:
+            payload["structuredRetrySessionId"] = resume_session_id
         payload["workflowAgentKey"] = workflow_agent_key
         payload["promptInstructionMode"] = (
             PROMPT_INSTRUCTION_MODE_SLASH if passthrough else PROMPT_INSTRUCTION_MODE_WRAPPED
@@ -1420,19 +1490,34 @@ class WorkflowDsl:
             )
         structured_codex = engine == "codex" and output_schema is not None
         if structured_codex:
-            return _live_child_completion_report(result, self.state.workspace)
-        if isinstance(result.get("text"), str):
-            return result["text"]
-        assistant = result.get("assistantText")
-        if prefer_assistant and isinstance(assistant, str) and assistant.strip():
-            return assistant
-        report_path = result.get("completionReportPath")
-        report = _read_completion_report(report_path, self.state.workspace)
-        if report is not None:
-            return report
-        if isinstance(assistant, str):
-            return assistant
-        return ""
+            answer = _live_child_completion_report(result, self.state.workspace)
+        elif isinstance(result.get("text"), str):
+            answer = result["text"]
+        else:
+            assistant = result.get("assistantText")
+            if prefer_assistant and isinstance(assistant, str) and assistant.strip():
+                answer = assistant
+            else:
+                report_path = result.get("completionReportPath")
+                report = _read_completion_report(report_path, self.state.workspace)
+                if report is not None:
+                    answer = report
+                elif isinstance(assistant, str):
+                    answer = assistant
+                else:
+                    answer = ""
+        if not return_metadata:
+            return answer
+        return _DelegateChildResult(
+            text=answer,
+            run_id=result.get("runId") if isinstance(result.get("runId"), str) else None,
+            execution_cwd=(
+                result.get("executionCwd") if isinstance(result.get("executionCwd"), str) else None
+            ),
+            session_id=(
+                result.get("sessionId") if isinstance(result.get("sessionId"), str) else None
+            ),
+        )
 
 
 def _run_child_command(
@@ -1522,6 +1607,17 @@ def _correction_prompt(prompt: str, prior_output: str, prior_error: str) -> str:
             prior_output,
             "Validation error:",
             prior_error,
+        ]
+    )
+
+
+def _structured_resume_prompt(prior_error: str) -> str:
+    return "\n".join(
+        [
+            "Your prior StructuredOutput failed validation:",
+            prior_error,
+            "",
+            "Re-emit the StructuredOutput now.",
         ]
     )
 

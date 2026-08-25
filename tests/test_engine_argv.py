@@ -841,6 +841,61 @@ class EngineArgvTests(CommandTestBase):
         self.assertNotIn("--mode=plan", argv)
         self.assertNotIn("--mode=ask", argv)
 
+    def test_structured_retry_native_resume_argv(self):
+        cursor = self.delegate.build_cursor_argv(
+            ["cursor-agent"],
+            "safe",
+            "/repo",
+            "composer-2.5",
+            "fix output",
+            resume_session_id="cursor-session",
+        )
+        self.assertEqual(cursor[cursor.index("--resume") + 1], "cursor-session")
+
+        claude = self.delegate.build_claude_argv(
+            self.delegate.DEFAULT_CONFIG["claude"],
+            "safe",
+            None,
+            self.delegate.delegate_config.effective_policy(
+                self.delegate.DEFAULT_CONFIG, engine="claude", mode="safe"
+            ),
+            persist_session=True,
+            resume_session_id="claude-session",
+        )
+        self.assertEqual(claude[claude.index("--resume") + 1], "claude-session")
+        self.assertNotIn("--no-session-persistence", claude)
+
+        omp = self.delegate.build_omp_argv(
+            self.delegate.DEFAULT_CONFIG["omp"],
+            "safe",
+            None,
+            None,
+            "fix output",
+            persist_session=True,
+            resume_session_id="omp-session",
+        )
+        self.assertIn("--resume=omp-session", omp)
+        self.assertNotIn("--no-session", omp)
+
+        codex = self.delegate.build_codex_argv(
+            self.delegate.DEFAULT_CONFIG["codex"],
+            "safe",
+            "/repo",
+            None,
+            "fix output",
+            self.delegate.delegate_config.effective_policy(
+                self.delegate.DEFAULT_CONFIG, engine="codex", mode="safe"
+            ),
+            workspace_kind="git",
+            persist_session=True,
+            resume_session_id="codex-thread",
+        )
+        self.assertEqual(
+            codex[codex.index("exec") : codex.index("exec") + 3], ["exec", "resume", "codex-thread"]
+        )
+        self.assertNotIn("--ephemeral", codex)
+        self.assertNotIn("--cd", codex)
+
     def test_droid_safe_argv(self):
         argv = self.delegate.build_droid_argv("droid", "safe", "/repo", "model-id", "hello")
         self.assertEqual(

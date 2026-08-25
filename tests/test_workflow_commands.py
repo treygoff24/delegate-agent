@@ -85,14 +85,31 @@ class WorkflowCommandTests(unittest.TestCase):
             path = self.bin_dir / name
             path.write_text(
                 "#!/usr/bin/env python3\n"
-                "import json, sys, time\n"
+                "import json, os, sys, time\n"
                 "prompt = (sys.stdin.read() if not sys.stdin.closed else '')\n"
                 "if '--file' in sys.argv:\n"
                 "    prompt += open(sys.argv[sys.argv.index('--file') + 1], encoding='utf-8').read()\n"
                 "prompt += ' '.join(sys.argv[1:])\n"
                 "if 'slow' in prompt:\n"
                 "    time.sleep(1)\n"
-                "text = '{\"ok\": true, \"value\": \"structured\"}' if 'Return ONLY' in prompt else 'fake completion'\n"
+                "prompt_log = os.environ.get('FAKE_GENERIC_PROMPT_LOG')\n"
+                "if prompt_log:\n"
+                "    open(prompt_log, 'a', encoding='utf-8').write(prompt + '\\n---\\n')\n"
+                "workspace_log = os.environ.get('FAKE_GENERIC_WORKSPACE_LOG')\n"
+                "if workspace_log:\n"
+                "    open(workspace_log, 'a', encoding='utf-8').write(os.getcwd() + '\\n')\n"
+                "attempt_file = os.environ.get('FAKE_GENERIC_ATTEMPT_FILE')\n"
+                "attempt = 0\n"
+                "if attempt_file:\n"
+                "    try:\n"
+                "        attempt = int(open(attempt_file, encoding='utf-8').read() or '0') + 1\n"
+                "    except FileNotFoundError:\n"
+                "        attempt = 1\n"
+                "    open(attempt_file, 'w', encoding='utf-8').write(str(attempt))\n"
+                "if 'Return ONLY' in prompt and attempt_file and attempt == 1:\n"
+                "    text = 'not json'\n"
+                "else:\n"
+                "    text = '{\"ok\": true, \"value\": \"structured\"}' if 'Return ONLY' in prompt else 'fake completion'\n"
                 "print(json.dumps({'type':'message','role':'assistant','content':text}))\n"
                 "print(json.dumps({'type':'completion','finalText':text}))\n",
                 encoding="utf-8",
@@ -118,6 +135,9 @@ class WorkflowCommandTests(unittest.TestCase):
             "argv_log = os.environ.get('FAKE_CODEX_ARGV_LOG')\n"
             "if argv_log:\n"
             "    open(argv_log, 'w', encoding='utf-8').write(json.dumps(sys.argv[1:]))\n"
+            "session_id = os.environ.get('FAKE_CODEX_SESSION_ID')\n"
+            "if session_id:\n"
+            "    print(json.dumps({'type': 'thread.started', 'thread_id': session_id}))\n"
             "if os.environ.get('FAKE_CODEX_REGISTERED_FAILURE'):\n"
             "    print(json.dumps({'ok': False, 'runId': os.environ['FAKE_CODEX_REGISTERED_FAILURE']}))\n"
             "    sys.exit(1)\n"
@@ -1890,6 +1910,136 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertIn('{"ok": "wrong"}', prompts[1])
         self.assertIn("Validation error:", prompts[1])
 
+    def test_codex_structured_retry_resumes_session_in_same_worktree(self) -> None:
+        subprocess.run(["git", "init", "-q", str(self.workspace)], check=True)
+        (self.workspace / "tracked.txt").write_text("base\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.workspace), "add", "tracked.txt"], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(self.workspace),
+                "-c",
+                "user.name=Delegate Tests",
+                "-c",
+                "user.email=delegate-tests@example.invalid",
+                "commit",
+                "-qm",
+                "base",
+            ],
+            check=True,
+        )
+        prompt_log = self.workspace / "resume-prompts.log"
+        argv_log = self.workspace / "resume-argv.json"
+        attempt_file = self.workspace / "resume-attempts.txt"
+        script = self.write_workflow(
+            """
+            meta = {"name": "schema-native-resume", "defaults": {"engine": "codex", "mode": "work"}}
+            SCHEMA = {"type": "object", "required": ["ok", "value"], "properties": {"ok": {"type": "boolean"}, "value": {"type": "string"}}, "additionalProperties": False}
+            return agent("review the entire repository", schema=SCHEMA, retries=1, isolation="worktree")
+            """
+        )
+        env = {
+            "FAKE_PROMPT_LOG": str(prompt_log),
+            "FAKE_CODEX_ARGV_LOG": str(argv_log),
+            "FAKE_CODEX_ATTEMPT_FILE": str(attempt_file),
+            "FAKE_CODEX_SESSION_ID": "thread-structured-1",
+        }
+        launch = self.run_delegate(["--json", "workflow", "run", str(script)], env_extra=env)
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        launched = json.loads(launch.stdout)
+        wf_id = launched["wfId"]
+        waited = self.run_delegate(
+            ["--json", "workflow", "wait", wf_id, "--timeout", "10"], env_extra=env
+        )
+        self.assertEqual(waited.returncode, 0, waited.stderr)
+        result = self.run_delegate(["--json", "workflow", "result", wf_id])
+        self.assertEqual(json.loads(result.stdout)["result"], {"ok": True, "value": "structured"})
+
+        prompts = prompt_log.read_text(encoding="utf-8").split("\n---\n")
+        self.assertIn("review the entire repository", prompts[0])
+        self.assertIn("Re-emit the StructuredOutput now", prompts[1])
+        self.assertNotIn("review the entire repository", prompts[1])
+        self.assertNotIn('{"ok": "wrong"}', prompts[1])
+        retry_argv = json.loads(argv_log.read_text(encoding="utf-8"))
+        exec_index = retry_argv.index("exec")
+        self.assertEqual(
+            retry_argv[exec_index : exec_index + 3],
+            ["exec", "resume", "thread-structured-1"],
+        )
+        self.assertNotIn("--ephemeral", retry_argv)
+        self.assertNotIn("--cd", retry_argv)
+
+        runs = self.wait_for_group_runs(wf_id, count=2)
+        self.assertEqual(len({run["executionCwd"] for run in runs}), 1)
+        journal_path = Path(launched["journalPath"])
+        events = [
+            json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines()
+        ]
+        retry = next(event for event in events if event["type"] == "agent_structured_retry")
+        self.assertEqual(retry["strategy"], "resume")
+        self.assertEqual(retry["sessionId"], "thread-structured-1")
+
+    def test_structured_retry_relaunches_unsupported_engine_in_same_worktree(self) -> None:
+        subprocess.run(["git", "init", "-q", str(self.workspace)], check=True)
+        (self.workspace / "tracked.txt").write_text("base\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.workspace), "add", "tracked.txt"], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(self.workspace),
+                "-c",
+                "user.name=Delegate Tests",
+                "-c",
+                "user.email=delegate-tests@example.invalid",
+                "commit",
+                "-qm",
+                "base",
+            ],
+            check=True,
+        )
+        prompt_log = self.workspace / "relaunch-prompts.log"
+        workspace_log = self.workspace / "relaunch-workspaces.log"
+        attempt_file = self.workspace / "relaunch-attempts.txt"
+        script = self.write_workflow(
+            """
+            meta = {"name": "schema-relaunch", "defaults": {"engine": "droid", "model": "gemini", "mode": "work"}}
+            SCHEMA = {"type": "object", "required": ["ok", "value"], "properties": {"ok": {"type": "boolean"}, "value": {"type": "string"}}, "additionalProperties": False}
+            return agent("perform the implementation", schema=SCHEMA, retries=1, isolation="worktree")
+            """
+        )
+        env = {
+            "FAKE_GENERIC_PROMPT_LOG": str(prompt_log),
+            "FAKE_GENERIC_WORKSPACE_LOG": str(workspace_log),
+            "FAKE_GENERIC_ATTEMPT_FILE": str(attempt_file),
+        }
+        launch = self.run_delegate(["--json", "workflow", "run", str(script)], env_extra=env)
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        launched = json.loads(launch.stdout)
+        wf_id = launched["wfId"]
+        waited = self.run_delegate(
+            ["--json", "workflow", "wait", wf_id, "--timeout", "10"], env_extra=env
+        )
+        self.assertEqual(waited.returncode, 0, waited.stderr)
+        result = self.run_delegate(["--json", "workflow", "result", wf_id])
+        self.assertEqual(json.loads(result.stdout)["result"], {"ok": True, "value": "structured"})
+
+        workspaces = workspace_log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(workspaces), 2)
+        self.assertEqual(workspaces[0], workspaces[1])
+        self.assertNotEqual(workspaces[0], str(self.workspace))
+        prompts = prompt_log.read_text(encoding="utf-8").split("\n---\n")
+        self.assertIn("perform the implementation", prompts[1])
+        self.assertIn("not json", prompts[1])
+        journal_path = Path(launched["journalPath"])
+        events = [
+            json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines()
+        ]
+        retry = next(event for event in events if event["type"] == "agent_structured_retry")
+        self.assertEqual(retry["strategy"], "relaunch")
+        self.assertNotIn("sessionId", retry)
+
     def test_structured_output_with_non_codex_schema_uses_assistant_text(self) -> None:
         script = self.write_workflow(
             """
@@ -2507,6 +2657,135 @@ class WorkflowCommandTests(unittest.TestCase):
             )
         }
         self.assertTrue({"agent_adopt_rejected", "agent_structured_retry"} <= event_types)
+
+    def test_structured_retry_resumes_same_native_session(self) -> None:
+        root = self.workspace / "workflow-native-resume"
+        root.mkdir()
+        state = workflow_runtime.WorkflowState(
+            wf_id="workflow-native-resume",
+            workspace=self.workspace,
+            root=root,
+            script_path=root / workflow_registry.SCRIPT_FILE,
+            config=json.loads(self.config_path.read_text(encoding="utf-8")),
+            cli_argv=[sys.executable, str(CLI)],
+            args=None,
+            budget=workflow_runtime.Budget(None),
+        )
+        state.write_status("running")
+        dsl = workflow_runtime.WorkflowDsl(state, {"defaults": {}})
+        schema = {
+            "type": "object",
+            "required": ["ok"],
+            "properties": {"ok": {"type": "boolean"}},
+            "additionalProperties": False,
+        }
+        first = workflow_runtime._DelegateChildResult(
+            text='{"ok": "wrong"}',
+            run_id="child-1",
+            execution_cwd="/worktrees/child-1",
+            session_id="thread-1",
+        )
+        second = workflow_runtime._DelegateChildResult(
+            text='{"ok": "still wrong"}',
+            run_id="child-2",
+            execution_cwd="/worktrees/child-1",
+            session_id="thread-1",
+        )
+        third = workflow_runtime._DelegateChildResult(
+            text='{"ok": true}',
+            run_id="child-3",
+            execution_cwd="/worktrees/child-1",
+            session_id="thread-1",
+        )
+        with mock.patch.object(
+            dsl, "_run_delegate", side_effect=[first, second, third]
+        ) as run_mock:
+            result = dsl._run_structured_or_text(
+                "codex",
+                "review the entire repository",
+                mode="safe",
+                model=None,
+                effort=None,
+                fast=None,
+                schema=schema,
+                isolation="worktree",
+                passthrough=False,
+                timeout=None,
+                retries=2,
+                key="stable-agent-key",
+            )
+
+        self.assertEqual(result, {"ok": True})
+        retry = run_mock.call_args_list[1]
+        self.assertEqual(retry.kwargs["structured_retry_run_id"], "child-1")
+        self.assertEqual(retry.kwargs["resume_session_id"], "thread-1")
+        self.assertEqual(retry.kwargs["workflow_agent_key"], "stable-agent-key")
+        self.assertIn("Re-emit the StructuredOutput now", retry.args[1])
+        self.assertNotIn("review the entire repository", retry.args[1])
+        self.assertNotIn('{"ok": "wrong"}', retry.args[1])
+        final_retry = run_mock.call_args_list[2]
+        self.assertEqual(final_retry.kwargs["structured_retry_run_id"], "child-1")
+        self.assertEqual(final_retry.kwargs["resume_session_id"], "thread-1")
+        events = [json.loads(line) for line in state.journal_path.read_text().splitlines()]
+        journal = next(event for event in events if event["type"] == "agent_structured_retry")
+        self.assertEqual(journal["strategy"], "resume")
+        self.assertEqual(journal["sessionId"], "thread-1")
+
+    def test_structured_retry_relaunches_in_previous_workspace_without_handle(self) -> None:
+        root = self.workspace / "workflow-relaunch"
+        root.mkdir()
+        state = workflow_runtime.WorkflowState(
+            wf_id="workflow-relaunch",
+            workspace=self.workspace,
+            root=root,
+            script_path=root / workflow_registry.SCRIPT_FILE,
+            config=json.loads(self.config_path.read_text(encoding="utf-8")),
+            cli_argv=[sys.executable, str(CLI)],
+            args=None,
+            budget=workflow_runtime.Budget(None),
+        )
+        state.write_status("running")
+        dsl = workflow_runtime.WorkflowDsl(state, {"defaults": {}})
+        schema = {"type": "object"}
+        first = workflow_runtime._DelegateChildResult(
+            text="not json",
+            run_id="child-1",
+            execution_cwd="/worktrees/child-1",
+            session_id=None,
+        )
+        second = workflow_runtime._DelegateChildResult(
+            text="{}",
+            run_id="child-2",
+            execution_cwd="/worktrees/child-1",
+            session_id=None,
+        )
+        with mock.patch.object(dsl, "_run_delegate", side_effect=[first, second]) as run_mock:
+            result = dsl._run_structured_or_text(
+                "droid",
+                "do the work",
+                mode="work",
+                model="gemini",
+                effort=None,
+                fast=None,
+                schema=schema,
+                isolation="worktree",
+                passthrough=False,
+                timeout=None,
+                retries=1,
+                key="stable-agent-key",
+            )
+
+        self.assertEqual(result, {})
+        retry = run_mock.call_args_list[1]
+        self.assertEqual(retry.kwargs["structured_retry_run_id"], "child-1")
+        self.assertIsNone(retry.kwargs["resume_session_id"])
+        self.assertEqual(retry.kwargs["workflow_agent_key"], "stable-agent-key")
+        self.assertIn("do the work", retry.args[1])
+        self.assertIn("not json", retry.args[1])
+        events = [json.loads(line) for line in state.journal_path.read_text().splitlines()]
+        journal = next(event for event in events if event["type"] == "agent_structured_retry")
+        self.assertEqual(journal["strategy"], "relaunch")
+        self.assertNotIn("sessionId", journal)
 
     def test_adoption_wait_timeout_cancels_child_without_duplicate(self) -> None:
         # F2: adoption wait timeout cancels the adopted run and returns None.

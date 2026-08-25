@@ -331,3 +331,5 @@ class EngineBuildInput:
     persona_digest: str | None = None
     persona_transport: str | None = None
     persona_env_overrides: dict[str, str] | None = None
+    persist_session: bool = False
+    resume_session_id: str | None = None

@@ -324,6 +324,7 @@ class StreamAccumulator:
     terminal_event: JsonObject | None = None
     terminal_status: str | None = None
     usage: JsonObject | None = None
+    session_id: str | None = None
     structured_events_seen: int = 0
 
     def _record_terminal_event(
@@ -394,6 +395,7 @@ class StreamAccumulator:
         if not isinstance(event_type, str):
             self._ingest_role_content_message(payload)
             return
+        self._capture_session_id(payload, event_type)
         if self.harness == "opencode":
             self._ingest_opencode_event(payload, event_type)
             return
@@ -472,6 +474,26 @@ class StreamAccumulator:
         # includes kimi 0.26.0 meta lines such as
         # {"role":"meta","type":"session.resume_hint",...}, which carry no
         # assistant text, tool activity, or terminal signal worth normalizing.
+
+    def _capture_session_id(self, payload: JsonObject, event_type: str) -> None:
+        candidate: object = None
+        if self.harness == "codex" and event_type == "thread.started":
+            candidate = payload.get("thread_id")
+        elif self.harness in {"claude", "cursor"} and event_type in {"system", "result"}:
+            candidate = payload.get("session_id", payload.get("sessionId"))
+            if candidate is None and self.harness == "cursor":
+                candidate = payload.get("chat_id", payload.get("chatId"))
+        elif self.harness == "omp" and event_type == "session":
+            candidate = payload.get("id")
+        if (
+            isinstance(candidate, str)
+            and candidate
+            and candidate == candidate.strip()
+            and len(candidate) <= 512
+            and candidate[0].isalnum()
+            and not any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in candidate)
+        ):
+            self.session_id = candidate
 
     def _ingest_error_event(self, payload: JsonObject) -> None:
         message = payload.get("message")

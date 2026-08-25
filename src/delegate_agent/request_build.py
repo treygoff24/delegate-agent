@@ -30,6 +30,7 @@ from delegate_agent import (
     personas,
     profiles,
     reasoning,
+    run_registry,
     safe_workspace,
     structured_output,
     wsl,
@@ -123,6 +124,9 @@ RUN_INPUT_KEYS = {
     "allowRepoPersona",
     "expectedPersonaDigest",
     "mailPush",
+    "structuredSession",
+    "structuredRetryRunId",
+    "structuredRetrySessionId",
 }
 
 OUTPUT_SCHEMA_COMPLETION_REPORT_WARNING = (
@@ -1649,6 +1653,86 @@ def _load_input_json_object(path: Path) -> JsonObject:
     return raw
 
 
+def _structured_retry_workspace(
+    source: ResolvedWorkspace,
+    *,
+    engine: str,
+    group: str,
+    workflow_agent_key: str,
+    run_id: str,
+    session_id: str | None,
+) -> ResolvedWorkspace:
+    root = run_registry.registry_root_if_exists(Path(source.path))
+    if root is None or not run_registry.RUN_ID_RE.fullmatch(run_id):
+        raise DelegateError(
+            "structured_retry_run_invalid", "Structured retry source run is invalid."
+        )
+    manifest = run_registry.load_run_manifest_or_none(root, run_id)
+    snapshot = run_registry.load_run_snapshot_or_none(root, run_id)
+    if not isinstance(manifest, dict) or not isinstance(snapshot, dict):
+        raise DelegateError(
+            "structured_retry_run_invalid",
+            "Structured retry source run has incomplete metadata.",
+        )
+    if (
+        manifest.get("engine") != engine
+        or manifest.get("group") != group
+        or manifest.get("workflowAgentKey") != workflow_agent_key
+    ):
+        raise DelegateError(
+            "structured_retry_run_invalid",
+            "Structured retry source run does not belong to this workflow agent.",
+        )
+    recorded_session = snapshot.get("sessionId")
+    if session_id is not None and recorded_session != session_id:
+        raise DelegateError(
+            "structured_retry_session_invalid",
+            "Structured retry session does not match the source run.",
+        )
+    execution_cwd = manifest.get("executionCwd")
+    if not isinstance(execution_cwd, str) or not execution_cwd:
+        raise DelegateError(
+            "structured_retry_workspace_missing",
+            "Structured retry source run has no execution workspace.",
+        )
+    target = Path(execution_cwd)
+    try:
+        canonical_target = target.resolve(strict=False)
+        canonical_source = Path(source.path).resolve(strict=False)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise DelegateError(
+            "structured_retry_workspace_missing",
+            "Structured retry workspace cannot be resolved.",
+        ) from exc
+    if target.is_symlink() or not target.is_dir():
+        if manifest.get("mode") == MODE_SAFE:
+            canonical_target = canonical_source
+        else:
+            raise DelegateError(
+                "structured_retry_workspace_missing",
+                "Structured retry workspace no longer exists.",
+            )
+    elif manifest.get("isolationLifecycle") == "persistent":
+        branch = manifest.get("branch")
+        probe = _run_git(
+            str(canonical_target),
+            ["branch", "--show-current"],
+            timeout_seconds=GIT_QUICK_TIMEOUT_SECONDS,
+        )
+        if not isinstance(branch, str) or probe.returncode != 0 or probe.stdout.strip() != branch:
+            raise DelegateError(
+                "structured_retry_workspace_changed",
+                "Structured retry worktree branch changed after the source run.",
+            )
+    elif canonical_target != canonical_source:
+        raise DelegateError(
+            "structured_retry_workspace_changed",
+            "Structured retry source was not a persistent worktree.",
+        )
+    kind = manifest.get("workspaceKind")
+    return ResolvedWorkspace(str(canonical_target), kind if isinstance(kind, str) else source.kind)
+
+
 def request_from_input_json(
     parsed: ParsedCommand,
     config: JsonObject,
@@ -1800,6 +1884,39 @@ def request_from_input_json(
     raw_workflow_agent_key = raw.get("workflowAgentKey")
     if raw_workflow_agent_key is not None and not isinstance(raw_workflow_agent_key, str):
         raise DelegateError("invalid_workflow_agent_key", "workflowAgentKey must be a string.")
+    raw_structured_session = raw.get("structuredSession", False)
+    if not isinstance(raw_structured_session, bool):
+        raise DelegateError(
+            "invalid_structured_session", "structuredSession must be true or false."
+        )
+    raw_structured_retry_run_id = raw.get("structuredRetryRunId")
+    if raw_structured_retry_run_id is not None and not isinstance(raw_structured_retry_run_id, str):
+        raise DelegateError(
+            "invalid_structured_retry_run",
+            "structuredRetryRunId must be a run id string.",
+        )
+    raw_structured_retry_session_id = raw.get("structuredRetrySessionId")
+    if raw_structured_retry_session_id is not None and not isinstance(
+        raw_structured_retry_session_id, str
+    ):
+        raise DelegateError(
+            "invalid_structured_retry_session",
+            "structuredRetrySessionId must be a session id string.",
+        )
+    if (
+        raw_structured_session
+        or raw_structured_retry_run_id is not None
+        or raw_structured_retry_session_id is not None
+    ) and (raw_workflow_agent_key is None or global_options.group is None):
+        raise DelegateError(
+            "invalid_structured_session",
+            "Structured session fields are internal to grouped workflow agents.",
+        )
+    if raw_structured_retry_session_id is not None and raw_structured_retry_run_id is None:
+        raise DelegateError(
+            "invalid_structured_retry_session",
+            "structuredRetrySessionId requires structuredRetryRunId.",
+        )
     raw_expected_persona_digest = raw.get("expectedPersonaDigest")
     if raw_expected_persona_digest is not None and (
         not isinstance(raw_expected_persona_digest, str)
@@ -1978,11 +2095,28 @@ def request_from_input_json(
         engine=str(engine),
         mode=str(mode),
     )
+    execution_workspace = workspace
+    if raw_structured_retry_run_id is not None:
+        retry_group = global_options.group
+        retry_key = raw_workflow_agent_key
+        if retry_group is None or retry_key is None:
+            raise DelegateError(
+                "invalid_structured_session",
+                "Structured retry source requires a grouped workflow agent.",
+            )
+        execution_workspace = _structured_retry_workspace(
+            workspace,
+            engine=str(engine),
+            group=retry_group,
+            workflow_agent_key=retry_key,
+            run_id=raw_structured_retry_run_id,
+            session_id=raw_structured_retry_session_id,
+        )
     return build_request(
         str(engine),
         str(mode),
         json_model_alias,
-        workspace,
+        execution_workspace,
         prompt,
         config,
         dry_run=False,
@@ -2016,7 +2150,9 @@ def request_from_input_json(
         pass_through=global_options.pass_through,
         stderr=stderr,
         mail_push=raw_mail_push,
-        frame_prompt=True,
+        frame_prompt=raw_structured_retry_session_id is None,
+        persist_session=raw_structured_session,
+        resume_session_id=raw_structured_retry_session_id,
     )
 
 
@@ -2067,6 +2203,8 @@ def build_request(
     expected_persona_digest: str | None = None,
     mail_push: bool = False,
     frame_prompt: bool | None = None,
+    persist_session: bool = False,
+    resume_session_id: str | None = None,
 ) -> Request:
     _validate_agent_option(engine, agent)
     if not isinstance(workspace, ResolvedWorkspace):
@@ -2242,6 +2380,8 @@ def build_request(
             allow_repo_persona=allow_repo_persona,
             skip_skill_preamble=pass_through,
             frame_prompt=frame_prompt,
+            persist_session=persist_session,
+            resume_session_id=resume_session_id,
         )
 
     def reprobed() -> tuple[JsonObject | None, tuple[str, ...]] | None:
@@ -2435,6 +2575,7 @@ def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         stream_capture=build.stream_capture,
         call_read_only=build.call_read_only,
         pure=build.pure,
+        resume_session_id=build.resume_session_id,
     )
     reasoning_kwargs = reasoning_request_kwargs(capability, build.effort_source)
     return EngineRequestParts(
@@ -2592,6 +2733,8 @@ def _codex_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         output_schema=build.output_schema,
         call_read_only=build.call_read_only,
         pure=build.pure,
+        persist_session=build.persist_session,
+        resume_session_id=build.resume_session_id,
     )
     return EngineRequestParts(
         model=model,
@@ -2646,6 +2789,8 @@ def _claude_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         pure=build.pure,
         output_schema=schema_contents,
         persona_file=build.persona_transport == "native-file",
+        persist_session=build.persist_session,
+        resume_session_id=build.resume_session_id,
     )
     display_argv = persona_display_argv(argv)
     return EngineRequestParts(
@@ -2991,6 +3136,8 @@ def _omp_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         build.prompt,
         call_read_only=build.call_read_only,
         pure=build.pure,
+        persist_session=build.persist_session,
+        resume_session_id=build.resume_session_id,
     )
     return EngineRequestParts(
         model=model,
@@ -3112,6 +3259,8 @@ def _build_request_for_workspace(
     skip_skill_preamble: bool = False,
     mail_push: bool = False,
     frame_prompt: bool = True,
+    persist_session: bool = False,
+    resume_session_id: str | None = None,
 ) -> Request:
     source_prompt = prompt if source_prompt is None else source_prompt
     materialized_schema_text, schema_warnings = _preflight_codex_output_schema(
@@ -3227,6 +3376,8 @@ def _build_request_for_workspace(
             persona_digest=persona_resolution.digest if persona_resolution is not None else None,
             persona_transport=persona_transport,
             persona_env_overrides=persona_env,
+            persist_session=persist_session,
+            resume_session_id=resume_session_id,
         ),
     )
     return _apply_profile_resolution(

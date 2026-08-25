@@ -505,6 +505,8 @@ def build_snapshot(
         snapshot["terminalEvent"] = accumulator.terminal_event
     if accumulator.terminal_status is not None:
         snapshot["terminalStatus"] = accumulator.terminal_status
+    if accumulator.session_id is not None:
+        snapshot["sessionId"] = accumulator.session_id
     if ctx.group is not None:
         snapshot["group"] = ctx.group
     if ctx.include_dirty:
@@ -2439,6 +2441,9 @@ def _tracked_result(
     ok = finalization.exit_code == 0
     if json_mode:
         _assistant_text, assistant_meta = capture.accumulator.bounded_assistant_text()
+        extra = dict(finalization.extra)
+        if capture.accumulator.session_id is not None:
+            extra["sessionId"] = capture.accumulator.session_id
         payload = completion_json_payload(
             ctx,
             ok=ok,
@@ -2450,7 +2455,7 @@ def _tracked_result(
             completion_report_written=finalization.report_written,
             assistant_meta=assistant_meta,
             usage=capture.accumulator.usage,
-            extra=finalization.extra,
+            extra=extra,
         )
         return finalization.exit_code, payload
 
