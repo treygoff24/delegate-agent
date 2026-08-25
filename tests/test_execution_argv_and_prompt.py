@@ -170,7 +170,7 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
         self.assertEqual(code, 0)
         self.assertIs(payload["requestedFast"], False)
         self.assertNotIn("emptyRetry", payload)
-        self.assertNotIn("resultQuality", payload)
+        self.assertEqual(payload["resultQuality"], "ok")
 
     def test_call_json_reports_empty_retry_only_when_attempted(self):
         parsed = self.delegate.parse_cli(["codex", "call", "hello"])
@@ -205,9 +205,54 @@ class ExecutionArgvAndPromptTests(ExecutionTestBase):
                 stdout=io.StringIO(),
                 stderr=io.StringIO(),
             )
-        self.assertEqual(code, 0)
+        # An unresolved empty is a failed call: the child exiting 0 with no
+        # output must not publish ok/exit 0 (run_status.run_succeeded contract).
+        self.assertEqual(code, 1)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["status"], "failed")
+        self.assertEqual(payload["exitCode"], 1)
+        self.assertEqual(payload["error"], "empty_result")
         self.assertEqual(payload["resultQuality"], "empty")
         self.assertEqual(payload["emptyRetry"], {"attempted": True, "resolved": False})
+
+    def test_call_json_no_assistant_text_fails_without_retry_metadata(self):
+        parsed = self.delegate.parse_cli(["codex", "call", "hello"])
+        request = self.delegate.request_from_parsed(
+            parsed, self.delegate.DEFAULT_CONFIG, io.StringIO("")
+        )
+        fake_result = self.delegate.delegate_runner.CallResult(
+            text="",
+            exit_code=0,
+            duration_ms=10,
+            stdout_bytes=120,
+            stderr_bytes=0,
+            text_chars=0,
+            text_truncated=False,
+            result_quality="no_assistant_text",
+        )
+        with (
+            mock.patch.object(self.delegate, "ensure_binary"),
+            mock.patch.object(
+                self.delegate.delegate_runner, "execute_call", return_value=fake_result
+            ),
+        ):
+            code, payload = self.delegate.execute_request(
+                request,
+                json_mode=True,
+                config=self.delegate.DEFAULT_CONFIG,
+                pass_through=False,
+                completion_report_mode="none",
+                source_workspace=self.delegate.ResolvedWorkspace("<call-temp-cwd>", "directory"),
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+        # resultQuality must be visible even when no retry ran (skipped-retry
+        # empties were previously invisible to JSON consumers).
+        self.assertEqual(code, 1)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"], "empty_result")
+        self.assertEqual(payload["resultQuality"], "no_assistant_text")
+        self.assertNotIn("emptyRetry", payload)
 
     def _call_temp_dirs(self):
         return set(Path(tempfile.gettempdir()).glob("delegate-call-*"))

@@ -1149,11 +1149,21 @@ def execute_request(
             except delegate_runner.RunnerLaunchError as exc:
                 raise DelegateError(exc.error, exc.message, exc.exit_code) from exc
             status = delegate_runner.status_from_exit(result.exit_code)
+            # Same verdict contract as tracked runs (run_status.run_succeeded):
+            # a child that exited 0 but produced no output is a failed call, not
+            # a success with a warning attached. The empty-success retry has
+            # already run inside execute_call by this point.
+            empty_failure = result.exit_code == 0 and not run_registry.run_succeeded(
+                status, result.result_quality
+            )
+            if empty_failure:
+                status = run_registry.STATUS_FAILED
+            exit_code = 1 if empty_failure else result.exit_code
             if json_mode:
                 payload: JsonObject = {
-                    "ok": result.exit_code == 0,
+                    "ok": exit_code == 0,
                     "status": status,
-                    "exitCode": result.exit_code,
+                    "exitCode": exit_code,
                     "engine": request.engine,
                     "mode": request.mode,
                     "workspaceRoot": (request.env_overrides or {}).get(
@@ -1195,8 +1205,10 @@ def execute_request(
                             seen.add(warning)
                             merged.append(warning)
                     payload["warnings"] = merged
+                # resultQuality is unconditional: emitting it only when a retry
+                # ran made a skipped-retry empty invisible to JSON consumers.
+                payload["resultQuality"] = result.result_quality
                 if result.empty_retry_attempted:
-                    payload["resultQuality"] = result.result_quality
                     payload["emptyRetry"] = {
                         "attempted": True,
                         "resolved": result.empty_retry_resolved,
@@ -1207,27 +1219,40 @@ def execute_request(
                     payload["codexThreadFallback"] = result.codex_thread_fallback
                 reasoning.add_reasoning_payload_fields(payload, request)
                 run_metadata.add_speed_payload_fields(payload, request)
-                if result.exit_code != 0:
-                    payload["error"] = result.error or "child_failed"
-                    if result.message:
-                        payload["message"] = result.message
-                    elif result.error == "call_output_invalid":
-                        payload["message"] = "Child output was invalid."
+                if exit_code != 0:
+                    if empty_failure:
+                        payload["error"] = "empty_result"
+                        payload["message"] = (
+                            "Child completed but produced no output "
+                            f"(resultQuality={result.result_quality})."
+                        )
                     else:
-                        payload["message"] = "Child command failed."
+                        payload["error"] = result.error or "child_failed"
+                        if result.message:
+                            payload["message"] = result.message
+                        elif result.error == "call_output_invalid":
+                            payload["message"] = "Child output was invalid."
+                        else:
+                            payload["message"] = "Child command failed."
                     payload["stderrTail"] = result.stderr_tail
-                call_response = (result.exit_code, payload)
+                call_response = (exit_code, payload)
                 return call_response
             for warning in result.warnings:
                 print(f"warning: {warning}", file=stderr)
-            if result.exit_code != 0:
+            if empty_failure:
+                print(
+                    "empty_result: child completed but produced no output "
+                    f"(resultQuality={result.result_quality}).",
+                    file=stderr,
+                )
+            elif exit_code != 0:
                 if result.message:
                     print(result.message, file=stderr)
                 elif result.stderr_tail:
                     print(result.stderr_tail, file=stderr)
             if result.text:
                 print(result.text, file=stdout)
-            call_response = (result.exit_code, None)
+            call_response = (exit_code, None)
             return call_response
         finally:
             if request.cleanup_workspace:

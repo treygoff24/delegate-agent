@@ -66,7 +66,10 @@ class Wave4LaunchFeatureTests(ExecutionTestBase):
             agent = self.write_executable(
                 "agent",
                 "printf 'source=%s\\nexecution=%s\\nworkspace=%s\\n' \"$DELEGATE_SOURCE_ROOT\" "
-                '"${DELEGATE_EXECUTION_ROOT:-}" "$WORKSPACE_ROOT" >> "$DELEGATE_ENV_LOG"\n',
+                '"${DELEGATE_EXECUTION_ROOT:-}" "$WORKSPACE_ROOT" >> "$DELEGATE_ENV_LOG"\n'
+                # Stdout output keeps the call-mode leg a genuine success: an
+                # empty call now reports failed/empty_result by design.
+                "printf 'env probe ok\\n'\n",
             )
             config_path = self.write_config(
                 self.config_with_cursor(agent, data_home=str(Path(fake_home) / "worktrees"))
