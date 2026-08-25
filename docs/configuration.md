@@ -10,7 +10,7 @@ From lowest to highest precedence:
 2. User config: `~/.delegate/config.json`.
 3. Its machine-local overlay: `~/.delegate/config.local.json`.
 4. `DELEGATE_CONFIG=/path/to/config.json`, when set.
-5. That file's machine-local overlay: `/path/to/config.local.json`.
+5. That file's machine-local overlay, if the file is in `~/.delegate`.
 6. Internal CLI overrides used by some commands.
 
 If `DELEGATE_CONFIG` is set, the file must exist. Delegate fails closed instead of silently falling back to another config.
@@ -24,7 +24,7 @@ and that no provisioning step writes:
 | --- | --- |
 | `~/.delegate/config.json` | `~/.delegate/config.local.json` |
 | `~/.delegate/config.work.json` | `~/.delegate/config.work.local.json` |
-| whatever `DELEGATE_CONFIG` names | that file with `.local` before `.json` |
+| a `DELEGATE_CONFIG` file in `~/.delegate` | that file with `.local` before `.json` |
 
 On a managed fleet these config files are *copied* onto each machine by an
 installer that has no way to learn about edits made there, so a model alias or
@@ -36,6 +36,13 @@ Pair the overlay with the file it defends, not with the base config. Under
 that is the file provisioning replaces and `config.local.json` would sit below
 it. A per-base sibling also keeps realms separate: a work overlay cannot reach
 into personal. Overlays are optional — absent, nothing changes.
+
+Overlays are honored **only for files in `~/.delegate`**. Pointing
+`DELEGATE_CONFIG` at a file anywhere else merges exactly that file: the trust
+you extend with `DELEGATE_CONFIG` is trust in the file you read, and a sibling
+shipped alongside it was never reviewed. Since config selects provider binaries
+and argv prefixes, honoring such a sibling would let a cloned repository choose
+what Delegate executes.
 
 Repository-local `.delegate/config.json` is never merged automatically. A cloned
 repository must not be able to select provider binaries, environment variables,

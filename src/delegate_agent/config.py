@@ -1317,12 +1317,33 @@ def local_config_path(base_path: Path) -> Path:
     return base_path.with_name(f"{base_path.stem}.{LOCAL_CONFIG_NAME}{base_path.suffix}")
 
 
+def in_config_home(path: Path) -> bool:
+    """True when ``path`` sits directly in the delegate config directory.
+
+    Resolved on both sides so a symlink cannot present an outside file as an
+    inside one.
+    """
+    home = default_config_path().parent.resolve(strict=False)
+    return path.parent.resolve(strict=False) == home
+
+
 def _merge_with_local_overlay(
     merged: JsonObject, base_path: Path, source: str
 ) -> tuple[JsonObject, str]:
-    """Merge ``base_path`` then its ``.local`` sibling, reporting what won."""
+    """Merge ``base_path``, then its ``.local`` sibling if that sibling is ours.
+
+    The sibling is admitted only for a base inside the delegate config home.
+    That covers every file provisioning can replace while preserving the trust
+    boundary DELEGATE_CONFIG documents: selecting a reviewed file inside a
+    cloned repository must merge *that file*, not an unreviewed sibling the
+    repository also ships. Config chooses provider binaries and argv prefixes,
+    so an overlay reachable that way would be arbitrary command execution
+    through the path the docs bless as the deliberate way to trust repo config.
+    """
     merged = merge_config_layer(merged, read_config_file(base_path))
     primary_source = source
+    if not in_config_home(base_path):
+        return merged, primary_source
     overlay = local_config_path(base_path)
     if overlay.exists():
         merged = merge_config_layer(merged, read_config_file(overlay))
