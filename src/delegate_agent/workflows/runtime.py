@@ -250,7 +250,18 @@ class WorkflowState:
                 **payload,
             }
             registry.append_jsonl(self.journal_path, event)
-            self._write_status_locked(status="running", last_event=event)
+            # A gate writes status="paused" with its gateKey and then raises GateExit; the
+            # script's own unwind logging must not clobber that back to "running", or
+            # `workflow approve` sees nothing gated and the parked supervisor reads as dead.
+            gate_key = status.get("gateKey") if isinstance(status, dict) else None
+            if isinstance(status, dict) and status.get("status") == "paused" and isinstance(gate_key, str):
+                self._write_status_locked(
+                    status="paused",
+                    last_event=event,
+                    extra={"gateKey": gate_key, "gateResult": status.get("gateResult")},
+                )
+            else:
+                self._write_status_locked(status="running", last_event=event)
             return event
 
     def _write_status_locked(
