@@ -59,6 +59,80 @@ def _effective_max_chars(command: RunOutputCommand) -> int | None:
     return command.max_chars if command.max_chars is not None else RUN_OUTPUT_DEFAULT_MAX_CHARS
 
 
+def _render_event_line(event: harness_events.NormalizedEvent) -> str:
+    # Field bounding lives in NormalizedEvent.to_dict, not on the dataclass
+    # fields, so bound here too: a codex command_execution target can embed an
+    # entire command line plus its output.
+    def bounded(value: str) -> str:
+        return harness_events.bounded_event_text(value)[0]
+
+    target = event.target or event.path
+    if event.kind in ("tool.started", "tool.completed"):
+        line = f"{event.kind}: {bounded(event.tool or 'tool')}"
+        if target:
+            line += f" {bounded(target)}"
+        if event.status:
+            line += f" ({bounded(event.status)})"
+        return line
+    if event.message is not None:
+        if event.kind == "text":
+            return bounded(event.message)
+        if event.status:
+            return f"{event.kind}: {bounded(event.status)} {bounded(event.message)}"
+        return f"{event.kind}: {bounded(event.message)}"
+    if event.status:
+        return f"{event.kind}: {bounded(event.status)}"
+    return event.kind
+
+
+def _structured_stdout_tail(
+    registry_root: Path,
+    run_id: str,
+    tail: int,
+) -> tuple[str, bool, int] | None:
+    """Tail a structured stdout stream in the caller's unit: rendered event lines.
+
+    Harness stdout is JSONL transport where one physical line can embed an entire
+    command plus its aggregated output, so tailing physical lines returns raw
+    protocol instead of what the lane did. Render the normalized events and tail
+    those. Returns ``(content, truncated, events_total)``, or None for plain-text
+    streams, which keep raw line-tail semantics (``--raw`` remains the escape
+    hatch for the untouched transport).
+    """
+    stdout_text, byte_truncated = _read_recovery_stdout_tail(registry_root, run_id)
+    if not stdout_text:
+        return None
+    manifest = run_registry.load_run_manifest(registry_root, run_id)
+    harness = manifest.get("harness") if isinstance(manifest, dict) else None
+    accumulator = harness_events.StreamAccumulator(
+        harness=harness if isinstance(harness, str) else None
+    )
+    for line in stdout_text.split("\n"):
+        accumulator.ingest_line(line)
+    if not accumulator.structured_events_seen:
+        return None
+    lines = [_render_event_line(event) for event in accumulator.events]
+    # Assistant prose is recorded as chunks, not events, so it would vanish from
+    # an events-only view. It goes last (it is the most recent useful output), so
+    # it survives the tail.
+    assistant, _ = accumulator.bounded_assistant_text()
+    if assistant:
+        lines.append("assistant:")
+        # Every rendered line must be a useful line — a blank paragraph separator
+        # consuming a slot of --tail N is the same wrong-unit bug this view fixes.
+        lines.extend(line for line in assistant.split("\n") if line.strip())
+    trimmed = lines[-tail:] if tail > 0 else []
+    truncated = (
+        byte_truncated
+        or len(lines) > len(trimmed)
+        or accumulator.events.total > len(accumulator.events)
+    )
+    content = "\n".join(trimmed)
+    if content:
+        content += "\n"
+    return content, truncated, accumulator.events.total
+
+
 def _add_log_output_section(
     *,
     registry_root: Path,
@@ -71,6 +145,29 @@ def _add_log_output_section(
     sections: JsonObject,
     text_sections: dict[str, str],
 ) -> None:
+    rendered = None
+    if log_name == run_registry.STDOUT_LOG and not raw and tail is not None:
+        rendered = _structured_stdout_tail(registry_root, run_id, tail)
+    if rendered is not None:
+        content, truncated, events_total = rendered
+        meta: JsonObject = {
+            "bytes": delegate_retention.log_file_byte_size(registry_root, run_id, log_name),
+            "truncated": truncated,
+            "archived": delegate_retention.raw_logs_archived(registry_root, run_id),
+            "view": "events",
+            "eventsTotal": events_total,
+            "tailLines": tail,
+        }
+        if max_chars is not None:
+            capped = log_output.cap_content_by_chars(content, max_chars)
+            content = capped.content
+            meta["maxChars"] = max_chars
+            meta["charTruncated"] = capped.char_truncated
+            meta["returnedChars"] = capped.returned_chars
+            meta["omittedChars"] = capped.omitted_chars
+        sections[section_name] = meta
+        text_sections[section_name] = content
+        return
     output = delegate_retention.read_log_output(
         registry_root,
         run_id,
@@ -79,7 +176,7 @@ def _add_log_output_section(
         raw=raw,
     )
     content = output.content
-    meta: JsonObject = {
+    meta = {
         "bytes": delegate_retention.log_file_byte_size(registry_root, run_id, log_name),
         "truncated": output.truncated,
         "archived": delegate_retention.raw_logs_archived(registry_root, run_id),

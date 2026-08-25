@@ -1044,6 +1044,53 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
         self.assertEqual(code, self.delegate.EXIT_USAGE)
         self.assertIn("missing_completion_report", stderr.getvalue())
 
+    def test_run_output_stdout_tail_renders_structured_events_not_raw_jsonl(self):
+        run_id, alias = self.write_run(harness="codex", status="succeeded", pid=None)
+        run_path = self.registry.run_directory(self.registry_root, run_id)
+        big_output = "x" * 10_000
+        lines = [
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "command_execution",
+                        "command": f"rg -n pattern{i} src/",
+                        "aggregated_output": big_output,
+                        "status": "completed",
+                    },
+                }
+            )
+            for i in range(30)
+        ]
+        (run_path / "stdout.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        stdout = io.StringIO()
+        code = self.delegate.main(
+            [
+                "--json",
+                "--cwd",
+                str(self.workspace),
+                "run-output",
+                alias,
+                "--stdout",
+                "--tail",
+                "5",
+            ],
+            stdout=stdout,
+        )
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        section = payload["sections"]["stdout"]
+        content = section["content"]
+        self.assertIn("tool.completed: command_execution rg -n pattern29", content)
+        self.assertIn("pattern25", content)
+        self.assertNotIn("pattern24", content)
+        self.assertNotIn("aggregated_output", content)
+        self.assertNotIn(big_output, content)
+        self.assertLess(len(content), 2_000)
+        self.assertEqual(section["view"], "events")
+        self.assertEqual(section["eventsTotal"], 30)
+        self.assertTrue(section["truncated"])
+
     def test_run_output_stdout_tail_only(self):
         run_id, alias = self.write_run()
         run_path = self.registry.run_directory(self.registry_root, run_id)

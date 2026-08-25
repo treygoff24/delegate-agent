@@ -917,7 +917,10 @@ class EndToEndTrackingTests(unittest.TestCase):
                 alias,
                 "--stdout",
                 "--tail",
-                "2",
+                # The rendered event view counts useful lines (events + assistant
+                # text), so a full-coverage tail needs headroom beyond the two
+                # physical JSONL lines the fake harness emits.
+                "10",
             ],
             text=True,
             capture_output=True,
