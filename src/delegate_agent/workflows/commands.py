@@ -40,6 +40,7 @@ class WorkflowCommand:
     timeout: int | None = None
     result_field: str | None = None
     json_mode: bool = False
+    notify: str | None = None
 
 
 def emit(
@@ -202,6 +203,10 @@ def emit_run(
                 "scriptSha256": registry.script_sha256(data),
                 "args": args_value,
                 "budget": {"total": budget_total, "spent": 0, "remaining": budget_total},
+                # Persisted rather than passed on argv: the supervisor is
+                # detached and re-execs itself, so status.json is the only thing
+                # that survives to tell it where to report.
+                "notify": command.notify,
             },
         )
     if command.dry_run:
@@ -243,6 +248,10 @@ def emit_run(
                     "updatedAt": run_registry.utc_now_iso(),
                 }
             )
+            # A resume may name a different target, or none; an explicit --notify
+            # on the resume wins, and its absence keeps whatever the run set.
+            if command.notify is not None:
+                status["notify"] = command.notify
             if resume_from_dry_run and isinstance(status.get("budget"), dict):
                 total = status["budget"].get("total")
                 status["budget"].update(

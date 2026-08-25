@@ -17,7 +17,13 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from delegate_agent import personas, run_registry, structured_output, wait_cancel_commands
+from delegate_agent import (
+    notify,
+    personas,
+    run_registry,
+    structured_output,
+    wait_cancel_commands,
+)
 from delegate_agent.constants import (
     KNOWN_ENGINES,
     MODE_CALL,
@@ -118,6 +124,11 @@ class WorkflowState:
     budget: Budget
     dry_run: bool = False
     replay_journal: bool = True
+    # Read once at supervisor start and re-emitted on every status write.
+    # status.json is REBUILT from scratch by _write_status_locked rather than
+    # merged, so a key written only at create time is erased by the supervisor's
+    # first write -- which is exactly what happened to the first version of this.
+    notify_target: str | None = None
     depth: int = 0
     namespace: str = "root"
     replay: dict[str, JsonValue] = field(default_factory=dict)
@@ -246,6 +257,7 @@ class WorkflowState:
             "supervisorPid": os.getpid(),
             "supervisorPgid": os.getpgrp(),
             "supervisorToken": self.supervisor_token,
+            "notify": self.notify_target,
             "updatedAt": run_registry.utc_now_iso(),
         }
         if not self.replay_journal:
@@ -259,6 +271,30 @@ class WorkflowState:
     def write_status(self, status: str, **extra: JsonValue) -> None:
         with self.journal_lock:
             self._write_status_locked(status=status, extra=extra)
+
+    def notify_event(self, event: str, *, detail: str = "") -> None:
+        """Send one metadata line to the workflow's --notify target, if any.
+
+        A workflow supervisor is detached: it parks at a gate, dies, or finishes
+        with nobody watching, and until now had no way to ring anyone. The
+        consumer running six lanes tonight was babysitting it with a cron and a
+        scheduled wake-up.
+
+        Target comes from status.json rather than argv because the supervisor
+        re-execs itself detached. Failures degrade exactly as launch notify does
+        -- a notification that cannot be delivered must never change a workflow's
+        outcome.
+        """
+        target_spec = self.notify_target
+        if not target_spec:
+            return
+        suffix = f" — {detail}" if detail else ""
+        message = f"delegate workflow {self.wf_id} {event}{suffix}"
+        try:
+            target = notify.parse_notify_target(target_spec)
+            notify.send_notification(target, message, cwd=str(self.workspace), env=os.environ)
+        except Exception:  # telemetry never fails the workflow
+            return
 
     def current_scope(self) -> str:
         return getattr(self.thread_local, "scope", self.namespace)
@@ -1229,7 +1265,23 @@ class WorkflowDsl:
             completed = _run_child_command(argv, cwd=str(self.state.workspace), timeout=timeout)
         except subprocess.TimeoutExpired:
             cancel_workflow_agent_child(self.state.workspace, self.state.wf_id, workflow_agent_key)
-            self.state.append_event("agent_timeout", engine=engine, timeout=timeout)
+            # key and label were both in scope here and neither was recorded, so
+            # a timeout row said which engine died and not which task, and the
+            # only way to find out was cross-referencing agent_started by time.
+            # The sibling timeout site at agent_timeout(key=..., scope=...)
+            # already did this correctly, which is how the gap survived.
+            self.state.append_event(
+                "agent_timeout",
+                engine=engine,
+                timeout=timeout,
+                key=workflow_agent_key,
+                label=label,
+                model=model,
+            )
+            self.state.notify_event(
+                "agent_timeout",
+                detail=f"{label or workflow_agent_key} ({engine}) after {timeout}s",
+            )
             return None
         finally:
             Path(input_path).unlink(missing_ok=True)
@@ -1673,6 +1725,7 @@ def run_supervisor(
     root = registry.workflow_dir(workspace, wf_id)
     with _held_workflow_lock(root):
         status = registry.read_json(root / registry.STATUS_FILE) or {}
+        notify_spec = status.get("notify")
         script_path = root / registry.SCRIPT_FILE
         args = load_args(root)
         budget_payload = status.get("budget")
@@ -1691,11 +1744,20 @@ def run_supervisor(
             args=args,
             budget=Budget(total_budget, spent_budget),
             replay_journal=replay_journal,
+            notify_target=notify_spec if isinstance(notify_spec, str) and notify_spec else None,
         )
         state.write_status("running")
         try:
             result = execute_workflow(state)
         except GateExit:
+            # A checkpoint is the state most worth ringing about: the workflow is
+            # alive, correct, and will sit there indefinitely until a human acts.
+            gate = registry.read_json(root / registry.STATUS_FILE) or {}
+            gate_key = gate.get("gateKey")
+            state.notify_event(
+                "paused",
+                detail=f"awaiting approval{f' at {gate_key}' if isinstance(gate_key, str) else ''}",
+            )
             return 0
         except BaseException as exc:
             tb = traceback.format_exc()[-4000:]
@@ -1704,10 +1766,12 @@ def run_supervisor(
                 root, {"ok": False, "wfId": wf_id, "error": str(exc), "traceback": tb}
             )
             state.write_status("failed", error=str(exc), traceback=tb)
+            state.notify_event("failed", detail=str(exc)[:160])
             return 1
         registry.write_result(root, {"ok": True, "wfId": wf_id, "result": result})
         state.append_event("workflow_finished", result=result)
         state.write_status("succeeded")
+        state.notify_event("succeeded")
         return 0
 
 

@@ -204,6 +204,105 @@ class WorkflowCommandTests(unittest.TestCase):
             time.sleep(0.1)
         self.fail(f"timed out waiting for {count} child runs in {wf_id}")
 
+    # A detached supervisor had no way to ring anyone: it parks at a gate, dies,
+    # or finishes with nobody watching, and --notify was rejected outright for
+    # `workflow` while every plain launch accepted it.
+
+    def test_notify_survives_the_supervisors_status_rebuild(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "notify-target"}
+            return {"ok": True}
+            """
+        )
+        result = self.run_delegate(
+            ["--notify", "channel:somewhere", "workflow", "run", str(script)]
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        wf_id = next(
+            line.split(": ", 1)[1].strip()
+            for line in result.stdout.splitlines()
+            if line.startswith("wfId:")
+        )
+        root = workflow_registry.workflow_dir(self.workspace, wf_id)
+        deadline = time.monotonic() + 20
+        status: dict[str, object] = {}
+        while time.monotonic() < deadline:
+            status = workflow_registry.read_json(root / workflow_registry.STATUS_FILE) or {}
+            if status.get("status") in {"succeeded", "failed"}:
+                break
+            time.sleep(0.1)
+        self.assertEqual(status.get("status"), "succeeded", status)
+        # _write_status_locked rebuilds status.json from scratch rather than
+        # merging it, so a key written only at create time is erased by the
+        # supervisor's first write. That is exactly what happened to the first
+        # version of this feature, and only a live run revealed it.
+        self.assertEqual(status.get("notify"), "channel:somewhere")
+
+    def test_workflow_without_notify_records_none_and_sends_nothing(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "no-notify"}
+            return {"ok": True}
+            """
+        )
+        result = self.run_delegate(["workflow", "run", str(script)])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        wf_id = next(
+            line.split(": ", 1)[1].strip()
+            for line in result.stdout.splitlines()
+            if line.startswith("wfId:")
+        )
+        root = workflow_registry.workflow_dir(self.workspace, wf_id)
+        deadline = time.monotonic() + 20
+        status: dict[str, object] = {}
+        while time.monotonic() < deadline:
+            status = workflow_registry.read_json(root / workflow_registry.STATUS_FILE) or {}
+            if status.get("status") in {"succeeded", "failed"}:
+                break
+            time.sleep(0.1)
+        self.assertIsNone(status.get("notify"))
+
+    def test_notify_target_is_parsed_and_rejected_early(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "bad-notify"}
+            return {"ok": True}
+            """
+        )
+        result = self.run_delegate(["--notify", "nonsense", "workflow", "run", str(script)])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("notify", (result.stdout + result.stderr).lower())
+
+    def test_a_failed_notification_never_changes_the_workflow_result(self) -> None:
+        """Telemetry that can fail a workflow is worse than no telemetry."""
+        script = self.write_workflow(
+            """
+            meta = {"name": "notify-degrades"}
+            return {"ok": True}
+            """
+        )
+        # `post` is absent from the sandboxed PATH, so every send degrades.
+        result = self.run_delegate(
+            ["--notify", "channel:nowhere", "workflow", "run", str(script)],
+            env_extra={"PATH": str(self.bin_dir)},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        wf_id = next(
+            line.split(": ", 1)[1].strip()
+            for line in result.stdout.splitlines()
+            if line.startswith("wfId:")
+        )
+        root = workflow_registry.workflow_dir(self.workspace, wf_id)
+        deadline = time.monotonic() + 20
+        status: dict[str, object] = {}
+        while time.monotonic() < deadline:
+            status = workflow_registry.read_json(root / workflow_registry.STATUS_FILE) or {}
+            if status.get("status") in {"succeeded", "failed"}:
+                break
+            time.sleep(0.1)
+        self.assertEqual(status.get("status"), "succeeded", status)
+
     def test_check_accepts_top_level_return_and_warns_on_determinism(self) -> None:
         script = self.write_workflow(
             """

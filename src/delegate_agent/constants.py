@@ -158,3 +158,11 @@ def validate_mode(mode: str) -> None:
             "delegate <harness> safe|work <prompt>; "
             "delegate droid <model-alias> safe|work <prompt>.",
         )
+
+
+# Every site that raises this is an error path, and `delegate dry-run <engine>
+# <mode> ...` validates an invocation without launching it -- same parser, same
+# exit 2, same message. Nine systemd-launched lanes died at exit 2 on a flag
+# combination and the operator relaunched twice before finding the check, which
+# already existed. A discoverability failure, not a missing feature.
+DRY_RUN_HINT = " Validate any invocation without launching it: prefix it with `delegate dry-run`."

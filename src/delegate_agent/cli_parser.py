@@ -30,6 +30,7 @@ from delegate_agent import (
 from delegate_agent import config as delegate_config
 from delegate_agent import notify as notify_module
 from delegate_agent.constants import (
+    DRY_RUN_HINT,
     ENGINE_SUPPORTED_MODES,
     ENGINES_PROSE,
     KNOWN_ENGINES,
@@ -74,7 +75,9 @@ AUTH_PROFILE_SUBCOMMANDS = frozenset(KNOWN_ENGINES) | frozenset(
 )
 GROUP_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 GROUP_SUBCOMMANDS = frozenset(KNOWN_ENGINES) | frozenset({"dry-run", "run", "resume"})
-NOTIFY_SUBCOMMANDS = frozenset(KNOWN_ENGINES) | frozenset({"droid", "dry-run", "run", "resume"})
+NOTIFY_SUBCOMMANDS = frozenset(KNOWN_ENGINES) | frozenset(
+    {"droid", "dry-run", "run", "resume", "workflow"}
+)
 
 
 def validate_group(value: str, *, option: str = "--group") -> str:
@@ -478,7 +481,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
         raise DelegateError(
             "invalid_option_combination",
             f"--notify is not supported with delegate {subcommand}; use it with a launch, "
-            "dry-run, run, or resume.",
+            "dry-run, run, resume, or workflow run.",
         )
     if group is not None and subcommand not in GROUP_SUBCOMMANDS:
         raise DelegateError(
@@ -647,7 +650,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
                 "invalid_option_combination",
                 "--isolation is not supported with delegate workflow commands.",
             )
-        return parse_workflow(rest, json_mode, cwd)
+        return parse_workflow(rest, json_mode, cwd, notify)
     if subcommand == "profiles":
         if isolation is not None:
             raise DelegateError(
@@ -888,8 +891,8 @@ def corrected_command_suffix(argv: list[str]) -> str:
     try:
         parse_cli(argv)
     except DelegateError:
-        return ""
-    return f" Corrected command: {_shell_command(argv)}."
+        return DRY_RUN_HINT
+    return f" Corrected command: {_shell_command(argv)}.{DRY_RUN_HINT}"
 
 
 def corrected_global_argv(argv: list[str]) -> list[str]:
@@ -1552,7 +1555,10 @@ def parse_prompt_tail(
                     + corrected_prompt_file_suffix(command_prefix, rest),
                 )
             if prompt_file is not None:
-                raise DelegateError("ambiguous_prompt_source", "Only one --prompt-file is allowed.")
+                raise DelegateError(
+                    "ambiguous_prompt_source",
+                    "Only one --prompt-file is allowed." + DRY_RUN_HINT,
+                )
             if i + 1 >= len(rest):
                 raise DelegateError("missing_prompt_file", "--prompt-file requires a path.")
             prompt_file = rest[i + 1]
@@ -2274,7 +2280,9 @@ def parse_cancel(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCom
     )
 
 
-def parse_workflow(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedCommand:
+def parse_workflow(
+    rest: list[str], json_mode: bool, cwd: str | None, notify: str | None = None
+) -> ParsedCommand:
     rest, json_mode = consume_json_option(rest, json_mode)
     if not rest or command_help.is_help_token(rest[0]):
         return help_command(json_mode, "workflow")
@@ -2293,7 +2301,7 @@ def parse_workflow(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedC
     if any(command_help.is_help_token(token) for token in args):
         return help_command(json_mode, f"workflow {action}")
     if action in {"run", "check", "save"}:
-        return _parse_workflow_path_action(action, args, json_mode, cwd)
+        return _parse_workflow_path_action(action, args, json_mode, cwd, notify)
     if action in {"status", "watch", "events", "result", "wait", "approve", "kill"}:
         return _parse_workflow_id_action(action, args, json_mode, cwd)
     if action == "list":
@@ -2311,6 +2319,7 @@ def _parse_workflow_path_action(
     args: list[str],
     json_mode: bool,
     cwd: str | None,
+    notify: str | None = None,
 ) -> ParsedCommand:
     script: str | None = None
     args_json: str | None = None
@@ -2394,6 +2403,7 @@ def _parse_workflow_path_action(
             resume=resume,
             name=name,
             json_mode=json_mode,
+            notify=notify,
         ),
     )
 

@@ -53,6 +53,7 @@ from delegate_agent.argv_builders import (
     redacted_prompt_argv,
 )
 from delegate_agent.constants import (
+    DRY_RUN_HINT,
     ENGINES_PROSE,
     KNOWN_ENGINES,
     MODE_CALL,
@@ -423,7 +424,7 @@ def resolve_prompt(
             message = "Use exactly one prompt source: direct arguments, --prompt-file, or stdin."
         raise DelegateError(
             "ambiguous_prompt_source",
-            message,
+            message + DRY_RUN_HINT,
         )
     if has_direct:
         return validate_prompt(direct)
