@@ -151,7 +151,11 @@ def parse_json_tolerant(text: str, schema: JsonObject | None = None) -> JsonValu
         candidates: list[JsonValue] = []
         position = 0
         while True:
-            starts = [idx for idx in (stripped.find("{", position), stripped.find("[", position)) if idx >= 0]
+            starts = [
+                idx
+                for idx in (stripped.find("{", position), stripped.find("[", position))
+                if idx >= 0
+            ]
             if not starts:
                 break
             start = min(starts)

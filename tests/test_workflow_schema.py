@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import ClassVar
 
 from delegate_agent.workflows import registry as workflow_registry
 from delegate_agent.workflows import runtime as workflow_runtime
@@ -64,7 +65,10 @@ class ParseJsonTolerant(unittest.TestCase):
 
 
 class AdditionalPropertiesSchema(unittest.TestCase):
-    MAP = {"type": "object", "additionalProperties": {"type": "boolean"}}
+    MAP: ClassVar[dict[str, object]] = {
+        "type": "object",
+        "additionalProperties": {"type": "boolean"},
+    }
 
     def test_map_schema_is_accepted_and_values_validated(self) -> None:
         workflow_schema.validate_schema_subset(self.MAP)
@@ -85,13 +89,19 @@ class CodexNativeSchema(unittest.TestCase):
         schema = {
             "type": "object",
             "required": ["flags"],
-            "properties": {"flags": {"type": "object", "additionalProperties": {"type": "boolean"}}},
+            "properties": {
+                "flags": {"type": "object", "additionalProperties": {"type": "boolean"}}
+            },
             "additionalProperties": False,
         }
         self.assertIsNone(workflow_runtime._codex_native_schema(schema))
 
     def test_strict_compatible_schema_goes_native_unmodified(self) -> None:
-        schema = {"type": "object", "required": ["summary"], "properties": {"summary": {"type": "string"}}}
+        schema = {
+            "type": "object",
+            "required": ["summary"],
+            "properties": {"summary": {"type": "string"}},
+        }
         self.assertIs(workflow_runtime._codex_native_schema(schema), schema)
 
 
@@ -104,12 +114,20 @@ class ResumeExhaustedKeys(unittest.TestCase):
             events = [
                 {"seq": 1, "type": "budget", "key": "k1"},
                 {"seq": 2, "type": "agent_started", "key": "k1"},
-                {"seq": 3, "type": "agent_finished", "key": "k1", "result": None, "exhausted": True},
+                {
+                    "seq": 3,
+                    "type": "agent_finished",
+                    "key": "k1",
+                    "result": None,
+                    "exhausted": True,
+                },
                 {"seq": 4, "type": "budget", "key": "k2"},
                 {"seq": 5, "type": "agent_started", "key": "k2"},
                 {"seq": 6, "type": "agent_finished", "key": "k2", "result": {"ok": True}},
             ]
-            journal.write_text("".join(json.dumps(event) + "\n" for event in events), encoding="utf-8")
+            journal.write_text(
+                "".join(json.dumps(event) + "\n" for event in events), encoding="utf-8"
+            )
             state = workflow_runtime.WorkflowState(
                 wf_id="wf_test",
                 workspace=Path(tmp),
@@ -140,34 +158,30 @@ class JournalPreservesResultOrder(unittest.TestCase):
         self.assertEqual(repr(event["result"]), repr(result))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class ApprovalAccumulates(unittest.TestCase):
     def test_second_approval_keeps_the_first_gate_open(self) -> None:
-        import tempfile
-        from delegate_agent.workflows import registry
-
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            registry.record_approval(root, "gate-one")
-            self.assertTrue(registry.approval_allows(root, "gate-one"))
-            registry.record_approval(root, "gate-two")
-            self.assertTrue(registry.approval_allows(root, "gate-one"))
-            self.assertTrue(registry.approval_allows(root, "gate-two"))
-            self.assertFalse(registry.approval_allows(root, "gate-three"))
-            payload = registry.read_json(root / registry.APPROVAL_FILE)
+            workflow_registry.record_approval(root, "gate-one")
+            self.assertTrue(workflow_registry.approval_allows(root, "gate-one"))
+            workflow_registry.record_approval(root, "gate-two")
+            self.assertTrue(workflow_registry.approval_allows(root, "gate-one"))
+            self.assertTrue(workflow_registry.approval_allows(root, "gate-two"))
+            self.assertFalse(workflow_registry.approval_allows(root, "gate-three"))
+            payload = workflow_registry.read_json(root / workflow_registry.APPROVAL_FILE)
             self.assertEqual(payload["approvedKeys"], ["gate-one", "gate-two"])
 
     def test_legacy_single_key_file_is_honoured_and_upgraded(self) -> None:
-        import tempfile
-        from delegate_agent.workflows import registry
-
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            registry.write_json(root / registry.APPROVAL_FILE, {"approved": True, "gateKey": "legacy"})
-            self.assertTrue(registry.approval_allows(root, "legacy"))
-            registry.record_approval(root, "next")
-            self.assertTrue(registry.approval_allows(root, "legacy"))
-            self.assertTrue(registry.approval_allows(root, "next"))
+            workflow_registry.write_json(
+                root / workflow_registry.APPROVAL_FILE, {"approved": True, "gateKey": "legacy"}
+            )
+            self.assertTrue(workflow_registry.approval_allows(root, "legacy"))
+            workflow_registry.record_approval(root, "next")
+            self.assertTrue(workflow_registry.approval_allows(root, "legacy"))
+            self.assertTrue(workflow_registry.approval_allows(root, "next"))
+
+
+if __name__ == "__main__":
+    unittest.main()
