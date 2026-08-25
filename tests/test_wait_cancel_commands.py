@@ -39,6 +39,7 @@ class WaitCancelCommandTests(unittest.TestCase):
         group: str | None = None,
         execution_cwd: str | None = None,
         isolated_workspace: bool | None = None,
+        result_quality: str | None = None,
     ):
         metadata = {"mode": "work", "cwd": str(self.workspace)}
         if group is not None:
@@ -58,6 +59,8 @@ class WaitCancelCommandTests(unittest.TestCase):
         }
         if group is not None:
             state["group"] = group
+        if result_quality is not None:
+            state["resultQuality"] = result_quality
         if pid is not None:
             state["pid"] = pid
         if pgid is not None:
@@ -1205,3 +1208,65 @@ class WaitCancelCommandTests(unittest.TestCase):
         _run_id2, alias2 = self.write_run(status="succeeded")
         code, _out, err = self.run_cli(["--json", "wait", alias1, alias2, "--interval", "1"])
         self.assertEqual(code, 0, err)
+
+    # A run that finished but produced nothing must not report success.
+    #
+    #     delegate classifies these correctly as resultQuality and prints a warning,
+    #     but until run_status.run_succeeded existed the warning was the only channel
+    #     that knew: `ok`, the exit code, and `status` all said succeeded. A scripted
+    #     coordinator branching on the exit code was told the lane worked.
+
+    def test_no_output_quality_fails_the_wait(self) -> None:
+        for quality in ("empty", "no_assistant_text"):
+            with self.subTest(quality=quality):
+                _, alias = self.write_run(
+                    status=run_registry.STATUS_SUCCEEDED, result_quality=quality
+                )
+                code, out, _ = self.run_cli(["wait", alias, "--json", "--timeout", "5"])
+                payload = json.loads(out)
+                self.assertEqual(code, 1, f"{quality} must not exit 0")
+                self.assertFalse(payload["ok"], f"{quality} must not report ok")
+                # The underlying harness fact is preserved, not overwritten.
+                self.assertEqual(payload["runs"][0]["status"], run_registry.STATUS_SUCCEEDED)
+
+    def test_heuristic_quality_still_succeeds(self) -> None:
+        """Judgments about the content of real output stay warnings.
+
+        housekeeping_noop and suspect_short can be wrong about output that does
+        exist. Failing on them would train callers to ignore the verdict, which
+        is the failure this whole change exists to remove.
+        """
+        for quality in ("housekeeping_noop", "suspect_short"):
+            with self.subTest(quality=quality):
+                _, alias = self.write_run(
+                    status=run_registry.STATUS_SUCCEEDED, result_quality=quality
+                )
+                code, out, _ = self.run_cli(["wait", alias, "--json", "--timeout", "5"])
+                self.assertEqual(code, 0, f"{quality} is a heuristic and must not fail the run")
+                self.assertTrue(json.loads(out)["ok"])
+
+    def test_clean_run_is_unaffected(self) -> None:
+        for quality in (None, "ok"):
+            with self.subTest(quality=quality):
+                _, alias = self.write_run(
+                    status=run_registry.STATUS_SUCCEEDED, result_quality=quality
+                )
+                code, out, _ = self.run_cli(["wait", alias, "--json", "--timeout", "5"])
+                self.assertEqual(code, 0)
+                self.assertTrue(json.loads(out)["ok"])
+
+    def test_predicate_truth_table(self) -> None:
+        cases = {
+            (run_registry.STATUS_SUCCEEDED, None): True,
+            (run_registry.STATUS_SUCCEEDED, "ok"): True,
+            (run_registry.STATUS_SUCCEEDED, "empty"): False,
+            (run_registry.STATUS_SUCCEEDED, "no_assistant_text"): False,
+            (run_registry.STATUS_SUCCEEDED, "housekeeping_noop"): True,
+            (run_registry.STATUS_SUCCEEDED, "suspect_short"): True,
+            (run_registry.STATUS_FAILED, "ok"): False,
+            (run_registry.STATUS_CANCELLED, "ok"): False,
+            (run_registry.STATUS_RUNNING, None): False,
+        }
+        for (status, quality), expected in cases.items():
+            with self.subTest(status=status, quality=quality):
+                self.assertIs(run_registry.run_succeeded(status, quality), expected)

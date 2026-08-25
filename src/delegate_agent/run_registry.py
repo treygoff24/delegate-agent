@@ -913,6 +913,7 @@ from delegate_agent.run_status import (  # noqa: E402, F401  # re-exported
     process_alive,
     raw_logs_archived,
     raw_status,
+    run_succeeded,
     stale_next_actions,
     status_fields,
 )

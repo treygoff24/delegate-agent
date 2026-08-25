@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 
 from delegate_agent import archived_logs
+from delegate_agent.harness_events import NO_OUTPUT_RESULT_QUALITIES
 from delegate_agent.json_types import JsonObject, first_string
 
 LARGE_LOG_WARN_MIB = 50
@@ -22,6 +23,24 @@ STATUS_UNKNOWN = "unknown"
 TERMINAL_STATUSES = frozenset({STATUS_SUCCEEDED, STATUS_FAILED, STATUS_CANCELLED})
 STATUS_FILTER_RUNNING = "running"
 STATUS_FILTER_STALE = "stale"
+
+
+def run_succeeded(status: str, result_quality: str | None) -> bool:
+    """Did this run finish AND come back with usable work?
+
+    ``status`` alone answers a narrower question -- whether the child harness ran
+    to completion -- and callers that branch on it (or on the exit code derived
+    from it) were being told "succeeded" for runs that produced nothing at all.
+    The resultQuality taxonomy already detected those, but nothing connected the
+    two, so the verdict could not see what the classifier knew.
+
+    Only the qualities in NO_OUTPUT_RESULT_QUALITIES veto success: those record
+    that no output existed, which cannot be a false positive. Heuristic judgments
+    about the content of real output stay warnings.
+    """
+    if status != STATUS_SUCCEEDED:
+        return False
+    return result_quality not in NO_OUTPUT_RESULT_QUALITIES
 
 
 _UNSET = object()

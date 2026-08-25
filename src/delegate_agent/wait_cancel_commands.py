@@ -155,6 +155,13 @@ def _status_label(payload: JsonObject) -> str:
     return str(payload.get("status") or payload.get("effectiveStatus") or "unknown")
 
 
+def _run_succeeded(payload: JsonObject) -> bool:
+    quality = payload.get("resultQuality")
+    return run_registry.run_succeeded(
+        _status_label(payload), quality if isinstance(quality, str) else None
+    )
+
+
 def _print_wait_table(runs: list[JsonObject], stdout: TextIO) -> None:
     for run in runs:
         delegate_rendering.render_resolution_text(run, stdout)
@@ -264,8 +271,7 @@ def emit_wait(command: WaitCommand, *, workspace_path: str, stdout: TextIO) -> i
         )
     if command.json_mode:
         payload: JsonObject = {
-            "ok": not timed_out
-            and all(_status_label(run) == run_registry.STATUS_SUCCEEDED for run in runs),
+            "ok": not timed_out and all(_run_succeeded(run) for run in runs),
             "schema": WAIT_SCHEMA,
             "timedOut": timed_out,
             "runs": runs,
@@ -295,7 +301,7 @@ def emit_wait(command: WaitCommand, *, workspace_path: str, stdout: TextIO) -> i
         return 1
     if timed_out:
         return 124
-    return 0 if all(_status_label(run) == run_registry.STATUS_SUCCEEDED for run in runs) else 1
+    return 0 if all(_run_succeeded(run) for run in runs) else 1
 
 
 def _signal_target_alive(value: int, *, process_group: bool) -> bool:
