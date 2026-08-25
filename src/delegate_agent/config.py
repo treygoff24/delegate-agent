@@ -1296,15 +1296,38 @@ LOCAL_CONFIG_NAME = "local"
 
 
 def local_config_path(base_path: Path) -> Path:
-    """Path to the machine-local overlay next to ``base_path``.
+    """Path to the machine-local overlay for ``base_path``.
 
-    ``~/.delegate/config.json`` is frequently provisioned — copied onto a
-    machine by a fleet installer that has no way to learn about edits made on
-    that machine, so an alias added here is reverted on the next apply. This
-    overlay is the durable home for those additions: it merges over the global
-    config and no provisioning step writes it.
+    Delegate config files are frequently provisioned rather than authored —
+    copied onto a machine by a fleet installer that has no way to learn about
+    edits made there, so a value tuned in place is reverted on the next apply,
+    silently, because nothing spoke. Every config layer therefore admits a
+    ``.local`` sibling that merges immediately above it and that no
+    provisioning step writes: ``config.json`` -> ``config.local.json``,
+    ``config.work.json`` -> ``config.work.local.json``.
+
+    Pairing the overlay with its own base rather than having one overlay for
+    everything is what keeps it correct under profiles. The profile shim
+    selects ``config.work.json`` by exporting DELEGATE_CONFIG, so a single
+    global overlay would sit *below* a provisioned file on every profiled
+    machine and lose exactly the colliding keys it exists to protect. A
+    per-base sibling also stays realm-scoped: a work overlay cannot reach
+    into personal.
     """
     return base_path.with_name(f"{base_path.stem}.{LOCAL_CONFIG_NAME}{base_path.suffix}")
+
+
+def _merge_with_local_overlay(
+    merged: JsonObject, base_path: Path, source: str
+) -> tuple[JsonObject, str]:
+    """Merge ``base_path`` then its ``.local`` sibling, reporting what won."""
+    merged = merge_config_layer(merged, read_config_file(base_path))
+    primary_source = source
+    overlay = local_config_path(base_path)
+    if overlay.exists():
+        merged = merge_config_layer(merged, read_config_file(overlay))
+        primary_source = str(overlay)
+    return merged, primary_source
 
 
 def workspace_config_path(workspace: Path) -> Path:
@@ -1338,13 +1361,7 @@ def load_config(
 
     global_path = default_config_path()
     if global_path.exists():
-        merged = merge_config_layer(merged, read_config_file(global_path))
-        primary_source = str(global_path)
-
-    local_path = local_config_path(global_path)
-    if local_path.exists():
-        merged = merge_config_layer(merged, read_config_file(local_path))
-        primary_source = str(local_path)
+        merged, primary_source = _merge_with_local_overlay(merged, global_path, str(global_path))
 
     explicit = os.environ.get(CONFIG_ENV)
     if explicit:
@@ -1357,11 +1374,11 @@ def load_config(
                 "config_not_found",
                 f"{CONFIG_ENV} points to a missing file: {explicit_path}",
             )
-        merged = merge_config_layer(merged, read_config_file(explicit_path))
-        primary_source = str(explicit_path)
+        merged, primary_source = _merge_with_local_overlay(
+            merged, explicit_path, str(explicit_path)
+        )
     elif path is not None and path != global_path and path.exists():
-        merged = merge_config_layer(merged, read_config_file(path))
-        primary_source = str(path)
+        merged, primary_source = _merge_with_local_overlay(merged, path, str(path))
 
     if cli_overrides:
         merged = merge_config_layer(merged, cli_overrides)

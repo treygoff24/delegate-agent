@@ -489,6 +489,57 @@ class ValidationTests(unittest.TestCase):
             self.assertEqual(loaded["cursor"]["argvPrefix"], ["agent"])
             self.assertEqual(loaded["codex"]["defaultModel"], "local-only")
 
+    def test_profile_overlay_survives_a_reprovisioned_profile_config(self):
+        # The fleet path, and the actual 2026-08-24 incident shape. The profile
+        # shim selects config.work.json by exporting DELEGATE_CONFIG, so the
+        # file that gets reprovisioned sits ABOVE the base config; only a
+        # sibling overlay of the profile file itself can defend a colliding key.
+        config_mod = load_config_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / ".delegate"
+            config_dir.mkdir()
+            global_cfg = config_dir / "config.json"
+            global_cfg.write_text(json.dumps({"cursor": {"defaultModel": "base"}}))
+            profile_cfg = config_dir / "config.work.json"
+            profile_cfg.write_text(json.dumps({"cursor": {"defaultModel": "provisioned"}}))
+            (config_dir / "config.work.local.json").write_text(
+                json.dumps({"cursor": {"defaultModel": "operator-tuned"}})
+            )
+            env = {config_mod.CONFIG_ENV: str(profile_cfg)}
+            with (
+                mock.patch.object(config_mod, "DEFAULT_CONFIG_PATH", global_cfg),
+                mock.patch.dict(os.environ, env, clear=False),
+            ):
+                loaded, source = config_mod.load_config()
+                self.assertEqual(loaded["cursor"]["defaultModel"], "operator-tuned")
+                self.assertEqual(source, str(config_dir / "config.work.local.json"))
+
+                # user-env apply rewrites the profile file wholesale.
+                profile_cfg.write_text(json.dumps({"cursor": {"defaultModel": "reprovisioned"}}))
+                reloaded, _ = config_mod.load_config()
+            self.assertEqual(reloaded["cursor"]["defaultModel"], "operator-tuned")
+
+    def test_a_realm_overlay_cannot_reach_into_the_other_realm(self):
+        config_mod = load_config_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / ".delegate"
+            config_dir.mkdir()
+            global_cfg = config_dir / "config.json"
+            global_cfg.write_text(json.dumps({"cursor": {"defaultModel": "base"}}))
+            personal_cfg = config_dir / "config.personal.json"
+            personal_cfg.write_text(json.dumps({"cursor": {"defaultModel": "personal"}}))
+            (config_dir / "config.work.local.json").write_text(
+                json.dumps({"cursor": {"defaultModel": "work-only"}})
+            )
+            with (
+                mock.patch.object(config_mod, "DEFAULT_CONFIG_PATH", global_cfg),
+                mock.patch.dict(
+                    os.environ, {config_mod.CONFIG_ENV: str(personal_cfg)}, clear=False
+                ),
+            ):
+                loaded, _ = config_mod.load_config()
+            self.assertEqual(loaded["cursor"]["defaultModel"], "personal")
+
     def test_explicit_delegate_config_still_outranks_the_local_overlay(self):
         config_mod = load_config_module()
         with tempfile.TemporaryDirectory() as tmp:

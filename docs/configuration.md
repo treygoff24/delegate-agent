@@ -8,21 +8,34 @@ From lowest to highest precedence:
 
 1. Embedded defaults in the package.
 2. User config: `~/.delegate/config.json`.
-3. Machine-local overlay: `~/.delegate/config.local.json`.
+3. Its machine-local overlay: `~/.delegate/config.local.json`.
 4. `DELEGATE_CONFIG=/path/to/config.json`, when set.
-5. Internal CLI overrides used by some commands.
+5. That file's machine-local overlay: `/path/to/config.local.json`.
+6. Internal CLI overrides used by some commands.
 
 If `DELEGATE_CONFIG` is set, the file must exist. Delegate fails closed instead of silently falling back to another config.
 
-### The machine-local overlay
+### Machine-local overlays
 
-`~/.delegate/config.local.json` is deep-merged over the user config and is the
-right home for anything that must survive a reprovisioned `config.json`. On a
-managed fleet the user config is frequently *copied* onto each machine by an
+Every config layer admits a `.local` sibling that merges immediately above it
+and that no provisioning step writes:
+
+| Layer | Its local overlay |
+| --- | --- |
+| `~/.delegate/config.json` | `~/.delegate/config.local.json` |
+| `~/.delegate/config.work.json` | `~/.delegate/config.work.local.json` |
+| whatever `DELEGATE_CONFIG` names | that file with `.local` before `.json` |
+
+On a managed fleet these config files are *copied* onto each machine by an
 installer that has no way to learn about edits made there, so a model alias or
-reasoning block added directly to `config.json` is reverted on the next apply.
-Put those in the overlay instead: no installer writes it, and it outranks the
-file that gets replaced. The file is optional — absent, nothing changes.
+reasoning block tuned in place is reverted on the next apply — silently, since
+nothing errors. Put those in the matching overlay instead.
+
+Pair the overlay with the file it defends, not with the base config. Under
+`AI_PROFILE`, Delegate runs on `config.work.json` or `config.personal.json`, so
+that is the file provisioning replaces and `config.local.json` would sit below
+it. A per-base sibling also keeps realms separate: a work overlay cannot reach
+into personal. Overlays are optional — absent, nothing changes.
 
 Repository-local `.delegate/config.json` is never merged automatically. A cloned
 repository must not be able to select provider binaries, environment variables,
