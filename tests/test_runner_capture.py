@@ -190,6 +190,97 @@ class RunnerCaptureTests(unittest.TestCase):
         self.runner._write_stdin(pipe, "x" * 65536, failures)
         self.assertEqual(len(failures), 1)
         self.assertIn("stdin prompt delivery", failures[0])
+        # EPIPE means the child was already gone. Read alone the warning looks
+        # like broken prompt plumbing and has been chased as such; it must send
+        # the reader to the child's exit code and stderr instead.
+        self.assertIn("exited before reading the prompt", failures[0])
+
+    def test_fast_dying_child_reports_its_own_error_not_just_the_broken_pipe(self):
+        # A burst of concurrent launches makes some children die at startup for
+        # a real, reportable reason. The prompt write then hits EPIPE, and the
+        # child's own words must still reach the caller: without stderrTail the
+        # payload says only "Child command failed" while the cause sits in a
+        # file nobody opened.
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        script = Path(temp.name) / "dies-at-startup"
+        script.write_text(
+            "#!/usr/bin/env bash\necho 'launcher refused: pool exhausted' >&2\nexit 70\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="work",
+                model="model-id",
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-08-25T00:00:00Z",
+            )
+            stderr = io.StringIO()
+            code, payload = self.runner.execute_tracked(
+                [str(script)],
+                workspace,
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=stderr,
+                stdin_text="x" * (1 << 20),
+            )
+            self.assertEqual(code, 70)
+            self.assertEqual(payload["error"], "child_failed")
+            self.assertIn("launcher refused: pool exhausted", payload["stderrTail"])
+            self.assertTrue(
+                any("stdin prompt delivery" in w for w in payload.get("warnings", [])),
+                payload.get("warnings"),
+            )
+
+    def test_successful_run_carries_no_stderr_tail(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        script = Path(temp.name) / "chatty-but-fine"
+        script.write_text(
+            "#!/usr/bin/env bash\ncat >/dev/null\necho 'progress noise' >&2\nexit 0\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="work",
+                model="model-id",
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at="2026-08-25T00:00:00Z",
+            )
+            code, payload = self.runner.execute_tracked(
+                [str(script)],
+                workspace,
+                ctx,
+                json_mode=True,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+                stdin_text="prompt",
+            )
+            self.assertEqual(code, 0)
+            self.assertNotIn("stderrTail", payload)
 
     def test_tracked_run_surfaces_stdin_delivery_failure(self):
         # Child closes stdin without reading the prompt: the run must warn

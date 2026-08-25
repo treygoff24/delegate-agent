@@ -1101,7 +1101,16 @@ def _write_stdin(pipe: BinaryIO | None, stdin_text: str, failures: list[str]) ->
         # The child may have exited or closed stdin before reading the prompt.
         # Record it so the run can report possibly-undelivered prompt text
         # instead of silently proceeding as if delivery succeeded.
-        failures.append(f"stdin prompt delivery may have failed: {exc}")
+        detail = f"stdin prompt delivery may have failed: {exc}"
+        if exc.errno == errno.EPIPE:
+            # EPIPE means the child was already gone. Read alone this looks
+            # like broken prompt plumbing, and operators have chased it as
+            # such; the child's own exit code and stderr hold the real cause.
+            detail += (
+                " (the child closed stdin or exited before reading the prompt;"
+                " its exit code and stderr tail carry the actual failure)"
+            )
+        failures.append(detail)
     finally:
         with contextlib.suppress(OSError):
             pipe.close()
@@ -2187,6 +2196,12 @@ def _finalize_tracked_run(
             merged_extra["message"] = failure_message
         if failure_reason == "auth_failed":
             merged_extra["nextActions"] = _auth_remediation_actions(ctx)
+        # An unclassified child failure carries a generic message, so without
+        # this the child's own words reach only the completion report and the
+        # caller is told "Child harness failed" and nothing else. Call mode
+        # already returns stderrTail on failure; tracked runs now match it.
+        if stderr_tail.strip():
+            merged_extra["stderrTail"] = stderr_tail
     report_text, report_source = _completion_report_text_and_source(
         ctx,
         capture.accumulator,
