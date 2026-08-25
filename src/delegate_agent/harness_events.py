@@ -113,9 +113,7 @@ RESULT_QUALITY_NO_ASSISTANT_TEXT = "no_assistant_text"
 # "suspect_short" are heuristics about the *content* of real output and can be
 # wrong, so they stay warnings; a verdict that fails good runs teaches callers to
 # ignore the verdict. This split is what run_status.run_succeeded acts on.
-NO_OUTPUT_RESULT_QUALITIES = frozenset(
-    {RESULT_QUALITY_EMPTY, RESULT_QUALITY_NO_ASSISTANT_TEXT}
-)
+NO_OUTPUT_RESULT_QUALITIES = frozenset({RESULT_QUALITY_EMPTY, RESULT_QUALITY_NO_ASSISTANT_TEXT})
 
 
 def quality_warning(quality: str, *, harness: str | None = None) -> str | None:

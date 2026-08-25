@@ -644,9 +644,7 @@ def _persist_final_progress(
             completion_report_written=completion_report_written,
             extra=persisted_extra,
         )
-        snapshot["ok"] = run_registry.run_succeeded(
-            persisted_status, snapshot.get("resultQuality")
-        )
+        snapshot["ok"] = run_registry.run_succeeded(persisted_status, snapshot.get("resultQuality"))
         snapshot["status"] = persisted_status
         write_snapshot(run_path, snapshot)
     return persisted_status, persisted_extra
