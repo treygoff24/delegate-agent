@@ -1362,22 +1362,50 @@ def _validate_call_input_json_options(
         )
 
 
-def _safe_none_normalization_warnings(
+def _safe_isolation_warnings(
     *,
     engine: str,
     mode: str,
     requested: str | None,
     effective: str,
+    source_path: str | None = None,
 ) -> tuple[str, ...]:
+    """Warn whenever "safe" does not mean what a reader would assume it means.
+
+    Two opposite cases, one question: can the child read the real source tree?
+
+    The first is an override -- an engine in SAFE_ISOLATION_REQUIRED_ENGINES asked
+    for none and got auto anyway, so the warning explains why the flag was ignored.
+
+    The second is the absence of that override, and it is the one that cost us a
+    review. Engines outside that set (today: codex) honour `--isolation none` in
+    safe mode, so the child runs against the real checkout with .git readable,
+    protected only by the harness's own read-only sandbox. Nothing said so. A
+    lane whose entire purpose was a read firewall silently had none, and the
+    reviewer's conclusions were trusted anyway (pc_03ebcbe34f53, 2026-07-18).
+    Whether codex belongs in that set is a behaviour question with real blast
+    radius -- unisolated safe runs are meaningfully faster and someone may depend
+    on that -- and nothing in the repo records why it was left out, so this
+    discloses the scope rather than changing it.
+    """
+    if mode != MODE_SAFE:
+        return ()
     if (
-        mode == MODE_SAFE
-        and requested == delegate_config.ISOLATION_NONE
+        requested == delegate_config.ISOLATION_NONE
         and effective == delegate_config.ISOLATION_AUTO
         and engine in delegate_config.SAFE_ISOLATION_REQUIRED_ENGINES
     ):
         return (
             f"isolation none is not used for {engine} safe mode; using auto "
             "temporary isolation instead.",
+        )
+    if effective == delegate_config.ISOLATION_NONE:
+        where = f" at {source_path}" if source_path else ""
+        return (
+            f"{engine} safe mode is running WITHOUT workspace isolation: the child "
+            f"reads the real source tree{where}, including .git, limited only by "
+            f"{engine}'s own read-only sandbox. Pass --isolation worktree for a "
+            "scoped copy if this run's conclusions depend on what it could not see.",
         )
     return ()
 
@@ -1512,11 +1540,12 @@ def request_from_parsed(
     except delegate_config.InvalidIsolationError as exc:
         raise DelegateError("invalid_isolation", str(exc)) from exc
     isolation_warnings = list(
-        _safe_none_normalization_warnings(
+        _safe_isolation_warnings(
             engine=launch.engine,
             mode=launch.mode,
             requested=global_options.isolation,
             effective=effective_isolation,
+            source_path=workspace.path,
         )
     )
     if launch.forbid_commit_implied_isolation:
@@ -1899,11 +1928,12 @@ def request_from_input_json(
     except delegate_config.InvalidIsolationError as exc:
         raise DelegateError("invalid_isolation", str(exc)) from exc
     isolation_warnings = list(
-        _safe_none_normalization_warnings(
+        _safe_isolation_warnings(
             engine=str(engine),
             mode=str(mode),
             requested=global_options.isolation or json_isolation,
             effective=effective_isolation,
+            source_path=workspace.path,
         )
     )
     if forbid_commit_note is not None:

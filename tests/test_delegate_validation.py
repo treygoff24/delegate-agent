@@ -1021,6 +1021,36 @@ class ValidationTests(unittest.TestCase):
             )
         self.assertEqual(ctx.exception.error, "invalid_isolation_config")
 
+    def test_safe_isolation_warnings_cover_both_directions(self):
+        """A safe run that is not isolated must say so, in either direction.
+
+        The override case (engine in the required set) was already warned about.
+        The absence of that override was not, and that silence is the defect: a
+        codex safe run with isolation none reads the real tree, .git included,
+        and the run that discovered this had been trusted as a read firewall.
+        """
+        from delegate_agent.request_build import _safe_isolation_warnings as warn
+
+        unisolated = warn(
+            engine="codex", mode="safe", requested="none", effective="none", source_path="/repo"
+        )
+        self.assertEqual(len(unisolated), 1)
+        self.assertIn("WITHOUT workspace isolation", unisolated[0])
+        self.assertIn("/repo", unisolated[0])
+        self.assertIn(".git", unisolated[0])
+
+        overridden = warn(engine="claude", mode="safe", requested="none", effective="auto")
+        self.assertEqual(len(overridden), 1)
+        self.assertIn("using auto", overridden[0])
+
+        # Silence is only correct where the reader's assumption already holds.
+        self.assertEqual(warn(engine="codex", mode="safe", requested=None, effective="auto"), ())
+        self.assertEqual(
+            warn(engine="codex", mode="safe", requested="worktree", effective="worktree"), ()
+        )
+        # Work mode edits the real tree by contract, so it is not a surprise.
+        self.assertEqual(warn(engine="codex", mode="work", requested="none", effective="none"), ())
+
     def test_worktrees_config_non_object_raises(self):
         config_mod = load_config_module()
         with self.assertRaises(config_mod.ConfigError) as ctx:
