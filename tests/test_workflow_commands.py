@@ -263,16 +263,28 @@ class WorkflowCommandTests(unittest.TestCase):
             time.sleep(0.1)
         self.assertIsNone(status.get("notify"))
 
-    def test_notify_target_is_parsed_and_rejected_early(self) -> None:
-        script = self.write_workflow(
-            """
-            meta = {"name": "bad-notify"}
-            return {"ok": True}
-            """
+    def test_a_valid_notify_target_is_accepted_for_workflow_run(self) -> None:
+        """The defect was a VALID target being refused, so pin acceptance.
+
+        The first version of this test passed a garbage target and asserted a
+        nonzero exit. That was decoration: `parse_notify_target` runs in the
+        global-option loop before the subcommand allow-list is consulted, so a
+        garbage target already failed closed on the parent that refused
+        `--notify` for `workflow` outright — the test would have been green
+        through the entire defect and through a fix that changed nothing.
+        """
+        from delegate_agent import cli_parser
+
+        parsed = cli_parser.parse_cli(
+            ["--cwd", str(self.workspace), "--notify", "channel:x", "workflow", "run", "s.py"]
         )
-        result = self.run_delegate(["--notify", "nonsense", "workflow", "run", str(script)])
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("notify", (result.stdout + result.stderr).lower())
+        self.assertEqual(parsed.subcommand, "workflow")
+        self.assertEqual(parsed.workflow_command.notify, "channel:x")
+
+        # And it is still refused where it genuinely does not apply.
+        with self.assertRaises(Exception) as ctx:
+            cli_parser.parse_cli(["--notify", "channel:x", "runs"])
+        self.assertIn("notify", str(ctx.exception).lower())
 
     def test_a_failed_notification_never_changes_the_workflow_result(self) -> None:
         """Telemetry that can fail a workflow is worse than no telemetry."""
@@ -302,6 +314,51 @@ class WorkflowCommandTests(unittest.TestCase):
                 break
             time.sleep(0.1)
         self.assertEqual(status.get("status"), "succeeded", status)
+
+    def test_a_degraded_notification_is_recorded_and_does_not_un_finish_the_run(self) -> None:
+        """Telemetry about a finished workflow must not reset it to running.
+
+        `append_event` writes status="running" beside every journal line, which
+        is correct for work events and catastrophic after a terminal write. The
+        first version of the degradation record used it and reset succeeded
+        workflows back to running; both notify tests caught it.
+        """
+        script = self.write_workflow(
+            """
+            meta = {"name": "notify-degraded-record"}
+            return {"ok": True}
+            """
+        )
+        result = self.run_delegate(
+            ["--notify", "channel:nowhere", "workflow", "run", str(script)],
+            env_extra={"PATH": str(self.bin_dir)},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        wf_id = next(
+            line.split(": ", 1)[1].strip()
+            for line in result.stdout.splitlines()
+            if line.startswith("wfId:")
+        )
+        root = workflow_registry.workflow_dir(self.workspace, wf_id)
+        deadline = time.monotonic() + 20
+        status: dict[str, object] = {}
+        while time.monotonic() < deadline:
+            status = workflow_registry.read_json(root / workflow_registry.STATUS_FILE) or {}
+            if status.get("status") in {"succeeded", "failed"}:
+                break
+            time.sleep(0.1)
+        self.assertEqual(status.get("status"), "succeeded", status)
+
+        # A silent degradation is indistinguishable from a delivered
+        # notification, which is the failure this whole feature exists to stop.
+        journal = (root / workflow_registry.JOURNAL_FILE).read_text(encoding="utf-8")
+        degraded = [
+            json.loads(line)
+            for line in journal.splitlines()
+            if line.strip() and json.loads(line).get("type") == "notify_degraded"
+        ]
+        self.assertTrue(degraded, f"an undelivered notification must be recorded: {journal}")
+        self.assertTrue(degraded[0].get("reason"), degraded[0])
 
     def test_check_accepts_top_level_return_and_warns_on_determinism(self) -> None:
         script = self.write_workflow(

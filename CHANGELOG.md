@@ -7,7 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `delegate workflow run --notify room:<name>|channel:<name>` rings a detached
+  supervisor's owner when it pauses at a checkpoint, fails, succeeds, or times
+  an agent out. The target survives resume and dry-run, and a notification that
+  cannot be delivered is recorded as a `notify_degraded` journal event without
+  changing the workflow's outcome.
+
 ### Fixed
+- `agent_timeout` and `agent_structured_retry` journal rows carry the task key
+  and label, so which lane died no longer has to be inferred by cross-referencing
+  `agent_started` timestamps.
+- A persistent-worktree run warns at completion when its base is N commits behind
+  the source branch — the child never saw work that landed after it was
+  dispatched.
+- Parse-time option errors name `delegate dry-run`, which already validated an
+  invocation without launching it. The hint appears only for launch-shaped
+  commands, never when the caller has already typed `dry-run`, and a correction
+  for a dry-run stays a dry-run instead of handing back a live launch.
 - `workflow approve` now accumulates approvals (`approvedKeys` in `approval.json`) instead of overwriting the single `gateKey`, so a resume that replays an earlier approved gate no longer re-pauses the run there.
 - Workflow `agent(schema=...)` on Codex no longer dies before launch when the
   schema has optional fields or a typed `additionalProperties` map: native

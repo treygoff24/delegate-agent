@@ -36,6 +36,7 @@ from delegate_agent.constants import (
     KNOWN_ENGINES,
     MODELESS_ENGINES,
     VALID_MODES,
+    WORKFLOW_DRY_RUN_HINT,
     validate_mode,
     validate_pure_call,
 )
@@ -887,12 +888,45 @@ def _shell_command(argv: list[str]) -> str:
     return shlex.join(["delegate", *argv])
 
 
+def _dry_run_hint_for(argv: list[str]) -> str:
+    """The hint, but only where `delegate dry-run` is a real thing to type.
+
+    Appending it everywhere was wrong twice over. `delegate dry-run runs` and
+    `delegate dry-run capabilities` do not exist, so the advice was invalid for
+    every non-launch subcommand; and it fired even when the caller had ALREADY
+    typed `dry-run`, telling them to do the thing they were doing. Workflows
+    have their own spelling (`workflow run --dry-run`), so they get that one.
+    """
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        if token in VALUE_GLOBAL_OPTIONS:
+            # Skip the flag AND its value: reading `--isolation worktree` as a
+            # subcommand named "worktree" is how the first version of this
+            # silently stopped hinting on the exact errors it was written for.
+            index += 2
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        if token == "dry-run":
+            return ""
+        if token == "workflow":
+            return WORKFLOW_DRY_RUN_HINT
+        return DRY_RUN_HINT if token in KNOWN_ENGINES else ""
+    return ""
+
+
 def corrected_command_suffix(argv: list[str]) -> str:
+    hint = _dry_run_hint_for(argv)
     try:
         parse_cli(argv)
     except DelegateError:
-        return DRY_RUN_HINT
-    return f" Corrected command: {_shell_command(argv)}.{DRY_RUN_HINT}"
+        return hint
+    # The hint goes after the sentence, never inside the copyable command: a
+    # test that split on "Corrected command: " and stripped a trailing period
+    # was silently absorbing the hint's words into the command it re-parsed.
+    return f" Corrected command: {_shell_command(argv)}.{hint}"
 
 
 def corrected_global_argv(argv: list[str]) -> list[str]:
@@ -1066,7 +1100,15 @@ def parse_modeless_engine(
         forbid_commit_implied_isolation = True
     if forbid_commit and mode == "work" and isolation == "none":
         corrected = corrected_command_suffix(
-            ["--isolation", "worktree", engine, mode, "--forbid-commit", *(prompt_parts or [])]
+            [
+                "--isolation",
+                "worktree",
+                *(["dry-run"] if dry_run else []),
+                engine,
+                mode,
+                "--forbid-commit",
+                *(prompt_parts or []),
+            ]
         )
         raise DelegateError(
             "invalid_option_combination",
@@ -1203,7 +1245,14 @@ def parse_droid(
     if forbid_commit and mode == "work" and isolation == "none":
         droid_tokens = ["droid", *([model_alias] if model_alias else []), mode]
         corrected = corrected_command_suffix(
-            ["--isolation", "worktree", *droid_tokens, "--forbid-commit", *(prompt_parts or [])]
+            [
+                "--isolation",
+                "worktree",
+                *(["dry-run"] if dry_run else []),
+                *droid_tokens,
+                "--forbid-commit",
+                *(prompt_parts or []),
+            ]
         )
         raise DelegateError(
             "invalid_option_combination",

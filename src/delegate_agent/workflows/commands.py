@@ -217,6 +217,7 @@ def emit_run(
             with contextlib.suppress(OSError):
                 os.close(lock_fd)
         return emit_dry_run(
+            notify=command.notify,
             wf_id=wf_id,
             root=root,
             script_path=script_path,
@@ -305,6 +306,7 @@ def emit_dry_run(
     json_mode: bool,
     warnings: list[str],
     stdout: TextIO,
+    notify: str | None = None,
 ) -> int:
     state = runtime.WorkflowState(
         wf_id=wf_id,
@@ -316,6 +318,10 @@ def emit_dry_run(
         args=args_value,
         budget=runtime.Budget(budget_total),
         dry_run=True,
+        # A dry run writes status too, and status.json is rebuilt rather than
+        # merged, so omitting the target here erases it from a workflow that was
+        # created with one and then dry-run before launching.
+        notify_target=notify,
     )
     try:
         result = runtime.execute_workflow(state)

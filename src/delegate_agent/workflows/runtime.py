@@ -215,6 +215,27 @@ class WorkflowState:
         # the journal, never lead it.
         self.budget.reconcile_spent(len(self.claimed_keys))
 
+    def append_journal_only(self, event_type: str, **payload: JsonValue) -> None:
+        """Record an event without touching status.
+
+        `append_event` writes status="running" alongside every journal line,
+        which is right for work events and catastrophic for anything recorded
+        AFTER a terminal write: notifying on "succeeded" and then journalling the
+        result reset the workflow to running, and two tests caught it. Telemetry
+        about a finished workflow must not un-finish it.
+        """
+        with self.journal_lock:
+            self.sequence += 1
+            registry.append_jsonl(
+                self.journal_path,
+                {
+                    "seq": self.sequence,
+                    "type": event_type,
+                    "at": run_registry.utc_now_iso(),
+                    **payload,
+                },
+            )
+
     def append_event(self, event_type: str, **payload: JsonValue) -> JsonObject:
         with self.journal_lock:
             status = registry.read_json(self.status_path)
@@ -292,9 +313,26 @@ class WorkflowState:
         message = f"delegate workflow {self.wf_id} {event}{suffix}"
         try:
             target = notify.parse_notify_target(target_spec)
-            notify.send_notification(target, message, cwd=str(self.workspace), env=os.environ)
-        except Exception:  # telemetry never fails the workflow
+            outcome = notify.send_notification(
+                target, message, cwd=str(self.workspace), env=os.environ
+            )
+        except Exception as exc:  # telemetry never fails the workflow
+            self.append_journal_only(
+                "notify_degraded", event=event, reason="hook_failed", detail=str(exc)[:200]
+            )
             return
+        # A silent degradation is indistinguishable from a delivered
+        # notification, which is the same failure this feature exists to prevent
+        # one level up. The launch path records notify.ok=false plus a reason;
+        # this recorded nothing at all, so a workflow could believe it had rung
+        # someone for hours.
+        if not outcome.ok:
+            self.append_journal_only(
+                "notify_degraded",
+                event=event,
+                reason=outcome.reason or "unknown",
+                detail=(outcome.detail or "")[:200],
+            )
 
     def current_scope(self) -> str:
         return getattr(self.thread_local, "scope", self.namespace)
@@ -651,6 +689,15 @@ class WorkflowDsl:
             args=args,
             budget=self.state.budget,
             dry_run=self.state.dry_run,
+            # Inherited, not defaulted. status.json is rebuilt rather than
+            # merged, so any field a child state forgets is not merely absent
+            # from the child -- it is ERASED from the file for everyone. A gated
+            # sub-workflow was writing `paused` with notify null, silently losing
+            # the target the parent was launched with, and replay_journal was
+            # taking the same path back to its default and quietly re-enabling
+            # journal replay after a dry run.
+            replay_journal=self.state.replay_journal,
+            notify_target=self.state.notify_target,
             depth=self.state.depth + 1,
             namespace=scope,
             replay=self.state.replay,
@@ -964,7 +1011,24 @@ class WorkflowDsl:
                 # The terminal re-check closes the race where the child finished
                 # between the wait deadline and the cancel — adopt that instead.
                 cancel_workflow_agent_child(self.state.workspace, self.state.wf_id, key)
-                self.state.append_event("agent_timeout", key=key, scope=scope, runId=run_id)
+                # The adoption path recorded key/scope/runId but not the label a
+                # human reads, nor the bound that expired, and it never notified
+                # at all -- so a lane adopted from a prior run could time out in
+                # silence while the live path rang. The two sites now carry every
+                # identifier each can honestly produce; `engine` belongs to the
+                # adopted run rather than this call, so it stays off this row
+                # instead of being guessed.
+                self.state.append_event(
+                    "agent_timeout",
+                    key=key,
+                    scope=scope,
+                    runId=run_id,
+                    label=label,
+                    timeout=timeout,
+                )
+                self.state.notify_event(
+                    "agent_timeout", detail=f"{label or key} (adopted run {run_id})"
+                )
                 return None
         text = _workflow_agent_run_result(
             self.state.workspace,
@@ -1193,11 +1257,16 @@ class WorkflowDsl:
             except Exception as exc:
                 prior_output = text or ""
                 prior_error = str(exc)
+                # Same defect the timeout rows had: engine and attempt without
+                # key or label means learning which task burned its retries
+                # still costs a cross-reference against agent_started by time.
                 self.state.append_event(
                     "agent_structured_retry",
                     engine=engine,
                     attempt=attempt,
                     error=prior_error,
+                    key=key,
+                    label=label,
                 )
         return None
 
@@ -1270,6 +1339,8 @@ class WorkflowDsl:
             # only way to find out was cross-referencing agent_started by time.
             # The sibling timeout site at agent_timeout(key=..., scope=...)
             # already did this correctly, which is how the gap survived.
+            # Two sites reporting a timeout differently is how the first gap
+            # survived unnoticed, so they carry the union of their fields.
             self.state.append_event(
                 "agent_timeout",
                 engine=engine,
@@ -1277,6 +1348,7 @@ class WorkflowDsl:
                 key=workflow_agent_key,
                 label=label,
                 model=model,
+                scope=self.state.current_scope(),
             )
             self.state.notify_event(
                 "agent_timeout",

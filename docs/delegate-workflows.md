@@ -89,6 +89,23 @@ non-sensitive persona metadata only.
 
 ## Gates and resume
 
+A supervisor is detached, so it pauses, fails, or finishes with nobody watching.
+Pass `--notify room:<name>` or `--notify channel:<name>` to `workflow run` and it
+sends one metadata line when it pauses at a gate, fails, succeeds, or times an
+agent out — the paused case being the one worth having, since the workflow will
+sit there correctly and indefinitely until a human acts.
+
+The target is recorded with the workflow and survives resume, dry-run, and
+nested sub-workflows; passing `--notify` on a resume replaces it. Delivery goes
+through the `post` CLI and therefore requires the workspace to resolve to a
+registered room. A notification that cannot be delivered is recorded as a
+`notify_degraded` journal event with a reason and never changes the workflow's
+outcome — telemetry that can fail a workflow is worse than no telemetry.
+
+```bash
+python3 bin/delegate.py workflow run plan.py --notify channel:machineroom
+```
+
 A workflow gate checkpoints the whole workflow tree, not just the nested child
 that reached the gate. When a gate closes, the runtime stops admitting new
 `agent()` calls tree-wide, drains already in-flight agents to the journal, emits

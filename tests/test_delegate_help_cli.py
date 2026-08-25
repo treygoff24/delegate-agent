@@ -561,10 +561,22 @@ class ErgonomicsParserTests(HelpCliTestBase):
         self.assertEqual(ctx.exception.error, "ambiguous_prompt_source")
         self.assertIn("Corrected command:", ctx.exception.message)
         self.assertIn("--prompt-file task.md", ctx.exception.message)
-        corrected = ctx.exception.message.split("Corrected command: ", 1)[1].removesuffix(".")
+        # The message may carry advice after the command. Cutting at the
+        # sentence end rather than stripping one trailing period is what keeps
+        # this test honest: with a hint appended, `removesuffix(".")` peeled the
+        # HINT's period and every hint word became a prompt_part, so a corrected
+        # command could be broken and this test would still pass on its
+        # parseable prefix. It went green through exactly that.
+        corrected = ctx.exception.message.split("Corrected command: ", 1)[1]
+        corrected = corrected.split(". ", 1)[0].removesuffix(".")
         corrected_argv = shlex.split(corrected)
         self.assertEqual(corrected_argv[0], "delegate")
-        self.delegate.parse_cli(corrected_argv[1:])
+        reparsed = self.delegate.parse_cli(corrected_argv[1:])
+        # And the corrected command must be the caller's invocation reordered,
+        # not merely one that parses: this error is about placement, so both
+        # sources survive, and no advice is smuggled in as prompt text.
+        self.assertEqual(reparsed.launch.prompt_parts, ["prompt text"])
+        self.assertEqual(reparsed.launch.prompt_file, "task.md")
 
     def test_unknown_launch_option_wins_before_prompt_source_validation(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:

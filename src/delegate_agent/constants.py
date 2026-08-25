@@ -165,4 +165,15 @@ def validate_mode(mode: str) -> None:
 # exit 2, same message. Nine systemd-launched lanes died at exit 2 on a flag
 # combination and the operator relaunched twice before finding the check, which
 # already existed. A discoverability failure, not a missing feature.
-DRY_RUN_HINT = " Validate any invocation without launching it: prefix it with `delegate dry-run`."
+# "Prefix it with `delegate dry-run`" was wrong the moment any global option was
+# present: globals must precede the subcommand, so `delegate dry-run --json codex
+# safe x` fails with misplaced_global_option. Advice that sends the operator into
+# a second parse error is the very frustration pc2_5dbc2b8399154f68 recorded,
+# reintroduced by its own remediation text.
+DRY_RUN_HINT = (
+    " Validate without launching: `delegate [global options] dry-run <engine> <mode> ...`"
+    " — global options stay ahead of `dry-run`."
+)
+WORKFLOW_DRY_RUN_HINT = (
+    " Validate a workflow without running it: `delegate workflow run <script> --dry-run`."
+)

@@ -1560,3 +1560,51 @@ class WorktreeStalenessWarningTests(unittest.TestCase):
             any("behind the source branch" in warning for warning in warnings),
             f"a current worktree must not warn, got: {warnings}",
         )
+
+
+class DryRunHintScopeTests(unittest.TestCase):
+    """`delegate dry-run` advice must only appear where it is a thing to type.
+
+    Appending it to every option error was wrong twice: `delegate dry-run runs`
+    does not exist, and it fired at callers who had already typed `dry-run`.
+    """
+
+    def setUp(self):
+        self.delegate = load_delegate()
+
+    def _message(self, argv):
+        with self.assertRaises(self.delegate.DelegateError) as ctx:
+            self.delegate.parse_cli(argv)
+        return ctx.exception.message
+
+    def test_a_launch_error_names_dry_run_with_workable_ordering(self):
+        message = self._message(["--isolation", "none", "codex", "work", "--forbid-commit", "fix"])
+        self.assertIn("dry-run", message)
+        # The advice has to survive being followed. "Prefix it with `delegate
+        # dry-run`" sends anyone holding a global option straight into
+        # misplaced_global_option -- the frustration this hint exists to end
+        # rather than reproduce.
+        self.assertIn("global options stay ahead", message)
+
+    def test_a_dry_run_error_does_not_tell_you_to_dry_run(self):
+        message = self._message(
+            ["--isolation", "none", "dry-run", "codex", "work", "--forbid-commit", "fix"]
+        )
+        self.assertNotIn("prefix it with", message)
+
+    def test_a_dry_run_correction_stays_a_dry_run(self):
+        """The correction must not silently convert a validation into a launch."""
+        message = self._message(
+            ["--isolation", "none", "dry-run", "codex", "work", "--forbid-commit", "fix"]
+        )
+        corrected = message.split("Corrected command: ", 1)[1].split(". ", 1)[0].removesuffix(".")
+        self.assertIn(" dry-run ", f" {corrected} ")
+        argv = corrected.split()
+        self.assertEqual(argv[0], "delegate")
+        reparsed = self.delegate.parse_cli(argv[1:])
+        self.assertEqual(reparsed.subcommand, "codex")
+        self.assertTrue(reparsed.launch.dry_run)
+
+    def test_a_non_launch_error_is_not_told_to_use_a_launch_only_verb(self):
+        message = self._message(["--notify", "channel:x", "runs"])
+        self.assertNotIn("delegate dry-run", message)
