@@ -279,6 +279,8 @@ class Request:
     # Execution uses this structural state rather than inspecting prompt bytes.
     persistent_worktree_notes_framed: bool = False
     mail_push: bool = False
+    preserve_safe_workspace: bool = False
+    temporary_workspace_cleanup: JsonObject | None = None
 
 
 @dataclass(frozen=True)

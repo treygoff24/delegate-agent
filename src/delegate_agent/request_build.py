@@ -125,6 +125,7 @@ RUN_INPUT_KEYS = {
     "expectedPersonaDigest",
     "mailPush",
     "structuredSession",
+    "structuredRetryWorkspace",
     "structuredRetryRunId",
     "structuredRetrySessionId",
 }
@@ -1705,14 +1706,23 @@ def _structured_retry_workspace(
             "Structured retry workspace cannot be resolved.",
         ) from exc
     if target.is_symlink() or not target.is_dir():
-        if manifest.get("mode") == MODE_SAFE:
-            canonical_target = canonical_source
-        else:
+        raise DelegateError(
+            "structured_retry_workspace_missing",
+            "Structured retry workspace no longer exists.",
+        )
+    lifecycle = manifest.get("isolationLifecycle")
+    if lifecycle == "temporary":
+        cleanup = snapshot.get("temporaryWorkspaceCleanup")
+        recorded_workspace = cleanup.get("isolatedWorkspace") if isinstance(cleanup, dict) else None
+        if (
+            not isinstance(recorded_workspace, str)
+            or Path(recorded_workspace).resolve(strict=False) != canonical_target
+        ):
             raise DelegateError(
-                "structured_retry_workspace_missing",
-                "Structured retry workspace no longer exists.",
+                "structured_retry_workspace_changed",
+                "Structured retry temporary workspace metadata is inconsistent.",
             )
-    elif manifest.get("isolationLifecycle") == "persistent":
+    elif lifecycle == "persistent":
         branch = manifest.get("branch")
         probe = _run_git(
             str(canonical_target),
@@ -1889,6 +1899,12 @@ def request_from_input_json(
         raise DelegateError(
             "invalid_structured_session", "structuredSession must be true or false."
         )
+    raw_structured_retry_workspace = raw.get("structuredRetryWorkspace", False)
+    if not isinstance(raw_structured_retry_workspace, bool):
+        raise DelegateError(
+            "invalid_structured_retry_workspace",
+            "structuredRetryWorkspace must be true or false.",
+        )
     raw_structured_retry_run_id = raw.get("structuredRetryRunId")
     if raw_structured_retry_run_id is not None and not isinstance(raw_structured_retry_run_id, str):
         raise DelegateError(
@@ -1905,6 +1921,7 @@ def request_from_input_json(
         )
     if (
         raw_structured_session
+        or raw_structured_retry_workspace
         or raw_structured_retry_run_id is not None
         or raw_structured_retry_session_id is not None
     ) and (raw_workflow_agent_key is None or global_options.group is None):
@@ -2112,6 +2129,13 @@ def request_from_input_json(
             run_id=raw_structured_retry_run_id,
             session_id=raw_structured_retry_session_id,
         )
+        isolation_context = IsolationContext(
+            source_workspace=workspace.path,
+            effective_isolation=delegate_config.ISOLATION_NONE,
+            isolation_mode=delegate_config.ISOLATION_NONE,
+            isolation_lifecycle="none",
+            preserved_workspace=False,
+        )
     return build_request(
         str(engine),
         str(mode),
@@ -2153,6 +2177,7 @@ def request_from_input_json(
         frame_prompt=raw_structured_retry_session_id is None,
         persist_session=raw_structured_session,
         resume_session_id=raw_structured_retry_session_id,
+        preserve_safe_workspace=raw_structured_retry_workspace,
     )
 
 
@@ -2205,6 +2230,7 @@ def build_request(
     frame_prompt: bool | None = None,
     persist_session: bool = False,
     resume_session_id: str | None = None,
+    preserve_safe_workspace: bool = False,
 ) -> Request:
     _validate_agent_option(engine, agent)
     if not isinstance(workspace, ResolvedWorkspace):
@@ -2382,6 +2408,7 @@ def build_request(
             frame_prompt=frame_prompt,
             persist_session=persist_session,
             resume_session_id=resume_session_id,
+            preserve_safe_workspace=preserve_safe_workspace,
         )
 
     def reprobed() -> tuple[JsonObject | None, tuple[str, ...]] | None:
@@ -3261,6 +3288,7 @@ def _build_request_for_workspace(
     frame_prompt: bool = True,
     persist_session: bool = False,
     resume_session_id: str | None = None,
+    preserve_safe_workspace: bool = False,
 ) -> Request:
     source_prompt = prompt if source_prompt is None else source_prompt
     materialized_schema_text, schema_warnings = _preflight_codex_output_schema(
@@ -3447,6 +3475,7 @@ def _build_request_for_workspace(
             account_binding_command=account_binding.cursor_status_command(engine, config),
             persistent_worktree_notes_framed=framed_worktree_note is not None,
             mail_push=mail_push,
+            preserve_safe_workspace=preserve_safe_workspace,
         ),
         config,
         resolution=profile_resolution,

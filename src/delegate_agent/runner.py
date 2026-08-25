@@ -180,6 +180,7 @@ class RunContext:
     agent: str | None = None
     resumed_from: JsonObject | None = None
     worktree_attachment: JsonObject | None = None
+    temporary_workspace_cleanup: JsonObject | None = None
     persona_name: str | None = None
     persona_source: str | None = None
     persona_transport: str | None = None
@@ -495,6 +496,8 @@ def build_snapshot(
         snapshot["authProfile"] = ctx.auth_profile
     if ctx.workflow_agent_key is not None:
         snapshot["workflowAgentKey"] = ctx.workflow_agent_key
+    if ctx.temporary_workspace_cleanup is not None:
+        snapshot["temporaryWorkspaceCleanup"] = ctx.temporary_workspace_cleanup
     cleanup = _worktree_cleanup_commands(ctx)
     if cleanup is not None:
         snapshot["worktreeCleanupCommands"] = cleanup
@@ -1036,6 +1039,8 @@ def completion_json_payload(
     if ctx.include_dirty:
         payload["includeDirty"] = True
         payload["syncedFiles"] = ctx.synced_files
+    if ctx.temporary_workspace_cleanup is not None:
+        payload["temporaryWorkspaceCleanup"] = ctx.temporary_workspace_cleanup
     payload["promptInstructionMode"] = ctx.prompt_instruction_mode
     run_metadata.add_run_metadata_payload_fields(payload, ctx)
     run_metadata.add_model_payload_fields(payload, ctx)

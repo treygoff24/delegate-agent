@@ -2040,6 +2040,53 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertEqual(retry["strategy"], "relaunch")
         self.assertNotIn("sessionId", retry)
 
+    def test_structured_retry_reuses_then_cleans_safe_temporary_workspace(self) -> None:
+        subprocess.run(["git", "init", "-q", str(self.workspace)], check=True)
+        (self.workspace / "tracked.txt").write_text("base\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.workspace), "add", "tracked.txt"], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(self.workspace),
+                "-c",
+                "user.name=Delegate Tests",
+                "-c",
+                "user.email=delegate-tests@example.invalid",
+                "commit",
+                "-qm",
+                "base",
+            ],
+            check=True,
+        )
+        workspace_log = self.workspace / "safe-relaunch-workspaces.log"
+        attempt_file = self.workspace / "safe-relaunch-attempts.txt"
+        script = self.write_workflow(
+            """
+            meta = {"name": "schema-safe-relaunch", "defaults": {"engine": "droid", "model": "gemini", "mode": "safe"}}
+            SCHEMA = {"type": "object", "required": ["ok", "value"], "properties": {"ok": {"type": "boolean"}, "value": {"type": "string"}}, "additionalProperties": False}
+            return agent("review safely", schema=SCHEMA, retries=1, isolation="worktree")
+            """
+        )
+        env = {
+            "FAKE_GENERIC_WORKSPACE_LOG": str(workspace_log),
+            "FAKE_GENERIC_ATTEMPT_FILE": str(attempt_file),
+        }
+        launch = self.run_delegate(["--json", "workflow", "run", str(script)], env_extra=env)
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        waited = self.run_delegate(
+            ["--json", "workflow", "wait", wf_id, "--timeout", "10"], env_extra=env
+        )
+        self.assertEqual(waited.returncode, 0, waited.stderr)
+        result = self.run_delegate(["--json", "workflow", "result", wf_id])
+        self.assertEqual(json.loads(result.stdout)["result"], {"ok": True, "value": "structured"})
+
+        workspaces = workspace_log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(workspaces), 2)
+        self.assertEqual(workspaces[0], workspaces[1])
+        self.assertFalse(Path(workspaces[0]).exists())
+
     def test_structured_output_with_non_codex_schema_uses_assistant_text(self) -> None:
         script = self.write_workflow(
             """

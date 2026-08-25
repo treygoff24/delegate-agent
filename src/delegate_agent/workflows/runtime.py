@@ -82,6 +82,7 @@ class _DelegateChildResult:
     run_id: str | None
     execution_cwd: str | None
     session_id: str | None
+    workspace_cleanup: JsonObject | None = None
 
 
 def _delegate_child_result(value: object) -> _DelegateChildResult:
@@ -92,6 +93,31 @@ def _delegate_child_result(value: object) -> _DelegateChildResult:
         run_id=None,
         execution_cwd=None,
         session_id=None,
+        workspace_cleanup=None,
+    )
+
+
+def _cleanup_structured_retry_workspace(record: JsonObject | None) -> None:
+    if record is None:
+        return
+    git_root = record.get("gitRoot")
+    isolated_workspace = record.get("isolatedWorkspace")
+    temp_base = record.get("tempBase")
+    source_root = record.get("sourceRoot")
+    if (
+        (git_root is not None and not isinstance(git_root, str))
+        or not isinstance(isolated_workspace, str)
+        or not isinstance(temp_base, str)
+        or not isinstance(source_root, str)
+    ):
+        raise RuntimeError("structured retry workspace cleanup metadata is invalid")
+    from delegate_agent import safe_workspace
+
+    safe_workspace.cleanup_safe_isolated_workspace(
+        git_root=git_root,
+        isolated_workspace=isolated_workspace,
+        temp_base=temp_base,
+        source_root=source_root,
     )
 
 
@@ -1231,6 +1257,7 @@ class WorkflowDsl:
         prior_error = ""
         prior_child: _DelegateChildResult | None = None
         retry_workspace_run_id: str | None = None
+        workspace_cleanup: JsonObject | None = None
         for attempt in range(attempts + 1):
             resume_session_id = (
                 prior_child.session_id
@@ -1251,6 +1278,41 @@ class WorkflowDsl:
                     json.dump(native_schema, schema_file)
                     schema_path = schema_file.name
                 try:
+                    try:
+                        raw_child = self._run_delegate(
+                            engine,
+                            attempt_prompt,
+                            mode=mode,
+                            model=model,
+                            effort=effort,
+                            fast=fast,
+                            isolation=isolation,
+                            passthrough=False,
+                            timeout=timeout,
+                            output_schema=schema_path,
+                            prefer_assistant=True,
+                            workflow_agent_key=key,
+                            label=label,
+                            persona=attempt_persona,
+                            allow_repo_persona=allow_repo_persona,
+                            expected_persona_digest=(
+                                attempt_persona.digest if attempt_persona is not None else None
+                            ),
+                            return_metadata=True,
+                            structured_session=engine in STRUCTURED_RESUME_ENGINES,
+                            structured_retry_run_id=retry_workspace_run_id,
+                            resume_session_id=resume_session_id,
+                            preserve_retry_workspace=True,
+                        )
+                    except BaseException:
+                        _cleanup_structured_retry_workspace(workspace_cleanup)
+                        raise
+                finally:
+                    Path(schema_path).unlink(missing_ok=True)
+            else:
+                if attempt == 0 or resume_session_id is None:
+                    attempt_prompt = _structured_prompt(prompt, schema, prior_output, prior_error)
+                try:
                     raw_child = self._run_delegate(
                         engine,
                         attempt_prompt,
@@ -1261,7 +1323,7 @@ class WorkflowDsl:
                         isolation=isolation,
                         passthrough=False,
                         timeout=timeout,
-                        output_schema=schema_path,
+                        output_schema=None,
                         prefer_assistant=True,
                         workflow_agent_key=key,
                         label=label,
@@ -1274,43 +1336,26 @@ class WorkflowDsl:
                         structured_session=engine in STRUCTURED_RESUME_ENGINES,
                         structured_retry_run_id=retry_workspace_run_id,
                         resume_session_id=resume_session_id,
+                        preserve_retry_workspace=True,
                     )
-                finally:
-                    Path(schema_path).unlink(missing_ok=True)
-            else:
-                if attempt == 0 or resume_session_id is None:
-                    attempt_prompt = _structured_prompt(prompt, schema, prior_output, prior_error)
-                raw_child = self._run_delegate(
-                    engine,
-                    attempt_prompt,
-                    mode=mode,
-                    model=model,
-                    effort=effort,
-                    fast=fast,
-                    isolation=isolation,
-                    passthrough=False,
-                    timeout=timeout,
-                    output_schema=None,
-                    prefer_assistant=True,
-                    workflow_agent_key=key,
-                    label=label,
-                    persona=attempt_persona,
-                    allow_repo_persona=allow_repo_persona,
-                    expected_persona_digest=(
-                        attempt_persona.digest if attempt_persona is not None else None
-                    ),
-                    return_metadata=True,
-                    structured_session=engine in STRUCTURED_RESUME_ENGINES,
-                    structured_retry_run_id=retry_workspace_run_id,
-                    resume_session_id=resume_session_id,
-                )
+                except BaseException:
+                    _cleanup_structured_retry_workspace(workspace_cleanup)
+                    raise
             child = _delegate_child_result(raw_child)
+            if child.workspace_cleanup is not None:
+                if workspace_cleanup is not None and child.workspace_cleanup != workspace_cleanup:
+                    _cleanup_structured_retry_workspace(child.workspace_cleanup)
+                    _cleanup_structured_retry_workspace(workspace_cleanup)
+                    raise RuntimeError("structured retry workspace cleanup metadata changed")
+                workspace_cleanup = child.workspace_cleanup
             text = child.text
             try:
                 value = workflow_schema.parse_json_tolerant(text or "", schema)
                 workflow_schema.validate_value(value, schema)
+                _cleanup_structured_retry_workspace(workspace_cleanup)
                 return value
             except PersonaDigestMismatch:
+                _cleanup_structured_retry_workspace(workspace_cleanup)
                 raise
             # Child output is untrusted; parse/validation blowups must not kill the supervisor.
             except Exception as exc:
@@ -1337,6 +1382,7 @@ class WorkflowDsl:
                 if retry_workspace_run_id is None:
                     retry_workspace_run_id = child.run_id
                 prior_child = child
+        _cleanup_structured_retry_workspace(workspace_cleanup)
         return None
 
     def _run_delegate(
@@ -1362,6 +1408,7 @@ class WorkflowDsl:
         structured_session: bool = False,
         structured_retry_run_id: str | None = None,
         resume_session_id: str | None = None,
+        preserve_retry_workspace: bool = False,
     ) -> str | _DelegateChildResult | None:
         payload: JsonObject = {
             "engine": engine,
@@ -1389,6 +1436,8 @@ class WorkflowDsl:
             payload["expectedPersonaDigest"] = expected_persona_digest
         if structured_session:
             payload["structuredSession"] = True
+        if preserve_retry_workspace:
+            payload["structuredRetryWorkspace"] = True
         if structured_retry_run_id is not None:
             payload["structuredRetryRunId"] = structured_retry_run_id
         if resume_session_id is not None:
@@ -1462,6 +1511,10 @@ class WorkflowDsl:
                 "workflow child could not resolve the parent-pinned persona"
             )
         if completed.returncode != 0:
+            if isinstance(result, dict) and isinstance(
+                result.get("temporaryWorkspaceCleanup"), dict
+            ):
+                _cleanup_structured_retry_workspace(result["temporaryWorkspaceCleanup"])
             stderr = completed.stderr.decode("utf-8", errors="replace")[-2000:]
             if expected_persona_digest is not None and "workflow_persona_digest_mismatch" in text:
                 raise PersonaDigestMismatch("workflow child rejected changed persona bytes")
@@ -1516,6 +1569,11 @@ class WorkflowDsl:
             ),
             session_id=(
                 result.get("sessionId") if isinstance(result.get("sessionId"), str) else None
+            ),
+            workspace_cleanup=(
+                result.get("temporaryWorkspaceCleanup")
+                if isinstance(result.get("temporaryWorkspaceCleanup"), dict)
+                else None
             ),
         )
 

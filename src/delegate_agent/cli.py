@@ -694,6 +694,7 @@ def make_run_context(
         persona_file=request.persona_file,
         persona_text=request.persona_text,
         account_binding_command=request.account_binding_command,
+        temporary_workspace_cleanup=request.temporary_workspace_cleanup,
     )
 
 
