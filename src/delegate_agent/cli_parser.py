@@ -12,7 +12,6 @@ from __future__ import annotations
 import difflib
 import re
 import shlex
-from typing import NoReturn
 
 from delegate_agent import (
     capability_commands,
@@ -53,23 +52,18 @@ from delegate_agent.request_models import (
 from delegate_agent.run_output_commands import RUN_OUTPUT_DEFAULT_TAIL_LINES
 from delegate_agent.workflows import commands as workflow_commands
 
-MISPLACED_GLOBAL_OPTIONS = frozenset(
+FLAG_GLOBAL_OPTIONS = frozenset(
     {
         "--json",
-        "--cwd",
-        "--isolation",
         "--pass-through",
-        "--completion-report",
         "--no-completion-report",
-        "--auth-profile",
-        "--group",
-        "--notify",
     }
 )
 
 VALUE_GLOBAL_OPTIONS = frozenset(
     {"--cwd", "--isolation", "--completion-report", "--auth-profile", "--group", "--notify"}
 )
+GLOBAL_OPTIONS = FLAG_GLOBAL_OPTIONS | VALUE_GLOBAL_OPTIONS
 
 AUTH_PROFILE_SUBCOMMANDS = frozenset(KNOWN_ENGINES) | frozenset(
     {"dry-run", "run", "profiles", "models", "capabilities", "setup", "resume"}
@@ -90,22 +84,66 @@ def validate_group(value: str, *, option: str = "--group") -> str:
     return value
 
 
-def infer_global_json(argv: list[str]) -> bool:
+def _is_command_local_global(option: str, command_argv: list[str]) -> bool:
+    """Keep colliding command options out of global normalization."""
+
+    if not command_argv:
+        return False
+    subcommand = "runs" if command_argv[0] == "list" else command_argv[0]
+    if option == "--completion-report":
+        return subcommand in {"run-output", "wait"}
+    if option != "--group":
+        return False
+    if subcommand in {"ps", "wait"}:
+        return True
+    if subcommand == "runs":
+        return len(command_argv) < 2 or command_argv[1] != "prune"
+    if subcommand == "mail":
+        return len(command_argv) >= 2 and command_argv[1] == "send"
+    if subcommand == "worktree":
+        return len(command_argv) >= 2 and command_argv[1] in {"list", "remove", "prune"}
+    return False
+
+
+def _normalize_global_options(argv: list[str]) -> tuple[list[str], list[str]]:
+    """Extract globals from anywhere before ``--`` while preserving local twins."""
+
+    globals_argv: list[str] = []
+    command_argv: list[str] = []
     i = 0
     while i < len(argv):
         token = argv[i]
-        if token == "--json":
-            return True
-        if token in VALUE_GLOBAL_OPTIONS:
-            i += 2
+        if token == "--":
+            command_argv.extend(argv[i:])
+            break
+        if token in GLOBAL_OPTIONS and _is_command_local_global(token, command_argv):
+            command_argv.append(token)
+            if token == "--group" and i + 1 < len(argv):
+                command_argv.append(argv[i + 1])
+                i += 2
+            else:
+                i += 1
             continue
-        if token in MISPLACED_GLOBAL_OPTIONS:
+        if token in FLAG_GLOBAL_OPTIONS:
+            globals_argv.append(token)
             i += 1
             continue
-        if token in ("--help", "-h", "--version"):
-            return False
-        break
-    return False
+        if token in VALUE_GLOBAL_OPTIONS:
+            globals_argv.append(token)
+            if i + 1 < len(argv) and argv[i + 1] != "--":
+                globals_argv.append(argv[i + 1])
+                i += 2
+            else:
+                i += 1
+            continue
+        command_argv.append(token)
+        i += 1
+    return globals_argv, command_argv
+
+
+def infer_global_json(argv: list[str]) -> bool:
+    globals_argv, _ = _normalize_global_options(argv)
+    return "--json" in globals_argv
 
 
 def canonical_help_topic(path: str | None) -> str | None:
@@ -253,8 +291,6 @@ def parse_capabilities_subcommand(
     if rest and rest[0] == "refresh":
         refresh = True
         requested = rest[1:]
-        if has_misplaced_global_option(requested):
-            raise_misplaced_global_option("Global options must appear before the subcommand.")
         for engine in requested:
             if engine not in KNOWN_ENGINES:
                 raise DelegateError(
@@ -373,6 +409,8 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
     if argv[0] == "--version":
         return ParsedCommand("version")
 
+    global_argv, command_argv = _normalize_global_options(argv)
+
     json_mode = False
     cwd: str | None = None
     pass_through = False
@@ -382,16 +420,16 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
     group: str | None = None
     notify: str | None = None
     i = 0
-    while i < len(argv):
-        token = argv[i]
+    while i < len(global_argv):
+        token = global_argv[i]
         if token == "--json":
             json_mode = True
             i += 1
             continue
         if token == "--cwd":
-            if i + 1 >= len(argv):
+            if i + 1 >= len(global_argv):
                 raise DelegateError("missing_cwd", "--cwd requires a path.")
-            cwd = argv[i + 1]
+            cwd = global_argv[i + 1]
             i += 2
             continue
         if token == "--pass-through":
@@ -403,11 +441,11 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             i += 1
             continue
         if token == "--completion-report":
-            if i + 1 >= len(argv):
+            if i + 1 >= len(global_argv):
                 raise DelegateError(
                     "missing_completion_report", "--completion-report requires markdown or none."
                 )
-            completion_report = argv[i + 1]
+            completion_report = global_argv[i + 1]
             if completion_report not in delegate_config.COMPLETION_REPORT_MODES:
                 raise DelegateError(
                     "invalid_completion_report",
@@ -416,9 +454,9 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             i += 2
             continue
         if token == "--isolation":
-            if i + 1 >= len(argv):
+            if i + 1 >= len(global_argv):
                 raise DelegateError("missing_isolation_value", "--isolation requires a value.")
-            isolation = argv[i + 1]
+            isolation = global_argv[i + 1]
             if isolation not in delegate_config.VALID_ISOLATION_VALUES:
                 raise DelegateError(
                     "invalid_isolation",
@@ -427,11 +465,11 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             i += 2
             continue
         if token == "--auth-profile":
-            if i + 1 >= len(argv):
+            if i + 1 >= len(global_argv):
                 raise DelegateError(
                     "missing_auth_profile", "--auth-profile requires a profile name."
                 )
-            auth_profile = argv[i + 1]
+            auth_profile = global_argv[i + 1]
             if not auth_profile or auth_profile.startswith("-"):
                 raise DelegateError(
                     "missing_auth_profile", "--auth-profile requires a profile name."
@@ -439,17 +477,17 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             i += 2
             continue
         if token == "--notify":
-            if i + 1 >= len(argv):
+            if i + 1 >= len(global_argv):
                 raise DelegateError(
                     "missing_notify", "--notify requires room:<name> or channel:<name>."
                 )
-            notify = notify_module.parse_notify_target(argv[i + 1]).spec
+            notify = notify_module.parse_notify_target(global_argv[i + 1]).spec
             i += 2
             continue
         if token == "--group":
-            if i + 1 >= len(argv):
+            if i + 1 >= len(global_argv):
                 raise DelegateError("missing_group", "--group requires a group name.")
-            group = validate_group(argv[i + 1])
+            group = validate_group(global_argv[i + 1])
             i += 2
             continue
         break
@@ -460,13 +498,13 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             "--pass-through is incompatible with --json.",
         )
 
-    if i >= len(argv):
+    if not command_argv:
         raise DelegateError("missing_subcommand", "Missing subcommand.")
 
-    subcommand = argv[i]
+    subcommand = command_argv[0]
     if subcommand == "list":
         subcommand = "runs"
-    rest = argv[i + 1 :]
+    rest = command_argv[1:]
     if subcommand.startswith("-"):
         raise DelegateError(
             "unknown_option", f"Unknown global option before subcommand: {subcommand}"
@@ -880,10 +918,6 @@ def parse_mail(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedComma
     )
 
 
-def has_misplaced_global_option(tokens: list[str]) -> bool:
-    return any(token in MISPLACED_GLOBAL_OPTIONS for token in tokens)
-
-
 def _shell_command(argv: list[str]) -> str:
     return shlex.join(["delegate", *argv])
 
@@ -929,34 +963,6 @@ def corrected_command_suffix(argv: list[str]) -> str:
     return f" Corrected command: {_shell_command(argv)}.{hint}"
 
 
-def corrected_global_argv(argv: list[str]) -> list[str]:
-    globals_out: list[str] = []
-    rest: list[str] = []
-    i = 0
-    while i < len(argv):
-        token = argv[i]
-        if token in VALUE_GLOBAL_OPTIONS and i + 1 < len(argv):
-            globals_out.extend([token, argv[i + 1]])
-            i += 2
-            continue
-        if token in MISPLACED_GLOBAL_OPTIONS:
-            globals_out.append(token)
-            i += 1
-            continue
-        rest.append(token)
-        i += 1
-    return [*globals_out, *rest]
-
-
-def raise_misplaced_global_option(message: str, argv: list[str] | None = None) -> NoReturn:
-    guidance = (
-        "Move global options before the subcommand "
-        "(for example: delegate --json --cwd PATH <subcommand> ...)."
-    )
-    corrected = corrected_command_suffix(corrected_global_argv(argv)) if argv else ""
-    raise DelegateError("misplaced_global_option", f"{message} {guidance}{corrected}")
-
-
 def unknown_option_message(command: str, option: str) -> str:
     spec = command_help.COMMAND_SPECS.get(command)
     candidates = [opt.flag for opt in spec.options] if spec is not None else []
@@ -968,13 +974,7 @@ def unknown_option_message(command: str, option: str) -> str:
 
 
 def consume_json_option(rest: list[str], json_mode: bool) -> tuple[list[str], bool]:
-    """Accept `--json` after contained inspection commands.
-
-    Launching commands still require global options before the subcommand so
-    prompt boundaries stay unambiguous. For no-launch inspection commands,
-    accepting `delegate describe --json` and friends removes a common operator
-    foot-gun without changing child-runtime invocation semantics.
-    """
+    """Retain compatibility for callers that invoke a command parser directly."""
 
     normalized: list[str] = []
     for token in rest:
@@ -987,8 +987,6 @@ def consume_json_option(rest: list[str], json_mode: bool) -> tuple[list[str], bo
 
 def require_no_extra(rest: list[str], name: str) -> None:
     if rest:
-        if has_misplaced_global_option(rest):
-            raise_misplaced_global_option("Global options must appear before the subcommand.")
         raise DelegateError(
             "unexpected_argument", f"{name} does not accept arguments: {' '.join(rest)}"
         )
@@ -1009,8 +1007,6 @@ def parse_run(
     if any(command_help.is_help_token(token) for token in rest):
         return help_command(json_mode, "run")
     if len(rest) != 2 or rest[0] != "--input-json":
-        if has_misplaced_global_option(rest):
-            raise_misplaced_global_option("Global options must appear before the subcommand.")
         raise DelegateError("invalid_run_args", "run requires: --input-json FILE")
     return ParsedCommand(
         "run",
@@ -1053,10 +1049,6 @@ def parse_modeless_engine(
         mode_list = f"{', '.join(modes[:-1])}, or {modes[-1]}"
         raise DelegateError("missing_mode", f"{engine} requires mode: {mode_list}.")
     mode = rest[0]
-    if mode.startswith("-"):
-        raise DelegateError(
-            "misplaced_global_option", "Global options must appear before the subcommand."
-        )
     validate_mode(mode)
     # Help wins immediately after the mode, before prompt capture begins:
     # `cursor safe --help`. Once a prompt positional begins, a later --help is
@@ -1175,10 +1167,6 @@ def parse_droid(
             "missing_droid_args",
             "droid requires mode (and optionally a MODEL_ALIAS before the mode).",
         )
-    if rest[0].startswith("-"):
-        raise DelegateError(
-            "misplaced_global_option", "Global options must appear before the subcommand."
-        )
     # First token is the mode when it is a known mode name; otherwise it is the
     # positional alias and the mode follows.
     if rest[0] in VALID_MODES:
@@ -1197,10 +1185,6 @@ def parse_droid(
         if command_help.is_help_token(rest[1]):
             return help_command(json_mode, topic)
         mode = rest[1]
-        if mode.startswith("-"):
-            raise DelegateError(
-                "misplaced_global_option", "Global options must appear before the subcommand."
-            )
         validate_mode(mode)
         tail = rest[2:]
         command_prefix = ["droid", model_alias, mode]
@@ -1317,10 +1301,6 @@ def parse_dry_run(
             f"dry-run requires {ENGINES_PROSE}.",
         )
     engine = rest[0]
-    if engine.startswith("-"):
-        raise DelegateError(
-            "misplaced_global_option", "Global options must appear before the subcommand."
-        )
     if engine in MODELESS_ENGINES:
         return parse_modeless_engine(
             engine,
@@ -1512,14 +1492,15 @@ def parse_resume(
                 dry_run = True
                 i += 1
                 continue
-            if token in MISPLACED_GLOBAL_OPTIONS:
-                raise_misplaced_global_option("Global options must appear before the subcommand.")
             if token.startswith("-"):
                 raise DelegateError("unknown_option", unknown_option_message("resume", token))
             handle = token
             i += 1
             continue
         extra_parts = rest[i:]
+        if "--" in extra_parts:
+            terminator = extra_parts.index("--")
+            extra_parts = [*extra_parts[:terminator], *extra_parts[terminator + 1 :]]
         break
     if handle is None:
         raise DelegateError("missing_handle", "resume requires a run handle (alias or run id).")
@@ -1587,11 +1568,8 @@ def parse_prompt_tail(
     i = 0
     while i < len(rest):
         token = rest[i]
-        # `--json` is unambiguous anywhere before inline prompt text starts (e.g.
-        # after --prompt-file), so accept it here instead of forcing it ahead of the
-        # subcommand. Once prompt text begins it lands in prompt_parts and the
-        # post-loop misplaced-global guard rejects it, since then it could be prompt
-        # text. Mirrors consume_json_option for inspection commands.
+        # Retain compatibility for callers that invoke this command parser directly;
+        # parse_cli normally extracts --json before dispatch.
         if token == "--json":
             json_mode = True
             i += 1
@@ -1838,20 +1816,32 @@ def parse_prompt_tail(
                 invalid_error="invalid_timeout",
             )
             continue
-        if token in MISPLACED_GLOBAL_OPTIONS:
-            raise_misplaced_global_option("Global options must appear before the subcommand.")
+        if token == "--":
+            prompt_parts = rest[i:]
+            break
         if token.startswith("-"):
             command = " ".join(command_prefix or ["launch"])
             raise DelegateError("unknown_option", unknown_option_message(command, token))
         prompt_parts = rest[i:]
         break
-    known_options = set(MISPLACED_GLOBAL_OPTIONS) | {"--help", "-h"}
+    literal_index = prompt_parts.index("--") if "--" in prompt_parts else None
+    checked_prompt_parts = prompt_parts if literal_index is None else prompt_parts[:literal_index]
+    if literal_index is not None:
+        prompt_parts = [
+            *checked_prompt_parts,
+            *prompt_parts[literal_index + 1 :],
+        ]
+    known_options = set(GLOBAL_OPTIONS) | {"--help", "-h"}
     if command_prefix:
         spec = command_help.COMMAND_SPECS.get(command_prefix[0])
         if spec is not None:
             known_options.update(option.flag for option in spec.options)
     unknown_option = next(
-        (token for token in prompt_parts if token.startswith("-") and token not in known_options),
+        (
+            token
+            for token in checked_prompt_parts
+            if token.startswith("-") and token not in known_options
+        ),
         None,
     )
     if unknown_option is not None:
@@ -1861,19 +1851,15 @@ def parse_prompt_tail(
             unknown_option_message(command, unknown_option)
             + " If this token is part of your prompt text, quote the whole prompt or use --prompt-file.",
         )
-    if "--prompt-file" in prompt_parts:
+    if "--prompt-file" in checked_prompt_parts:
         raise DelegateError(
             "ambiguous_prompt_source",
             "--prompt-file must appear before direct prompt text."
             + corrected_prompt_file_suffix(command_prefix, rest),
         )
-    if "--output-schema" in prompt_parts:
+    if "--output-schema" in checked_prompt_parts:
         raise DelegateError(
             "invalid_output_schema", "--output-schema must appear before direct prompt text."
-        )
-    if has_misplaced_global_option(prompt_parts):
-        raise_misplaced_global_option(
-            "Global options must appear before the subcommand; use --prompt-file for literal flag text.",
         )
     return PromptTail(
         prompt_file,
@@ -2697,8 +2683,6 @@ def parse_worktree(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedC
         if spec is not None:
             i = _apply_worktree_option(options, args, i, token, spec)
             continue
-        if token in MISPLACED_GLOBAL_OPTIONS:
-            raise_misplaced_global_option(f"{token} must appear before the subcommand.")
         if token.startswith("--"):
             raise DelegateError(
                 "unknown_option", f"worktree {action} does not support option: {token}"

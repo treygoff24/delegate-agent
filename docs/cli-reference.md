@@ -1,6 +1,6 @@
 # CLI reference and JSON contracts
 
-Use `delegate --help` for the exact command list from the installed version. Global options must appear before the subcommand, except `--json` and `--isolation` are also accepted in launch and `dry-run` option tails before inline prompt text begins.
+Use `delegate --help` for the exact command list from the installed version. Global options may appear anywhere before `--`. Tokens after `--` remain literal child-prompt text.
 
 ## Global options
 
@@ -160,13 +160,16 @@ are left unchanged. The safe prompt asks the child to cite workspace-relative
 paths in its report; consumers should not depend on temporary isolation paths.
 Verbatim slash pass-through prompts are not rewritten.
 
-For launch and `dry-run` commands, `--json` and `--isolation auto|none|worktree`
-are unambiguous before inline prompt text starts and may appear with launch
-options, such as `delegate codex work --prompt-file task.md --json` or
-`delegate codex work --isolation worktree "Implement..."`. After prompt text
-begins, a later `--json` or `--isolation` still fails with
-`misplaced_global_option`; use `--prompt-file` or stdin for literal flag-like
-prompt text.
+All nine global options are normalized before subcommand dispatch, so they may
+appear before or after the subcommand and prompt text. For example,
+`delegate dry-run --json codex safe x` and
+`delegate dry-run codex safe --json x` are equivalent. Use `--` to make later
+flag-like tokens literal prompt text: `delegate codex safe -- --json`.
+
+Two spellings collide with command-local options and remain local where those
+commands own them: `--group` on `runs`, `ps`, `wait`, `mail send`, and
+`worktree list|remove|prune`; and `--completion-report` on `run-output` and
+`wait`.
 
 `--model <alias-or-model>` is optional on every engine and is parsed only before
 prompt text begins. The value is resolved against `<engine>.models` when it

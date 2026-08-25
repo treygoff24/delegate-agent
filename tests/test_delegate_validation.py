@@ -1577,14 +1577,10 @@ class DryRunHintScopeTests(unittest.TestCase):
             self.delegate.parse_cli(argv)
         return ctx.exception.message
 
-    def test_a_launch_error_names_dry_run_with_workable_ordering(self):
+    def test_a_launch_error_names_dry_run(self):
         message = self._message(["--isolation", "none", "codex", "work", "--forbid-commit", "fix"])
         self.assertIn("dry-run", message)
-        # The advice has to survive being followed. "Prefix it with `delegate
-        # dry-run`" sends anyone holding a global option straight into
-        # misplaced_global_option -- the frustration this hint exists to end
-        # rather than reproduce.
-        self.assertIn("global options stay ahead", message)
+        self.assertIn("Validate without launching", message)
 
     def test_a_dry_run_error_does_not_tell_you_to_dry_run(self):
         message = self._message(

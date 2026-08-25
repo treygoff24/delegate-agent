@@ -61,7 +61,6 @@ from delegate_agent.argv_builders import (  # noqa: F401  # re-exported for test
 )
 from delegate_agent.argv_utils import public_argv
 from delegate_agent.cli_parser import (  # noqa: F401  # re-exported for tests / back-compat
-    has_misplaced_global_option,
     infer_global_json,
     parse_cli,
     parse_required_positive_int_option,

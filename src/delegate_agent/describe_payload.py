@@ -1540,7 +1540,7 @@ def emit_describe(
     print(f"engines: {', '.join(KNOWN_ENGINES)}", file=stdout)
     print(f"modes: {', '.join(MODE_ORDER)}", file=stdout)
     print("prompt sources: direct, --prompt-file, stdin", file=stdout)
-    print("global options must appear before the subcommand", file=stdout)
+    print("global options may appear anywhere before --", file=stdout)
     return EXIT_OK
 
 
@@ -1639,7 +1639,7 @@ Cursor safe mode:
   - The child runs in the isolated copy; tracked runs may still write .delegate metadata in the source workspace.
 
 Profiles (auth/env switching):
-  - A profile selects which credentials/env every spawned harness inherits; the active profile is detected from env (profiles.detectFrom) or set explicitly with --auth-profile NAME before the subcommand.
+  - A profile selects which credentials/env every spawned harness inherits; the active profile is detected from env (profiles.detectFrom) or set explicitly with --auth-profile NAME anywhere before --.
   - --auth-profile applies to launches, dry-run, run, profiles, models, capabilities, and setup; it remains rejected for run-inspection, worktree, and unrelated diagnostics.
   - delegate profiles (optionally with --json) reports the resolved profile, source, and non-secret env keys; it never mutates config.
   - profiles.definitions.<name>.env holds non-secret pointers only (e.g. CODEX_HOME); secret-shaped keys are rejected at config load, and values must not interpolate secrets via $VAR. Export real credentials in the shell instead.
@@ -1648,7 +1648,7 @@ Rules for agents:
   - Keep prompts bounded: task, scope, verification, report format.
   - Delegate always prepends a mandatory skill-review instruction before your prompt.
   - Use --prompt-file or delegate --json run --input-json for long prompts.
-  - Run from the target workspace, or pass --cwd before the subcommand.
+  - Run from the target workspace, or pass --cwd anywhere before --.
   - Inside Git, --cwd resolves to the repo root; outside Git, the directory is used directly.
   - Always review diffs after work mode when Git is available; outside Git, manually review changed files.
   - Do not use delegate for production deploys or repository publishing unless the operator explicitly asks.

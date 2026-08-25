@@ -270,22 +270,19 @@ If a dry-run or launch warns that the workspace is under `/mnt/c`, the run can
 still work, but WSL filesystem performance and private-file permissions are
 better under `/home/<user>/...`.
 
-## Global options rejected
+## Literal flag-like prompt text
 
-For launch commands and `dry-run`, global options must appear before the
-subcommand:
+Global options may appear anywhere before `--`, including after the subcommand
+or inline prompt text:
 
 ```bash
-# Correct
 delegate --json --cwd /path/to/repo dry-run codex safe "Review only."
-
-# Incorrect
 delegate dry-run --json codex safe "Review only."
 delegate codex safe --pass-through "Review only."
 ```
 
-Some inspection commands accept trailing `--json` for convenience, such as
-`delegate describe --json` and `delegate run-output <alias> --json`.
+To send a token that looks like a global option as literal child-prompt text,
+put it after the option terminator: `delegate codex safe -- --json`.
 
 ## Long foreground run looks silent
 
@@ -436,8 +433,8 @@ rerun without `--forbid-commit` or integrate the branch manually.
 `--pass-through` is incompatible with `--json` and with persistent worktree
 launches. Dry-run may still show the planned persistent-worktree argv; the real
 launch is refused before child execution. `--pass-through` is intended only for
-raw child stdout/stderr streaming and must appear before the subcommand. Normal
-tracked runs already return bounded parent-facing summaries.
+raw child stdout/stderr streaming. Normal tracked runs already return bounded
+parent-facing summaries.
 
 Use inspection commands instead:
 

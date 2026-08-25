@@ -328,7 +328,7 @@ class FocusedGlobalOptionsTests(unittest.TestCase):
     def _global_option_lines(self, text: str):
         in_globals = False
         for line in text.splitlines():
-            if line == "Global options (before the subcommand):":
+            if line == "Global options (anywhere before --):":
                 in_globals = True
                 continue
             if in_globals and not line:

@@ -85,7 +85,7 @@ WORKTREE_DIRTY_SYNC_NOTE = (
 )
 
 
-# Global options (must appear before the subcommand).
+# Global options are normalized from anywhere before an option terminator.
 
 GLOBAL_OPTIONS: tuple[OptionSpec, ...] = (
     OptionSpec(
@@ -2069,7 +2069,7 @@ def render_command_help_text(spec: CommandSpec, *, prog: str = "delegate") -> st
             lines.append(f"  {label.ljust(width)}  {description}")
 
     lines.append("")
-    lines.append("Global options (before the subcommand):")
+    lines.append("Global options (anywhere before --):")
     unsupported_globals = set(spec.unsupported_global_options)
     rendered_globals = [
         (_format_option(opt), opt.description)
@@ -2194,7 +2194,7 @@ def render_overview_text() -> str:
         lines.append(f"  {usage}")
 
     lines.append("")
-    lines.append("Global options must appear before the subcommand.")
+    lines.append("Global options may appear anywhere before an option terminator (--).")
 
     lines.append("")
     lines.append("Run output options (before subcommand):")

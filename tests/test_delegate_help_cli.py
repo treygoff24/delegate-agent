@@ -427,11 +427,10 @@ class RegressionGuardTests(HelpCliTestBase):
         self.assertEqual(parsed.launch.prompt_file, "task.md")
         self.assertEqual(parsed.launch.prompt_parts, [])
 
-    def test_trailing_json_after_prompt_is_rejected(self):
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.parse_cli(["dry-run", "droid", "minimax", "work", "hello", "--json"])
-        self.assertEqual(ctx.exception.error, "misplaced_global_option")
-        self.assertIn("delegate --json", ctx.exception.message)
+    def test_trailing_json_after_prompt_is_global(self):
+        parsed = self.delegate.parse_cli(["dry-run", "droid", "minimax", "work", "hello", "--json"])
+        self.assertTrue(parsed.global_options.json_mode)
+        self.assertEqual(parsed.launch.prompt_parts, ["hello"])
 
     def test_trailing_json_is_accepted_for_inspection_commands(self):
         cases = (

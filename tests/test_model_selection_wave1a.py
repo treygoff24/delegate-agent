@@ -84,14 +84,10 @@ class ModelOptionParserTests(CommandTestBase):
         self.assertIsNone(parsed.launch.model)
         self.assertEqual(parsed.launch.prompt_parts, ["review", "--model", "gpt-5.5"])
 
-    def test_droid_model_before_mode_rejected_by_misplaced_option_guard(self):
+    def test_droid_model_before_mode_is_not_a_launch_option(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:
             self.delegate.parse_cli(["droid", "--model", "X", "safe"])
-        self.assertEqual(ctx.exception.error, "misplaced_global_option")
-        self.assertEqual(
-            ctx.exception.message,
-            "Global options must appear before the subcommand.",
-        )
+        self.assertEqual(ctx.exception.error, "invalid_mode")
 
 
 class EngineModelsConfigTests(unittest.TestCase):

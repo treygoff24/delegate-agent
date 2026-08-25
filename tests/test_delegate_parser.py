@@ -82,6 +82,102 @@ class ParserTests(unittest.TestCase):
         self.assertTrue(parsed.global_options.json_mode)
         self.assertEqual(parsed.global_options.cwd, "/tmp/repo")
 
+    def test_all_global_options_are_normalized_before_dispatch(self):
+        cases = (
+            (["dry-run", "--json", "codex", "safe", "hello"], "json_mode", True),
+            (["dry-run", "codex", "safe", "hello", "--cwd", "/tmp/repo"], "cwd", "/tmp/repo"),
+            (
+                ["dry-run", "--isolation", "none", "codex", "safe", "hello"],
+                "isolation",
+                "none",
+            ),
+            (
+                ["dry-run", "codex", "safe", "hello", "--pass-through"],
+                "pass_through",
+                True,
+            ),
+            (
+                ["dry-run", "--completion-report", "markdown", "codex", "safe", "hello"],
+                "completion_report",
+                "markdown",
+            ),
+            (
+                ["dry-run", "codex", "safe", "hello", "--no-completion-report"],
+                "completion_report",
+                "none",
+            ),
+            (
+                ["dry-run", "--auth-profile", "work", "codex", "safe", "hello"],
+                "auth_profile",
+                "work",
+            ),
+            (
+                ["dry-run", "codex", "safe", "hello", "--group", "launch-group"],
+                "group",
+                "launch-group",
+            ),
+            (
+                ["dry-run", "--notify", "room:ops", "codex", "safe", "hello"],
+                "notify",
+                "room:ops",
+            ),
+        )
+        for argv, attribute, expected in cases:
+            with self.subTest(option=attribute, argv=argv):
+                parsed = self.delegate.parse_cli(argv)
+                self.assertEqual(getattr(parsed.global_options, attribute), expected)
+                self.assertEqual(parsed.launch.prompt_parts, ["hello"])
+
+    def test_group_stays_local_for_commands_that_own_it(self):
+        cases = (
+            (["runs", "--group", "local"], lambda parsed: parsed.runs.group),
+            (["ps", "--group", "local"], lambda parsed: parsed.runs.group),
+            (["wait", "--group", "local"], lambda parsed: parsed.wait_command.group),
+            (
+                ["mail", "send", "--group", "local", "body"],
+                lambda parsed: parsed.mail_command.group,
+            ),
+            (
+                ["worktree", "list", "--group", "local"],
+                lambda parsed: parsed.worktree.group,
+            ),
+            (
+                ["worktree", "remove", "--group", "local"],
+                lambda parsed: parsed.worktree.group,
+            ),
+            (
+                ["worktree", "prune", "--group", "local"],
+                lambda parsed: parsed.worktree.group,
+            ),
+        )
+        for argv, local_group in cases:
+            with self.subTest(argv=argv):
+                parsed = self.delegate.parse_cli(argv)
+                self.assertIsNone(parsed.global_options.group)
+                self.assertEqual(local_group(parsed), "local")
+
+    def test_group_is_global_for_a_launch(self):
+        parsed = self.delegate.parse_cli(["codex", "safe", "hello", "--group", "launch-group"])
+        self.assertEqual(parsed.global_options.group, "launch-group")
+        self.assertEqual(parsed.launch.prompt_parts, ["hello"])
+
+    def test_completion_report_stays_local_for_commands_that_own_it(self):
+        run_output = self.delegate.parse_cli(["run-output", "run-1", "--completion-report"])
+        self.assertIsNone(run_output.global_options.completion_report)
+        self.assertTrue(run_output.run_output.completion_report)
+
+        wait = self.delegate.parse_cli(["wait", "run-1", "--completion-report"])
+        self.assertIsNone(wait.global_options.completion_report)
+        self.assertTrue(wait.wait_command.completion_report)
+
+    def test_option_terminator_keeps_global_tokens_literal(self):
+        parsed = self.delegate.parse_cli(
+            ["dry-run", "codex", "safe", "hello", "--", "--json", "--group", "literal"]
+        )
+        self.assertFalse(parsed.global_options.json_mode)
+        self.assertIsNone(parsed.global_options.group)
+        self.assertEqual(parsed.launch.prompt_parts, ["hello", "--json", "--group", "literal"])
+
     def test_setup_accepts_only_json_and_auth_profile(self):
         parsed = self.delegate.parse_cli(["--json", "--auth-profile", "work", "setup"])
         self.assertEqual(parsed.subcommand, "setup")
@@ -286,11 +382,10 @@ class ParserTests(unittest.TestCase):
             self.delegate.parse_cli(["capabilities", "refresh", "not-a-harness"])
         self.assertEqual(ctx.exception.error, "invalid_engine")
 
-    def test_capabilities_refresh_hints_misplaced_global_option(self):
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.parse_cli(["capabilities", "refresh", "--auth-profile", "work"])
-        self.assertEqual(ctx.exception.error, "misplaced_global_option")
-        self.assertIn("before the subcommand", ctx.exception.message)
+    def test_capabilities_refresh_accepts_trailing_auth_profile(self):
+        parsed = self.delegate.parse_cli(["capabilities", "refresh", "--auth-profile", "work"])
+        self.assertEqual(parsed.global_options.auth_profile, "work")
+        self.assertTrue(parsed.capabilities.refresh)
 
     def test_ps_rejects_conflicting_runs_filters_with_ps_specific_message(self):
         for flag in ("--running", "--stale", "--recent"):
@@ -362,11 +457,10 @@ class ParserTests(unittest.TestCase):
             self.delegate.infer_global_json(["--no-completion-report", "--json", "cursor"])
         )
 
-    def test_json_after_inline_prompt_text_is_rejected(self):
-        # Once prompt text starts, a trailing --json could be prompt text -> still ambiguous.
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.parse_cli(["dry-run", "droid", "minimax", "work", "hello", "--json"])
-        self.assertEqual(ctx.exception.error, "misplaced_global_option")
+    def test_json_after_inline_prompt_text_is_global(self):
+        parsed = self.delegate.parse_cli(["dry-run", "droid", "minimax", "work", "hello", "--json"])
+        self.assertTrue(parsed.global_options.json_mode)
+        self.assertEqual(parsed.launch.prompt_parts, ["hello"])
 
     def test_json_in_launch_tail_before_prompt_text_is_accepted(self):
         # Agents reflexively append --json; before inline prompt text it is unambiguous.
@@ -1002,29 +1096,29 @@ class ParserTests(unittest.TestCase):
             self.delegate.parse_cli(["--json", "--pass-through", "cursor", "safe", "hello"])
         self.assertEqual(ctx.exception.error, "invalid_option_combination")
 
-    def test_launch_global_options_after_mode_are_rejected(self):
-        misplaced_options = [
-            ["--pass-through"],
-            ["--completion-report", "none"],
-            ["--no-completion-report"],
-        ]
-        for option_tokens in misplaced_options:
+    def test_launch_global_options_after_mode_are_accepted(self):
+        cases = (
+            (["--pass-through"], "pass_through", True),
+            (["--completion-report", "none"], "completion_report", "none"),
+            (["--no-completion-report"], "completion_report", "none"),
+        )
+        for option_tokens, attribute, expected in cases:
             with self.subTest(option=option_tokens):
-                with self.assertRaises(self.delegate.DelegateError) as ctx:
-                    self.delegate.parse_cli(["codex", "safe", *option_tokens, "hello"])
-                self.assertEqual(ctx.exception.error, "misplaced_global_option")
+                parsed = self.delegate.parse_cli(["codex", "safe", *option_tokens, "hello"])
+                self.assertEqual(getattr(parsed.global_options, attribute), expected)
 
-    def test_dry_run_global_options_after_subcommand_are_rejected(self):
-        misplaced_options = [
-            ["--pass-through"],
-            ["--completion-report", "none"],
-            ["--no-completion-report"],
-        ]
-        for option_tokens in misplaced_options:
+    def test_dry_run_global_options_after_subcommand_are_accepted(self):
+        cases = (
+            (["--pass-through"], "pass_through", True),
+            (["--completion-report", "none"], "completion_report", "none"),
+            (["--no-completion-report"], "completion_report", "none"),
+        )
+        for option_tokens, attribute, expected in cases:
             with self.subTest(option=option_tokens):
-                with self.assertRaises(self.delegate.DelegateError) as ctx:
-                    self.delegate.parse_cli(["dry-run", *option_tokens, "codex", "safe", "hello"])
-                self.assertEqual(ctx.exception.error, "misplaced_global_option")
+                parsed = self.delegate.parse_cli(
+                    ["dry-run", *option_tokens, "codex", "safe", "hello"]
+                )
+                self.assertEqual(getattr(parsed.global_options, attribute), expected)
 
     def test_completion_report_none_flag(self):
         parsed = self.delegate.parse_cli(["--completion-report", "none", "cursor", "safe", "hello"])
@@ -1124,11 +1218,6 @@ class ParserTests(unittest.TestCase):
             self.delegate.parse_cli(["runs", "prune", "--older-than", "-1"])
         self.assertEqual(ctx.exception.error, "missing_option_value")
 
-    def test_has_misplaced_global_option_detects_exact_tokens(self):
-        self.assertFalse(self.delegate.has_misplaced_global_option([]))
-        self.assertFalse(self.delegate.has_misplaced_global_option(["--jsonish"]))
-        self.assertTrue(self.delegate.has_misplaced_global_option(["prompt", "--json"]))
-
     def test_parse_required_positive_int_option(self):
         parsed, next_index = self.delegate.parse_required_positive_int_option(
             ["--limit", "3"],
@@ -1210,10 +1299,9 @@ class ParserTests(unittest.TestCase):
         self.assertTrue(parsed.run_output.stdout)
         self.assertEqual(parsed.run_output.tail, self.delegate.RUN_OUTPUT_DEFAULT_TAIL_LINES)
 
-    def test_worktree_misplaced_global_option_is_rejected(self):
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.parse_cli(["worktree", "list", "--json"])
-        self.assertEqual(ctx.exception.error, "misplaced_global_option")
+    def test_worktree_trailing_json_is_global(self):
+        parsed = self.delegate.parse_cli(["worktree", "list", "--json"])
+        self.assertTrue(parsed.global_options.json_mode)
 
     def test_worktree_unknown_option_is_action_specific(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:
@@ -1337,10 +1425,10 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(parsed.global_options.isolation, "worktree")
         self.assertEqual(parsed.launch.prompt_parts, ["fix"])
 
-    def test_isolation_after_inline_prompt_text_is_rejected(self):
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.parse_cli(["cursor", "work", "fix", "--isolation", "worktree"])
-        self.assertEqual(ctx.exception.error, "misplaced_global_option")
+    def test_isolation_after_inline_prompt_text_is_global(self):
+        parsed = self.delegate.parse_cli(["cursor", "work", "fix", "--isolation", "worktree"])
+        self.assertEqual(parsed.global_options.isolation, "worktree")
+        self.assertEqual(parsed.launch.prompt_parts, ["fix"])
 
     def test_isolation_launch_tail_rejects_unknown_value(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:
@@ -1850,10 +1938,11 @@ class ParserTests(unittest.TestCase):
         )
         self.assertEqual(parsed.global_options.isolation, "worktree")
 
-    def test_isolation_after_subcommand_dry_run_cursor_is_misplaced(self):
-        with self.assertRaises(self.delegate.DelegateError) as ctx:
-            self.delegate.parse_cli(["dry-run", "--isolation", "worktree", "cursor", "work", "fix"])
-        self.assertEqual(ctx.exception.error, "misplaced_global_option")
+    def test_isolation_after_subcommand_dry_run_cursor_is_accepted(self):
+        parsed = self.delegate.parse_cli(
+            ["dry-run", "--isolation", "worktree", "cursor", "work", "fix"]
+        )
+        self.assertEqual(parsed.global_options.isolation, "worktree")
 
     def test_isolation_after_dry_run_engine_mode_is_accepted(self):
         parsed = self.delegate.parse_cli(
