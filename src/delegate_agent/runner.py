@@ -1316,6 +1316,17 @@ def _persistent_work_summary(ctx: RunContext) -> JsonObject | None:
     )
 
 
+def _source_commits_missed(summary: JsonObject | None) -> int | None:
+    """Commits on the source branch that this worktree's base predates."""
+    if not isinstance(summary, dict):
+        return None
+    pair = summary.get("branchAheadOfSource")
+    if not isinstance(pair, dict):
+        return None
+    behind = pair.get("behind")
+    return behind if isinstance(behind, int) and behind > 0 else None
+
+
 def _final_extra(ctx: RunContext, capture_exit_code: int) -> tuple[int, JsonObject]:
     extra: JsonObject = {}
     summary = _persistent_work_summary(ctx)
@@ -1328,6 +1339,29 @@ def _final_extra(ctx: RunContext, capture_exit_code: int) -> tuple[int, JsonObje
                 "Work-mode run completed with no file changes or commits detected.",
             )
             extra["warnings"] = warnings
+    # A worktree snapshots its base at launch, so anything landing on the source
+    # afterwards is invisible to the child. That is usually fine and occasionally
+    # ruinous: a reviewer lane dispatched before a contract fix reviews the tree
+    # without it and returns a confident verdict about a document that no longer
+    # exists in that form -- which is what happened to a W1 gate review, caught
+    # only because a human noticed and relaunched it.
+    #
+    # There is nothing to warn about at dispatch, because at dispatch there is no
+    # drift; it accrues while the child runs. Completion is therefore the
+    # earliest honest moment, and it is also the moment the verdict is about to
+    # be trusted. The number already existed in the summary and nothing surfaced
+    # it.
+    behind = _source_commits_missed(summary)
+    if behind:
+        warnings = list(extra.get("warnings") or [])
+        _append_unique(
+            warnings,
+            f"Worktree base is {behind} commit(s) behind the source branch: "
+            "the child never saw work that landed after it was dispatched. "
+            "Re-run against a current base if this run's conclusions depend on it.",
+        )
+        extra["warnings"] = warnings
+
     commits_created = worktree_summary.commits_created_count(summary)
     if (
         summary is not None

@@ -1494,3 +1494,69 @@ class ValidationTests(unittest.TestCase):
             delegate.request_from_input_json(parsed, droid_test_config(delegate))
         self.assertEqual(ctx.exception.error, "invalid_option_combination")
         self.assertIn("none", ctx.exception.message.lower())
+
+
+class WorktreeStalenessWarningTests(unittest.TestCase):
+    """A worktree snapshots its base at launch; the source keeps moving.
+
+    A reviewer lane dispatched before a contract fix reviews the tree without it
+    and returns a confident verdict about a document that no longer exists in
+    that form. The count was already in the work summary and nothing surfaced it.
+    """
+
+    def test_only_a_positive_behind_count_warns(self):
+        from delegate_agent.runner import _source_commits_missed as missed
+
+        self.assertEqual(missed({"branchAheadOfSource": {"behind": 3, "ahead": 1}}), 3)
+        # Zero is the ordinary case and must stay silent, or the warning becomes
+        # noise on every run and gets ignored exactly when it matters.
+        self.assertIsNone(missed({"branchAheadOfSource": {"behind": 0, "ahead": 2}}))
+        # Absence of the field is not evidence of zero drift.
+        self.assertIsNone(missed({"baseCommit": "abc123"}))
+        self.assertIsNone(missed({"branchAheadOfSource": None}))
+        self.assertIsNone(missed({"branchAheadOfSource": {"behind": "3"}}))
+        self.assertIsNone(missed(None))
+
+    def test_the_warning_names_the_count_and_the_consequence(self):
+        from delegate_agent import runner
+
+        ctx = mock.Mock()
+        ctx.isolation_lifecycle = "persistent"
+        ctx.forbid_commit = False
+        ctx.worktree_attachment = None
+        summary = {
+            "branchAheadOfSource": {"behind": 4, "ahead": 0},
+            "noChanges": False,
+            "commitsCreatedCount": 0,
+        }
+        with mock.patch.object(runner, "_persistent_work_summary", return_value=summary):
+            _, extra = runner._final_extra(ctx, 0)
+        warnings = extra.get("warnings") or []
+        self.assertTrue(
+            any("4 commit(s) behind" in warning for warning in warnings),
+            f"the count must be named, got: {warnings}",
+        )
+        self.assertTrue(
+            any("never saw work that landed after it was dispatched" in w for w in warnings),
+            f"the consequence must be named, got: {warnings}",
+        )
+
+    def test_a_current_worktree_warns_about_nothing(self):
+        from delegate_agent import runner
+
+        ctx = mock.Mock()
+        ctx.isolation_lifecycle = "persistent"
+        ctx.forbid_commit = False
+        ctx.worktree_attachment = None
+        summary = {
+            "branchAheadOfSource": {"behind": 0, "ahead": 1},
+            "noChanges": False,
+            "commitsCreatedCount": 0,
+        }
+        with mock.patch.object(runner, "_persistent_work_summary", return_value=summary):
+            _, extra = runner._final_extra(ctx, 0)
+        warnings = extra.get("warnings") or []
+        self.assertFalse(
+            any("behind the source branch" in warning for warning in warnings),
+            f"a current worktree must not warn, got: {warnings}",
+        )
