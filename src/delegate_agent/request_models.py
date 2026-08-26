@@ -19,6 +19,7 @@ from delegate_agent import (
     profile_commands,
     profiles,
     run_output_commands,
+    stall_watchdog,
     wait_cancel_commands,
     worktree_commands,
 )
@@ -226,6 +227,9 @@ class Request:
     progress: bool = False
     progress_initial_delay_sec: float = 30.0
     progress_interval_sec: float = 60.0
+    # Seconds of no child progress before the stall watchdog cancels the run.
+    # 0 disables it. Resolved from config at request-build time.
+    stall_seconds: float = float(stall_watchdog.STALL_MINUTES_DEFAULT * 60)
     forbid_commit: bool = False
     warnings: tuple[str, ...] = ()
     stdin_text: str | None = None

@@ -301,6 +301,7 @@ def _build_persistent_worktree_run_context(
         forbid_commit=request.forbid_commit,
         progress_initial_delay_sec=request.progress_initial_delay_sec,
         progress_interval_sec=request.progress_interval_sec,
+        stall_seconds=request.stall_seconds,
         env_overrides={
             **(request.env_overrides or {}),
             "DELEGATE_SOURCE_ROOT": str(Path(execution.source_workspace.path).resolve()),

@@ -663,6 +663,7 @@ def make_run_context(
         forbid_commit=request.forbid_commit,
         progress_initial_delay_sec=request.progress_initial_delay_sec,
         progress_interval_sec=request.progress_interval_sec,
+        stall_seconds=request.stall_seconds,
         env_overrides=dict(request.env_overrides or {}),
         fallback_env_overrides=profiles.codex_fallback_child_env_overrides(
             request.profile_resolution,

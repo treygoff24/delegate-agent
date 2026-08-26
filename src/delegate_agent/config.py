@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Final
 
-from delegate_agent import reasoning, redaction, wsl
+from delegate_agent import reasoning, redaction, stall_watchdog, wsl
 from delegate_agent.constants import VALID_MODES
 from delegate_agent.json_types import JsonObject, JsonValue, is_non_negative_int
 
@@ -231,6 +231,39 @@ def default_progress_initial_delay_sec() -> float:
 
 def default_progress_interval_sec() -> float:
     return _embedded_progress_default("intervalSec")
+
+
+def _stall_minutes_value(value: JsonValue) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value) or value < 0:
+        return None
+    return float(value)
+
+
+def resolve_stall_minutes(config: JsonObject) -> float:
+    """Minutes of no child progress before the stall watchdog cancels a run.
+
+    ``workflows.stallMinutes`` wins over a top-level ``stallMinutes`` so a
+    workflow-specific threshold can override a machine-wide one; absent both,
+    the embedded default applies. The key is deliberately NOT part of the
+    embedded default config: merging a default into ``workflows`` would make it
+    permanently shadow the top-level form.
+    """
+    workflows = config.get("workflows")
+    if isinstance(workflows, dict):
+        minutes = _stall_minutes_value(workflows.get("stallMinutes"))
+        if minutes is not None:
+            return minutes
+    minutes = _stall_minutes_value(config.get("stallMinutes"))
+    if minutes is not None:
+        return minutes
+    return float(stall_watchdog.STALL_MINUTES_DEFAULT)
+
+
+def resolve_stall_seconds(config: JsonObject) -> float:
+    """Stall threshold in seconds; 0 disables the watchdog."""
+    return stall_watchdog.stall_seconds_from_minutes(resolve_stall_minutes(config))
 
 
 DEFAULT_CONFIG: JsonObject = embedded_default_config()
@@ -537,6 +570,21 @@ def _validate_workflows_section(workflows: JsonValue) -> None:
                 "invalid_workflows_config",
                 f"workflows.{key} must be a non-negative integer.",
             )
+    if "stallMinutes" in workflows:
+        _validate_stall_minutes(
+            workflows["stallMinutes"],
+            path="workflows.stallMinutes",
+            error="invalid_workflows_config",
+        )
+
+
+def _validate_stall_minutes(value: JsonValue, *, path: str, error: str) -> None:
+    if _stall_minutes_value(value) is None:
+        raise ConfigError(
+            error,
+            f"{path} must be a non-negative, finite number of minutes (0 disables the "
+            "stall watchdog).",
+        )
 
 
 def _validate_personas_section(personas: JsonValue) -> None:
@@ -1497,6 +1545,10 @@ def validate_config(config: JsonObject) -> None:
     _validate_worktrees_section(config.get("worktrees"))
     _validate_progress_section(config.get("progress"))
     _validate_workflows_section(config.get("workflows"))
+    if "stallMinutes" in config:
+        _validate_stall_minutes(
+            config["stallMinutes"], path="stallMinutes", error="invalid_stall_minutes"
+        )
     _validate_personas_section(config.get("personas"))
     _validate_mail_section(config.get("mail"))
 

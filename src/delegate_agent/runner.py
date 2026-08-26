@@ -39,6 +39,7 @@ from delegate_agent import (
     run_registry,
     sandbox_bwrap,
     seatbelt,
+    stall_watchdog,
     worktree_summary,
 )
 from delegate_agent import config as delegate_config
@@ -70,6 +71,10 @@ PROGRESS_INITIAL_DELAY_SEC = delegate_config.default_progress_initial_delay_sec(
 PROGRESS_HEARTBEAT_INTERVAL_SEC = delegate_config.default_progress_interval_sec()
 PROGRESS_INITIAL_DELAY_ENV = "DELEGATE_PROGRESS_INITIAL_DELAY_SEC"
 PROGRESS_INTERVAL_ENV = "DELEGATE_PROGRESS_INTERVAL_SEC"
+STALL_SECONDS_DEFAULT = stall_watchdog.stall_seconds_from_minutes(
+    stall_watchdog.STALL_MINUTES_DEFAULT
+)
+STALL_MINUTES_ENV = "DELEGATE_STALL_MINUTES"
 RESULT_QUALITY_OK = harness_events.RESULT_QUALITY_OK
 RESULT_QUALITY_HOUSEKEEPING = harness_events.RESULT_QUALITY_HOUSEKEEPING
 RESULT_QUALITY_EMPTY = harness_events.RESULT_QUALITY_EMPTY
@@ -153,6 +158,7 @@ class RunContext:
     forbid_commit: bool = False
     progress_initial_delay_sec: float = PROGRESS_INITIAL_DELAY_SEC
     progress_interval_sec: float = PROGRESS_HEARTBEAT_INTERVAL_SEC
+    stall_seconds: float = STALL_SECONDS_DEFAULT
     env_overrides: dict[str, str] = field(default_factory=dict)
     fallback_env_overrides: dict[str, str] = field(default_factory=dict)
     auth_profile: str | None = None
@@ -1271,6 +1277,7 @@ class TrackedCaptureResult:
     output_limit_stream: str | None = None
     output_limit_bytes: int | None = None
     stopped_after_completion: bool = False
+    stall: JsonObject | None = None
 
 
 @dataclass(frozen=True)
@@ -1431,6 +1438,38 @@ class StreamLimitSignal:
             if self.stream is None:
                 self.stream = stream
             self.event.set()
+
+
+def _stall_message(detail: JsonObject) -> str:
+    idle = detail.get("idleSeconds")
+    threshold = detail.get("thresholdSeconds")
+    idle_text = f"{float(idle):.0f}s" if isinstance(idle, (int, float)) else "the stall window"
+    threshold_text = (
+        f"{float(threshold) / 60:.0f} min" if isinstance(threshold, (int, float)) else "the limit"
+    )
+    return (
+        f"Child produced no new output and no tool activity for {idle_text} "
+        f"(stall threshold {threshold_text}); the run was cancelled by the stall watchdog."
+    )
+
+
+def _stall_seconds_from_env(default: float) -> float:
+    """Operator override for the configured stall threshold, in minutes.
+
+    Mirrors the progress-heartbeat env overrides: an unparseable or negative
+    value falls back to the configured threshold rather than silently disabling
+    the watchdog. ``0`` is honoured, because disabling is a real intent.
+    """
+    raw = os.environ.get(STALL_MINUTES_ENV)
+    if raw is None:
+        return default
+    try:
+        minutes = float(raw)
+    except ValueError:
+        return default
+    if not math.isfinite(minutes) or minutes < 0:
+        return default
+    return stall_watchdog.stall_seconds_from_minutes(minutes)
 
 
 def _progress_interval_from_env(name: str, default: float) -> float:
@@ -1739,6 +1778,10 @@ def _capture_tracked_process(
     progress_interval_sec: float = PROGRESS_HEARTBEAT_INTERVAL_SEC,
 ) -> TrackedCaptureResult:
     accumulator = harness_events.StreamAccumulator(harness=ctx.harness)
+    watchdog = stall_watchdog.StallWatchdog(
+        stall_seconds=_stall_seconds_from_env(ctx.stall_seconds),
+        harness=ctx.harness,
+    )
     pgid = None
     with contextlib.suppress(OSError):
         pgid = os.getpgid(process.pid)
@@ -1810,6 +1853,7 @@ def _capture_tracked_process(
             while "\n" in line_buffer:
                 line, line_buffer = line_buffer.split("\n", 1)
                 accumulator.ingest_line(line)
+                watchdog.observe_line(line, now=time.monotonic())
                 if accumulator.terminal_status is not None:
                     terminal_signal.set()
                 progress_dirty = True
@@ -1886,6 +1930,7 @@ def _capture_tracked_process(
         )
         next_progress_at = time.monotonic() + initial_delay
         terminal_seen_at: float | None = None
+        stall_detail: JsonObject | None = None
         while True:
             now = time.monotonic()
             if limit_signal.event.is_set():
@@ -1906,6 +1951,18 @@ def _capture_tracked_process(
                 timed_out = True
                 exit_code = 1
                 break
+            if not terminal_signal.is_set():
+                # A child that is alive and emitting, but has produced no new
+                # content and no tool activity for the configured window, is
+                # cancelled the way `delegate cancel` cancels: SIGTERM to the
+                # process group, then SIGKILL. The run finalizes as failed with
+                # failureReason "stalled" so a workflow's retry/park logic runs.
+                idle_seconds = watchdog.stalled_for(now)
+                if idle_seconds is not None:
+                    stall_detail = watchdog.stall_detail(idle_seconds)
+                    _terminate_call_process(process)
+                    exit_code = 1
+                    break
             return_code = process.poll()
             if return_code is not None:
                 exit_code = return_code
@@ -1949,7 +2006,13 @@ def _capture_tracked_process(
             append_stdout_line_event(line_buffer)
         error: str | None = None
         message: str | None = None
-        if timed_out:
+        if stall_detail is not None:
+            # Written here rather than from the poll loop: the stdout drain
+            # thread shares this handle and has only just been joined.
+            append_event(events_handle, {"kind": "run.stalled", **stall_detail})
+            error = "stalled"
+            message = _stall_message(stall_detail)
+        elif timed_out:
             error = "call_timeout"
             message = "Child command exceeded the configured timeout."
         elif output_limited:
@@ -1973,6 +2036,7 @@ def _capture_tracked_process(
         output_limit_stream=limit_signal.stream if output_limited else None,
         output_limit_bytes=TRACKED_STREAM_MAX_BYTES if output_limited else None,
         stopped_after_completion=stopped_after_completion,
+        stall=stall_detail,
     )
 
 
@@ -3306,6 +3370,8 @@ def _execute_tracked(
         }
     if capture.stopped_after_completion:
         final_extra["stoppedAfterCompletion"] = True
+    if capture.stall is not None:
+        final_extra["stall"] = capture.stall
     if capture.error is not None:
         final_extra.update(
             error=capture.error,

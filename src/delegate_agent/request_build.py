@@ -3264,6 +3264,7 @@ def _build_request_for_workspace(
             progress=progress,
             progress_initial_delay_sec=progress_initial_delay_sec,
             progress_interval_sec=progress_interval_sec,
+            stall_seconds=delegate_config.resolve_stall_seconds(config),
             forbid_commit=forbid_commit,
             include_dirty=include_dirty,
             call_read_only=call_read_only,
