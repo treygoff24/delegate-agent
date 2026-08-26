@@ -2420,9 +2420,7 @@ def _finalize_tracked_run(
         extra=merged_extra,
     )
     if ctx.followup_of is not None:
-        session_failure = child_failures.classify_followup_session_failure(
-            signal_text, ctx.engine
-        )
+        session_failure = child_failures.classify_followup_session_failure(signal_text, ctx.engine)
         if session_failure is not None:
             failure = session_failure
     failure_reason = failure.code if failure is not None else None

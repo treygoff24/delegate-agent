@@ -647,6 +647,26 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertIn("invalid schema literal", payload["message"])
 
+    def test_check_rejects_invalid_judge_effort(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "bad-effort"}
+            SCHEMA = {"type": "object", "properties": {"ok": {"type": "boolean"}}}
+            return judges(
+                "grade this",
+                SCHEMA,
+                engines=[{"engine": "codex", "effort": "turbo"}],
+            )
+            """
+        )
+        result = self.run_delegate(["--json", "workflow", "check", str(script)])
+        self.assertNotEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"], "invalid_workflow_script")
+        self.assertIn("effort", payload["message"])
+        self.assertIn("low", payload["message"])
+
     def test_run_journal_result_group_and_resume_cache(self) -> None:
         script = self.write_workflow(
             """
@@ -4247,6 +4267,138 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertEqual(r2_argv[exec_idx + 1], "resume")
         self.assertIn("th_wf_fixed_12345", r2_argv)
 
+    def test_followup_timeout_rounds_up_for_cli(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "followup-timeout", "defaults": {"engine": "codex", "mode": "work"}}
+            r1 = agent("do it", label="fix-r1", resumable=True)
+            r2 = followup("fix-r1", "round 2 findings", timeout=0.9)
+            return {"r1": r1, "r2": r2}
+            """
+        )
+        env_extra = {"FAKE_CODEX_THREAD_ID": "th_wf_fixed_12345"}
+        launch = self.run_delegate(["--json", "workflow", "run", str(script)], env_extra=env_extra)
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        self.assertEqual(
+            self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"]).returncode,
+            0,
+        )
+        runs = json.loads(self.run_delegate(["--json", "runs", "--group", wf_id]).stdout)["runs"]
+        manifests = []
+        for run in runs:
+            manifest_path = self.workspace / ".delegate" / "runs" / run["runId"] / "manifest.json"
+            if manifest_path.is_file():
+                manifests.append(json.loads(manifest_path.read_text(encoding="utf-8")))
+        manifest = next(item for item in manifests if item.get("timeoutSeconds"))
+        self.assertEqual(manifest["timeoutSeconds"], 1)
+
+    def test_resume_replays_followup_after_first_resumable_agent(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "followup-replay", "defaults": {"engine": "codex", "mode": "work"}}
+            r1 = agent("do it", label="fix-r1", resumable=True)
+            r2 = followup("fix-r1", "round 2 findings", label="fix-r2")
+            return {"r1": r1, "r2": r2}
+            """
+        )
+        env_extra = {"FAKE_CODEX_THREAD_ID": "th_wf_fixed_12345"}
+        launch = self.run_delegate(["--json", "workflow", "run", str(script)], env_extra=env_extra)
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        self.assertEqual(
+            self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"]).returncode,
+            0,
+        )
+        root = workflow_registry.workflow_dir(self.workspace, wf_id)
+        journal = root / workflow_registry.JOURNAL_FILE
+        events = workflow_registry.iter_journal(journal)
+        first_key = next(
+            index
+            for index, event in enumerate(events)
+            if event.get("type") == "agent_child" and event.get("label") == "fix-r1"
+        )
+        first_key = events[first_key]["key"]
+        first_finished = next(
+            index
+            for index, event in enumerate(events)
+            if event.get("type") == "agent_finished" and event.get("key") == first_key
+        )
+        journal.write_text(
+            "".join(json.dumps(event) + "\n" for event in events[: first_finished + 1]),
+            encoding="utf-8",
+        )
+        (root / workflow_registry.RESULT_FILE).unlink()
+
+        resumed = self.run_delegate(
+            ["--json", "workflow", "run", "--resume", wf_id], env_extra=env_extra
+        )
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        self.assertEqual(
+            self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"]).returncode,
+            0,
+        )
+        events_after = workflow_registry.iter_journal(journal)
+        children = [event for event in events_after if event.get("type") == "agent_child"]
+        self.assertEqual([event.get("label") for event in children], ["fix-r1", "fix-r2"])
+        result = self.run_delegate(["--json", "workflow", "result", wf_id])
+        self.assertEqual(
+            json.loads(result.stdout)["result"],
+            {"r1": "fake completion", "r2": "round 2 output"},
+        )
+
+    def test_resume_replays_labeled_followup_chain_without_duplicate_children(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "followup-chain-replay", "defaults": {"engine": "codex", "mode": "work"}}
+            r1 = agent("step 1", label="turn-1", resumable=True)
+            r2 = followup("turn-1", "step 2", label="turn-2")
+            r3 = followup("turn-2", "step 3", label="turn-3")
+            return {"r1": r1, "r2": r2, "r3": r3}
+            """
+        )
+        env_extra = {"FAKE_CODEX_THREAD_ID": "th_wf_fixed_12345"}
+        launch = self.run_delegate(["--json", "workflow", "run", str(script)], env_extra=env_extra)
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        self.assertEqual(
+            self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"]).returncode,
+            0,
+        )
+        root = workflow_registry.workflow_dir(self.workspace, wf_id)
+        journal = root / workflow_registry.JOURNAL_FILE
+        events = workflow_registry.iter_journal(journal)
+        second_key = next(
+            index
+            for index, event in enumerate(events)
+            if event.get("type") == "agent_child" and event.get("label") == "turn-2"
+        )
+        second_key = events[second_key]["key"]
+        second_finished = next(
+            index
+            for index, event in enumerate(events)
+            if event.get("type") == "agent_finished" and event.get("key") == second_key
+        )
+        journal.write_text(
+            "".join(json.dumps(event) + "\n" for event in events[: second_finished + 1]),
+            encoding="utf-8",
+        )
+        (root / workflow_registry.RESULT_FILE).unlink()
+
+        resumed = self.run_delegate(
+            ["--json", "workflow", "run", "--resume", wf_id], env_extra=env_extra
+        )
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        self.assertEqual(
+            self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"]).returncode,
+            0,
+        )
+        events_after = workflow_registry.iter_journal(journal)
+        children = [event for event in events_after if event.get("type") == "agent_child"]
+        labels = [event.get("label") for event in children]
+        self.assertEqual(labels, ["turn-1", "turn-2", "turn-3"])
+        self.assertEqual(len(labels), len(set(labels)))
+
     def test_followup_fails_on_unknown_prior_label(self) -> None:
         script = self.write_workflow(
             """
@@ -4379,6 +4531,16 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertIn(
             "only supported by codex and claude", json.loads(check_droid.stdout)["message"]
         )
+
+        script_safe = self.write_workflow(
+            """
+            meta = {"name": "invalid-safe-resumable"}
+            return agent("do it", engine="codex", mode="safe", resumable=True)
+            """
+        )
+        check_safe = self.run_delegate(["--json", "workflow", "check", str(script_safe)])
+        self.assertNotEqual(check_safe.returncode, 0)
+        self.assertIn("safe workspaces are temporary", json.loads(check_safe.stdout)["message"])
 
         # Duplicate label ambiguity
         script_dup = self.write_workflow(

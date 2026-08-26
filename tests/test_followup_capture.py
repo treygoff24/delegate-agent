@@ -224,9 +224,7 @@ class FollowupCaptureE2ETests(unittest.TestCase):
         )
         (self.bin_dir / "codex").chmod(0o755)
 
-        exit_code, stdout, _stderr = self.run_delegate(
-            ["--json", "followup", alias, "continue"]
-        )
+        exit_code, stdout, _stderr = self.run_delegate(["--json", "followup", alias, "continue"])
         self.assertEqual(exit_code, 1)
         payload = json.loads(stdout)
         self.assertFalse(payload["ok"])
@@ -249,9 +247,7 @@ class FollowupCaptureE2ETests(unittest.TestCase):
         )
         (self.bin_dir / "claude").chmod(0o755)
 
-        exit_code, stdout, _stderr = self.run_delegate(
-            ["--json", "followup", alias, "continue"]
-        )
+        exit_code, stdout, _stderr = self.run_delegate(["--json", "followup", alias, "continue"])
         self.assertEqual(exit_code, 1)
         payload = json.loads(stdout)
         self.assertFalse(payload["ok"])

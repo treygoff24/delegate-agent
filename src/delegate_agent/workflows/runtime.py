@@ -20,6 +20,7 @@ from pathlib import Path
 from delegate_agent import (
     notify,
     personas,
+    reasoning,
     run_registry,
     structured_output,
     wait_cancel_commands,
@@ -61,6 +62,7 @@ PERSONA_RESOLUTION_ERRORS = frozenset(
 WORKFLOW_LOCK_FD_ENV = "DELEGATE_WORKFLOW_LOCK_FD"
 KILL_SUPERVISOR_WAIT_SECONDS = 5.0
 KILL_SUPERVISOR_FORCE_WAIT_SECONDS = 2.0
+WORKFLOW_EFFORT_VALUES = tuple(dict.fromkeys(reasoning.PI_THINKING_LEVELS))
 
 
 class _MissingType:
@@ -909,6 +911,7 @@ class WorkflowDsl:
         *,
         effort: str | None = None,
     ) -> list[object]:
+        effort = _validate_workflow_effort(effort)
         selected = engines or ["codex"]
         thunks = []
         for item in selected:
@@ -1037,7 +1040,7 @@ class WorkflowDsl:
         if resumable and resolved_mode == MODE_SAFE:
             raise ValueError(
                 "resumable=True with mode='safe' is invalid; safe workspaces are temporary "
-                "and cannot be followed up"
+                "and a captured session would have no re-entry path"
             )
         if resumable and any(candidate not in {"codex", "claude"} for candidate in engines):
             raise ValueError(
@@ -1046,7 +1049,9 @@ class WorkflowDsl:
                 "native session resumption"
             )
         resolved_model = model or self.defaults.get("model")
-        resolved_effort = effort or self.defaults.get("effort")
+        resolved_effort = _validate_workflow_effort(
+            effort if effort is not None else self.defaults.get("effort")
+        )
         resolved_fast = fast if fast is not None else self.defaults.get("fast")
         if persona is not None and (not isinstance(persona, str) or not persona.strip()):
             raise ValueError("persona must be a non-empty string or None")
@@ -2192,7 +2197,7 @@ class WorkflowDsl:
                 "followup",
             ]
             if timeout is not None:
-                argv.extend(["--timeout", str(int(timeout))])
+                argv.extend(["--timeout", str(max(1, math.ceil(timeout)))])
             argv.extend(["--prompt-file", prompt_path, handle])
             completed = _run_child_command(argv, cwd=str(self.state.workspace), timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -2350,13 +2355,22 @@ def _parse_engine_spec(value: object) -> tuple[str, str | None, str | None]:
         return (
             str(value.get("engine", DEFAULT_ENGINE)),
             value.get("model"),
-            value.get("effort"),
+            _validate_workflow_effort(value.get("effort")),
         )
     if isinstance(value, str):
         if value in KNOWN_ENGINES:
             return value, None, None
         return "droid", value, None
     return DEFAULT_ENGINE, None, None
+
+
+def _validate_workflow_effort(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or value not in WORKFLOW_EFFORT_VALUES:
+        allowed = ", ".join(WORKFLOW_EFFORT_VALUES)
+        raise ValueError(f"effort must be one of: {allowed}")
+    return value
 
 
 def _engine_chain(value: object) -> list[str]:
