@@ -694,6 +694,7 @@ def make_run_context(
         persona_file=request.persona_file,
         persona_text=request.persona_text,
         account_binding_command=request.account_binding_command,
+        temporary_workspace_cleanup=request.temporary_workspace_cleanup,
     )
 
 
@@ -1388,6 +1389,8 @@ def execute_request(
                 else source_workspace.path
             ),
         }
+        if isolated_request.temporary_workspace_cleanup is not None:
+            metadata["temporaryWorkspaceCleanup"] = isolated_request.temporary_workspace_cleanup
         run_metadata.add_initiator_metadata(metadata, initiator_root)
         run_id, alias = run_registry.register_run(
             registry_root,

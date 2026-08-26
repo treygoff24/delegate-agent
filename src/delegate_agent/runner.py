@@ -180,6 +180,7 @@ class RunContext:
     agent: str | None = None
     resumed_from: JsonObject | None = None
     worktree_attachment: JsonObject | None = None
+    temporary_workspace_cleanup: JsonObject | None = None
     persona_name: str | None = None
     persona_source: str | None = None
     persona_transport: str | None = None
@@ -331,6 +332,8 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
         "promptTransport": ctx.prompt_transport,
         "promptInstructionMode": ctx.prompt_instruction_mode,
     }
+    if ctx.temporary_workspace_cleanup is not None:
+        payload["temporaryWorkspaceCleanup"] = ctx.temporary_workspace_cleanup
     run_metadata.add_run_metadata_payload_fields(payload, ctx)
     run_metadata.add_model_payload_fields(payload, ctx)
     reasoning.add_reasoning_payload_fields(payload, ctx)
@@ -495,6 +498,8 @@ def build_snapshot(
         snapshot["authProfile"] = ctx.auth_profile
     if ctx.workflow_agent_key is not None:
         snapshot["workflowAgentKey"] = ctx.workflow_agent_key
+    if ctx.temporary_workspace_cleanup is not None:
+        snapshot["temporaryWorkspaceCleanup"] = ctx.temporary_workspace_cleanup
     cleanup = _worktree_cleanup_commands(ctx)
     if cleanup is not None:
         snapshot["worktreeCleanupCommands"] = cleanup
@@ -505,6 +510,8 @@ def build_snapshot(
         snapshot["terminalEvent"] = accumulator.terminal_event
     if accumulator.terminal_status is not None:
         snapshot["terminalStatus"] = accumulator.terminal_status
+    if accumulator.session_id is not None:
+        snapshot["sessionId"] = accumulator.session_id
     if ctx.group is not None:
         snapshot["group"] = ctx.group
     if ctx.include_dirty:
@@ -1034,6 +1041,8 @@ def completion_json_payload(
     if ctx.include_dirty:
         payload["includeDirty"] = True
         payload["syncedFiles"] = ctx.synced_files
+    if ctx.temporary_workspace_cleanup is not None:
+        payload["temporaryWorkspaceCleanup"] = ctx.temporary_workspace_cleanup
     payload["promptInstructionMode"] = ctx.prompt_instruction_mode
     run_metadata.add_run_metadata_payload_fields(payload, ctx)
     run_metadata.add_model_payload_fields(payload, ctx)
@@ -1852,6 +1861,7 @@ def _capture_tracked_process(
             line_buffer += chunk_text
             while "\n" in line_buffer:
                 line, line_buffer = line_buffer.split("\n", 1)
+                prior_session_id = accumulator.session_id
                 accumulator.ingest_line(line)
                 watchdog.observe_line(line, now=time.monotonic())
                 if accumulator.terminal_status is not None:
@@ -1863,6 +1873,7 @@ def _capture_tracked_process(
                 if (
                     lines_since_persist >= PROGRESS_PERSIST_LINE_INTERVAL
                     or elapsed >= PROGRESS_PERSIST_TIME_INTERVAL_SEC
+                    or accumulator.session_id != prior_session_id
                 ):
                     events_handle.flush()
                     maybe_persist_running()
@@ -2439,6 +2450,9 @@ def _tracked_result(
     ok = finalization.exit_code == 0
     if json_mode:
         _assistant_text, assistant_meta = capture.accumulator.bounded_assistant_text()
+        extra = dict(finalization.extra)
+        if capture.accumulator.session_id is not None:
+            extra["sessionId"] = capture.accumulator.session_id
         payload = completion_json_payload(
             ctx,
             ok=ok,
@@ -2450,7 +2464,7 @@ def _tracked_result(
             completion_report_written=finalization.report_written,
             assistant_meta=assistant_meta,
             usage=capture.accumulator.usage,
-            extra=finalization.extra,
+            extra=extra,
         )
         return finalization.exit_code, payload
 

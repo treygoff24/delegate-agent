@@ -1188,11 +1188,18 @@ def safe_isolated_request(
             stdin_text=isolated_stdin_text,
             prompt_file_text=isolated_prompt_file_text,
             display_argv=isolated_display_argv,
+            temporary_workspace_cleanup={
+                "gitRoot": cleanup_git_root,
+                "isolatedWorkspace": isolated_workspace,
+                "tempBase": temp_base,
+                "sourceRoot": request.workspace,
+            },
         )
     finally:
-        cleanup_safe_isolated_workspace(
-            git_root=cleanup_git_root,
-            isolated_workspace=isolated_workspace,
-            temp_base=temp_base,
-            source_root=request.workspace,
-        )
+        if not request.preserve_safe_workspace:
+            cleanup_safe_isolated_workspace(
+                git_root=cleanup_git_root,
+                isolated_workspace=isolated_workspace,
+                temp_base=temp_base,
+                source_root=request.workspace,
+            )

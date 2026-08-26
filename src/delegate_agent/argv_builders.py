@@ -154,6 +154,7 @@ def build_cursor_argv(
     stream_capture: bool = True,
     call_read_only: bool = False,
     pure: bool = False,
+    resume_session_id: str | None = None,
 ) -> list[str]:
     _reject_pure("cursor", mode, pure)
     argv = [*prefix, "--workspace", workspace, "-p", "--trust"]
@@ -166,6 +167,8 @@ def build_cursor_argv(
             argv.extend(["--approve-mcps", "--force"])
     else:
         validate_mode(mode)
+    if resume_session_id is not None:
+        argv.extend(["--resume", resume_session_id])
     if stream_capture:
         argv.extend(["--model", model, "--print", "--output-format", "stream-json", prompt])
     else:
@@ -248,6 +251,8 @@ def build_claude_argv(
     pure: bool = False,
     output_schema: str | None = None,
     persona_file: bool = False,
+    persist_session: bool = False,
+    resume_session_id: str | None = None,
 ) -> list[str]:
     _reject_pure("claude", mode, pure, supported=True)
     if pure or output_schema is not None:
@@ -310,7 +315,12 @@ def build_claude_argv(
             argv.extend(["--permission-mode", str(claude.get("workPermissionMode", "auto"))])
     else:
         validate_mode(mode)
-    if not pure and claude.get("noSessionPersistence", True) is True:
+    if (
+        not pure
+        and not persist_session
+        and resume_session_id is None
+        and claude.get("noSessionPersistence", True) is True
+    ):
         argv.append("--no-session-persistence")
     if not pure and claude.get("bare", False) is True:
         argv.append("--bare")
@@ -320,6 +330,8 @@ def build_claude_argv(
         argv.extend(["--model", model])
     if reasoning_effort is not None:
         argv.extend(["--effort", reasoning_effort])
+    if resume_session_id is not None:
+        argv.extend(["--resume", resume_session_id])
     if persona_file:
         argv.extend(["--append-system-prompt-file", PERSONA_FILE_ARG_PLACEHOLDER])
     return argv
@@ -480,11 +492,18 @@ def _build_pi_family_argv(
     *,
     call_read_only: bool = False,
     pure: bool = False,
+    persist_session: bool = False,
+    resume_session_id: str | None = None,
 ) -> list[str]:
     _reject_pure(engine, mode, pure)
     if mode not in (MODE_SAFE, MODE_WORK, MODE_CALL):
         validate_mode(mode)
-    argv = [str(section["binary"]), "-p", "--no-session", "--mode", "json"]
+    argv = [str(section["binary"]), "-p"]
+    if not persist_session and resume_session_id is None:
+        argv.append("--no-session")
+    argv.extend(["--mode", "json"])
+    if resume_session_id is not None:
+        argv.append(f"--resume={resume_session_id}")
     if mode == MODE_SAFE or (mode == MODE_CALL and call_read_only):
         argv.extend(PI_FAMILY_SAFE_LOCKDOWN[engine])
     if model:
@@ -538,6 +557,8 @@ def build_omp_argv(
     *,
     call_read_only: bool = False,
     pure: bool = False,
+    persist_session: bool = False,
+    resume_session_id: str | None = None,
 ) -> list[str]:
     return _build_pi_family_argv(
         omp,
@@ -548,6 +569,8 @@ def build_omp_argv(
         prompt,
         call_read_only=call_read_only,
         pure=pure,
+        persist_session=persist_session,
+        resume_session_id=resume_session_id,
     )
 
 
@@ -567,6 +590,8 @@ def build_codex_argv(
     output_schema: str | None = None,
     call_read_only: bool = False,
     pure: bool = False,
+    persist_session: bool = False,
+    resume_session_id: str | None = None,
 ) -> list[str]:
     _reject_pure("codex", mode, pure)
     binary = str(codex["binary"])
@@ -632,26 +657,52 @@ def build_codex_argv(
             # Codex drops a "fast" tier silently when features.fast_mode is off
             # in the ambient config; enable it so --fast cannot no-op.
             argv.extend(["-c", "features.fast_mode=true"])
+    if resume_session_id is not None:
+        sandbox = codex["workSandbox"] if write_sandbox else "read-only"
+        if bypass_sandbox:
+            argv.append("--dangerously-bypass-approvals-and-sandbox")
+        else:
+            argv.extend(["--sandbox", str(sandbox)])
+            if (
+                write_sandbox
+                and sandbox == "workspace-write"
+                and policy.get("networkAccess") is True
+            ):
+                argv.extend(["-c", "sandbox_workspace_write.network_access=true"])
+        if bypass_hook_trust:
+            argv.append("--dangerously-bypass-hook-trust")
     argv.append("exec")
-    argv.extend(["--cd", workspace])
+    if resume_session_id is not None:
+        argv.extend(["resume", resume_session_id])
+    else:
+        argv.extend(["--cd", workspace])
     if output_schema is not None:
         argv.extend(["--output-schema", output_schema])
     if codex.get("ignoreUserConfig") is True:
         argv.append("--ignore-user-config")
     if workspace_kind != "git":
         argv.append("--skip-git-repo-check")
-    if bypass_sandbox:
-        argv.append("--dangerously-bypass-approvals-and-sandbox")
-    else:
-        sandbox = codex["workSandbox"] if write_sandbox else "read-only"
-        argv.extend(["--sandbox", str(sandbox)])
-        if write_sandbox and sandbox == "workspace-write" and policy.get("networkAccess") is True:
-            argv.extend(["-c", "sandbox_workspace_write.network_access=true"])
-    if bypass_hook_trust:
-        argv.append("--dangerously-bypass-hook-trust")
+    if resume_session_id is None:
+        if bypass_sandbox:
+            argv.append("--dangerously-bypass-approvals-and-sandbox")
+        else:
+            sandbox = codex["workSandbox"] if write_sandbox else "read-only"
+            argv.extend(["--sandbox", str(sandbox)])
+            if (
+                write_sandbox
+                and sandbox == "workspace-write"
+                and policy.get("networkAccess") is True
+            ):
+                argv.extend(["-c", "sandbox_workspace_write.network_access=true"])
+        if bypass_hook_trust:
+            argv.append("--dangerously-bypass-hook-trust")
     if stream_capture:
         argv.extend(["--color", "never", "--json"])
-        if codex.get("ephemeral", True) is True:
+        if (
+            not persist_session
+            and resume_session_id is None
+            and codex.get("ephemeral", True) is True
+        ):
             argv.append("--ephemeral")
     if prompt_transport == PROMPT_TRANSPORT_ARGV:
         argv.append(prompt)

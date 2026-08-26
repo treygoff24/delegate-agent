@@ -114,6 +114,33 @@ class HarnessEventsTests(unittest.TestCase):
         )
         self.assertEqual(acc.completion_text, "Status: completed\n- did work")
 
+    def test_resume_capable_harnesses_capture_native_session_id(self):
+        cases = (
+            ("codex", {"type": "thread.started", "thread_id": "thread-123"}, "thread-123"),
+            (
+                "claude",
+                {"type": "system", "subtype": "init", "session_id": "claude-123"},
+                "claude-123",
+            ),
+            (
+                "cursor",
+                {"type": "system", "subtype": "init", "session_id": "cursor-123"},
+                "cursor-123",
+            ),
+            ("omp", {"type": "session", "version": 3, "id": "omp-123"}, "omp-123"),
+        )
+        for harness, event, expected in cases:
+            with self.subTest(harness=harness):
+                acc = self.events.StreamAccumulator(harness=harness)
+                acc.ingest_line(json.dumps(event))
+                self.assertEqual(acc.session_id, expected)
+
+        untrusted = self.events.StreamAccumulator(harness="codex")
+        untrusted.ingest_line(
+            json.dumps({"type": "thread.started", "thread_id": "--dangerous-flag"})
+        )
+        self.assertIsNone(untrusted.session_id)
+
     def test_codex_item_completed_agent_message_is_latest_completion(self):
         acc = self.events.StreamAccumulator()
         acc.ingest_line(

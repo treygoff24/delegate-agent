@@ -279,6 +279,8 @@ class Request:
     # Execution uses this structural state rather than inspecting prompt bytes.
     persistent_worktree_notes_framed: bool = False
     mail_push: bool = False
+    preserve_safe_workspace: bool = False
+    temporary_workspace_cleanup: JsonObject | None = None
 
 
 @dataclass(frozen=True)
@@ -331,3 +333,5 @@ class EngineBuildInput:
     persona_digest: str | None = None
     persona_transport: str | None = None
     persona_env_overrides: dict[str, str] | None = None
+    persist_session: bool = False
+    resume_session_id: str | None = None

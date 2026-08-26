@@ -1995,17 +1995,18 @@ class RunnerCaptureTests(unittest.TestCase):
             isolated_workspace=False,
             started_at="2026-05-20T21:42:33Z",
         )
-        snapshot = self.runner.build_snapshot(
-            ctx,
-            accumulator=self.runner.harness_events.StreamAccumulator(),
-        )
+        accumulator = self.runner.harness_events.StreamAccumulator()
+        accumulator.session_id = "thread-123"
+        snapshot = self.runner.build_snapshot(ctx, accumulator=accumulator)
         self.assertEqual(snapshot["modelResolved"], "effective-model")
+        self.assertEqual(snapshot["sessionId"], "thread-123")
 
     def test_cursor_result_usage_reaches_tracked_completion_payload(self):
         payload = self._execute_cursor_result(
             {
                 "type": "result",
                 "subtype": "success",
+                "session_id": "cursor-123",
                 "result": "Status: completed\n- captured usage\n- finished",
                 "usage": {
                     "inputTokens": 29957,
@@ -2026,6 +2027,7 @@ class RunnerCaptureTests(unittest.TestCase):
                 "cacheWriteTokens": 0,
             },
         )
+        self.assertEqual(payload["sessionId"], "cursor-123")
 
     def test_tracked_completion_payload_omits_usage_when_child_reports_none(self):
         payload = self._execute_cursor_result(
