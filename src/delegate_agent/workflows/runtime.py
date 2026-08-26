@@ -184,14 +184,14 @@ def _workflow_agent_run_result_metadata(
     entry = index.get("runs", {}).get(run_id)
     snapshot = run_registry.load_run_snapshot_or_none(root, run_id)
     manifest = run_registry.load_run_manifest_or_none(root, run_id)
-    records = tuple(
-        record for record in (snapshot, manifest, entry) if isinstance(record, dict)
-    )
+    records = tuple(record for record in (snapshot, manifest, entry) if isinstance(record, dict))
     if not records:
         return None
     execution_cwd = next(
         (
-            value for record in records for value in (record.get("executionCwd"),)
+            value
+            for record in records
+            for value in (record.get("executionCwd"),)
             if isinstance(value, str) and value
         ),
         None,
