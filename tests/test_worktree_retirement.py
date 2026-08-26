@@ -73,6 +73,11 @@ class WorktreeRetirementTests(ExecutionTestBase):
             self.assertIsNotNone(payload)
             self.assertTrue(payload["worktreeRetired"])
             self.assertFalse(self._worktree_paths(fake_home))
+            run_path = Path(repo.name) / ".delegate" / "runs" / payload["runId"]
+            state = json.loads((run_path / "state.json").read_text(encoding="utf-8"))
+            snapshot = json.loads((run_path / "snapshot.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["worktreeStatus"], "removed")
+            self.assertEqual(snapshot["worktreeStatus"], "removed")
             branches = subprocess.run(
                 [
                     "git",
@@ -111,6 +116,9 @@ class WorktreeRetirementTests(ExecutionTestBase):
             self.assertEqual(code, 0)
             self.assertEqual(payload["worktreeRetained"], "dirty")
             self.assertTrue(self._worktree_paths(fake_home))
+            run_path = Path(repo.name) / ".delegate" / "runs" / payload["runId"]
+            state = json.loads((run_path / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["worktreeRetained"], "dirty")
 
     def test_seeded_dirt_unchanged_since_sync_is_clean(self):
         with tempfile.TemporaryDirectory() as fake_home:
