@@ -176,9 +176,11 @@ def _retire_worktree_on_completion(ctx: object, completion_extra: JsonObject) ->
             )
         except Exception as exc:  # pragma: no cover - defensive lifecycle guard
             completion_extra["autoPrune"] = {"ok": False, "error": str(exc)}
+            _persist_completion_worktree_fields(ctx, {"autoPrune": completion_extra["autoPrune"]})
             return
         if result is not None:
             completion_extra["autoPrune"] = result
+            _persist_completion_worktree_fields(ctx, {"autoPrune": result})
 
     def retain(reason: str, **fields: object) -> None:
         completion_extra["worktreeRetained"] = reason

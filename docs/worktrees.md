@@ -42,8 +42,9 @@ Gitignored files remain excluded. External symlinks are blocked with the same
 protections used by Delegate's safe-mode workspace sync. The completion payload
 reports `includeDirty: true` and `syncedFiles`.
 
-By default, a completed work-lane run retires its persistent worktree when the
-end-state is clean. Source dirt copied into the worktree at launch is compared
+By default, a successful work-lane run retires its persistent worktree when the
+end-state is clean. Failed or cancelled runs are retained for inspection.
+Source dirt copied into the worktree at launch is compared
 by content against a launch digest, so unchanged seeded files do not block
 retirement while a child edit to a seeded file does. The `delegate/*` branch is
 kept as the durable artifact. Dirty, unverifiable, or unsafe worktrees remain
