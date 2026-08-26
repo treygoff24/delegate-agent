@@ -1807,10 +1807,7 @@ def _capture_tracked_process(
         stall_seconds=_stall_seconds_from_env(ctx.stall_seconds),
         harness=ctx.harness,
     )
-    pgid = process_group_pgid
-    if pgid is None:
-        with contextlib.suppress(OSError):
-            pgid = os.getpgid(process.pid)
+    pgid = process_group_pgid or _process_group_for_process(process)
     persist_progress(
         files.run_path,
         ctx,
@@ -2795,13 +2792,15 @@ def _run_single_tracked_attempt(
             boundary_exc = exc
         else:
             try:
-                with contextlib.suppress(OSError):
-                    process_pgid = os.getpgid(process.pid)
+                process_pgid = _process_group_for_process(process)
                 # start_new_session makes the child the group leader. Keep the
                 # launch pid as a last-resort record when an immediately
                 # exiting child has already made getpgid() return ESRCH.
                 if process_pgid is None:
-                    process_pgid = process.pid
+                    raise RunnerLaunchError(
+                        "missing_child_pid",
+                        "Child process did not expose a numeric pid for process-group tracking.",
+                    )
                 write_state(
                     files.run_path,
                     build_state(
@@ -3565,6 +3564,19 @@ def _safe_process_group_id(pgid: int | None) -> int | None:
     return pgid
 
 
+def _process_group_for_process(
+    process: subprocess.Popen[bytes] | subprocess.Popen[str],
+) -> int | None:
+    pid = getattr(process, "pid", None)
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return None
+    with contextlib.suppress(OSError, TypeError):
+        return os.getpgid(pid)
+    # start_new_session makes the leader pid the pgid. This fallback also
+    # preserves a usable group id after the leader has already been reaped.
+    return pid
+
+
 def _kill_process_group(pgid: int, sig: signal.Signals) -> None:
     safe_pgid = _safe_process_group_id(pgid)
     if safe_pgid is None:
@@ -3599,9 +3611,7 @@ def _terminate_call_process(
 ) -> None:
     """Terminate a child process group, tolerating reaped leaders and ESRCH."""
     if pgid is None:
-        pgid = process.pid
-        with contextlib.suppress(OSError):
-            pgid = os.getpgid(process.pid)
+        pgid = _process_group_for_process(process)
     safe_pgid = _safe_process_group_id(pgid)
     if safe_pgid is None:
         return
@@ -4006,10 +4016,7 @@ def _execute_call_once(
                 launch_argv,
                 **popen_kwargs,
             )
-            with contextlib.suppress(OSError):
-                process_pgid = os.getpgid(process.pid)
-            if process_pgid is None:
-                process_pgid = process.pid
+            process_pgid = _process_group_for_process(process)
             stdout_data, stderr_data = _bounded_call_communicate(
                 process,
                 stdin_text.encode("utf-8") if stdin_text is not None else None,
@@ -4308,10 +4315,7 @@ def execute_passthrough(
                 text=True,
                 start_new_session=True,
             )
-            with contextlib.suppress(OSError):
-                process_pgid = os.getpgid(process.pid)
-            if process_pgid is None:
-                process_pgid = process.pid
+            process_pgid = _process_group_for_process(process)
             process.communicate(input=stdin_text)
         except OSError as exc:
             raise _runner_launch_error(launch_argv, cwd, exc) from exc
