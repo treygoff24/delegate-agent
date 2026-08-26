@@ -83,6 +83,202 @@ class WorktreeManagementError(Exception):
         self.message = message
 
 
+def _effective_dirty_for_retirement(
+    record: PersistentWorktreeRecord,
+    status: str,
+) -> tuple[bool | None, list[str], list[str]]:
+    """Check end-state dirt while discounting unchanged launch-seeded files."""
+
+    execution_cwd = record.get("executionCwd")
+    if status not in (STATUS_PRESENT, STATUS_UNKNOWN):
+        return None, [], []
+    if not isinstance(execution_cwd, str) or not execution_cwd:
+        return None, [], ["missing executionCwd metadata"]
+    lines, total, warnings = porcelain_status(execution_cwd)
+    if lines is None or total is None:
+        return None, [], warnings
+    entries, raw_total = worktree_summary.changed_files_from_porcelain_lines(lines, total)
+    effective, effective_total, _ = worktree_summary.effective_changed_files(
+        entries,
+        execution_cwd=execution_cwd,
+        creation_context=record.get("creationContext")
+        if isinstance(record.get("creationContext"), dict)
+        else None,
+        raw_total=raw_total,
+    )
+    if raw_total > len(entries):
+        effective_total = max(effective_total, raw_total - len(entries))
+    return effective_total > 0, [str(item.get("path")) for item in effective], warnings
+
+
+def _completion_record(ctx: object) -> PersistentWorktreeRecord | None:
+    registry_root = getattr(ctx, "registry_root", None)
+    run_id = getattr(ctx, "run_id", None)
+    if not isinstance(registry_root, Path) or not isinstance(run_id, str):
+        return None
+    index = run_registry.load_index(registry_root)
+    entry = index.get("runs", {}).get(run_id) if isinstance(index.get("runs"), dict) else None
+    return _record_for_run(registry_root, run_id, entry if isinstance(entry, dict) else None)
+
+
+def _persist_completion_worktree_fields(ctx: object, fields: JsonObject) -> None:
+    registry_root = getattr(ctx, "registry_root", None)
+    run_id = getattr(ctx, "run_id", None)
+    if not isinstance(registry_root, Path) or not isinstance(run_id, str):
+        return
+    run_path = run_registry.run_directory(registry_root, run_id)
+    with run_registry.registry_lock(registry_root):
+        for filename in (run_registry.STATE_FILE, run_registry.SNAPSHOT_FILE):
+            path = run_path / filename
+            payload = run_registry.read_json_object(path)
+            if payload is None:
+                continue
+            payload.update(fields)
+            run_registry.write_json_atomic(path, payload)
+
+
+def _retire_worktree_on_completion(ctx: object, completion_extra: JsonObject) -> None:
+    """Retire one completed work-lane worktree without weakening safety gates.
+
+    The caller has already persisted the terminal run state. This hook mutates
+    only worktree lifecycle metadata and never changes the run's exit status.
+    ``completion_extra`` is intentionally mutated in place so the live JSON
+    envelope includes the retirement result.
+    """
+
+    if (
+        getattr(ctx, "mode", None) != "work"
+        or getattr(ctx, "isolation_lifecycle", None) != "persistent"
+    ):
+        return
+
+    auto_prune_enabled = getattr(ctx, "worktree_auto_prune_on_completion", False)
+    auto_prune_days = getattr(ctx, "worktree_auto_prune_merged_older_than_days", 7)
+
+    def run_auto_prune() -> None:
+        if not auto_prune_enabled:
+            return
+        registry_root = getattr(ctx, "registry_root", None)
+        if not isinstance(registry_root, Path):
+            return
+        try:
+            result = maybe_auto_prune(
+                registry_root,
+                {
+                    "worktrees": {
+                        "autoPrune": {
+                            "enabled": True,
+                            "mergedOlderThanDays": auto_prune_days,
+                        }
+                    }
+                },
+            )
+        except Exception as exc:  # pragma: no cover - defensive lifecycle guard
+            completion_extra["autoPrune"] = {"ok": False, "error": str(exc)}
+            return
+        if result is not None:
+            completion_extra["autoPrune"] = result
+
+    def retain(reason: str, **fields: object) -> None:
+        completion_extra["worktreeRetained"] = reason
+        completion_extra.update(fields)
+        persisted = {"worktreeStatus": STATUS_PRESENT, "worktreeRetained": reason, **fields}
+        _persist_completion_worktree_fields(ctx, persisted)
+        run_auto_prune()
+
+    if getattr(ctx, "retire_worktree_on_completion", True) is not True:
+        run_auto_prune()
+        return
+
+    record = _completion_record(ctx)
+    if record is None:
+        retain("record_missing")
+        return
+    status, status_warnings = detect_worktree_status(record)
+    if status != STATUS_PRESENT:
+        retain(
+            "worktree_missing" if status == STATUS_MISSING else "status_unknown",
+            **({"worktreeRetentionWarnings": status_warnings} if status_warnings else {}),
+        )
+        return
+
+    dirty, dirty_paths, dirty_warnings = _effective_dirty_for_retirement(record, status)
+    if dirty is None:
+        retain(
+            "dirty_check_failed",
+            **({"worktreeRetentionWarnings": dirty_warnings} if dirty_warnings else {}),
+        )
+        return
+    if dirty:
+        retain(
+            "dirty",
+            **(
+                {"worktreeRetentionPaths": dirty_paths[:MAX_DIRTY_PATHS_REPORTED]}
+                if dirty_paths
+                else {}
+            ),
+        )
+        return
+
+    branch = record.get("branch")
+    source_git_root = record.get("sourceGitRoot")
+    if not isinstance(branch, str) or not branch.startswith("delegate/"):
+        retain("branch_not_delegate")
+        return
+    if not isinstance(source_git_root, str) or _branch_exists(source_git_root, branch) is not True:
+        retain("branch_missing")
+        return
+
+    try:
+        result = remove_worktree(
+            ctx.registry_root,
+            handle=str(record.get("alias") or record.get("runId")),
+            keep_branch=True,
+            discard_uncommitted=True,
+            _dirty_check_already_passed=True,
+        )
+    except WorktreeManagementError as exc:
+        retain("cleanup_failed", worktreeRetentionError=exc.code)
+        return
+    if result.get("ok") is not True or result.get("pathRemoved") is not True:
+        retain(
+            "cleanup_failed",
+            worktreeRetentionError=str(result.get("error") or "worktree_remove_failed"),
+        )
+        return
+
+    completion_extra["worktreeRetired"] = True
+    completion_extra["worktreeStatus"] = STATUS_REMOVED
+    completion_extra["worktreeBranchPreserved"] = True
+    _persist_completion_worktree_fields(
+        ctx,
+        {
+            "worktreeStatus": STATUS_REMOVED,
+            "worktreeRetired": True,
+            "worktreeBranchPreserved": True,
+        },
+    )
+    run_auto_prune()
+
+
+def retire_worktree_on_completion(ctx: object, completion_extra: JsonObject) -> None:
+    """Best-effort completion hook; cleanup failures retain the worktree."""
+
+    try:
+        _retire_worktree_on_completion(ctx, completion_extra)
+    except Exception as exc:  # pragma: no cover - final safety net for run completion
+        completion_extra["worktreeRetained"] = "cleanup_failed"
+        completion_extra["worktreeRetentionError"] = str(exc)
+        _persist_completion_worktree_fields(
+            ctx,
+            {
+                "worktreeStatus": STATUS_PRESENT,
+                "worktreeRetained": "cleanup_failed",
+                "worktreeRetentionError": str(exc),
+            },
+        )
+
+
 def _branch_ref(branch: str) -> str:
     return branch if branch.startswith("refs/heads/") else f"refs/heads/{branch}"
 

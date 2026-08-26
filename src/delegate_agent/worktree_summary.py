@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 from delegate_agent.git_utils import (
     GIT_QUICK_TIMEOUT_SECONDS,
@@ -9,6 +10,10 @@ from delegate_agent.git_utils import (
     run_git,
 )
 from delegate_agent.json_types import JsonObject
+from delegate_agent.worktree_records import (
+    SYNCED_FILE_DIGESTS_KEY,
+    file_content_digest,
+)
 
 MAX_CHANGED_FILES_REPORTED = 50
 MAX_COMMITS_REPORTED = 20
@@ -61,6 +66,68 @@ def changed_files_from_porcelain_lines(
         [_parse_porcelain_line(line) for line in lines[:MAX_CHANGED_FILES_REPORTED]],
         len(lines) if total is None else total,
     )
+
+
+def effective_changed_files_from_porcelain_lines(
+    lines: list[str],
+    *,
+    execution_cwd: str,
+    creation_context: JsonObject | None,
+    total: int | None = None,
+) -> tuple[list[JsonObject], int, int]:
+    """Filter launch-seeded paths whose content is unchanged at completion.
+
+    ``git status`` alone cannot distinguish source dirt copied into a worktree
+    from edits made by the child. A digest captured immediately after sync is
+    the independent baseline; a seeded path is still dirty when its current
+    content differs from that baseline (or when the baseline is unavailable).
+    Returns ``(effective_entries, effective_total, raw_total)``.
+    """
+
+    raw_total = len(lines) if total is None else total
+    raw_entries = [_parse_porcelain_line(line) for line in lines]
+    return effective_changed_files(
+        raw_entries,
+        execution_cwd=execution_cwd,
+        creation_context=creation_context,
+        raw_total=raw_total,
+    )
+
+
+def effective_changed_files(
+    raw_entries: list[JsonObject],
+    *,
+    execution_cwd: str,
+    creation_context: JsonObject | None,
+    raw_total: int,
+) -> tuple[list[JsonObject], int, int]:
+    """Apply seeded-content filtering to already parsed status entries."""
+
+    creation = creation_context if isinstance(creation_context, dict) else {}
+    digests = creation.get(SYNCED_FILE_DIGESTS_KEY)
+    seeded = digests if isinstance(digests, dict) else {}
+
+    effective: list[JsonObject] = []
+    for entry in raw_entries:
+        # ``oldPath`` is considered below as well; a rename/deletion of a
+        # seeded path is real dirt because its content no longer exists there.
+        candidate_paths = [entry.get("path")]
+        old_path = entry.get("oldPath")
+        if isinstance(old_path, str):
+            candidate_paths.append(old_path)
+        seeded_only = True
+        for candidate in candidate_paths:
+            if not isinstance(candidate, str) or candidate not in seeded:
+                seeded_only = False
+                break
+            baseline = seeded.get(candidate)
+            current = file_content_digest(Path(execution_cwd), candidate)
+            if not isinstance(baseline, str) or current != baseline:
+                seeded_only = False
+                break
+        if not seeded_only:
+            effective.append(entry)
+    return effective[:MAX_CHANGED_FILES_REPORTED], len(effective), raw_total
 
 
 _SHORTSTAT_FILES_RE = re.compile(r"(\d+)\s+files?\s+changed")
@@ -174,7 +241,17 @@ def build_work_summary(
         changed_files, changed_total = _changed_files(execution_cwd, warnings)
     else:
         changed_files, changed_total = prefetched_changed_files
-    dirty = changed_total > 0
+    effective_files, effective_total, raw_total = effective_changed_files(
+        changed_files,
+        execution_cwd=execution_cwd,
+        creation_context=creation,
+        raw_total=changed_total,
+    )
+    # When the caller supplied a truncated prefetch, retain the raw total for
+    # reporting but do not claim that all unseen paths were seeded-clean.
+    if raw_total > len(changed_files):
+        effective_total = max(effective_total, raw_total - len(changed_files))
+    dirty = effective_total > 0
     head_commit = _rev_parse(execution_cwd, "HEAD", warnings)
     source_head = _rev_parse(source_git_root, "HEAD", warnings)
 
@@ -205,9 +282,11 @@ def build_work_summary(
 
     summary: JsonObject = {
         "dirty": dirty,
-        "changedFilesCount": changed_total,
-        "changedFiles": changed_files,
-        "changedFilesTruncated": changed_total > len(changed_files),
+        "changedFilesCount": effective_total,
+        "changedFiles": effective_files,
+        "changedFilesTruncated": effective_total > len(effective_files),
+        "rawChangedFilesCount": raw_total,
+        "seededOnlyChanges": raw_total > 0 and effective_total == 0,
         "commitsCreatedCount": commits_count,
         "commitsCreated": commits,
         "commitsCreatedTruncated": (

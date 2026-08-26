@@ -350,6 +350,7 @@ def _build_remove_worktree_plan(
     status_warnings: list[str],
     options: RemoveWorktreeOptions,
     merged_check_already_passed: bool,
+    dirty_check_already_passed: bool,
 ) -> RemoveWorktreePlan:
     source_git_root, execution_cwd = _require_removal_metadata(record)
     if target_contains_source_root(execution_cwd, source_git_root):
@@ -360,7 +361,10 @@ def _build_remove_worktree_plan(
                 record=record,
             )
         )
-    dirty, dirty_paths, _dirty_total, dirty_warnings = wm.dirty_info(record, status)
+    if dirty_check_already_passed:
+        dirty, dirty_paths, dirty_warnings = False, [], []
+    else:
+        dirty, dirty_paths, _dirty_total, dirty_warnings = wm.dirty_info(record, status)
     all_warnings = [*status_warnings, *dirty_warnings]
     if status in (STATUS_PRESENT, STATUS_UNKNOWN):
         _raise_if_dirty_without_discard(
@@ -512,6 +516,7 @@ def remove_worktree(
     keep_branch: bool = False,
     force: bool = False,
     _merged_check_already_passed: bool = False,
+    _dirty_check_already_passed: bool = False,
 ) -> JsonObject:
     discard_uncommitted, force_branch, keep_branch = _normalize_remove_options(
         discard_uncommitted=discard_uncommitted,
@@ -570,6 +575,7 @@ def remove_worktree(
             status_warnings=warnings,
             options=options,
             merged_check_already_passed=_merged_check_already_passed,
+            dirty_check_already_passed=_dirty_check_already_passed,
         )
 
         if status == STATUS_MISSING:

@@ -167,6 +167,9 @@ class RunContext:
     codex_fallback_failover_identity: str | None = None
     include_dirty: bool = False
     synced_files: int = 0
+    retire_worktree_on_completion: bool = True
+    worktree_auto_prune_on_completion: bool = False
+    worktree_auto_prune_merged_older_than_days: int = 7
     group: str | None = None
     notify: str | None = None
     workflow_agent_key: str | None = None
@@ -3385,6 +3388,9 @@ def _execute_tracked(
         completion_report_mode=completion_report_mode,
         extra=final_extra or None,
     )
+    from delegate_agent import worktree_mgmt
+
+    worktree_mgmt.retire_worktree_on_completion(ctx, finalization.extra)
     _send_completion_notification(files.run_path, ctx, finalization.status)
     if capture.error is not None and finalization.status != run_registry.STATUS_CANCELLED:
         raise RunnerLaunchError(capture.error, capture.message or capture.error, 1)

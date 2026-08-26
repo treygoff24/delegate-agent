@@ -357,10 +357,25 @@ class ExecutionWorktreeRunTests(ExecutionTestBase):
                     stderr=io.StringIO(),
                 )
             self.assertEqual(code, 0)
-            # The worktree should exist
+            # A clean completed worktree is retired automatically; its branch
+            # remains as the durable artifact.
             worktree_root = Path(fake_home) / ".delegate" / "worktrees"
             worktrees = list(worktree_root.glob("*/*"))
-            self.assertTrue(len(worktrees) > 0)
+            self.assertFalse(worktrees)
+            branches = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    repo.name,
+                    "for-each-ref",
+                    "--format=%(refname)",
+                    "refs/heads/delegate/",
+                ],
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout.splitlines()
+            self.assertEqual(len(branches), 1)
 
     def test_grok_work_persistent_worktree_rewrites_cwd_and_redacts_prompt_file(self):
         """Grok work --isolation worktree rewrites --cwd and keeps prompt-file redaction."""

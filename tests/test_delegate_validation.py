@@ -1122,6 +1122,26 @@ class ValidationTests(unittest.TestCase):
                 self.assertEqual(ctx.exception.error, "invalid_worktrees_config")
                 self.assertIn("poolWarnCount", ctx.exception.message)
 
+    def test_worktrees_retire_worktree_on_completion_must_be_bool(self):
+        config_mod = load_config_module()
+        for value in (None, 0, "yes"):
+            with self.subTest(value=value):
+                with self.assertRaises(config_mod.ConfigError) as ctx:
+                    config_mod.validate_config(
+                        config_mod.deep_merge(
+                            config_mod.DEFAULT_CONFIG,
+                            {"worktrees": {"retireWorktreeOnCompletion": value}},
+                        )
+                    )
+                self.assertEqual(ctx.exception.error, "invalid_worktrees_config")
+                self.assertIn("retireWorktreeOnCompletion", ctx.exception.message)
+
+    def test_worktrees_retire_worktree_on_completion_defaults_on(self):
+        config_mod = load_config_module()
+        self.assertIs(
+            config_mod.embedded_default_config()["worktrees"]["retireWorktreeOnCompletion"], True
+        )
+
     def test_isolation_and_worktrees_valid_does_not_raise(self):
         config_mod = load_config_module()
         config_mod.validate_config(
