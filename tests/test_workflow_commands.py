@@ -2087,6 +2087,62 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertEqual(workspaces[0], workspaces[1])
         self.assertFalse(Path(workspaces[0]).exists())
 
+    def test_structured_retry_timeout_exhaustion_reaps_every_workspace(self) -> None:
+        subprocess.run(["git", "init", "-q", str(self.workspace)], check=True)
+        (self.workspace / "tracked.txt").write_text("base\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.workspace), "add", "tracked.txt"], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(self.workspace),
+                "-c",
+                "user.name=Delegate Tests",
+                "-c",
+                "user.email=delegate-tests@example.invalid",
+                "commit",
+                "-qm",
+                "base",
+            ],
+            check=True,
+        )
+        script = self.write_workflow(
+            """
+            meta = {"name": "schema-timeout", "defaults": {"engine": "codex", "mode": "safe"}}
+            SCHEMA = {"type": "object", "required": ["ok"], "properties": {"ok": {"type": "boolean"}}, "additionalProperties": False}
+            return agent("timeout structured", schema=SCHEMA, retries=1, timeout=0.2, isolation="worktree")
+            """
+        )
+        launch = self.run_delegate(
+            ["--json", "workflow", "run", str(script)],
+            env_extra={"FAKE_CODEX_SLEEP_SECONDS": "1"},
+        )
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        waited = self.run_delegate(
+            ["--json", "workflow", "wait", wf_id, "--timeout", "15"],
+            env_extra={"FAKE_CODEX_SLEEP_SECONDS": "1"},
+        )
+        self.assertEqual(waited.returncode, 0, waited.stderr)
+        result = json.loads(self.run_delegate(["--json", "workflow", "result", wf_id]).stdout)
+        self.assertIsNone(result["result"])
+        runs = json.loads(self.run_delegate(["--json", "runs", "--group", wf_id]).stdout)["runs"]
+        self.assertEqual(len(runs), 2)
+        worktree_list = subprocess.run(
+            ["git", "-C", str(self.workspace), "worktree", "list", "--porcelain"],
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout
+        self.assertEqual(worktree_list.count("worktree "), 1, worktree_list)
+        self.assertTrue(
+            all(
+                not Path(run["executionCwd"]).exists()
+                for run in runs
+                if isinstance(run.get("executionCwd"), str)
+            )
+        )
+
     def test_structured_output_with_non_codex_schema_uses_assistant_text(self) -> None:
         script = self.write_workflow(
             """
@@ -2763,6 +2819,8 @@ class WorkflowCommandTests(unittest.TestCase):
             )
 
         self.assertEqual(result, {"ok": True})
+        self.assertTrue(run_mock.call_args_list[0].kwargs["preserve_retry_workspace"])
+        self.assertTrue(run_mock.call_args_list[1].kwargs["preserve_retry_workspace"])
         retry = run_mock.call_args_list[1]
         self.assertEqual(retry.kwargs["structured_retry_run_id"], "child-1")
         self.assertEqual(retry.kwargs["resume_session_id"], "thread-1")

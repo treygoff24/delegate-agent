@@ -128,6 +128,7 @@ RUN_INPUT_KEYS = {
     "structuredRetryWorkspace",
     "structuredRetryRunId",
     "structuredRetrySessionId",
+    "structuredRetryBackend",
 }
 
 OUTPUT_SCHEMA_COMPLETION_REPORT_WARNING = (
@@ -1714,10 +1715,17 @@ def _structured_retry_workspace(
     if lifecycle == "temporary":
         cleanup = snapshot.get("temporaryWorkspaceCleanup")
         recorded_workspace = cleanup.get("isolatedWorkspace") if isinstance(cleanup, dict) else None
-        if (
-            not isinstance(recorded_workspace, str)
-            or Path(recorded_workspace).resolve(strict=False) != canonical_target
-        ):
+        if isinstance(recorded_workspace, str):
+            workspace_matches = Path(recorded_workspace).resolve(strict=False) == canonical_target
+        else:
+            # Bubblewrap keeps the source checkout in place, so there is no
+            # temporary copy descriptor to hand back to the parent. Reusing it
+            # is safe only when the recorded backend is bwrap and the execution
+            # path is exactly the source path.
+            workspace_matches = (
+                manifest.get("isolationBackend") == "bwrap" and canonical_target == canonical_source
+            )
+        if not workspace_matches:
             raise DelegateError(
                 "structured_retry_workspace_changed",
                 "Structured retry temporary workspace metadata is inconsistent.",
@@ -1919,6 +1927,15 @@ def request_from_input_json(
             "invalid_structured_retry_session",
             "structuredRetrySessionId must be a session id string.",
         )
+    raw_structured_retry_backend = raw.get("structuredRetryBackend")
+    if raw_structured_retry_backend is not None and raw_structured_retry_backend not in {
+        "bwrap",
+        "copy",
+    }:
+        raise DelegateError(
+            "invalid_structured_retry_backend",
+            "structuredRetryBackend must be bwrap or copy.",
+        )
     if (
         raw_structured_session
         or raw_structured_retry_workspace
@@ -1933,6 +1950,11 @@ def request_from_input_json(
         raise DelegateError(
             "invalid_structured_retry_session",
             "structuredRetrySessionId requires structuredRetryRunId.",
+        )
+    if raw_structured_retry_backend is not None and raw_structured_retry_run_id is None:
+        raise DelegateError(
+            "invalid_structured_retry_backend",
+            "structuredRetryBackend requires structuredRetryRunId.",
         )
     raw_expected_persona_digest = raw.get("expectedPersonaDigest")
     if raw_expected_persona_digest is not None and (
@@ -2129,13 +2151,32 @@ def request_from_input_json(
             run_id=raw_structured_retry_run_id,
             session_id=raw_structured_retry_session_id,
         )
-        isolation_context = IsolationContext(
-            source_workspace=workspace.path,
-            effective_isolation=delegate_config.ISOLATION_NONE,
-            isolation_mode=delegate_config.ISOLATION_NONE,
-            isolation_lifecycle="none",
-            preserved_workspace=False,
-        )
+        if raw_structured_retry_backend == "bwrap":
+            # Rebuild the safe bwrap context around the verified source path;
+            # unlike copy-backend retries this must not drop the sandbox while
+            # reusing the in-place workspace.
+            isolation_context = build_isolation_context(
+                source_workspace=workspace.path,
+                resolved_isolation=delegate_config.ISOLATION_WORKTREE,
+                engine=str(engine),
+                mode=str(mode),
+                model_alias=model_alias,
+                source_git_root=workspace.path if workspace.kind == "git" else None,
+                source_git_common_dir=git_common_dir,
+                source_head_oid=git_head_oid,
+                source_head_ref=git_head_ref,
+                source_branch=git_branch,
+                config=config,
+                include_dirty=raw_include_dirty,
+            )
+        else:
+            isolation_context = IsolationContext(
+                source_workspace=workspace.path,
+                effective_isolation=delegate_config.ISOLATION_NONE,
+                isolation_mode=delegate_config.ISOLATION_NONE,
+                isolation_lifecycle="none",
+                preserved_workspace=False,
+            )
     return build_request(
         str(engine),
         str(mode),

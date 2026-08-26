@@ -19,6 +19,8 @@ if SRC not in sys.path:
 # Imported after the base (which bootstraps sys.path).
 from delegate_agent import config as delegate_config  # noqa: E402
 from delegate_agent import (  # noqa: E402
+    request_build,
+    run_registry,
     runner,
     safe_workspace,
     sandbox_bwrap,
@@ -467,6 +469,48 @@ class SafeIsolatedRequestBwrapTests(CommandTestBase):
                 ctx.sandbox["masks"],
                 [{"path": "secret.env", "kind": sandbox_bwrap.MASK_KIND_DEVNULL}],
             )
+
+    def test_structured_retry_accepts_bwrap_source_without_cleanup_descriptor(self):
+        root = run_registry.ensure_registry(self.repo, workspace_kind="git")
+        run_id, _alias = run_registry.register_run(
+            root,
+            harness="codex",
+            metadata={
+                "engine": "codex",
+                "group": "wf-test",
+                "workflowAgentKey": "agent",
+                "executionCwd": str(self.repo),
+                "workspaceKind": "git",
+                "isolationLifecycle": "temporary",
+                "isolationBackend": "bwrap",
+            },
+        )
+        run_path = run_registry.run_directory(root, run_id)
+        run_registry.write_json_atomic(
+            run_path / run_registry.MANIFEST_FILE,
+            {
+                "engine": "codex",
+                "group": "wf-test",
+                "workflowAgentKey": "agent",
+                "executionCwd": str(self.repo),
+                "isolationLifecycle": "temporary",
+                "isolationBackend": "bwrap",
+                "workspaceKind": "git",
+            },
+        )
+        run_registry.write_json_atomic(
+            run_path / run_registry.SNAPSHOT_FILE,
+            {"runId": run_id, "status": "succeeded"},
+        )
+        resolved = request_build._structured_retry_workspace(
+            self.delegate.ResolvedWorkspace(str(self.repo), "git"),
+            engine="codex",
+            group="wf-test",
+            workflow_agent_key="agent",
+            run_id=run_id,
+            session_id=None,
+        )
+        self.assertEqual(resolved.path, str(self.repo.resolve()))
 
 
 class RunnerTempBaseTests(unittest.TestCase):

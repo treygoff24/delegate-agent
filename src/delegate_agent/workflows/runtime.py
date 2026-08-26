@@ -83,6 +83,7 @@ class _DelegateChildResult:
     execution_cwd: str | None
     session_id: str | None
     workspace_cleanup: JsonObject | None = None
+    isolation_backend: str | None = None
 
 
 def _delegate_child_result(value: object) -> _DelegateChildResult:
@@ -94,6 +95,28 @@ def _delegate_child_result(value: object) -> _DelegateChildResult:
         execution_cwd=None,
         session_id=None,
         workspace_cleanup=None,
+        isolation_backend=None,
+    )
+
+
+def _child_result_from_payload(result: JsonObject, *, text: str | None) -> _DelegateChildResult:
+    return _DelegateChildResult(
+        text=text,
+        run_id=result.get("runId") if isinstance(result.get("runId"), str) else None,
+        execution_cwd=(
+            result.get("executionCwd") if isinstance(result.get("executionCwd"), str) else None
+        ),
+        session_id=(result.get("sessionId") if isinstance(result.get("sessionId"), str) else None),
+        workspace_cleanup=(
+            result.get("temporaryWorkspaceCleanup")
+            if isinstance(result.get("temporaryWorkspaceCleanup"), dict)
+            else None
+        ),
+        isolation_backend=(
+            result.get("isolationBackend")
+            if isinstance(result.get("isolationBackend"), str)
+            else None
+        ),
     )
 
 
@@ -119,6 +142,77 @@ def _cleanup_structured_retry_workspace(record: JsonObject | None) -> None:
         temp_base=temp_base,
         source_root=source_root,
     )
+
+
+def _workflow_agent_run_result_metadata(
+    workspace: Path,
+    wf_id: str,
+    workflow_agent_key: str,
+) -> _DelegateChildResult | None:
+    """Recover child identity and cleanup ownership from the latest run snapshot.
+
+    The supervisor may be handling a timeout, a killed child, or a malformed
+    child envelope. In each case stdout is not a reliable ownership channel;
+    the runner's first progress persist is the durable source of truth.
+    """
+    run_id = _find_workflow_agent_run(workspace, wf_id, workflow_agent_key)
+    if run_id is None:
+        return None
+    root = _run_registry_root(workspace)
+    snapshot = run_registry.load_run_snapshot_or_none(root, run_id)
+    manifest = run_registry.load_run_manifest_or_none(root, run_id)
+    if not isinstance(snapshot, dict):
+        return None
+    execution_cwd = next(
+        (
+            value
+            for value in (
+                snapshot.get("executionCwd"),
+                manifest.get("executionCwd") if isinstance(manifest, dict) else None,
+            )
+            if isinstance(value, str) and value
+        ),
+        None,
+    )
+    session_id = snapshot.get("sessionId")
+    cleanup = snapshot.get("temporaryWorkspaceCleanup")
+    backend = snapshot.get("isolationBackend")
+    return _DelegateChildResult(
+        text=None,
+        run_id=run_id,
+        execution_cwd=execution_cwd,
+        session_id=session_id if isinstance(session_id, str) else None,
+        workspace_cleanup=cleanup if isinstance(cleanup, dict) else None,
+        isolation_backend=backend if isinstance(backend, str) else None,
+    )
+
+
+def _cleanup_workflow_agent_run_workspace(workspace: Path, run_id: str) -> None:
+    root = _run_registry_root(workspace)
+    snapshot = run_registry.load_run_snapshot_or_none(root, run_id)
+    if not isinstance(snapshot, dict):
+        return
+    cleanup = snapshot.get("temporaryWorkspaceCleanup")
+    if isinstance(cleanup, dict):
+        _cleanup_structured_retry_workspace(cleanup)
+
+
+def cleanup_workflow_agent_workspaces(
+    workspace: Path,
+    wf_id: str,
+    workflow_agent_key: str | None = None,
+) -> None:
+    """Reap all structured temporary workspaces belonging to a workflow."""
+    root = _run_registry_root(workspace)
+    if not root.exists():
+        return
+    index = run_registry.load_index(root)
+    for run_id, entry in run_registry.index_run_entries(index):
+        if entry.get("group") != wf_id:
+            continue
+        if workflow_agent_key is not None and entry.get("workflowAgentKey") != workflow_agent_key:
+            continue
+        _cleanup_workflow_agent_run_workspace(workspace, run_id)
 
 
 class BudgetExceeded(RuntimeError):
@@ -300,7 +394,11 @@ class WorkflowState:
             # script's own unwind logging must not clobber that back to "running", or
             # `workflow approve` sees nothing gated and the parked supervisor reads as dead.
             gate_key = status.get("gateKey") if isinstance(status, dict) else None
-            if isinstance(status, dict) and status.get("status") == "paused" and isinstance(gate_key, str):
+            if (
+                isinstance(status, dict)
+                and status.get("status") == "paused"
+                and isinstance(gate_key, str)
+            ):
                 self._write_status_locked(
                     status="paused",
                     last_event=event,
@@ -1086,6 +1184,7 @@ class WorkflowDsl:
                 self.state.notify_event(
                     "agent_timeout", detail=f"{label or key} (adopted run {run_id})"
                 )
+                _cleanup_workflow_agent_run_workspace(self.state.workspace, run_id)
                 return None
         text = _workflow_agent_run_result(
             self.state.workspace,
@@ -1094,6 +1193,7 @@ class WorkflowDsl:
         )
         if text is None:
             # Failed/cancelled/unparseable children are not definitive — respawn.
+            _cleanup_workflow_agent_run_workspace(self.state.workspace, run_id)
             return _MISSING
         if schema is None:
             result: JsonValue = text
@@ -1111,7 +1211,9 @@ class WorkflowDsl:
                     runId=run_id,
                     error=str(exc),
                 )
+                _cleanup_workflow_agent_run_workspace(self.state.workspace, run_id)
                 return _MISSING
+        _cleanup_workflow_agent_run_workspace(self.state.workspace, run_id)
         self._emit_adopted_child_identity(run_id, key=key, label=label)
         self.state.append_event(
             "agent_adopted",
@@ -1257,6 +1359,7 @@ class WorkflowDsl:
         prior_error = ""
         prior_child: _DelegateChildResult | None = None
         retry_workspace_run_id: str | None = None
+        structured_retry_backend: str | None = None
         workspace_cleanup: JsonObject | None = None
         for attempt in range(attempts + 1):
             resume_session_id = (
@@ -1303,6 +1406,7 @@ class WorkflowDsl:
                             structured_retry_run_id=retry_workspace_run_id,
                             resume_session_id=resume_session_id,
                             preserve_retry_workspace=True,
+                            structured_retry_backend=structured_retry_backend,
                         )
                     except BaseException:
                         _cleanup_structured_retry_workspace(workspace_cleanup)
@@ -1337,6 +1441,7 @@ class WorkflowDsl:
                         structured_retry_run_id=retry_workspace_run_id,
                         resume_session_id=resume_session_id,
                         preserve_retry_workspace=True,
+                        structured_retry_backend=structured_retry_backend,
                     )
                 except BaseException:
                     _cleanup_structured_retry_workspace(workspace_cleanup)
@@ -1348,6 +1453,8 @@ class WorkflowDsl:
                     _cleanup_structured_retry_workspace(workspace_cleanup)
                     raise RuntimeError("structured retry workspace cleanup metadata changed")
                 workspace_cleanup = child.workspace_cleanup
+            if child.isolation_backend == "bwrap":
+                structured_retry_backend = "bwrap"
             text = child.text
             try:
                 value = workflow_schema.parse_json_tolerant(text or "", schema)
@@ -1409,6 +1516,7 @@ class WorkflowDsl:
         structured_retry_run_id: str | None = None,
         resume_session_id: str | None = None,
         preserve_retry_workspace: bool = False,
+        structured_retry_backend: str | None = None,
     ) -> str | _DelegateChildResult | None:
         payload: JsonObject = {
             "engine": engine,
@@ -1423,7 +1531,7 @@ class WorkflowDsl:
             payload["reasoningEffort"] = effort
         if fast is not None and engine == "codex":
             payload["fast"] = fast
-        if structured_retry_run_id is not None:
+        if structured_retry_run_id is not None and structured_retry_backend != "bwrap":
             payload["isolation"] = "none"
         elif isolation is not None:
             payload["isolation"] = isolation
@@ -1440,6 +1548,8 @@ class WorkflowDsl:
             payload["structuredRetryWorkspace"] = True
         if structured_retry_run_id is not None:
             payload["structuredRetryRunId"] = structured_retry_run_id
+        if structured_retry_backend is not None:
+            payload["structuredRetryBackend"] = structured_retry_backend
         if resume_session_id is not None:
             payload["structuredRetrySessionId"] = resume_session_id
         payload["workflowAgentKey"] = workflow_agent_key
@@ -1482,6 +1592,15 @@ class WorkflowDsl:
                 "agent_timeout",
                 detail=f"{label or workflow_agent_key} ({engine}) after {timeout}s",
             )
+            recovered = _workflow_agent_run_result_metadata(
+                self.state.workspace,
+                self.state.wf_id,
+                workflow_agent_key,
+            )
+            if return_metadata:
+                return recovered
+            if recovered is not None:
+                _cleanup_structured_retry_workspace(recovered.workspace_cleanup)
             return None
         finally:
             Path(input_path).unlink(missing_ok=True)
@@ -1511,10 +1630,20 @@ class WorkflowDsl:
                 "workflow child could not resolve the parent-pinned persona"
             )
         if completed.returncode != 0:
-            if isinstance(result, dict) and isinstance(
-                result.get("temporaryWorkspaceCleanup"), dict
-            ):
-                _cleanup_structured_retry_workspace(result["temporaryWorkspaceCleanup"])
+            cleanup = (
+                result.get("temporaryWorkspaceCleanup")
+                if isinstance(result, dict)
+                and isinstance(result.get("temporaryWorkspaceCleanup"), dict)
+                else None
+            )
+            if cleanup is None:
+                recovered = _workflow_agent_run_result_metadata(
+                    self.state.workspace,
+                    self.state.wf_id,
+                    workflow_agent_key,
+                )
+                cleanup = recovered.workspace_cleanup if recovered is not None else None
+            _cleanup_structured_retry_workspace(cleanup)
             stderr = completed.stderr.decode("utf-8", errors="replace")[-2000:]
             if expected_persona_digest is not None and "workflow_persona_digest_mismatch" in text:
                 raise PersonaDigestMismatch("workflow child rejected changed persona bytes")
@@ -1531,8 +1660,30 @@ class WorkflowDsl:
                 parts.append(stderr.strip())
             raise RuntimeError("; ".join(parts))
         if result is None:
+            recovered = _workflow_agent_run_result_metadata(
+                self.state.workspace,
+                self.state.wf_id,
+                workflow_agent_key,
+            )
+            if recovered is not None:
+                _cleanup_structured_retry_workspace(recovered.workspace_cleanup)
             raise RuntimeError(f"delegate child returned invalid JSON: {text[:500]}")
         if not isinstance(result, dict) or not result.get("ok", False):
+            child = (
+                _child_result_from_payload(result, text=None) if isinstance(result, dict) else None
+            )
+            if return_metadata and child is not None:
+                return child
+            if child is not None:
+                _cleanup_structured_retry_workspace(child.workspace_cleanup)
+            else:
+                recovered = _workflow_agent_run_result_metadata(
+                    self.state.workspace,
+                    self.state.wf_id,
+                    workflow_agent_key,
+                )
+                if recovered is not None:
+                    _cleanup_structured_retry_workspace(recovered.workspace_cleanup)
             return None
         if (
             expected_persona_digest is not None
@@ -1561,21 +1712,8 @@ class WorkflowDsl:
                     answer = ""
         if not return_metadata:
             return answer
-        return _DelegateChildResult(
-            text=answer,
-            run_id=result.get("runId") if isinstance(result.get("runId"), str) else None,
-            execution_cwd=(
-                result.get("executionCwd") if isinstance(result.get("executionCwd"), str) else None
-            ),
-            session_id=(
-                result.get("sessionId") if isinstance(result.get("sessionId"), str) else None
-            ),
-            workspace_cleanup=(
-                result.get("temporaryWorkspaceCleanup")
-                if isinstance(result.get("temporaryWorkspaceCleanup"), dict)
-                else None
-            ),
-        )
+        child = _child_result_from_payload(result, text=answer)
+        return child
 
 
 def _run_child_command(
@@ -2099,6 +2237,7 @@ __all__ = [
     "WorkflowState",
     "cancel_workflow_agent_child",
     "cancel_workflow_children",
+    "cleanup_workflow_agent_workspaces",
     "detach_supervisor",
     "execute_workflow",
     "kill_supervisor",

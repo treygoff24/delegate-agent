@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Structured-output retries now resume in place when the harness supports it,
+  retaining a safe temporary workspace across attempts and reaping it from
+  durable child snapshots on timeout, kill, crash, or supervisor resume.
+
 - `delegate workflow run --notify room:<name>|channel:<name>` rings a detached
   supervisor's owner when it pauses at a checkpoint, fails, succeeds, or times
   an agent out. The target survives resume and dry-run, and a notification that

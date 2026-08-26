@@ -534,6 +534,10 @@ def emit_kill(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) -> i
     if isinstance(pid, int):
         supervisor_signalled = runtime.kill_supervisor(pid, pgid if isinstance(pgid, int) else None)
     cancelled = runtime.cancel_workflow_children(workspace, command.wf_id or "")
+    # Child safe-mode workspaces are parent-owned during structured retries.
+    # Reap every descriptor, including terminal runs that finished after the
+    # supervisor was signalled and therefore were not in ``cancelled``.
+    runtime.cleanup_workflow_agent_workspaces(workspace, command.wf_id or "")
     # Wait for the supervisor to release the workflow lock before merging
     # status=killed, so the dying supervisor cannot overwrite the kill status.
     supervisor_exited = runtime.wait_for_workflow_lock(
