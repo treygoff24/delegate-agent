@@ -70,6 +70,7 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
             "enabled": True,
             "rawLogDays": 7,
         },
+        "processGroupTerminationGraceSec": 3,
     },
     "personas": {
         "forceTransport": None,
@@ -232,6 +233,32 @@ def default_progress_initial_delay_sec() -> float:
 
 def default_progress_interval_sec() -> float:
     return _embedded_progress_default("intervalSec")
+
+
+PROCESS_GROUP_TERMINATION_GRACE_SEC_DEFAULT = 3.0
+
+
+def _process_group_termination_grace_value(value: JsonValue) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value) or value < 0:
+        return None
+    return float(value)
+
+
+def default_process_group_termination_grace_sec() -> float:
+    return PROCESS_GROUP_TERMINATION_GRACE_SEC_DEFAULT
+
+
+def resolve_process_group_termination_grace_sec(config: JsonObject) -> float:
+    tracking = config.get("tracking")
+    if isinstance(tracking, dict):
+        value = _process_group_termination_grace_value(
+            tracking.get("processGroupTerminationGraceSec")
+        )
+        if value is not None:
+            return value
+    return default_process_group_termination_grace_sec()
 
 
 def _stall_minutes_value(value: JsonValue) -> float | None:
@@ -1536,6 +1563,14 @@ def validate_config(config: JsonObject) -> None:
                     raw_log_days,
                     path="tracking.retention.rawLogDays",
                     error="invalid_tracking_config",
+                )
+        if "processGroupTerminationGraceSec" in tracking:
+            grace = tracking["processGroupTerminationGraceSec"]
+            if _process_group_termination_grace_value(grace) is None:
+                raise ConfigError(
+                    "invalid_tracking_config",
+                    "tracking.processGroupTerminationGraceSec must be a non-negative, "
+                    "finite number of seconds.",
                 )
     _validate_policy_section(config.get("policy"))
     _validate_profiles_section(config.get("profiles"))

@@ -6,7 +6,8 @@
     "retention": {
       "enabled": true,
       "rawLogDays": 7
-    }
+    },
+    "processGroupTerminationGraceSec": 3
   },
   "personas": {
     "forceTransport": null

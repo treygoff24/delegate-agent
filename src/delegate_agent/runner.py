@@ -67,6 +67,9 @@ TRACKED_STREAM_MAX_BYTES = 16 * 1024 * 1024
 STREAM_READ_CHUNK_BYTES = 64 * 1024
 TRACKED_PROCESS_POLL_SEC = 0.05
 TERMINAL_EXIT_GRACE_SEC = 1.0
+PROCESS_GROUP_TERMINATION_GRACE_SEC = delegate_config.default_process_group_termination_grace_sec()
+PROCESS_GROUP_KILL_WAIT_SEC = 5.0
+PROCESS_GROUP_TERMINATION_GRACE_ENV = "DELEGATE_PROCESS_GROUP_TERMINATION_GRACE_SEC"
 PROGRESS_INITIAL_DELAY_SEC = delegate_config.default_progress_initial_delay_sec()
 PROGRESS_HEARTBEAT_INTERVAL_SEC = delegate_config.default_progress_interval_sec()
 PROGRESS_INITIAL_DELAY_ENV = "DELEGATE_PROGRESS_INITIAL_DELAY_SEC"
@@ -159,6 +162,7 @@ class RunContext:
     progress_initial_delay_sec: float = PROGRESS_INITIAL_DELAY_SEC
     progress_interval_sec: float = PROGRESS_HEARTBEAT_INTERVAL_SEC
     stall_seconds: float = STALL_SECONDS_DEFAULT
+    process_group_termination_grace_sec: float = PROCESS_GROUP_TERMINATION_GRACE_SEC
     env_overrides: dict[str, str] = field(default_factory=dict)
     fallback_env_overrides: dict[str, str] = field(default_factory=dict)
     auth_profile: str | None = None
@@ -192,6 +196,19 @@ class RunContext:
     mail_push: bool = False
     account_binding_command: tuple[str, ...] | None = None
     sandbox: JsonObject | None = None
+
+
+def _process_group_grace_seconds(ctx: RunContext) -> float:
+    """Resolve the parent-configured group grace, including worktree contexts."""
+    raw = (ctx.env_overrides or {}).get(PROCESS_GROUP_TERMINATION_GRACE_ENV)
+    if raw is not None:
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            value = -1.0
+        if math.isfinite(value) and value >= 0:
+            return value
+    return max(float(ctx.process_group_termination_grace_sec), 0.0)
 
 
 def write_manifest(run_path: Path, manifest: JsonObject) -> None:
@@ -382,6 +399,7 @@ def build_state(
     stderr_bytes: int = 0,
     current: str | None = None,
     pid: int | None = None,
+    pgid: int | None = None,
     extra: JsonObject | None = None,
 ) -> JsonObject:
     now = run_registry.utc_now_iso()
@@ -416,8 +434,11 @@ def build_state(
         state["current"] = redaction.redact_string(current)
     if pid is not None:
         state["pid"] = pid
-        with contextlib.suppress(OSError):
-            state["pgid"] = os.getpgid(pid)
+        if pgid is not None:
+            state["pgid"] = pgid
+        else:
+            with contextlib.suppress(OSError):
+                state["pgid"] = os.getpgid(pid)
     if extra is not None:
         state.update(extra)
     if ctx.group is not None:
@@ -538,6 +559,7 @@ def persist_progress(
     stdout_bytes: int = 0,
     stderr_bytes: int = 0,
     pid: int | None = None,
+    pgid: int | None = None,
     completion_report_written: bool = False,
     extra: JsonObject | None = None,
     lock_timeout_seconds: float = run_registry.REGISTRY_LOCK_TIMEOUT_SECONDS,
@@ -566,6 +588,7 @@ def persist_progress(
                 stderr_bytes=stderr_bytes,
                 current=accumulator.current,
                 pid=pid,
+                pgid=pgid,
                 extra=persisted_extra or None,
             ),
         )
@@ -1779,16 +1802,23 @@ def _capture_tracked_process(
     progress_stderr: TextIO | None = None,
     progress_initial_delay_sec: float = PROGRESS_INITIAL_DELAY_SEC,
     progress_interval_sec: float = PROGRESS_HEARTBEAT_INTERVAL_SEC,
+    process_group_pgid: int | None = None,
+    process_group_grace_seconds: float = PROCESS_GROUP_TERMINATION_GRACE_SEC,
 ) -> TrackedCaptureResult:
     accumulator = harness_events.StreamAccumulator(harness=ctx.harness)
     watchdog = stall_watchdog.StallWatchdog(
         stall_seconds=_stall_seconds_from_env(ctx.stall_seconds),
         harness=ctx.harness,
     )
-    pgid = None
-    with contextlib.suppress(OSError):
-        pgid = os.getpgid(process.pid)
-    persist_progress(files.run_path, ctx, accumulator, status="running", pid=process.pid)
+    pgid = process_group_pgid or _process_group_for_process(process)
+    persist_progress(
+        files.run_path,
+        ctx,
+        accumulator,
+        status="running",
+        pid=process.pid,
+        pgid=pgid,
+    )
 
     line_buffer = ""
     stdout_bytes_counter = ByteCounter()
@@ -1937,7 +1967,11 @@ def _capture_tracked_process(
         while True:
             now = time.monotonic()
             if limit_signal.event.is_set():
-                _terminate_call_process(process)
+                _terminate_call_process(
+                    process,
+                    pgid=pgid,
+                    grace_seconds=process_group_grace_seconds,
+                )
                 output_limited = True
                 exit_code = 1
                 break
@@ -1945,12 +1979,20 @@ def _capture_tracked_process(
                 terminal_seen_at = terminal_seen_at or now
                 if now - terminal_seen_at >= TERMINAL_EXIT_GRACE_SEC:
                     if process.poll() is None:
-                        _terminate_call_process(process)
+                        _terminate_call_process(
+                            process,
+                            pgid=pgid,
+                            grace_seconds=process_group_grace_seconds,
+                        )
                         stopped_after_completion = True
                     exit_code = 0 if accumulator.terminal_status == "succeeded" else 1
                     break
             if deadline is not None and now >= deadline and not terminal_signal.is_set():
-                _terminate_call_process(process)
+                _terminate_call_process(
+                    process,
+                    pgid=pgid,
+                    grace_seconds=process_group_grace_seconds,
+                )
                 timed_out = True
                 exit_code = 1
                 break
@@ -1963,7 +2005,11 @@ def _capture_tracked_process(
                 idle_seconds = watchdog.stalled_for(now)
                 if idle_seconds is not None:
                     stall_detail = watchdog.stall_detail(idle_seconds)
-                    _terminate_call_process(process)
+                    _terminate_call_process(
+                        process,
+                        pgid=pgid,
+                        grace_seconds=process_group_grace_seconds,
+                    )
                     exit_code = 1
                     break
             return_code = process.poll()
@@ -1993,6 +2039,15 @@ def _capture_tracked_process(
                 )
             with contextlib.suppress(subprocess.TimeoutExpired):
                 process.wait(timeout=wait_for)
+        # Reap the whole group before joining drain threads. A grandchild that
+        # inherited stdout/stderr can keep those pipes open after the leader
+        # exits; waiting for the drains first would otherwise delay cleanup
+        # until the daemon's natural exit.
+        _terminate_call_process(
+            process,
+            pgid=pgid,
+            grace_seconds=process_group_grace_seconds,
+        )
         _cleanup_tracked_process_streams(
             process,
             stdin_thread=stdin_thread,
@@ -2247,7 +2302,11 @@ def _finalize_tracked_run(
         merged_extra["warnings"] = warnings
         merged_extra["mailPushDegraded"] = True
         merged_extra["mailPushWarning"] = mail_warnings[0]
-    merged_extra = {**merged_extra, "pid": capture.pid}
+    merged_extra = {
+        **merged_extra,
+        "pid": capture.pid,
+        "processGroupTerminationGraceSec": _process_group_grace_seconds(ctx),
+    }
     if capture.pgid is not None:
         merged_extra["pgid"] = capture.pgid
     terminal_extra = _terminal_override_extra(capture.accumulator)
@@ -2693,6 +2752,8 @@ def _run_single_tracked_attempt(
     prior_capture: TrackedCaptureResult | None = None,
 ) -> TrackedCaptureResult:
     process: subprocess.Popen[bytes] | None = None
+    process_pgid: int | None = None
+    grace_seconds = _process_group_grace_seconds(ctx)
     launch_exc: OSError | None = None
     boundary_exc: DelegateError | None = None
     # Admission, launch, and pid/pgid publication are one locked generation
@@ -2733,14 +2794,45 @@ def _run_single_tracked_attempt(
             # child never ran. Recorded below, outside the registry lock.
             boundary_exc = exc
         else:
-            write_state(
-                files.run_path,
-                build_state(
-                    ctx,
-                    status="running",
-                    pid=process.pid,
-                ),
-            )
+            try:
+                process_pgid = _process_group_for_process(process)
+                # start_new_session makes the child the group leader. Keep the
+                # launch pid as a last-resort record when an immediately
+                # exiting child has already made getpgid() return ESRCH.
+                if process_pgid is None:
+                    raise RunnerLaunchError(
+                        "missing_child_pid",
+                        "Child process did not expose a numeric pid for process-group tracking.",
+                    )
+                write_state(
+                    files.run_path,
+                    build_state(
+                        ctx,
+                        status="running",
+                        pid=process.pid,
+                        pgid=process_pgid,
+                    ),
+                )
+                manifest = run_registry.load_run_manifest_or_none(ctx.registry_root, ctx.run_id)
+                if isinstance(manifest, dict):
+                    manifest["pid"] = process.pid
+                    manifest["pgid"] = process_pgid
+                    manifest["processGroupTerminationGraceSec"] = grace_seconds
+                    write_manifest(files.run_path, manifest)
+                index = run_registry.load_index(ctx.registry_root)
+                runs = index.get("runs")
+                entry = runs.get(ctx.run_id) if isinstance(runs, dict) else None
+                if isinstance(entry, dict):
+                    entry["pid"] = process.pid
+                    entry["pgid"] = process_pgid
+                    run_registry.save_index(ctx.registry_root, index)
+            except BaseException:
+                _terminate_call_process(
+                    process,
+                    pgid=process_pgid,
+                    grace_seconds=grace_seconds,
+                )
+                raise
     if boundary_exc is not None:
         boundary_error = RunnerLaunchError(boundary_exc.error, boundary_exc.message)
         _record_tracked_launch_failure(files, ctx, boundary_error, prior_capture=prior_capture)
@@ -2762,10 +2854,22 @@ def _run_single_tracked_attempt(
             progress_stderr=progress_stderr,
             progress_initial_delay_sec=progress_initial_delay_sec,
             progress_interval_sec=progress_interval_sec,
+            process_group_pgid=process_pgid,
+            process_group_grace_seconds=grace_seconds,
         )
     except RunnerLaunchError as error:
         _record_tracked_launch_failure(files, ctx, error, prior_capture=prior_capture)
         raise
+    finally:
+        # Capture terminates timeout/stall/overflow paths while the leader is
+        # alive. This second, unconditional pass handles normal exits, failed
+        # exits, retries, and unexpected capture exceptions where grandchildren
+        # can remain in the recorded group after the leader was reaped.
+        _terminate_call_process(
+            process,
+            pgid=process_pgid,
+            grace_seconds=grace_seconds,
+        )
 
 
 def _merge_tracked_attempt_captures(
@@ -3457,16 +3561,44 @@ def _parse_rfc3339(value: str) -> datetime | None:
         return None
 
 
+def _safe_process_group_id(pgid: int | None) -> int | None:
+    if not isinstance(pgid, int) or isinstance(pgid, bool) or pgid <= 1:
+        return None
+    with contextlib.suppress(OSError):
+        if pgid == os.getpgrp():
+            return None
+    return pgid
+
+
+def _process_group_for_process(
+    process: subprocess.Popen[bytes] | subprocess.Popen[str],
+) -> int | None:
+    pid = getattr(process, "pid", None)
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return None
+    with contextlib.suppress(OSError, TypeError):
+        return os.getpgid(pid)
+    # start_new_session makes the leader pid the pgid. This fallback also
+    # preserves a usable group id after the leader has already been reaped.
+    return pid
+
+
 def _kill_process_group(pgid: int, sig: signal.Signals) -> None:
-    with contextlib.suppress(ProcessLookupError):
-        os.killpg(pgid, sig)
+    safe_pgid = _safe_process_group_id(pgid)
+    if safe_pgid is None:
+        return
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(safe_pgid, sig)
 
 
 def _wait_for_process_group_exit(pgid: int, timeout: float) -> bool:
+    safe_pgid = _safe_process_group_id(pgid)
+    if safe_pgid is None:
+        return True
     deadline = time.monotonic() + timeout
     while True:
         try:
-            os.killpg(pgid, 0)
+            os.killpg(safe_pgid, 0)
         except ProcessLookupError:
             return True
         except PermissionError:
@@ -3477,22 +3609,28 @@ def _wait_for_process_group_exit(pgid: int, timeout: float) -> bool:
         time.sleep(min(0.05, remaining))
 
 
-def _terminate_call_process(process: subprocess.Popen[bytes]) -> None:
-    """Send SIGTERM, wait for graceful exit, then SIGKILL if needed."""
-    pgid = process.pid
-    with contextlib.suppress(ProcessLookupError):
-        pgid = os.getpgid(process.pid)
-    term_deadline = time.monotonic() + 2
-    _kill_process_group(pgid, signal.SIGTERM)
-    with contextlib.suppress(subprocess.TimeoutExpired):
-        process.wait(timeout=2)
-    remaining = max(term_deadline - time.monotonic(), 0)
-    if _wait_for_process_group_exit(pgid, remaining):
+def _terminate_call_process(
+    process: subprocess.Popen[bytes],
+    *,
+    pgid: int | None = None,
+    grace_seconds: float = PROCESS_GROUP_TERMINATION_GRACE_SEC,
+) -> None:
+    """Terminate a child process group, tolerating reaped leaders and ESRCH."""
+    if pgid is None:
+        pgid = _process_group_for_process(process)
+    safe_pgid = _safe_process_group_id(pgid)
+    if safe_pgid is None:
         return
-    _kill_process_group(pgid, signal.SIGKILL)
+    grace = max(float(grace_seconds), 0.0)
+    _kill_process_group(safe_pgid, signal.SIGTERM)
     with contextlib.suppress(subprocess.TimeoutExpired):
-        process.wait(timeout=5)
-    _wait_for_process_group_exit(pgid, 5)
+        process.wait(timeout=grace)
+    if _wait_for_process_group_exit(safe_pgid, grace):
+        return
+    _kill_process_group(safe_pgid, signal.SIGKILL)
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        process.wait(timeout=PROCESS_GROUP_KILL_WAIT_SEC)
+    _wait_for_process_group_exit(safe_pgid, PROCESS_GROUP_KILL_WAIT_SEC)
 
 
 def _bounded_call_communicate(
@@ -3501,6 +3639,7 @@ def _bounded_call_communicate(
     timeout: float | None,
     max_stdout: int,
     max_stderr: int,
+    process_group_grace_seconds: float = PROCESS_GROUP_TERMINATION_GRACE_SEC,
 ) -> tuple[bytes, bytes]:
     """Read child stdout/stderr under fixed byte caps; kill on overflow or timeout.
 
@@ -3629,7 +3768,10 @@ def _bounded_call_communicate(
         # closes the child's read end first, so the blocked write() raises and
         # releases the lock; only then can we close and join safely.
         if process.poll() is None:
-            _terminate_call_process(process)
+            if process_group_grace_seconds == PROCESS_GROUP_TERMINATION_GRACE_SEC:
+                _terminate_call_process(process)
+            else:
+                _terminate_call_process(process, grace_seconds=process_group_grace_seconds)
         if process.stdin is not None:
             with contextlib.suppress(OSError):
                 process.stdin.close()
@@ -3647,6 +3789,13 @@ def _bounded_call_communicate(
             1,
         )
 
+    # A successful leader can leave grandchildren holding stdout/stderr open.
+    # Kill the recorded group before joining drains so a daemon cannot make a
+    # one-shot call wait for its natural lifetime.
+    if process_group_grace_seconds == PROCESS_GROUP_TERMINATION_GRACE_SEC:
+        _terminate_call_process(process)
+    else:
+        _terminate_call_process(process, grace_seconds=process_group_grace_seconds)
     _join_io_threads()
     return stdout_buf.getvalue(), stderr_buf.getvalue()
 
@@ -3801,6 +3950,7 @@ def _execute_call_once(
     timeout: float | None = None,
     structured_output: bool = False,
     sensitive_texts: tuple[str, ...] = (),
+    process_group_grace_seconds: float = PROCESS_GROUP_TERMINATION_GRACE_SEC,
 ) -> CallResult:
     """Run a one-shot stateless model call and return parsed assistant text."""
     if stdin_text is not None and prompt_file_text is not None:
@@ -3821,6 +3971,8 @@ def _execute_call_once(
     started = time.monotonic()
     seatbelt_profile_path: str | None = None
     ephemeral_codex_home: str | None = None
+    process: subprocess.Popen[bytes] | None = None
+    process_pgid: int | None = None
     try:
         if harness == "codex" and pure:
             if not seatbelt.codex_pure_available():
@@ -3870,16 +4022,24 @@ def _execute_call_once(
                 launch_argv,
                 **popen_kwargs,
             )
+            process_pgid = _process_group_for_process(process)
             stdout_data, stderr_data = _bounded_call_communicate(
                 process,
                 stdin_text.encode("utf-8") if stdin_text is not None else None,
                 timeout,
                 CALL_STDOUT_MAX_BYTES,
                 CALL_STDERR_MAX_BYTES,
+                process_group_grace_seconds,
             )
         except OSError as exc:
             raise _runner_launch_error(launch_argv, cwd, exc) from exc
     finally:
+        if process is not None:
+            _terminate_call_process(
+                process,
+                pgid=process_pgid,
+                grace_seconds=process_group_grace_seconds,
+            )
         if seatbelt_profile_path is not None:
             with contextlib.suppress(OSError):
                 os.unlink(seatbelt_profile_path)
@@ -4026,6 +4186,7 @@ def execute_call(
     timeout: int | None = None,
     structured_output: bool = False,
     sensitive_texts: tuple[str, ...] = (),
+    process_group_grace_seconds: float = PROCESS_GROUP_TERMINATION_GRACE_SEC,
 ) -> CallResult:
     deadline = None if timeout is None else time.monotonic() + timeout
 
@@ -4051,6 +4212,7 @@ def execute_call(
             timeout=None if deadline is None else max(deadline - time.monotonic(), 0),
             structured_output=structured_output,
             sensitive_texts=sensitive_texts,
+            process_group_grace_seconds=process_group_grace_seconds,
         )
 
     result = call_once(argv)
@@ -4132,6 +4294,7 @@ def execute_passthrough(
     agent_config_text: str | None = None,
     agent_config_placeholder: str | None = None,
     env_overrides: dict[str, str] | None = None,
+    process_group_grace_seconds: float = PROCESS_GROUP_TERMINATION_GRACE_SEC,
 ) -> int:
     """Stream child stdout/stderr to the caller. JSON mode is not supported."""
     if stdin_text is not None and prompt_file_text is not None:
@@ -4144,30 +4307,30 @@ def execute_passthrough(
         agent_config_placeholder=agent_config_placeholder,
     )
     env = profiles.child_environment(overrides=env_overrides)
+    process: subprocess.Popen[str] | None = None
+    process_pgid: int | None = None
     try:
         # Passthrough mode mirrors the child runtime directly, so Delegate does
         # not impose a separate timeout here.
         try:
-            if stdin_text is None:
-                completed = subprocess.run(  # nosec B603 - passthrough intentionally mirrors validated harness argv with shell=False.
-                    launch_argv,
-                    cwd=cwd,
-                    env=env,
-                    stdin=subprocess.DEVNULL,
-                    text=True,
-                    check=False,
-                )
-            else:
-                completed = subprocess.run(  # nosec B603 - passthrough intentionally mirrors validated harness argv with shell=False.
-                    launch_argv,
-                    cwd=cwd,
-                    env=env,
-                    input=stdin_text,
-                    text=True,
-                    check=False,
-                )
+            process = subprocess.Popen(  # nosec B603 - passthrough intentionally mirrors validated harness argv with shell=False.
+                launch_argv,
+                cwd=cwd,
+                env=env,
+                stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
+                text=True,
+                start_new_session=True,
+            )
+            process_pgid = _process_group_for_process(process)
+            process.communicate(input=stdin_text)
         except OSError as exc:
             raise _runner_launch_error(launch_argv, cwd, exc) from exc
-        return completed.returncode
+        return process.returncode
     finally:
+        if process is not None:
+            _terminate_call_process(
+                process,
+                pgid=process_pgid,
+                grace_seconds=process_group_grace_seconds,
+            )
         _cleanup_prompt_file_dir(prompt_temp_dir)

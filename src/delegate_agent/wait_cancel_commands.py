@@ -322,6 +322,11 @@ def _signal_target_alive(value: int, *, process_group: bool) -> bool:
 def _send_signal(value: int, sig: signal.Signals, *, process_group: bool) -> None:
     if value <= 1:
         raise WaitCancelError("unsafe_signal_target", f"Refusing to signal pid/pgid <= 1: {value}")
+    if process_group and value == os.getpgrp():
+        raise WaitCancelError(
+            "unsafe_signal_target",
+            f"Refusing to signal Delegate's own process group: {value}",
+        )
     if process_group:
         os.killpg(value, sig)
     else:
