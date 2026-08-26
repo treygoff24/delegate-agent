@@ -3229,6 +3229,7 @@ def _build_request_for_workspace(
             persona_env_overrides=persona_env,
         ),
     )
+    process_group_grace_sec = delegate_config.resolve_process_group_termination_grace_sec(config)
     return _apply_profile_resolution(
         Request(
             engine,
@@ -3265,6 +3266,9 @@ def _build_request_for_workspace(
             progress_initial_delay_sec=progress_initial_delay_sec,
             progress_interval_sec=progress_interval_sec,
             stall_seconds=delegate_config.resolve_stall_seconds(config),
+            process_group_termination_grace_sec=(
+                delegate_config.resolve_process_group_termination_grace_sec(config)
+            ),
             forbid_commit=forbid_commit,
             include_dirty=include_dirty,
             call_read_only=call_read_only,
@@ -3274,7 +3278,13 @@ def _build_request_for_workspace(
             agent_config_text=parts.agent_config_text,
             prompt_transport=parts.prompt_transport,
             display_argv=parts.display_argv,
-            env_overrides=parts.env_overrides,
+            env_overrides={
+                **(parts.env_overrides or {}),
+                # Persistent worktree execution builds its RunContext in the
+                # worktree boundary; carry this resolved parent setting through
+                # the already-owned child environment without widening that API.
+                delegate_runner.PROCESS_GROUP_TERMINATION_GRACE_ENV: str(process_group_grace_sec),
+            },
             cleanup_workspace=cleanup_workspace,
             group=group,
             notify=notify,

@@ -230,6 +230,9 @@ class Request:
     # Seconds of no child progress before the stall watchdog cancels the run.
     # 0 disables it. Resolved from config at request-build time.
     stall_seconds: float = float(stall_watchdog.STALL_MINUTES_DEFAULT * 60)
+    # Seconds to wait after SIGTERM before escalating a child process group to
+    # SIGKILL. Resolved from tracking config at request-build time.
+    process_group_termination_grace_sec: float = 3.0
     forbid_commit: bool = False
     warnings: tuple[str, ...] = ()
     stdin_text: str | None = None

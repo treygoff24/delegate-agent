@@ -287,7 +287,8 @@ Controls local run recording.
 {
   "tracking": {
     "completionReport": {"defaultMode": "markdown"},
-    "retention": {"enabled": true, "rawLogDays": 7}
+    "retention": {"enabled": true, "rawLogDays": 7},
+    "processGroupTerminationGraceSec": 3
   }
 }
 ```
@@ -295,6 +296,9 @@ Controls local run recording.
 - `completionReport.defaultMode`: `markdown` or `none`.
 - `retention.enabled`: whether raw logs are eligible for archive-only retention.
 - `retention.rawLogDays`: non-negative number of days before bulky raw logs may be archived.
+- `processGroupTerminationGraceSec`: non-negative, finite number of seconds to
+  wait after SIGTERM before escalating a child process group to SIGKILL. The
+  default is `3` seconds; `0` escalates immediately.
 
 Ambient retention is best-effort. Archive I/O is serialized separately from
 Registry mutations, so a slow archive cannot block run progress, inspection,
