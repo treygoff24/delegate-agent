@@ -326,7 +326,12 @@ def retire_completed_worktree(
         resumable=manifest.get("resumable") is True,
         structured_retry=False,
     )
-    extra: JsonObject = {}
+    state = run_registry.load_run_state_or_none(registry_root, run_id)
+    extra: JsonObject = (
+        {"processGroupSurvived": True}
+        if isinstance(state, dict) and state.get("processGroupSurvived") is True
+        else {}
+    )
     retire_worktree_on_completion(ctx, extra)
     return extra
 
