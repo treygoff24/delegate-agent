@@ -2616,6 +2616,7 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertIn("agent_adopted", workflow_registry.DURABLE_EVENT_TYPES)
         self.assertIn("agent_adopt_rejected", workflow_registry.DURABLE_EVENT_TYPES)
         self.assertIn("agent_timeout", workflow_registry.DURABLE_EVENT_TYPES)
+        self.assertIn("agent_structured_retry", workflow_registry.DURABLE_EVENT_TYPES)
         self.assertIn("budget", workflow_registry.DURABLE_EVENT_TYPES)
         self.assertNotIn("agent_result", workflow_registry.DURABLE_EVENT_TYPES)
         journal = self.workspace / "fsync-journal.jsonl"
@@ -2628,23 +2629,23 @@ class WorkflowCommandTests(unittest.TestCase):
 
         original = os.fsync
         os.fsync = tracking_fsync  # type: ignore[assignment]
+        events = [
+            {"seq": 1, "type": "agent_started", "key": "k"},
+            {"seq": 2, "type": "log", "message": "x"},
+            {"seq": 3, "type": "agent_finished", "key": "k", "result": "ok"},
+            {"seq": 4, "type": "agent_adopted", "key": "k"},
+            {"seq": 5, "type": "agent_adopt_rejected", "key": "k"},
+            {"seq": 6, "type": "agent_timeout", "key": "k"},
+            {"seq": 7, "type": "budget", "key": "k", "spent": 1},
+            {"seq": 8, "type": "agent_structured_retry", "key": "k"},
+        ]
         try:
-            workflow_registry.append_jsonl(journal, {"seq": 1, "type": "agent_started", "key": "k"})
-            workflow_registry.append_jsonl(journal, {"seq": 2, "type": "log", "message": "x"})
-            workflow_registry.append_jsonl(
-                journal, {"seq": 3, "type": "agent_finished", "key": "k", "result": "ok"}
-            )
-            workflow_registry.append_jsonl(journal, {"seq": 4, "type": "agent_adopted", "key": "k"})
-            workflow_registry.append_jsonl(
-                journal, {"seq": 5, "type": "agent_adopt_rejected", "key": "k"}
-            )
-            workflow_registry.append_jsonl(journal, {"seq": 6, "type": "agent_timeout", "key": "k"})
-            workflow_registry.append_jsonl(
-                journal, {"seq": 7, "type": "budget", "key": "k", "spent": 1}
-            )
+            for event in events:
+                workflow_registry.append_jsonl(journal, event)
         finally:
             os.fsync = original  # type: ignore[assignment]
-        self.assertEqual(len(fsynced), 6)
+        expected = sum(event["type"] in workflow_registry.DURABLE_EVENT_TYPES for event in events)
+        self.assertEqual(len(fsynced), expected)
 
     def test_workflow_replay_ignores_simulated_dry_run_events(self) -> None:
         from delegate_agent.workflows import runtime as workflow_runtime
