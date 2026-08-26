@@ -44,6 +44,7 @@ MODEL_METADATA_KEYS: MetadataKeyGroup = (
 SPEED_METADATA_KEYS: MetadataKeyGroup = ("requestedFast",)
 
 RESUME_METADATA_KEYS: MetadataKeyGroup = ("resumedFrom", "worktreeAttachment")
+FOLLOWUP_METADATA_KEYS: MetadataKeyGroup = ("followupOf",)
 INITIATOR_METADATA_KEYS: MetadataKeyGroup = ("initiatorRoot",)
 PERSONA_METADATA_KEYS: MetadataKeyGroup = (
     "personaName",
@@ -52,10 +53,12 @@ PERSONA_METADATA_KEYS: MetadataKeyGroup = (
     "personaDigest",
     "personaFile",
 )
+HARNESS_SESSION_METADATA_KEYS: MetadataKeyGroup = ("resumable", "harnessSessionId")
 
 SNAPSHOT_STATE_FALLBACK_KEYS: MetadataKeyGroup = (
     "worktreeStatus",
     "safeWorkspaceMethod",
+    *HARNESS_SESSION_METADATA_KEYS,
 )
 
 SNAPSHOT_MANIFEST_FALLBACK_KEYS: MetadataKeyGroup = (
@@ -66,8 +69,10 @@ SNAPSHOT_MANIFEST_FALLBACK_KEYS: MetadataKeyGroup = (
     *REASONING_METADATA_KEYS,
     *SPEED_METADATA_KEYS,
     *RESUME_METADATA_KEYS,
+    *FOLLOWUP_METADATA_KEYS,
     *PERSONA_METADATA_KEYS,
     "processGroupTerminationGraceSec",
+    *HARNESS_SESSION_METADATA_KEYS,
 )
 
 _NATIVE_INITIATOR_ENV_KEYS = (
@@ -81,6 +86,14 @@ def _clean_initiator_value(value: object) -> str | None:
     if not isinstance(value, str) or not value or value != value.strip() or len(value) > 256:
         return None
     if ":" in value or any(ord(char) < 32 or ord(char) == 127 for char in value):
+        return None
+    return value
+
+
+def clean_harness_session_id(value: object) -> str | None:
+    if not isinstance(value, str) or not value or value != value.strip() or len(value) > 256:
+        return None
+    if any(ord(char) < 32 or ord(char) == 127 for char in value):
         return None
     return value
 

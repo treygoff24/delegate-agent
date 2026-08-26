@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from delegate_agent.json_types import JsonObject, JsonValue, is_non_negative_int
+from delegate_agent.run_metadata import clean_harness_session_id
 
 RecoveryQuality = Literal[
     "explicit_completion",
@@ -311,6 +312,7 @@ class StreamAccumulator:
     events: EventBuffer = field(default_factory=EventBuffer)
     completion_text: str | None = None
     current: str | None = None
+    harness_session_id: str | None = None
     _assistant_text_cache: str | None = field(default=None, repr=False)
     _codex_completion_candidate: str | None = field(default=None, repr=False)
     _last_recoverable_assistant_text: str | None = field(default=None, repr=False)
@@ -427,6 +429,9 @@ class StreamAccumulator:
         if event_type == "system":
             self._ingest_system(payload)
             return
+        if event_type == "thread.started":
+            self._ingest_codex_thread_started(payload)
+            return
         if event_type == "message":
             self._ingest_message(payload)
             return
@@ -514,6 +519,23 @@ class StreamAccumulator:
         cwd = payload.get("cwd")
         if isinstance(cwd, str) and cwd:
             self.current = f"session cwd {cwd}"
+        session_id = payload.get("session_id")
+        if session_id is not None:
+            self._ingest_harness_session_id(session_id)
+
+    def _ingest_codex_thread_started(self, payload: JsonObject) -> None:
+        thread_id = payload.get("thread_id")
+        if thread_id is not None:
+            self._ingest_harness_session_id(thread_id)
+
+    def _ingest_harness_session_id(self, raw_id: object) -> None:
+        clean_id = clean_harness_session_id(raw_id)
+        if clean_id is not None:
+            self.harness_session_id = clean_id
+        else:
+            self.events.append(
+                NormalizedEvent(kind="session.invalid", message="Invalid harness session ID")
+            )
 
     def _ingest_message(self, payload: JsonObject) -> None:
         role = payload.get("role")

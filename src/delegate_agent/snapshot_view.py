@@ -60,6 +60,8 @@ class SnapshotView(TypedDict, total=False):
     reasoningTransport: str
     requestedFast: bool
     resumedFrom: JsonObject
+    followupOf: str
+    resumable: bool
     worktreeAttachment: JsonObject
     personaName: str
     personaSource: str

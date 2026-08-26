@@ -152,6 +152,47 @@ class SnapshotViewTests(unittest.TestCase):
         self.assertEqual(view["reasoningTransport"], "native")
         self.assertEqual(view["worktreeCleanupCommands"], cleanup)
 
+    def test_merge_snapshot_view_projects_harness_session_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            registry_root = run_registry.ensure_registry(workspace, workspace_kind="directory")
+            run_id, alias = run_registry.register_run(registry_root, harness="codex")
+            run_path = run_registry.run_directory(registry_root, run_id)
+            run_registry.write_json_atomic(
+                run_path / "state.json",
+                {
+                    "schema": run_registry.STATE_SCHEMA,
+                    "runId": run_id,
+                    "status": "completed",
+                    "lastActivityAt": "2026-05-20T12:00:00Z",
+                    "resumable": True,
+                    "harnessSessionId": "019e88bc-8615-7232-b6cf-f22315386ee8",
+                },
+            )
+            run_registry.write_json_atomic(
+                run_path / "manifest.json",
+                {
+                    "schema": run_registry.MANIFEST_SCHEMA,
+                    "runId": run_id,
+                    "alias": alias,
+                    "harness": "codex",
+                    "cwd": str(workspace),
+                    "mode": "work",
+                    "model": "gpt-5.5",
+                    "startedAt": "2026-05-20T12:00:00Z",
+                    "resumable": True,
+                },
+            )
+            view = snapshot_view.merge_snapshot_view(
+                registry_root,
+                run_id,
+                None,
+                redact=False,
+            )
+
+        self.assertTrue(view["resumable"])
+        self.assertEqual(view["harnessSessionId"], "019e88bc-8615-7232-b6cf-f22315386ee8")
+
 
 if __name__ == "__main__":
     unittest.main()

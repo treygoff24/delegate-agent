@@ -15,11 +15,9 @@ from delegate_agent.errors import DelegateError
 
 class MailResolutionTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory(
-            prefix="delegate-mail-resolution-", dir=str(Path(__file__).resolve().parents[3])
-        )
+        self.temp = tempfile.TemporaryDirectory(prefix="delegate-mail-resolution-")
         self.addCleanup(self.temp.cleanup)
-        self.workspace = Path(self.temp.name)
+        self.workspace = Path(self.temp.name).resolve()
         self.root = run_registry.ensure_registry(self.workspace, workspace_kind="directory")
 
     def _run(self) -> tuple[str, str]:

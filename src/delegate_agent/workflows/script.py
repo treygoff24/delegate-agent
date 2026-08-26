@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import CodeType
 
+from delegate_agent import reasoning
 from delegate_agent.constants import (
     KNOWN_ENGINES,
     MODE_CALL,
@@ -103,6 +104,7 @@ def check_source(source: str, *, filename: str = "<workflow>") -> CheckResult:
     warnings = [*_determinism_warnings(tree), *_budget_loop_warnings(tree)]
     _validate_literal_schemas(tree)
     _validate_literal_agent_modes(tree, meta)
+    _validate_literal_judge_efforts(tree)
     return CheckResult(meta=meta, warnings=tuple(warnings))
 
 
@@ -158,7 +160,7 @@ def _validate_literal_schemas(tree: ast.AST) -> None:
         if not isinstance(node, ast.Call):
             continue
         call_name = _name_of(node.func)
-        if call_name not in {"agent", "judges"}:
+        if call_name not in {"agent", "judges", "followup"}:
             continue
         schema_value = _literal_keyword(node, "schema")
         if schema_value is None and call_name == "judges" and len(node.args) >= 2:
@@ -177,6 +179,7 @@ def _validate_literal_agent_modes(tree: ast.AST, meta: WorkflowMeta) -> None:
     defaults = meta.get("defaults") if isinstance(meta.get("defaults"), dict) else {}
     default_engine = defaults.get("engine") if isinstance(defaults, dict) else None
     default_mode = defaults.get("mode") if isinstance(defaults, dict) else None
+    _validate_literal_effort(defaults.get("effort") if isinstance(defaults, dict) else None)
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call) or _name_of(node.func) != "agent":
             continue
@@ -187,17 +190,60 @@ def _validate_literal_agent_modes(tree: ast.AST, meta: WorkflowMeta) -> None:
             raise WorkflowScriptError("agent mode must be safe, work, or call")
         if any(item is not None and item not in KNOWN_ENGINES for item in engines):
             raise WorkflowScriptError("agent engine must be a real delegate engine")
+        _validate_literal_effort(_literal_keyword(node, "effort"))
         passthrough = _literal_keyword(node, "passthrough") is True
-        if not passthrough:
+        if passthrough:
+            if mode == MODE_CALL:
+                raise WorkflowScriptError(
+                    "passthrough=True with mode='call' is invalid; slash pass-through needs "
+                    "a work or argv-enforced-safe lane"
+                )
+            if _has_keyword(node, "schema") and _literal_keyword(node, "schema") is not None:
+                raise WorkflowScriptError("passthrough=True is mutually exclusive with schema=")
+            if mode == MODE_SAFE and any(item in PROMPT_ENFORCED_SAFE_ENGINES for item in engines):
+                raise WorkflowScriptError(
+                    "passthrough=True is not supported for prompt-enforced safe engines"
+                )
+        resumable = _literal_keyword(node, "resumable") is True
+        if resumable:
+            if mode == MODE_CALL:
+                raise WorkflowScriptError(
+                    "resumable=True with mode='call' is invalid; call mode runs execute in a "
+                    "throwaway workspace and cannot be followed up"
+                )
+            if mode == MODE_SAFE:
+                raise WorkflowScriptError(
+                    "resumable=True with mode='safe' is invalid; safe workspaces are temporary "
+                    "and a captured session would have no re-entry path"
+                )
+            if any(item is not None and item not in {"codex", "claude"} for item in engines):
+                raise WorkflowScriptError(
+                    "resumable=True is only supported by codex and claude; other engines do "
+                    "not support native session resumption"
+                )
+
+
+def _validate_literal_judge_efforts(tree: ast.AST) -> None:
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or _name_of(node.func) != "judges":
             continue
-        if mode == MODE_CALL:
-            raise WorkflowScriptError(
-                "passthrough=True with mode='call' is invalid; slash pass-through needs "
-                "a work or argv-enforced-safe lane"
-            )
-        if _has_keyword(node, "schema") and _literal_keyword(node, "schema") is not None:
-            raise WorkflowScriptError("passthrough=True is mutually exclusive with schema=")
-        if mode == MODE_SAFE and any(item in PROMPT_ENFORCED_SAFE_ENGINES for item in engines):
-            raise WorkflowScriptError(
-                "passthrough=True is not supported for prompt-enforced safe engines"
-            )
+        _validate_literal_effort(_literal_keyword(node, "effort"))
+        engines = _literal_keyword(node, "engines")
+        if engines is None and len(node.args) >= 3:
+            try:
+                engines = ast.literal_eval(node.args[2])
+            except (ValueError, TypeError):
+                engines = None
+        if not isinstance(engines, list):
+            continue
+        for item in engines:
+            if isinstance(item, dict) and "effort" in item:
+                _validate_literal_effort(item.get("effort"))
+
+
+def _validate_literal_effort(value: object) -> None:
+    if value is None:
+        return
+    if not isinstance(value, str) or value not in reasoning.PI_THINKING_LEVELS:
+        allowed = ", ".join(reasoning.PI_THINKING_LEVELS)
+        raise WorkflowScriptError(f"effort must be one of: {allowed}")

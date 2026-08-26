@@ -195,6 +195,11 @@ class RunContext:
     persona_file: str | None = None
     persona_text: str | None = None
     mail_push: bool = False
+    resumable: bool = False
+    followup_of: str | None = None
+    resume_session_id: str | None = None
+    structured_retry: bool = False
+    harness_session_id: str | None = None
     account_binding_command: tuple[str, ...] | None = None
     sandbox: JsonObject | None = None
 
@@ -372,6 +377,10 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
         payload["workflowAgentKey"] = ctx.workflow_agent_key
     if ctx.mail_push:
         payload["mailPush"] = True
+    if ctx.resumable:
+        payload["resumable"] = True
+    if ctx.harness_session_id is not None:
+        payload["harnessSessionId"] = ctx.harness_session_id
     if ctx.include_dirty:
         payload["includeDirty"] = True
         payload["syncedFiles"] = ctx.synced_files
@@ -388,6 +397,10 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
     _add_persona_payload_fields(payload, ctx)
     if ctx.resumed_from is not None:
         payload["resumedFrom"] = ctx.resumed_from
+    if ctx.followup_of is not None:
+        payload["followupOf"] = ctx.followup_of
+    if ctx.structured_retry:
+        payload["structuredRetryWorkspace"] = True
     if ctx.worktree_attachment is not None:
         payload["worktreeAttachment"] = ctx.worktree_attachment
     return payload
@@ -517,6 +530,10 @@ def build_snapshot(
     run_metadata.add_model_payload_fields(snapshot, ctx)
     reasoning.add_reasoning_payload_fields(snapshot, ctx)
     run_metadata.add_speed_payload_fields(snapshot, ctx)
+    if ctx.resumable:
+        snapshot["resumable"] = True
+    if ctx.resumable and accumulator.harness_session_id is not None:
+        snapshot["harnessSessionId"] = accumulator.harness_session_id
     snapshot["promptInstructionMode"] = ctx.prompt_instruction_mode
     if ctx.auth_profile is not None:
         snapshot["authProfile"] = ctx.auth_profile
@@ -590,6 +607,9 @@ def persist_progress(
             current_pgid = current.get("pgid")
             if isinstance(current_pgid, int) and not isinstance(current_pgid, bool):
                 persisted_pgid = current_pgid
+        if ctx.resumable and accumulator.harness_session_id is not None:
+            persisted_extra["harnessSessionId"] = accumulator.harness_session_id
+            persisted_extra["resumable"] = True
         write_state(
             run_path,
             build_state(
@@ -655,6 +675,9 @@ def _persist_final_progress(
     """
     persisted_status = status
     persisted_extra = dict(extra)
+    if ctx.resumable and accumulator.harness_session_id is not None:
+        persisted_extra["harnessSessionId"] = accumulator.harness_session_id
+        persisted_extra["resumable"] = True
     with run_registry.registry_lock(ctx.registry_root):
         current = run_registry.load_run_state_or_none(ctx.registry_root, ctx.run_id)
         current_status = current.get("status") if isinstance(current, dict) else None
@@ -1069,6 +1092,12 @@ def completion_json_payload(
         payload["fallbackProfile"] = ctx.fallback_auth_profile
     if ctx.group is not None:
         payload["group"] = ctx.group
+    if ctx.resumed_from is not None:
+        payload["resumedFrom"] = ctx.resumed_from
+    if ctx.followup_of is not None:
+        payload["followupOf"] = ctx.followup_of
+    if ctx.resumable:
+        payload["resumable"] = True
     if ctx.include_dirty:
         payload["includeDirty"] = True
         payload["syncedFiles"] = ctx.synced_files
@@ -2383,15 +2412,20 @@ def _finalize_tracked_run(
         else:
             for key in ("failureReason", "error", "message"):
                 merged_extra.pop(key, None)
+    signal_text = "\n".join(
+        part
+        for part in (stderr_tail, _accumulator_failure_signal_text(capture.accumulator))
+        if part
+    )
     failure = _failure_details(
         status=status,
-        signal_text="\n".join(
-            part
-            for part in (stderr_tail, _accumulator_failure_signal_text(capture.accumulator))
-            if part
-        ),
+        signal_text=signal_text,
         extra=merged_extra,
     )
+    if ctx.followup_of is not None:
+        session_failure = child_failures.classify_followup_session_failure(signal_text, ctx.engine)
+        if session_failure is not None:
+            failure = session_failure
     failure_reason = failure.code if failure is not None else None
     failure_message = failure.message if failure is not None else None
     if failure_reason is not None:
@@ -3282,6 +3316,7 @@ def _execute_tracked(
                 and retry_failure is not None
                 and retry_failure.code == "codex_thread_lost"
                 and not _cancel_requested_or_cancelled(ctx)
+                and not ctx.followup_of
                 and _retry_is_safe(
                     ctx,
                     retry_capture,

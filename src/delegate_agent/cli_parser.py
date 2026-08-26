@@ -33,6 +33,7 @@ from delegate_agent.constants import (
     ENGINE_SUPPORTED_MODES,
     ENGINES_PROSE,
     KNOWN_ENGINES,
+    MODE_SAFE,
     MODELESS_ENGINES,
     VALID_MODES,
     WORKFLOW_DRY_RUN_HINT,
@@ -41,6 +42,7 @@ from delegate_agent.constants import (
 )
 from delegate_agent.errors import DelegateError
 from delegate_agent.request_models import (
+    FollowupOptions,
     GlobalOptions,
     InspectionOptions,
     LaunchOptions,
@@ -66,12 +68,12 @@ VALUE_GLOBAL_OPTIONS = frozenset(
 GLOBAL_OPTIONS = FLAG_GLOBAL_OPTIONS | VALUE_GLOBAL_OPTIONS
 
 AUTH_PROFILE_SUBCOMMANDS = frozenset(KNOWN_ENGINES) | frozenset(
-    {"dry-run", "run", "profiles", "models", "capabilities", "setup", "resume"}
+    {"dry-run", "run", "profiles", "models", "capabilities", "setup", "resume", "followup"}
 )
 GROUP_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
-GROUP_SUBCOMMANDS = frozenset(KNOWN_ENGINES) | frozenset({"dry-run", "run", "resume"})
+GROUP_SUBCOMMANDS = frozenset(KNOWN_ENGINES) | frozenset({"dry-run", "run", "resume", "followup"})
 NOTIFY_SUBCOMMANDS = frozenset(KNOWN_ENGINES) | frozenset(
-    {"droid", "dry-run", "run", "resume", "workflow"}
+    {"droid", "dry-run", "run", "resume", "followup", "workflow"}
 )
 
 
@@ -654,6 +656,23 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             group=group,
             notify=notify,
         )
+    if subcommand == "followup":
+        if isolation is not None:
+            raise DelegateError(
+                "invalid_option_combination",
+                "--isolation is not supported with delegate followup; "
+                "isolation is inherited from the source run.",
+            )
+        return parse_followup(
+            rest,
+            json_mode,
+            cwd,
+            pass_through=pass_through,
+            completion_report=completion_report,
+            auth_profile=auth_profile,
+            group=group,
+            notify=notify,
+        )
     if subcommand == "snapshot":
         return parse_snapshot(rest, json_mode, cwd)
     if subcommand == "runs":
@@ -1075,10 +1094,28 @@ def parse_modeless_engine(
     persona = tail.persona
     no_persona = tail.no_persona
     allow_repo_persona = tail.allow_repo_persona
+    resumable = tail.resumable
     if agent is not None and engine != "opencode":
         raise DelegateError("unsupported_agent", "--agent is only supported by opencode.")
     if fast is not None and engine != "codex":
         raise DelegateError("unsupported_fast", "--fast and --no-fast are only supported by codex.")
+    if resumable and mode == "call":
+        raise DelegateError(
+            "invalid_option_combination",
+            "--resumable is not supported with call mode; call runs execute in a throwaway workspace and cannot be followed up.",
+        )
+    if resumable and mode == MODE_SAFE:
+        raise DelegateError(
+            "invalid_option_combination",
+            "--resumable is not supported with safe mode; safe workspaces are temporary and a captured session would have no re-entry path.",
+        )
+    if resumable and engine not in {"codex", "claude"}:
+        raise DelegateError(
+            "followup-unsupported",
+            f"--resumable is only supported by codex and claude; {engine} does not support native session resumption.",
+            diagnostics={"code": "followup-unsupported"},
+            next_actions=["Use --resumable with codex or claude."],
+        )
     _validate_pure_options(engine, mode, pure=pure, read_only=read_only, group=group)
     if timeout is not None and pass_through:
         raise DelegateError(
@@ -1140,6 +1177,7 @@ def parse_modeless_engine(
             persona=persona,
             no_persona=no_persona,
             allow_repo_persona=allow_repo_persona,
+            resumable=resumable,
         ),
     )
 
@@ -1211,10 +1249,23 @@ def parse_droid(
     persona = tail_result.persona
     no_persona = tail_result.no_persona
     allow_repo_persona = tail_result.allow_repo_persona
+    resumable = tail_result.resumable
     if agent is not None:
         raise DelegateError("unsupported_agent", "--agent is only supported by opencode.")
     if fast is not None:
         raise DelegateError("unsupported_fast", "--fast and --no-fast are only supported by codex.")
+    if resumable and mode == "call":
+        raise DelegateError(
+            "invalid_option_combination",
+            "--resumable is not supported with call mode; call runs execute in a throwaway workspace and cannot be followed up.",
+        )
+    if resumable:
+        raise DelegateError(
+            "followup-unsupported",
+            "--resumable is only supported by codex and claude; droid does not support native session resumption.",
+            diagnostics={"code": "followup-unsupported"},
+            next_actions=["Use --resumable with codex or claude."],
+        )
     _validate_pure_options("droid", mode, pure=pure, read_only=read_only, group=group)
     if timeout is not None and pass_through:
         raise DelegateError(
@@ -1277,6 +1328,7 @@ def parse_droid(
             persona=persona,
             no_persona=no_persona,
             allow_repo_persona=allow_repo_persona,
+            resumable=resumable,
         ),
     )
 
@@ -1541,6 +1593,92 @@ def parse_resume(
     )
 
 
+def parse_followup(
+    rest: list[str],
+    json_mode: bool,
+    cwd: str | None,
+    *,
+    pass_through: bool,
+    completion_report: str | None,
+    auth_profile: str | None,
+    group: str | None,
+    notify: str | None = None,
+) -> ParsedCommand:
+    """Parse ``followup [followup-options] <alias|runId> [--prompt-file PATH] [prompt...]``.
+
+    Parser law: launch flags must appear BEFORE the handle — once positional
+    text starts, remaining tokens are prompt material.
+    """
+    if rest and command_help.is_help_token(rest[0]):
+        return help_command(json_mode, "followup")
+    prompt_file: str | None = None
+    timeout: int | None = None
+    dry_run = False
+    handle: str | None = None
+    prompt_parts: list[str] = []
+    i = 0
+    while i < len(rest):
+        token = rest[i]
+        if handle is None:
+            if token == "--json":
+                json_mode = True
+                i += 1
+                continue
+            if command_help.is_help_token(token):
+                return help_command(json_mode, "followup")
+            if token == "--timeout":
+                timeout, i = parse_required_positive_int_option(
+                    rest,
+                    i,
+                    option_label="--timeout",
+                    missing_error="missing_timeout",
+                    invalid_error="invalid_timeout",
+                )
+                continue
+            if token == "--prompt-file":
+                if i + 1 >= len(rest):
+                    raise DelegateError("missing_prompt_file", "--prompt-file requires a path.")
+                if prompt_file is not None:
+                    raise DelegateError(
+                        "ambiguous_prompt_source", "Only one --prompt-file is allowed."
+                    )
+                prompt_file = rest[i + 1]
+                i += 2
+                continue
+            if token == "--dry-run":
+                dry_run = True
+                i += 1
+                continue
+            if token.startswith("-"):
+                raise DelegateError("unknown_option", unknown_option_message("followup", token))
+            handle = token
+            i += 1
+            continue
+        prompt_parts = rest[i:]
+        break
+    if handle is None:
+        raise DelegateError("missing_handle", "followup requires a run handle (alias or run id).")
+    return ParsedCommand(
+        "followup",
+        global_options=GlobalOptions(
+            json_mode=json_mode,
+            cwd=cwd,
+            pass_through=pass_through,
+            completion_report=completion_report,
+            auth_profile=auth_profile,
+            group=group,
+            notify=notify,
+        ),
+        followup=FollowupOptions(
+            handle=handle,
+            prompt_parts=list(prompt_parts),
+            prompt_file=prompt_file,
+            timeout=timeout,
+            dry_run=dry_run,
+        ),
+    )
+
+
 def parse_prompt_tail(
     rest: list[str],
     json_mode: bool,
@@ -1557,6 +1695,7 @@ def parse_prompt_tail(
     include_dirty = False
     mail_push = False
     read_only = False
+    resumable = False
     pure = False
     timeout: int | None = None
     model: str | None = None
@@ -1793,6 +1932,14 @@ def parse_prompt_tail(
             mail_push = True
             i += 1
             continue
+        if token == "--resumable":
+            if resumable:
+                raise DelegateError(
+                    "invalid_option_combination", "Only one --resumable flag is allowed."
+                )
+            resumable = True
+            i += 1
+            continue
         if token == "--read-only":
             read_only = True
             i += 1
@@ -1881,6 +2028,7 @@ def parse_prompt_tail(
         persona,
         no_persona,
         allow_repo_persona,
+        resumable,
     )
 
 

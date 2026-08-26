@@ -52,3 +52,40 @@ class ResumeParserTests(unittest.TestCase):
         with self.assertRaises(DelegateError) as caught:
             parse_cli(["resume", "--engine", "cursor"])
         self.assertEqual(caught.exception.error, "missing_handle")
+
+    def test_resumable_accepted_for_codex_and_claude(self):
+        parsed_codex = parse_cli(["codex", "work", "--resumable", "implement feature"])
+        self.assertTrue(parsed_codex.launch.resumable)
+
+        parsed_claude = parse_cli(["claude", "work", "--resumable", "review code"])
+        self.assertTrue(parsed_claude.launch.resumable)
+
+    def test_resumable_rejected_on_safe_mode(self):
+        for engine in ("codex", "claude"):
+            with self.subTest(engine=engine):
+                with self.assertRaises(DelegateError) as caught:
+                    parse_cli([engine, "safe", "--resumable", "review code"])
+                self.assertEqual(caught.exception.error, "invalid_option_combination")
+                self.assertIn("safe workspaces are temporary", caught.exception.message)
+                self.assertIn("no re-entry path", caught.exception.message)
+
+    def test_resumable_rejected_on_call_mode(self):
+        for engine in ("codex", "claude"):
+            with self.subTest(engine=engine):
+                with self.assertRaises(DelegateError) as caught:
+                    parse_cli([engine, "call", "--resumable", "summarize"])
+                self.assertEqual(caught.exception.error, "invalid_option_combination")
+
+    def test_resumable_rejected_for_unsupported_engines(self):
+        for engine in ("cursor", "droid", "grok", "devin", "opencode", "pi", "omp", "kimi"):
+            with self.subTest(engine=engine):
+                with self.assertRaises(DelegateError) as caught:
+                    parse_cli([engine, "work", "--resumable", "prompt"])
+                self.assertEqual(caught.exception.error, "followup-unsupported")
+                self.assertIn("codex and claude", caught.exception.message)
+                self.assertEqual(caught.exception.diagnostics.get("code"), "followup-unsupported")
+
+    def test_resumable_rejected_on_duplicate_flag(self):
+        with self.assertRaises(DelegateError) as caught:
+            parse_cli(["codex", "work", "--resumable", "--resumable", "prompt"])
+        self.assertEqual(caught.exception.error, "invalid_option_combination")

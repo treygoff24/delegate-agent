@@ -20,11 +20,21 @@ class ChildFailure:
 
 _THREAD_LOSS_PATTERNS = (
     re.compile(r"\bno thread with id\b", re.IGNORECASE),
+    re.compile(r"\bno thread (?:found )?with id\b", re.IGNORECASE),
+    re.compile(r"\bthread\b[^\n]{0,80}\b(?:not found|does not exist|unknown)\b", re.IGNORECASE),
     re.compile(
         r"\bstate (?:data)?base\b[^\n]{0,80}\bthread\b[^\n]{0,40}\b(?:lookup|find|load)[^\n]{0,20}\b(?:fail|error)",
         re.IGNORECASE,
     ),
     re.compile(r"\bthread lookup\b[^\n]{0,40}\b(?:fail|error)", re.IGNORECASE),
+)
+_CLAUDE_SESSION_LOSS_PATTERNS = (
+    re.compile(r"\bunknown session\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:session|conversation)\b[^\n]{0,80}\b(?:not found|does not exist|unknown)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\bno (?:conversation|session) (?:found|exists?)\b", re.IGNORECASE),
 )
 _AUTH_PATTERNS = (
     re.compile(r"\btoken_expired\b", re.IGNORECASE),
@@ -91,3 +101,22 @@ def classify(text: str) -> ChildFailure | None:
 
 def is_usage_limit(text: str) -> bool:
     return bool(text.strip()) and _matches_usage_limit(text)
+
+
+def classify_followup_session_failure(text: str, engine: str) -> ChildFailure | None:
+    """Normalize a native-session lookup failure for ``delegate followup``."""
+    if not text.strip():
+        return None
+    if engine == "codex" and any(pattern.search(text) for pattern in _THREAD_LOSS_PATTERNS):
+        return ChildFailure(
+            "session_expired",
+            "The native Codex session is no longer available; relaunch with --resumable.",
+        )
+    if engine == "claude" and any(
+        pattern.search(text) for pattern in _CLAUDE_SESSION_LOSS_PATTERNS
+    ):
+        return ChildFailure(
+            "session_expired",
+            "The native Claude session is no longer available; relaunch with --resumable.",
+        )
+    return None

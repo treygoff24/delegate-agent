@@ -19,6 +19,7 @@ from delegate_agent import (
     command_errors,
     command_help,  # noqa: F401  # re-exported for tests / back-compat
     config_commands,
+    followup_command,
     harness_discovery,
     inspection_commands,
     mail,
@@ -388,6 +389,10 @@ def dry_run_payload(request: Request, config: JsonObject | None = None) -> JsonO
         payload["personaFile"] = request.persona_file
     if request.resumed_from is not None:
         payload["resumedFrom"] = request.resumed_from
+    if request.followup_of is not None:
+        payload["followupOf"] = request.followup_of
+    if request.resumable:
+        payload["resumable"] = True
     if request.auth_profile is not None:
         payload["authProfile"] = request.auth_profile
     if (
@@ -676,6 +681,10 @@ def make_run_context(
         codex_fallback_failover_identity=request.codex_fallback_failover_identity,
         include_dirty=request.include_dirty,
         mail_push=request.mail_push,
+        resumable=request.resumable,
+        followup_of=request.followup_of,
+        resume_session_id=request.resume_session_id,
+        structured_retry=request.structured_retry,
         group=request.group,
         notify=request.notify,
         workflow_agent_key=request.workflow_agent_key,
@@ -1768,15 +1777,24 @@ def main(
             return emit_profiles_command(parsed, config, source, stdout)
 
         resume_plan: resume_command.ResumePlan | None = None
+        followup_plan: followup_command.FollowupPlan | None = None
         if parsed.subcommand == "resume":
             resume_plan = resume_command.build_resume_plan(parsed, workspace, config, stderr=stderr)
             # The plan is a fully ordinary launch; from here on the resume flows
             # through the normal request build and execution path.
             parsed = resume_plan.parsed
             global_options = parsed.global_options
+        elif parsed.subcommand == "followup":
+            followup_plan = followup_command.build_followup_plan(
+                parsed, workspace, config, stderr=stderr
+            )
+            parsed = followup_plan.parsed
+            global_options = parsed.global_options
         request = request_from_parsed(parsed, config, stdin, stderr, workspace=workspace)
         if resume_plan is not None:
             request = resume_command.apply_resume_to_request(request, resume_plan)
+        if followup_plan is not None:
+            request = followup_command.apply_followup_to_request(request, followup_plan)
         if request.dry_run:
             payload = dry_run_payload(request, config=config)
             if global_options.json_mode:

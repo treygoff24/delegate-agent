@@ -19,6 +19,7 @@ from __future__ import annotations
 import contextlib
 from contextlib import suppress
 from pathlib import Path
+from types import SimpleNamespace
 
 from delegate_agent import run_registry, worktree_summary
 from delegate_agent.git_utils import (
@@ -201,6 +202,12 @@ def _retire_worktree_on_completion(ctx: object, completion_extra: JsonObject) ->
     if completion_extra.get("processGroupSurvived") is True:
         retain("process_group_survived")
         return
+    if getattr(ctx, "structured_retry", False) is True:
+        retain("structured_retry_pending")
+        return
+    if getattr(ctx, "resumable", False) is True:
+        retain("resumable_session")
+        return
     status, status_warnings = detect_worktree_status(record)
     if status != STATUS_PRESENT:
         retain(
@@ -288,6 +295,45 @@ def retire_worktree_on_completion(ctx: object, completion_extra: JsonObject) -> 
                     "worktreeRetentionError": str(exc),
                 },
             )
+
+
+def retire_completed_worktree(
+    registry_root: Path,
+    run_id: str,
+    *,
+    retire_worktree: bool = True,
+    auto_prune: bool = False,
+    auto_prune_days: int = 7,
+) -> JsonObject:
+    """Release a structured-retry hold and apply ordinary completion retirement.
+
+    Workflow supervisors call this after their retry loop reaches a terminal
+    result. The run itself already finalized, so reconstruct the small context
+    surface the completion hook needs from its durable manifest.
+    """
+
+    manifest = run_registry.load_run_manifest_or_none(registry_root, run_id)
+    if not isinstance(manifest, dict):
+        return {}
+    ctx = SimpleNamespace(
+        mode=manifest.get("mode"),
+        isolation_lifecycle=manifest.get("isolationLifecycle"),
+        retire_worktree_on_completion=retire_worktree,
+        worktree_auto_prune_on_completion=auto_prune,
+        worktree_auto_prune_merged_older_than_days=auto_prune_days,
+        registry_root=registry_root,
+        run_id=run_id,
+        resumable=manifest.get("resumable") is True,
+        structured_retry=False,
+    )
+    state = run_registry.load_run_state_or_none(registry_root, run_id)
+    extra: JsonObject = (
+        {"processGroupSurvived": True}
+        if isinstance(state, dict) and state.get("processGroupSurvived") is True
+        else {}
+    )
+    retire_worktree_on_completion(ctx, extra)
+    return extra
 
 
 def _branch_ref(branch: str) -> str:

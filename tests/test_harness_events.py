@@ -1692,3 +1692,41 @@ class HarnessEventsTests(unittest.TestCase):
         grok.ingest_line(json.dumps({"type": "end", "stopReason": "EndTurn"}))
         self.assertEqual(grok.assistant_text, "x")
         self.assertEqual(grok.completion_text, "x")
+
+    def test_codex_thread_started_captures_harness_session_id(self):
+        acc = self.events.StreamAccumulator(harness="codex")
+        acc.ingest_line(
+            json.dumps(
+                {"type": "thread.started", "thread_id": "019e88bc-8615-7232-b6cf-f22315386ee8"}
+            )
+        )
+        self.assertEqual(acc.harness_session_id, "019e88bc-8615-7232-b6cf-f22315386ee8")
+
+    def test_claude_system_init_captures_harness_session_id(self):
+        acc = self.events.StreamAccumulator(harness="claude")
+        acc.ingest_line(
+            json.dumps(
+                {
+                    "type": "system",
+                    "subtype": "init",
+                    "session_id": "ses_0b850d7d2ffeowrlqEvxrNru7d",
+                    "cwd": "/repo",
+                }
+            )
+        )
+        self.assertEqual(acc.harness_session_id, "ses_0b850d7d2ffeowrlqEvxrNru7d")
+
+    def test_invalid_harness_session_id_discarded_with_event(self):
+        overlong_id = "a" * 257
+        acc_overlong = self.events.StreamAccumulator(harness="codex")
+        acc_overlong.ingest_line(json.dumps({"type": "thread.started", "thread_id": overlong_id}))
+        self.assertIsNone(acc_overlong.harness_session_id)
+        self.assertTrue(any(e.kind == "session.invalid" for e in acc_overlong.events))
+
+        control_id = "ses_abc\x00def"
+        acc_control = self.events.StreamAccumulator(harness="claude")
+        acc_control.ingest_line(
+            json.dumps({"type": "system", "subtype": "init", "session_id": control_id})
+        )
+        self.assertIsNone(acc_control.harness_session_id)
+        self.assertTrue(any(e.kind == "session.invalid" for e in acc_control.events))
