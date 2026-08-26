@@ -180,24 +180,41 @@ def _workflow_agent_run_result_metadata(
     if run_id is None:
         return None
     root = _run_registry_root(workspace)
+    index = run_registry.load_index(root)
+    entry = index.get("runs", {}).get(run_id)
     snapshot = run_registry.load_run_snapshot_or_none(root, run_id)
     manifest = run_registry.load_run_manifest_or_none(root, run_id)
-    if not isinstance(snapshot, dict):
+    records = tuple(
+        record for record in (snapshot, manifest, entry) if isinstance(record, dict)
+    )
+    if not records:
         return None
     execution_cwd = next(
         (
-            value
-            for value in (
-                snapshot.get("executionCwd"),
-                manifest.get("executionCwd") if isinstance(manifest, dict) else None,
-            )
+            value for record in records for value in (record.get("executionCwd"),)
             if isinstance(value, str) and value
         ),
         None,
     )
-    session_id = snapshot.get("sessionId")
-    cleanup = snapshot.get("temporaryWorkspaceCleanup")
-    backend = snapshot.get("isolationBackend")
+    session_id = snapshot.get("sessionId") if isinstance(snapshot, dict) else None
+    cleanup = next(
+        (
+            value
+            for record in records
+            for value in (record.get("temporaryWorkspaceCleanup"),)
+            if isinstance(value, dict)
+        ),
+        None,
+    )
+    backend = next(
+        (
+            value
+            for record in records
+            for value in (record.get("isolationBackend"),)
+            if isinstance(value, str)
+        ),
+        None,
+    )
     return _DelegateChildResult(
         text=None,
         run_id=run_id,
@@ -212,12 +229,16 @@ def _cleanup_workflow_agent_run_workspace(workspace: Path, run_id: str) -> None:
     if not run_registry.RUN_ID_RE.fullmatch(run_id):
         return
     root = _run_registry_root(workspace)
+    index = run_registry.load_index(root)
+    entry = index.get("runs", {}).get(run_id)
     snapshot = run_registry.load_run_snapshot_or_none(root, run_id)
-    if not isinstance(snapshot, dict):
-        return
-    cleanup = snapshot.get("temporaryWorkspaceCleanup")
-    if isinstance(cleanup, dict):
-        _cleanup_structured_retry_workspace(cleanup)
+    manifest = run_registry.load_run_manifest_or_none(root, run_id)
+    for record in (snapshot, manifest, entry):
+        if isinstance(record, dict):
+            cleanup = record.get("temporaryWorkspaceCleanup")
+            if isinstance(cleanup, dict):
+                _cleanup_structured_retry_workspace(cleanup)
+                return
 
 
 def cleanup_workflow_agent_workspaces(

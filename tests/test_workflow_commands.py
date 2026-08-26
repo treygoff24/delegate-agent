@@ -20,6 +20,7 @@ from delegate_agent.workflows import commands as workflow_commands  # noqa: E402
 from delegate_agent.workflows import registry as workflow_registry  # noqa: E402
 from delegate_agent.workflows import runtime as workflow_runtime  # noqa: E402
 from delegate_agent.workflows import schema as workflow_schema  # noqa: E402
+from delegate_agent import run_registry  # noqa: E402
 
 CLI = ROOT / "bin" / "delegate.py"
 
@@ -2097,6 +2098,99 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertEqual(len(workspaces), 2)
         self.assertEqual(workspaces[0], workspaces[1])
         self.assertFalse(Path(workspaces[0]).exists())
+        index = json.loads(
+            (self.workspace / ".delegate" / "index.json").read_text(encoding="utf-8")
+        )
+        owners = []
+        for run in json.loads(
+            self.run_delegate(["--json", "runs", "--group", wf_id]).stdout
+        )["runs"]:
+            run_id = run["runId"]
+            manifest = json.loads(
+                (
+                    self.workspace
+                    / ".delegate"
+                    / "runs"
+                    / run_id
+                    / "manifest.json"
+                ).read_text(encoding="utf-8")
+            )
+            descriptor = manifest.get("temporaryWorkspaceCleanup")
+            if descriptor is None:
+                self.assertNotIn("temporaryWorkspaceCleanup", index["runs"][run_id])
+                continue
+            owners.append(run_id)
+            self.assertEqual(index["runs"][run_id]["temporaryWorkspaceCleanup"], descriptor)
+            self.assertEqual(descriptor["isolatedWorkspace"], workspaces[0])
+        self.assertEqual(len(owners), 1)
+
+    def test_structured_retry_recovery_reads_manifest_before_first_snapshot(self) -> None:
+        root = run_registry.ensure_registry(self.workspace, workspace_kind="directory")
+        isolated_workspace = self.workspace / "isolated"
+        temp_base = self.workspace / "temp-base"
+        descriptor = {
+            "gitRoot": None,
+            "isolatedWorkspace": str(isolated_workspace),
+            "tempBase": str(temp_base),
+            "sourceRoot": str(self.workspace),
+        }
+        run_id, _alias = run_registry.register_run(
+            root,
+            harness="droid",
+            metadata={
+                "group": "wf-manifest-only",
+                "workflowAgentKey": "agent",
+                "executionCwd": str(isolated_workspace),
+            },
+        )
+        run_path = run_registry.run_directory(root, run_id)
+        run_registry.write_json_atomic(
+            run_path / run_registry.MANIFEST_FILE,
+            {
+                "runId": run_id,
+                "group": "wf-manifest-only",
+                "workflowAgentKey": "agent",
+                "executionCwd": str(isolated_workspace),
+                "temporaryWorkspaceCleanup": descriptor,
+                "isolationBackend": "copy",
+            },
+        )
+
+        recovered = workflow_runtime._workflow_agent_run_result_metadata(
+            self.workspace,
+            "wf-manifest-only",
+            "agent",
+        )
+        self.assertIsNotNone(recovered)
+        self.assertEqual(recovered.workspace_cleanup, descriptor)
+        self.assertEqual(recovered.execution_cwd, str(isolated_workspace))
+
+    def test_invalid_run_id_cleanup_is_skipped_but_valid_manifest_run_is_cleaned(self) -> None:
+        root = run_registry.ensure_registry(self.workspace, workspace_kind="directory")
+        descriptor = {
+            "gitRoot": None,
+            "isolatedWorkspace": str(self.workspace / "isolated"),
+            "tempBase": str(self.workspace / "temp-base"),
+            "sourceRoot": str(self.workspace),
+        }
+        run_id, _alias = run_registry.register_run(
+            root,
+            harness="droid",
+            metadata={"group": "wf-cleanup", "workflowAgentKey": "agent"},
+        )
+        run_path = run_registry.run_directory(root, run_id)
+        run_registry.write_json_atomic(
+            run_path / run_registry.MANIFEST_FILE,
+            {"temporaryWorkspaceCleanup": descriptor},
+        )
+
+        with mock.patch.object(
+            workflow_runtime, "_cleanup_structured_retry_workspace"
+        ) as cleanup:
+            workflow_runtime._cleanup_workflow_agent_run_workspace(self.workspace, "malformed")
+            cleanup.assert_not_called()
+            workflow_runtime._cleanup_workflow_agent_run_workspace(self.workspace, run_id)
+            cleanup.assert_called_once_with(descriptor)
 
     def test_structured_retry_timeout_exhaustion_reaps_every_workspace(self) -> None:
         subprocess.run(["git", "init", "-q", str(self.workspace)], check=True)

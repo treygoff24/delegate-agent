@@ -1389,6 +1389,8 @@ def execute_request(
                 else source_workspace.path
             ),
         }
+        if isolated_request.temporary_workspace_cleanup is not None:
+            metadata["temporaryWorkspaceCleanup"] = isolated_request.temporary_workspace_cleanup
         run_metadata.add_initiator_metadata(metadata, initiator_root)
         run_id, alias = run_registry.register_run(
             registry_root,

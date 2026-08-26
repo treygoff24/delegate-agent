@@ -332,6 +332,8 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
         "promptTransport": ctx.prompt_transport,
         "promptInstructionMode": ctx.prompt_instruction_mode,
     }
+    if ctx.temporary_workspace_cleanup is not None:
+        payload["temporaryWorkspaceCleanup"] = ctx.temporary_workspace_cleanup
     run_metadata.add_run_metadata_payload_fields(payload, ctx)
     run_metadata.add_model_payload_fields(payload, ctx)
     reasoning.add_reasoning_payload_fields(payload, ctx)
