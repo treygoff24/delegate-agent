@@ -1641,8 +1641,6 @@ def parse_followup(
                 dry_run = True
                 i += 1
                 continue
-            if token in MISPLACED_GLOBAL_OPTIONS:
-                raise_misplaced_global_option("Global options must appear before the subcommand.")
             if token.startswith("-"):
                 raise DelegateError("unknown_option", unknown_option_message("followup", token))
             handle = token
