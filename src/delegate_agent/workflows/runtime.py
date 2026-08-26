@@ -254,7 +254,11 @@ class WorkflowState:
             # script's own unwind logging must not clobber that back to "running", or
             # `workflow approve` sees nothing gated and the parked supervisor reads as dead.
             gate_key = status.get("gateKey") if isinstance(status, dict) else None
-            if isinstance(status, dict) and status.get("status") == "paused" and isinstance(gate_key, str):
+            if (
+                isinstance(status, dict)
+                and status.get("status") == "paused"
+                and isinstance(gate_key, str)
+            ):
                 self._write_status_locked(
                     status="paused",
                     last_event=event,
