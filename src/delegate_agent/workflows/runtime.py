@@ -120,6 +120,27 @@ def _child_result_from_payload(result: JsonObject, *, text: str | None) -> _Dele
     )
 
 
+def _session_id_from_child_output(output: object) -> str | None:
+    if isinstance(output, bytes):
+        text = output.decode("utf-8", errors="replace")
+    elif isinstance(output, str):
+        text = output
+    else:
+        return None
+    for line in text.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if (
+            isinstance(event, dict)
+            and event.get("type") == "thread.started"
+            and isinstance(event.get("thread_id"), str)
+        ):
+            return event["thread_id"]
+    return None
+
+
 def _cleanup_structured_retry_workspace(record: JsonObject | None) -> None:
     if record is None:
         return
@@ -1574,7 +1595,7 @@ class WorkflowDsl:
                 input_path,
             ]
             completed = _run_child_command(argv, cwd=str(self.state.workspace), timeout=timeout)
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
             cancel_workflow_agent_child(self.state.workspace, self.state.wf_id, workflow_agent_key)
             # key and label were both in scope here and neither was recorded, so
             # a timeout row said which engine died and not which task, and the
@@ -1599,6 +1620,20 @@ class WorkflowDsl:
                 self.state.wf_id,
                 workflow_agent_key,
             )
+            session_id = _session_id_from_child_output(exc.output)
+            if session_id is not None:
+                recovered = _DelegateChildResult(
+                    text=None,
+                    run_id=recovered.run_id if recovered is not None else None,
+                    execution_cwd=recovered.execution_cwd if recovered is not None else None,
+                    session_id=session_id,
+                    workspace_cleanup=(
+                        recovered.workspace_cleanup if recovered is not None else None
+                    ),
+                    isolation_backend=(
+                        recovered.isolation_backend if recovered is not None else None
+                    ),
+                )
             if return_metadata:
                 return recovered
             if recovered is not None:

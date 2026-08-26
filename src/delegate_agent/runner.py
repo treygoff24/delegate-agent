@@ -1859,6 +1859,7 @@ def _capture_tracked_process(
             line_buffer += chunk_text
             while "\n" in line_buffer:
                 line, line_buffer = line_buffer.split("\n", 1)
+                prior_session_id = accumulator.session_id
                 accumulator.ingest_line(line)
                 watchdog.observe_line(line, now=time.monotonic())
                 if accumulator.terminal_status is not None:
@@ -1870,6 +1871,7 @@ def _capture_tracked_process(
                 if (
                     lines_since_persist >= PROGRESS_PERSIST_LINE_INTERVAL
                     or elapsed >= PROGRESS_PERSIST_TIME_INTERVAL_SEC
+                    or accumulator.session_id != prior_session_id
                 ):
                     events_handle.flush()
                     maybe_persist_running()
