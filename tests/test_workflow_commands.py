@@ -16,13 +16,34 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from delegate_agent import (  # noqa: E402
+    request_build,
+    run_registry,
+    safe_workspace,
+    sandbox_bwrap,
+)
+from delegate_agent.isolation import build_isolation_context  # noqa: E402
+from delegate_agent.request_models import (  # noqa: E402
+    GlobalOptions,
+    ParsedCommand,
+    ResolvedWorkspace,
+    RunJsonOptions,
+)
 from delegate_agent.workflows import commands as workflow_commands  # noqa: E402
 from delegate_agent.workflows import registry as workflow_registry  # noqa: E402
 from delegate_agent.workflows import runtime as workflow_runtime  # noqa: E402
 from delegate_agent.workflows import schema as workflow_schema  # noqa: E402
-from delegate_agent import run_registry  # noqa: E402
 
 CLI = ROOT / "bin" / "delegate.py"
+
+
+def _argv_pairs(argv: list[str]) -> list[list[str]]:
+    pairs: list[list[str]] = []
+    for index, flag in enumerate(argv):
+        width = 3 if flag == "--ro-bind" else 2 if flag == "--tmpfs" else 0
+        if width:
+            pairs.append(argv[index : index + width])
+    return pairs
 
 
 class WorkflowCommandTests(unittest.TestCase):
@@ -2102,18 +2123,14 @@ class WorkflowCommandTests(unittest.TestCase):
             (self.workspace / ".delegate" / "index.json").read_text(encoding="utf-8")
         )
         owners = []
-        for run in json.loads(
-            self.run_delegate(["--json", "runs", "--group", wf_id]).stdout
-        )["runs"]:
+        for run in json.loads(self.run_delegate(["--json", "runs", "--group", wf_id]).stdout)[
+            "runs"
+        ]:
             run_id = run["runId"]
             manifest = json.loads(
-                (
-                    self.workspace
-                    / ".delegate"
-                    / "runs"
-                    / run_id
-                    / "manifest.json"
-                ).read_text(encoding="utf-8")
+                (self.workspace / ".delegate" / "runs" / run_id / "manifest.json").read_text(
+                    encoding="utf-8"
+                )
             )
             descriptor = manifest.get("temporaryWorkspaceCleanup")
             if descriptor is None:
@@ -2184,9 +2201,7 @@ class WorkflowCommandTests(unittest.TestCase):
             {"temporaryWorkspaceCleanup": descriptor},
         )
 
-        with mock.patch.object(
-            workflow_runtime, "_cleanup_structured_retry_workspace"
-        ) as cleanup:
+        with mock.patch.object(workflow_runtime, "_cleanup_structured_retry_workspace") as cleanup:
             workflow_runtime._cleanup_workflow_agent_run_workspace(self.workspace, "malformed")
             cleanup.assert_not_called()
             workflow_runtime._cleanup_workflow_agent_run_workspace(self.workspace, run_id)
@@ -3140,6 +3155,154 @@ class WorkflowCommandTests(unittest.TestCase):
             )
         self.assertEqual(result, {"ok": True})
         self.assertEqual(run_mock.call_args_list[1].kwargs["structured_retry_backend"], "bwrap")
+
+        source = self.workspace / "bwrap-source"
+        source.mkdir()
+        subprocess.run(["git", "init", "-q", str(source)], check=True)
+        (source / ".gitignore").write_text("secret.env\nignored-dir/\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(source), "add", ".gitignore"], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(source),
+                "-c",
+                "user.name=Delegate Tests",
+                "-c",
+                "user.email=delegate-tests@example.invalid",
+                "commit",
+                "-qm",
+                "base",
+            ],
+            check=True,
+        )
+        (source / "secret.env").write_text("hidden\n", encoding="utf-8")
+        (source / "ignored-dir").mkdir()
+        (source / "ignored-dir" / "nested.txt").write_text("hidden\n", encoding="utf-8")
+        config = json.loads(self.config_path.read_text(encoding="utf-8"))
+        config["isolation"] = {
+            "safeBackend": "bwrap",
+            "bwrapBinds": [{"path": str(self.home), "mode": "ro"}],
+        }
+        workspace = ResolvedWorkspace(str(source), "git")
+        initial_context = build_isolation_context(
+            source_workspace=str(source),
+            resolved_isolation="worktree",
+            engine="codex",
+            mode="safe",
+            source_git_root=str(source),
+            config=config,
+        )
+        initial_request = request_build.build_request(
+            "codex",
+            "safe",
+            None,
+            workspace,
+            "review safely",
+            config,
+            False,
+            isolation_context=initial_context,
+        )
+        run_registry_root = run_registry.ensure_registry(source, workspace_kind="git")
+        source_run_id, _source_alias = run_registry.register_run(
+            run_registry_root,
+            harness="codex",
+            metadata={
+                "engine": "codex",
+                "group": "wf-bwrap-context",
+                "workflowAgentKey": "bwrap-context-agent",
+                "executionCwd": str(source),
+            },
+        )
+        source_run_path = run_registry.run_directory(run_registry_root, source_run_id)
+        run_registry.write_json_atomic(
+            source_run_path / run_registry.MANIFEST_FILE,
+            {
+                "runId": source_run_id,
+                "engine": "codex",
+                "group": "wf-bwrap-context",
+                "workflowAgentKey": "bwrap-context-agent",
+                "executionCwd": str(source),
+                "workspaceKind": "git",
+                "isolationLifecycle": "temporary",
+                "isolationBackend": "bwrap",
+            },
+        )
+        run_registry.write_json_atomic(
+            source_run_path / run_registry.SNAPSHOT_FILE,
+            {"runId": source_run_id, "status": "succeeded"},
+        )
+        input_path = self.workspace / "bwrap-retry.json"
+        input_path.write_text(
+            json.dumps(
+                {
+                    "engine": "codex",
+                    "mode": "safe",
+                    "prompt": "retry safely",
+                    "cwd": str(source),
+                    "isolation": "worktree",
+                    "workflowAgentKey": "bwrap-context-agent",
+                    "structuredRetryWorkspace": True,
+                    "structuredRetryRunId": source_run_id,
+                    "structuredRetryBackend": "bwrap",
+                }
+            ),
+            encoding="utf-8",
+        )
+        parsed = ParsedCommand(
+            "run",
+            global_options=GlobalOptions(json_mode=True, group="wf-bwrap-context"),
+            run_json=RunJsonOptions(str(input_path)),
+        )
+        retry_request = request_build.request_from_input_json(
+            parsed,
+            config,
+            workspace=workspace,
+        )
+        with (
+            mock.patch.object(
+                safe_workspace, "ensure_bwrap_backend", return_value="/usr/bin/bwrap"
+            ),
+            mock.patch.object(safe_workspace, "_ensure_no_bwrap_symlink_leaks"),
+            safe_workspace.safe_isolated_request(
+                initial_request,
+                config=config,
+                env={"DELEGATE_SAFE_BACKEND": "bwrap"},
+            ) as initial_isolated,
+            safe_workspace.safe_isolated_request(
+                retry_request,
+                config=config,
+                env={"DELEGATE_SAFE_BACKEND": "bwrap"},
+            ) as retry_isolated,
+        ):
+            initial_sandbox = initial_isolated.isolation_context.sandbox
+            retry_sandbox = retry_isolated.isolation_context.sandbox
+
+        self.assertEqual(retry_sandbox, initial_sandbox)
+        self.assertIsNotNone(retry_sandbox)
+        masks = tuple(
+            sandbox_bwrap.Mask(path=item["path"], kind=item["kind"])
+            for item in retry_sandbox["masks"]
+        )
+        ro_binds = [item["path"] for item in retry_sandbox["binds"] if item["mode"] == "ro"]
+        sandbox_argv = sandbox_bwrap.wrap_engine_argv(
+            engine_argv=["/bin/true"],
+            cwd=str(source),
+            env={"HOME": str(self.home), "PATH": os.environ.get("PATH", "")},
+            engine="codex",
+            scratch_dir=str(self.workspace / "scratch"),
+            masks=masks,
+            extra_ro_roots=ro_binds,
+            bwrap_path="/usr/bin/bwrap",
+        )
+        self.assertIn(["--ro-bind", str(source), str(source)], _argv_pairs(sandbox_argv))
+        self.assertIn(["--tmpfs", "/tmp"], _argv_pairs(sandbox_argv))
+        self.assertIn(["--tmpfs", str(self.home)], _argv_pairs(sandbox_argv))
+        self.assertIn(
+            ["--ro-bind", "/dev/null", str(source / "secret.env")],
+            _argv_pairs(sandbox_argv),
+        )
+        self.assertIn(["--tmpfs", str(source / "ignored-dir")], _argv_pairs(sandbox_argv))
 
     def test_structured_retry_relaunches_in_previous_workspace_without_handle(self) -> None:
         root = self.workspace / "workflow-relaunch"
