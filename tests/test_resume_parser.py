@@ -57,8 +57,17 @@ class ResumeParserTests(unittest.TestCase):
         parsed_codex = parse_cli(["codex", "work", "--resumable", "implement feature"])
         self.assertTrue(parsed_codex.launch.resumable)
 
-        parsed_claude = parse_cli(["claude", "safe", "--resumable", "review code"])
+        parsed_claude = parse_cli(["claude", "work", "--resumable", "review code"])
         self.assertTrue(parsed_claude.launch.resumable)
+
+    def test_resumable_rejected_on_safe_mode(self):
+        for engine in ("codex", "claude"):
+            with self.subTest(engine=engine):
+                with self.assertRaises(DelegateError) as caught:
+                    parse_cli([engine, "safe", "--resumable", "review code"])
+                self.assertEqual(caught.exception.error, "invalid_option_combination")
+                self.assertIn("safe workspaces are temporary", caught.exception.message)
+                self.assertIn("no re-entry path", caught.exception.message)
 
     def test_resumable_rejected_on_call_mode(self):
         for engine in ("codex", "claude"):

@@ -59,6 +59,11 @@ class FollowupParserTests(unittest.TestCase):
         self.assertEqual(parsed.global_options.auth_profile, "work")
         self.assertEqual(parsed.global_options.group, "batch")
 
+    def test_followup_is_allowed_for_notify(self):
+        self.assertIn("followup", cli_parser.NOTIFY_SUBCOMMANDS)
+        parsed = parse_cli(["--notify", "room:ops", "followup", "run-1"])
+        self.assertEqual(parsed.global_options.notify, "room:ops")
+
     def test_followup_rejects_isolation(self):
         with self.assertRaises(DelegateError) as caught:
             parse_cli(["--isolation", "none", "followup", "run-1"])

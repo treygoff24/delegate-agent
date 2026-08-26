@@ -33,6 +33,7 @@ from delegate_agent.constants import (
     ENGINE_SUPPORTED_MODES,
     ENGINES_PROSE,
     KNOWN_ENGINES,
+    MODE_SAFE,
     MODELESS_ENGINES,
     VALID_MODES,
     WORKFLOW_DRY_RUN_HINT,
@@ -72,7 +73,7 @@ AUTH_PROFILE_SUBCOMMANDS = frozenset(KNOWN_ENGINES) | frozenset(
 GROUP_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 GROUP_SUBCOMMANDS = frozenset(KNOWN_ENGINES) | frozenset({"dry-run", "run", "resume", "followup"})
 NOTIFY_SUBCOMMANDS = frozenset(KNOWN_ENGINES) | frozenset(
-    {"droid", "dry-run", "run", "resume", "workflow"}
+    {"droid", "dry-run", "run", "resume", "followup", "workflow"}
 )
 
 
@@ -670,6 +671,7 @@ def parse_cli(argv: list[str]) -> ParsedCommand:
             completion_report=completion_report,
             auth_profile=auth_profile,
             group=group,
+            notify=notify,
         )
     if subcommand == "snapshot":
         return parse_snapshot(rest, json_mode, cwd)
@@ -1101,6 +1103,11 @@ def parse_modeless_engine(
         raise DelegateError(
             "invalid_option_combination",
             "--resumable is not supported with call mode; call runs execute in a throwaway workspace and cannot be followed up.",
+        )
+    if resumable and mode == MODE_SAFE:
+        raise DelegateError(
+            "invalid_option_combination",
+            "--resumable is not supported with safe mode; safe workspaces are temporary and a captured session would have no re-entry path.",
         )
     if resumable and engine not in {"codex", "claude"}:
         raise DelegateError(
@@ -1595,6 +1602,7 @@ def parse_followup(
     completion_report: str | None,
     auth_profile: str | None,
     group: str | None,
+    notify: str | None = None,
 ) -> ParsedCommand:
     """Parse ``followup [followup-options] <alias|runId> [--prompt-file PATH] [prompt...]``.
 
@@ -1659,6 +1667,7 @@ def parse_followup(
             completion_report=completion_report,
             auth_profile=auth_profile,
             group=group,
+            notify=notify,
         ),
         followup=FollowupOptions(
             handle=handle,
