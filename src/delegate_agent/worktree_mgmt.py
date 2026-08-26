@@ -254,6 +254,9 @@ def _retire_worktree_on_completion(ctx: object, completion_extra: JsonObject) ->
         )
         return
 
+    execution_cwd = record.get("executionCwd")
+    if isinstance(execution_cwd, str):
+        remove_empty_pool_parent(execution_cwd)
     completion_extra["worktreeRetired"] = True
     completion_extra["worktreeStatus"] = STATUS_REMOVED
     completion_extra["worktreeBranchPreserved"] = True
@@ -990,5 +993,6 @@ from delegate_agent.worktree_remove import (  # noqa: E402, F401  # re-exported
     _remove_present_worktree_path,
     _remove_worktree_path,
     _require_removal_metadata,
+    remove_empty_pool_parent,
     remove_worktree,
 )

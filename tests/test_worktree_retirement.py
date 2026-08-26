@@ -73,6 +73,8 @@ class WorktreeRetirementTests(ExecutionTestBase):
             self.assertIsNotNone(payload)
             self.assertTrue(payload["worktreeRetired"])
             self.assertFalse(self._worktree_paths(fake_home))
+            pool = Path(fake_home) / ".delegate" / "worktrees"
+            self.assertFalse(list(pool.iterdir()))
             run_path = Path(repo.name) / ".delegate" / "runs" / payload["runId"]
             state = json.loads((run_path / "state.json").read_text(encoding="utf-8"))
             snapshot = json.loads((run_path / "snapshot.json").read_text(encoding="utf-8"))

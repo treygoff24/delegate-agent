@@ -17,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from delegate_agent import run_registry, worktree_records
+from delegate_agent import isolation, run_registry, worktree_records
 from delegate_agent.git_utils import GIT_TIMEOUT_RETURN_CODE
 from delegate_agent.isolation import target_contains_source_root
 from delegate_agent.json_types import JsonObject
@@ -262,6 +262,20 @@ def _remove_worktree_path(
                 retry_safe=True,
             )
         )
+
+
+def remove_empty_pool_parent(execution_cwd: str) -> bool:
+    """Remove an empty Delegate fingerprint directory after path retirement."""
+
+    worktree = Path(execution_cwd)
+    parent = worktree.parent
+    if not isolation.is_pool_fingerprint_name(parent.name):
+        return False
+    try:
+        parent.rmdir()
+    except OSError:
+        return False
+    return True
 
 
 def _remove_branch_if_requested(
