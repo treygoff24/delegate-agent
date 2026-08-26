@@ -190,6 +190,20 @@ class FollowupRefusalsTests(unittest.TestCase):
         self.assertIn("th_valid12345", argv)
         self.assertNotIn("--ephemeral", argv)
 
+    def test_dry_run_preserves_notify_target(self):
+        _run_id, alias = self.write_test_run(
+            harness="codex",
+            mode="work",
+            status="succeeded",
+            harness_session_id="th_valid12345",
+        )
+        exit_code, stdout, _stderr = self.run_followup_cli(
+            ["--json", "--notify", "room:ops", "followup", "--dry-run", alias, "continue"]
+        )
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout)
+        self.assertEqual(payload["notify"]["target"], "room:ops")
+
     def test_happy_path_claude_dry_run(self):
         claude_session = "550e8400-e29b-41d4-a716-446655440000"
         _run_id, alias = self.write_test_run(

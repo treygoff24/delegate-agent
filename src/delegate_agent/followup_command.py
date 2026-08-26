@@ -380,6 +380,7 @@ def build_followup_plan(
             isolation=isolation,
             auth_profile=auth_profile,
             group=group,
+            notify=global_options.notify,
         ),
         launch=launch,
     )
