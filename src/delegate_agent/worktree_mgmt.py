@@ -195,6 +195,10 @@ def _retire_worktree_on_completion(ctx: object, completion_extra: JsonObject) ->
     if record is None:
         retain("record_missing")
         return
+    state = run_registry.load_run_state_or_none(ctx.registry_root, ctx.run_id)
+    if not isinstance(state, dict) or state.get("status") != run_registry.STATUS_SUCCEEDED:
+        retain("run_not_succeeded")
+        return
     status, status_warnings = detect_worktree_status(record)
     if status != STATUS_PRESENT:
         retain(
