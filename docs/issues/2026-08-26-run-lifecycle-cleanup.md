@@ -28,6 +28,8 @@ On work-lane completion, when the worktree is safe to retire (`fullyIntegrated: 
 
 Dirty or unmerged worktrees must never be deleted silently — report them in the completion payload as `worktreeRetained: <reason>` so an orchestrator can decide.
 
+**Critical design note, from the manual sweep of this incident:** raw `git status` dirtiness is a nearly useless retirement signal, because `dirty_source_auto_included` seeds every work-mode worktree with the source repo's uncommitted state at launch. Of 157 dead worktrees swept, **113 were "dirty" — almost all of it seeded source dirt** (the same modified briefs/docs mirrored into lane after lane), not child-created work, and those 113 held 43 GB that a status-based GC could never reclaim. Delegate already records `syncedFiles` at launch and `workSummary` at completion: retirement must compare end-state dirt against the seeded set and treat "dirty only by seeded, unmodified-since-sync files" as clean. External backstop reapers can't make this distinction — only delegate can.
+
 ### 2. Kill the child's process group at run end
 
 Launch child harnesses in their own session/process group (`setsid` / `start_new_session=True`), record the pgid in run metadata, and on run completion (success, failure, timeout, or supervisor exit) send SIGTERM to the group, escalating to SIGKILL after a grace period. A dev server the child started must not outlive the run. Platform note: needed on both macOS and Linux.
