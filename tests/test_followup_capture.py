@@ -209,6 +209,56 @@ class FollowupCaptureE2ETests(unittest.TestCase):
         resume_idx = followup_argv.index("--resume")
         self.assertEqual(followup_argv[resume_idx + 1], "550e8400-e29b-41d4-a716-446655440000")
 
+    def test_codex_expired_session_has_stable_followup_error(self):
+        exit_code, stdout, _stderr = self.run_delegate(
+            ["--json", "codex", "work", "--resumable", "initial task"]
+        )
+        self.assertEqual(exit_code, 0, stdout)
+        alias = json.loads(stdout)["alias"]
+        (self.bin_dir / "codex").write_text(
+            "#!/usr/bin/env python3\n"
+            "import json\n"
+            "print(json.dumps({'type': 'error', 'message': 'no thread with id: expired'}))\n"
+            "raise SystemExit(1)\n",
+            encoding="utf-8",
+        )
+        (self.bin_dir / "codex").chmod(0o755)
+
+        exit_code, stdout, _stderr = self.run_delegate(
+            ["--json", "followup", alias, "continue"]
+        )
+        self.assertEqual(exit_code, 1)
+        payload = json.loads(stdout)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"], "session_expired")
+        self.assertIn("relaunch with --resumable", payload["message"])
+        self.assertNotIn("no thread with id", payload["message"])
+
+    def test_claude_expired_session_has_stable_followup_error(self):
+        exit_code, stdout, _stderr = self.run_delegate(
+            ["--json", "claude", "work", "--resumable", "initial task"]
+        )
+        self.assertEqual(exit_code, 0, stdout)
+        alias = json.loads(stdout)["alias"]
+        (self.bin_dir / "claude").write_text(
+            "#!/usr/bin/env python3\n"
+            "import json\n"
+            "print(json.dumps({'type': 'error', 'message': 'Unknown session 550e8400-e29b-41d4-a716-446655440000'}))\n"
+            "raise SystemExit(1)\n",
+            encoding="utf-8",
+        )
+        (self.bin_dir / "claude").chmod(0o755)
+
+        exit_code, stdout, _stderr = self.run_delegate(
+            ["--json", "followup", alias, "continue"]
+        )
+        self.assertEqual(exit_code, 1)
+        payload = json.loads(stdout)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"], "session_expired")
+        self.assertIn("relaunch with --resumable", payload["message"])
+        self.assertNotIn("unknown session", payload["message"].lower())
+
 
 if __name__ == "__main__":
     unittest.main()

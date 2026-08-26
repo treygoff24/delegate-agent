@@ -2409,15 +2409,22 @@ def _finalize_tracked_run(
         else:
             for key in ("failureReason", "error", "message"):
                 merged_extra.pop(key, None)
+    signal_text = "\n".join(
+        part
+        for part in (stderr_tail, _accumulator_failure_signal_text(capture.accumulator))
+        if part
+    )
     failure = _failure_details(
         status=status,
-        signal_text="\n".join(
-            part
-            for part in (stderr_tail, _accumulator_failure_signal_text(capture.accumulator))
-            if part
-        ),
+        signal_text=signal_text,
         extra=merged_extra,
     )
+    if ctx.followup_of is not None:
+        session_failure = child_failures.classify_followup_session_failure(
+            signal_text, ctx.engine
+        )
+        if session_failure is not None:
+            failure = session_failure
     failure_reason = failure.code if failure is not None else None
     failure_message = failure.message if failure is not None else None
     if failure_reason is not None:
