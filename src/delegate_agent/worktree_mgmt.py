@@ -16,6 +16,7 @@ through this module so those patches keep taking effect.
 
 from __future__ import annotations
 
+import contextlib
 from contextlib import suppress
 from pathlib import Path
 
@@ -269,14 +270,15 @@ def retire_worktree_on_completion(ctx: object, completion_extra: JsonObject) -> 
     except Exception as exc:  # pragma: no cover - final safety net for run completion
         completion_extra["worktreeRetained"] = "cleanup_failed"
         completion_extra["worktreeRetentionError"] = str(exc)
-        _persist_completion_worktree_fields(
-            ctx,
-            {
-                "worktreeStatus": STATUS_PRESENT,
-                "worktreeRetained": "cleanup_failed",
-                "worktreeRetentionError": str(exc),
-            },
-        )
+        with contextlib.suppress(Exception):
+            _persist_completion_worktree_fields(
+                ctx,
+                {
+                    "worktreeStatus": STATUS_PRESENT,
+                    "worktreeRetained": "cleanup_failed",
+                    "worktreeRetentionError": str(exc),
+                },
+            )
 
 
 def _branch_ref(branch: str) -> str:
