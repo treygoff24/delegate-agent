@@ -153,7 +153,9 @@ delegate worktree show --latest cursor
 created by the child (`commitsCreatedCount` and `commitsCreated`). It is present
 on `worktree show` and run completion payloads when Delegate can inspect the
 persistent worktree; `worktree list` keeps this deep summary out of overview
-entries for responsiveness.
+entries for responsiveness. Completion summaries also expose
+`rawChangedFilesCount` and `seededOnlyChanges` so an orchestrator can tell when
+the raw Git status consisted only of unchanged source dirt copied at launch.
 
 ### Integration state semantics
 
