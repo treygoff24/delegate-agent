@@ -3581,7 +3581,7 @@ def _kill_process_group(pgid: int, sig: signal.Signals) -> None:
     safe_pgid = _safe_process_group_id(pgid)
     if safe_pgid is None:
         return
-    with contextlib.suppress(ProcessLookupError):
+    with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(safe_pgid, sig)
 
 
