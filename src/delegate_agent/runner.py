@@ -578,6 +578,11 @@ def persist_progress(
             cancel_requested_at = current.get("cancelRequestedAt")
             if isinstance(cancel_requested_at, str):
                 persisted_extra["cancelRequestedAt"] = cancel_requested_at
+        persisted_pgid = pgid
+        if persisted_pgid is None and isinstance(current, dict):
+            current_pgid = current.get("pgid")
+            if isinstance(current_pgid, int) and not isinstance(current_pgid, bool):
+                persisted_pgid = current_pgid
         write_state(
             run_path,
             build_state(
@@ -588,7 +593,7 @@ def persist_progress(
                 stderr_bytes=stderr_bytes,
                 current=accumulator.current,
                 pid=pid,
-                pgid=pgid,
+                pgid=persisted_pgid,
                 extra=persisted_extra or None,
             ),
         )
@@ -1304,6 +1309,7 @@ class TrackedCaptureResult:
     output_limit_bytes: int | None = None
     stopped_after_completion: bool = False
     stall: JsonObject | None = None
+    process_group_survived: bool = False
 
 
 @dataclass(frozen=True)
@@ -1971,6 +1977,7 @@ def _capture_tracked_process(
                     process,
                     pgid=pgid,
                     grace_seconds=process_group_grace_seconds,
+                    identity_ctx=ctx,
                 )
                 output_limited = True
                 exit_code = 1
@@ -1983,6 +1990,7 @@ def _capture_tracked_process(
                             process,
                             pgid=pgid,
                             grace_seconds=process_group_grace_seconds,
+                            identity_ctx=ctx,
                         )
                         stopped_after_completion = True
                     exit_code = 0 if accumulator.terminal_status == "succeeded" else 1
@@ -1992,6 +2000,7 @@ def _capture_tracked_process(
                     process,
                     pgid=pgid,
                     grace_seconds=process_group_grace_seconds,
+                    identity_ctx=ctx,
                 )
                 timed_out = True
                 exit_code = 1
@@ -2009,6 +2018,7 @@ def _capture_tracked_process(
                         process,
                         pgid=pgid,
                         grace_seconds=process_group_grace_seconds,
+                        identity_ctx=ctx,
                     )
                     exit_code = 1
                     break
@@ -2047,6 +2057,7 @@ def _capture_tracked_process(
             process,
             pgid=pgid,
             grace_seconds=process_group_grace_seconds,
+            identity_ctx=ctx,
         )
         _cleanup_tracked_process_streams(
             process,
@@ -2309,6 +2320,8 @@ def _finalize_tracked_run(
     }
     if capture.pgid is not None:
         merged_extra["pgid"] = capture.pgid
+    if capture.process_group_survived:
+        merged_extra["processGroupSurvived"] = True
     terminal_extra = _terminal_override_extra(capture.accumulator)
     if terminal_extra:
         merged_extra = {**merged_extra, **terminal_extra}
@@ -2831,6 +2844,7 @@ def _run_single_tracked_attempt(
                     process,
                     pgid=process_pgid,
                     grace_seconds=grace_seconds,
+                    identity_ctx=ctx,
                 )
                 raise
     if boundary_exc is not None:
@@ -2843,8 +2857,9 @@ def _run_single_tracked_attempt(
         _record_tracked_launch_failure(files, ctx, error, prior_capture=prior_capture)
         raise error from exc
     assert process is not None
+    capture: TrackedCaptureResult | None = None
     try:
-        return _capture_tracked_process(
+        capture = _capture_tracked_process(
             process,
             files,
             ctx,
@@ -2865,11 +2880,17 @@ def _run_single_tracked_attempt(
         # alive. This second, unconditional pass handles normal exits, failed
         # exits, retries, and unexpected capture exceptions where grandchildren
         # can remain in the recorded group after the leader was reaped.
-        _terminate_call_process(
+        group_exited = _terminate_call_process(
             process,
             pgid=process_pgid,
             grace_seconds=grace_seconds,
+            identity_ctx=ctx,
         )
+    if capture is None:  # pragma: no cover - the try block either returns or raises
+        raise AssertionError("tracked capture did not produce a result")
+    if not group_exited:
+        capture = replace(capture, process_group_survived=True)
+    return capture
 
 
 def _merge_tracked_attempt_captures(
@@ -2911,6 +2932,9 @@ def _merge_tracked_attempt_captures(
         ),
         mail_push_failure_reason=(
             current_capture.mail_push_failure_reason or prior_capture.mail_push_failure_reason
+        ),
+        process_group_survived=(
+            prior_capture.process_group_survived or current_capture.process_group_survived
         ),
     )
 
@@ -3583,6 +3607,24 @@ def _process_group_for_process(
     return pid
 
 
+def _process_identity_matches(ctx: RunContext, pid: int) -> bool:
+    """Return whether a reaped tracked leader still belongs to this run."""
+
+    # Keep the cancel and completion paths on the same PID-reuse guard. Import
+    # lazily so the runner does not make the command module part of its import
+    # cycle during CLI startup.
+    from delegate_agent import wait_cancel_commands
+
+    target = run_registry.RunTarget(run_id=ctx.run_id, alias=ctx.alias)
+    try:
+        wait_cancel_commands._check_pid_identity(ctx.registry_root, target, pid)
+    except wait_cancel_commands.WaitCancelError as exc:
+        if exc.error == "pid_identity_mismatch":
+            return False
+        raise
+    return True
+
+
 def _kill_process_group(pgid: int, sig: signal.Signals) -> None:
     safe_pgid = _safe_process_group_id(pgid)
     if safe_pgid is None:
@@ -3614,23 +3656,30 @@ def _terminate_call_process(
     *,
     pgid: int | None = None,
     grace_seconds: float = PROCESS_GROUP_TERMINATION_GRACE_SEC,
-) -> None:
+    identity_ctx: RunContext | None = None,
+) -> bool:
     """Terminate a child process group, tolerating reaped leaders and ESRCH."""
     if pgid is None:
         pgid = _process_group_for_process(process)
     safe_pgid = _safe_process_group_id(pgid)
     if safe_pgid is None:
-        return
+        return True
+    if (
+        identity_ctx is not None
+        and process.poll() is not None
+        and not _process_identity_matches(identity_ctx, process.pid)
+    ):
+        return True
     grace = max(float(grace_seconds), 0.0)
     _kill_process_group(safe_pgid, signal.SIGTERM)
     with contextlib.suppress(subprocess.TimeoutExpired):
         process.wait(timeout=grace)
     if _wait_for_process_group_exit(safe_pgid, grace):
-        return
+        return True
     _kill_process_group(safe_pgid, signal.SIGKILL)
     with contextlib.suppress(subprocess.TimeoutExpired):
         process.wait(timeout=PROCESS_GROUP_KILL_WAIT_SEC)
-    _wait_for_process_group_exit(safe_pgid, PROCESS_GROUP_KILL_WAIT_SEC)
+    return _wait_for_process_group_exit(safe_pgid, PROCESS_GROUP_KILL_WAIT_SEC)
 
 
 def _bounded_call_communicate(

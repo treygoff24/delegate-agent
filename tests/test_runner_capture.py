@@ -928,6 +928,47 @@ class RunnerCaptureTests(unittest.TestCase):
             self.assertTrue(snapshot["cancelRequested"])
             self.assertEqual(snapshot["cancelRequestedAt"], requested_at)
 
+    def test_progress_persist_preserves_last_known_pgid_when_leader_is_gone(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            run_path = self.registry.run_directory(root, run_id)
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at=self.registry.utc_now_iso(),
+            )
+            accumulator = self.runner.harness_events.StreamAccumulator(harness="codex")
+            self.runner.persist_progress(
+                run_path,
+                ctx,
+                accumulator,
+                status="running",
+                pid=4242,
+                pgid=4343,
+            )
+
+            with mock.patch.object(self.runner.os, "getpgid", side_effect=ProcessLookupError):
+                self.runner.persist_progress(
+                    run_path,
+                    ctx,
+                    accumulator,
+                    status="running",
+                    pid=4242,
+                )
+
+            state = json.loads((run_path / self.registry.STATE_FILE).read_text(encoding="utf-8"))
+            self.assertEqual(state["pgid"], 4343)
+
     def test_progress_persist_never_downgrades_terminal_state_or_snapshot(self):
         with tempfile.TemporaryDirectory() as workspace:
             root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
@@ -4750,6 +4791,58 @@ class RunnerCaptureTests(unittest.TestCase):
             [call.args for call in kill_group.call_args_list],
             [(4242, signal.SIGTERM), (4242, signal.SIGKILL)],
         )
+
+    def test_process_group_survivor_is_reported_after_sigkill_bound(self):
+        process = mock.Mock()
+        process.pid = 4244
+        with (
+            mock.patch.object(self.runner, "_kill_process_group") as kill_group,
+            mock.patch.object(
+                self.runner,
+                "_wait_for_process_group_exit",
+                side_effect=[False, False],
+            ),
+        ):
+            exited = self.runner._terminate_call_process(process, pgid=4244, grace_seconds=0)
+        self.assertFalse(exited)
+        self.assertEqual(
+            [call.args for call in kill_group.call_args_list],
+            [(4244, signal.SIGTERM), (4244, signal.SIGKILL)],
+        )
+
+    def test_reaped_completion_process_identity_mismatch_sends_no_signal(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
+            run_id, alias = self.registry.register_run(root, harness="codex")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="codex",
+                engine="codex",
+                mode="safe",
+                model=None,
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="directory",
+                isolated_workspace=False,
+                started_at=self.registry.utc_now_iso(),
+            )
+            process = mock.Mock()
+            process.pid = 4245
+            process.poll.return_value = 0
+            with (
+                mock.patch.object(self.runner, "_process_identity_matches", return_value=False),
+                mock.patch.object(self.runner, "_kill_process_group") as kill_group,
+            ):
+                exited = self.runner._terminate_call_process(
+                    process,
+                    pgid=4245,
+                    grace_seconds=0,
+                    identity_ctx=ctx,
+                )
+            self.assertTrue(exited)
+            kill_group.assert_not_called()
 
     def test_process_group_termination_tolerates_esrch(self):
         process = mock.Mock()
