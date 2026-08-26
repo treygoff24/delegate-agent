@@ -229,6 +229,11 @@ def _validate_literal_judge_efforts(tree: ast.AST) -> None:
             continue
         _validate_literal_effort(_literal_keyword(node, "effort"))
         engines = _literal_keyword(node, "engines")
+        if engines is None and len(node.args) >= 3:
+            try:
+                engines = ast.literal_eval(node.args[2])
+            except (ValueError, TypeError):
+                engines = None
         if not isinstance(engines, list):
             continue
         for item in engines:
