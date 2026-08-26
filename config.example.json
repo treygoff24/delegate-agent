@@ -120,6 +120,7 @@
   "worktrees": {
     "dataHome": null,
     "poolWarnCount": 20,
+    "retireWorktreeOnCompletion": true,
     "autoPrune": {
       "enabled": false,
       "mergedOlderThanDays": 7

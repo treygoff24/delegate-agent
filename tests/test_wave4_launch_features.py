@@ -71,9 +71,8 @@ class Wave4LaunchFeatureTests(ExecutionTestBase):
                 # empty call now reports failed/empty_result by design.
                 "printf 'env probe ok\\n'\n",
             )
-            config_path = self.write_config(
-                self.config_with_cursor(agent, data_home=str(Path(fake_home) / "worktrees"))
-            )
+            config = self.config_with_cursor(agent, data_home=str(Path(fake_home) / "worktrees"))
+            config_path = self.write_config(config)
 
             with mock.patch.dict(
                 os.environ,
@@ -138,9 +137,11 @@ class Wave4LaunchFeatureTests(ExecutionTestBase):
             os.symlink(outside, repo_path / "external-link")
 
             agent = self.write_executable("agent", "exit 0\n")
-            config_path = self.write_config(
-                self.config_with_cursor(agent, data_home=str(Path(fake_home) / "worktrees"))
-            )
+            config = self.config_with_cursor(agent, data_home=str(Path(fake_home) / "worktrees"))
+            # This test inspects the realized seeded files after completion;
+            # opt out of lifecycle retirement for that inspection.
+            config["worktrees"]["retireWorktreeOnCompletion"] = False
+            config_path = self.write_config(config)
             stdout = io.StringIO()
             stderr = io.StringIO()
             original_sync = safe_workspace.sync_git_dirty_snapshot

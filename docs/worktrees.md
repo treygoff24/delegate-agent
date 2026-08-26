@@ -42,6 +42,17 @@ Gitignored files remain excluded. External symlinks are blocked with the same
 protections used by Delegate's safe-mode workspace sync. The completion payload
 reports `includeDirty: true` and `syncedFiles`.
 
+By default, a successful work-lane run retires its persistent worktree when the
+end-state is clean. Failed or cancelled runs are retained for inspection.
+Source dirt copied into the worktree at launch is compared
+by content against a launch digest, so unchanged seeded files do not block
+retirement while a child edit to a seeded file does. The `delegate/*` branch is
+kept as the durable artifact. Dirty, unverifiable, or unsafe worktrees remain
+on disk and the completion JSON includes `worktreeRetained` with a reason. Set
+`worktrees.retireWorktreeOnCompletion` to `false` to preserve the previous
+manual-cleanup behavior. If `worktrees.autoPrune.enabled` is true, its existing
+merged-and-age-filtered pass also runs at completion.
+
 A few boundaries are worth stating explicitly:
 
 - **Tracked-but-gitignored files sync by design.** A path that is tracked in
@@ -142,7 +153,9 @@ delegate worktree show --latest cursor
 created by the child (`commitsCreatedCount` and `commitsCreated`). It is present
 on `worktree show` and run completion payloads when Delegate can inspect the
 persistent worktree; `worktree list` keeps this deep summary out of overview
-entries for responsiveness.
+entries for responsiveness. Completion summaries also expose
+`rawChangedFilesCount` and `seededOnlyChanges` so an orchestrator can tell when
+the raw Git status consisted only of unchanged source dirt copied at launch.
 
 ### Integration state semantics
 

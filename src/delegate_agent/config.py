@@ -170,6 +170,7 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
     "worktrees": {
         "dataHome": None,
         "poolWarnCount": 20,
+        "retireWorktreeOnCompletion": True,
         "autoPrune": {
             "enabled": False,
             "mergedOlderThanDays": 7,
@@ -498,6 +499,13 @@ def _validate_worktrees_section(worktrees: JsonValue) -> None:
             path="worktrees.poolWarnCount",
             error="invalid_worktrees_config",
         )
+    if "retireWorktreeOnCompletion" in worktrees:
+        retire = worktrees["retireWorktreeOnCompletion"]
+        if not isinstance(retire, bool):
+            raise ConfigError(
+                "invalid_worktrees_config",
+                "worktrees.retireWorktreeOnCompletion must be a boolean.",
+            )
     auto_prune = worktrees.get("autoPrune")
     if auto_prune is not None:
         if not isinstance(auto_prune, dict):
@@ -1567,6 +1575,27 @@ def completion_report_default_mode(config: JsonObject) -> str:
         return COMPLETION_REPORT_MODE_MARKDOWN
     mode = completion.get("defaultMode", COMPLETION_REPORT_MODE_MARKDOWN)
     return mode if mode in COMPLETION_REPORT_MODES else COMPLETION_REPORT_MODE_MARKDOWN
+
+
+def retire_worktree_on_completion(config: JsonObject) -> bool:
+    """Return whether completed persistent worktrees should be retired."""
+
+    worktrees = config.get("worktrees")
+    if not isinstance(worktrees, dict):
+        return True
+    value = worktrees.get("retireWorktreeOnCompletion", True)
+    return value if isinstance(value, bool) else True
+
+
+def worktree_auto_prune_settings(config: JsonObject) -> tuple[bool, int]:
+    """Return completion-time auto-prune settings (enabled, age threshold)."""
+
+    worktrees = config.get("worktrees")
+    auto = worktrees.get("autoPrune") if isinstance(worktrees, dict) else None
+    if not isinstance(auto, dict) or auto.get("enabled") is not True:
+        return False, 7
+    days = auto.get("mergedOlderThanDays", 7)
+    return True, days if is_non_negative_int(days) else 7
 
 
 def harness_binary(config: JsonObject, engine: str) -> str:

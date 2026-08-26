@@ -751,6 +751,7 @@ for the full boundary and fail-closed conditions.
   "worktrees": {
     "dataHome": null,
     "poolWarnCount": 20,
+    "retireWorktreeOnCompletion": true,
     "autoPrune": {
       "enabled": false,
       "mergedOlderThanDays": 7
@@ -761,7 +762,8 @@ for the full boundary and fail-closed conditions.
 
 - `dataHome`: persistent-worktree root. `null` means `~/.delegate/worktrees`.
 - `poolWarnCount`: non-negative worktree-count threshold for a launch-time warning when the shared persistent-worktree pool holds more worktrees. The default is 20. The warning does not block or delete anything.
-- `autoPrune.enabled`: if true, `delegate worktree list` opportunistically prunes clean, fully merged worktrees older than `mergedOlderThanDays`.
+- `retireWorktreeOnCompletion`: when true (the default), a successful work-lane run retires its clean persistent worktree while preserving the `delegate/*` branch. Unchanged source dirt seeded at launch is treated as clean; failed/cancelled runs, child edits, unverifiable state, and unsafe metadata retain the worktree and are reported in the completion payload. Set false to keep manual cleanup behavior.
+- `autoPrune.enabled`: if true, `delegate worktree list` and work-lane completion run the existing opportunistic prune pass for clean, fully merged worktrees older than `mergedOlderThanDays`.
 - `autoPrune.mergedOlderThanDays`: non-negative integer.
 
 See [Worktrees](worktrees.md) for lifecycle details.

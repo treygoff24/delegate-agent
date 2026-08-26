@@ -16,6 +16,7 @@ from delegate_agent import (
     run_metadata,
     run_registry,
     safe_workspace,
+    worktree_records,
 )
 from delegate_agent import runner as delegate_runner
 from delegate_agent.argv_utils import public_argv, replace_workspace_arg_in_argv
@@ -257,6 +258,9 @@ def _build_persistent_worktree_run_context(
 ) -> delegate_runner.RunContext:
     request = execution.request
     iso_ctx = preflight.iso_ctx
+    auto_prune_enabled, auto_prune_days = delegate_config.worktree_auto_prune_settings(
+        execution.config
+    )
     dirty_warnings = creation_context.get("includeDirtyWarnings")
     merged_warnings = (
         (*request.warnings, *[w for w in dirty_warnings if isinstance(w, str)])
@@ -323,6 +327,11 @@ def _build_persistent_worktree_run_context(
         codex_fallback_failover_identity=request.codex_fallback_failover_identity,
         include_dirty=bool(creation_context.get("includeDirty")),
         synced_files=int(creation_context.get("syncedFiles") or 0),
+        retire_worktree_on_completion=delegate_config.retire_worktree_on_completion(
+            execution.config
+        ),
+        worktree_auto_prune_on_completion=auto_prune_enabled,
+        worktree_auto_prune_merged_older_than_days=auto_prune_days,
         mail_push=request.mail_push,
         group=request.group,
         notify=request.notify,
@@ -537,6 +546,16 @@ def _create_persistent_worktree_or_record_failure(
             )
             registration.creation_context["includeDirty"] = True
             registration.creation_context["syncedFiles"] = synced_files
+            seeded_paths = (
+                *preflight.dirty_snapshot.diff_names,
+                *preflight.dirty_snapshot.untracked_names,
+            )
+            registration.creation_context[worktree_records.SYNCED_FILE_DIGESTS_KEY] = (
+                worktree_records.capture_file_content_digests(
+                    registration.worktree_path,
+                    seeded_paths,
+                )
+            )
             sync_warnings = list(warnings)
             if auto_include_dirty:
                 sync_warnings.insert(
@@ -803,11 +822,13 @@ def _launch_child_in_persistent_worktree(
             getattr(exc, "exit_code", 2),
         ) from exc
 
-    run_registry.set_worktree_status(
-        preflight.registry_root,
-        registration.run_id,
-        "present",
-    )
+    state = run_registry.load_run_state_or_none(preflight.registry_root, registration.run_id)
+    if not isinstance(state, dict) or state.get("worktreeStatus") != "removed":
+        run_registry.set_worktree_status(
+            preflight.registry_root,
+            registration.run_id,
+            "present",
+        )
 
     return exit_code, payload
 
