@@ -1579,6 +1579,8 @@ class WorkflowDsl:
                         )
                     except BaseException:
                         _cleanup_structured_retry_workspace(workspace_cleanup)
+                        if first_child_run_id is not None:
+                            self._release_structured_retry_worktree(first_child_run_id)
                         raise
                 finally:
                     Path(schema_path).unlink(missing_ok=True)
@@ -1615,6 +1617,8 @@ class WorkflowDsl:
                     )
                 except BaseException:
                     _cleanup_structured_retry_workspace(workspace_cleanup)
+                    if first_child_run_id is not None:
+                        self._release_structured_retry_worktree(first_child_run_id)
                     raise
             child = _delegate_child_result(raw_child)
             if first_child_run_id is None:
@@ -1623,6 +1627,8 @@ class WorkflowDsl:
                 if workspace_cleanup is not None and child.workspace_cleanup != workspace_cleanup:
                     _cleanup_structured_retry_workspace(child.workspace_cleanup)
                     _cleanup_structured_retry_workspace(workspace_cleanup)
+                    if first_child_run_id is not None:
+                        self._release_structured_retry_worktree(first_child_run_id)
                     raise RuntimeError("structured retry workspace cleanup metadata changed")
                 workspace_cleanup = child.workspace_cleanup
             if child.isolation_backend == "bwrap":
