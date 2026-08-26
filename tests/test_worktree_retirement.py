@@ -171,6 +171,35 @@ class WorktreeRetirementTests(ExecutionTestBase):
             self.assertEqual(payload["worktreeRetained"], "dirty")
             self.assertTrue(self._worktree_paths(fake_home))
 
+    def test_seeded_tracked_deletion_unchanged_since_sync_is_clean(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            repo, _ = self._make_git_repo_with_commit()
+            tracked = Path(repo.name) / "tracked.txt"
+            tracked.write_text("tracked\n", encoding="utf-8")
+            subprocess.run(["git", "-C", repo.name, "add", "tracked.txt"], check=True)
+            subprocess.run(
+                ["git", "-C", repo.name, "commit", "-m", "tracked"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            tracked.unlink()
+            agent = self._clean_agent()
+            config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+            code, payload = self._run_cursor(
+                repo.name,
+                config,
+                agent=agent,
+                env={
+                    "HOME": fake_home,
+                    "PATH": str(agent.parent) + os.pathsep + os.environ["PATH"],
+                },
+            )
+
+            self.assertEqual(code, 0)
+            self.assertTrue(payload["worktreeRetired"])
+            self.assertFalse(self._worktree_paths(fake_home))
+
     def test_config_off_preserves_clean_worktree(self):
         with tempfile.TemporaryDirectory() as fake_home:
             repo, _ = self._make_git_repo_with_commit()

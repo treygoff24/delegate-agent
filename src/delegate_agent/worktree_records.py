@@ -85,6 +85,8 @@ def file_content_digest(root: str | Path, relative_path: str) -> str | None:
             return f"file:{digest.hexdigest()}"
         else:
             return None
+    except FileNotFoundError:
+        return "missing"
     except (OSError, ValueError):
         return None
     return f"symlink:{hashlib.sha256(data).hexdigest()}"
