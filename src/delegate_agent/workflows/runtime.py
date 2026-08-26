@@ -188,6 +188,8 @@ def _workflow_agent_run_result_metadata(
 
 
 def _cleanup_workflow_agent_run_workspace(workspace: Path, run_id: str) -> None:
+    if not run_registry.RUN_ID_RE.fullmatch(run_id):
+        return
     root = _run_registry_root(workspace)
     snapshot = run_registry.load_run_snapshot_or_none(root, run_id)
     if not isinstance(snapshot, dict):
