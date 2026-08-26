@@ -275,8 +275,12 @@ class MailPushSeamTests(CommandTestBase):
         observations = root / "observations.jsonl"
         primary = self._write_codex_home(root, "primary-codex", self.credential_canary)
         fake = self._write_fake_harness(root)
+        config = self._config(engine, fake, observations, primary_home=primary)
+        # This helper exercises mail/attachment lifecycle after the owner exits;
+        # keep the owner worktree so the resume target remains available.
+        config["worktrees"]["retireWorktreeOnCompletion"] = False
         Path(self._config_env["DELEGATE_CONFIG"]).write_text(
-            json.dumps(self._config(engine, fake, observations, primary_home=primary)),
+            json.dumps(config),
             encoding="utf-8",
         )
         self._launch_baselines[workspace] = self._file_snapshot(root)
