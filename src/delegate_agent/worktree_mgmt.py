@@ -98,17 +98,14 @@ def _effective_dirty_for_retirement(
     lines, total, warnings = porcelain_status(execution_cwd)
     if lines is None or total is None:
         return None, [], warnings
-    entries, raw_total = worktree_summary.changed_files_from_porcelain_lines(lines, total)
-    effective, effective_total, _ = worktree_summary.effective_changed_files(
-        entries,
+    effective, effective_total, _ = worktree_summary.effective_changed_files_from_porcelain_lines(
+        lines,
         execution_cwd=execution_cwd,
         creation_context=record.get("creationContext")
         if isinstance(record.get("creationContext"), dict)
         else None,
-        raw_total=raw_total,
+        total=total,
     )
-    if raw_total > len(entries):
-        effective_total = max(effective_total, raw_total - len(entries))
     return effective_total > 0, [str(item.get("path")) for item in effective], warnings
 
 
@@ -200,6 +197,9 @@ def _retire_worktree_on_completion(ctx: object, completion_extra: JsonObject) ->
     state = run_registry.load_run_state_or_none(ctx.registry_root, ctx.run_id)
     if not isinstance(state, dict) or state.get("status") != run_registry.STATUS_SUCCEEDED:
         retain("run_not_succeeded")
+        return
+    if completion_extra.get("processGroupSurvived") is True:
+        retain("process_group_survived")
         return
     status, status_warnings = detect_worktree_status(record)
     if status != STATUS_PRESENT:
@@ -620,7 +620,7 @@ def decorate_record(
         output["_porcelainStatusWarnings"] = dirty_warnings
     if include_work_summary and status in (STATUS_PRESENT, STATUS_UNKNOWN):
         prefetched_changed_files = (
-            worktree_summary.changed_files_from_porcelain_lines(
+            worktree_summary.all_changed_files_from_porcelain_lines(
                 dirty_paths,
                 dirty_total if isinstance(dirty_total, int) else len(dirty_paths),
             )

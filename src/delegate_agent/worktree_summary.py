@@ -55,7 +55,7 @@ def _changed_files(execution_cwd: str, warnings: list[str]) -> tuple[list[JsonOb
     if stdout is None:
         return [], 0
     lines = stdout.splitlines()
-    return changed_files_from_porcelain_lines(lines)
+    return all_changed_files_from_porcelain_lines(lines)
 
 
 def changed_files_from_porcelain_lines(
@@ -66,6 +66,15 @@ def changed_files_from_porcelain_lines(
         [_parse_porcelain_line(line) for line in lines[:MAX_CHANGED_FILES_REPORTED]],
         len(lines) if total is None else total,
     )
+
+
+def all_changed_files_from_porcelain_lines(
+    lines: list[str],
+    total: int | None = None,
+) -> tuple[list[JsonObject], int]:
+    """Parse every porcelain entry before any display/reporting cap is applied."""
+
+    return [_parse_porcelain_line(line) for line in lines], len(lines) if total is None else total
 
 
 def effective_changed_files_from_porcelain_lines(
@@ -248,7 +257,9 @@ def build_work_summary(
         raw_total=changed_total,
     )
     # When the caller supplied a truncated prefetch, retain the raw total for
-    # reporting but do not claim that all unseen paths were seeded-clean.
+    # reporting but do not claim that all unseen paths were seeded-clean. Normal
+    # callers pass every porcelain entry; the cap is applied only to the
+    # effective list returned above.
     if raw_total > len(changed_files):
         effective_total = max(effective_total, raw_total - len(changed_files))
     dirty = effective_total > 0

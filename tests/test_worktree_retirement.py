@@ -171,6 +171,139 @@ class WorktreeRetirementTests(ExecutionTestBase):
             self.assertEqual(payload["worktreeRetained"], "dirty")
             self.assertTrue(self._worktree_paths(fake_home))
 
+    def test_more_than_50_seeded_files_unchanged_are_still_retired(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            repo, _ = self._make_git_repo_with_commit()
+            for idx in range(51):
+                (Path(repo.name) / f"seeded-{idx:02d}.txt").write_text(
+                    f"seeded {idx}\n", encoding="utf-8"
+                )
+            config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+            code, payload = self._run_cursor(
+                repo.name,
+                config,
+                agent=self._clean_agent(),
+                env={
+                    "HOME": fake_home,
+                    "PATH": str(Path(repo.name).parent) + os.pathsep + os.environ["PATH"],
+                },
+            )
+
+            self.assertEqual(code, 0)
+            self.assertTrue(payload["worktreeRetired"])
+            self.assertEqual(payload["workSummary"]["changedFilesCount"], 0)
+            self.assertTrue(payload["workSummary"]["seededOnlyChanges"])
+            self.assertFalse(self._worktree_paths(fake_home))
+
+    def test_50_seeded_files_plus_child_file_are_retained_and_name_child(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            repo, _ = self._make_git_repo_with_commit()
+            for idx in range(50):
+                (Path(repo.name) / f"seeded-{idx:02d}.txt").write_text(
+                    f"seeded {idx}\n", encoding="utf-8"
+                )
+            agent = self._clean_agent()
+            agent.write_text(
+                "#!/usr/bin/env bash\nprintf 'child dirt\\n' > child-created.txt\nprintf 'done\\n'\n",
+                encoding="utf-8",
+            )
+            agent.chmod(0o755)
+            config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+            code, payload = self._run_cursor(
+                repo.name,
+                config,
+                agent=agent,
+                env={
+                    "HOME": fake_home,
+                    "PATH": str(agent.parent) + os.pathsep + os.environ["PATH"],
+                },
+            )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(payload["worktreeRetained"], "dirty")
+            self.assertIn("child-created.txt", payload["worktreeRetentionPaths"])
+            self.assertTrue(self._worktree_paths(fake_home))
+
+    def test_failed_run_retains_worktree_as_not_succeeded(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            repo, _ = self._make_git_repo_with_commit()
+            agent = self._clean_agent()
+            agent.write_text("#!/usr/bin/env bash\nexit 7\n", encoding="utf-8")
+            agent.chmod(0o755)
+            config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+            code, payload = self._run_cursor(
+                repo.name,
+                config,
+                agent=agent,
+                env={
+                    "HOME": fake_home,
+                    "PATH": str(agent.parent) + os.pathsep + os.environ["PATH"],
+                },
+            )
+
+            self.assertNotEqual(code, 0)
+            self.assertEqual(payload["status"], "failed")
+            self.assertEqual(payload["worktreeRetained"], "run_not_succeeded")
+            self.assertTrue(self._worktree_paths(fake_home))
+
+    def test_cancelled_run_retains_worktree_as_not_succeeded(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            repo, _ = self._make_git_repo_with_commit()
+            agent = self._clean_agent()
+            agent.write_text(
+                "#!/usr/bin/env bash\nprintf '%s\\n' '{\"type\":\"turn.cancelled\"}'\n",
+                encoding="utf-8",
+            )
+            agent.chmod(0o755)
+            config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+            code, payload = self._run_cursor(
+                repo.name,
+                config,
+                agent=agent,
+                env={
+                    "HOME": fake_home,
+                    "PATH": str(agent.parent) + os.pathsep + os.environ["PATH"],
+                },
+            )
+
+            self.assertEqual(code, 1)
+            self.assertEqual(payload["status"], "cancelled")
+            self.assertEqual(payload["worktreeRetained"], "run_not_succeeded")
+            self.assertTrue(self._worktree_paths(fake_home))
+
+    def test_process_group_survivor_skips_retirement_with_distinct_reason(self):
+        with tempfile.TemporaryDirectory() as registry:
+            ctx = SimpleNamespace(
+                mode="work",
+                isolation_lifecycle="persistent",
+                retire_worktree_on_completion=True,
+                registry_root=Path(registry),
+                run_id="del_survivor",
+            )
+            extra = {"processGroupSurvived": True}
+            with (
+                mock.patch.object(
+                    self.delegate.worktree_mgmt,
+                    "_completion_record",
+                    return_value={"runId": "del_survivor"},
+                ),
+                mock.patch.object(
+                    self.delegate.worktree_mgmt.run_registry,
+                    "load_run_state_or_none",
+                    return_value={"status": "succeeded"},
+                ),
+                mock.patch.object(
+                    self.delegate.worktree_mgmt,
+                    "_persist_completion_worktree_fields",
+                ) as persist,
+                mock.patch.object(self.delegate.worktree_mgmt, "detect_worktree_status") as detect,
+            ):
+                self.delegate.worktree_mgmt.retire_worktree_on_completion(ctx, extra)
+
+            self.assertEqual(extra["worktreeRetained"], "process_group_survived")
+            persist.assert_called_once()
+            detect.assert_not_called()
+
     def test_seeded_tracked_deletion_unchanged_since_sync_is_clean(self):
         with tempfile.TemporaryDirectory() as fake_home:
             repo, _ = self._make_git_repo_with_commit()
