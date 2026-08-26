@@ -304,6 +304,79 @@ class WorktreeRetirementTests(ExecutionTestBase):
             persist.assert_called_once()
             detect.assert_not_called()
 
+    def test_structured_retry_pending_skips_retirement(self):
+        with tempfile.TemporaryDirectory() as registry:
+            ctx = SimpleNamespace(
+                mode="work",
+                isolation_lifecycle="persistent",
+                structured_retry=True,
+                retire_worktree_on_completion=True,
+                registry_root=Path(registry),
+                run_id="del_structured",
+            )
+            extra = {}
+            with (
+                mock.patch.object(
+                    self.delegate.worktree_mgmt,
+                    "_completion_record",
+                    return_value={"runId": "del_structured"},
+                ),
+                mock.patch.object(
+                    self.delegate.worktree_mgmt.run_registry,
+                    "load_run_state_or_none",
+                    return_value={"status": "succeeded"},
+                ),
+                mock.patch.object(
+                    self.delegate.worktree_mgmt, "_persist_completion_worktree_fields"
+                ),
+                mock.patch.object(self.delegate.worktree_mgmt, "detect_worktree_status") as detect,
+            ):
+                self.delegate.worktree_mgmt.retire_worktree_on_completion(ctx, extra)
+
+            self.assertEqual(extra["worktreeRetained"], "structured_retry_pending")
+            detect.assert_not_called()
+
+    def test_resumable_clean_completion_is_retained_for_followup(self):
+        with tempfile.TemporaryDirectory() as registry:
+            ctx = SimpleNamespace(
+                mode="work",
+                isolation_lifecycle="persistent",
+                resumable=True,
+                retire_worktree_on_completion=True,
+                registry_root=Path(registry),
+                run_id="del_resumable",
+            )
+            extra = {}
+            with (
+                mock.patch.object(
+                    self.delegate.worktree_mgmt,
+                    "_completion_record",
+                    return_value={"runId": "del_resumable"},
+                ),
+                mock.patch.object(
+                    self.delegate.worktree_mgmt.run_registry,
+                    "load_run_state_or_none",
+                    return_value={"status": "succeeded"},
+                ),
+                mock.patch.object(
+                    self.delegate.worktree_mgmt, "_persist_completion_worktree_fields"
+                ),
+                mock.patch.object(
+                    self.delegate.worktree_mgmt,
+                    "detect_worktree_status",
+                    return_value=("present", []),
+                ),
+                mock.patch.object(
+                    self.delegate.worktree_mgmt,
+                    "_effective_dirty_for_retirement",
+                    return_value=(False, [], []),
+                ),
+            ):
+                self.delegate.worktree_mgmt.retire_worktree_on_completion(ctx, extra)
+
+            self.assertEqual(extra["worktreeRetained"], "resumable_session")
+            self.assertNotIn("worktreeRetired", extra)
+
     def test_seeded_tracked_deletion_unchanged_since_sync_is_clean(self):
         with tempfile.TemporaryDirectory() as fake_home:
             repo, _ = self._make_git_repo_with_commit()

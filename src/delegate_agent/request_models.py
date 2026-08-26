@@ -302,6 +302,10 @@ class Request:
     resumable: bool = False
     followup_of: str | None = None
     resume_session_id: str | None = None
+    # True while a workflow supervisor may re-enter this run's workspace for
+    # structured-output retries. Completion must retain the tree until the
+    # supervisor releases it.
+    structured_retry: bool = False
 
 
 @dataclass(frozen=True)

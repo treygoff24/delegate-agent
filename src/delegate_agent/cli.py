@@ -684,6 +684,7 @@ def make_run_context(
         resumable=request.resumable,
         followup_of=request.followup_of,
         resume_session_id=request.resume_session_id,
+        structured_retry=request.structured_retry,
         group=request.group,
         notify=request.notify,
         workflow_agent_key=request.workflow_agent_key,

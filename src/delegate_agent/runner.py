@@ -198,6 +198,7 @@ class RunContext:
     resumable: bool = False
     followup_of: str | None = None
     resume_session_id: str | None = None
+    structured_retry: bool = False
     harness_session_id: str | None = None
     account_binding_command: tuple[str, ...] | None = None
     sandbox: JsonObject | None = None
@@ -398,6 +399,8 @@ def build_manifest(ctx: RunContext, argv: list[str]) -> JsonObject:
         payload["resumedFrom"] = ctx.resumed_from
     if ctx.followup_of is not None:
         payload["followupOf"] = ctx.followup_of
+    if ctx.structured_retry:
+        payload["structuredRetryWorkspace"] = True
     if ctx.worktree_attachment is not None:
         payload["worktreeAttachment"] = ctx.worktree_attachment
     return payload

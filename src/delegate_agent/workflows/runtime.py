@@ -1528,6 +1528,7 @@ class WorkflowDsl:
         retry_workspace_run_id: str | None = None
         structured_retry_backend: str | None = None
         workspace_cleanup: JsonObject | None = None
+        first_child_run_id: str | None = None
         for attempt in range(attempts + 1):
             resume_session_id = (
                 prior_child.session_id
@@ -1616,6 +1617,8 @@ class WorkflowDsl:
                     _cleanup_structured_retry_workspace(workspace_cleanup)
                     raise
             child = _delegate_child_result(raw_child)
+            if first_child_run_id is None:
+                first_child_run_id = child.run_id
             if child.workspace_cleanup is not None:
                 if workspace_cleanup is not None and child.workspace_cleanup != workspace_cleanup:
                     _cleanup_structured_retry_workspace(child.workspace_cleanup)
@@ -1629,9 +1632,13 @@ class WorkflowDsl:
                 value = workflow_schema.parse_json_tolerant(text or "", schema)
                 workflow_schema.validate_value(value, schema)
                 _cleanup_structured_retry_workspace(workspace_cleanup)
+                if first_child_run_id is not None:
+                    self._release_structured_retry_worktree(first_child_run_id)
                 return value
             except PersonaDigestMismatch:
                 _cleanup_structured_retry_workspace(workspace_cleanup)
+                if first_child_run_id is not None:
+                    self._release_structured_retry_worktree(first_child_run_id)
                 raise
             # Child output is untrusted; parse/validation blowups must not kill the supervisor.
             except Exception as exc:
@@ -1659,7 +1666,30 @@ class WorkflowDsl:
                     retry_workspace_run_id = child.run_id
                 prior_child = child
         _cleanup_structured_retry_workspace(workspace_cleanup)
+        if first_child_run_id is not None:
+            self._release_structured_retry_worktree(first_child_run_id)
         return None
+
+    def _release_structured_retry_worktree(self, run_id: str) -> None:
+        """Release a completed structured retry's completion-time worktree hold."""
+        if not run_registry.RUN_ID_RE.fullmatch(run_id):
+            return
+        root = _run_registry_root(self.state.workspace)
+        if not root.exists():
+            return
+        from delegate_agent import config as delegate_config
+        from delegate_agent import worktree_mgmt
+
+        auto_prune, auto_prune_days = delegate_config.worktree_auto_prune_settings(
+            self.state.config
+        )
+        worktree_mgmt.retire_completed_worktree(
+            root,
+            run_id,
+            retire_worktree=delegate_config.retire_worktree_on_completion(self.state.config),
+            auto_prune=auto_prune,
+            auto_prune_days=auto_prune_days,
+        )
 
     def _run_delegate(
         self,
