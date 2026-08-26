@@ -17,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from delegate_agent import run_registry, worktree_records
+from delegate_agent import isolation, run_registry, worktree_records
 from delegate_agent.git_utils import GIT_TIMEOUT_RETURN_CODE
 from delegate_agent.isolation import target_contains_source_root
 from delegate_agent.json_types import JsonObject
@@ -264,6 +264,20 @@ def _remove_worktree_path(
         )
 
 
+def remove_empty_pool_parent(execution_cwd: str) -> bool:
+    """Remove an empty Delegate fingerprint directory after path retirement."""
+
+    worktree = Path(execution_cwd)
+    parent = worktree.parent
+    if not isolation.is_pool_fingerprint_name(parent.name):
+        return False
+    try:
+        parent.rmdir()
+    except OSError:
+        return False
+    return True
+
+
 def _remove_branch_if_requested(
     *,
     source_git_root: str | None,
@@ -350,6 +364,7 @@ def _build_remove_worktree_plan(
     status_warnings: list[str],
     options: RemoveWorktreeOptions,
     merged_check_already_passed: bool,
+    dirty_check_already_passed: bool,
 ) -> RemoveWorktreePlan:
     source_git_root, execution_cwd = _require_removal_metadata(record)
     if target_contains_source_root(execution_cwd, source_git_root):
@@ -360,7 +375,10 @@ def _build_remove_worktree_plan(
                 record=record,
             )
         )
-    dirty, dirty_paths, _dirty_total, dirty_warnings = wm.dirty_info(record, status)
+    if dirty_check_already_passed:
+        dirty, dirty_paths, dirty_warnings = False, [], []
+    else:
+        dirty, dirty_paths, _dirty_total, dirty_warnings = wm.dirty_info(record, status)
     all_warnings = [*status_warnings, *dirty_warnings]
     if status in (STATUS_PRESENT, STATUS_UNKNOWN):
         _raise_if_dirty_without_discard(
@@ -512,6 +530,7 @@ def remove_worktree(
     keep_branch: bool = False,
     force: bool = False,
     _merged_check_already_passed: bool = False,
+    _dirty_check_already_passed: bool = False,
 ) -> JsonObject:
     discard_uncommitted, force_branch, keep_branch = _normalize_remove_options(
         discard_uncommitted=discard_uncommitted,
@@ -570,6 +589,7 @@ def remove_worktree(
             status_warnings=warnings,
             options=options,
             merged_check_already_passed=_merged_check_already_passed,
+            dirty_check_already_passed=_dirty_check_already_passed,
         )
 
         if status == STATUS_MISSING:

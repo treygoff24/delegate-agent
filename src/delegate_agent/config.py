@@ -70,6 +70,7 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
             "enabled": True,
             "rawLogDays": 7,
         },
+        "processGroupTerminationGraceSec": 3,
     },
     "personas": {
         "forceTransport": None,
@@ -170,6 +171,7 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
     "worktrees": {
         "dataHome": None,
         "poolWarnCount": 20,
+        "retireWorktreeOnCompletion": True,
         "autoPrune": {
             "enabled": False,
             "mergedOlderThanDays": 7,
@@ -231,6 +233,32 @@ def default_progress_initial_delay_sec() -> float:
 
 def default_progress_interval_sec() -> float:
     return _embedded_progress_default("intervalSec")
+
+
+PROCESS_GROUP_TERMINATION_GRACE_SEC_DEFAULT = 3.0
+
+
+def _process_group_termination_grace_value(value: JsonValue) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value) or value < 0:
+        return None
+    return float(value)
+
+
+def default_process_group_termination_grace_sec() -> float:
+    return PROCESS_GROUP_TERMINATION_GRACE_SEC_DEFAULT
+
+
+def resolve_process_group_termination_grace_sec(config: JsonObject) -> float:
+    tracking = config.get("tracking")
+    if isinstance(tracking, dict):
+        value = _process_group_termination_grace_value(
+            tracking.get("processGroupTerminationGraceSec")
+        )
+        if value is not None:
+            return value
+    return default_process_group_termination_grace_sec()
 
 
 def _stall_minutes_value(value: JsonValue) -> float | None:
@@ -498,6 +526,13 @@ def _validate_worktrees_section(worktrees: JsonValue) -> None:
             path="worktrees.poolWarnCount",
             error="invalid_worktrees_config",
         )
+    if "retireWorktreeOnCompletion" in worktrees:
+        retire = worktrees["retireWorktreeOnCompletion"]
+        if not isinstance(retire, bool):
+            raise ConfigError(
+                "invalid_worktrees_config",
+                "worktrees.retireWorktreeOnCompletion must be a boolean.",
+            )
     auto_prune = worktrees.get("autoPrune")
     if auto_prune is not None:
         if not isinstance(auto_prune, dict):
@@ -1529,6 +1564,14 @@ def validate_config(config: JsonObject) -> None:
                     path="tracking.retention.rawLogDays",
                     error="invalid_tracking_config",
                 )
+        if "processGroupTerminationGraceSec" in tracking:
+            grace = tracking["processGroupTerminationGraceSec"]
+            if _process_group_termination_grace_value(grace) is None:
+                raise ConfigError(
+                    "invalid_tracking_config",
+                    "tracking.processGroupTerminationGraceSec must be a non-negative, "
+                    "finite number of seconds.",
+                )
     _validate_policy_section(config.get("policy"))
     _validate_profiles_section(config.get("profiles"))
     _validate_codex_section(config.get("codex"))
@@ -1567,6 +1610,27 @@ def completion_report_default_mode(config: JsonObject) -> str:
         return COMPLETION_REPORT_MODE_MARKDOWN
     mode = completion.get("defaultMode", COMPLETION_REPORT_MODE_MARKDOWN)
     return mode if mode in COMPLETION_REPORT_MODES else COMPLETION_REPORT_MODE_MARKDOWN
+
+
+def retire_worktree_on_completion(config: JsonObject) -> bool:
+    """Return whether completed persistent worktrees should be retired."""
+
+    worktrees = config.get("worktrees")
+    if not isinstance(worktrees, dict):
+        return True
+    value = worktrees.get("retireWorktreeOnCompletion", True)
+    return value if isinstance(value, bool) else True
+
+
+def worktree_auto_prune_settings(config: JsonObject) -> tuple[bool, int]:
+    """Return completion-time auto-prune settings (enabled, age threshold)."""
+
+    worktrees = config.get("worktrees")
+    auto = worktrees.get("autoPrune") if isinstance(worktrees, dict) else None
+    if not isinstance(auto, dict) or auto.get("enabled") is not True:
+        return False, 7
+    days = auto.get("mergedOlderThanDays", 7)
+    return True, days if is_non_negative_int(days) else 7
 
 
 def harness_binary(config: JsonObject, engine: str) -> str:

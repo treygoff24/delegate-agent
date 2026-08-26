@@ -6,7 +6,8 @@
     "retention": {
       "enabled": true,
       "rawLogDays": 7
-    }
+    },
+    "processGroupTerminationGraceSec": 3
   },
   "personas": {
     "forceTransport": null
@@ -120,6 +121,7 @@
   "worktrees": {
     "dataHome": null,
     "poolWarnCount": 20,
+    "retireWorktreeOnCompletion": true,
     "autoPrune": {
       "enabled": false,
       "mergedOlderThanDays": 7

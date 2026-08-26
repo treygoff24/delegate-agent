@@ -67,6 +67,7 @@ SNAPSHOT_MANIFEST_FALLBACK_KEYS: MetadataKeyGroup = (
     *SPEED_METADATA_KEYS,
     *RESUME_METADATA_KEYS,
     *PERSONA_METADATA_KEYS,
+    "processGroupTerminationGraceSec",
 )
 
 _NATIVE_INITIATOR_ENV_KEYS = (
@@ -165,6 +166,7 @@ class RunMetadataCarrier(Protocol):
     safe_workspace_method: str | None
     sandbox: JsonObject | None
     warnings: tuple[str, ...]
+    process_group_termination_grace_sec: float
 
 
 def add_run_metadata_payload_fields(payload: JsonObject, carrier: RunMetadataCarrier) -> None:
@@ -190,5 +192,8 @@ def add_run_metadata_payload_fields(payload: JsonObject, carrier: RunMetadataCar
         payload["worktreeStatus"] = carrier.worktree_status
     if carrier.safe_workspace_method is not None:
         payload["safeWorkspaceMethod"] = carrier.safe_workspace_method
+    grace = getattr(carrier, "process_group_termination_grace_sec", None)
+    if isinstance(grace, (int, float)) and not isinstance(grace, bool):
+        payload["processGroupTerminationGraceSec"] = grace
     if carrier.warnings:
         payload["warnings"] = list(carrier.warnings)

@@ -664,6 +664,7 @@ def make_run_context(
         progress_initial_delay_sec=request.progress_initial_delay_sec,
         progress_interval_sec=request.progress_interval_sec,
         stall_seconds=request.stall_seconds,
+        process_group_termination_grace_sec=request.process_group_termination_grace_sec,
         env_overrides=dict(request.env_overrides or {}),
         fallback_env_overrides=profiles.codex_fallback_child_env_overrides(
             request.profile_resolution,
@@ -1146,6 +1147,7 @@ def execute_request(
                     timeout=request.timeout,
                     structured_output=request.output_schema is not None,
                     sensitive_texts=tuple(sensitive_texts),
+                    process_group_grace_seconds=request.process_group_termination_grace_sec,
                 )
             except delegate_runner.RunnerLaunchError as exc:
                 raise DelegateError(exc.error, exc.message, exc.exit_code) from exc
@@ -1364,6 +1366,9 @@ def execute_request(
                     agent_config_text=isolated_request.agent_config_text,
                     agent_config_placeholder=DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
                     env_overrides=isolated_request.env_overrides,
+                    process_group_grace_seconds=(
+                        isolated_request.process_group_termination_grace_sec
+                    ),
                 )
             except delegate_runner.RunnerLaunchError as exc:
                 raise DelegateError(exc.error, exc.message) from exc

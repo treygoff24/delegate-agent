@@ -9,7 +9,10 @@ constants without an import cycle.
 
 from __future__ import annotations
 
+import hashlib
+import os
 import shlex
+import stat
 from pathlib import Path
 from typing import TypedDict
 
@@ -23,6 +26,7 @@ SCHEMA_PRUNE = "delegate.worktree-prune.v1"
 SCHEMA_GC = "delegate.worktree-gc.v1"
 WORKTREE_ERROR_EXIT_CODE = 2
 MAX_DIRTY_PATHS_REPORTED = 20
+SYNCED_FILE_DIGESTS_KEY = "syncedFileDigests"
 
 STATUS_PRESENT = "present"
 STATUS_REMOVED = "removed"
@@ -58,6 +62,45 @@ _utc_now_iso = run_registry.utc_now_iso
 
 def _shell(args: list[str]) -> str:
     return shlex.join(args)
+
+
+def file_content_digest(root: str | Path, relative_path: str) -> str | None:
+    """Return a stable digest for one seeded path, or ``None`` if unreadable.
+
+    The digest includes the file kind so a seeded symlink replaced by a regular
+    file (or vice versa) is real child dirt even when the bytes happen to match.
+    ``git status`` reports paths, but retirement needs this content-level check.
+    """
+
+    path = Path(root) / relative_path
+    try:
+        stat_result = path.lstat()
+        if stat.S_ISLNK(stat_result.st_mode):
+            data = b"symlink\0" + os.fsencode(os.readlink(path))
+        elif stat.S_ISREG(stat_result.st_mode):
+            digest = hashlib.sha256()
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            return f"file:{digest.hexdigest()}"
+        else:
+            return None
+    except FileNotFoundError:
+        return "missing"
+    except (OSError, ValueError):
+        return None
+    return f"symlink:{hashlib.sha256(data).hexdigest()}"
+
+
+def capture_file_content_digests(root: str | Path, paths: tuple[str, ...]) -> dict[str, str]:
+    """Capture content digests for paths copied into a persistent worktree."""
+
+    digests: dict[str, str] = {}
+    for relative_path in dict.fromkeys(paths):
+        digest = file_content_digest(root, relative_path)
+        if digest is not None:
+            digests[relative_path] = digest
+    return digests
 
 
 def _get_str(source: object, key: str) -> str | None:

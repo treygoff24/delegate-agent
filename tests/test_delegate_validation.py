@@ -1122,6 +1122,26 @@ class ValidationTests(unittest.TestCase):
                 self.assertEqual(ctx.exception.error, "invalid_worktrees_config")
                 self.assertIn("poolWarnCount", ctx.exception.message)
 
+    def test_worktrees_retire_worktree_on_completion_must_be_bool(self):
+        config_mod = load_config_module()
+        for value in (None, 0, "yes"):
+            with self.subTest(value=value):
+                with self.assertRaises(config_mod.ConfigError) as ctx:
+                    config_mod.validate_config(
+                        config_mod.deep_merge(
+                            config_mod.DEFAULT_CONFIG,
+                            {"worktrees": {"retireWorktreeOnCompletion": value}},
+                        )
+                    )
+                self.assertEqual(ctx.exception.error, "invalid_worktrees_config")
+                self.assertIn("retireWorktreeOnCompletion", ctx.exception.message)
+
+    def test_worktrees_retire_worktree_on_completion_defaults_on(self):
+        config_mod = load_config_module()
+        self.assertIs(
+            config_mod.embedded_default_config()["worktrees"]["retireWorktreeOnCompletion"], True
+        )
+
     def test_isolation_and_worktrees_valid_does_not_raise(self):
         config_mod = load_config_module()
         config_mod.validate_config(
@@ -1239,6 +1259,35 @@ class ValidationTests(unittest.TestCase):
             )
         self.assertEqual(ctx.exception.error, "invalid_tracking_config")
         self.assertIn("rawLogDays", ctx.exception.message)
+
+    def test_tracking_process_group_grace_resolves_and_accepts_zero(self):
+        config_mod = load_config_module()
+        config = config_mod.deep_merge(
+            config_mod.DEFAULT_CONFIG,
+            {"tracking": {"processGroupTerminationGraceSec": 0}},
+        )
+        config_mod.validate_config(config)
+        self.assertEqual(config_mod.resolve_process_group_termination_grace_sec(config), 0.0)
+
+    def test_request_carries_configured_process_group_grace(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["tracking"]["processGroupTerminationGraceSec"] = 0.25
+        parsed = self.delegate.parse_cli(["codex", "safe", "review"])
+        request = self.delegate.request_from_parsed(parsed, config, io.StringIO(""))
+        self.assertEqual(request.process_group_termination_grace_sec, 0.25)
+
+    def test_tracking_process_group_grace_rejects_negative_or_non_numeric(self):
+        config_mod = load_config_module()
+        for value in (-1, True, "1", float("inf")):
+            with self.subTest(value=value), self.assertRaises(config_mod.ConfigError) as ctx:
+                config_mod.validate_config(
+                    config_mod.deep_merge(
+                        config_mod.DEFAULT_CONFIG,
+                        {"tracking": {"processGroupTerminationGraceSec": value}},
+                    )
+                )
+            self.assertEqual(ctx.exception.error, "invalid_tracking_config")
+            self.assertIn("processGroupTerminationGraceSec", ctx.exception.message)
 
     def test_worktrees_data_home_explicit_null_accepted(self):
         """dataHome: null is the valid explicit default sentinel."""
