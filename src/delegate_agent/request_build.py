@@ -2174,7 +2174,41 @@ def request_from_input_json(
             run_id=raw_structured_retry_run_id,
             session_id=raw_structured_retry_session_id,
         )
-        if raw_structured_retry_backend == "bwrap":
+        retry_root = run_registry.registry_root_if_exists(Path(workspace.path))
+        retry_manifest = (
+            run_registry.load_run_manifest_or_none(retry_root, raw_structured_retry_run_id)
+            if retry_root is not None
+            else None
+        )
+        if (
+            isinstance(retry_manifest, dict)
+            and retry_manifest.get("isolationLifecycle") == "persistent"
+        ):
+            retry_branch = retry_manifest.get("branch")
+            retry_source_git_root = retry_manifest.get("sourceGitRoot")
+            if not isinstance(retry_branch, str) or not isinstance(retry_source_git_root, str):
+                raise DelegateError(
+                    "structured_retry_workspace_changed",
+                    "Structured retry persistent worktree metadata is incomplete.",
+                )
+            isolation_context = IsolationContext(
+                source_workspace=workspace.path,
+                effective_isolation=delegate_config.ISOLATION_WORKTREE,
+                isolation_mode=delegate_config.ISOLATION_WORKTREE,
+                isolation_lifecycle="attached",
+                preserved_workspace=False,
+                planned_branch=retry_branch,
+                planned_execution_cwd=execution_workspace.path,
+                source_git_root=retry_source_git_root,
+                attachment={
+                    "sourceRunId": raw_structured_retry_run_id,
+                    "sourceAlias": retry_manifest.get("alias"),
+                    "path": execution_workspace.path,
+                    "branch": retry_branch,
+                    "sourceGitRoot": retry_source_git_root,
+                },
+            )
+        elif raw_structured_retry_backend == "bwrap":
             # Rebuild the safe bwrap context around the verified source path;
             # unlike copy-backend retries this must not drop the sandbox while
             # reusing the in-place workspace.
@@ -3584,6 +3618,7 @@ def _build_request_for_workspace(
             preserve_safe_workspace=preserve_safe_workspace,
             followup_of=followup_of,
             resume_session_id=resume_session_id,
+            structured_retry=preserve_safe_workspace,
         ),
         config,
         resolution=profile_resolution,

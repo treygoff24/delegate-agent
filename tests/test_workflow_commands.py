@@ -3415,6 +3415,114 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertEqual(journal["strategy"], "relaunch")
         self.assertNotIn("sessionId", journal)
 
+    def test_structured_retry_in_persistent_worktree_carries_attachment(self) -> None:
+        root = self.workspace / "workflow-attachment"
+        root.mkdir()
+        source = self.workspace / "source"
+        source.mkdir()
+        subprocess.run(["git", "init", "-q", str(source)], check=True)
+        (source / "tracked.txt").write_text("base\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(source), "add", "tracked.txt"], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(source),
+                "-c",
+                "user.name=Delegate Tests",
+                "-c",
+                "user.email=delegate-tests@example.invalid",
+                "commit",
+                "-qm",
+                "base",
+            ],
+            check=True,
+        )
+        registry_root = run_registry.ensure_registry(source, workspace_kind="git")
+        worktree = self.workspace / "prior-worktree"
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(source),
+                "worktree",
+                "add",
+                "-q",
+                str(worktree),
+                "-b",
+                "delegate/codex-prior",
+            ],
+            check=True,
+        )
+        source_run_id, source_alias = run_registry.register_run(
+            registry_root,
+            harness="codex",
+            metadata={
+                "engine": "codex",
+                "group": "workflow-attachment",
+                "workflowAgentKey": "stable-agent-key",
+            },
+        )
+        source_run_path = run_registry.run_directory(registry_root, source_run_id)
+        run_registry.write_json_atomic(
+            source_run_path / run_registry.MANIFEST_FILE,
+            {
+                "runId": source_run_id,
+                "alias": source_alias,
+                "engine": "codex",
+                "group": "workflow-attachment",
+                "workflowAgentKey": "stable-agent-key",
+                "executionCwd": str(worktree),
+                "workspaceKind": "git",
+                "isolationLifecycle": "persistent",
+                "sourceGitRoot": str(source),
+                "branch": "delegate/codex-prior",
+            },
+        )
+        run_registry.write_json_atomic(
+            source_run_path / run_registry.SNAPSHOT_FILE,
+            {"runId": source_run_id, "status": "succeeded"},
+        )
+        input_path = root / "retry.json"
+        input_path.write_text(
+            json.dumps(
+                {
+                    "engine": "codex",
+                    "mode": "work",
+                    "prompt": "retry",
+                    "cwd": str(source),
+                    "isolation": "worktree",
+                    "workflowAgentKey": "stable-agent-key",
+                    "structuredRetryWorkspace": True,
+                    "structuredRetryRunId": source_run_id,
+                }
+            ),
+            encoding="utf-8",
+        )
+        parsed = ParsedCommand(
+            "run",
+            global_options=GlobalOptions(json_mode=True, group="workflow-attachment"),
+            run_json=RunJsonOptions(str(input_path)),
+        )
+        request = request_build.request_from_input_json(
+            parsed,
+            {
+                **json.loads(self.config_path.read_text(encoding="utf-8")),
+                "codex": {
+                    **request_build.delegate_config.DEFAULT_CONFIG["codex"],
+                    "binary": str(self.bin_dir / "codex"),
+                },
+            },
+            workspace=ResolvedWorkspace(str(source), "git"),
+        )
+
+        self.assertEqual(request.workspace, str(worktree.resolve()))
+        self.assertIsNotNone(request.isolation_context)
+        assert request.isolation_context is not None
+        self.assertEqual(request.isolation_context.isolation_lifecycle, "attached")
+        self.assertEqual(request.isolation_context.attachment["sourceRunId"], source_run_id)
+        self.assertEqual(request.isolation_context.attachment["path"], str(worktree))
+
     def test_adoption_wait_timeout_cancels_child_without_duplicate(self) -> None:
         # F2: adoption wait timeout cancels the adopted run and returns None.
         script = self.write_workflow(
