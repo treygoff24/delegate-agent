@@ -2429,6 +2429,17 @@ def build_request(
         expand_env=expand_env,
     )
     discovery = harness_discovery.load_discovery_cache(profile_resolution.name)
+    if (
+        isinstance(discovery, dict)
+        and isinstance(discovery.get("schema"), int)
+        and isinstance(discovery.get("profile"), str)
+    ):
+        contextual = harness_discovery.load_discovery_cache(
+            profile_resolution.name,
+            env=profiles.child_environment(overrides=profile_resolution.env),
+        )
+        if contextual is not None:
+            discovery = contextual
     discovery, drift_warnings = _runtime_discovery_for_engine(
         config,
         engine,

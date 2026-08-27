@@ -48,8 +48,36 @@ def _public_attempts(attempt_records: JsonObject) -> JsonObject:
         models = raw_record.get("models")
         if isinstance(models, dict):
             record["catalogCount"] = len(models)
+        probe_error = raw_record.get("probeError")
+        identified_harness = raw_record.get("identifiedHarness")
+        if isinstance(probe_error, str):
+            record["probeError"] = probe_error
+        if isinstance(identified_harness, str):
+            record["identifiedHarness"] = identified_harness
+        if probe_error == "fingerprint_mismatch":
+            selector = raw_record.get("selector")
+            if isinstance(selector, list) and all(isinstance(item, str) for item in selector):
+                record["selector"] = list(redaction.redact_argv(tuple(selector)))
         projected[harness] = record
-    return redaction.scrub_public_projection(projected)
+    scrubbed = redaction.scrub_public_projection(projected)
+    # ``selector`` is deliberately omitted from ordinary attempts. For a typed
+    # identity mismatch it is the remediation anchor, so restore the
+    # credential-scrubbed normalized selector after the generic projection
+    # (which masks arbitrary paths under unknown keys).
+    for harness, raw_record in attempt_records.items():
+        if (
+            not isinstance(raw_record, dict)
+            or raw_record.get("probeError") != "fingerprint_mismatch"
+        ):
+            continue
+        selector = raw_record.get("selector")
+        if (
+            isinstance(selector, list)
+            and all(isinstance(item, str) for item in selector)
+            and isinstance(scrubbed.get(harness), dict)
+        ):
+            scrubbed[harness]["selector"] = list(redaction.redact_argv(tuple(selector)))
+    return scrubbed
 
 
 def _drop_drifted_records(
@@ -90,6 +118,20 @@ def capabilities_payload(
     discovery: JsonObject | None = None,
 ) -> JsonObject:
     active_profile = profile or profiles.empty_profile_resolution()
+    if (
+        isinstance(discovery, dict)
+        and isinstance(discovery.get("schema"), int)
+        and isinstance(discovery.get("profile"), str)
+    ):
+        # ``cli`` loads the cache before dispatch and historically had no
+        # profile-environment argument. Re-select the context here so a plain
+        # read cannot accidentally consume another process's PATH/TMPDIR view.
+        contextual = harness_discovery.load_discovery_cache(
+            active_profile.name,
+            env=profiles.child_environment(overrides=active_profile.env),
+        )
+        if contextual is not None:
+            discovery = contextual
     live_discovery, drifted_harnesses = _drop_drifted_records(config, discovery, active_profile)
     legacy_cache = reasoning.load_reasoning_capability_cache(workspace)
     legacy_path = reasoning.reasoning_capability_cache_path(workspace)
@@ -166,6 +208,27 @@ def _refresh_payload(
         "staleHarnesses": result.get("staleHarnesses", []),
         "attempts": public_attempts,
     }
+    mismatches = [
+        (harness, record)
+        for harness, record in attempt_records.items()
+        if isinstance(record, dict) and record.get("probeError") == "fingerprint_mismatch"
+    ]
+    if mismatches:
+        harness, record = mismatches[0]
+        identified = record.get("identifiedHarness")
+        selector = record.get("selector")
+        shown_selector = (
+            " ".join(redaction.redact_argv(tuple(selector)))
+            if isinstance(selector, list)
+            else "<unknown selector>"
+        )
+        shown_identified = identified if isinstance(identified, str) else "another known harness"
+        raise CapabilitiesError(
+            "harness_identity_mismatch",
+            f"capability refresh found configured {harness} selector {shown_selector!r} "
+            f"identifying as {shown_identified}; fix the selector before refreshing {harness}.",
+            diagnostics=diagnostics,
+        )
     installed = [
         harness
         for harness, record in attempt_records.items()

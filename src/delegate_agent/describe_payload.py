@@ -1451,6 +1451,18 @@ def emit_models(
     discovery: JsonObject | None = None,
     profile: profiles.ProfileResolution | None = None,
 ) -> int:
+    if (
+        profile is not None
+        and isinstance(discovery, dict)
+        and isinstance(discovery.get("schema"), int)
+        and isinstance(discovery.get("profile"), str)
+    ):
+        contextual = harness_discovery.load_discovery_cache(
+            profile.name,
+            env=profiles.child_environment(overrides=profile.env),
+        )
+        if contextual is not None:
+            discovery = contextual
     legacy_cache = (
         reasoning.load_reasoning_capability_cache(workspace) if workspace is not None else None
     )

@@ -900,6 +900,37 @@ class DiscoveryCacheTests(unittest.TestCase):
             self.assertEqual(set(work["harnesses"]), {"codex"})
             self.assertEqual(set(personal["harnesses"]), {"droid"})
 
+    def test_concurrent_context_writes_merge_without_losing_a_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir()
+            barrier = threading.Barrier(2)
+
+            def write(env: dict[str, str], harness: str) -> None:
+                barrier.wait()
+                snapshot = self._snapshot("work", harness)
+                self.discovery.write_discovery_cache("work", snapshot, home=home, env=env)
+
+            threads = [
+                threading.Thread(
+                    target=write,
+                    args=({"PATH": "/ctx-a", "TMPDIR": "/tmp-a"}, "codex"),
+                ),
+                threading.Thread(
+                    target=write,
+                    args=({"PATH": "/ctx-b", "TMPDIR": "/tmp-b"}, "droid"),
+                ),
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+            raw = json.loads(
+                self.discovery.discovery_cache_path("work", home=home).read_text(encoding="utf-8")
+            )
+            self.assertEqual(len(raw["contexts"]), 2)
+
     def test_same_profile_writes_are_whole_snapshot_last_writer_wins(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
@@ -910,6 +941,29 @@ class DiscoveryCacheTests(unittest.TestCase):
                 self.discovery.load_discovery_cache("work", home=home),
                 expected,
             )
+
+    def test_context_cache_migrates_legacy_snapshot_and_selects_by_environment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir()
+            legacy = self._snapshot("work")
+            path = self.discovery.discovery_cache_path("work", home=home)
+            self.discovery.private_io.write_json_atomic(path, legacy)
+            env_a = {"PATH": "/ctx-a", "TMPDIR": "/tmp-a"}
+            env_b = {"PATH": "/ctx-b", "TMPDIR": "/tmp-b"}
+
+            # A legacy cache remains readable before its first context-aware
+            # write, so upgrading Delegate never silently discards it.
+            self.assertEqual(
+                self.discovery.load_discovery_cache("work", home=home, env=env_a), legacy
+            )
+            self.discovery.write_discovery_cache("work", legacy, home=home, env=env_a)
+            selected_a = self.discovery.load_discovery_cache("work", home=home, env=env_a)
+            selected_b = self.discovery.load_discovery_cache("work", home=home, env=env_b)
+            self.assertEqual(selected_a["harnesses"], legacy["harnesses"])
+            self.assertEqual(selected_b["harnesses"], {})
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(len(raw["contexts"]), 1)
 
     def test_refresh_preserves_failed_last_good_and_uses_profile_environment(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1490,7 +1544,10 @@ class FutureSchemaCacheTests(unittest.TestCase):
             # disk: everything but os.replace happens before the decision.
             self.assertEqual(len(staged), 1)
             self.assertTrue(any(name.endswith(".tmp") for name in staged[0]))
-            self.assertEqual(list(path.parent.iterdir()), [])
+            self.assertEqual(
+                [entry for entry in path.parent.iterdir() if not entry.name.endswith(".lock")],
+                [],
+            )
 
     def test_refresh_probes_fresh_and_preserves_the_newer_cache(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1615,6 +1672,7 @@ class ProbeProgressTests(unittest.TestCase):
 
 class DetectionTests(unittest.TestCase):
     def setUp(self) -> None:
+        from delegate_agent import profiles
         from delegate_agent.config import embedded_default_config
         from delegate_agent.harness_discovery import (
             resolve_harness_selector,
@@ -1622,6 +1680,7 @@ class DetectionTests(unittest.TestCase):
         )
 
         self.embedded_default_config = embedded_default_config
+        self.profiles = profiles
         self.resolve_harness_selector = resolve_harness_selector
         self.selector_candidates = selector_candidates
 
@@ -1648,7 +1707,43 @@ class DetectionTests(unittest.TestCase):
             env = {**os.environ, "PATH": f"{root}{os.pathsep}{os.environ.get('PATH', '')}"}
             result = self.resolve_harness_selector(config, "cursor", env=env)
         self.assertEqual(result.error, "fingerprint_mismatch")
-        self.assertIsNone(result.selector)
+        self.assertEqual(result.selector, (str(wrong),))
+        self.assertEqual(result.identified_harness, "grok")
+
+    def test_mismatch_attempt_preserves_last_good_record_and_typed_provenance(self):
+        from delegate_agent import harness_discovery
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            wrong = write_version_harness(root / "wrong", "grok 2.4.0")
+            config = self.embedded_default_config()
+            config["codex"]["binary"] = str(wrong)
+            profile = self.profiles.ProfileResolution(
+                name="work", source="test", env={"PATH": str(root), "TMPDIR": str(root)}
+            )
+            old = _harness_record()
+            home = Path(tmp) / "home"
+            home.mkdir()
+            self.assertTrue(
+                harness_discovery.write_discovery_cache(
+                    "work",
+                    {
+                        **harness_discovery.empty_snapshot(profile="work"),
+                        "harnesses": {"codex": old},
+                    },
+                    home=home,
+                    env={"PATH": str(root), "TMPDIR": str(root)},
+                )
+            )
+            result = harness_discovery.refresh_discovery(
+                config, profile=profile, engines=("codex",), home=home
+            )
+            attempt = result["attempts"]["codex"]
+            self.assertFalse(attempt["installed"])
+            self.assertEqual(attempt["probeError"], "fingerprint_mismatch")
+            self.assertEqual(attempt["identifiedHarness"], "grok")
+            self.assertEqual(attempt["selector"], [str(wrong)])
+            self.assertEqual(result["snapshot"]["harnesses"]["codex"], old)
 
     def test_dead_configured_selector_is_distinguished_from_a_missing_harness(self):
         from delegate_agent import harness_discovery
