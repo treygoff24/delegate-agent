@@ -2438,7 +2438,14 @@ def build_request(
             profile_resolution.name,
             env=profiles.child_environment(overrides=profile_resolution.env),
         )
-        if contextual is not None:
+        # A context miss is a valid empty snapshot. It must not erase a base
+        # record for the engine we are launching: that record still receives
+        # the normal selector-drift check below. Do not merge records -- when
+        # the current context has an engine record, it is authoritative intact.
+        if contextual is not None and (
+            not _discovery_has_engine_record(discovery, engine)
+            or _discovery_has_engine_record(contextual, engine)
+        ):
             discovery = contextual
     discovery, drift_warnings = _runtime_discovery_for_engine(
         config,

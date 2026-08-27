@@ -131,6 +131,48 @@ class EngineArgvTests(CommandTestBase):
         self.assertEqual(manifest["capabilityModel"], "gpt-live")
         self.assertEqual(manifest["reasoningCapabilityEvidence"], "exact")
 
+    def test_contextual_snapshot_without_codex_preserves_base_codex_capability(self):
+        base = {
+            "schema": 1,
+            "profile": "default",
+            "capturedAt": "2026-08-27T09:00:00Z",
+            "harnesses": {
+                "codex": {
+                    "defaultModel": "gpt-context",
+                    "models": {
+                        "gpt-context": {"reasoning": {"supported": ["high"], "evidence": "exact"}}
+                    },
+                }
+            },
+        }
+        contextual = {
+            "schema": 1,
+            "profile": "default",
+            "capturedAt": "2026-08-27T09:00:01Z",
+            "harnesses": {},
+        }
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["codex"]["defaultModel"] = "gpt-context"
+
+        with mock.patch.object(
+            self.delegate.harness_discovery,
+            "load_discovery_cache",
+            side_effect=[base, contextual],
+        ):
+            request = self.build_git_request(
+                "codex",
+                "safe",
+                None,
+                "/repo",
+                "review",
+                config,
+                True,
+                reasoning_effort="high",
+            )
+
+        self.assertEqual(request.reasoning_capability_source, "discovery")
+        self.assertIn('model_reasoning_effort="high"', " ".join(request.argv))
+
     def test_selector_drifted_runtime_discovery_is_ignored_without_probing(self):
         discovery = {
             "harnesses": {

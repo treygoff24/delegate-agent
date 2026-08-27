@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from delegate_agent import (  # noqa: E402
+    harness_discovery,
     request_build,
     run_registry,
     safe_workspace,
@@ -2988,6 +2989,30 @@ class WorkflowCommandTests(unittest.TestCase):
                 "base",
             ],
             check=True,
+        )
+        # A workflow pin changes the child process context.  Keep a legacy/base
+        # Codex capability record while its context-keyed cache has only a
+        # different context, exercising the request-build selection boundary.
+        discovery = harness_discovery.empty_snapshot()
+        discovery["harnesses"] = {
+            "codex": {
+                "installed": True,
+                "selector": [str(self.bin_dir / "codex")],
+                "version": "codex-cli 1.0.0",
+                "probeStatus": "ok",
+                "modelScope": "account",
+                "defaultModel": None,
+                "models": {},
+                "harnessReasoning": None,
+                "warnings": [],
+            }
+        }
+        harness_discovery.write_discovery_cache(None, discovery, home=self.home)
+        harness_discovery.write_discovery_cache(
+            None,
+            discovery,
+            home=self.home,
+            env={"PATH": "/unrelated-context", "TMPDIR": "/unrelated-context"},
         )
         script = self.write_workflow(
             """
