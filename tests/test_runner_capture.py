@@ -1773,7 +1773,7 @@ class RunnerCaptureTests(unittest.TestCase):
                 harness="omp",
                 engine="omp",
                 mode="work",
-                model="openrouter/stealth/ox-alpha",
+                model="opencode-go/glm-5.3",
                 source_cwd=workspace,
                 execution_cwd=workspace,
                 workspace_kind="git",
