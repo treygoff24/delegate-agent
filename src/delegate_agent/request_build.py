@@ -3583,6 +3583,9 @@ def _build_request_for_workspace(
             process_group_termination_grace_sec=(
                 delegate_config.resolve_process_group_termination_grace_sec(config)
             ),
+            registry_lock_timeout_seconds=run_registry.resolve_registry_lock_timeout_seconds(
+                config
+            ),
             forbid_commit=forbid_commit,
             include_dirty=include_dirty,
             call_read_only=call_read_only,

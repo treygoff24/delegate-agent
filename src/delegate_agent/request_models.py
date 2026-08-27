@@ -248,6 +248,9 @@ class Request:
     # Seconds to wait after SIGTERM before escalating a child process group to
     # SIGKILL. Resolved from tracking config at request-build time.
     process_group_termination_grace_sec: float = 3.0
+    # Bounded wait for the workspace registry lock. Finalization publishes a
+    # WAL when this budget expires; launch admission fails before spawning.
+    registry_lock_timeout_seconds: float = 120.0
     forbid_commit: bool = False
     warnings: tuple[str, ...] = ()
     stdin_text: str | None = None

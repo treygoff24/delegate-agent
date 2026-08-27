@@ -288,6 +288,7 @@ Controls local run recording.
   "tracking": {
     "completionReport": {"defaultMode": "markdown"},
     "retention": {"enabled": true, "rawLogDays": 7},
+    "registryLockTimeoutSec": 120,
     "processGroupTerminationGraceSec": 3
   }
 }
@@ -299,6 +300,14 @@ Controls local run recording.
 - `processGroupTerminationGraceSec`: non-negative, finite number of seconds to
   wait after SIGTERM before escalating a child process group to SIGKILL. The
   default is `3` seconds; `0` escalates immediately.
+- `registryLockTimeoutSec`: non-negative, finite number of seconds a launch or
+  finalization waits for the workspace Registry lock. The default is `120`.
+  `DELEGATE_REGISTRY_LOCK_TIMEOUT_SECONDS` overrides it for one process. A
+  completed finalization that exhausts this budget publishes an atomic
+  per-run `finalize-wal.json`; the next successful Registry lock holder replays
+  it before its own mutation. Until replay, readers see the prior canonical
+  state. Malformed WAL records are quarantined, and a cancellation marker wins
+  over a WAL success.
 
 Ambient retention is best-effort. Archive I/O is serialized separately from
 Registry mutations, so a slow archive cannot block run progress, inspection,

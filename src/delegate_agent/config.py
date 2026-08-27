@@ -70,6 +70,9 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
             "enabled": True,
             "rawLogDays": 7,
         },
+        # Advisory registry mutations wait this long before a finalizer falls
+        # back to its per-run write-ahead record.
+        "registryLockTimeoutSec": 120.0,
         "processGroupTerminationGraceSec": 3,
     },
     "personas": {
@@ -1571,6 +1574,20 @@ def validate_config(config: JsonObject) -> None:
                     "invalid_tracking_config",
                     "tracking.processGroupTerminationGraceSec must be a non-negative, "
                     "finite number of seconds.",
+                )
+        for key in ("registryLockTimeoutSec", "registryLockTimeoutSeconds"):
+            if key not in tracking:
+                continue
+            value = tracking[key]
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value < 0
+            ):
+                raise ConfigError(
+                    "invalid_tracking_config",
+                    f"tracking.{key} must be a non-negative, finite number of seconds.",
                 )
     _validate_policy_section(config.get("policy"))
     _validate_profiles_section(config.get("profiles"))
