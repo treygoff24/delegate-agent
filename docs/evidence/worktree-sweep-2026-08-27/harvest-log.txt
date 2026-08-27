@@ -1,0 +1,12 @@
+codex-20260825T031329Z_0936c3	briefing-site	lines=2
+codex-20260825T030930Z_dcc210	briefing-site	lines=2
+codex-20260825T005936Z_29cd6d	briefing-site	lines=2
+codex-20260825T030937Z_df91a2	briefing-site	lines=2
+codex-20260825T030935Z_cc8806	briefing-site	lines=2
+codex-20260825T030932Z_4b02e8	briefing-site	lines=2
+codex-20260825T011313Z_873710	briefing-site	lines=5
+codex-20260825T030938Z_eef803	briefing-site	lines=2
+codex-20260825T031332Z_486ca7	briefing-site	lines=2
+codex-20260825T031330Z_52321b	briefing-site	lines=2
+codex-20260825T031335Z_48709c	briefing-site	lines=2
+codex-20260825T031334Z_1e7251	briefing-site	lines=2

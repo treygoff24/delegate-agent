@@ -411,6 +411,7 @@ def _release_structured_retry_worktree_for_state(state: WorkflowState, run_id: s
         root,
         run_id,
         retire_worktree=delegate_config.retire_worktree_on_completion(state.config),
+        retirement_ignore_globs=delegate_config.retirement_ignore_globs(state.config),
         auto_prune=auto_prune,
         auto_prune_days=auto_prune_days,
     )

@@ -17,11 +17,13 @@ through this module so those patches keep taking effect.
 from __future__ import annotations
 
 import contextlib
+import fnmatch
 from contextlib import suppress
 from pathlib import Path
 from types import SimpleNamespace
 
 from delegate_agent import run_registry, worktree_summary
+from delegate_agent.config import DEFAULT_RETIREMENT_IGNORE_GLOBS
 from delegate_agent.git_utils import (
     GIT_QUICK_TIMEOUT_SECONDS,
     rev_parse_verify,
@@ -85,11 +87,27 @@ class WorktreeManagementError(Exception):
         self.message = message
 
 
+def _ignored_for_retirement(path: str, patterns: tuple[str, ...]) -> bool:
+    return any(fnmatch.fnmatch(path, pattern) for pattern in patterns)
+
+
+def _retirement_ignore_globs(ctx: object) -> tuple[str, ...]:
+    value = getattr(ctx, "retirement_ignore_globs", None)
+    if isinstance(value, (tuple, list)):
+        return tuple(str(item) for item in value if item)
+    return DEFAULT_RETIREMENT_IGNORE_GLOBS
+
+
 def _effective_dirty_for_retirement(
     record: PersistentWorktreeRecord,
     status: str,
+    ignore_globs: tuple[str, ...] = (),
 ) -> tuple[bool | None, list[str], list[str]]:
-    """Check end-state dirt while discounting unchanged launch-seeded files."""
+    """Check end-state dirt while discounting unchanged launch-seeded files.
+
+    ``ignore_globs`` additionally discounts shared ledgers the harness itself
+    writes to (beads, papercuts); their dirt is bookkeeping, never lane work.
+    """
 
     execution_cwd = record.get("executionCwd")
     if status not in (STATUS_PRESENT, STATUS_UNKNOWN):
@@ -107,6 +125,13 @@ def _effective_dirty_for_retirement(
         else None,
         total=total,
     )
+    if ignore_globs:
+        effective = [
+            item
+            for item in effective
+            if not _ignored_for_retirement(str(item.get("path") or ""), ignore_globs)
+        ]
+        effective_total = len(effective)
     return effective_total > 0, [str(item.get("path")) for item in effective], warnings
 
 
@@ -216,7 +241,11 @@ def _retire_worktree_on_completion(ctx: object, completion_extra: JsonObject) ->
         )
         return
 
-    dirty, dirty_paths, dirty_warnings = _effective_dirty_for_retirement(record, status)
+    dirty, dirty_paths, dirty_warnings = _effective_dirty_for_retirement(
+        record,
+        status,
+        _retirement_ignore_globs(ctx),
+    )
     if dirty is None:
         retain(
             "dirty_check_failed",
@@ -302,6 +331,7 @@ def retire_completed_worktree(
     run_id: str,
     *,
     retire_worktree: bool = True,
+    retirement_ignore_globs: tuple[str, ...] = DEFAULT_RETIREMENT_IGNORE_GLOBS,
     auto_prune: bool = False,
     auto_prune_days: int = 7,
 ) -> JsonObject:
@@ -319,6 +349,7 @@ def retire_completed_worktree(
         mode=manifest.get("mode"),
         isolation_lifecycle=manifest.get("isolationLifecycle"),
         retire_worktree_on_completion=retire_worktree,
+        retirement_ignore_globs=retirement_ignore_globs,
         worktree_auto_prune_on_completion=auto_prune,
         worktree_auto_prune_merged_older_than_days=auto_prune_days,
         registry_root=registry_root,

@@ -361,6 +361,48 @@ class WorktreeRetirementTests(ExecutionTestBase):
         self.assertEqual(extra["worktreeRetained"], "dirty")
         self.assertTrue(self._worktree_paths(fake_home.name))
 
+    def test_ledger_only_dirt_does_not_block_retirement(self):
+        agent = self._clean_agent()
+        agent.write_text(
+            "#!/usr/bin/env bash\n"
+            "mkdir -p .beads\n"
+            'printf \'{"id":"int-1"}\\n\' >> .beads/interactions.jsonl\n'
+            "printf 'papercut\\n' >> .papercuts.jsonl\n"
+            "printf 'done\\n'\n",
+            encoding="utf-8",
+        )
+        agent.chmod(0o755)
+        fake_home, _repo, _config, run_id, registry_root, _payload = self._completed_manifest_run(
+            agent=agent
+        )
+
+        extra = self.delegate.worktree_mgmt.retire_completed_worktree(registry_root, run_id)
+
+        self.assertNotIn("worktreeRetained", extra)
+        self.assertTrue(extra.get("worktreeRetired"))
+        self.assertFalse(self._worktree_paths(fake_home.name))
+
+    def test_real_dirt_alongside_ledger_dirt_still_retains(self):
+        agent = self._clean_agent()
+        agent.write_text(
+            "#!/usr/bin/env bash\n"
+            "mkdir -p .beads\n"
+            'printf \'{"id":"int-1"}\\n\' >> .beads/interactions.jsonl\n'
+            "printf 'real work\\n' > child-created.txt\n"
+            "printf 'done\\n'\n",
+            encoding="utf-8",
+        )
+        agent.chmod(0o755)
+        fake_home, _repo, _config, run_id, registry_root, _payload = self._completed_manifest_run(
+            agent=agent
+        )
+
+        extra = self.delegate.worktree_mgmt.retire_completed_worktree(registry_root, run_id)
+
+        self.assertEqual(extra["worktreeRetained"], "dirty")
+        self.assertEqual(extra.get("worktreeRetentionPaths"), ["child-created.txt"])
+        self.assertTrue(self._worktree_paths(fake_home.name))
+
     def test_manifest_reconstruction_retains_process_group_survivor(self):
         fake_home, _repo, _config, run_id, registry_root, _payload = self._completed_manifest_run(
             agent=self._clean_agent()

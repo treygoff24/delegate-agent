@@ -172,6 +172,7 @@ class RunContext:
     include_dirty: bool = False
     synced_files: int = 0
     retire_worktree_on_completion: bool = True
+    retirement_ignore_globs: tuple[str, ...] = delegate_config.DEFAULT_RETIREMENT_IGNORE_GLOBS
     worktree_auto_prune_on_completion: bool = False
     worktree_auto_prune_merged_older_than_days: int = 7
     group: str | None = None

@@ -26,6 +26,11 @@ ISOLATION_AUTO = "auto"
 ISOLATION_NONE = "none"
 ISOLATION_WORKTREE = "worktree"
 VALID_ISOLATION_VALUES = (ISOLATION_AUTO, ISOLATION_NONE, ISOLATION_WORKTREE)
+
+# Shared append-only ledgers every agent writes to as a matter of course. A lane
+# that files one papercut or closes one bead would otherwise read dirty forever and
+# its worktree could never retire, so completion-time dirt discounts them by default.
+DEFAULT_RETIREMENT_IGNORE_GLOBS: Final = (".beads/**", ".papercuts.jsonl")
 SAFE_ISOLATION_REQUIRED_ENGINES = frozenset(
     {
         "codex",
@@ -186,6 +191,7 @@ _EMBEDDED_DEFAULT_CONFIG: JsonObject = {
         "dataHome": None,
         "poolWarnCount": 20,
         "retireWorktreeOnCompletion": True,
+        "retirementIgnoreGlobs": list(DEFAULT_RETIREMENT_IGNORE_GLOBS),
         "autoPrune": {
             "enabled": False,
             "mergedOlderThanDays": 7,
@@ -540,6 +546,13 @@ def _validate_worktrees_section(worktrees: JsonValue) -> None:
             path="worktrees.poolWarnCount",
             error="invalid_worktrees_config",
         )
+    if "retirementIgnoreGlobs" in worktrees:
+        globs = worktrees["retirementIgnoreGlobs"]
+        if not isinstance(globs, list) or any(not isinstance(item, str) for item in globs):
+            raise ConfigError(
+                "invalid_worktrees_config",
+                "worktrees.retirementIgnoreGlobs must be a list of strings.",
+            )
     if "retireWorktreeOnCompletion" in worktrees:
         retire = worktrees["retireWorktreeOnCompletion"]
         if not isinstance(retire, bool):
@@ -1648,6 +1661,20 @@ def retire_worktree_on_completion(config: JsonObject) -> bool:
         return True
     value = worktrees.get("retireWorktreeOnCompletion", True)
     return value if isinstance(value, bool) else True
+
+
+def retirement_ignore_globs(config: JsonObject) -> tuple[str, ...]:
+    """Return glob patterns whose dirt does not block completion-time retirement."""
+
+    worktrees = config.get("worktrees")
+    if not isinstance(worktrees, dict):
+        return DEFAULT_RETIREMENT_IGNORE_GLOBS
+    value = worktrees.get("retirementIgnoreGlobs")
+    if value is None:
+        return DEFAULT_RETIREMENT_IGNORE_GLOBS
+    if not isinstance(value, list):
+        return DEFAULT_RETIREMENT_IGNORE_GLOBS
+    return tuple(item for item in value if isinstance(item, str) and item)
 
 
 def worktree_auto_prune_settings(config: JsonObject) -> tuple[bool, int]:
