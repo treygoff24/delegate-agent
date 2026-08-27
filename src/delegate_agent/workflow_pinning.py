@@ -10,6 +10,7 @@ reconcile the active-supervisor index.
 
 from __future__ import annotations
 
+import compileall
 import hashlib
 import json
 import os
@@ -169,9 +170,9 @@ def _install() -> None:
         payload = json.loads(Path(pin_path).read_text(encoding="utf-8"))
         pinned = payload.get("personas", {})
     except (OSError, ValueError, TypeError):
-        return
-    if not isinstance(pinned, dict) or not pinned:
-        return
+        pinned = {}
+    if not isinstance(pinned, dict):
+        pinned = {}
     try:
         from delegate_agent import personas
     except Exception:
@@ -246,7 +247,7 @@ def _runtime_digest(files: list[tuple[str, bytes]]) -> str:
 def _runtime_directory_digest(root: Path) -> str:
     files: list[tuple[str, bytes]] = []
     for source in sorted(root.rglob("*")):
-        if source.is_file():
+        if source.is_file() and source.suffix not in {".pyc", ".pyo"}:
             files.append((source.relative_to(root).as_posix(), source.read_bytes()))
     return _runtime_digest(files)
 
@@ -274,6 +275,9 @@ def _write_runtime_snapshot(
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(content)
             target.chmod(0o500 if relative == "bin/delegate.py" else 0o400)
+        compileall.compile_dir(str(runtime_root / "src"), quiet=1, legacy=False)
+        for cached in runtime_root.rglob("*.pyc"):
+            cached.chmod(0o400)
         for directory in sorted(
             (path for path in runtime_root.rglob("*") if path.is_dir()), reverse=True
         ):
