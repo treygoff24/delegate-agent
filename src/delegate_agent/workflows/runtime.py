@@ -1404,6 +1404,7 @@ def execute_workflow(state: WorkflowState) -> object:
         "judges": dsl.judges,
         "args": state.args,
         "budget": state.budget,
+        "dry_run": state.dry_run,
     }
     exec(code, globals_dict)
     return globals_dict["__delegate_workflow__"]()
@@ -1684,7 +1685,7 @@ class WorkflowDsl:
                 thread = threading.Thread(
                     target=run_item,
                     args=(index, name, value, callback, scope),
-                    daemon=False,
+                    daemon=self.state.dry_run,
                 )
                 thread.start()
                 active[index] = thread
@@ -1806,7 +1807,7 @@ class WorkflowDsl:
                     self.state.item_semaphore.release()
                     break
             thread = threading.Thread(
-                target=run_item, args=(index, item, pre_acquired), daemon=False
+                target=run_item, args=(index, item, pre_acquired), daemon=self.state.dry_run
             )
             try:
                 thread.start()
@@ -1899,7 +1900,7 @@ class WorkflowDsl:
                     self.state.item_semaphore.release()
                     break
             thread = threading.Thread(
-                target=run_thunk, args=(index, thunk, pre_acquired), daemon=False
+                target=run_thunk, args=(index, thunk, pre_acquired), daemon=self.state.dry_run
             )
             try:
                 thread.start()

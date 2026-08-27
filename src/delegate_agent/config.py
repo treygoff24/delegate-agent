@@ -31,6 +31,11 @@ VALID_ISOLATION_VALUES = (ISOLATION_AUTO, ISOLATION_NONE, ISOLATION_WORKTREE)
 # that files one papercut or closes one bead would otherwise read dirty forever and
 # its worktree could never retire, so completion-time dirt discounts them by default.
 DEFAULT_RETIREMENT_IGNORE_GLOBS: Final = (".beads/**", ".papercuts.jsonl")
+
+# A dry run resolves no real work, so it must be provably terminating. Without a
+# ceiling a script that waits on a human gate parks forever and the dry run hangs
+# with it (observed 2026-08-27: 38 minutes and still climbing).
+DEFAULT_DRY_RUN_TIMEOUT_SECONDS: Final = 300
 SAFE_ISOLATION_REQUIRED_ENGINES = frozenset(
     {
         "codex",
@@ -1661,6 +1666,18 @@ def retire_worktree_on_completion(config: JsonObject) -> bool:
         return True
     value = worktrees.get("retireWorktreeOnCompletion", True)
     return value if isinstance(value, bool) else True
+
+
+def dry_run_timeout_seconds(config: JsonObject) -> int:
+    """Return the wall-clock ceiling for a workflow dry run."""
+
+    workflows = config.get("workflows")
+    if not isinstance(workflows, dict):
+        return DEFAULT_DRY_RUN_TIMEOUT_SECONDS
+    value = workflows.get("dryRunTimeoutSeconds")
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return DEFAULT_DRY_RUN_TIMEOUT_SECONDS
+    return value
 
 
 def retirement_ignore_globs(config: JsonObject) -> tuple[str, ...]:
