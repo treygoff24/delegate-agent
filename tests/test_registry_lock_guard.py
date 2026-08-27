@@ -13,6 +13,10 @@ from pathlib import Path
 from tests.registry_lock_guard import scan_lock
 
 
+@unittest.skipUnless(
+    sys.platform == "linux",
+    "the lock-guard watcher reads the kernel flock table via /proc (Linux-only by design)",
+)
 class RegistryLockGuardTests(unittest.TestCase):
     def test_scan_reports_real_flock_with_offending_process(self):
         with tempfile.TemporaryDirectory() as tmp:
