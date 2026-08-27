@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -176,10 +177,8 @@ def _install() -> None:
         pinned = {}
     try:
         from delegate_agent import personas
-    except Exception:
-        return
-    original = personas.resolve_persona
-
+    except Exception as exc:
+        raise RuntimeError("workflow_persona_pin_unavailable") from exc
     def resolve(workspace, name, *, mode=None, allow_repo_persona=False):
         item = pinned.get(name)
         if not isinstance(item, dict):
@@ -190,7 +189,11 @@ def _install() -> None:
             )
         source = item.get("source")
         if mode == "safe" and source == "workspace" and not allow_repo_persona:
-            return original(workspace, name, mode=mode, allow_repo_persona=allow_repo_persona)
+            from delegate_agent.errors import DelegateError
+            raise DelegateError(
+                "workspace_persona_refused",
+                f"workspace persona {name!r} is refused in safe mode by the workflow pin.",
+            )
         text = item.get("text")
         digest = item.get("digest")
         if not isinstance(text, str) or not isinstance(digest, str):
@@ -258,33 +261,44 @@ def _write_runtime_snapshot(
 ) -> tuple[str, Path, Path, Path]:
     files = _runtime_source_files()
     digest = _runtime_digest(files)
-    runtime_root = pin_root(home) / RUNTIME_DIR / digest
-    if runtime_root.exists():
-        for relative, content in files:
-            target = runtime_root / relative
-            if (
-                not target.is_file()
-                or hashlib.sha256(target.read_bytes()).hexdigest()
-                != hashlib.sha256(content).hexdigest()
+    runtime_pool = pin_root(home) / RUNTIME_DIR
+    runtime_root = runtime_pool / digest
+    with run_registry.file_lock(runtime_pool / ".runtime-snapshot.lock"):
+        if runtime_root.exists():
+            for relative, content in files:
+                target = runtime_root / relative
+                if (
+                    not target.is_file()
+                    or hashlib.sha256(target.read_bytes()).hexdigest()
+                    != hashlib.sha256(content).hexdigest()
+                ):
+                    raise WorkflowPinError(
+                        "runtime_snapshot_collision", f"runtime snapshot differs: {target}"
+                    )
+        else:
+            temporary_root = runtime_pool / f"{digest}.tmp"
+            if temporary_root.exists():
+                if temporary_root.is_symlink() or not temporary_root.is_dir():
+                    raise WorkflowPinError(
+                        "runtime_snapshot_collision",
+                        f"runtime snapshot temporary path is unsafe: {temporary_root}",
+                    )
+                shutil.rmtree(temporary_root)
+            for relative, content in files:
+                target = temporary_root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(content)
+                target.chmod(0o500 if relative == "bin/delegate.py" else 0o400)
+            compileall.compile_dir(str(temporary_root / "src"), quiet=1, legacy=False)
+            for cached in temporary_root.rglob("*.pyc"):
+                cached.chmod(0o400)
+            for directory in sorted(
+                (path for path in temporary_root.rglob("*") if path.is_dir()), reverse=True
             ):
-                raise WorkflowPinError(
-                    "runtime_snapshot_collision", f"runtime snapshot differs: {target}"
-                )
-    else:
-        for relative, content in files:
-            target = runtime_root / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(content)
-            target.chmod(0o500 if relative == "bin/delegate.py" else 0o400)
-        compileall.compile_dir(str(runtime_root / "src"), quiet=1, legacy=False)
-        for cached in runtime_root.rglob("*.pyc"):
-            cached.chmod(0o400)
-        for directory in sorted(
-            (path for path in runtime_root.rglob("*") if path.is_dir()), reverse=True
-        ):
-            directory.chmod(0o500)
-        runtime_root.parent.chmod(0o700)
-        runtime_root.chmod(0o500)
+                directory.chmod(0o500)
+            runtime_pool.chmod(0o700)
+            temporary_root.chmod(0o500)
+            os.replace(temporary_root, runtime_root)
     return digest, runtime_root, runtime_root / "src", runtime_root / "bin" / "delegate.py"
 
 
@@ -528,7 +542,7 @@ def _write_active_index(path: Path, payload: JsonObject) -> None:
     path.chmod(0o600)
 
 
-def reconcile_active_supervisors(*, home: Path | None = None) -> JsonObject:
+def _reconcile_active_supervisors_locked(*, home: Path | None = None) -> JsonObject:
     """Drop missing/unlocked workflow entries and return the live index."""
     path = active_index_path(home)
     payload = _read_active_index(path)
@@ -550,6 +564,13 @@ def reconcile_active_supervisors(*, home: Path | None = None) -> JsonObject:
     return result
 
 
+def reconcile_active_supervisors(*, home: Path | None = None) -> JsonObject:
+    """Drop missing/unlocked workflow entries and return the live index."""
+    path = active_index_path(home)
+    with run_registry.file_lock(path.with_name(f".{path.name}.lock")):
+        return _reconcile_active_supervisors_locked(home=home)
+
+
 def register_active_supervisor(
     workflow_id: str,
     *,
@@ -558,19 +579,21 @@ def register_active_supervisor(
     pin: WorkflowPin,
     home: Path | None = None,
 ) -> JsonObject:
-    index = reconcile_active_supervisors(home=home)
-    entries = index["supervisors"]
-    assert isinstance(entries, dict)
-    entries[workflow_id] = {
-        "workflowId": workflow_id,
-        "workflowRoot": str(workflow_root),
-        "workspace": str(workspace),
-        "pinPath": str(pin.path),
-        "startedAt": pin.created_at,
-    }
-    result: JsonObject = {"schema": ACTIVE_INDEX_SCHEMA, "supervisors": entries}
-    _write_active_index(active_index_path(home), result)
-    return result
+    path = active_index_path(home)
+    with run_registry.file_lock(path.with_name(f".{path.name}.lock")):
+        index = _reconcile_active_supervisors_locked(home=home)
+        entries = index["supervisors"]
+        assert isinstance(entries, dict)
+        entries[workflow_id] = {
+            "workflowId": workflow_id,
+            "workflowRoot": str(workflow_root),
+            "workspace": str(workspace),
+            "pinPath": str(pin.path),
+            "startedAt": pin.created_at,
+        }
+        result: JsonObject = {"schema": ACTIVE_INDEX_SCHEMA, "supervisors": entries}
+        _write_active_index(path, result)
+        return result
 
 
 def doctor(*, home: Path | None = None) -> JsonObject:

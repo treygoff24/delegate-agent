@@ -904,27 +904,55 @@ class DiscoveryCacheTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
             home.mkdir()
-            barrier = threading.Barrier(2)
+            tmp_a = Path(tmp) / "tmp-a"
+            tmp_b = Path(tmp) / "tmp-b"
+            tmp_a.mkdir()
+            tmp_b.mkdir()
+            writer = """
+import os
+import sys
+from delegate_agent.harness_discovery import empty_snapshot, write_discovery_cache
 
-            def write(env: dict[str, str], harness: str) -> None:
-                barrier.wait()
-                snapshot = self._snapshot("work", harness)
-                self.discovery.write_discovery_cache("work", snapshot, home=home, env=env)
-
-            threads = [
-                threading.Thread(
-                    target=write,
-                    args=({"PATH": "/ctx-a", "TMPDIR": "/tmp-a"}, "codex"),
-                ),
-                threading.Thread(
-                    target=write,
-                    args=({"PATH": "/ctx-b", "TMPDIR": "/tmp-b"}, "droid"),
-                ),
-            ]
-            for thread in threads:
-                thread.start()
-            for thread in threads:
-                thread.join()
+home, harness = sys.argv[1:]
+snapshot = empty_snapshot(profile='work', captured_at='2026-07-20T21:00:00Z')
+snapshot['harnesses'] = {
+    harness: {
+        'installed': True,
+        'selector': [f'/{harness}'],
+        'version': 'test 1.0.0',
+        'probeStatus': 'ok',
+        'modelScope': 'account',
+        'defaultModel': 'gpt-test',
+        'models': {'gpt-test': {'displayName': 'GPT Test', 'reasoning': {'supported': ['low'], 'default': 'low', 'evidence': 'exact'}}},
+        'harnessReasoning': None,
+        'warnings': [],
+    }
+}
+write_discovery_cache('work', snapshot, home=__import__('pathlib').Path(home), env=os.environ)
+"""
+            processes = []
+            for path, harness in ((tmp_a, "codex"), (tmp_b, "droid")):
+                env = {
+                    **os.environ,
+                    "PATH": f"/ctx-{harness}",
+                    "TMPDIR": str(path),
+                    "PYTHONPATH": os.pathsep.join(
+                        part for part in (SRC, os.environ.get("PYTHONPATH")) if part
+                    ),
+                }
+                processes.append(
+                    subprocess.Popen(
+                        [sys.executable, "-c", writer, str(home), harness],
+                        cwd=ROOT,
+                        env=env,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                    )
+                )
+            for process in processes:
+                stdout, stderr = process.communicate(timeout=30)
+                self.assertEqual(process.returncode, 0, f"{stdout}\n{stderr}")
 
             raw = json.loads(
                 self.discovery.discovery_cache_path("work", home=home).read_text(encoding="utf-8")
