@@ -1175,6 +1175,198 @@ class WorkflowCommandTests(unittest.TestCase):
         approval = workflow_registry.read_json(root / workflow_registry.APPROVAL_FILE) or {}
         self.assertIn(gate_key, approval.get("approvedKeys", []))
 
+    def test_reject_is_durable_idempotent_and_sequence_ordered(self) -> None:
+        wf_id = "wf_333333333333"
+        root = workflow_registry.ensure_workflow_dir(self.workspace, wf_id)
+        script_path = root / workflow_registry.SCRIPT_FILE
+        script_path.write_text("return True\n", encoding="utf-8")
+        workflow_registry.write_json(
+            root / workflow_registry.STATUS_FILE,
+            {
+                "wfId": wf_id,
+                "status": "created",
+                "budget": {"total": None, "spent": 0, "remaining": None},
+            },
+        )
+        state = workflow_runtime.WorkflowState(
+            wf_id=wf_id,
+            workspace=self.workspace,
+            root=root,
+            script_path=script_path,
+            config={},
+            cli_argv=[str(CLI)],
+            args=None,
+            budget=workflow_runtime.Budget(None),
+        )
+        state.append_event("agent_started", key="agent-key", label="draft")
+        state.append_event("agent_finished", key="agent-key", result={"ok": False})
+        self.assertEqual(state.reject_agent("draft", "emitter policy"), "agent-key")
+        self.assertEqual(state.reject_agent("agent-key", "same policy"), "agent-key")
+        self.assertIn("agent-key", state.tombstoned_keys)
+        self.assertNotIn("agent-key", state.replay_keys)
+        events = workflow_registry.iter_journal(root / workflow_registry.JOURNAL_FILE)
+        self.assertEqual(
+            [event["type"] for event in events],
+            ["agent_started", "agent_finished", "agent_rejected"],
+        )
+
+        # A result recorded after the tombstone is a fresh settlement and
+        # becomes replayable on the next supervisor start.
+        state.append_event("agent_finished", key="agent-key", result={"ok": True})
+        resumed = workflow_runtime.WorkflowState(
+            wf_id=wf_id,
+            workspace=self.workspace,
+            root=root,
+            script_path=script_path,
+            config={},
+            cli_argv=[str(CLI)],
+            args=None,
+            budget=workflow_runtime.Budget(None),
+        )
+        self.assertNotIn("agent-key", resumed.tombstoned_keys)
+        self.assertEqual(resumed.replay.get("agent-key"), {"ok": True})
+
+    def test_v1_agent_key_parity_omits_timeout(self) -> None:
+        wf_id = "wf_444444444444"
+        root = workflow_registry.ensure_workflow_dir(self.workspace, wf_id)
+        script_path = root / workflow_registry.SCRIPT_FILE
+        script_path.write_text("return True\n", encoding="utf-8")
+        workflow_registry.write_json(
+            root / workflow_registry.STATUS_FILE,
+            {
+                "wfId": wf_id,
+                "status": "created",
+                "budget": {"total": None, "spent": 0, "remaining": None},
+            },
+        )
+        state = workflow_runtime.WorkflowState(
+            wf_id=wf_id,
+            workspace=self.workspace,
+            root=root,
+            script_path=script_path,
+            config={},
+            cli_argv=[str(CLI)],
+            args=None,
+            budget=workflow_runtime.Budget(None),
+            workflow_key_version=1,
+            dry_run=True,
+        )
+        workflow_runtime.WorkflowDsl(state, {"defaults": {"engine": "codex"}}).agent(
+            "parity prompt", timeout=3601
+        )
+        event = next(
+            event
+            for event in workflow_registry.iter_journal(root / workflow_registry.JOURNAL_FILE)
+            if event.get("type") == "agent_started"
+        )
+        expected = workflow_runtime._agent_key(
+            "root/seq#0",
+            "parity prompt",
+            {
+                "engine": "codex",
+                "mode": "safe",
+                "model": None,
+                "effort": None,
+                "fast": None,
+                "schema": None,
+                "isolation": None,
+                "personaDigest": None,
+            },
+        )
+        self.assertEqual(event["key"], expected)
+        self.assertNotEqual(
+            event["key"],
+            workflow_runtime._agent_key(
+                "root/seq#0",
+                "parity prompt",
+                {
+                    "engine": "codex",
+                    "mode": "safe",
+                    "model": None,
+                    "effort": None,
+                    "fast": None,
+                    "schema": None,
+                    "isolation": None,
+                    "personaDigest": None,
+                    "timeout": 3601,
+                },
+            ),
+            "v1 key fixture must remain timeout-independent",
+        )
+
+    def test_new_workflow_launch_stamps_v2_key_version(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "v2-stamp"}
+            return True
+            """
+        )
+        launch = self.run_delegate(["--json", "workflow", "run", str(script), "--dry-run"])
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        status = self.run_delegate(["--json", "workflow", "status", wf_id])
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertEqual(json.loads(status.stdout).get("workflowKeyVersion"), 2)
+
+    def test_v2_tombstone_retry_uses_attempt_key(self) -> None:
+        wf_id = "wf_555555555555"
+        root = workflow_registry.ensure_workflow_dir(self.workspace, wf_id)
+        script_path = root / workflow_registry.SCRIPT_FILE
+        script_path.write_text("return True\n", encoding="utf-8")
+        workflow_registry.write_json(
+            root / workflow_registry.STATUS_FILE,
+            {
+                "wfId": wf_id,
+                "status": "created",
+                "budget": {"total": None, "spent": 0, "remaining": None},
+            },
+        )
+        base_opts = {
+            "engine": "codex",
+            "mode": "safe",
+            "model": None,
+            "effort": None,
+            "fast": None,
+            "schema": None,
+            "isolation": None,
+            "personaDigest": None,
+            "timeout": 1,
+        }
+        base_key = workflow_runtime._agent_key("root/seq#0", "retry prompt", base_opts, version=2)
+        workflow_registry.append_jsonl(
+            root / workflow_registry.JOURNAL_FILE,
+            {"seq": 1, "type": "agent_rejected", "key": base_key, "reason": "retry"},
+        )
+        state = workflow_runtime.WorkflowState(
+            wf_id=wf_id,
+            workspace=self.workspace,
+            root=root,
+            script_path=script_path,
+            config={},
+            cli_argv=[str(CLI)],
+            args=None,
+            budget=workflow_runtime.Budget(None),
+            workflow_key_version=2,
+            replay_attempt=2,
+            dry_run=True,
+        )
+        workflow_runtime.WorkflowDsl(state, {"defaults": {"engine": "codex"}}).agent(
+            "retry prompt", timeout=1
+        )
+        started = [
+            event
+            for event in workflow_registry.iter_journal(root / workflow_registry.JOURNAL_FILE)
+            if event.get("type") == "agent_started"
+        ]
+        self.assertEqual(len(started), 1)
+        self.assertNotEqual(started[0]["key"], base_key)
+        retry_opts = dict(base_opts)
+        retry_opts["retryAttempt"] = 2
+        self.assertEqual(
+            started[0]["key"],
+            workflow_runtime._agent_key("root/seq#0", "retry prompt", retry_opts, version=2),
+        )
+
     def test_resume_releases_paused_gate(self) -> None:
         child = self.write_saved_workflow(
             "resume-gate-child",
@@ -3676,7 +3868,8 @@ class WorkflowCommandTests(unittest.TestCase):
             break
         else:
             self.fail("supervisor did not release workflow lock")
-        # timeout is not part of the structural key; shorten adoption wait only.
+        # v2 timeout changes intentionally resolve a fresh key; the stale child
+        # is cancelled and its temporary workspace is reaped before relaunch.
         Path(status["scriptPath"]).write_text(
             textwrap.dedent(
                 """
@@ -3702,8 +3895,8 @@ class WorkflowCommandTests(unittest.TestCase):
         runs_after = json.loads(self.run_delegate(["--json", "runs", "--group", wf_id]).stdout)[
             "runs"
         ]
-        self.assertEqual(len(runs_after), 1)
-        snap = json.loads(self.run_delegate(["--json", "snapshot", runs_after[0]["alias"]]).stdout)
+        self.assertEqual(len(runs_after), 2)
+        snap = json.loads(self.run_delegate(["--json", "snapshot", runs_after[-1]["alias"]]).stdout)
         self.assertIn(snap.get("effectiveStatus") or snap.get("status"), {"cancelled", "failed"})
 
     def test_argv_transport_prompt_size_guard(self) -> None:

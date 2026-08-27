@@ -36,6 +36,7 @@ DURABLE_EVENT_TYPES = {
     "agent_adopted",
     "agent_adopt_rejected",
     "agent_timeout",
+    "agent_rejected",
     "agent_structured_retry",
     "budget",
     "gate",

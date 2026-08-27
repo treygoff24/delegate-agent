@@ -361,6 +361,7 @@ class WorkflowState:
     budget: Budget
     dry_run: bool = False
     replay_journal: bool = True
+    workflow_key_version: int = 1
     # Read once at supervisor start and re-emitted on every status write.
     # status.json is REBUILT from scratch by _write_status_locked rather than
     # merged, so a key written only at create time is erased by the supervisor's
@@ -371,6 +372,9 @@ class WorkflowState:
     replay: dict[str, JsonValue] = field(default_factory=dict)
     replay_keys: set[str] = field(default_factory=set)
     failed_replay_keys: set[str] = field(default_factory=set)
+    tombstoned_keys: set[str] = field(default_factory=set)
+    label_keys: dict[str, str] = field(default_factory=dict)
+    started_scopes: dict[str, str] = field(default_factory=dict)
     started_without_result: set[str] = field(default_factory=set)
     exhausted_keys: set[str] = field(default_factory=set)
     claimed_keys: set[str] = field(default_factory=set)
@@ -447,6 +451,12 @@ class WorkflowState:
             key = event.get("key")
             if not isinstance(key, str):
                 continue
+            label = event.get("label")
+            if isinstance(label, str) and label:
+                self.label_keys[label] = key
+            scope = event.get("scope")
+            if event.get("type") == "agent_started" and isinstance(scope, str):
+                self.started_scopes[key] = scope
             is_simulated = event.get("simulated") is True or event.get("dryRun") is True
             if is_simulated:
                 simulated_keys.add(key)
@@ -457,7 +467,13 @@ class WorkflowState:
                     simulated_keys.discard(key)
                 else:
                     continue
-            if event.get("type") == "budget":
+            if event.get("type") == "agent_rejected":
+                self.tombstoned_keys.add(key)
+                self.replay_keys.discard(key)
+                self.replay.pop(key, None)
+                self.started_without_result.discard(key)
+                self.exhausted_keys.discard(key)
+            elif event.get("type") == "budget":
                 # Idempotent resume: keys already charged must not re-claim.
                 self.claimed_keys.add(key)
             elif event.get("type") == "agent_started":
@@ -471,6 +487,10 @@ class WorkflowState:
                 else:
                     self.exhausted_keys.discard(key)
                 result = event.get("result")
+                # A result after a tombstone is a fresh settlement and is
+                # replayable.  A tombstone that follows this row removes it on
+                # the next pass through the journal.
+                self.tombstoned_keys.discard(key)
                 # Historical v1 journals replay every completed result,
                 # including an exhausted ``None``.  CP2's explicit reject()
                 # tombstone adds invalidation without reinterpreting these
@@ -523,6 +543,17 @@ class WorkflowState:
                 "at": run_registry.utc_now_iso(),
                 **payload,
             }
+            event_key = event.get("key")
+            event_label = event.get("label")
+            if isinstance(event_key, str) and isinstance(event_label, str) and event_label:
+                self.label_keys[event_label] = event_key
+            event_scope = event.get("scope")
+            if (
+                event_type == "agent_started"
+                and isinstance(event_key, str)
+                and isinstance(event_scope, str)
+            ):
+                self.started_scopes[event_key] = event_scope
             registry.append_jsonl(self.journal_path, event)
             # A gate writes status="paused" with its gateKey and then raises GateExit; the
             # script's own unwind logging must not clobber that back to "running", or
@@ -659,6 +690,40 @@ class WorkflowState:
             )
         return GateExit("workflow gate is closed to new agent calls")
 
+    def reject_agent(self, key_or_label: object, reason: object) -> str:
+        """Durably tombstone an agent key so a later call executes fresh."""
+        if not isinstance(key_or_label, str) or not key_or_label.strip():
+            raise ValueError("reject() expects a non-empty agent key or label")
+        raw = key_or_label.strip()
+        key = self.label_keys.get(raw, raw)
+        if key in self.tombstoned_keys:
+            return key
+        event: JsonObject = {"key": key, "reason": str(reason)}
+        if raw != key:
+            event["label"] = raw
+        # The durable row is written before mutating in-memory replay state.
+        self.append_event("agent_rejected", **event)
+        self.tombstoned_keys.add(key)
+        self.replay_keys.discard(key)
+        self.replay.pop(key, None)
+        self.started_without_result.discard(key)
+        self.exhausted_keys.discard(key)
+        return key
+
+    def cancel_stale_scope_children(self, scope: str, current_key: str) -> None:
+        for old_key, old_scope in tuple(self.started_scopes.items()):
+            if (
+                old_scope != scope
+                or old_key == current_key
+                or old_key not in self.started_without_result
+            ):
+                continue
+            cancel_workflow_agent_child(self.workspace, self.wf_id, old_key)
+            old_run = _find_workflow_agent_run(self.workspace, self.wf_id, old_key)
+            if old_run is not None:
+                _cleanup_workflow_agent_run_workspace(self.workspace, old_run)
+            self.started_without_result.discard(old_key)
+
     def _write_status_locked(
         self,
         *,
@@ -687,6 +752,8 @@ class WorkflowState:
             "notify": self.notify_target,
             "updatedAt": run_registry.utc_now_iso(),
         }
+        if self.workflow_key_version == 2:
+            payload["workflowKeyVersion"] = 2
         if not self.replay_journal:
             payload["replayJournal"] = False
         if last_event is not None:
@@ -926,6 +993,7 @@ def execute_workflow(state: WorkflowState) -> object:
         "phase": dsl.phase,
         "log": dsl.log,
         "workflow": dsl.workflow,
+        "reject": dsl.reject,
         "judges": dsl.judges,
         "args": state.args,
         "budget": state.budget,
@@ -948,6 +1016,10 @@ class WorkflowDsl:
 
     def log(self, message: object) -> None:
         self.state.append_event("log", message=str(message))
+
+    def reject(self, key_or_label: object, reason: object) -> None:
+        """Invalidate an agent result explicitly; emitters own this policy."""
+        self.state.reject_agent(key_or_label, reason)
 
     def pipeline(
         self, items: list[object], *stages: Callable[[object, object, int], object]
@@ -1195,9 +1267,13 @@ class WorkflowDsl:
             started_without_result=self.state.started_without_result,
             claimed_keys=self.state.claimed_keys,
             failed_replay_keys=self.state.failed_replay_keys,
+            tombstoned_keys=self.state.tombstoned_keys,
+            label_keys=self.state.label_keys,
+            started_scopes=self.state.started_scopes,
             lifetime_counter=self.state.lifetime_counter,
             gate_state=self.state.gate_state,
             replay_attempt=self.state.replay_attempt,
+            workflow_key_version=self.state.workflow_key_version,
             cancel_event=self.state.cancel_event,
             retry_worktree_runs=self.state.retry_worktree_runs,
             pending_gate=self.state.pending_gate,
@@ -1323,28 +1399,27 @@ class WorkflowDsl:
         if timeout is not None:
             opts["timeout"] = timeout
         path = self.state.next_agent_path()
-        # v1 cache keys intentionally omit timeout.  The timeout is execution
-        # metadata, not structural identity; changing it must not fork a
-        # paused production workflow.  CP2 adds an explicit v2 key lane.
+        key_version = 2 if self.state.workflow_key_version == 2 else 1
         key_opts = dict(opts)
-        key_opts.pop("timeout", None)
-        base_key = _agent_key(path, prompt, key_opts)
-        legacy_opts = dict(key_opts)
-        legacy_opts.pop("retryAttempt", None)
-        legacy_key = _agent_key(path, prompt, legacy_opts)
-        failed_key = base_key if base_key in self.state.failed_replay_keys else None
-        if legacy_key in self.state.failed_replay_keys:
-            failed_key = legacy_key
-        if failed_key is not None:
-            opts["retryAttempt"] = max(self.state.replay_attempt, 1)
-            key = _agent_key(path, prompt, opts)
-        elif base_key not in self.state.replay_keys and legacy_key in self.state.replay_keys:
-            # Pre-timeout-key journals remain replay-compatible without
-            # rewriting their historical key or event rows.
-            key = legacy_key
-        else:
-            key = base_key
-        if key in self.state.replay_keys:
+        if key_version == 1:
+            # v1 cache keys intentionally omit timeout.  The timeout is
+            # execution metadata, not structural identity; changing it must
+            # not fork a paused production workflow.
+            key_opts.pop("timeout", None)
+        base_key = _agent_key(path, prompt, key_opts, version=key_version)
+        key = base_key
+        if key_version == 2 and base_key in self.state.tombstoned_keys:
+            retry_opts = dict(key_opts)
+            retry_opts["retryAttempt"] = max(self.state.replay_attempt, 1)
+            key = _agent_key(path, prompt, retry_opts, version=key_version)
+        if label is not None:
+            self.state.label_keys[label] = key
+        if key_version == 2:
+            # A v2 timeout change intentionally creates a fresh key.  Cancel
+            # any unfinished child from the same structural scope before the
+            # replacement launches, so its temporary worktree cannot leak.
+            self.state.cancel_stale_scope_children(path, key)
+        if key in self.state.replay_keys and key not in self.state.tombstoned_keys:
             result = self.state.replay[key]
             if key in self.state.exhausted_keys:
                 self.state.exhausted_keys.discard(key)
@@ -1376,7 +1451,7 @@ class WorkflowDsl:
                 result=result,
             )
             return result
-        if key in self.state.started_without_result:
+        if key in self.state.started_without_result and key not in self.state.tombstoned_keys:
             adopted = self._adopt_existing_agent_run(
                 key,
                 scope=path,
@@ -1466,6 +1541,7 @@ class WorkflowDsl:
             self.state.append_event(
                 "agent_finished", key=key, scope=path, result=placeholder, simulated=True
             )
+            self.state.tombstoned_keys.discard(key)
             if label is not None:
                 self.state.record_completed_child(
                     label=label,
@@ -1533,6 +1609,7 @@ class WorkflowDsl:
                     )
                     result = None
                 if result is not None:
+                    self.state.tombstoned_keys.discard(key)
                     self.state.replay_keys.add(key)
                     self.state.replay[key] = result
                     self.state.append_event(
@@ -2222,13 +2299,16 @@ class WorkflowDsl:
         if retries is not None:
             opts["retries"] = retries
         path = self.state.next_agent_path()
-        base_key = _followup_key(path, prior_label, prompt, opts)
-        if base_key in self.state.failed_replay_keys:
-            opts["retryAttempt"] = max(self.state.replay_attempt, 1)
-            key = _followup_key(path, prior_label, prompt, opts)
-        else:
-            key = base_key
-        if key in self.state.replay_keys:
+        key_version = 2 if self.state.workflow_key_version == 2 else 1
+        base_key = _followup_key(path, prior_label, prompt, opts, version=key_version)
+        key = base_key
+        if key_version == 2 and base_key in self.state.tombstoned_keys:
+            retry_opts = dict(opts)
+            retry_opts["retryAttempt"] = max(self.state.replay_attempt, 1)
+            key = _followup_key(path, prior_label, prompt, retry_opts, version=key_version)
+        if label is not None:
+            self.state.label_keys[label] = key
+        if key in self.state.replay_keys and key not in self.state.tombstoned_keys:
             result = self.state.replay[key]
             self.state.append_event(
                 "agent_cache_hit",
@@ -2239,7 +2319,7 @@ class WorkflowDsl:
                 result=result,
             )
             return result
-        if key in self.state.started_without_result:
+        if key in self.state.started_without_result and key not in self.state.tombstoned_keys:
             adopted = self._adopt_existing_agent_run(
                 key,
                 scope=path,
@@ -2358,28 +2438,25 @@ class WorkflowDsl:
                     error=str(exc),
                 )
                 result = None
-            if result is not None:
-                self.state.replay_keys.add(key)
-                self.state.replay[key] = result
-                self.state.append_event(
-                    "agent_finished",
-                    key=key,
-                    scope=path,
-                    engine=prior_child.engine,
-                    result=result,
-                )
-                run_id = getattr(self.state.thread_local, "last_run_id", None)
-                if label is not None and isinstance(run_id, str):
-                    self.state.record_completed_child(
-                        label, run_id, prior_child.engine, resumable=True
-                    )
-                return result
+        if result is not None:
+            self.state.tombstoned_keys.discard(key)
             self.state.replay_keys.add(key)
-            self.state.replay[key] = None
+            self.state.replay[key] = result
             self.state.append_event(
-                "agent_finished", key=key, scope=path, result=None, exhausted=True
+                "agent_finished",
+                key=key,
+                scope=path,
+                engine=prior_child.engine,
+                result=result,
             )
-            return None
+            run_id = getattr(self.state.thread_local, "last_run_id", None)
+            if label is not None and isinstance(run_id, str):
+                self.state.record_completed_child(label, run_id, prior_child.engine, resumable=True)
+            return result
+        self.state.replay_keys.add(key)
+        self.state.replay[key] = None
+        self.state.append_event("agent_finished", key=key, scope=path, result=None, exhausted=True)
+        return None
 
     def _run_followup_attempts(
         self,
@@ -2730,14 +2807,16 @@ def _engine_chain(value: object) -> list[str]:
     return [DEFAULT_ENGINE]
 
 
-def _agent_key(scope_path: str, prompt: str, opts: JsonObject) -> str:
+def _agent_key(scope_path: str, prompt: str, opts: JsonObject, *, version: int = 1) -> str:
     canonical_opts = _canonical_json(opts)
-    return _stable_hash(f"v1:{scope_path}{prompt}{canonical_opts}")
+    return _stable_hash(f"v{version}:{scope_path}{prompt}{canonical_opts}")
 
 
-def _followup_key(scope_path: str, prior_label: str, prompt: str, opts: JsonObject) -> str:
+def _followup_key(
+    scope_path: str, prior_label: str, prompt: str, opts: JsonObject, *, version: int = 1
+) -> str:
     canonical_opts = _canonical_json(opts)
-    return _stable_hash(f"followup-v1:{scope_path}{prior_label}{prompt}{canonical_opts}")
+    return _stable_hash(f"followup-v{version}:{scope_path}{prior_label}{prompt}{canonical_opts}")
 
 
 def _stable_hash(value: str) -> str:
@@ -3093,6 +3172,8 @@ def run_supervisor(
         spent = budget_payload.get("spent") if isinstance(budget_payload, dict) else None
         total_budget = total if isinstance(total, int) else None
         replay_journal = status.get("replayJournal") is not False
+        key_version = status.get("workflowKeyVersion")
+        workflow_key_version = key_version if key_version in {1, 2} else 1
         spent_budget = spent if isinstance(spent, int) and spent >= 0 else 0
         state = WorkflowState(
             wf_id=wf_id,
@@ -3104,6 +3185,7 @@ def run_supervisor(
             args=args,
             budget=Budget(total_budget, spent_budget),
             replay_journal=replay_journal,
+            workflow_key_version=workflow_key_version,
             notify_target=notify_spec if isinstance(notify_spec, str) and notify_spec else None,
         )
         state.write_status("running")

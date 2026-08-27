@@ -203,6 +203,9 @@ def emit_run(
                 "scriptSha256": registry.script_sha256(data),
                 "args": args_value,
                 "budget": {"total": budget_total, "spent": 0, "remaining": budget_total},
+                # New workflow launches use v2 keys.  A resumed workflow keeps
+                # its existing version (missing means legacy v1).
+                "workflowKeyVersion": 2,
                 # Persisted rather than passed on argv: the supervisor is
                 # detached and re-execs itself, so status.json is the only thing
                 # that survives to tell it where to report.
@@ -323,6 +326,7 @@ def emit_dry_run(
         args=args_value,
         budget=runtime.Budget(budget_total),
         dry_run=True,
+        workflow_key_version=2,
         # A dry run writes status too, and status.json is rebuilt rather than
         # merged, so omitting the target here erases it from a workflow that was
         # created with one and then dry-run before launching.
