@@ -2264,6 +2264,19 @@ class RunnerCaptureTests(unittest.TestCase):
         )
         summary.assert_called_once_with(ctx)
 
+    def test_zero_commit_health_flags_at_exact_budget_fraction_boundary(self):
+        ctx = self._persistent_health_context()
+        with mock.patch.object(
+            self.runner,
+            "_persistent_work_summary",
+            return_value={"commitsCreatedCount": 0},
+        ):
+            detail = self.runner._zero_commit_health_detail(
+                ctx, elapsed_seconds=5, budget_seconds=10, threshold_fraction=0.5
+            )
+
+        self.assertIsNotNone(detail)
+
     def test_zero_commit_health_does_not_flag_lane_with_commits(self):
         ctx = self._persistent_health_context()
         with mock.patch.object(
@@ -2349,7 +2362,8 @@ class RunnerCaptureTests(unittest.TestCase):
                     [
                         sys.executable,
                         "-c",
-                        "import time; time.sleep(0.65); print('done')",
+                        "import pathlib, sys, time; time.sleep(0.65); pathlib.Path(sys.argv[1]).write_text('complete'); print('done')",
+                        str(Path(workspace) / "child-complete"),
                     ],
                     workspace,
                     ctx,
@@ -2360,7 +2374,10 @@ class RunnerCaptureTests(unittest.TestCase):
                     timeout=1,
                 )
 
-            self.assertIn(code, (0, 1))
+            self.assertEqual(code, 0)
+            self.assertEqual(
+                (Path(workspace) / "child-complete").read_text(encoding="utf-8"), "complete"
+            )
             assert payload is not None
             self.assertIn("zeroCommitHealth", payload)
             self.assertTrue(
