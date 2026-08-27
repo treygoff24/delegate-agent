@@ -427,6 +427,11 @@ class RegressionGuardTests(HelpCliTestBase):
         self.assertEqual(parsed.launch.prompt_file, "task.md")
         self.assertEqual(parsed.launch.prompt_parts, [])
 
+    def test_true_usage_error_exits_with_exit_usage(self):
+        code, _out, err = self.run_main(["definitely-not-a-command"])
+        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        self.assertIn("unknown_subcommand", err)
+
     def test_trailing_json_after_prompt_is_global(self):
         parsed = self.delegate.parse_cli(["dry-run", "droid", "minimax", "work", "hello", "--json"])
         self.assertTrue(parsed.global_options.json_mode)
