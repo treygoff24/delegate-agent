@@ -459,6 +459,44 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertEqual(payload["result"], {"ok": False})
         self.assertEqual(payload["runTree"]["counts"], {"codex:safe": 1})
 
+    def test_dry_run_exposes_dry_run_flag_to_the_script(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "dry-flag"}
+            return {"sawDryRun": dry_run}
+            """
+        )
+        result = self.run_delegate(["--json", "workflow", "run", str(script), "--dry-run"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["result"], {"sawDryRun": True})
+
+    def test_dry_run_abandons_a_script_that_waits_forever(self) -> None:
+        # Reproduces dlg-8oc: a generated plan whose human gate polls for a
+        # decision no dry run can supply. Before the deadline this hung until
+        # the process was killed by hand.
+        script = self.write_workflow(
+            """
+            import threading
+
+            meta = {"name": "dry-hang"}
+
+            def block(prev, item=None, index=None):
+                threading.Event().wait(600)
+                return prev
+
+            return pipeline([1, 2, 3], block)
+            """
+        )
+        config = json.loads(self.config_path.read_text(encoding="utf-8"))
+        config.setdefault("workflows", {})["dryRunTimeoutSeconds"] = 2
+        self.config_path.write_text(json.dumps(config), encoding="utf-8")
+
+        result = self.run_delegate(["--json", "workflow", "run", str(script), "--dry-run"])
+        self.assertNotEqual(result.returncode, 0)
+        payload = json.loads(result.stdout or result.stderr)
+        self.assertEqual(payload["error"], "dry_run_timeout")
+
     def test_dry_run_schema_placeholders_honor_recursive_minimums(self) -> None:
         schema = {
             "type": "object",

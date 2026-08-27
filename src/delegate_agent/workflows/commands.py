@@ -5,11 +5,13 @@ import json
 import os
 import shutil
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
 
+from delegate_agent import config as delegate_config
 from delegate_agent import rendering, run_registry, workflow_pinning
 from delegate_agent.errors import EXIT_OK, DelegateError
 from delegate_agent.isolation import worktrees_data_home
@@ -381,10 +383,33 @@ def emit_dry_run(
         # created with one and then dry-run before launching.
         notify_target=notify,
     )
-    try:
-        result = runtime.execute_workflow(state)
-    except Exception as exc:
-        raise DelegateError("workflow_execution_failed", str(exc)) from exc
+    timeout_seconds = delegate_config.dry_run_timeout_seconds(config)
+    outcome: dict[str, object] = {}
+
+    def _execute() -> None:
+        try:
+            outcome["result"] = runtime.execute_workflow(state)
+        except BaseException as exc:  # surfaced on the calling thread below
+            outcome["error"] = exc
+
+    # A dry run launches no real children, so its worker threads are disposable
+    # and the interpreter can exit out from under a script that parks forever
+    # waiting on a human gate it will never receive.
+    worker = threading.Thread(target=_execute, name="dry-run", daemon=True)
+    worker.start()
+    worker.join(timeout_seconds)
+    if worker.is_alive():
+        raise DelegateError(
+            "dry_run_timeout",
+            f"Dry run exceeded {timeout_seconds}s and was abandoned. A workflow that "
+            "waits on a human gate cannot resolve one during a dry run; give the "
+            "script a dry-run path for its gates, or raise "
+            "workflows.dryRunTimeoutSeconds.",
+        )
+    error = outcome.get("error")
+    if isinstance(error, BaseException):
+        raise DelegateError("workflow_execution_failed", str(error)) from error
+    result = outcome.get("result")
     tree = _run_tree(state.dry_runs)
     payload: JsonObject = {
         "ok": True,
