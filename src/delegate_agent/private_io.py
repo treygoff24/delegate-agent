@@ -357,6 +357,8 @@ def write_json_atomic(
         )
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
         if before_replace is not None:
             before_replace()
         os.replace(temp_name, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)

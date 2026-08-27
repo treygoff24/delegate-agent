@@ -26,7 +26,7 @@ class LockViolation:
     target: str
 
 
-def _target_identity(target: Path) -> tuple[int, int] | None:
+def _target_identity(target: Path) -> tuple[int, int, int] | None:
     try:
         info = target.stat()
     except OSError:

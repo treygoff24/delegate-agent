@@ -521,6 +521,10 @@ class WorkflowState:
     replay_keys: set[str] = field(default_factory=set)
     failed_replay_keys: set[str] = field(default_factory=set)
     tombstoned_keys: set[str] = field(default_factory=set)
+    # Starts recorded after a tombstone are fresh work.  Preserve the
+    # tombstone for v2 attempt-key derivation, but allow a later supervisor to
+    # adopt that fresh child rather than launching a third copy of it.
+    started_after_tombstone: set[str] = field(default_factory=set)
     label_keys: dict[str, str] = field(default_factory=dict)
     started_scopes: dict[str, str] = field(default_factory=dict)
     started_without_result: set[str] = field(default_factory=set)
@@ -600,7 +604,11 @@ class WorkflowState:
             if not isinstance(key, str):
                 continue
             label = event.get("label")
-            if isinstance(label, str) and label:
+            if (
+                event.get("type") in {"agent_started", "agent_finished"}
+                and isinstance(label, str)
+                and label
+            ):
                 self.label_keys[label] = key
             scope = event.get("scope")
             if event.get("type") == "agent_started" and isinstance(scope, str):
@@ -620,9 +628,8 @@ class WorkflowState:
                 # Repeated tombstones and no-result tombstones are durable
                 # no-ops, preserving any unfinished adoption state.  The
                 # tombstone marker itself remains so v2 can select a retry key.
-                if key in self.tombstoned_keys:
-                    continue
                 self.tombstoned_keys.add(key)
+                self.started_after_tombstone.discard(key)
                 if key not in self.replay_keys and key not in self.replay:
                     continue
                 self.replay_keys.discard(key)
@@ -634,6 +641,8 @@ class WorkflowState:
                 self.claimed_keys.add(key)
             elif event.get("type") == "agent_started":
                 self.started_without_result.add(key)
+                if key in self.tombstoned_keys:
+                    self.started_after_tombstone.add(key)
             elif event.get("type") == "agent_finished":
                 # An exhausted key replays its None without respawning, but a
                 # child run that did finish gets one adoption attempt first —
@@ -647,6 +656,7 @@ class WorkflowState:
                 # replayable.  A tombstone that follows this row removes it on
                 # the next pass through the journal.
                 self.tombstoned_keys.discard(key)
+                self.started_after_tombstone.discard(key)
                 # Historical v1 journals replay every completed result,
                 # including an exhausted ``None``.  CP2's explicit reject()
                 # tombstone adds invalidation without reinterpreting these
@@ -701,7 +711,12 @@ class WorkflowState:
             }
             event_key = event.get("key")
             event_label = event.get("label")
-            if isinstance(event_key, str) and isinstance(event_label, str) and event_label:
+            if (
+                event_type in {"agent_started", "agent_finished"}
+                and isinstance(event_key, str)
+                and isinstance(event_label, str)
+                and event_label
+            ):
                 self.label_keys[event_label] = event_key
             event_scope = event.get("scope")
             if (
@@ -815,8 +830,6 @@ class WorkflowState:
             # interruption so approve/resume never depends on status.json.
             with self.journal_lock:
                 self._write_gate_projection_locked(event)
-            if self.pending_gate and self.pending_gate[-1][0] == gate_key:
-                self.pending_gate.pop()
         return GateExit(
             "workflow gate checkpoint reached",
             gate_key=gate_key,
@@ -852,6 +865,17 @@ class WorkflowState:
                 child=child,
                 result=result,
             )
+        latest = self.latest_gate_event()
+        if latest is not None:
+            gate_key = latest.get("key")
+            if isinstance(gate_key, str):
+                child = latest.get("child")
+                return GateExit(
+                    "workflow gate is closed to new agent calls",
+                    gate_key=gate_key,
+                    child=child if isinstance(child, str) else None,
+                    result=latest.get("result"),
+                )
         return GateExit("workflow gate is closed to new agent calls")
 
     def _known_agent_keys(self) -> set[str]:
@@ -920,16 +944,14 @@ class WorkflowState:
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError("reject() expects a non-empty reason string")
         key, label = self.resolve_agent_key(key_or_label)
-        already_tombstoned = key in self.tombstoned_keys
         has_cached_result = self._has_cached_result(key)
         event: JsonObject = {"key": key, "reason": reason}
         if label is not None:
             event["label"] = label
         # The durable row is written before mutating in-memory replay state.
         self.append_event("agent_rejected", **event)
-        if already_tombstoned:
-            return key
         self.tombstoned_keys.add(key)
+        self.started_after_tombstone.discard(key)
         # Tombstones with no cached result do not clear an unfinished adoption
         # state; the marker remains for v2's fresh attempt-key derivation.
         if not has_cached_result:
@@ -980,6 +1002,7 @@ class WorkflowState:
             "supervisorPgid": os.getpgrp(),
             "supervisorToken": self.supervisor_token,
             "notify": self.notify_target,
+            "replayAttempt": self.replay_attempt,
             "updatedAt": run_registry.utc_now_iso(),
         }
         if self.workflow_key_version == 2:
@@ -1090,15 +1113,7 @@ class WorkflowState:
             if self.cancel_event.is_set():
                 raise SupervisorWatchdogExit("cancellation requested before agent admission")
             if self.gate_state["stop_admitting"]:
-                if self.pending_gate:
-                    gate_key, child, result = self.pending_gate[-1]
-                    raise GateExit(
-                        "workflow gate is closed to new agent calls",
-                        gate_key=gate_key,
-                        child=child,
-                        result=result,
-                    )
-                raise GateExit("workflow gate is closed to new agent calls")
+                raise self.closed_gate_exit()
             self.gate_state["in_flight_agents"] += 1
         try:
             yield
@@ -1504,6 +1519,7 @@ class WorkflowDsl:
             claimed_keys=self.state.claimed_keys,
             failed_replay_keys=self.state.failed_replay_keys,
             tombstoned_keys=self.state.tombstoned_keys,
+            started_after_tombstone=self.state.started_after_tombstone,
             label_keys=self.state.label_keys,
             started_scopes=self.state.started_scopes,
             lifetime_counter=self.state.lifetime_counter,
@@ -1650,8 +1666,21 @@ class WorkflowDsl:
             # any unfinished child from the same structural scope before the
             # replacement launches, so its temporary worktree cannot leak.
             self.state.cancel_stale_scope_children(path, key)
-        if key in self.state.replay_keys and key not in self.state.tombstoned_keys:
-            result = self.state.replay[key]
+        # reject() mutates the replay maps under journal_lock.  Take one
+        # coherent decision so a concurrent cache hit cannot observe a key in
+        # replay_keys after reject has popped its value.
+        with self.state.journal_lock:
+            cached = (
+                key in self.state.replay_keys
+                and key not in self.state.tombstoned_keys
+                and key in self.state.replay
+            )
+            cached_result = self.state.replay.get(key)
+            adoptable_started = key in self.state.started_without_result and (
+                key not in self.state.tombstoned_keys or key in self.state.started_after_tombstone
+            )
+        if cached:
+            result = cached_result
             if key in self.state.exhausted_keys:
                 self.state.exhausted_keys.discard(key)
                 adopted = self._adopt_existing_agent_run(
@@ -1682,7 +1711,7 @@ class WorkflowDsl:
                 result=result,
             )
             return result
-        if key in self.state.started_without_result and key not in self.state.tombstoned_keys:
+        if adoptable_started:
             adopted = self._adopt_existing_agent_run(
                 key,
                 scope=path,
@@ -1794,6 +1823,8 @@ class WorkflowDsl:
             remaining=_budget_remaining_json(self.state.budget),
         )
         with self.state.active_agent():
+            if key in self.state.tombstoned_keys:
+                self.state.started_after_tombstone.add(key)
             self.state.append_event(
                 "agent_started",
                 key=key,
@@ -2062,25 +2093,102 @@ class WorkflowDsl:
         resumable: bool = False,
     ) -> JsonValue:
         if schema is None:
-            return self._run_delegate(
-                engine,
-                prompt,
-                mode=mode,
-                model=model,
-                effort=effort,
-                fast=fast,
-                isolation=isolation,
-                passthrough=passthrough,
-                timeout=timeout,
-                output_schema=None,
-                prefer_assistant=False,
-                workflow_agent_key=key,
-                label=label,
-                persona=persona,
-                allow_repo_persona=allow_repo_persona,
-                expected_persona_digest=persona.digest if persona is not None else None,
-                resumable=resumable,
-            )
+            # Retry attachment is a child-run concern, not a structured-output
+            # concern.  A work-lane timeout with no schema still has a dirty
+            # worktree worth preserving for its retry.
+            attempts = retries if retries is not None else 0
+            if attempts <= 0:
+                return self._run_delegate(
+                    engine,
+                    prompt,
+                    mode=mode,
+                    model=model,
+                    effort=effort,
+                    fast=fast,
+                    isolation=isolation,
+                    passthrough=passthrough,
+                    timeout=timeout,
+                    output_schema=None,
+                    prefer_assistant=False,
+                    workflow_agent_key=key,
+                    label=label,
+                    persona=persona,
+                    allow_repo_persona=allow_repo_persona,
+                    expected_persona_digest=persona.digest if persona is not None else None,
+                    resumable=resumable,
+                )
+            retry_workspace_run_id: str | None = None
+            retry_backend: str | None = None
+            workspace_cleanup: JsonObject | None = None
+            first_child_run_id: str | None = None
+            for attempt in range(attempts + 1):
+                try:
+                    raw_child = self._run_delegate(
+                        engine,
+                        prompt,
+                        mode=mode,
+                        model=model,
+                        effort=effort,
+                        fast=fast,
+                        isolation=isolation,
+                        passthrough=passthrough,
+                        timeout=timeout,
+                        output_schema=None,
+                        prefer_assistant=False,
+                        workflow_agent_key=key,
+                        label=label,
+                        persona=persona,
+                        allow_repo_persona=allow_repo_persona,
+                        expected_persona_digest=persona.digest if persona is not None else None,
+                        return_metadata=True,
+                        structured_retry_run_id=retry_workspace_run_id,
+                        preserve_retry_workspace=True,
+                        structured_retry_backend=retry_backend,
+                        resumable=resumable,
+                    )
+                except BaseException:
+                    _cleanup_structured_retry_workspace(workspace_cleanup)
+                    if first_child_run_id is not None:
+                        self._release_structured_retry_worktree(first_child_run_id)
+                    raise
+                child = _delegate_child_result(raw_child)
+                if first_child_run_id is None:
+                    first_child_run_id = child.run_id
+                if child.run_id is not None:
+                    self.state.retry_worktree_runs.add(child.run_id)
+                if child.workspace_cleanup is not None:
+                    workspace_cleanup = child.workspace_cleanup
+                if child.isolation_backend == "bwrap":
+                    retry_backend = "bwrap"
+                if child.text is not None:
+                    _cleanup_structured_retry_workspace(workspace_cleanup)
+                    if first_child_run_id is not None:
+                        self._release_structured_retry_worktree(first_child_run_id)
+                    return child.text
+                outcome = child.outcome or ChildAttemptOutcome(
+                    run_id=child.run_id,
+                    failure_reason="nonzero_exit",
+                    worktree=child.execution_cwd,
+                    cleanup_ownership=child.workspace_cleanup,
+                    execution_cwd=child.execution_cwd,
+                )
+                if attempt >= attempts or outcome.failure_reason not in CHILD_FAILURE_REASONS:
+                    break
+                self.state.append_event(
+                    "agent_retry",
+                    key=key,
+                    label=label,
+                    engine=engine,
+                    attempt=attempt,
+                    retryAttempt=attempt + 1,
+                    childAttemptOutcome=outcome.as_json(),
+                )
+                if retry_workspace_run_id is None:
+                    retry_workspace_run_id = child.run_id
+            _cleanup_structured_retry_workspace(workspace_cleanup)
+            if first_child_run_id is not None:
+                self._release_structured_retry_worktree(first_child_run_id)
+            return None
         workflow_schema.validate_schema_subset(schema)
         attempts = retries if retries is not None else _structured_retries(self.state.config)
         native_schema = _codex_native_schema(schema) if engine == "codex" else None
@@ -3431,6 +3539,10 @@ def run_supervisor(
         replay_journal = status.get("replayJournal") is not False
         key_version = status.get("workflowKeyVersion")
         workflow_key_version = key_version if key_version in {1, 2} else 1
+        prior_attempt = status.get("replayAttempt")
+        replay_attempt = (
+            prior_attempt if isinstance(prior_attempt, int) and prior_attempt >= 0 else 0
+        )
         spent_budget = spent if isinstance(spent, int) and spent >= 0 else 0
         state = WorkflowState(
             wf_id=wf_id,
@@ -3443,6 +3555,7 @@ def run_supervisor(
             budget=Budget(total_budget, spent_budget),
             replay_journal=replay_journal,
             workflow_key_version=workflow_key_version,
+            replay_attempt=replay_attempt,
             notify_target=notify_spec if isinstance(notify_spec, str) and notify_spec else None,
         )
         state.write_status("running")
@@ -3459,30 +3572,48 @@ def run_supervisor(
             # metadata-less unwind is an execution failure, not a successful
             # pause that an operator can never approve.
             if exc.gate_key is None:
-                tb = traceback.format_exc()[-4000:]
-                with contextlib.suppress(Exception):
-                    state.append_event(
-                        "workflow_failed",
-                        error="gate exit missing durable gate key",
-                        detail=str(exc),
-                        traceback=tb,
+                # A sibling can be between agent() calls after the durable
+                # gate row closed admission.  Its GateExit has no local
+                # metadata, but the journal does.  Journal authority wins
+                # over this lossy concurrent unwind.
+                latest_gate = state.latest_gate_event()
+                latest_key = latest_gate.get("key") if latest_gate is not None else None
+                if isinstance(latest_key, str):
+                    exc = GateExit(
+                        str(exc),
+                        gate_key=latest_key,
+                        child=(
+                            latest_gate.get("child")
+                            if isinstance(latest_gate.get("child"), str)
+                            else None
+                        ),
+                        result=latest_gate.get("result"),
                     )
-                with contextlib.suppress(Exception):
-                    registry.write_result(
-                        root,
-                        {
-                            "ok": False,
-                            "wfId": wf_id,
-                            "error": "gate exit missing durable gate key",
-                            "traceback": tb,
-                        },
-                    )
-                with contextlib.suppress(Exception):
-                    state.write_status(
-                        "failed", error="gate exit missing durable gate key", traceback=tb
-                    )
-                state.notify_event("failed", detail="gate exit missing durable gate key")
-                return 1
+                else:
+                    tb = traceback.format_exc()[-4000:]
+                    with contextlib.suppress(Exception):
+                        state.append_event(
+                            "workflow_failed",
+                            error="gate exit missing durable gate key",
+                            detail=str(exc),
+                            traceback=tb,
+                        )
+                    with contextlib.suppress(Exception):
+                        registry.write_result(
+                            root,
+                            {
+                                "ok": False,
+                                "wfId": wf_id,
+                                "error": "gate exit missing durable gate key",
+                                "traceback": tb,
+                            },
+                        )
+                    with contextlib.suppress(Exception):
+                        state.write_status(
+                            "failed", error="gate exit missing durable gate key", traceback=tb
+                        )
+                    state.notify_event("failed", detail="gate exit missing durable gate key")
+                    return 1
             # A concurrent unwind may have left status.json stale or absent;
             # rebuild its projection from the journal-authoritative gate event.
             state.ensure_gate_durable(exc)

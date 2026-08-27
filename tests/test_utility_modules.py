@@ -334,6 +334,28 @@ class UtilityModuleTests(unittest.TestCase):
 
 
 class WriteJsonAtomicCleanupTests(unittest.TestCase):
+    def test_write_json_atomic_fsyncs_before_rename(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "state.json"
+            fsynced = False
+            real_fsync = private_io.os.fsync
+            real_replace = private_io.os.replace
+
+            def observe_fsync(fd: int) -> None:
+                nonlocal fsynced
+                fsynced = True
+                real_fsync(fd)
+
+            def observe_replace(src: str, dst: str, **kwargs: object) -> None:
+                self.assertTrue(fsynced)
+                real_replace(src, dst, **kwargs)
+
+            with (
+                mock.patch.object(private_io.os, "fsync", observe_fsync),
+                mock.patch.object(private_io.os, "replace", observe_replace),
+            ):
+                private_io.write_json_atomic(target, {"ok": True})
+
     def test_write_json_atomic_unlinks_temp_on_failure(self):
         """A failed write_json_atomic must not leave .tmp files behind."""
         with tempfile.TemporaryDirectory() as tmp:

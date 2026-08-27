@@ -1393,6 +1393,69 @@ class WorkflowCommandTests(unittest.TestCase):
         status = self.run_delegate(["--json", "workflow", "status", script_wf_id])
         self.assertIn("missing-key", json.loads(status.stdout).get("error", ""))
 
+    def test_reject_label_ignores_non_settlement_events(self) -> None:
+        wf_id = "wf_777777777777"
+        root = workflow_registry.ensure_workflow_dir(self.workspace, wf_id)
+        script_path = root / workflow_registry.SCRIPT_FILE
+        script_path.write_text("return True\n", encoding="utf-8")
+        workflow_registry.write_json(
+            root / workflow_registry.STATUS_FILE,
+            {"wfId": wf_id, "status": "created", "budget": {"total": None, "spent": 0}},
+        )
+        state = workflow_runtime.WorkflowState(
+            wf_id=wf_id,
+            workspace=self.workspace,
+            root=root,
+            script_path=script_path,
+            config={},
+            cli_argv=[str(CLI)],
+            args=None,
+            budget=workflow_runtime.Budget(None),
+        )
+        state.append_event("agent_started", key="settled-key", label="draft")
+        state.append_event("agent_finished", key="settled-key", label="draft", result="old")
+        state.append_event("agent_cache_hit", key="wrong-key", label="draft", result="old")
+        state.append_event("agent_rejected", key="wrong-key", label="draft", reason="other")
+        replayed = workflow_runtime.WorkflowState(
+            wf_id=wf_id,
+            workspace=self.workspace,
+            root=root,
+            script_path=script_path,
+            config={},
+            cli_argv=[str(CLI)],
+            args=None,
+            budget=workflow_runtime.Budget(None),
+        )
+        self.assertEqual(replayed.resolve_agent_key("draft"), ("settled-key", "draft"))
+
+    def test_v1_start_after_reject_remains_adoptable(self) -> None:
+        wf_id = "wf_888888888888"
+        root = workflow_registry.ensure_workflow_dir(self.workspace, wf_id)
+        script_path = root / workflow_registry.SCRIPT_FILE
+        script_path.write_text("return True\n", encoding="utf-8")
+        workflow_registry.write_json(
+            root / workflow_registry.STATUS_FILE,
+            {"wfId": wf_id, "status": "created", "budget": {"total": None, "spent": 0}},
+        )
+        for event in (
+            {"seq": 1, "type": "agent_started", "key": "v1-key"},
+            {"seq": 2, "type": "agent_rejected", "key": "v1-key", "reason": "stale"},
+            {"seq": 3, "type": "agent_started", "key": "v1-key"},
+        ):
+            workflow_registry.append_jsonl(root / workflow_registry.JOURNAL_FILE, event)
+        state = workflow_runtime.WorkflowState(
+            wf_id=wf_id,
+            workspace=self.workspace,
+            root=root,
+            script_path=script_path,
+            config={},
+            cli_argv=[str(CLI)],
+            args=None,
+            budget=workflow_runtime.Budget(None),
+        )
+        self.assertIn("v1-key", state.tombstoned_keys)
+        self.assertIn("v1-key", state.started_after_tombstone)
+
     def test_cli_reject_parked_workflow_tombstones_and_resume_respawns(self) -> None:
         child = self.write_saved_workflow(
             "reject-cli-child",
@@ -1437,6 +1500,26 @@ class WorkflowCommandTests(unittest.TestCase):
         started = [event for event in events if event.get("type") == "agent_started"]
         self.assertEqual(len(started), 2)
         self.assertNotEqual(started[0]["key"], started[1]["key"])
+
+        # Exercise the real resume path a second time.  Setting
+        # WorkflowState.replay_attempt directly cannot prove the supervisor
+        # restored and re-emitted status.json's counter.
+        rejected = self.run_delegate(
+            ["--json", "workflow", "reject", wf_id, "draft", "--reason", "still stale"]
+        )
+        self.assertEqual(rejected.returncode, 0, rejected.stderr)
+        resumed = self.run_delegate(["--json", "workflow", "run", "--resume", wf_id])
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        resumed_wait = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
+        self.assertEqual(resumed_wait.returncode, 0, resumed_wait.stderr)
+        events = json.loads(self.run_delegate(["--json", "workflow", "events", wf_id]).stdout)[
+            "events"
+        ]
+        started = [event for event in events if event.get("type") == "agent_started"]
+        self.assertEqual(len(started), 3)
+        self.assertEqual(len({event["key"] for event in started}), 3)
+        status = json.loads(self.run_delegate(["--json", "workflow", "status", wf_id]).stdout)
+        self.assertEqual(status.get("replayAttempt"), 2)
 
     def test_cli_reject_refuses_live_running_workflow(self) -> None:
         script = self.write_workflow(
@@ -1494,20 +1577,10 @@ class WorkflowCommandTests(unittest.TestCase):
             for event in workflow_registry.iter_journal(root / workflow_registry.JOURNAL_FILE)
             if event.get("type") == "agent_started"
         )
-        expected = workflow_runtime._agent_key(
-            "root/seq#0",
-            "parity prompt",
-            {
-                "engine": "codex",
-                "mode": "safe",
-                "model": None,
-                "effort": None,
-                "fast": None,
-                "schema": None,
-                "isolation": None,
-                "personaDigest": None,
-            },
-        )
+        # Frozen main-branch v1 vector: sha256 of
+        # `v1:{scope}{prompt}{canonical opts}`.  Do not derive the expected
+        # value with _agent_key(), which would reproduce a changed bug.
+        expected = "3f6a782a9ecd411cb4640bc0224c81b3bd40ee7cbcfa045b107010d1826f8cab"
         self.assertEqual(event["key"], expected)
         self.assertNotEqual(
             event["key"],
@@ -3706,6 +3779,64 @@ class WorkflowCommandTests(unittest.TestCase):
         journal = next(event for event in events if event["type"] == "agent_structured_retry")
         self.assertEqual(journal["strategy"], "resume")
         self.assertEqual(journal["sessionId"], "thread-1")
+
+    def test_unstructured_retry_attaches_to_failed_worktree(self) -> None:
+        """A schema-less timeout must retain the prior worktree for retry."""
+        root = self.workspace / "workflow-text-retry"
+        root.mkdir()
+        state = workflow_runtime.WorkflowState(
+            wf_id="workflow-text-retry",
+            workspace=self.workspace,
+            root=root,
+            script_path=root / workflow_registry.SCRIPT_FILE,
+            config={},
+            cli_argv=[sys.executable, str(CLI)],
+            args=None,
+            budget=workflow_runtime.Budget(None),
+        )
+        state.write_status("running")
+        dsl = workflow_runtime.WorkflowDsl(state, {"defaults": {}})
+        timed_out = workflow_runtime._DelegateChildResult(
+            text=None,
+            run_id="del_20260827T000000Z_abcdef",
+            execution_cwd="/worktrees/dirty-child",
+            session_id=None,
+            outcome=workflow_runtime.ChildAttemptOutcome(
+                run_id="del_20260827T000000Z_abcdef",
+                failure_reason="timeout",
+                worktree="/worktrees/dirty-child",
+                execution_cwd="/worktrees/dirty-child",
+            ),
+        )
+        retried = workflow_runtime._DelegateChildResult(
+            text="kept dirty worktree",
+            run_id="del_20260827T000001Z_abcdef",
+            execution_cwd="/worktrees/dirty-child",
+            session_id=None,
+        )
+        with mock.patch.object(dsl, "_run_delegate", side_effect=[timed_out, retried]) as run_mock:
+            result = dsl._run_structured_or_text(
+                "codex",
+                "implement in the worktree",
+                mode="work",
+                model=None,
+                effort=None,
+                fast=None,
+                schema=None,
+                isolation="worktree",
+                passthrough=False,
+                timeout=1,
+                retries=1,
+                key="stable-agent-key",
+            )
+
+        self.assertEqual(result, "kept dirty worktree")
+        self.assertTrue(run_mock.call_args_list[0].kwargs["preserve_retry_workspace"])
+        self.assertEqual(
+            run_mock.call_args_list[1].kwargs["structured_retry_run_id"],
+            "del_20260827T000000Z_abcdef",
+        )
+        self.assertEqual(run_mock.call_args_list[1].kwargs["isolation"], "worktree")
 
     def test_structured_retry_preserves_bwrap_backend_on_retry(self) -> None:
         root = self.workspace / "workflow-bwrap-retry"

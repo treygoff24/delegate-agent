@@ -407,8 +407,13 @@ def _replay_finalize_wal_locked(registry_root: Path) -> None:
             current = load_run_state_or_none(registry_root, run_id)
             current_status = current.get("status") if isinstance(current, dict) else None
             if current_status in TERMINAL_STATUSES and current_status != STATUS_CANCELLED:
-                wal_path.unlink(missing_ok=True)
-                continue
+                # A crash can land state.json before snapshot.json.  Do not
+                # treat a terminal state alone as publication: only both WAL
+                # payloads are the finalized projection.
+                current_snapshot = load_run_snapshot_or_none(registry_root, run_id)
+                if current == state and current_snapshot == snapshot:
+                    wal_path.unlink(missing_ok=True)
+                    continue
             if current_status == STATUS_CANCELLED or (
                 isinstance(current, dict) and current.get("cancelRequested") is True
             ):

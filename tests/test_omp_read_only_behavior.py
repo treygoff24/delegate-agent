@@ -115,7 +115,9 @@ class OmpReadOnlyBehaviorTests(unittest.TestCase):
         argv = [self._omp_bin(), "--model", self._model(), "-p", "--no-session", "--mode", "json"]
         argv.extend(PI_FAMILY_SAFE_LOCKDOWN["omp"])
         argv.append(prompt)
-        result = subprocess.run(argv, cwd=cwd, env=_probe_env(), capture_output=True, text=True, timeout=180)
+        result = subprocess.run(
+            argv, cwd=cwd, env=_probe_env(), capture_output=True, text=True, timeout=180
+        )
         assert_live_turn(result.stdout)
         return result
 
@@ -159,7 +161,9 @@ class OmpReadOnlyBehaviorTests(unittest.TestCase):
             ]
             argv.extend(PI_FAMILY_SAFE_LOCKDOWN["omp"])
             argv.append("Read target.txt and print the exact marker string it contains.")
-            result = subprocess.run(argv, cwd=d, env=_probe_env(), capture_output=True, text=True, timeout=180)
+            result = subprocess.run(
+                argv, cwd=d, env=_probe_env(), capture_output=True, text=True, timeout=180
+            )
             assert_live_turn(result.stdout)
             self.assertIn(
                 "SECRET_MARKER_42",

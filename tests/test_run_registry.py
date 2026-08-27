@@ -501,6 +501,27 @@ class RunRegistryTests(unittest.TestCase):
             self.assertFalse(snapshot["ok"])
             self.assertFalse((run_path / self.registry.FINALIZE_WAL_FILE).exists())
 
+    def test_registry_lock_repairs_snapshot_before_removing_terminal_wal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
+            run_id, _alias = self.registry.register_run(root, harness="cursor")
+            run_path = self.registry.run_directory(root, run_id)
+            state = {"status": "succeeded", "exitCode": 0}
+            snapshot = {"status": "succeeded", "ok": True}
+            self.registry.write_json_atomic(run_path / self.registry.STATE_FILE, state)
+            self.registry.write_snapshot(run_path, {"status": "running", "ok": False})
+            self.registry.write_finalize_wal(
+                root, run_id, status="succeeded", state=state, snapshot=snapshot
+            )
+
+            with self.registry.registry_lock(root, timeout_seconds=1):
+                pass
+
+            self.assertEqual(
+                json.loads((run_path / self.registry.SNAPSHOT_FILE).read_text()), snapshot
+            )
+            self.assertFalse((run_path / self.registry.FINALIZE_WAL_FILE).exists())
+
     def test_corrupt_finalize_wal_is_quarantined_without_blocking_lock(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
