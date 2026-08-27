@@ -1386,7 +1386,7 @@ def _safe_isolation_warnings(
     for none and got auto anyway, so the warning explains why the flag was ignored.
 
     The second is the absence of that override, and it is the one that cost us a
-    review. Engines outside that set (today: codex) honour `--isolation none` in
+    review. An engine outside that set honours `--isolation none` in
     safe mode, so the child runs against the real checkout with .git readable,
     protected only by the harness's own read-only sandbox. Nothing said so. A
     lane whose entire purpose was a read firewall silently had none, and the

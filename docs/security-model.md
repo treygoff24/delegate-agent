@@ -118,7 +118,7 @@ Safe mode is for review and investigation.
 - OpenCode safe uses `--pure` plus environment-injected runtime enforcement. `OPENCODE_CONFIG_CONTENT` merges after repository config, disables sharing and autoupdate, applies deny-all-but-read/glob/grep permissions globally and to the selected agent, and creates a synthetic `delegate-read-only` agent when none is selected. `OPENCODE_PERMISSION` applies the same tool policy. Delegate re-applies these protected settings after profile resolution. `--pure` also disables repository-local plugins that could otherwise execute code during a safe run.
 - Pi safe enables only the built-in `read` tool and adds `--no-extensions --no-skills --no-prompt-templates --no-approve`. The isolated workspace remains a second filesystem boundary. `pi call --read-only` uses the same argv restrictions.
 - Oh My Pi safe enables only `read` and adds `--no-extensions --no-skills --no-rules --no-lsp --approval-mode always-ask`. This differs from Pi because Oh My Pi 17.0.4 has no `--no-prompt-templates` or `--no-approve`. The read-only enforcement is **not** `--tools read` — that allowlist is not self-enforcing in Oh My Pi 17.0.4 (the write, bash, and python tools still execute under it alone). The load-bearing flag is `--approval-mode always-ask`: in headless `-p` mode there is no approver present, so every write/exec tool call auto-denies while the built-in `read` capability stays auto-allowed. This is Oh My Pi's analog of Pi's `--no-approve`. It also overrides a hostile project-local `approvalMode: yolo`. `--no-extensions` is the operative extension-discovery kill, `--no-rules` disables rules discovery, and `--no-lsp` closes the LSP formatting path. The isolated workspace remains a second filesystem boundary. `omp call --read-only` uses the same argv restrictions. Because `--tools read` alone does not bind, dropping `--approval-mode always-ask` would silently make Oh My Pi safe mode write-capable; a behavioral write-probe, not an argv-shape assertion, is the gate that this holds.
-- Explicit `--isolation none` is normalized to `auto` with a warning for Cursor, Claude, Grok, OpenCode, Pi, Oh My Pi, Droid, and Kimi safe mode because it would remove the isolation/config boundary those safe contracts rely on. Codex safe may opt out of Delegate workspace isolation because the Codex read-only sandbox remains active.
+- Explicit `--isolation none` is normalized to `auto` with a warning for every currently supported safe engine because it would remove the isolation/config boundary those safe contracts rely on.
 
 Safe mode is not a proof of zero side effects. Treat it as a defensive default plus prompt/runtime policy. A runtime could still read available files, use configured credentials, load its own customizations, or perform actions allowed by its own permissions.
 
@@ -190,9 +190,13 @@ Pi `call --read-only` uses the same read-only tool allowlist and discovery-disab
 flags as Pi safe mode. All Pi modes use `--no-session`.
 Oh My Pi `call --read-only` uses its fork-specific read-only tool allowlist and
 discovery-disable flags. All Oh My Pi modes use `--no-session`.
-Devin `call --read-only` passes a Delegate-generated agent-config deny-list for
-edit, write, exec, and `mcp__*`, plus `--permission-mode auto`. Default Devin
-call uses `--permission-mode dangerous`.
+Devin `call --read-only` passes a Delegate-generated `--config` deny-list for
+edit, write, exec, and `mcp__*`, plus `--sandbox --permission-mode autonomous`.
+Delegate fails closed if the installed Devin version is outside the transport's
+known-good range or if Devin reports an unaccepted transport flag. The actual
+write/exec denial boundary is verified by the gated `DELEGATE_DEVIN_BEHAVIOR_TEST`
+smoke against the operator's Devin version; it is not proven by argv shape alone.
+Default Devin call uses `--permission-mode dangerous`.
 
 `call --pure` is a separate, stronger completion boundary. It is currently
 supported on **Claude only**. Delegate sends the prompt verbatim on stdin, starts

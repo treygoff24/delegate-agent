@@ -513,7 +513,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "Prompt uses Delegate temp file via Devin --prompt-file plus -p; dry-run argv shows <prompt file>.",
             WORKTREE_DIRTY_SYNC_NOTE,
             CALL_MODE_NOTE,
-            "Call --read-only passes a Delegate-generated --agent-config deny-list for edit/write/exec and mcp__* plus --permission-mode auto.",
+            "Call --read-only passes a Delegate-generated --config deny-list for edit/write/exec and mcp__* plus --sandbox --permission-mode autonomous.",
             "Work and default call mode use --permission-mode dangerous because Devin print mode rejects unapproved edit/exec tools.",
             "Model selection uses --model (alias from devin.models or a raw model ID), the run-input JSON model, or devin.defaultModel in config; unknown models are left to Devin CLI validation.",
             "Reasoning effort is unsupported for Devin in v1.",

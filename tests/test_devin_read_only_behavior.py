@@ -31,6 +31,7 @@ from delegate_agent.prompt_transport import (
     DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
     PROMPT_FILE_ARG_PLACEHOLDER,
 )
+from delegate_agent.request_build import DEVIN_READ_ONLY_AGENT_CONFIG
 
 GATE = os.environ.get("DELEGATE_DEVIN_BEHAVIOR_TEST") == "1"
 BIN_ENV = "DELEGATE_DEVIN_BEHAVIOR_BIN"
@@ -76,18 +77,8 @@ class DevinReadOnlyBehaviorTests(unittest.TestCase):
                 "the request. If either action is denied, report the denial and stop.\n",
                 encoding="utf-8",
             )
-            # These are the tool names and deny semantics documented by Devin's
-            # current CLI.  The OS sandbox is defense in depth for any path a
-            # future tool might reach outside the selected workspace.
             config_path.write_text(
-                json.dumps(
-                    {
-                        "permissions": {
-                            "allow": ["read", "grep", "glob", "Read(/**)"],
-                            "deny": ["edit", "exec", "Write(/**)", "mcp__*"],
-                        }
-                    }
-                ),
+                json.dumps(DEVIN_READ_ONLY_AGENT_CONFIG),
                 encoding="utf-8",
             )
 

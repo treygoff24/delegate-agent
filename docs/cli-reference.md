@@ -355,8 +355,11 @@ delegate [--json] [--isolation auto|none|worktree] devin work [--model <alias-or
 delegate [--json] devin call [--read-only] [--timeout SECONDS] [--model <alias-or-model>] [--prompt-file PATH] [prompt...]
 ```
 
-- `call --read-only` passes a Delegate-generated `--agent-config` deny-list for
-  edit, write, exec, and `mcp__*`, plus `--permission-mode auto`. Work and
+- `call --read-only` passes a Delegate-generated `--config` deny-list for
+  edit, write, exec, and `mcp__*`, plus `--sandbox --permission-mode autonomous`.
+  Delegate fails closed on an unsupported Devin version or an unaccepted
+  transport flag; behavioral write/exec denial is verified only by the gated
+  `DELEGATE_DEVIN_BEHAVIOR_TEST` smoke against the operator's Devin version. Work and
   default call use `--permission-mode dangerous` because non-interactive Devin
   rejects unapproved edit/exec tools.
 - Prompt text is materialized in a private temporary file and passed with
