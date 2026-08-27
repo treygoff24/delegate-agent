@@ -240,7 +240,7 @@ def _launch_registry_lock(ctx: RunContext):
 def _registry_lock_timeout(ctx: RunContext) -> float:
     value = getattr(ctx, "registry_lock_timeout_seconds", None)
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
-        return run_registry.REGISTRY_LOCK_TIMEOUT_SECONDS
+        return run_registry.resolve_registry_lock_timeout_seconds()
     return max(float(value), 0.0)
 
 

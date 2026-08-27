@@ -267,9 +267,11 @@ def ensure_registry(
     workspace: Path,
     *,
     workspace_kind: str,
-    timeout_seconds: float = REGISTRY_LOCK_TIMEOUT_SECONDS,
+    timeout_seconds: float | None = None,
 ) -> Path:
     root = delegate_root(workspace)
+    if timeout_seconds is None:
+        timeout_seconds = resolve_registry_lock_timeout_seconds()
     with registry_lock(root, timeout_seconds=timeout_seconds):
         ensure_private_dir(aliases_dir(root))
         ensure_private_dir(runs_dir(root))
@@ -440,9 +442,11 @@ def _replay_finalize_wal_locked(registry_root: Path) -> None:
 def file_lock(
     lock_path: Path,
     *,
-    timeout_seconds: float = REGISTRY_LOCK_TIMEOUT_SECONDS,
+    timeout_seconds: float | None = None,
 ) -> Iterator[None]:
     """Acquire a private advisory lock; flock releases it on process exit."""
+    if timeout_seconds is None:
+        timeout_seconds = resolve_registry_lock_timeout_seconds()
     ensure_private_dir(lock_path.parent)
     fd = open_private_file(lock_path, os.O_CREAT | os.O_RDWR)
     try:
@@ -469,7 +473,7 @@ def file_lock(
 def registry_lock(
     registry_root: Path,
     *,
-    timeout_seconds: float = REGISTRY_LOCK_TIMEOUT_SECONDS,
+    timeout_seconds: float | None = None,
 ) -> Iterator[None]:
     """Serialize registry mutations and replay pending finalization WALs.
 
@@ -489,11 +493,13 @@ def register_run(
     harness: str,
     run_id: str | None = None,
     metadata: JsonObject | None = None,
-    timeout_seconds: float = REGISTRY_LOCK_TIMEOUT_SECONDS,
+    timeout_seconds: float | None = None,
 ) -> tuple[str, str]:
     run_id = run_id or generate_run_id()
     if not RUN_ID_RE.match(run_id):
         raise ValueError(f"run id does not match expected format: {run_id}")
+    if timeout_seconds is None:
+        timeout_seconds = resolve_registry_lock_timeout_seconds()
     with registry_lock(registry_root, timeout_seconds=timeout_seconds):
         alias = allocate_alias(registry_root, harness)
         index = load_index(registry_root)
