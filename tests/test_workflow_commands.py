@@ -1175,6 +1175,58 @@ class WorkflowCommandTests(unittest.TestCase):
         approval = workflow_registry.read_json(root / workflow_registry.APPROVAL_FILE) or {}
         self.assertIn(gate_key, approval.get("approvedKeys", []))
 
+    def test_approve_recovers_wf_b43032f7fee5_fixture(self) -> None:
+        """Recover the named production-shaped fixture from journal authority."""
+        wf_id = "wf_b43032f7fee5"
+        root = workflow_registry.ensure_workflow_dir(self.workspace, wf_id)
+        script_path = root / workflow_registry.SCRIPT_FILE
+        script_path.write_text(
+            "meta = {'name': 'b43032-fixture'}\nreturn {'ok': True}\n", encoding="utf-8"
+        )
+        workflow_registry.write_json(
+            root / workflow_registry.STATUS_FILE,
+            {
+                "wfId": wf_id,
+                "status": "running",
+                "workspace": str(self.workspace),
+                "scriptPath": str(script_path),
+                "journalPath": str(root / workflow_registry.JOURNAL_FILE),
+                "resultPath": str(root / workflow_registry.RESULT_FILE),
+                "budget": {"total": None, "spent": 4, "remaining": None},
+            },
+        )
+        events = [
+            {"seq": 1, "type": "budget", "key": "agent-1"},
+            {"seq": 2, "type": "agent_finished", "key": "agent-1", "result": {"ok": True}},
+            {"seq": 3, "type": "agent_finished", "key": "agent-2", "result": {"ok": True}},
+            *[
+                {
+                    "seq": seq,
+                    "type": "gate",
+                    "key": f"gate-{seq - 4}",
+                    "child": f"child-{seq - 4}",
+                    "result": {"ok": False},
+                }
+                for seq in range(4, 9)
+            ],
+        ]
+        for event in events:
+            workflow_registry.append_jsonl(root / workflow_registry.JOURNAL_FILE, event)
+        workflow_registry.write_json(
+            root / workflow_registry.APPROVAL_FILE,
+            {
+                "approved": True,
+                "gateKey": "gate-3",
+                "approvedKeys": ["gate-0", "gate-1", "gate-2", "gate-3"],
+            },
+        )
+        approved = self.run_delegate(["--json", "workflow", "approve", wf_id])
+        self.assertEqual(approved.returncode, 0, approved.stderr)
+        status = self.run_delegate(["--json", "workflow", "status", wf_id])
+        self.assertEqual(json.loads(status.stdout).get("status"), "succeeded")
+        approval = workflow_registry.read_json(root / workflow_registry.APPROVAL_FILE) or {}
+        self.assertIn("gate-4", approval.get("approvedKeys", []))
+
     def test_reject_is_durable_idempotent_and_sequence_ordered(self) -> None:
         wf_id = "wf_333333333333"
         root = workflow_registry.ensure_workflow_dir(self.workspace, wf_id)
