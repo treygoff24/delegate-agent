@@ -59,6 +59,16 @@ class ParseJsonTolerant(unittest.TestCase):
         self.assertEqual(workflow_schema.parse_json_tolerant('{"a": 1}'), {"a": 1})
         self.assertEqual(workflow_schema.parse_json_tolerant('```json\n{"a": 1}\n```'), {"a": 1})
 
+    def test_json_string_payload_is_decoded_once_for_non_string_schema(self) -> None:
+        payload = json.dumps(json.dumps({"a": 1}))
+        schema = {"type": "object", "required": ["a"], "properties": {"a": {"type": "integer"}}}
+        self.assertEqual(workflow_schema.parse_json_tolerant(payload, schema), {"a": 1})
+
+    def test_string_schema_remains_strictly_a_string(self) -> None:
+        payload = json.dumps(json.dumps({"a": 1}))
+        schema = {"type": "string"}
+        self.assertEqual(workflow_schema.parse_json_tolerant(payload, schema), '{"a": 1}')
+
     def test_no_json_raises(self) -> None:
         with self.assertRaises(json.JSONDecodeError):
             workflow_schema.parse_json_tolerant("nothing here [T1] {run, exit}")

@@ -8,6 +8,7 @@ import io
 import json
 import math
 import os
+import queue
 import signal
 import subprocess
 import tempfile
@@ -112,6 +113,21 @@ class ChildAttemptOutcome:
             "sessionMetadata": self.session_metadata,
         }
         return payload
+
+
+@dataclass(frozen=True)
+class StructuredAttemptOutcome:
+    """The final structured-output parse/validation result for one agent call."""
+
+    last_parsed_candidate: JsonValue | None
+    validation_error: str
+    candidate_present: bool = False
+
+    def as_json(self) -> JsonObject:
+        return {
+            "lastParsedCandidate": (self.last_parsed_candidate if self.candidate_present else None),
+            "validationError": self.validation_error,
+        }
 
 
 @dataclass(frozen=True)
@@ -454,6 +470,28 @@ class GateExit(RuntimeError):
         self.result = result
 
 
+class SoftParkExit(RuntimeError):
+    """The runnable set drained with one or more named items parked."""
+
+    def __init__(self, names: tuple[str, ...]) -> None:
+        self.names = names
+        joined = ", ".join(names)
+        super().__init__(f"workflow soft-parked items: {joined}")
+
+
+class _SoftParkRequest(RuntimeError):
+    """Internal request raised by an item callback to release its slot."""
+
+    def __init__(self, name: str, result: JsonValue = None) -> None:
+        self.name = name
+        self.result = result
+        super().__init__(f"soft-park item {name!r}")
+
+
+class SoftPark(_SoftParkRequest):
+    """Public callback signal for a named item that must yield its slot."""
+
+
 class SupervisorWatchdogExit(RuntimeError):
     """Internal cooperative cancellation raised by the supervisor watchdog."""
 
@@ -551,6 +589,8 @@ class WorkflowState:
     cancel_event: threading.Event = field(default_factory=threading.Event)
     retry_worktree_runs: set[str] = field(default_factory=set)
     pending_gate: list[tuple[str, str | None, JsonValue]] = field(default_factory=list)
+    soft_parked_items: dict[str, JsonObject] = field(default_factory=dict)
+    soft_park_scopes: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.journal_path = self.root / registry.JOURNAL_FILE
@@ -596,6 +636,18 @@ class WorkflowState:
                         cresumable,
                         clabel if isinstance(clabel, str) else None,
                     )
+            if etype == "item_parked":
+                name = event.get("name")
+                scope = event.get("scope")
+                if isinstance(name, str) and name and isinstance(scope, str) and scope:
+                    self.soft_park_scopes[name] = scope
+                    self.soft_parked_items[name] = dict(event)
+                continue
+            if etype == "item_unparked":
+                name = event.get("name")
+                if isinstance(name, str) and name:
+                    self.soft_parked_items.pop(name, None)
+                continue
             # agent_adopted events carry no engine/resumable metadata; the
             # agent_child + agent_finished pair (always present for adopted
             # runs via _emit_adopted_child_identity) registers the label with
@@ -696,6 +748,43 @@ class WorkflowState:
                     **payload,
                 },
             )
+
+    def append_durable_event(self, event_type: str, **payload: JsonValue) -> JsonObject:
+        """Append and fsync a journal event without relying on its registry list."""
+        with self.journal_lock:
+            status = registry.read_json(self.status_path)
+            last_seq = status.get("lastSeq") if isinstance(status, dict) else None
+            if isinstance(last_seq, int):
+                self.sequence = max(self.sequence, last_seq)
+            self.sequence += 1
+            event: JsonObject = {
+                "seq": self.sequence,
+                "type": event_type,
+                "at": run_registry.utc_now_iso(),
+                **payload,
+            }
+            fd = run_registry.open_private_file(
+                self.journal_path, os.O_CREAT | os.O_APPEND | os.O_WRONLY
+            )
+            with os.fdopen(fd, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(event) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            gate_key = status.get("gateKey") if isinstance(status, dict) else None
+            if (
+                isinstance(status, dict)
+                and status.get("status") == "paused"
+                and isinstance(gate_key, str)
+            ):
+                self._write_status_locked(
+                    status="paused",
+                    last_event=event,
+                    extra={"gateKey": gate_key, "gateResult": status.get("gateResult")},
+                )
+            else:
+                self._write_status_locked(status="running", last_event=event)
+            self._touch_heartbeat_locked()
+            return event
 
     def append_event(self, event_type: str, **payload: JsonValue) -> JsonObject:
         with self.journal_lock:
@@ -1150,6 +1239,57 @@ class WorkflowState:
                 if pre_acquired:
                     self.item_semaphore.release()
 
+    def soft_park_scope(self, name: str) -> str:
+        """Return the durable, explicit scope for one named soft-park item."""
+        _validate_soft_park_name(name)
+        existing = self.soft_park_scopes.get(name)
+        if existing is not None:
+            return existing
+        scope = f"{self.namespace}/soft-park/{name}"
+        self.soft_park_scopes[name] = scope
+        return scope
+
+    def park_item(self, name: object, result: JsonValue = None) -> None:
+        """Request that the enclosing ``soft_park`` item unwind its slot."""
+        if not isinstance(name, str):
+            raise ValueError("park_item() expects a non-empty stable name")
+        _validate_soft_park_name(name)
+        raise SoftPark(name, result)
+
+    def soft_park_request(self, name: object, result: JsonValue = None) -> _SoftParkRequest:
+        """Build a park marker that an item callback may return."""
+        if not isinstance(name, str):
+            raise ValueError("soft_park_request() expects a non-empty stable name")
+        _validate_soft_park_name(name)
+        return SoftPark(name, result)
+
+    def is_soft_parked(self, name: object) -> bool:
+        return isinstance(name, str) and name in self.soft_parked_items
+
+    def record_item_park(
+        self, name: str, *, scope: str, result: JsonValue, owner_scope: str
+    ) -> None:
+        """Persist one item park before its worker unwinds and releases its slot."""
+        with self.journal_lock:
+            if name in self.soft_parked_items:
+                return
+        event = self.append_durable_event(
+            "item_parked",
+            name=name,
+            scope=scope,
+            ownerScope=owner_scope,
+            result=result,
+        )
+        with self.journal_lock:
+            self.soft_park_scopes[name] = scope
+            self.soft_parked_items[name] = event
+
+    def record_item_unpark(self, name: str, *, scope: str) -> None:
+        """Persist successful replay of a previously parked item."""
+        self.append_durable_event("item_unparked", name=name, scope=scope)
+        with self.journal_lock:
+            self.soft_parked_items.pop(name, None)
+
     def dry_run_budget_tick(self) -> int:
         with self.lifetime_lock:
             self.dry_run_budget_spent += 1
@@ -1224,6 +1364,13 @@ def _item_thread_cap(config: JsonObject) -> int:
     return DEFAULT_ITEM_THREADS
 
 
+def _validate_soft_park_name(name: str) -> None:
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("soft-park item names must be non-empty strings")
+    if "/" in name:
+        raise ValueError("soft-park item names must not contain '/'")
+
+
 def _structured_retries(config: JsonObject) -> int:
     value = _workflow_config(config).get("structuredOutputRetries", DEFAULT_STRUCTURED_RETRIES)
     if isinstance(value, int) and value >= 0:
@@ -1240,11 +1387,20 @@ def execute_workflow(state: WorkflowState) -> object:
         "agent": dsl.agent,
         "followup": dsl.followup,
         "pipeline": dsl.pipeline,
+        "soft_park": dsl.soft_park,
+        "park_item": dsl.park_item,
+        "soft_park_item": dsl.park_item,
+        "item_park": dsl.park_item,
+        "park": dsl.park_item,
+        "soft_park_request": dsl.soft_park_request,
+        "parked": dsl.is_soft_parked,
+        "SoftPark": SoftPark,
         "parallel": dsl.parallel,
         "phase": dsl.phase,
         "log": dsl.log,
         "workflow": dsl.workflow,
         "reject": dsl.reject,
+        "structured_attempt": dsl.structured_attempt,
         "judges": dsl.judges,
         "args": state.args,
         "budget": state.budget,
@@ -1260,6 +1416,63 @@ class WorkflowDsl:
         defaults = meta.get("defaults")
         self.defaults = defaults if isinstance(defaults, dict) else {}
         self.current_phase: str | None = None
+        self._structured_attempts: dict[str, StructuredAttemptOutcome] = {}
+        self._structured_attempt_lock = threading.Lock()
+        self._soft_park_seen: set[str] = set()
+
+    def _record_structured_attempt(
+        self, key: str, outcome: StructuredAttemptOutcome | None
+    ) -> None:
+        lock = getattr(self, "_structured_attempt_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._structured_attempt_lock = lock
+        attempts = getattr(self, "_structured_attempts", None)
+        if attempts is None:
+            attempts = {}
+            self._structured_attempts = attempts
+        with lock:
+            if outcome is None:
+                attempts.pop(key, None)
+            else:
+                attempts[key] = outcome
+        self.state.thread_local.last_structured_attempt_key = key
+
+    def structured_attempt(self, key_or_label: object | None = None) -> JsonObject | None:
+        """Return the latest exhausted structured attempt for this workflow call."""
+        if key_or_label is None:
+            key_or_label = getattr(self.state.thread_local, "last_structured_attempt_key", None)
+        if not isinstance(key_or_label, str) or not key_or_label.strip():
+            return None
+        key = key_or_label
+        if key not in getattr(self, "_structured_attempts", {}):
+            try:
+                key, _label = self.state.resolve_agent_key(key_or_label)
+            except ValueError:
+                return None
+        lock = getattr(self, "_structured_attempt_lock", None)
+        if lock is None:
+            return None
+        with lock:
+            outcome = getattr(self, "_structured_attempts", {}).get(key)
+        if outcome is not None:
+            return outcome.as_json()
+        with self.state.journal_lock:
+            for event in reversed(registry.iter_journal(self.state.journal_path)):
+                if event.get("key") != key:
+                    continue
+                if event.get("type") == "agent_structured_exhausted":
+                    return {
+                        "lastParsedCandidate": event.get("lastParsedCandidate"),
+                        "validationError": event.get("validationError", ""),
+                    }
+                if event.get("type") == "agent_finished":
+                    if event.get("exhausted") is True and event.get("result") is None:
+                        continue
+                    return None
+                if event.get("type") == "agent_rejected":
+                    return None
+        return None
 
     def phase(self, title: str) -> None:
         self.current_phase = str(title)
@@ -1271,6 +1484,254 @@ class WorkflowDsl:
     def reject(self, key_or_label: object, reason: object) -> None:
         """Invalidate an agent result explicitly; emitters own this policy."""
         self.state.reject_agent(key_or_label, reason)
+
+    def park_item(self, name: object, result: JsonValue = None) -> None:
+        self.state.park_item(name, result)
+
+    def soft_park_request(self, name: object, result: JsonValue = None) -> _SoftParkRequest:
+        return self.state.soft_park_request(name, result)
+
+    def is_soft_parked(self, name: object) -> bool:
+        return self.state.is_soft_parked(name)
+
+    def _soft_park_entries(
+        self, items: object, worker: Callable[[object, str, int], object] | None
+    ) -> list[tuple[str, object, Callable[[], object]]]:
+        raw: list[tuple[str, object, Callable[[], object]]] = []
+
+        def add(name: object, value: object, callback: Callable[[], object]) -> None:
+            if not isinstance(name, str):
+                raise ValueError("soft_park() item names must be non-empty strings")
+            _validate_soft_park_name(name)
+            raw.append((name, value, callback))
+
+        if isinstance(items, str) and callable(worker):
+            add(items, None, lambda: worker(None, items, 0))
+        elif isinstance(items, dict):
+            for name, value in items.items():
+                if worker is None:
+                    if not callable(value):
+                        raise TypeError("soft_park() mapping values must be callables")
+                    add(name, value, value)
+                else:
+                    add(name, value, lambda value=value, name=name: worker(value, name, 0))
+        elif isinstance(items, (list, tuple)):
+            if (
+                isinstance(items, tuple)
+                and len(items) == 2
+                and isinstance(items[0], str)
+                and callable(items[1])
+            ):
+                add(items[0], items[1], items[1])
+            else:
+                for index, item in enumerate(items):
+                    if isinstance(item, str) and worker is not None:
+                        add(
+                            item,
+                            item,
+                            lambda item=item, index=index: worker(item, item, index),
+                        )
+                        continue
+                    if isinstance(item, (list, tuple)) and len(item) == 2:
+                        name, value = item
+                        if not isinstance(name, str):
+                            raise ValueError("soft_park() item names must be non-empty strings")
+                        if worker is None:
+                            if not callable(value):
+                                raise TypeError("soft_park() tuple values must be callables")
+                            add(name, value, value)
+                        else:
+                            add(
+                                name,
+                                value,
+                                lambda value=value, name=name, index=index: worker(
+                                    value, name, index
+                                ),
+                            )
+                        continue
+                    if isinstance(item, dict):
+                        name = item.get("name")
+                        if not isinstance(name, str):
+                            raise ValueError("soft_park() item dictionaries require a name")
+                        callback = next(
+                            (
+                                item.get(key)
+                                for key in ("run", "thunk", "callback", "work", "fn")
+                                if callable(item.get(key))
+                            ),
+                            None,
+                        )
+                        if worker is None and callback is None:
+                            raise TypeError("soft_park() item dictionaries require a callable")
+                        if worker is None:
+                            add(name, item, callback)
+                        else:
+                            add(
+                                name,
+                                item,
+                                lambda item=item, name=name, index=index: worker(item, name, index),
+                            )
+                        continue
+                    if worker is None:
+                        raise TypeError(
+                            "soft_park() items must be (name, callable) pairs or named dictionaries"
+                        )
+                    raise ValueError("soft_park() items require an explicit stable name")
+        else:
+            raise TypeError("soft_park() expects a mapping or named item list")
+
+        if not raw:
+            return []
+        if len(raw) > workflow_script.ITEM_LIMIT:
+            raise ValueError(f"soft_park() item limit is {workflow_script.ITEM_LIMIT}")
+        seen: set[str] = set()
+        for name, _value, _callback in raw:
+            if name in seen or name in self._soft_park_seen:
+                raise ValueError(f"soft_park() item name must be unique: {name!r}")
+            existing_scope = self.state.soft_park_scopes.get(name)
+            candidate_scope = f"{self.state.namespace}/soft-park/{name}"
+            if existing_scope is not None and existing_scope != candidate_scope:
+                raise ValueError(f"soft_park() item name must be unique: {name!r}")
+            seen.add(name)
+        self._soft_park_seen.update(seen)
+        return raw
+
+    def soft_park(
+        self,
+        items: object,
+        worker: Callable[[object, str, int], object] | None = None,
+    ) -> list[object]:
+        """Dynamically admit named items and unwind parked workers.
+
+        ``items`` is a mapping of stable names to zero-argument callbacks, or
+        a list of ``(name, callback)`` pairs.  A callback can call
+        ``park_item(name, payload)`` (or return ``soft_park_request(...)``) to
+        durably park itself.  The worker exits immediately, releasing its item
+        slot; the supervisor parks only after all unrelated admitted work drains.
+        On resume the script is replayed and the same named scope is reused.
+        """
+        entries = self._soft_park_entries(items, worker)
+        if not entries:
+            return []
+        results: list[object] = [None] * len(entries)
+        finished: queue.Queue[tuple[int, object, _SoftParkRequest | None, GateExit | None]] = (
+            queue.Queue()
+        )
+        active: dict[int, threading.Thread] = {}
+        gate_errors: list[GateExit] = []
+        watchdog_errors: list[SupervisorWatchdogExit] = []
+        validation_errors: list[ValueError] = []
+        bypass_item_cap = self.state.inside_item_thread()
+        cap = _item_thread_cap(self.state.config)
+        owner_scope = self.state.current_scope()
+
+        def run_item(
+            index: int,
+            name: str,
+            value: object,
+            callback: Callable[[], object],
+            scope: str,
+        ) -> None:
+            request: _SoftParkRequest | None = None
+            gate_error: GateExit | None = None
+            with self.state.item_slot(bypass=bypass_item_cap), self.state.scope(scope):
+                try:
+                    result = callback()
+                    if isinstance(result, _SoftParkRequest):
+                        request = result
+                        result = None
+                        if request.name == name:
+                            self.state.record_item_park(
+                                name,
+                                scope=scope,
+                                owner_scope=owner_scope,
+                                result=request.result,
+                            )
+                    results[index] = result
+                except _SoftParkRequest as exc:
+                    request = exc
+                    if request.name == name:
+                        self.state.record_item_park(
+                            name,
+                            scope=scope,
+                            owner_scope=owner_scope,
+                            result=request.result,
+                        )
+                except GateExit as exc:
+                    gate_error = exc
+                except SupervisorWatchdogExit as exc:
+                    watchdog_errors.append(exc)
+                except Exception as exc:
+                    self.state.append_event(
+                        "soft_park_item_failed",
+                        scope=self.state.current_scope(),
+                        name=name,
+                        error=str(exc),
+                    )
+            finished.put((index, value, request, gate_error))
+
+        next_index = 0
+        while next_index < len(entries) or active:
+            while (
+                next_index < len(entries)
+                and len(active) < cap
+                and not gate_errors
+                and not watchdog_errors
+            ):
+                index = next_index
+                name, value, callback = entries[index]
+                scope = self.state.soft_park_scope(name)
+                thread = threading.Thread(
+                    target=run_item,
+                    args=(index, name, value, callback, scope),
+                    daemon=False,
+                )
+                thread.start()
+                active[index] = thread
+                next_index += 1
+            if not active:
+                break
+            index, _value, request, gate_error = finished.get()
+            active.pop(index, None)
+            name = entries[index][0]
+            scope = self.state.soft_park_scope(name)
+            if gate_error is not None:
+                gate_errors.append(gate_error)
+                continue
+            if request is not None:
+                if request.name != name:
+                    validation_errors.append(
+                        ValueError(
+                            f"soft_park() callback requested {request.name!r}, expected {name!r}"
+                        )
+                    )
+                else:
+                    self.state.record_item_park(
+                        name,
+                        scope=scope,
+                        owner_scope=owner_scope,
+                        result=request.result,
+                    )
+            elif name in self.state.soft_parked_items:
+                self.state.record_item_unpark(name, scope=scope)
+
+        for thread in tuple(active.values()):
+            thread.join()
+        if watchdog_errors:
+            raise watchdog_errors[0]
+        if validation_errors:
+            raise validation_errors[0]
+        if gate_errors:
+            self.state.ensure_gate_durable(gate_errors[0])
+            raise gate_errors[0]
+        outstanding = tuple(
+            sorted(
+                name for name, _value, _callback in entries if name in self.state.soft_parked_items
+            )
+        )
+        if outstanding:
+            raise SoftParkExit(outstanding)
+        return results
 
     def pipeline(
         self, items: list[object], *stages: Callable[[object, object, int], object]
@@ -1286,6 +1747,7 @@ class WorkflowDsl:
         threads: list[threading.Thread] = []
         bypass_item_cap = self.state.inside_item_thread()
         gate_errors: list[GateExit] = []
+        soft_park_errors: list[SoftParkExit | _SoftParkRequest] = []
         start_barrier = (
             threading.Barrier(len(items) + 1)
             if not bypass_item_cap and len(items) <= _item_thread_cap(self.state.config)
@@ -1309,6 +1771,10 @@ class WorkflowDsl:
                                 break
                             except SupervisorWatchdogExit:
                                 raise
+                            except (SoftParkExit, _SoftParkRequest) as exc:
+                                soft_park_errors.append(exc)
+                                previous = None
+                                break
                             except GateExit as exc:
                                 gate_errors.append(exc)
                                 previous = None
@@ -1355,6 +1821,8 @@ class WorkflowDsl:
             thread.join()
         if self.state.cancel_event.is_set():
             raise SupervisorWatchdogExit("cancellation requested during pipeline")
+        if soft_park_errors:
+            raise soft_park_errors[0]
         if gate_errors:
             self.state.ensure_gate_durable(gate_errors[0])
             raise gate_errors[0]
@@ -1376,6 +1844,8 @@ class WorkflowDsl:
             for thunk in thunks:
                 try:
                     results.append(thunk())
+                except (SoftParkExit, _SoftParkRequest):
+                    raise
                 except (BudgetExceeded, GateExit):
                     results.append(None)
             return results
@@ -1384,6 +1854,7 @@ class WorkflowDsl:
         threads: list[threading.Thread] = []
         bypass_item_cap = self.state.inside_item_thread()
         gate_errors: list[GateExit] = []
+        soft_park_errors: list[SoftParkExit | _SoftParkRequest] = []
         start_barrier = (
             threading.Barrier(len(thunks) + 1)
             if not bypass_item_cap and len(thunks) <= _item_thread_cap(self.state.config)
@@ -1403,6 +1874,9 @@ class WorkflowDsl:
                     results[index] = None
                 except SupervisorWatchdogExit:
                     raise
+                except (SoftParkExit, _SoftParkRequest) as exc:
+                    soft_park_errors.append(exc)
+                    results[index] = None
                 except GateExit as exc:
                     gate_errors.append(exc)
                     results[index] = None
@@ -1440,6 +1914,8 @@ class WorkflowDsl:
             thread.join()
         if self.state.cancel_event.is_set():
             raise SupervisorWatchdogExit("cancellation requested during parallel")
+        if soft_park_errors:
+            raise soft_park_errors[0]
         if gate_errors:
             self.state.ensure_gate_durable(gate_errors[0])
             raise gate_errors[0]
@@ -1533,6 +2009,8 @@ class WorkflowDsl:
             cancel_event=self.state.cancel_event,
             retry_worktree_runs=self.state.retry_worktree_runs,
             pending_gate=self.state.pending_gate,
+            soft_parked_items=self.state.soft_parked_items,
+            soft_park_scopes=self.state.soft_park_scopes,
         )
         child_state.journal_lock = self.state.journal_lock
         child_state.scope_lock = self.state.scope_lock
@@ -1665,6 +2143,7 @@ class WorkflowDsl:
             key = _agent_key(path, prompt, retry_opts, version=key_version)
         if label is not None:
             self.state.label_keys[label] = key
+        self.state.thread_local.last_structured_attempt_key = key
         if key_version == 2:
             # A v2 timeout change intentionally creates a fresh key.  Cancel
             # any unfinished child from the same structural scope before the
@@ -2208,6 +2687,8 @@ class WorkflowDsl:
         prior_output = ""
         prior_error = ""
         prior_child: _DelegateChildResult | None = None
+        last_parsed_candidate: JsonValue | None = None
+        candidate_present = False
         retry_workspace_run_id: str | None = None
         structured_retry_backend: str | None = None
         workspace_cleanup: JsonObject | None = None
@@ -2321,7 +2802,10 @@ class WorkflowDsl:
             text = child.text
             try:
                 value = workflow_schema.parse_json_tolerant(text or "", schema)
+                last_parsed_candidate = value
+                candidate_present = True
                 workflow_schema.validate_value(value, schema)
+                self._record_structured_attempt(key, None)
                 _cleanup_structured_retry_workspace(workspace_cleanup)
                 if first_child_run_id is not None:
                     self._release_structured_retry_worktree(first_child_run_id)
@@ -2370,6 +2854,21 @@ class WorkflowDsl:
                 if retry_workspace_run_id is None:
                     retry_workspace_run_id = child.run_id
                 prior_child = child
+        outcome = StructuredAttemptOutcome(
+            last_parsed_candidate=last_parsed_candidate,
+            validation_error=prior_error,
+            candidate_present=candidate_present,
+        )
+        self._record_structured_attempt(key, outcome)
+        self.state.append_durable_event(
+            "agent_structured_exhausted",
+            key=key,
+            scope=self.state.current_scope(),
+            label=label,
+            engine=engine,
+            attempts=attempts + 1,
+            **outcome.as_json(),
+        )
         _cleanup_structured_retry_workspace(workspace_cleanup)
         if first_child_run_id is not None:
             self._release_structured_retry_worktree(first_child_run_id)
@@ -2896,6 +3395,8 @@ class WorkflowDsl:
         attempts = retries if retries is not None else _structured_retries(self.state.config)
         prior_output = ""
         prior_error = ""
+        last_parsed_candidate: JsonValue | None = None
+        candidate_present = False
         for attempt in range(attempts + 1):
             attempt_prompt = _structured_prompt(prompt, schema, prior_output, prior_error)
             text = self._run_delegate_followup(
@@ -2908,8 +3409,11 @@ class WorkflowDsl:
                 label=label,
             )
             try:
-                value = workflow_schema.parse_json_tolerant(text or "")
+                value = workflow_schema.parse_json_tolerant(text or "", schema)
+                last_parsed_candidate = value
+                candidate_present = True
                 workflow_schema.validate_value(value, schema)
+                self._record_structured_attempt(key, None)
                 return value
             except Exception as exc:
                 prior_output = text or ""
@@ -2919,7 +3423,24 @@ class WorkflowDsl:
                     engine=prior_child.engine,
                     attempt=attempt,
                     error=prior_error,
+                    key=key,
+                    label=label,
                 )
+        outcome = StructuredAttemptOutcome(
+            last_parsed_candidate=last_parsed_candidate,
+            validation_error=prior_error,
+            candidate_present=candidate_present,
+        )
+        self._record_structured_attempt(key, outcome)
+        self.state.append_durable_event(
+            "agent_structured_exhausted",
+            key=key,
+            scope=self.state.current_scope(),
+            label=label,
+            engine=prior_child.engine,
+            attempts=attempts + 1,
+            **outcome.as_json(),
+        )
         return None
 
     def _run_delegate_followup(
@@ -3653,6 +4174,21 @@ def run_supervisor(
                 detail=f"awaiting approval at {gate_key}",
             )
             return 0
+        except SoftParkExit as exc:
+            # Soft parks are not human approval gates.  The scheduler has
+            # already drained every unrelated runnable item and each parked
+            # worker has unwound its item slot; resume simply replays the
+            # script and re-enters the same explicit named scopes.
+            state.write_status(
+                "paused",
+                parkedItems=list(exc.names),
+                softPark=True,
+            )
+            state.notify_event(
+                "paused",
+                detail=f"soft-parked items: {', '.join(exc.names)}",
+            )
+            return 0
         except SupervisorWatchdogExit as exc:
             tb = traceback.format_exc()[-4000:]
             if root.exists() and (root / registry.STATUS_FILE).exists():
@@ -3795,6 +4331,8 @@ __all__ = [
     "KILL_SUPERVISOR_WAIT_SECONDS",
     "Budget",
     "BudgetExceeded",
+    "SoftPark",
+    "SoftParkExit",
     "WorkflowState",
     "cancel_workflow_agent_child",
     "cancel_workflow_children",

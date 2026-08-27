@@ -427,6 +427,11 @@ class RegressionGuardTests(HelpCliTestBase):
         self.assertEqual(parsed.launch.prompt_file, "task.md")
         self.assertEqual(parsed.launch.prompt_parts, [])
 
+    def test_true_usage_error_exits_with_exit_usage(self):
+        code, _out, err = self.run_main(["definitely-not-a-command"])
+        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        self.assertIn("unknown_subcommand", err)
+
     def test_trailing_json_after_prompt_is_global(self):
         parsed = self.delegate.parse_cli(["dry-run", "droid", "minimax", "work", "hello", "--json"])
         self.assertTrue(parsed.global_options.json_mode)
@@ -493,6 +498,13 @@ class UnknownTopicTests(HelpCliTestBase):
         payload = json.loads(out)
         self.assertIs(payload["ok"], False)
         self.assertEqual(payload["error"], "unknown_help_topic")
+
+    def test_malformed_launch_exits_nonzero(self):
+        code, out, _err = self.run_main(["--json", "codex", "safe", "--unknown"])
+        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        payload = json.loads(out)
+        self.assertIs(payload["ok"], False)
+        self.assertEqual(payload["exitCode"], self.delegate.EXIT_USAGE)
 
 
 class SparseArgsNoIndexErrorTests(HelpCliTestBase):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,6 +9,7 @@ from unittest import mock
 
 from delegate_agent import run_registry
 from delegate_agent.workflows import registry, runtime
+from delegate_agent.workflows import schema as workflow_schema
 
 
 class ChildAttemptOutcomeTests(unittest.TestCase):
@@ -104,6 +106,88 @@ class ChildAttemptOutcomeTests(unittest.TestCase):
         self.assertEqual(outcome["runId"], first.run_id)
         self.assertEqual(outcome["branch"], "delegate/codex-timeout")
 
+    def test_timeout_event_keeps_child_identity_fields(self) -> None:
+        dsl = self._dsl()
+        with (
+            mock.patch.object(
+                runtime,
+                "_run_child_command_for_state",
+                side_effect=subprocess.TimeoutExpired(["delegate"], 1),
+            ),
+            mock.patch.object(runtime, "cancel_workflow_agent_child"),
+            mock.patch.object(runtime, "_workflow_agent_run_result_metadata", return_value=None),
+        ):
+            result = dsl._run_delegate(
+                "codex",
+                "timeout",
+                mode="safe",
+                model="model-id",
+                effort=None,
+                fast=None,
+                isolation=None,
+                passthrough=False,
+                timeout=1,
+                output_schema=None,
+                prefer_assistant=False,
+                workflow_agent_key="timeout-key",
+                label="timeout-label",
+            )
+        self.assertIsNone(result)
+        event = next(
+            event
+            for event in runtime.registry.iter_journal(dsl.state.journal_path)
+            if event.get("type") == "agent_timeout"
+        )
+        self.assertEqual(
+            {event["key"], event["label"], event["model"]},
+            {"timeout-key", "timeout-label", "model-id"},
+        )
+        self.assertEqual(event["scope"], "root")
+
+    def test_workflow_notify_events_cover_paused_failed_and_succeeded_states(self) -> None:
+        scenarios = {
+            "succeeded": "meta = {'name': 'notify-success'}\nreturn True\n",
+            "failed": "meta = {'name': 'notify-failure'}\nraise RuntimeError('boom')\n",
+            "paused": (
+                "meta = {'name': 'notify-paused'}\nreturn workflow('child.py', gate=True)\n"
+            ),
+        }
+        observed: list[str] = []
+        with mock.patch.object(
+            runtime.WorkflowState,
+            "notify_event",
+            side_effect=lambda event, **_kwargs: observed.append(event),
+        ):
+            for index, (name, source) in enumerate(scenarios.items(), start=1):
+                wf_id = f"wf_7777777777{index:02x}"
+                root = self.workspace / ".delegate" / "workflows" / wf_id
+                root.mkdir(parents=True)
+                (root / runtime.registry.SCRIPT_FILE).write_text(source, encoding="utf-8")
+                if name == "paused":
+                    (root / "child.py").write_text(
+                        "meta = {'name': 'notify-child'}\nreturn True\n", encoding="utf-8"
+                    )
+                runtime.registry.write_json(root / runtime.registry.ARGS_FILE, {"args": None})
+                runtime.registry.write_status(
+                    root,
+                    {
+                        "wfId": wf_id,
+                        "status": "created",
+                        "workspace": str(self.workspace),
+                        "budget": {"total": None, "spent": 0, "remaining": None},
+                    },
+                )
+                self.assertEqual(
+                    runtime.run_supervisor(
+                        workspace=self.workspace,
+                        wf_id=wf_id,
+                        cli_argv=["delegate"],
+                        config={},
+                    ),
+                    0 if name in {"paused", "succeeded"} else 1,
+                )
+        self.assertEqual({"paused", "failed", "succeeded"}, set(observed))
+
     def test_output_cap_outcome_links_retry_to_failed_run(self) -> None:
         first = runtime._DelegateChildResult(
             text=None,
@@ -130,6 +214,181 @@ class ChildAttemptOutcomeTests(unittest.TestCase):
         self.assertEqual(
             event["childAttemptOutcome"]["cleanupOwnership"],
             {"isolatedWorkspace": "/tmp/failed-worktree"},
+        )
+
+    def test_structured_parse_failure_exhaustion_carries_no_candidate(self) -> None:
+        dsl = self._dsl()
+        child = runtime._DelegateChildResult(
+            text="not json",
+            run_id="del_20260827T040000Z_parse1",
+            execution_cwd="/tmp/parse-worktree",
+            session_id=None,
+        )
+        with (
+            mock.patch.object(dsl, "_run_delegate", return_value=child),
+            mock.patch.object(dsl, "_release_structured_retry_worktree"),
+        ):
+            result = dsl._run_structured_or_text(
+                "codex",
+                "parse",
+                mode="safe",
+                model=None,
+                effort=None,
+                fast=None,
+                schema={"type": "object"},
+                isolation="worktree",
+                passthrough=False,
+                timeout=None,
+                retries=0,
+                key="parse-key",
+            )
+        self.assertIsNone(result)
+        event = next(
+            event
+            for event in runtime.registry.iter_journal(dsl.state.journal_path)
+            if event.get("type") == "agent_structured_exhausted"
+        )
+        self.assertIsNone(event["lastParsedCandidate"])
+        self.assertIn("Expecting value", event["validationError"])
+        self.assertIsNone(dsl.structured_attempt("parse-key")["lastParsedCandidate"])
+        resumed_dsl = self._dsl()
+        self.assertEqual(
+            resumed_dsl.structured_attempt("parse-key"),
+            {
+                "lastParsedCandidate": None,
+                "validationError": event["validationError"],
+            },
+        )
+
+    def test_structured_agent_accepts_json_string_payload_for_object_schema(self) -> None:
+        dsl = self._dsl()
+        child = runtime._DelegateChildResult(
+            text=json.dumps(json.dumps({"ok": True})),
+            run_id="del_20260827T040000Z_string1",
+            execution_cwd="/tmp/string-worktree",
+            session_id=None,
+        )
+        schema = {
+            "type": "object",
+            "required": ["ok"],
+            "properties": {"ok": {"type": "boolean"}},
+            "additionalProperties": False,
+        }
+        with mock.patch.object(dsl, "_run_delegate", return_value=child):
+            result = dsl._run_structured_or_text(
+                "codex",
+                "string payload",
+                mode="safe",
+                model=None,
+                effort=None,
+                fast=None,
+                schema=schema,
+                isolation=None,
+                passthrough=False,
+                timeout=None,
+                retries=0,
+                key="string-key",
+            )
+        self.assertEqual(result, {"ok": True})
+
+    def test_structured_invalid_candidate_exhaustion_carries_candidate_and_error(self) -> None:
+        dsl = self._dsl()
+        child = runtime._DelegateChildResult(
+            text=json.dumps({"ok": "wrong"}),
+            run_id="del_20260827T040000Z_invalid1",
+            execution_cwd="/tmp/invalid-worktree",
+            session_id=None,
+        )
+        schema = {
+            "type": "object",
+            "required": ["ok"],
+            "properties": {"ok": {"type": "boolean"}},
+            "additionalProperties": False,
+        }
+        with (
+            mock.patch.object(dsl, "_run_delegate", return_value=child),
+            mock.patch.object(dsl, "_release_structured_retry_worktree"),
+        ):
+            result = dsl._run_structured_or_text(
+                "codex",
+                "invalid",
+                mode="safe",
+                model=None,
+                effort=None,
+                fast=None,
+                schema=schema,
+                isolation="worktree",
+                passthrough=False,
+                timeout=None,
+                retries=0,
+                key="invalid-key",
+            )
+        self.assertIsNone(result)
+        event = next(
+            event
+            for event in runtime.registry.iter_journal(dsl.state.journal_path)
+            if event.get("type") == "agent_structured_exhausted"
+        )
+        self.assertEqual(event["lastParsedCandidate"], {"ok": "wrong"})
+        self.assertIn("value.ok must be 'boolean'", event["validationError"])
+        self.assertEqual(
+            dsl.structured_attempt("invalid-key"),
+            {
+                "lastParsedCandidate": {"ok": "wrong"},
+                "validationError": event["validationError"],
+            },
+        )
+
+    def test_structured_json_string_invalid_candidate_carries_decoded_object(self) -> None:
+        dsl = self._dsl()
+        child = runtime._DelegateChildResult(
+            text=json.dumps(json.dumps({"ok": "wrong"})),
+            run_id="del_20260827T040000Z_stringinvalid1",
+            execution_cwd="/tmp/string-invalid-worktree",
+            session_id=None,
+        )
+        schema = {
+            "type": "object",
+            "required": ["ok"],
+            "properties": {"ok": {"type": "boolean"}},
+            "additionalProperties": False,
+        }
+        with mock.patch.object(dsl, "_run_delegate", return_value=child):
+            result = dsl._run_structured_or_text(
+                "codex",
+                "invalid",
+                mode="safe",
+                model=None,
+                effort=None,
+                fast=None,
+                schema=schema,
+                isolation=None,
+                passthrough=False,
+                timeout=None,
+                retries=0,
+                key="string-invalid-key",
+            )
+        self.assertIsNone(result)
+        event = next(
+            event
+            for event in runtime.registry.iter_journal(dsl.state.journal_path)
+            if event.get("type") == "agent_structured_exhausted"
+        )
+        self.assertEqual(event["lastParsedCandidate"], {"ok": "wrong"})
+        self.assertIn("value.ok must be 'boolean'", event["validationError"])
+
+    def test_schema_string_union_preserves_literal_json_string(self) -> None:
+        wrapped = json.dumps({"a": 1})
+        schema = {"type": ["string", "object"]}
+        self.assertEqual(workflow_schema.parse_json_tolerant(json.dumps(wrapped), schema), wrapped)
+
+    def test_typeless_object_schema_unwraps_json_string_in_prose(self) -> None:
+        schema = {"required": ["ok"], "properties": {"ok": {"type": "boolean"}}}
+        self.assertEqual(
+            workflow_schema.parse_json_tolerant(
+                f"report: {json.dumps(json.dumps({'ok': True}))}", schema
+            ),
+            {"ok": True},
         )
 
     def test_text_retry_rejects_changed_workspace_cleanup_metadata(self) -> None:

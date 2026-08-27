@@ -125,6 +125,26 @@ def _matches_type(value: object, schema_type: object) -> bool:
     return False
 
 
+def _schema_requires_non_string_value(schema: JsonObject | None) -> bool:
+    if schema is None:
+        return False
+    schema_type = schema.get("type")
+    if isinstance(schema_type, list):
+        return "string" not in schema_type
+    return schema_type not in (None, "string") or "properties" in schema
+
+
+def _decode_string_payload(value: str, schema: JsonObject | None) -> JsonValue:
+    """Decode one JSON layer when a provider wraps a structured value in a string."""
+    if not _schema_requires_non_string_value(schema):
+        return value
+    try:
+        decoded = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return value
+    return decoded if not isinstance(decoded, str) else value
+
+
 def parse_json_tolerant(text: str, schema: JsonObject | None = None) -> JsonValue:
     """Pull the JSON value out of child output that may be wrapped in prose.
 
@@ -146,14 +166,18 @@ def parse_json_tolerant(text: str, schema: JsonObject | None = None) -> JsonValu
     decoder = json.JSONDecoder()
     try:
         value, _end = decoder.raw_decode(stripped)
-        return value
+        return _decode_string_payload(value, schema) if isinstance(value, str) else value
     except json.JSONDecodeError as first_error:
         candidates: list[JsonValue] = []
         position = 0
         while True:
             starts = [
                 idx
-                for idx in (stripped.find("{", position), stripped.find("[", position))
+                for idx in (
+                    stripped.find("{", position),
+                    stripped.find("[", position),
+                    stripped.find('"', position),
+                )
                 if idx >= 0
             ]
             if not starts:
@@ -164,7 +188,9 @@ def parse_json_tolerant(text: str, schema: JsonObject | None = None) -> JsonValu
             except json.JSONDecodeError:
                 position = start + 1
                 continue
-            candidates.append(value)
+            candidates.append(
+                _decode_string_payload(value, schema) if isinstance(value, str) else value
+            )
             position = start + end
         if not candidates:
             raise first_error
