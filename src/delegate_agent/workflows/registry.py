@@ -40,8 +40,11 @@ DURABLE_EVENT_TYPES = {
     "agent_rejected",
     "agent_retry",
     "agent_structured_retry",
+    "agent_structured_exhausted",
     "budget",
     "gate",
+    "item_parked",
+    "item_unparked",
     "workflow_finished",
 }
 
