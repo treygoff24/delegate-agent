@@ -1,3 +1,10 @@
+"""Persistent-worktree retirement coverage.
+
+The manifest-reconstruction tests cover the four high-risk followup-r2 branches
+only: dirty-tree retention, process-group-survivor retention, resumable-session
+retention, and clean retirement.  The production matrix is intentionally wider.
+"""
+
 from __future__ import annotations
 
 import io
@@ -23,7 +30,15 @@ class WorktreeRetirementTests(ExecutionTestBase):
         agent.chmod(0o755)
         return agent
 
-    def _run_cursor(self, repo: str, config: dict, *, agent: Path, env: dict[str, str]):
+    def _run_cursor(
+        self,
+        repo: str,
+        config: dict,
+        *,
+        agent: Path,
+        env: dict[str, str],
+        resumable: bool = False,
+    ):
         workspace = self.delegate.resolve_workspace(repo)
         request = self._make_persistent_worktree_request("cursor", "work", repo, config)
         request = self.delegate.Request(
@@ -37,6 +52,7 @@ class WorktreeRetirementTests(ExecutionTestBase):
             workspace_kind=request.workspace_kind,
             isolation_context=request.isolation_context,
         )
+        request.resumable = resumable
         with mock.patch.dict(os.environ, env, clear=False):
             return self.delegate.execute_request(
                 request,
@@ -48,6 +64,31 @@ class WorktreeRetirementTests(ExecutionTestBase):
                 stdout=io.StringIO(),
                 stderr=io.StringIO(),
             )
+
+    def _completed_manifest_run(self, *, agent: Path, resumable: bool = False):
+        """Leave a real succeeded persistent-worktree manifest for reconstruction tests."""
+
+        fake_home = tempfile.TemporaryDirectory(prefix="delegate-reconstruct-home-")
+        self.addCleanup(fake_home.cleanup)
+        repo, _ = self._make_git_repo_with_commit()
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["worktrees"]["retireWorktreeOnCompletion"] = False
+        code, payload = self._run_cursor(
+            repo.name,
+            config,
+            agent=agent,
+            resumable=resumable,
+            env={
+                "HOME": fake_home.name,
+                "PATH": str(agent.parent) + os.pathsep + os.environ["PATH"],
+            },
+        )
+        self.assertEqual(code, 0, payload)
+        run_id = payload["runId"]
+        registry_root = Path(repo.name) / ".delegate"
+        manifest_path = registry_root / "runs" / run_id / "manifest.json"
+        self.assertTrue(manifest_path.is_file())
+        return fake_home, repo, config, run_id, registry_root, payload
 
     def _worktree_paths(self, home: str) -> list[Path]:
         return [
@@ -303,6 +344,59 @@ class WorktreeRetirementTests(ExecutionTestBase):
             self.assertEqual(extra["worktreeRetained"], "process_group_survived")
             persist.assert_called_once()
             detect.assert_not_called()
+
+    def test_manifest_reconstruction_retains_dirty_tree(self):
+        agent = self._clean_agent()
+        agent.write_text(
+            "#!/usr/bin/env bash\nprintf 'dirty\\n' > child-created.txt\nprintf 'done\\n'\n",
+            encoding="utf-8",
+        )
+        agent.chmod(0o755)
+        fake_home, _repo, _config, run_id, registry_root, _payload = self._completed_manifest_run(
+            agent=agent
+        )
+
+        extra = self.delegate.worktree_mgmt.retire_completed_worktree(registry_root, run_id)
+
+        self.assertEqual(extra["worktreeRetained"], "dirty")
+        self.assertTrue(self._worktree_paths(fake_home.name))
+
+    def test_manifest_reconstruction_retains_process_group_survivor(self):
+        fake_home, _repo, _config, run_id, registry_root, _payload = self._completed_manifest_run(
+            agent=self._clean_agent()
+        )
+        state_path = self.delegate.run_registry.run_directory(registry_root, run_id) / "state.json"
+        state = self.delegate.run_registry.load_run_state(registry_root, run_id)
+        self.assertIsNotNone(state)
+        state["processGroupSurvived"] = True
+        self.delegate.run_registry.write_json_atomic(state_path, state)
+
+        extra = self.delegate.worktree_mgmt.retire_completed_worktree(registry_root, run_id)
+
+        self.assertEqual(extra["worktreeRetained"], "process_group_survived")
+        self.assertTrue(self._worktree_paths(fake_home.name))
+
+    def test_manifest_reconstruction_retains_resumable_session(self):
+        fake_home, _repo, _config, run_id, registry_root, _payload = self._completed_manifest_run(
+            agent=self._clean_agent(), resumable=True
+        )
+
+        extra = self.delegate.worktree_mgmt.retire_completed_worktree(registry_root, run_id)
+
+        self.assertEqual(extra["worktreeRetained"], "resumable_session")
+        self.assertTrue(self._worktree_paths(fake_home.name))
+
+    def test_manifest_reconstruction_retires_clean_tree(self):
+        fake_home, _repo, _config, run_id, registry_root, _payload = self._completed_manifest_run(
+            agent=self._clean_agent()
+        )
+        self.assertTrue(self._worktree_paths(fake_home.name))
+
+        extra = self.delegate.worktree_mgmt.retire_completed_worktree(registry_root, run_id)
+
+        self.assertTrue(extra["worktreeRetired"])
+        self.assertEqual(extra["worktreeStatus"], "removed")
+        self.assertFalse(self._worktree_paths(fake_home.name))
 
     def test_structured_retry_pending_skips_retirement(self):
         with tempfile.TemporaryDirectory() as registry:

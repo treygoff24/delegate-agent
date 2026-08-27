@@ -1,18 +1,16 @@
 from __future__ import annotations
 
 import os
-import tempfile
 import unittest
 from pathlib import Path
 
 from delegate_agent import mail, run_registry
+from tests.mail_test_helpers import mail_temporary_directory
 
 
 class MailEligibilityTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory(
-            prefix="delegate-mail-eligibility-", dir=str(Path(__file__).resolve().parents[3])
-        )
+        self.temp = mail_temporary_directory(prefix="delegate-mail-eligibility-")
         self.addCleanup(self.temp.cleanup)
         self.workspace = Path(self.temp.name)
         self.root = run_registry.ensure_registry(self.workspace, workspace_kind="directory")

@@ -2,20 +2,18 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from delegate_agent import cli, command_help, mail, profiles, run_registry
 from delegate_agent.errors import DelegateError
+from tests.mail_test_helpers import mail_temporary_directory
 
 
 class MailIdentityTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory(
-            prefix="delegate-mail-identity-", dir=str(Path(__file__).resolve().parents[3])
-        )
+        self.temp = mail_temporary_directory(prefix="delegate-mail-identity-")
         self.addCleanup(self.temp.cleanup)
         self.workspace = Path(self.temp.name)
         self.root = run_registry.ensure_registry(self.workspace, workspace_kind="directory")
