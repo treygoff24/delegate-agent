@@ -174,6 +174,7 @@ class FollowupAfterRetryE2ETests(unittest.TestCase):
             result_payload["result"]["first"]["value"],
             result_payload["result"]["second"].split(": ", 1)[1],
         )
+        self.assertEqual(self.attempt_file.read_text(encoding="utf-8"), "2")
 
         events_payload = json.loads(
             self._run_delegate(["--json", "workflow", "events", wf_id]).stdout
@@ -201,9 +202,17 @@ class FollowupAfterRetryE2ETests(unittest.TestCase):
         self.assertNotEqual(worktree_path, str(self.workspace))
         self.assertEqual(first_manifest["isolationLifecycle"], "persistent")
         self.assertEqual(retry_manifest["isolationLifecycle"], "attached")
+        self.assertEqual(retry_manifest["worktreeAttachment"]["sourceRunId"], first_event["runId"])
         self.assertEqual(retry_manifest["worktreeAttachment"]["path"], worktree_path)
         self.assertEqual(followup_manifest["isolationLifecycle"], "attached")
         self.assertEqual(followup_manifest["worktreeAttachment"]["path"], worktree_path)
+        retry_events = [
+            event
+            for event in events_payload["events"]
+            if event.get("type") == "agent_structured_retry"
+        ]
+        self.assertEqual(len(retry_events), 1)
+        self.assertEqual(retry_events[0]["strategy"], "resume")
 
         cwds = self.workspace_log.read_text(encoding="utf-8").splitlines()
         self.assertEqual(len(cwds), 3)
