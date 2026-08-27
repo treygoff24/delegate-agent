@@ -618,12 +618,13 @@ class WorkflowState:
             if event.get("type") == "agent_rejected":
                 # A tombstone only invalidates a result that exists before it.
                 # Repeated tombstones and no-result tombstones are durable
-                # no-ops, preserving any unfinished adoption state.
-                if key in self.tombstoned_keys or (
-                    key not in self.replay_keys and key not in self.replay
-                ):
+                # no-ops, preserving any unfinished adoption state.  The
+                # tombstone marker itself remains so v2 can select a retry key.
+                if key in self.tombstoned_keys:
                     continue
                 self.tombstoned_keys.add(key)
+                if key not in self.replay_keys and key not in self.replay:
+                    continue
                 self.replay_keys.discard(key)
                 self.replay.pop(key, None)
                 self.started_without_result.discard(key)
@@ -926,11 +927,13 @@ class WorkflowState:
             event["label"] = label
         # The durable row is written before mutating in-memory replay state.
         self.append_event("agent_rejected", **event)
-        # Tombstones with no cached result are durable no-ops.  In particular,
-        # do not clear a started-without-result key that can still be adopted.
-        if already_tombstoned or not has_cached_result:
+        if already_tombstoned:
             return key
         self.tombstoned_keys.add(key)
+        # Tombstones with no cached result do not clear an unfinished adoption
+        # state; the marker remains for v2's fresh attempt-key derivation.
+        if not has_cached_result:
+            return key
         self.replay_keys.discard(key)
         self.replay.pop(key, None)
         self.started_without_result.discard(key)

@@ -1337,7 +1337,7 @@ class WorkflowCommandTests(unittest.TestCase):
         )
         state.append_event("agent_started", key="known-key", label="known")
         self.assertEqual(state.reject_agent("known-key", "no cached result"), "known-key")
-        self.assertNotIn("known-key", state.tombstoned_keys)
+        self.assertIn("known-key", state.tombstoned_keys)
         replayed = workflow_runtime.WorkflowState(
             wf_id=wf_id,
             workspace=self.workspace,
@@ -1348,7 +1348,7 @@ class WorkflowCommandTests(unittest.TestCase):
             args=None,
             budget=workflow_runtime.Budget(None),
         )
-        self.assertNotIn("known-key", replayed.tombstoned_keys)
+        self.assertIn("known-key", replayed.tombstoned_keys)
         self.assertIn("known-key", replayed.started_without_result)
         with self.assertRaisesRegex(ValueError, "missing-key"):
             state.reject_agent("missing-key", "not found")
