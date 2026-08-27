@@ -78,6 +78,9 @@ STALL_SECONDS_DEFAULT = stall_watchdog.stall_seconds_from_minutes(
     stall_watchdog.STALL_MINUTES_DEFAULT
 )
 STALL_MINUTES_ENV = "DELEGATE_STALL_MINUTES"
+ZERO_COMMIT_BUDGET_FRACTION_DEFAULT = 0.5
+ZERO_COMMIT_BUDGET_FRACTION_ENV = "DELEGATE_ZERO_COMMIT_BUDGET_FRACTION"
+ZERO_COMMIT_HEALTH_EVENT_KIND = "run.zero_commits_at_half_budget"
 RESULT_QUALITY_OK = harness_events.RESULT_QUALITY_OK
 RESULT_QUALITY_HOUSEKEEPING = harness_events.RESULT_QUALITY_HOUSEKEEPING
 RESULT_QUALITY_EMPTY = harness_events.RESULT_QUALITY_EMPTY
@@ -1404,6 +1407,7 @@ class TrackedCaptureResult:
     output_limit_bytes: int | None = None
     stopped_after_completion: bool = False
     stall: JsonObject | None = None
+    zero_commit_health: JsonObject | None = None
     process_group_survived: bool = False
 
 
@@ -1597,6 +1601,81 @@ def _stall_seconds_from_env(default: float) -> float:
     if not math.isfinite(minutes) or minutes < 0:
         return default
     return stall_watchdog.stall_seconds_from_minutes(minutes)
+
+
+def _zero_commit_budget_fraction(default: float = ZERO_COMMIT_BUDGET_FRACTION_DEFAULT) -> float:
+    """Resolve the advisory zero-commit checkpoint as a budget fraction.
+
+    A persistent worktree lane doing real work normally checkpoints commits
+    incrementally.  Reaching the checkpoint with no commits is therefore a
+    useful health signal, but not a failure: reviewers may intentionally leave
+    a read-only lane uncommitted.  ``0`` disables the signal; malformed,
+    negative, or greater-than-one overrides fall back to the default.
+    """
+    raw = os.environ.get(ZERO_COMMIT_BUDGET_FRACTION_ENV)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    if not math.isfinite(value) or value < 0 or value > 1:
+        return default
+    return value
+
+
+def _zero_commit_health_detail(
+    ctx: RunContext,
+    *,
+    elapsed_seconds: float,
+    budget_seconds: float,
+    threshold_fraction: float | None = None,
+) -> JsonObject | None:
+    """Return the zero-commit health flag once a lane crosses its checkpoint.
+
+    Commit accounting is deliberately restricted to persistent/attached
+    worktree contexts through ``_persistent_work_summary``.  If Git metadata
+    cannot be verified, the advisory stays silent rather than guessing from
+    the source checkout or treating an unobservable lane as unhealthy.
+    """
+    if not math.isfinite(elapsed_seconds) or not math.isfinite(budget_seconds):
+        return None
+    if budget_seconds <= 0:
+        return None
+    fraction = _zero_commit_budget_fraction() if threshold_fraction is None else threshold_fraction
+    if fraction <= 0 or elapsed_seconds < budget_seconds * fraction:
+        return None
+    summary = _persistent_work_summary(ctx)
+    commits_created = worktree_summary.commits_created_count(summary)
+    if commits_created != 0:
+        return None
+    return {
+        "branch": ctx.branch,
+        "budgetSeconds": round(budget_seconds, 3),
+        "elapsedSeconds": round(max(elapsed_seconds, 0.0), 3),
+        "thresholdFraction": round(fraction, 3),
+        "commitsCreatedCount": 0,
+    }
+
+
+def _zero_commit_health_warning(detail: JsonObject) -> str:
+    branch = detail.get("branch")
+    branch_text = branch if isinstance(branch, str) and branch else "the lane branch"
+    elapsed = detail.get("elapsedSeconds")
+    budget = detail.get("budgetSeconds")
+    fraction = detail.get("thresholdFraction")
+    if isinstance(elapsed, (int, float)) and isinstance(budget, (int, float)):
+        timing = f"after {float(elapsed):.0f}s of its {float(budget):.0f}s budget"
+    else:
+        timing = "at its budget checkpoint"
+    fraction_text = (
+        f" ({float(fraction):.0%} checkpoint)" if isinstance(fraction, (int, float)) else ""
+    )
+    return (
+        "zero_commits_at_half_budget: "
+        f"{branch_text} has produced zero commits {timing}{fraction_text}; "
+        "lane health warning only (the run continues)."
+    )
 
 
 def _progress_interval_from_env(name: str, default: float) -> float:
@@ -1928,6 +2007,17 @@ def _capture_tracked_process(
     lines_since_persist = 0
     last_persist_at = time.monotonic()
     progress_dirty = False
+    zero_commit_health: JsonObject | None = None
+    zero_commit_health_warning: str | None = None
+    zero_commit_running_extra: JsonObject = {}
+    zero_commit_fraction = _zero_commit_budget_fraction()
+    zero_commit_budget_seconds: float | None = None
+    zero_commit_checkpoint_at: float | None = None
+    if deadline is not None:
+        budget_seconds = deadline - started
+        if math.isfinite(budget_seconds) and budget_seconds > 0 and zero_commit_fraction > 0:
+            zero_commit_budget_seconds = budget_seconds
+            zero_commit_checkpoint_at = started + budget_seconds * zero_commit_fraction
     mail_push_failure_reason: str | None = None
     mail_push_nonce = _mail_push_failure_nonce(ctx)
     terminal_signal = threading.Event()
@@ -1949,6 +2039,7 @@ def _capture_tracked_process(
                 pid=process.pid,
                 stdout_bytes=stdout_bytes_counter.total,
                 stderr_bytes=stderr_bytes_counter.total,
+                extra=zero_commit_running_extra or None,
                 lock_timeout_seconds=0,
             )
         except TimeoutError:
@@ -2070,6 +2161,44 @@ def _capture_tracked_process(
         stall_detail: JsonObject | None = None
         while True:
             now = time.monotonic()
+            if (
+                zero_commit_health is None
+                and zero_commit_checkpoint_at is not None
+                and zero_commit_budget_seconds is not None
+                and now >= zero_commit_checkpoint_at
+            ):
+                detail = _zero_commit_health_detail(
+                    ctx,
+                    elapsed_seconds=now - started,
+                    budget_seconds=zero_commit_budget_seconds,
+                    threshold_fraction=zero_commit_fraction,
+                )
+                if detail is not None:
+                    zero_commit_health = detail
+                    zero_commit_health_warning = _zero_commit_health_warning(detail)
+                    zero_commit_running_extra = {
+                        "zeroCommitHealth": detail,
+                        "warnings": [zero_commit_health_warning],
+                    }
+                    append_event(
+                        events_handle,
+                        {"kind": ZERO_COMMIT_HEALTH_EVENT_KIND, **detail},
+                    )
+                    events_handle.flush()
+                    # The event and final state still carry the signal; a
+                    # contended registry must not change child execution.
+                    with contextlib.suppress(TimeoutError):
+                        persist_progress(
+                            files.run_path,
+                            ctx,
+                            accumulator,
+                            status="running",
+                            pid=process.pid,
+                            stdout_bytes=stdout_bytes_counter.total,
+                            stderr_bytes=stderr_bytes_counter.total,
+                            extra=zero_commit_running_extra,
+                            lock_timeout_seconds=0,
+                        )
             if limit_signal.event.is_set():
                 _terminate_call_process(
                     process,
@@ -2204,6 +2333,7 @@ def _capture_tracked_process(
         output_limit_bytes=TRACKED_STREAM_MAX_BYTES if output_limited else None,
         stopped_after_completion=stopped_after_completion,
         stall=stall_detail,
+        zero_commit_health=zero_commit_health,
     )
 
 
@@ -3042,6 +3172,7 @@ def _merge_tracked_attempt_captures(
         process_group_survived=(
             prior_capture.process_group_survived or current_capture.process_group_survived
         ),
+        zero_commit_health=(current_capture.zero_commit_health or prior_capture.zero_commit_health),
     )
 
 
@@ -3599,6 +3730,9 @@ def _execute_tracked(
         for warning in attempt_extra.get("warnings") or []:
             if isinstance(warning, str):
                 _append_unique(final_warnings, warning)
+    if capture.zero_commit_health is not None:
+        final_extra["zeroCommitHealth"] = capture.zero_commit_health
+        _append_unique(final_warnings, _zero_commit_health_warning(capture.zero_commit_health))
     if final_warnings:
         final_extra["warnings"] = final_warnings
     if capture.output_limit_stream is not None:

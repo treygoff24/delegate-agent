@@ -94,6 +94,25 @@ class RunnerCaptureTests(unittest.TestCase):
         self.registry = load_module(REGISTRY_PATH, "delegate_registry_runner_test")
         self.run_output = load_module(RUN_OUTPUT_PATH, "delegate_run_output_under_test")
 
+    def _persistent_health_context(self):
+        return self.runner.RunContext(
+            registry_root=Path("/tmp"),
+            run_id="run-1",
+            alias="cursor-1",
+            harness="cursor",
+            engine="cursor",
+            mode="work",
+            model="composer-2.5",
+            source_cwd="/repo",
+            execution_cwd="/wt",
+            workspace_kind="git",
+            isolated_workspace=True,
+            started_at="2026-05-20T21:42:33Z",
+            source_git_root="/repo",
+            isolation_lifecycle="persistent",
+            branch="delegate/cursor-1",
+        )
+
     def _execute_cursor_result(self, event):
         with tempfile.TemporaryDirectory() as workspace:
             root = self.registry.ensure_registry(Path(workspace), workspace_kind="directory")
@@ -2216,6 +2235,152 @@ class RunnerCaptureTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertIn("Work-mode run completed with no file changes", extra["warnings"][0])
+
+    def test_zero_commit_health_flags_persistent_lane_past_half_budget(self):
+        ctx = self._persistent_health_context()
+        with (
+            mock.patch.dict(
+                os.environ,
+                {self.runner.ZERO_COMMIT_BUDGET_FRACTION_ENV: "0.5"},
+            ),
+            mock.patch.object(
+                self.runner,
+                "_persistent_work_summary",
+                return_value={"commitsCreatedCount": 0},
+            ) as summary,
+        ):
+            detail = self.runner._zero_commit_health_detail(
+                ctx,
+                elapsed_seconds=6,
+                budget_seconds=10,
+            )
+
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertEqual(detail["commitsCreatedCount"], 0)
+        self.assertEqual(detail["branch"], "delegate/cursor-1")
+        self.assertIn(
+            "zero_commits_at_half_budget", self.runner._zero_commit_health_warning(detail)
+        )
+        summary.assert_called_once_with(ctx)
+
+    def test_zero_commit_health_does_not_flag_lane_with_commits(self):
+        ctx = self._persistent_health_context()
+        with mock.patch.object(
+            self.runner,
+            "_persistent_work_summary",
+            return_value={"commitsCreatedCount": 1},
+        ):
+            detail = self.runner._zero_commit_health_detail(
+                ctx,
+                elapsed_seconds=6,
+                budget_seconds=10,
+            )
+
+        self.assertIsNone(detail)
+
+    def test_zero_commit_health_does_not_flag_lane_under_checkpoint(self):
+        ctx = self._persistent_health_context()
+        with mock.patch.object(self.runner, "_persistent_work_summary") as summary:
+            detail = self.runner._zero_commit_health_detail(
+                ctx,
+                elapsed_seconds=4,
+                budget_seconds=10,
+            )
+
+        self.assertIsNone(detail)
+        summary.assert_not_called()
+
+    def test_zero_commit_health_checkpoint_is_configurable(self):
+        ctx = self._persistent_health_context()
+        with (
+            mock.patch.dict(
+                os.environ,
+                {self.runner.ZERO_COMMIT_BUDGET_FRACTION_ENV: "0.75"},
+            ),
+            mock.patch.object(
+                self.runner,
+                "_persistent_work_summary",
+                return_value={"commitsCreatedCount": 0},
+            ),
+        ):
+            self.assertIsNone(
+                self.runner._zero_commit_health_detail(
+                    ctx,
+                    elapsed_seconds=6,
+                    budget_seconds=10,
+                )
+            )
+            detail = self.runner._zero_commit_health_detail(
+                ctx,
+                elapsed_seconds=8,
+                budget_seconds=10,
+            )
+
+        self.assertIsNotNone(detail)
+
+    def test_tracked_run_persists_zero_commit_health_at_budget_checkpoint(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            root = self.registry.ensure_registry(Path(workspace), workspace_kind="git")
+            run_id, alias = self.registry.register_run(root, harness="cursor")
+            ctx = self.runner.RunContext(
+                registry_root=root,
+                run_id=run_id,
+                alias=alias,
+                harness="cursor",
+                engine="cursor",
+                mode="work",
+                model="composer-2.5",
+                source_cwd=workspace,
+                execution_cwd=workspace,
+                workspace_kind="git",
+                isolated_workspace=True,
+                started_at=self.registry.utc_now_iso(),
+                source_git_root=workspace,
+                isolation_lifecycle="persistent",
+                branch="delegate/cursor-1",
+            )
+            with mock.patch.object(
+                self.runner,
+                "_persistent_work_summary",
+                return_value={"commitsCreatedCount": 0},
+            ):
+                code, payload = self.runner.execute_tracked(
+                    [
+                        sys.executable,
+                        "-c",
+                        "import time; time.sleep(0.65); print('done')",
+                    ],
+                    workspace,
+                    ctx,
+                    json_mode=True,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                    completion_report_mode="off",
+                    timeout=1,
+                )
+
+            self.assertIn(code, (0, 1))
+            assert payload is not None
+            self.assertIn("zeroCommitHealth", payload)
+            self.assertTrue(
+                any(
+                    warning.startswith("zero_commits_at_half_budget:")
+                    for warning in payload.get("warnings", [])
+                )
+            )
+            events = [
+                json.loads(line)
+                for line in (root / "runs" / run_id / "events.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            self.assertTrue(
+                any(
+                    event.get("kind") == self.runner.ZERO_COMMIT_HEALTH_EVENT_KIND
+                    for event in events
+                )
+            )
 
     def test_forbid_commit_unverified_does_not_mask_child_failure(self):
         ctx = self.runner.RunContext(
