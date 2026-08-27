@@ -1,0 +1,18 @@
+=== PID 4082334 ===
+    PID    PPID    PGID STAT     ELAPSED WCHAN                          CMD
+4082334     300 4082334 Ss         38:38 do_wait                        sh -c T=$(mktemp -d); bin/plan-lint docs/plans/2026-08-27-v2-hardening-plan.md && bin/plan-to-workflow docs/plans/2026-08-27-v2-hardening-plan.md -o "$T/wf.py" && delegate workflow run "$T/wf.py" --dry-run
+--- syscall ---
+61 0xffffffffffffffff 0x7ffc42b45c7c 0x0 0x0 0x0 0x0 0x7ffc42b45c20 0x7f7f08b6c687
+--- wchan ---
+do_wait
+--- cwd ---
+/home/trey-agent/Code/writing-plans/.worktrees/plan-v2-hardening
+=== PID 4082512 ===
+    PID    PPID    PGID STAT     ELAPSED WCHAN                          CMD
+4082512 4082334 4082334 Sl         38:37 futex_wait_queue               python3 /home/trey-agent/.delegate/bin/delegate.py workflow run /tmp/tmp.LQM7rU8lPs/wf.py --dry-run
+--- syscall ---
+202 0x7ffe7b57be98 0x189 0x0 0x0 0x0 0xffffffff 0x7ffe7b57bd98 0x7faaa53e99ee
+--- wchan ---
+futex_wait_queue
+--- cwd ---
+/home/trey-agent/Code/writing-plans/.worktrees/plan-v2-hardening
