@@ -2516,8 +2516,10 @@ class EngineArgvTests(CommandTestBase):
             io.StringIO(""),
         )
         self.addCleanup(shutil.rmtree, ro_req.workspace, ignore_errors=True)
-        self.assertIn("auto", ro_req.argv)
-        self.assertIn("--agent-config", ro_req.argv)
+        self.assertEqual(ro_req.argv[ro_req.argv.index("--permission-mode") + 1], "autonomous")
+        self.assertIn("--sandbox", ro_req.argv)
+        self.assertIn("--config", ro_req.argv)
+        self.assertNotIn("--agent-config", ro_req.argv)
         self.assertIsNotNone(ro_req.agent_config_text)
         self.assertTrue(ro_req.prompt_file_text.startswith("You are being called"))
 
