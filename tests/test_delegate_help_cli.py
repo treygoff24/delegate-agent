@@ -494,6 +494,13 @@ class UnknownTopicTests(HelpCliTestBase):
         self.assertIs(payload["ok"], False)
         self.assertEqual(payload["error"], "unknown_help_topic")
 
+    def test_malformed_launch_exits_nonzero(self):
+        code, out, _err = self.run_main(["--json", "codex", "safe", "--unknown"])
+        self.assertEqual(code, self.delegate.EXIT_USAGE)
+        payload = json.loads(out)
+        self.assertIs(payload["ok"], False)
+        self.assertEqual(payload["exitCode"], self.delegate.EXIT_USAGE)
+
 
 class SparseArgsNoIndexErrorTests(HelpCliTestBase):
     """Sparse args raise a clean DelegateError, never a stray exception."""
