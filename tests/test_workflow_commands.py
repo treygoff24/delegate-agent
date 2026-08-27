@@ -1056,6 +1056,90 @@ class WorkflowCommandTests(unittest.TestCase):
         result = self.run_delegate(["--json", "workflow", "result", wf_id])
         self.assertEqual(json.loads(result.stdout)["result"], [["fake completion"]])
 
+    def test_soft_park_releases_slot_and_replays_named_scope(self) -> None:
+        config = json.loads(self.config_path.read_text(encoding="utf-8"))
+        config["workflows"]["itemThreads"] = 1
+        self.config_path.write_text(json.dumps(config), encoding="utf-8")
+        script = self.write_workflow(
+            """
+            meta = {"name": "soft-park", "defaults": {"engine": "codex", "mode": "safe"}}
+
+            def parked_item():
+                if not parked("parked"):
+                    park_item("parked", {"reason": "operator"})
+                return agent("parked")
+
+            def unrelated_item():
+                return agent("unrelated")
+
+            return soft_park({"parked": parked_item, "unrelated": unrelated_item})
+            """
+        )
+        launch = self.run_delegate(["--json", "workflow", "run", str(script)])
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
+        self.assertEqual(waited.returncode, 0, waited.stderr)
+        events = json.loads(
+            self.run_delegate(["--json", "workflow", "events", wf_id, "--since", "0"]).stdout
+        )["events"]
+        parked_event = next(event for event in events if event["type"] == "item_parked")
+        unrelated_finished = next(
+            event
+            for event in events
+            if event["type"] == "agent_finished"
+            and event.get("scope", "").startswith("root/soft-park/unrelated/")
+        )
+        self.assertEqual(parked_event["name"], "parked")
+        self.assertEqual(parked_event["scope"], "root/soft-park/parked")
+        self.assertLess(parked_event["seq"], unrelated_finished["seq"])
+        status = json.loads(self.run_delegate(["--json", "workflow", "status", wf_id]).stdout)
+        self.assertEqual(status["status"], "paused")
+        self.assertEqual(status["parkedItems"], ["parked"])
+
+        resumed = self.run_delegate(["--json", "workflow", "run", "--resume", wf_id])
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
+        self.assertEqual(waited.returncode, 0, waited.stderr)
+        result = self.run_delegate(["--json", "workflow", "result", wf_id])
+        self.assertEqual(
+            json.loads(result.stdout)["result"], ["fake completion", "fake completion"]
+        )
+        after = json.loads(
+            self.run_delegate(["--json", "workflow", "events", wf_id, "--since", "0"]).stdout
+        )["events"]
+        parked_scopes = [
+            event["scope"]
+            for event in after
+            if event["type"] == "agent_started"
+            and event.get("scope", "").startswith("root/soft-park/parked/")
+        ]
+        self.assertEqual(parked_scopes, ["root/soft-park/parked/seq#0"])
+        self.assertIn("item_unparked", {event["type"] for event in after})
+
+    def test_soft_park_rejects_duplicate_stable_names(self) -> None:
+        wf_id = "wf_444444444444"
+        root = workflow_registry.ensure_workflow_dir(self.workspace, wf_id)
+        script_path = root / workflow_registry.SCRIPT_FILE
+        script_path.write_text("return True\n", encoding="utf-8")
+        workflow_registry.write_json(
+            root / workflow_registry.STATUS_FILE,
+            {"wfId": wf_id, "status": "created", "budget": {"total": None, "spent": 0}},
+        )
+        state = workflow_runtime.WorkflowState(
+            wf_id=wf_id,
+            workspace=self.workspace,
+            root=root,
+            script_path=script_path,
+            config={},
+            cli_argv=[str(CLI)],
+            args=None,
+            budget=workflow_runtime.Budget(None),
+        )
+        dsl = workflow_runtime.WorkflowDsl(state, {})
+        with self.assertRaisesRegex(ValueError, "unique"):
+            dsl.soft_park([("same", lambda: None), ("same", lambda: None)])
+
     def test_nested_gate_waits_for_sibling_parent_agents(self) -> None:
         grandchild = self.write_saved_workflow(
             "gate-grandchild",
