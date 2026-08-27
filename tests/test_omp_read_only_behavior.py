@@ -26,11 +26,30 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import tests
 from delegate_agent.argv_builders import PI_FAMILY_SAFE_LOCKDOWN
 
 GATE = os.environ.get("DELEGATE_OMP_BEHAVIOR_TEST") == "1"
 BIN_ENV = "DELEGATE_OMP_BEHAVIOR_BIN"
 MODEL_ENV = "DELEGATE_OMP_BEHAVIOR_MODEL"
+
+
+def _probe_env() -> dict[str, str]:
+    """Environment for the live omp subprocess.
+
+    The suite initializer redirects ``HOME`` to an empty temp dir for
+    hermeticity, but this probe exists to exercise the REAL binary with its
+    real credentials (realm keys and omp auth both live under the real home).
+    Under the hermetic home the shim exits keyless in milliseconds with an
+    empty transcript — indistinguishable from the dead-lane failure this test
+    guards against. Restoring the stashed home is deliberate and scoped to
+    the probe subprocess only.
+    """
+
+    env = os.environ.copy()
+    if tests.ORIGINAL_HOME:
+        env["HOME"] = tests.ORIGINAL_HOME
+    return env
 
 
 def _turn_stop_reason(event: dict[str, object]) -> object:
@@ -96,7 +115,7 @@ class OmpReadOnlyBehaviorTests(unittest.TestCase):
         argv = [self._omp_bin(), "--model", self._model(), "-p", "--no-session", "--mode", "json"]
         argv.extend(PI_FAMILY_SAFE_LOCKDOWN["omp"])
         argv.append(prompt)
-        result = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=180)
+        result = subprocess.run(argv, cwd=cwd, env=_probe_env(), capture_output=True, text=True, timeout=180)
         assert_live_turn(result.stdout)
         return result
 
@@ -140,7 +159,7 @@ class OmpReadOnlyBehaviorTests(unittest.TestCase):
             ]
             argv.extend(PI_FAMILY_SAFE_LOCKDOWN["omp"])
             argv.append("Read target.txt and print the exact marker string it contains.")
-            result = subprocess.run(argv, cwd=d, capture_output=True, text=True, timeout=180)
+            result = subprocess.run(argv, cwd=d, env=_probe_env(), capture_output=True, text=True, timeout=180)
             assert_live_turn(result.stdout)
             self.assertIn(
                 "SECRET_MARKER_42",

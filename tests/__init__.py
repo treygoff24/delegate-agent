@@ -64,6 +64,12 @@ os.environ.pop("TMP", None)
 os.environ.pop("TEMP", None)
 tempfile.tempdir = None
 
+# Stashed for the rare test that must run a real credentialed binary (the
+# live omp write-probe): everything credential-bearing lives under the real
+# home, so a probe subprocess launched with the hermetic HOME dies keyless in
+# milliseconds and reads as a dead lane.
+ORIGINAL_HOME = os.environ.get("HOME")
+
 _TEST_HOME = tempfile.mkdtemp(prefix="delegate-tests-home-")
 os.environ["HOME"] = _TEST_HOME
 atexit.register(shutil.rmtree, _TEST_HOME, True)
