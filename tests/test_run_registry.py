@@ -7,6 +7,7 @@ import sys
 import tarfile
 import tempfile
 import threading
+import time
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
@@ -450,6 +451,66 @@ class RunRegistryTests(unittest.TestCase):
             index = self.registry.load_index(root)
             self.assertEqual(len(index["runs"]), 4)
             self.assertEqual(set(index["aliases"]), {"codex-1", "codex-2", "codex-3", "codex-4"})
+
+    @unittest.skipUnless(os.name == "posix", "flock is POSIX-only")
+    def test_lock_fd_is_not_inherited_by_sleeper_spawned_under_lock(self):
+        """O_CLOEXEC protects the registry lock even when close_fds is disabled."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
+            sleeper = None
+            try:
+                with self.registry.registry_lock(root, timeout_seconds=1):
+                    sleeper = subprocess.Popen(
+                        [sys.executable, "-c", "import time; time.sleep(2)"],
+                        close_fds=False,
+                    )
+                started = time.monotonic()
+                with self.registry.registry_lock(root, timeout_seconds=0.5):
+                    pass
+                self.assertLess(time.monotonic() - started, 0.5)
+            finally:
+                if sleeper is not None:
+                    sleeper.wait(timeout=5)
+
+    def test_registry_lock_replays_finalize_wal_and_cancel_wins(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
+            run_id, _alias = self.registry.register_run(root, harness="cursor")
+            run_path = self.registry.run_directory(root, run_id)
+            self.registry.write_json_atomic(
+                run_path / self.registry.STATE_FILE, {"status": "running"}
+            )
+            self.registry.write_snapshot(run_path, {"status": "running", "ok": False})
+            self.registry.write_finalize_wal(
+                root,
+                run_id,
+                status="succeeded",
+                state={"status": "succeeded", "exitCode": 0, "resultQuality": "ok"},
+                snapshot={"status": "succeeded", "ok": True, "resultQuality": "ok"},
+            )
+            self.registry.write_json_atomic(
+                run_path / self.registry.STATE_FILE,
+                {"status": "running", "cancelRequested": True},
+            )
+            with self.registry.registry_lock(root, timeout_seconds=1):
+                pass
+            persisted = json.loads((run_path / self.registry.STATE_FILE).read_text())
+            snapshot = json.loads((run_path / self.registry.SNAPSHOT_FILE).read_text())
+            self.assertEqual(persisted["status"], self.registry.STATUS_CANCELLED)
+            self.assertEqual(snapshot["status"], self.registry.STATUS_CANCELLED)
+            self.assertFalse(snapshot["ok"])
+            self.assertFalse((run_path / self.registry.FINALIZE_WAL_FILE).exists())
+
+    def test_corrupt_finalize_wal_is_quarantined_without_blocking_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
+            run_id, _alias = self.registry.register_run(root, harness="cursor")
+            wal = self.registry.finalize_wal_path(root, run_id)
+            wal.write_text("not-json", encoding="utf-8")
+            with self.registry.registry_lock(root, timeout_seconds=1):
+                pass
+            self.assertFalse(wal.exists())
+            self.assertTrue(list(wal.parent.glob(wal.name + ".corrupt.*")))
 
     def test_resolve_handle_returns_suggestions_when_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
