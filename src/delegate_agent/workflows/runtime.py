@@ -950,16 +950,19 @@ class WorkflowState:
             event["label"] = label
         # The durable row is written before mutating in-memory replay state.
         self.append_event("agent_rejected", **event)
-        self.tombstoned_keys.add(key)
-        self.started_after_tombstone.discard(key)
-        # Tombstones with no cached result do not clear an unfinished adoption
-        # state; the marker remains for v2's fresh attempt-key derivation.
-        if not has_cached_result:
-            return key
-        self.replay_keys.discard(key)
-        self.replay.pop(key, None)
-        self.started_without_result.discard(key)
-        self.exhausted_keys.discard(key)
+        # agent() snapshots every cache-decision input under journal_lock, so
+        # invalidate this matching set atomically with respect to that reader.
+        with self.journal_lock:
+            self.tombstoned_keys.add(key)
+            self.started_after_tombstone.discard(key)
+            # Tombstones with no cached result do not clear an unfinished adoption
+            # state; the marker remains for v2's fresh attempt-key derivation.
+            if not has_cached_result:
+                return key
+            self.replay_keys.discard(key)
+            self.replay.pop(key, None)
+            self.started_without_result.discard(key)
+            self.exhausted_keys.discard(key)
         return key
 
     def cancel_stale_scope_children(self, scope: str, current_key: str) -> None:
@@ -2157,6 +2160,15 @@ class WorkflowDsl:
                 if child.run_id is not None:
                     self.state.retry_worktree_runs.add(child.run_id)
                 if child.workspace_cleanup is not None:
+                    if (
+                        workspace_cleanup is not None
+                        and child.workspace_cleanup != workspace_cleanup
+                    ):
+                        _cleanup_structured_retry_workspace(child.workspace_cleanup)
+                        _cleanup_structured_retry_workspace(workspace_cleanup)
+                        if first_child_run_id is not None:
+                            self._release_structured_retry_worktree(first_child_run_id)
+                        raise RuntimeError("structured retry workspace cleanup metadata changed")
                     workspace_cleanup = child.workspace_cleanup
                 if child.isolation_backend == "bwrap":
                     retry_backend = "bwrap"

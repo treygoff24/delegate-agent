@@ -132,6 +132,63 @@ class ChildAttemptOutcomeTests(unittest.TestCase):
             {"isolatedWorkspace": "/tmp/failed-worktree"},
         )
 
+    def test_text_retry_rejects_changed_workspace_cleanup_metadata(self) -> None:
+        first_cleanup = {
+            "gitRoot": None,
+            "isolatedWorkspace": "/tmp/first-retry-worktree",
+            "tempBase": "/tmp",
+            "sourceRoot": str(self.workspace),
+        }
+        second_cleanup = {
+            "gitRoot": None,
+            "isolatedWorkspace": "/tmp/second-retry-worktree",
+            "tempBase": "/tmp",
+            "sourceRoot": str(self.workspace),
+        }
+        first = runtime._DelegateChildResult(
+            text=None,
+            run_id="del_20260827T040000Z_text1",
+            execution_cwd="/tmp/first-retry-worktree",
+            session_id=None,
+            workspace_cleanup=first_cleanup,
+            outcome=runtime.ChildAttemptOutcome(
+                run_id="del_20260827T040000Z_text1",
+                failure_reason="timeout",
+                cleanup_ownership=first_cleanup,
+            ),
+        )
+        second = runtime._DelegateChildResult(
+            text=None,
+            run_id="del_20260827T040000Z_text2",
+            execution_cwd="/tmp/second-retry-worktree",
+            session_id=None,
+            workspace_cleanup=second_cleanup,
+        )
+        dsl = self._dsl()
+        with (
+            mock.patch.object(dsl, "_run_delegate", side_effect=[first, second]),
+            mock.patch.object(dsl, "_release_structured_retry_worktree") as release,
+            mock.patch.object(runtime, "_cleanup_structured_retry_workspace") as cleanup,
+            self.assertRaisesRegex(RuntimeError, "workspace cleanup metadata changed"),
+        ):
+            dsl._run_structured_or_text(
+                "codex",
+                "retry",
+                mode="safe",
+                model=None,
+                effort=None,
+                fast=None,
+                schema=None,
+                isolation="worktree",
+                passthrough=False,
+                timeout=1,
+                retries=1,
+                key="workflow-key",
+            )
+
+        cleanup.assert_has_calls([mock.call(second_cleanup), mock.call(first_cleanup)])
+        release.assert_called_once_with(first.run_id)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -25,6 +25,7 @@ later.
 """
 
 import atexit
+import contextlib
 import os
 import shutil
 import subprocess
@@ -135,6 +136,8 @@ def _finish_linked_worktree_lock_guard() -> None:
         os.write(2, f"{exc}\n".encode("utf-8", "replace"))
         # atexit suppresses ordinary exceptions, so make unittest's real CI
         # process fail if the session-wide watcher observed a violation.
+        with contextlib.suppress(OSError):
+            shutil.rmtree(_TEST_HOME, ignore_errors=True)
         os._exit(1)
 
 

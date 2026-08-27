@@ -1080,8 +1080,15 @@ class WorkflowCommandTests(unittest.TestCase):
             budget=workflow_runtime.Budget(None),
         )
         observed: list[tuple[str, str]] = []
+        ordering: list[str] = []
+        real_fsync = workflow_registry.os.fsync
+
+        def observe_fsync(fd: int) -> None:
+            ordering.append("fsync")
+            real_fsync(fd)
 
         def drain() -> None:
+            ordering.append("drain")
             events = workflow_registry.iter_journal(root / workflow_registry.JOURNAL_FILE)
             observed.append(
                 (
@@ -1092,12 +1099,16 @@ class WorkflowCommandTests(unittest.TestCase):
                 )
             )
 
-        with mock.patch.object(state, "close_gate_and_wait", side_effect=drain):
+        with (
+            mock.patch.object(workflow_registry.os, "fsync", side_effect=observe_fsync),
+            mock.patch.object(state, "close_gate_and_wait", side_effect=drain),
+        ):
             first = state.park_gate("gate-fixture", child="child", result={"ok": False})
             second = state.park_gate("gate-fixture", child="child", result={"ok": False})
 
         self.assertEqual(first.gate_key, "gate-fixture")
         self.assertEqual(second.gate_key, "gate-fixture")
+        self.assertGreater(ordering.index("drain"), ordering.index("fsync"))
         self.assertEqual(observed, [("gate", "created"), ("gate", "paused")])
         events = workflow_registry.iter_journal(root / workflow_registry.JOURNAL_FILE)
         self.assertEqual([event["type"] for event in events], ["gate"])
@@ -3286,12 +3297,13 @@ class WorkflowCommandTests(unittest.TestCase):
         ]
         self.assertGreater(len(runs_after), len(runs_before))
 
-    def test_agent_started_events_are_fsynced(self) -> None:
+    def test_durable_workflow_events_are_fsynced(self) -> None:
         # R4 / F5: durable adoption, audit, and budget-claim events are fsynced.
         self.assertIn("agent_started", workflow_registry.DURABLE_EVENT_TYPES)
         self.assertIn("agent_adopted", workflow_registry.DURABLE_EVENT_TYPES)
         self.assertIn("agent_adopt_rejected", workflow_registry.DURABLE_EVENT_TYPES)
         self.assertIn("agent_timeout", workflow_registry.DURABLE_EVENT_TYPES)
+        self.assertIn("agent_retry", workflow_registry.DURABLE_EVENT_TYPES)
         self.assertIn("agent_structured_retry", workflow_registry.DURABLE_EVENT_TYPES)
         self.assertIn("budget", workflow_registry.DURABLE_EVENT_TYPES)
         self.assertNotIn("agent_result", workflow_registry.DURABLE_EVENT_TYPES)
@@ -3313,7 +3325,8 @@ class WorkflowCommandTests(unittest.TestCase):
             {"seq": 5, "type": "agent_adopt_rejected", "key": "k"},
             {"seq": 6, "type": "agent_timeout", "key": "k"},
             {"seq": 7, "type": "budget", "key": "k", "spent": 1},
-            {"seq": 8, "type": "agent_structured_retry", "key": "k"},
+            {"seq": 8, "type": "agent_retry", "key": "k"},
+            {"seq": 9, "type": "agent_structured_retry", "key": "k"},
         ]
         try:
             for event in events:
