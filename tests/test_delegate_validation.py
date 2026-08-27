@@ -1357,26 +1357,30 @@ class ValidationTests(unittest.TestCase):
 
     def test_resolve_isolation_normalizes_input_json_safe_none_for_droid(self):
         config_mod = load_config_module()
-        self.assertEqual(
-            config_mod.resolve_isolation(
-                input_json_value="none",
-                loaded_config=config_mod.DEFAULT_CONFIG,
-                engine="droid",
-                mode="safe",
-            ),
-            "auto",
-        )
+        for engine in ("codex", "droid"):
+            with self.subTest(engine=engine):
+                self.assertEqual(
+                    config_mod.resolve_isolation(
+                        input_json_value="none",
+                        loaded_config=config_mod.DEFAULT_CONFIG,
+                        engine=engine,
+                        mode="safe",
+                    ),
+                    "auto",
+                )
 
     def test_resolve_isolation_normalizes_config_safe_none_for_kimi(self):
         config_mod = load_config_module()
-        self.assertEqual(
-            config_mod.resolve_isolation(
-                loaded_config={"isolation": {"safe": "none"}},
-                engine="kimi",
-                mode="safe",
-            ),
-            "auto",
-        )
+        for engine in ("codex", "kimi"):
+            with self.subTest(engine=engine):
+                self.assertEqual(
+                    config_mod.resolve_isolation(
+                        loaded_config={"isolation": {"safe": "none"}},
+                        engine=engine,
+                        mode="safe",
+                    ),
+                    "auto",
+                )
 
     def test_resolve_isolation_normalizes_codex_safe_none_but_allows_work_none(self):
         config_mod = load_config_module()
