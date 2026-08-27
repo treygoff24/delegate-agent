@@ -3209,13 +3209,16 @@ class WorkflowCommandTests(unittest.TestCase):
             """
             meta = {"name": "schema-timeout", "defaults": {"engine": "codex", "mode": "safe"}}
             SCHEMA = {"type": "object", "required": ["ok"], "properties": {"ok": {"type": "boolean"}}, "additionalProperties": False}
-            return agent("timeout structured", schema=SCHEMA, retries=1, timeout=0.2, isolation="worktree")
+            return agent("timeout structured", schema=SCHEMA, retries=1, timeout=1.5, isolation="worktree")
             """
         )
+        # The resume-vs-relaunch assertion needs the fake child's thread.started
+        # line captured BEFORE the timeout kill; interpreter startup on a loaded
+        # macOS box blows through a 0.2s window, so give it real margin.
         launch = self.run_delegate(
             ["--json", "workflow", "run", str(script)],
             env_extra={
-                "FAKE_CODEX_SLEEP_SECONDS": "1",
+                "FAKE_CODEX_SLEEP_SECONDS": "5",
                 "FAKE_CODEX_SESSION_ID": "timeout-thread",
                 "FAKE_CODEX_SESSION_BEFORE_SLEEP": "1",
             },
@@ -3225,7 +3228,7 @@ class WorkflowCommandTests(unittest.TestCase):
         waited = self.run_delegate(
             ["--json", "workflow", "wait", wf_id, "--timeout", "15"],
             env_extra={
-                "FAKE_CODEX_SLEEP_SECONDS": "1",
+                "FAKE_CODEX_SLEEP_SECONDS": "5",
                 "FAKE_CODEX_SESSION_ID": "timeout-thread",
                 "FAKE_CODEX_SESSION_BEFORE_SLEEP": "1",
             },
@@ -3360,7 +3363,7 @@ class WorkflowCommandTests(unittest.TestCase):
                 """
                 meta = {"name": "schema-supervisor-crash", "defaults": {"engine": "codex", "mode": "safe"}}
                 SCHEMA = {"type": "object", "required": ["ok"], "properties": {"ok": {"type": "boolean"}}, "additionalProperties": False}
-                return agent("supervisor crash", schema=SCHEMA, retries=0, timeout=0.2, isolation="worktree")
+                return agent("supervisor crash", schema=SCHEMA, retries=0, timeout=1.5, isolation="worktree")
                 """
             ).strip()
             + "\n",
@@ -3370,12 +3373,12 @@ class WorkflowCommandTests(unittest.TestCase):
             (workflow_root / "result.json").unlink()
         resumed = self.run_delegate(
             ["--json", "workflow", "run", "--resume", wf_id],
-            env_extra={"FAKE_CODEX_SLEEP_SECONDS": "1"},
+            env_extra={"FAKE_CODEX_SLEEP_SECONDS": "5"},
         )
         self.assertEqual(resumed.returncode, 0, resumed.stderr)
         waited = self.run_delegate(
             ["--json", "workflow", "wait", wf_id, "--timeout", "15"],
-            env_extra={"FAKE_CODEX_SLEEP_SECONDS": "1"},
+            env_extra={"FAKE_CODEX_SLEEP_SECONDS": "5"},
         )
         self.assertEqual(waited.returncode, 0, waited.stderr)
         result = json.loads(self.run_delegate(["--json", "workflow", "result", wf_id]).stdout)

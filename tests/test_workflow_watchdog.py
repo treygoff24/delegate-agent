@@ -101,15 +101,22 @@ class WorkflowWatchdogProcessTests(unittest.TestCase):
         self.fail("watchdog process condition timed out")
 
     def _wait_process_gone(self, pid: int, timeout: float = 6.0) -> None:
+        # ps rather than /proc: the supervisor is not our child (no waitpid),
+        # and /proc does not exist on macOS. A zombie counts as gone.
         def gone() -> bool:
-            proc = Path(f"/proc/{pid}")
-            if not proc.exists():
-                return True
             try:
-                state = proc.joinpath("stat").read_text(encoding="utf-8").split()[2]
-            except (FileNotFoundError, OSError, IndexError):
+                os.kill(pid, 0)
+            except ProcessLookupError:
                 return True
-            return state == "Z"
+            except PermissionError:
+                return False
+            state = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "stat="],
+                text=True,
+                capture_output=True,
+                check=False,
+            ).stdout.strip()
+            return not state or state.startswith("Z")
 
         self._wait_for(gone, timeout)
 
