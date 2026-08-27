@@ -846,19 +846,58 @@ class WorkflowState:
             )
         return GateExit("workflow gate is closed to new agent calls")
 
-    def reject_agent(self, key_or_label: object, reason: object) -> str:
-        """Durably tombstone an agent key so a later call executes fresh."""
+    def _known_agent_keys(self) -> set[str]:
+        """Return structural agent keys known to this live/replayed workflow."""
+        with self.journal_lock:
+            known = {
+                *self.replay,
+                *self.replay_keys,
+                *self.failed_replay_keys,
+                *self.tombstoned_keys,
+                *self.started_without_result,
+                *self.exhausted_keys,
+                *self.claimed_keys,
+                *self.started_scopes,
+                *self.label_keys.values(),
+            }
+            for event in registry.iter_journal(self.journal_path):
+                event_type = event.get("type")
+                if not (
+                    isinstance(event_type, str)
+                    and (event_type.startswith("agent_") or event_type == "budget")
+                ):
+                    continue
+                key = event.get("key")
+                if isinstance(key, str):
+                    known.add(key)
+            return known
+
+    def resolve_agent_key(self, key_or_label: object) -> tuple[str, str | None]:
+        """Resolve an exact structural key or the most recent exact label."""
         if not isinstance(key_or_label, str) or not key_or_label.strip():
             raise ValueError("reject() expects a non-empty agent key or label")
-        raw = key_or_label.strip()
-        key = self.label_keys.get(raw, raw)
-        if key in self.tombstoned_keys:
-            return key
-        event: JsonObject = {"key": key, "reason": str(reason)}
-        if raw != key:
-            event["label"] = raw
+        raw = key_or_label
+        known = self._known_agent_keys()
+        if raw in known:
+            return raw, None
+        key = self.label_keys.get(raw)
+        if isinstance(key, str) and key in known:
+            return key, raw
+        raise ValueError(f"reject() could not resolve agent key or label: {raw!r}")
+
+    def reject_agent(self, key_or_label: object, reason: object) -> str:
+        """Durably tombstone an agent key so a later call executes fresh."""
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("reject() expects a non-empty reason string")
+        key, label = self.resolve_agent_key(key_or_label)
+        already_tombstoned = key in self.tombstoned_keys
+        event: JsonObject = {"key": key, "reason": reason}
+        if label is not None:
+            event["label"] = label
         # The durable row is written before mutating in-memory replay state.
         self.append_event("agent_rejected", **event)
+        if already_tombstoned:
+            return key
         self.tombstoned_keys.add(key)
         self.replay_keys.discard(key)
         self.replay.pop(key, None)

@@ -31,6 +31,8 @@ class WorkflowCommand:
     action: str
     script: str | None = None
     wf_id: str | None = None
+    key_or_label: str | None = None
+    reason: str | None = None
     args_json: str | None = None
     budget: int | None = None
     dry_run: bool = False
@@ -84,6 +86,8 @@ def emit(
         return emit_wait(command, workspace=workspace, stdout=stdout)
     if action == "approve":
         return emit_approve(command, workspace=workspace, config=config, stdout=stdout)
+    if action == "reject":
+        return emit_reject(command, workspace=workspace, config=config, stdout=stdout)
     if action == "kill":
         return emit_kill(command, workspace=workspace, stdout=stdout)
     if action == "list":
@@ -550,6 +554,93 @@ def emit_approve(
     # Resume acquires the lock before mutating approval/budget state.
     resumed = WorkflowCommand("run", resume=command.wf_id, json_mode=command.json_mode)
     return emit_run(resumed, workspace=workspace, config=config, stdout=stdout, stderr=stdout)
+
+
+def emit_reject(
+    command: WorkflowCommand,
+    *,
+    workspace: Path,
+    config: JsonObject,
+    stdout: TextIO,
+) -> int:
+    """Tombstone a workflow agent key from a parked or dead supervisor."""
+    root = _workflow_dir_for_command(command, workspace)
+    wf_id = command.wf_id
+    key_or_label = command.key_or_label
+    reason = command.reason
+    if wf_id is None or key_or_label is None:
+        raise DelegateError(
+            "missing_workflow_reject_args",
+            'workflow reject requires <wfId> <key-or-label> --reason "<text>".',
+        )
+    if not isinstance(reason, str) or not reason.strip():
+        raise DelegateError(
+            "missing_workflow_reject_reason",
+            "workflow reject requires a non-empty --reason.",
+        )
+    if registry.supervisor_alive(root):
+        raise DelegateError(
+            "workflow_running",
+            "Cannot reject a live running supervisor; let the script judge — "
+            "reject() from the workflow script.",
+        )
+    try:
+        lock_fd = _acquire_workflow_lock(root, wf_id)
+    except DelegateError as exc:
+        raise DelegateError(
+            "workflow_running",
+            "Cannot reject a live running supervisor; let the script judge — "
+            "reject() from the workflow script.",
+        ) from exc
+    try:
+        status = registry.read_json(root / registry.STATUS_FILE) or {}
+        budget_payload = status.get("budget")
+        total = budget_payload.get("total") if isinstance(budget_payload, dict) else None
+        spent = budget_payload.get("spent") if isinstance(budget_payload, dict) else None
+        state = runtime.WorkflowState(
+            wf_id=wf_id,
+            workspace=workspace,
+            root=root,
+            script_path=root / registry.SCRIPT_FILE,
+            config=config,
+            cli_argv=_delegate_cli_argv(),
+            args=runtime.load_args(root),
+            budget=runtime.Budget(
+                total if isinstance(total, int) else None,
+                spent if isinstance(spent, int) and spent >= 0 else 0,
+            ),
+            replay_journal=status.get("replayJournal") is not False,
+            workflow_key_version=(
+                status.get("workflowKeyVersion")
+                if status.get("workflowKeyVersion") in {1, 2}
+                else 1
+            ),
+        )
+        try:
+            key, label = state.resolve_agent_key(key_or_label)
+        except ValueError as exc:
+            raise DelegateError("workflow_reject_unresolved", str(exc)) from exc
+        event: JsonObject = {"key": key, "reason": reason}
+        if label is not None:
+            event["label"] = label
+        _append_command_event(root, "agent_rejected", **event)
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(lock_fd)
+    payload: JsonObject = {
+        "ok": True,
+        "schema": WORKFLOW_COMMAND_SCHEMA,
+        "wfId": wf_id,
+        "key": key,
+        "reason": reason,
+    }
+    if label is not None:
+        payload["label"] = label
+    if command.json_mode:
+        rendering.print_json(payload, stdout)
+    else:
+        print(f"rejected: {key}", file=stdout)
+    return EXIT_OK
 
 
 def _latest_unapproved_gate_event(root: Path) -> JsonObject | None:

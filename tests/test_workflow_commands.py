@@ -1253,13 +1253,37 @@ class WorkflowCommandTests(unittest.TestCase):
         state.append_event("agent_started", key="agent-key", label="draft")
         state.append_event("agent_finished", key="agent-key", result={"ok": False})
         self.assertEqual(state.reject_agent("draft", "emitter policy"), "agent-key")
+        single = workflow_runtime.WorkflowState(
+            wf_id=wf_id,
+            workspace=self.workspace,
+            root=root,
+            script_path=script_path,
+            config={},
+            cli_argv=[str(CLI)],
+            args=None,
+            budget=workflow_runtime.Budget(None),
+        )
         self.assertEqual(state.reject_agent("agent-key", "same policy"), "agent-key")
         self.assertIn("agent-key", state.tombstoned_keys)
         self.assertNotIn("agent-key", state.replay_keys)
+        double = workflow_runtime.WorkflowState(
+            wf_id=wf_id,
+            workspace=self.workspace,
+            root=root,
+            script_path=script_path,
+            config={},
+            cli_argv=[str(CLI)],
+            args=None,
+            budget=workflow_runtime.Budget(None),
+        )
+        self.assertEqual(double.replay, single.replay)
+        self.assertEqual(double.replay_keys, single.replay_keys)
+        self.assertEqual(double.tombstoned_keys, single.tombstoned_keys)
+        self.assertEqual(double.started_without_result, single.started_without_result)
         events = workflow_registry.iter_journal(root / workflow_registry.JOURNAL_FILE)
         self.assertEqual(
             [event["type"] for event in events],
-            ["agent_started", "agent_finished", "agent_rejected"],
+            ["agent_started", "agent_finished", "agent_rejected", "agent_rejected"],
         )
 
         # A result recorded after the tombstone is a fresh settlement and
@@ -1277,6 +1301,142 @@ class WorkflowCommandTests(unittest.TestCase):
         )
         self.assertNotIn("agent-key", resumed.tombstoned_keys)
         self.assertEqual(resumed.replay.get("agent-key"), {"ok": True})
+
+    def test_reject_unknown_key_or_label_fails_script_and_cli(self) -> None:
+        wf_id = "wf_666666666666"
+        root = workflow_registry.ensure_workflow_dir(self.workspace, wf_id)
+        script_path = root / workflow_registry.SCRIPT_FILE
+        script_path.write_text("return True\n", encoding="utf-8")
+        workflow_registry.write_json(
+            root / workflow_registry.STATUS_FILE,
+            {
+                "wfId": wf_id,
+                "status": "created",
+                "budget": {"total": None, "spent": 0, "remaining": None},
+            },
+        )
+        state = workflow_runtime.WorkflowState(
+            wf_id=wf_id,
+            workspace=self.workspace,
+            root=root,
+            script_path=script_path,
+            config={},
+            cli_argv=[str(CLI)],
+            args=None,
+            budget=workflow_runtime.Budget(None),
+        )
+        state.append_event("agent_started", key="known-key", label="known")
+        self.assertEqual(state.reject_agent("known-key", "no cached result"), "known-key")
+        with self.assertRaisesRegex(ValueError, "missing-key"):
+            state.reject_agent("missing-key", "not found")
+        with self.assertRaisesRegex(ValueError, "missing-label"):
+            state.reject_agent("missing-label", "not found")
+
+        rejected = self.run_delegate(
+            ["--json", "workflow", "reject", wf_id, "missing-key", "--reason", "not found"]
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        payload = json.loads(rejected.stdout)
+        self.assertEqual(payload["error"], "workflow_reject_unresolved")
+        self.assertIn("missing-key", payload["message"])
+        rejected_label = self.run_delegate(
+            [
+                "--json",
+                "workflow",
+                "reject",
+                wf_id,
+                "missing-label",
+                "--reason",
+                "not found",
+            ]
+        )
+        self.assertNotEqual(rejected_label.returncode, 0)
+        label_payload = json.loads(rejected_label.stdout)
+        self.assertEqual(label_payload["error"], "workflow_reject_unresolved")
+        self.assertIn("missing-label", label_payload["message"])
+
+        script = self.write_workflow(
+            """
+            meta = {"name": "reject-unknown-script"}
+            reject("missing-key", "not found")
+            return True
+            """
+        )
+        launch = self.run_delegate(["--json", "workflow", "run", str(script)])
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        script_wf_id = json.loads(launch.stdout)["wfId"]
+        waited = self.run_delegate(["--json", "workflow", "wait", script_wf_id, "--timeout", "10"])
+        self.assertNotEqual(waited.returncode, 0)
+        status = self.run_delegate(["--json", "workflow", "status", script_wf_id])
+        self.assertIn("missing-key", json.loads(status.stdout).get("error", ""))
+
+    def test_cli_reject_parked_workflow_tombstones_and_resume_respawns(self) -> None:
+        child = self.write_saved_workflow(
+            "reject-cli-child",
+            """
+            meta = {"name": "reject-cli-child"}
+            return agent("draft", label="draft")
+            """,
+        )
+        parent = self.write_workflow(
+            f"""
+            meta = {{"name": "reject-cli-parent"}}
+            return workflow({child!r}, gate=True)
+            """
+        )
+        launch = self.run_delegate(["--json", "workflow", "run", str(parent)])
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
+        self.assertEqual(waited.returncode, 0, waited.stderr)
+        self.assertEqual(json.loads(waited.stdout)["workflow"]["status"], "paused")
+
+        events = json.loads(self.run_delegate(["--json", "workflow", "events", wf_id]).stdout)[
+            "events"
+        ]
+        first_key = next(event["key"] for event in events if event.get("label") == "draft")
+        rejected = self.run_delegate(
+            ["--json", "workflow", "reject", wf_id, "draft", "--reason", "stale result"]
+        )
+        self.assertEqual(rejected.returncode, 0, rejected.stderr)
+        reject_payload = json.loads(rejected.stdout)
+        self.assertEqual(reject_payload["key"], first_key)
+        self.assertEqual(reject_payload["label"], "draft")
+        self.assertEqual(reject_payload["reason"], "stale result")
+
+        resumed = self.run_delegate(["--json", "workflow", "run", "--resume", wf_id])
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        resumed_wait = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
+        self.assertEqual(resumed_wait.returncode, 0, resumed_wait.stderr)
+        events = json.loads(self.run_delegate(["--json", "workflow", "events", wf_id]).stdout)[
+            "events"
+        ]
+        started = [event for event in events if event.get("type") == "agent_started"]
+        self.assertEqual(len(started), 2)
+        self.assertNotEqual(started[0]["key"], started[1]["key"])
+
+    def test_cli_reject_refuses_live_running_workflow(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "reject-live"}
+            return agent("slow", label="draft")
+            """
+        )
+        launch = self.run_delegate(
+            ["--json", "workflow", "run", str(script)],
+            env_extra={"FAKE_CODEX_SLEEP_SECONDS": "2"},
+        )
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        rejected = self.run_delegate(
+            ["--json", "workflow", "reject", wf_id, "draft", "--reason", "race"]
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        payload = json.loads(rejected.stdout)
+        self.assertEqual(payload["error"], "workflow_running")
+        self.assertIn("reject() from the workflow script", payload["message"])
+        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
+        self.assertEqual(waited.returncode, 0, waited.stderr)
 
     def test_v1_agent_key_parity_omits_timeout(self) -> None:
         wf_id = "wf_444444444444"

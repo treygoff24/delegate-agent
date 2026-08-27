@@ -2485,7 +2485,7 @@ def parse_workflow(
         return help_command(json_mode, f"workflow {action}")
     if action in {"run", "check", "save"}:
         return _parse_workflow_path_action(action, args, json_mode, cwd, notify)
-    if action in {"status", "watch", "events", "result", "wait", "approve", "kill"}:
+    if action in {"status", "watch", "events", "result", "wait", "approve", "reject", "kill"}:
         return _parse_workflow_id_action(action, args, json_mode, cwd)
     if action == "list":
         require_no_extra(args, "workflow list")
@@ -2598,6 +2598,8 @@ def _parse_workflow_id_action(
     cwd: str | None,
 ) -> ParsedCommand:
     wf_id: str | None = None
+    key_or_label: str | None = None
+    reason: str | None = None
     since = 0
     timeout: int | None = None
     result_field: str | None = None
@@ -2628,22 +2630,47 @@ def _parse_workflow_id_action(
             result_field = args[i + 1]
             i += 2
             continue
+        if token == "--reason" and action == "reject":
+            if i + 1 >= len(args):
+                raise DelegateError(
+                    "missing_workflow_reject_reason",
+                    "workflow reject --reason requires a non-empty value.",
+                )
+            reason = args[i + 1]
+            i += 2
+            continue
         if token.startswith("-"):
             raise DelegateError(
                 "unknown_option", unknown_option_message(f"workflow {action}", token)
             )
-        if wf_id is not None:
+        if wf_id is None:
+            wf_id = token
+        elif action == "reject" and key_or_label is None:
+            key_or_label = token
+        else:
             raise DelegateError("unexpected_argument", f"workflow {action} accepts one wfId.")
-        wf_id = token
         i += 1
     if wf_id is None and action not in {"wait", "result"}:
         raise DelegateError("missing_workflow", f"workflow {action} requires <wfId>.")
+    if action == "reject":
+        if key_or_label is None:
+            raise DelegateError(
+                "missing_workflow_reject_target",
+                "workflow reject requires <wfId> <key-or-label>.",
+            )
+        if reason is None or not reason.strip():
+            raise DelegateError(
+                "missing_workflow_reject_reason",
+                "workflow reject requires a non-empty --reason.",
+            )
     return ParsedCommand(
         "workflow",
         global_options=GlobalOptions(json_mode=json_mode, cwd=cwd),
         workflow_command=workflow_commands.WorkflowCommand(
             action,
             wf_id=wf_id,
+            key_or_label=key_or_label,
+            reason=reason,
             since=since,
             timeout=timeout,
             result_field=result_field,
