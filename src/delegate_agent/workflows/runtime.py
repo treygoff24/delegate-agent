@@ -115,6 +115,21 @@ class ChildAttemptOutcome:
 
 
 @dataclass(frozen=True)
+class StructuredAttemptOutcome:
+    """The final structured-output parse/validation result for one agent call."""
+
+    last_parsed_candidate: JsonValue | None
+    validation_error: str
+    candidate_present: bool = False
+
+    def as_json(self) -> JsonObject:
+        return {
+            "lastParsedCandidate": (self.last_parsed_candidate if self.candidate_present else None),
+            "validationError": self.validation_error,
+        }
+
+
+@dataclass(frozen=True)
 class _DelegateChildResult:
     text: str | None
     run_id: str | None
@@ -696,6 +711,43 @@ class WorkflowState:
                 },
             )
 
+    def append_durable_event(self, event_type: str, **payload: JsonValue) -> JsonObject:
+        """Append and fsync a journal event without relying on its registry list."""
+        with self.journal_lock:
+            status = registry.read_json(self.status_path)
+            last_seq = status.get("lastSeq") if isinstance(status, dict) else None
+            if isinstance(last_seq, int):
+                self.sequence = max(self.sequence, last_seq)
+            self.sequence += 1
+            event: JsonObject = {
+                "seq": self.sequence,
+                "type": event_type,
+                "at": run_registry.utc_now_iso(),
+                **payload,
+            }
+            fd = run_registry.open_private_file(
+                self.journal_path, os.O_CREAT | os.O_APPEND | os.O_WRONLY
+            )
+            with os.fdopen(fd, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(event) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            gate_key = status.get("gateKey") if isinstance(status, dict) else None
+            if (
+                isinstance(status, dict)
+                and status.get("status") == "paused"
+                and isinstance(gate_key, str)
+            ):
+                self._write_status_locked(
+                    status="paused",
+                    last_event=event,
+                    extra={"gateKey": gate_key, "gateResult": status.get("gateResult")},
+                )
+            else:
+                self._write_status_locked(status="running", last_event=event)
+            self._touch_heartbeat_locked()
+            return event
+
     def append_event(self, event_type: str, **payload: JsonValue) -> JsonObject:
         with self.journal_lock:
             status = registry.read_json(self.status_path)
@@ -1244,6 +1296,7 @@ def execute_workflow(state: WorkflowState) -> object:
         "log": dsl.log,
         "workflow": dsl.workflow,
         "reject": dsl.reject,
+        "structured_attempt": dsl.structured_attempt,
         "judges": dsl.judges,
         "args": state.args,
         "budget": state.budget,
@@ -1259,6 +1312,45 @@ class WorkflowDsl:
         defaults = meta.get("defaults")
         self.defaults = defaults if isinstance(defaults, dict) else {}
         self.current_phase: str | None = None
+        self._structured_attempts: dict[str, StructuredAttemptOutcome] = {}
+        self._structured_attempt_lock = threading.Lock()
+
+    def _record_structured_attempt(
+        self, key: str, outcome: StructuredAttemptOutcome | None
+    ) -> None:
+        lock = getattr(self, "_structured_attempt_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._structured_attempt_lock = lock
+        attempts = getattr(self, "_structured_attempts", None)
+        if attempts is None:
+            attempts = {}
+            self._structured_attempts = attempts
+        with lock:
+            if outcome is None:
+                attempts.pop(key, None)
+            else:
+                attempts[key] = outcome
+        self.state.thread_local.last_structured_attempt_key = key
+
+    def structured_attempt(self, key_or_label: object | None = None) -> JsonObject | None:
+        """Return the latest exhausted structured attempt for this workflow call."""
+        if key_or_label is None:
+            key_or_label = getattr(self.state.thread_local, "last_structured_attempt_key", None)
+        if not isinstance(key_or_label, str) or not key_or_label.strip():
+            return None
+        key = key_or_label
+        if key not in getattr(self, "_structured_attempts", {}):
+            try:
+                key, _label = self.state.resolve_agent_key(key_or_label)
+            except ValueError:
+                return None
+        lock = getattr(self, "_structured_attempt_lock", None)
+        if lock is None:
+            return None
+        with lock:
+            outcome = getattr(self, "_structured_attempts", {}).get(key)
+        return outcome.as_json() if outcome is not None else None
 
     def phase(self, title: str) -> None:
         self.current_phase = str(title)
@@ -2207,6 +2299,8 @@ class WorkflowDsl:
         prior_output = ""
         prior_error = ""
         prior_child: _DelegateChildResult | None = None
+        last_parsed_candidate: JsonValue | None = None
+        candidate_present = False
         retry_workspace_run_id: str | None = None
         structured_retry_backend: str | None = None
         workspace_cleanup: JsonObject | None = None
@@ -2320,7 +2414,10 @@ class WorkflowDsl:
             text = child.text
             try:
                 value = workflow_schema.parse_json_tolerant(text or "", schema)
+                last_parsed_candidate = value
+                candidate_present = True
                 workflow_schema.validate_value(value, schema)
+                self._record_structured_attempt(key, None)
                 _cleanup_structured_retry_workspace(workspace_cleanup)
                 if first_child_run_id is not None:
                     self._release_structured_retry_worktree(first_child_run_id)
@@ -2369,6 +2466,21 @@ class WorkflowDsl:
                 if retry_workspace_run_id is None:
                     retry_workspace_run_id = child.run_id
                 prior_child = child
+        outcome = StructuredAttemptOutcome(
+            last_parsed_candidate=last_parsed_candidate,
+            validation_error=prior_error,
+            candidate_present=candidate_present,
+        )
+        self._record_structured_attempt(key, outcome)
+        self.state.append_durable_event(
+            "agent_structured_exhausted",
+            key=key,
+            scope=self.state.current_scope(),
+            label=label,
+            engine=engine,
+            attempts=attempts + 1,
+            **outcome.as_json(),
+        )
         _cleanup_structured_retry_workspace(workspace_cleanup)
         if first_child_run_id is not None:
             self._release_structured_retry_worktree(first_child_run_id)
@@ -2895,6 +3007,8 @@ class WorkflowDsl:
         attempts = retries if retries is not None else _structured_retries(self.state.config)
         prior_output = ""
         prior_error = ""
+        last_parsed_candidate: JsonValue | None = None
+        candidate_present = False
         for attempt in range(attempts + 1):
             attempt_prompt = _structured_prompt(prompt, schema, prior_output, prior_error)
             text = self._run_delegate_followup(
@@ -2907,8 +3021,11 @@ class WorkflowDsl:
                 label=label,
             )
             try:
-                value = workflow_schema.parse_json_tolerant(text or "")
+                value = workflow_schema.parse_json_tolerant(text or "", schema)
+                last_parsed_candidate = value
+                candidate_present = True
                 workflow_schema.validate_value(value, schema)
+                self._record_structured_attempt(key, None)
                 return value
             except Exception as exc:
                 prior_output = text or ""
@@ -2918,7 +3035,24 @@ class WorkflowDsl:
                     engine=prior_child.engine,
                     attempt=attempt,
                     error=prior_error,
+                    key=key,
+                    label=label,
                 )
+        outcome = StructuredAttemptOutcome(
+            last_parsed_candidate=last_parsed_candidate,
+            validation_error=prior_error,
+            candidate_present=candidate_present,
+        )
+        self._record_structured_attempt(key, outcome)
+        self.state.append_durable_event(
+            "agent_structured_exhausted",
+            key=key,
+            scope=self.state.current_scope(),
+            label=label,
+            engine=prior_child.engine,
+            attempts=attempts + 1,
+            **outcome.as_json(),
+        )
         return None
 
     def _run_delegate_followup(

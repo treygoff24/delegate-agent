@@ -125,6 +125,30 @@ def _matches_type(value: object, schema_type: object) -> bool:
     return False
 
 
+def _schema_requires_non_string_value(schema: JsonObject | None) -> bool:
+    if schema is None:
+        return False
+    schema_type = schema.get("type")
+    if isinstance(schema_type, list):
+        return any(item != "string" for item in schema_type)
+    return schema_type is not None and schema_type != "string"
+
+
+def _decode_string_payload(value: str, schema: JsonObject | None) -> JsonValue:
+    """Decode one JSON layer when a provider wraps a structured value in a string."""
+    if not _schema_requires_non_string_value(schema):
+        return value
+    try:
+        decoded = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return value
+    try:
+        validate_value(decoded, schema or {})
+    except SchemaError:
+        return value
+    return decoded
+
+
 def parse_json_tolerant(text: str, schema: JsonObject | None = None) -> JsonValue:
     """Pull the JSON value out of child output that may be wrapped in prose.
 
@@ -146,7 +170,7 @@ def parse_json_tolerant(text: str, schema: JsonObject | None = None) -> JsonValu
     decoder = json.JSONDecoder()
     try:
         value, _end = decoder.raw_decode(stripped)
-        return value
+        return _decode_string_payload(value, schema) if isinstance(value, str) else value
     except json.JSONDecodeError as first_error:
         candidates: list[JsonValue] = []
         position = 0
