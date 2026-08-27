@@ -1454,18 +1454,13 @@ class WorkflowDsl:
             gate_key = _stable_hash(f"gate:{scope}:{_canonical_json(args)}")
             approved = registry.approval_allows(self.state.root, gate_key)
             if not approved:
-                self.state.pending_gate.append((gate_key, name, result))
-                try:
-                    # Let sibling pipeline/parallel callbacks that were
-                    # admitted in the same wave enter their child seam before
-                    # stop_admitting becomes visible.  This closes the race
-                    # where a fast gate callback otherwise parks before a
-                    # concurrently-started item has incremented active_agent.
-                    time.sleep(0.01)
-                    raise self.state.park_gate(gate_key, child=name, result=result)
-                finally:
-                    if self.state.pending_gate and self.state.pending_gate[-1][0] == gate_key:
-                        self.state.pending_gate.pop()
+                # Let sibling pipeline/parallel callbacks that were admitted in
+                # the same wave enter their child seam before stop_admitting
+                # becomes visible.  This closes the race where a fast gate
+                # callback otherwise parks before a concurrently-started item
+                # has incremented active_agent.
+                time.sleep(0.01)
+                raise self.state.park_gate(gate_key, child=name, result=result)
         return result
 
     def agent(
