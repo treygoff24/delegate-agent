@@ -10,8 +10,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
 
-from delegate_agent import rendering, run_registry
+from delegate_agent import rendering, run_registry, workflow_pinning
 from delegate_agent.errors import EXIT_OK, DelegateError
+from delegate_agent.isolation import worktrees_data_home
 from delegate_agent.json_types import JsonObject, JsonValue
 from delegate_agent.workflows import registry, runtime
 from delegate_agent.workflows import script as workflow_script
@@ -63,17 +64,31 @@ def emit(
         if command.wf_id is None:
             raise DelegateError("missing_workflow", "workflow _supervise requires <wfId>.")
         try:
+            pin = workflow_pinning.load_pin(command.wf_id)
+            if pin is not None:
+                previous_environment = workflow_pinning.temporarily_apply_environment(pin)
+                cli_argv = pin.cli_argv
+                launch_config = pin.config
+            else:
+                previous_environment = {}
+                cli_argv = _delegate_cli_argv()
+                launch_config = config
             return runtime.run_supervisor(
                 workspace=workspace,
                 wf_id=command.wf_id,
-                cli_argv=_delegate_cli_argv(),
-                config=config,
+                cli_argv=cli_argv,
+                config=launch_config,
             )
+        except workflow_pinning.WorkflowPinError as exc:
+            raise DelegateError(exc.error, exc.message) from exc
         except BlockingIOError as exc:
             raise DelegateError(
                 "workflow_locked",
                 f"Workflow is already running: {command.wf_id}",
             ) from exc
+        finally:
+            if "previous_environment" in locals() and previous_environment:
+                workflow_pinning.restore_environment(previous_environment)
     if action == "status":
         return emit_status(command, workspace=workspace, stdout=stdout)
     if action == "events":
@@ -129,11 +144,16 @@ def emit_run(
     previous_status: JsonObject | None = None
     previous_result: bytes | None = None
     previous_result_exists = False
+    pin: workflow_pinning.WorkflowPin | None = None
     if command.resume:
         wf_id = _validate_wf_id(command.resume)
         root = registry.workflow_dir(workspace, wf_id)
         if not root.exists():
             raise DelegateError("workflow_not_found", f"Workflow not found: {wf_id}")
+        try:
+            pin = workflow_pinning.load_pin(wf_id)
+        except workflow_pinning.WorkflowPinError as exc:
+            raise DelegateError(exc.error, exc.message) from exc
         # Acquire the lock before any approval/budget mutation so a failed
         # resume cannot clobber a live supervisor's status.json.
         lock_fd = _acquire_workflow_lock(root, wf_id)
@@ -216,6 +236,15 @@ def emit_run(
                 "notify": command.notify,
             },
         )
+        try:
+            pin = workflow_pinning.create_pin(
+                wf_id,
+                workspace=workspace,
+                config=config,
+                data_home=worktrees_data_home(config),
+            )
+        except workflow_pinning.WorkflowPinError as exc:
+            raise DelegateError(exc.error, exc.message) from exc
     if command.dry_run:
         status = registry.read_json(root / registry.STATUS_FILE) or {}
         status.update({"status": "dry_run", "updatedAt": run_registry.utc_now_iso()})
@@ -239,7 +268,7 @@ def emit_run(
     if lock_fd is None:
         lock_fd = _acquire_workflow_lock(root, wf_id)
     supervisor_argv = [
-        *_delegate_cli_argv(),
+        *(pin.cli_argv if pin is not None else _delegate_cli_argv()),
         "--cwd",
         str(workspace),
         "workflow",
@@ -273,7 +302,21 @@ def emit_run(
             registry.write_status(root, status)
             with contextlib.suppress(FileNotFoundError):
                 result_path.unlink()
-        runtime.detach_supervisor(supervisor_argv, cwd=workspace, lock_fd=lock_fd)
+        if pin is not None:
+            workflow_pinning.register_active_supervisor(
+                wf_id,
+                workflow_root=root,
+                workspace=workspace,
+                pin=pin,
+            )
+        previous_environment = (
+            workflow_pinning.temporarily_apply_environment(pin) if pin is not None else {}
+        )
+        try:
+            runtime.detach_supervisor(supervisor_argv, cwd=workspace, lock_fd=lock_fd)
+        finally:
+            if previous_environment:
+                workflow_pinning.restore_environment(previous_environment)
     except BaseException:
         if previous_status is not None:
             registry.write_json(root / registry.STATUS_FILE, previous_status)
@@ -553,7 +596,18 @@ def emit_approve(
         registry.write_status(root, projected)
     # Resume acquires the lock before mutating approval/budget state.
     resumed = WorkflowCommand("run", resume=command.wf_id, json_mode=command.json_mode)
-    return emit_run(resumed, workspace=workspace, config=config, stdout=stdout, stderr=stdout)
+    result = emit_run(resumed, workspace=workspace, config=config, stdout=stdout, stderr=stdout)
+    # Approval is an operator-facing transition: wait for the detached
+    # trampoline to publish a terminal projection when the child is already
+    # ready.  This removes a misleading transient ``starting`` read without
+    # turning a genuinely slow workflow into a blocking wait.
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        current = registry.read_json(root / registry.STATUS_FILE) or {}
+        if current.get("status") not in {"starting", "running"}:
+            break
+        time.sleep(0.01)
+    return result
 
 
 def emit_reject(
