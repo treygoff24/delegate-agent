@@ -31,6 +31,8 @@ class WorkflowCommand:
     action: str
     script: str | None = None
     wf_id: str | None = None
+    key_or_label: str | None = None
+    reason: str | None = None
     args_json: str | None = None
     budget: int | None = None
     dry_run: bool = False
@@ -84,6 +86,8 @@ def emit(
         return emit_wait(command, workspace=workspace, stdout=stdout)
     if action == "approve":
         return emit_approve(command, workspace=workspace, config=config, stdout=stdout)
+    if action == "reject":
+        return emit_reject(command, workspace=workspace, config=config, stdout=stdout)
     if action == "kill":
         return emit_kill(command, workspace=workspace, stdout=stdout)
     if action == "list":
@@ -203,6 +207,9 @@ def emit_run(
                 "scriptSha256": registry.script_sha256(data),
                 "args": args_value,
                 "budget": {"total": budget_total, "spent": 0, "remaining": budget_total},
+                # New workflow launches use v2 keys.  A resumed workflow keeps
+                # its existing version (missing means legacy v1).
+                "workflowKeyVersion": 2,
                 # Persisted rather than passed on argv: the supervisor is
                 # detached and re-execs itself, so status.json is the only thing
                 # that survives to tell it where to report.
@@ -241,11 +248,16 @@ def emit_run(
     ]
     try:
         if command.resume:
+            prior_attempt = status.get("replayAttempt")
+            replay_attempt = (
+                prior_attempt if isinstance(prior_attempt, int) and prior_attempt >= 0 else 0
+            )
             status.update(
                 {
                     "ok": True,
                     "status": "starting",
                     "replayJournal": not resume_from_dry_run,
+                    "replayAttempt": replay_attempt + 1,
                     "updatedAt": run_registry.utc_now_iso(),
                 }
             )
@@ -318,6 +330,7 @@ def emit_dry_run(
         args=args_value,
         budget=runtime.Budget(budget_total),
         dry_run=True,
+        workflow_key_version=2,
         # A dry run writes status too, and status.json is rebuilt rather than
         # merged, so omitting the target here erases it from a workflow that was
         # created with one and then dry-run before launching.
@@ -515,14 +528,137 @@ def emit_approve(
 ) -> int:
     root = _workflow_dir_for_command(command, workspace)
     status = registry.read_json(root / registry.STATUS_FILE) or {}
-    gate_key = status.get("gateKey")
+    # status.json is a projection and may have been lost or clobbered while a
+    # supervisor drained a gate.  The durable journal is authoritative: choose
+    # the newest gate event whose key has not already been approved.
+    recovered_gate = _latest_unapproved_gate_event(root)
+    gate_key = recovered_gate.get("key") if recovered_gate is not None else status.get("gateKey")
     if not isinstance(gate_key, str):
         raise DelegateError(
             "workflow_not_gated", f"Workflow is not waiting on a gate: {command.wf_id}"
         )
+    if recovered_gate is not None and (
+        status.get("status") != "paused" or status.get("gateKey") != gate_key
+    ):
+        projected = dict(status)
+        projected.update(
+            {
+                "status": "paused",
+                "ok": True,
+                "gateKey": gate_key,
+                "gateResult": recovered_gate.get("result"),
+                "updatedAt": run_registry.utc_now_iso(),
+            }
+        )
+        registry.write_status(root, projected)
     # Resume acquires the lock before mutating approval/budget state.
     resumed = WorkflowCommand("run", resume=command.wf_id, json_mode=command.json_mode)
     return emit_run(resumed, workspace=workspace, config=config, stdout=stdout, stderr=stdout)
+
+
+def emit_reject(
+    command: WorkflowCommand,
+    *,
+    workspace: Path,
+    config: JsonObject,
+    stdout: TextIO,
+) -> int:
+    """Tombstone a workflow agent key from a parked or dead supervisor."""
+    root = _workflow_dir_for_command(command, workspace)
+    wf_id = command.wf_id
+    key_or_label = command.key_or_label
+    reason = command.reason
+    if wf_id is None or key_or_label is None:
+        raise DelegateError(
+            "missing_workflow_reject_args",
+            'workflow reject requires <wfId> <key-or-label> --reason "<text>".',
+        )
+    if not isinstance(reason, str) or not reason.strip():
+        raise DelegateError(
+            "missing_workflow_reject_reason",
+            "workflow reject requires a non-empty --reason.",
+        )
+    if registry.supervisor_alive(root):
+        raise DelegateError(
+            "workflow_running",
+            "Cannot reject a live running supervisor; let the script judge — "
+            "reject() from the workflow script.",
+        )
+    try:
+        lock_fd = _acquire_workflow_lock(root, wf_id)
+    except DelegateError as exc:
+        raise DelegateError(
+            "workflow_running",
+            "Cannot reject a live running supervisor; let the script judge — "
+            "reject() from the workflow script.",
+        ) from exc
+    try:
+        status = registry.read_json(root / registry.STATUS_FILE) or {}
+        budget_payload = status.get("budget")
+        total = budget_payload.get("total") if isinstance(budget_payload, dict) else None
+        spent = budget_payload.get("spent") if isinstance(budget_payload, dict) else None
+        state = runtime.WorkflowState(
+            wf_id=wf_id,
+            workspace=workspace,
+            root=root,
+            script_path=root / registry.SCRIPT_FILE,
+            config=config,
+            cli_argv=_delegate_cli_argv(),
+            args=runtime.load_args(root),
+            budget=runtime.Budget(
+                total if isinstance(total, int) else None,
+                spent if isinstance(spent, int) and spent >= 0 else 0,
+            ),
+            replay_journal=status.get("replayJournal") is not False,
+            workflow_key_version=(
+                status.get("workflowKeyVersion")
+                if status.get("workflowKeyVersion") in {1, 2}
+                else 1
+            ),
+        )
+        try:
+            key, label = state.resolve_agent_key(key_or_label)
+        except ValueError as exc:
+            raise DelegateError("workflow_reject_unresolved", str(exc)) from exc
+        event: JsonObject = {"key": key, "reason": reason}
+        if label is not None:
+            event["label"] = label
+        _append_command_event(root, "agent_rejected", **event)
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(lock_fd)
+    payload: JsonObject = {
+        "ok": True,
+        "schema": WORKFLOW_COMMAND_SCHEMA,
+        "wfId": wf_id,
+        "key": key,
+        "reason": reason,
+    }
+    if label is not None:
+        payload["label"] = label
+    if command.json_mode:
+        rendering.print_json(payload, stdout)
+    else:
+        print(f"rejected: {key}", file=stdout)
+    return EXIT_OK
+
+
+def _latest_unapproved_gate_event(root: Path) -> JsonObject | None:
+    approval = registry.read_json(root / registry.APPROVAL_FILE) or {}
+    approved: set[str] = set()
+    if isinstance(approval.get("gateKey"), str):
+        approved.add(approval["gateKey"])
+    keys = approval.get("approvedKeys")
+    if isinstance(keys, list):
+        approved.update(key for key in keys if isinstance(key, str))
+    latest: JsonObject | None = None
+    for event in registry.iter_journal(root / registry.JOURNAL_FILE):
+        if event.get("type") != "gate":
+            continue
+        key = event.get("key")
+        if isinstance(key, str) and key not in approved:
+            latest = event
+    return latest
 
 
 def emit_kill(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) -> int:
