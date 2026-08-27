@@ -27,7 +27,18 @@ ISOLATION_NONE = "none"
 ISOLATION_WORKTREE = "worktree"
 VALID_ISOLATION_VALUES = (ISOLATION_AUTO, ISOLATION_NONE, ISOLATION_WORKTREE)
 SAFE_ISOLATION_REQUIRED_ENGINES = frozenset(
-    {"cursor", "droid", "kimi", "claude", "grok", "devin", "opencode", "pi", "omp"}
+    {
+        "codex",
+        "cursor",
+        "droid",
+        "kimi",
+        "claude",
+        "grok",
+        "devin",
+        "opencode",
+        "pi",
+        "omp",
+    }
 )
 
 SAFE_BACKEND_COPY = "copy"

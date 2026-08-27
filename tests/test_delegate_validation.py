@@ -1022,22 +1022,14 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(ctx.exception.error, "invalid_isolation_config")
 
     def test_safe_isolation_warnings_cover_both_directions(self):
-        """A safe run that is not isolated must say so, in either direction.
-
-        The override case (engine in the required set) was already warned about.
-        The absence of that override was not, and that silence is the defect: a
-        codex safe run with isolation none reads the real tree, .git included,
-        and the run that discovered this had been trusted as a read firewall.
-        """
+        """Safe isolation warnings describe explicit overrides after normalization."""
         from delegate_agent.request_build import _safe_isolation_warnings as warn
 
-        unisolated = warn(
-            engine="codex", mode="safe", requested="none", effective="none", source_path="/repo"
+        normalized = warn(
+            engine="codex", mode="safe", requested="none", effective="auto", source_path="/repo"
         )
-        self.assertEqual(len(unisolated), 1)
-        self.assertIn("WITHOUT workspace isolation", unisolated[0])
-        self.assertIn("/repo", unisolated[0])
-        self.assertIn(".git", unisolated[0])
+        self.assertEqual(len(normalized), 1)
+        self.assertIn("using auto", normalized[0])
 
         overridden = warn(engine="claude", mode="safe", requested="none", effective="auto")
         self.assertEqual(len(overridden), 1)
@@ -1341,6 +1333,7 @@ class ValidationTests(unittest.TestCase):
     def test_resolve_isolation_normalizes_safe_none_for_isolation_required_harnesses(self):
         config_mod = load_config_module()
         for engine in (
+            "codex",
             "cursor",
             "droid",
             "kimi",
@@ -1385,7 +1378,7 @@ class ValidationTests(unittest.TestCase):
             "auto",
         )
 
-    def test_resolve_isolation_allows_codex_safe_none_and_work_none(self):
+    def test_resolve_isolation_normalizes_codex_safe_none_but_allows_work_none(self):
         config_mod = load_config_module()
         self.assertEqual(
             config_mod.resolve_isolation(
@@ -1394,7 +1387,7 @@ class ValidationTests(unittest.TestCase):
                 engine="codex",
                 mode="safe",
             ),
-            "none",
+            "auto",
         )
         self.assertEqual(
             config_mod.resolve_isolation(
