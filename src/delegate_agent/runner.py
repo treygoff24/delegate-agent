@@ -1407,8 +1407,8 @@ class TrackedCaptureResult:
     output_limit_bytes: int | None = None
     stopped_after_completion: bool = False
     stall: JsonObject | None = None
-    zero_commit_health: JsonObject | None = None
     process_group_survived: bool = False
+    zero_commit_health: JsonObject | None = None
 
 
 @dataclass(frozen=True)
