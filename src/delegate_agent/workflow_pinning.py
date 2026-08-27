@@ -369,9 +369,7 @@ def create_pin(
         if existing_config != cleaned_config:
             raise WorkflowPinError("pin_collision", f"pin config already differs: {config_path}")
     else:
-        config_path.write_text(
-            json.dumps(cleaned_config, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
+        run_registry.write_json_atomic(config_path, cleaned_config)
         config_path.chmod(0o400)
     records = _persona_records(workspace)
     _write_persona_snapshots(root, records)
@@ -404,7 +402,7 @@ def create_pin(
         if existing != payload:
             raise WorkflowPinError("pin_collision", f"pin already differs: {path}")
     else:
-        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        run_registry.write_json_atomic(path, payload)
         path.chmod(0o400)
     root.chmod(0o500)
     return load_pin(workflow_id, home=home)
