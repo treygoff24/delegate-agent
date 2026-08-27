@@ -616,6 +616,13 @@ class WorkflowState:
                 else:
                     continue
             if event.get("type") == "agent_rejected":
+                # A tombstone only invalidates a result that exists before it.
+                # Repeated tombstones and no-result tombstones are durable
+                # no-ops, preserving any unfinished adoption state.
+                if key in self.tombstoned_keys or (
+                    key not in self.replay_keys and key not in self.replay
+                ):
+                    continue
                 self.tombstoned_keys.add(key)
                 self.replay_keys.discard(key)
                 self.replay.pop(key, None)
@@ -885,18 +892,43 @@ class WorkflowState:
             return key, raw
         raise ValueError(f"reject() could not resolve agent key or label: {raw!r}")
 
+    def _has_cached_result(self, key: str) -> bool:
+        """Check the latest cached-result state, including newly appended rows."""
+        cached = False
+        saw_settlement = False
+        with self.journal_lock:
+            for event in registry.iter_journal(self.journal_path):
+                if event.get("key") != key:
+                    continue
+                if not self.replay_journal and (
+                    event.get("simulated") is True or event.get("dryRun") is True
+                ):
+                    continue
+                if event.get("type") == "agent_rejected":
+                    cached = False
+                    saw_settlement = True
+                elif event.get("type") == "agent_finished":
+                    cached = True
+                    saw_settlement = True
+        if saw_settlement:
+            return cached
+        return key in self.replay_keys or key in self.replay
+
     def reject_agent(self, key_or_label: object, reason: object) -> str:
         """Durably tombstone an agent key so a later call executes fresh."""
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError("reject() expects a non-empty reason string")
         key, label = self.resolve_agent_key(key_or_label)
         already_tombstoned = key in self.tombstoned_keys
+        has_cached_result = self._has_cached_result(key)
         event: JsonObject = {"key": key, "reason": reason}
         if label is not None:
             event["label"] = label
         # The durable row is written before mutating in-memory replay state.
         self.append_event("agent_rejected", **event)
-        if already_tombstoned:
+        # Tombstones with no cached result are durable no-ops.  In particular,
+        # do not clear a started-without-result key that can still be adopted.
+        if already_tombstoned or not has_cached_result:
             return key
         self.tombstoned_keys.add(key)
         self.replay_keys.discard(key)
