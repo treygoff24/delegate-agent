@@ -40,11 +40,11 @@ class NotifyArgvTests(unittest.TestCase):
             run_id="del_x",
             status="succeeded",
             engine="omp",
-            model="ox",
+            model="glm",
             elapsed_sec=12.4,
             workspace="/home/u/Code/proj",
         )
-        self.assertEqual(text, "delegate del_x succeeded omp/ox 12s — proj")
+        self.assertEqual(text, "delegate del_x succeeded omp/glm 12s — proj")
 
 
 def _fake_post(
@@ -144,7 +144,7 @@ class RunnerHookTests(unittest.TestCase):
             ctx.run_id = "del_test"
             ctx.registry_root = registry
             ctx.engine = "omp"
-            ctx.model = "ox"
+            ctx.model = "glm"
             ctx.model_resolved = None
             ctx.started_at = "2026-08-22T00:00:00Z"
             ctx.source_cwd = temp
@@ -162,7 +162,7 @@ class RunnerHookTests(unittest.TestCase):
                 runner._send_completion_notification(run_path, ctx, "failed")
             self.assertEqual(send.call_count, 1)
             message = send.call_args.args[1]
-            self.assertTrue(message.startswith("delegate del_test failed omp/ox "))
+            self.assertTrue(message.startswith("delegate del_test failed omp/glm "))
             manifest = json.loads((run_path / "manifest.json").read_text())
             self.assertEqual(
                 manifest["notify"], {"target": "room:r", "ok": True, "messageId": "id"}
@@ -181,7 +181,7 @@ class RunnerHookTests(unittest.TestCase):
             ctx.run_id = "del_test"
             ctx.registry_root = registry
             ctx.engine = "omp"
-            ctx.model = "ox"
+            ctx.model = "glm"
             ctx.model_resolved = None
             ctx.started_at = "not-a-timestamp"
             ctx.source_cwd = temp
