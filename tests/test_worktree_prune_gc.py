@@ -400,6 +400,63 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
             skipped_reasons = {entry["alias"]: entry["reason"] for entry in result["skipped"]}
             self.assertEqual(skipped_reasons["cursor-merge-unknown"], "merge_check_failed")
 
+    def _set_run_state(self, repo_path, run_id, **fields):
+        registry_root = self._registry_root(repo_path)
+        run_path = self.delegate.run_registry.run_directory(registry_root, run_id)
+        state = self.delegate.run_registry.read_json_object(run_path / "state.json") or {}
+        state.update(fields)
+        self.delegate.run_registry.write_json_atomic(run_path / "state.json", state)
+
+    def _seed_prunable_tree(self, repo_path, fake_home, alias):
+        branch = f"delegate/{alias}"
+        wt_path = str(Path(fake_home) / "wt" / alias)
+        run_id, _alias = self._seed_persistent_run(
+            repo_path, alias=alias, branch=branch, execution_cwd=wt_path
+        )
+        self._create_worktree_at(repo_path, branch, wt_path)
+        return run_id
+
+    def test_prune_skips_tree_whose_owning_run_is_still_running(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            run_id = self._seed_prunable_tree(path, fake_home, "cursor-live-owner")
+            self._set_run_state(path, run_id, status="running", pid=os.getpid())
+
+            result = self.delegate.worktree_mgmt.prune_worktrees(
+                self._registry_root(path), merged=True, dry_run=True
+            )
+
+            self.assertEqual(result["planned"], [])
+            reasons = {entry["alias"]: entry["reason"] for entry in result["skipped"]}
+            self.assertEqual(reasons["cursor-live-owner"], "run_active")
+
+    def test_prune_skips_terminal_run_whose_process_group_is_alive(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            run_id = self._seed_prunable_tree(path, fake_home, "cursor-live-pgid")
+            self._set_run_state(path, run_id, status="succeeded", pgid=os.getpgid(0))
+
+            result = self.delegate.worktree_mgmt.prune_worktrees(
+                self._registry_root(path), merged=True, dry_run=True
+            )
+
+            self.assertEqual(result["planned"], [])
+            reasons = {entry["alias"]: entry["reason"] for entry in result["skipped"]}
+            self.assertEqual(reasons["cursor-live-pgid"], "process_group_alive")
+
+    def test_prune_force_overrides_live_owner_guard(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            run_id = self._seed_prunable_tree(path, fake_home, "cursor-forced")
+            self._set_run_state(path, run_id, status="running", pid=os.getpid())
+
+            result = self.delegate.worktree_mgmt.prune_worktrees(
+                self._registry_root(path), merged=True, dry_run=True, force=True
+            )
+
+            planned = {entry["alias"] for entry in result["planned"]}
+            self.assertIn("cursor-forced", planned)
+
     def test_prune_older_than_filters(self):
         _repo, path = self._make_repo()
         with tempfile.TemporaryDirectory() as fake_home:

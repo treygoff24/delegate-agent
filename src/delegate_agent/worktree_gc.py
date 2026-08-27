@@ -23,7 +23,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import NamedTuple
 
-from delegate_agent import isolation, run_registry
+from delegate_agent import isolation, run_registry, run_status
 from delegate_agent.json_types import JsonObject, is_non_negative_int
 from delegate_agent.worktree_records import (
     SCHEMA_GC,
@@ -54,6 +54,46 @@ def _entry_ref(record: PersistentWorktreeRecord, *, reason: str | None = None) -
     if reason is not None:
         entry["reason"] = reason
     return entry
+
+
+def _process_group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _owner_run_block_reason(registry_root: Path, record: PersistentWorktreeRecord) -> str | None:
+    """Refuse to prune a tree whose owning run has not provably finished.
+
+    ``live_attachments_for_path`` only sees resume-style attachments, so a
+    worktree's own still-running owner is invisible to it. That gap removed four
+    just-started lanes on 2026-08-26 and a running adjudicate-fix lane before
+    that: a lane with no commits yet reads mergedIntoSource=true, and nothing
+    else asked whether anyone was still working in it.
+    """
+
+    run_id = record.get("runId")
+    if not isinstance(run_id, str) or not run_id:
+        return None
+    state = run_registry.load_run_state_or_none(registry_root, run_id)
+    status = run_status.effective_status(state)
+    if status not in run_status.TERMINAL_STATUSES:
+        return "run_active" if status == run_status.STATUS_RUNNING else "run_not_terminal"
+    pgid = state.get("pgid") if isinstance(state, dict) else None
+    if (
+        isinstance(pgid, int)
+        and not isinstance(pgid, bool)
+        and pgid > 1
+        and _process_group_alive(pgid)
+    ):
+        return "process_group_alive"
+    return None
 
 
 def prune_worktrees(
@@ -96,6 +136,11 @@ def prune_worktrees(
             attachments = live_attachments_for_path(registry_root, execution_cwd)
             if attachments:
                 skipped.append(_entry_ref(record, reason="live_attachment"))
+                continue
+        if not force:
+            owner_block = _owner_run_block_reason(registry_root, record)
+            if owner_block is not None:
+                skipped.append(_entry_ref(record, reason=owner_block))
                 continue
         status, _warnings = wm.detect_worktree_status(record)
         if status in (STATUS_REMOVED, STATUS_UNKNOWN):
