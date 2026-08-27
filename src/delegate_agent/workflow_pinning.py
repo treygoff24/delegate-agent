@@ -39,6 +39,8 @@ PROMOTION_FILE = "last-promotion.json"
 ACTIVE_INDEX_SCHEMA = "delegate.active-supervisors.v1"
 PROMOTION_SCHEMA = "delegate.promotion.v1"
 WORKFLOW_ID_RE = re.compile(r"^wf_[0-9a-f]{12}$")
+_PINNED_PERSONA_RESOLVER_ATTR = "_delegate_workflow_pinned_resolver"
+_PIN_GUARD_EXIT_CODE = 70
 
 
 class WorkflowPinError(Exception):
@@ -48,6 +50,23 @@ class WorkflowPinError(Exception):
         super().__init__(message)
         self.error = error
         self.message = message
+
+
+def require_pinned_persona_resolver() -> None:
+    """Hard-exit a pinned process unless sitecustomize installed its resolver.
+
+    CPython reports, but continues after, an exception raised by sitecustomize.
+    This guard runs from the CLI's workflow command import after sitecustomize
+    and before command dispatch, so a failed patch cannot fall through to
+    persona resolution from the live HOME.
+    """
+    if "DELEGATE_WORKFLOW_PIN" not in os.environ:
+        return
+    pinned_resolver = getattr(personas, _PINNED_PERSONA_RESOLVER_ATTR, None)
+    if pinned_resolver is not None and personas.resolve_persona is pinned_resolver:
+        return
+    os.write(2, b"workflow_persona_pin_unavailable\n")
+    os._exit(_PIN_GUARD_EXIT_CODE)
 
 
 @dataclass(frozen=True)
@@ -213,6 +232,7 @@ def _install() -> None:
             preview=personas.escaped_preview(text),
         )
 
+    personas._delegate_workflow_pinned_resolver = resolve
     personas.resolve_persona = resolve
 
 

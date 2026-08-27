@@ -130,6 +130,53 @@ class WorkflowPinningTests(unittest.TestCase):
         self.assertEqual(probe.stdout.strip(), "workspace_persona_refused")
         self.assertNotIn("LIVE HOME BYTES", probe.stdout)
 
+    def test_cli_hard_exits_when_pinned_resolver_installation_is_missing(self) -> None:
+        live_persona = self.home / ".delegate" / "personas" / "reviewer.md"
+        live_persona.write_text("LIVE HOME BYTES\n", encoding="utf-8")
+        pin = workflow_pinning.create_pin(
+            "wf_456789abcdef",
+            workspace=self.workspace,
+            config={},
+            home=self.home,
+        )
+        sitecustomize = pin.import_root / "sitecustomize.py"
+        sitecustomize.chmod(0o600)
+        sitecustomize.write_text('"""Deliberately leaves the pin resolver uninstalled."""\n')
+
+        probe_code = (
+            "from delegate_agent.cli import main; "
+            "from delegate_agent.personas import resolve_persona; "
+            "print(resolve_persona('.', 'reviewer').text, end='')"
+        )
+        env = {
+            **os.environ,
+            "HOME": str(self.home),
+            "PYTHONPATH": str(pin.import_root),
+        }
+        pinned = subprocess.run(
+            [sys.executable, "-c", probe_code],
+            cwd=self.workspace,
+            env={**env, "DELEGATE_WORKFLOW_PIN": str(pin.path)},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertNotEqual(pinned.returncode, 0)
+        self.assertEqual(pinned.stdout, "")
+        self.assertNotIn("LIVE HOME BYTES", pinned.stderr)
+
+        pinless = subprocess.run(
+            [sys.executable, "-c", probe_code],
+            cwd=self.workspace,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(pinless.returncode, 0, pinless.stderr)
+        self.assertEqual(pinless.stdout, "LIVE HOME BYTES\n")
+
     def test_partial_runtime_temporary_directory_is_rebuilt_before_publish(self) -> None:
         files = workflow_pinning._runtime_source_files()
         digest = workflow_pinning._runtime_digest(files)

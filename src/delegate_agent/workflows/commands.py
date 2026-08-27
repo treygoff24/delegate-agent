@@ -17,6 +17,8 @@ from delegate_agent.json_types import JsonObject, JsonValue
 from delegate_agent.workflows import registry, runtime
 from delegate_agent.workflows import script as workflow_script
 
+workflow_pinning.require_pinned_persona_resolver()
+
 WORKFLOW_COMMAND_SCHEMA = "delegate.workflow-command.v1"
 TERMINAL_WORKFLOW_STATUSES = {"succeeded", "failed", "killed"}
 WAIT_DONE_WORKFLOW_STATUSES = TERMINAL_WORKFLOW_STATUSES | {"dry_run", "paused", "stalled"}
