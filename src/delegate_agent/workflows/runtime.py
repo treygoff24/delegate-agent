@@ -745,6 +745,14 @@ class WorkflowState:
                 latest = event
         return latest
 
+    def latest_gate_event(self) -> JsonObject | None:
+        with self.journal_lock:
+            latest: JsonObject | None = None
+            for event in registry.iter_journal(self.journal_path):
+                if event.get("type") == "gate" and isinstance(event.get("key"), str):
+                    latest = event
+            return latest
+
     def _write_gate_projection_locked(self, event: JsonObject) -> None:
         gate_key = event.get("key")
         if not isinstance(gate_key, str):
@@ -1005,6 +1013,8 @@ class WorkflowState:
     @contextlib.contextmanager
     def active_agent(self) -> Iterator[None]:
         with self.gate_condition:
+            if self.cancel_event.is_set():
+                raise SupervisorWatchdogExit("cancellation requested before agent admission")
             if self.gate_state["stop_admitting"]:
                 if self.pending_gate:
                     gate_key, child, result = self.pending_gate[-1]
@@ -1250,6 +1260,8 @@ class WorkflowDsl:
             start_barrier.wait()
         for thread in threads:
             thread.join()
+        if self.state.cancel_event.is_set():
+            raise SupervisorWatchdogExit("cancellation requested during pipeline")
         if gate_errors:
             self.state.ensure_gate_durable(gate_errors[0])
             raise gate_errors[0]
@@ -1333,6 +1345,8 @@ class WorkflowDsl:
             start_barrier.wait()
         for thread in threads:
             thread.join()
+        if self.state.cancel_event.is_set():
+            raise SupervisorWatchdogExit("cancellation requested during parallel")
         if gate_errors:
             self.state.ensure_gate_durable(gate_errors[0])
             raise gate_errors[0]
@@ -3428,9 +3442,21 @@ def run_supervisor(
             return 0
         except SupervisorWatchdogExit as exc:
             tb = traceback.format_exc()[-4000:]
-            if root.exists():
+            if root.exists() and (root / registry.STATUS_FILE).exists():
                 with contextlib.suppress(Exception):
                     state.append_event("workflow_watchdog", reason=exc.reason, traceback=tb)
+                gate_event = state.latest_gate_event()
+                if isinstance(gate_event, dict) and isinstance(gate_event.get("key"), str):
+                    # A watchdog can interrupt the drain after the gate row was
+                    # fsynced.  Keep that journal-authoritative checkpoint
+                    # recoverable rather than overwriting it with failed state.
+                    with contextlib.suppress(Exception), state.journal_lock:
+                        state._write_gate_projection_locked(gate_event)
+                    state.notify_event(
+                        "paused",
+                        detail=f"awaiting approval at {gate_event['key']}",
+                    )
+                    return 0
                 with contextlib.suppress(Exception):
                     registry.write_result(
                         root,
