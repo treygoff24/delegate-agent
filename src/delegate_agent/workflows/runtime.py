@@ -1366,6 +1366,8 @@ def _item_thread_cap(config: JsonObject) -> int:
 def _validate_soft_park_name(name: str) -> None:
     if not isinstance(name, str) or not name.strip():
         raise ValueError("soft-park item names must be non-empty strings")
+    if "/" in name:
+        raise ValueError("soft-park item names must not contain '/'")
 
 
 def _structured_retries(config: JsonObject) -> int:
@@ -1579,6 +1581,8 @@ class WorkflowDsl:
 
         if not raw:
             return []
+        if len(raw) > workflow_script.ITEM_LIMIT:
+            raise ValueError(f"soft_park() item limit is {workflow_script.ITEM_LIMIT}")
         seen: set[str] = set()
         for name, _value, _callback in raw:
             if name in seen or name in self._soft_park_seen:
@@ -1742,6 +1746,7 @@ class WorkflowDsl:
         threads: list[threading.Thread] = []
         bypass_item_cap = self.state.inside_item_thread()
         gate_errors: list[GateExit] = []
+        soft_park_errors: list[SoftParkExit | _SoftParkRequest] = []
         start_barrier = (
             threading.Barrier(len(items) + 1)
             if not bypass_item_cap and len(items) <= _item_thread_cap(self.state.config)
@@ -1765,6 +1770,10 @@ class WorkflowDsl:
                                 break
                             except SupervisorWatchdogExit:
                                 raise
+                            except (SoftParkExit, _SoftParkRequest) as exc:
+                                soft_park_errors.append(exc)
+                                previous = None
+                                break
                             except GateExit as exc:
                                 gate_errors.append(exc)
                                 previous = None
@@ -1811,6 +1820,8 @@ class WorkflowDsl:
             thread.join()
         if self.state.cancel_event.is_set():
             raise SupervisorWatchdogExit("cancellation requested during pipeline")
+        if soft_park_errors:
+            raise soft_park_errors[0]
         if gate_errors:
             self.state.ensure_gate_durable(gate_errors[0])
             raise gate_errors[0]
@@ -1832,6 +1843,8 @@ class WorkflowDsl:
             for thunk in thunks:
                 try:
                     results.append(thunk())
+                except (SoftParkExit, _SoftParkRequest):
+                    raise
                 except (BudgetExceeded, GateExit):
                     results.append(None)
             return results
@@ -1840,6 +1853,7 @@ class WorkflowDsl:
         threads: list[threading.Thread] = []
         bypass_item_cap = self.state.inside_item_thread()
         gate_errors: list[GateExit] = []
+        soft_park_errors: list[SoftParkExit | _SoftParkRequest] = []
         start_barrier = (
             threading.Barrier(len(thunks) + 1)
             if not bypass_item_cap and len(thunks) <= _item_thread_cap(self.state.config)
@@ -1859,6 +1873,9 @@ class WorkflowDsl:
                     results[index] = None
                 except SupervisorWatchdogExit:
                     raise
+                except (SoftParkExit, _SoftParkRequest) as exc:
+                    soft_park_errors.append(exc)
+                    results[index] = None
                 except GateExit as exc:
                     gate_errors.append(exc)
                     results[index] = None
@@ -1896,6 +1913,8 @@ class WorkflowDsl:
             thread.join()
         if self.state.cancel_event.is_set():
             raise SupervisorWatchdogExit("cancellation requested during parallel")
+        if soft_park_errors:
+            raise soft_park_errors[0]
         if gate_errors:
             self.state.ensure_gate_durable(gate_errors[0])
             raise gate_errors[0]

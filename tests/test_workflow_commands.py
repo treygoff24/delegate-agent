@@ -1139,6 +1139,72 @@ class WorkflowCommandTests(unittest.TestCase):
         dsl = workflow_runtime.WorkflowDsl(state, {})
         with self.assertRaisesRegex(ValueError, "unique"):
             dsl.soft_park([("same", lambda: None), ("same", lambda: None)])
+        with self.assertRaisesRegex(ValueError, "must not contain"):
+            dsl.soft_park({"nested/name": lambda: None})
+        too_many = [(f"item-{index}", lambda: None) for index in range(4097)]
+        with self.assertRaisesRegex(ValueError, "item limit"):
+            dsl.soft_park(too_many)
+
+    def test_nested_pipeline_soft_park_pauses_and_resumes(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "nested-soft-park", "defaults": {"engine": "codex", "mode": "safe"}}
+
+            def stage(previous, item, index):
+                def parked_child():
+                    if not parked("nested"):
+                        park_item("nested", {"reason": "operator"})
+                    return agent("nested")
+                return soft_park({"nested": parked_child})
+
+            return pipeline(["outer"], stage)
+            """
+        )
+        launch = self.run_delegate(["--json", "workflow", "run", str(script)])
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
+        self.assertEqual(waited.returncode, 0, waited.stderr)
+        status = json.loads(self.run_delegate(["--json", "workflow", "status", wf_id]).stdout)
+        self.assertEqual(status["status"], "paused")
+        self.assertEqual(status["parkedItems"], ["nested"])
+
+        resumed = self.run_delegate(["--json", "workflow", "run", "--resume", wf_id])
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
+        self.assertEqual(waited.returncode, 0, waited.stderr)
+        result = json.loads(self.run_delegate(["--json", "workflow", "result", wf_id]).stdout)
+        self.assertEqual(result["result"], [["fake completion"]])
+
+    def test_pipeline_scope_strings_remain_v1_compatible(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "pipeline-scope", "defaults": {"engine": "codex", "mode": "safe"}}
+            def first(previous, item, index):
+                return agent(f"first-{item}")
+            def second(previous, item, index):
+                return agent(f"second-{item}")
+            return pipeline(["a", "b"], first, second)
+            """
+        )
+        launch = self.run_delegate(["--json", "workflow", "run", str(script)])
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
+        self.assertEqual(waited.returncode, 0, waited.stderr)
+        events = json.loads(
+            self.run_delegate(["--json", "workflow", "events", wf_id, "--since", "0"]).stdout
+        )["events"]
+        scopes = sorted(event["scope"] for event in events if event["type"] == "agent_started")
+        self.assertEqual(
+            scopes,
+            [
+                "root/pipeline@0/item#0/stage#0/seq#0",
+                "root/pipeline@0/item#0/stage#1/seq#0",
+                "root/pipeline@0/item#1/stage#0/seq#0",
+                "root/pipeline@0/item#1/stage#1/seq#0",
+            ],
+        )
 
     def test_nested_gate_waits_for_sibling_parent_agents(self) -> None:
         grandchild = self.write_saved_workflow(
@@ -3493,7 +3559,10 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertIn("agent_timeout", workflow_registry.DURABLE_EVENT_TYPES)
         self.assertIn("agent_retry", workflow_registry.DURABLE_EVENT_TYPES)
         self.assertIn("agent_structured_retry", workflow_registry.DURABLE_EVENT_TYPES)
+        self.assertIn("agent_structured_exhausted", workflow_registry.DURABLE_EVENT_TYPES)
         self.assertIn("budget", workflow_registry.DURABLE_EVENT_TYPES)
+        self.assertIn("item_parked", workflow_registry.DURABLE_EVENT_TYPES)
+        self.assertIn("item_unparked", workflow_registry.DURABLE_EVENT_TYPES)
         self.assertNotIn("agent_result", workflow_registry.DURABLE_EVENT_TYPES)
         journal = self.workspace / "fsync-journal.jsonl"
         fsynced: list[int] = []
@@ -3515,6 +3584,9 @@ class WorkflowCommandTests(unittest.TestCase):
             {"seq": 7, "type": "budget", "key": "k", "spent": 1},
             {"seq": 8, "type": "agent_retry", "key": "k"},
             {"seq": 9, "type": "agent_structured_retry", "key": "k"},
+            {"seq": 10, "type": "agent_structured_exhausted", "key": "k"},
+            {"seq": 11, "type": "item_parked", "name": "parked"},
+            {"seq": 12, "type": "item_unparked", "name": "parked"},
         ]
         try:
             for event in events:
