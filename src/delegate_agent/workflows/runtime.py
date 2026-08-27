@@ -1350,7 +1350,24 @@ class WorkflowDsl:
             return None
         with lock:
             outcome = getattr(self, "_structured_attempts", {}).get(key)
-        return outcome.as_json() if outcome is not None else None
+        if outcome is not None:
+            return outcome.as_json()
+        with self.state.journal_lock:
+            for event in reversed(registry.iter_journal(self.state.journal_path)):
+                if event.get("key") != key:
+                    continue
+                if event.get("type") == "agent_structured_exhausted":
+                    return {
+                        "lastParsedCandidate": event.get("lastParsedCandidate"),
+                        "validationError": event.get("validationError", ""),
+                    }
+                if event.get("type") == "agent_finished":
+                    if event.get("exhausted") is True and event.get("result") is None:
+                        continue
+                    return None
+                if event.get("type") == "agent_rejected":
+                    return None
+        return None
 
     def phase(self, title: str) -> None:
         self.current_phase = str(title)
@@ -1756,6 +1773,7 @@ class WorkflowDsl:
             key = _agent_key(path, prompt, retry_opts, version=key_version)
         if label is not None:
             self.state.label_keys[label] = key
+        self.state.thread_local.last_structured_attempt_key = key
         if key_version == 2:
             # A v2 timeout change intentionally creates a fresh key.  Cancel
             # any unfinished child from the same structural scope before the

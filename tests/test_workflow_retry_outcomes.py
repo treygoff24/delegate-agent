@@ -250,6 +250,14 @@ class ChildAttemptOutcomeTests(unittest.TestCase):
         self.assertIsNone(event["lastParsedCandidate"])
         self.assertIn("Expecting value", event["validationError"])
         self.assertIsNone(dsl.structured_attempt("parse-key")["lastParsedCandidate"])
+        resumed_dsl = self._dsl()
+        self.assertEqual(
+            resumed_dsl.structured_attempt("parse-key"),
+            {
+                "lastParsedCandidate": None,
+                "validationError": event["validationError"],
+            },
+        )
 
     def test_structured_agent_accepts_json_string_payload_for_object_schema(self) -> None:
         dsl = self._dsl()
