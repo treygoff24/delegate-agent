@@ -202,6 +202,9 @@ class RunContext:
     harness_session_id: str | None = None
     account_binding_command: tuple[str, ...] | None = None
     sandbox: JsonObject | None = None
+    # Bounded wait for registry mutations. Finalization writes a WAL when this
+    # budget expires; launch admission fails before spawning a child.
+    registry_lock_timeout_seconds: float = run_registry.REGISTRY_LOCK_TIMEOUT_SECONDS
 
 
 def _process_group_grace_seconds(ctx: RunContext) -> float:
@@ -215,6 +218,30 @@ def _process_group_grace_seconds(ctx: RunContext) -> float:
         if math.isfinite(value) and value >= 0:
             return value
     return max(float(ctx.process_group_termination_grace_sec), 0.0)
+
+
+@contextlib.contextmanager
+def _launch_registry_lock(ctx: RunContext):
+    """Acquire the launch-generation lock or fail before ``Popen``."""
+    timeout = _registry_lock_timeout(ctx)
+    try:
+        with run_registry.registry_lock(
+            ctx.registry_root,
+            timeout_seconds=timeout,
+        ):
+            yield
+    except TimeoutError as exc:
+        raise RunnerLaunchError(
+            "registry_lock_timeout",
+            f"Could not launch child: registry lock was not acquired within {timeout:g}s.",
+        ) from exc
+
+
+def _registry_lock_timeout(ctx: RunContext) -> float:
+    value = getattr(ctx, "registry_lock_timeout_seconds", None)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return run_registry.resolve_registry_lock_timeout_seconds()
+    return max(float(value), 0.0)
 
 
 def write_manifest(run_path: Path, manifest: JsonObject) -> None:
@@ -586,8 +613,10 @@ def persist_progress(
     pgid: int | None = None,
     completion_report_written: bool = False,
     extra: JsonObject | None = None,
-    lock_timeout_seconds: float = run_registry.REGISTRY_LOCK_TIMEOUT_SECONDS,
+    lock_timeout_seconds: float | None = None,
 ) -> None:
+    if lock_timeout_seconds is None:
+        lock_timeout_seconds = _registry_lock_timeout(ctx)
     with run_registry.registry_lock(
         ctx.registry_root,
         timeout_seconds=lock_timeout_seconds,
@@ -654,6 +683,7 @@ def _persist_final_progress(
     stderr_bytes: int,
     completion_report_written: bool,
     extra: JsonObject,
+    lock_timeout_seconds: float | None = None,
 ) -> tuple[str, JsonObject]:
     """Persist terminal state with cancel-precedence reconciliation.
 
@@ -673,36 +703,36 @@ def _persist_final_progress(
     cancelled, keeping the live envelope (ok/status/exitCode) consistent with
     the eventual reconciled state.
     """
-    persisted_status = status
-    persisted_extra = dict(extra)
-    if ctx.resumable and accumulator.harness_session_id is not None:
-        persisted_extra["harnessSessionId"] = accumulator.harness_session_id
-        persisted_extra["resumable"] = True
-    with run_registry.registry_lock(ctx.registry_root):
-        current = run_registry.load_run_state_or_none(ctx.registry_root, ctx.run_id)
+    lock_timeout_seconds = (
+        _registry_lock_timeout(ctx) if lock_timeout_seconds is None else lock_timeout_seconds
+    )
+
+    def terminal_payloads(
+        current: JsonObject | None,
+    ) -> tuple[str, JsonObject, JsonObject, JsonObject]:
+        persisted_status = status
+        persisted_extra = dict(extra)
+        if ctx.resumable and accumulator.harness_session_id is not None:
+            persisted_extra["harnessSessionId"] = accumulator.harness_session_id
+            persisted_extra["resumable"] = True
         current_status = current.get("status") if isinstance(current, dict) else None
         cancel_requested = isinstance(current, dict) and current.get("cancelRequested") is True
         if current_status == run_registry.STATUS_CANCELLED or cancel_requested:
-            # Cancel won the race (either it already wrote cancelled, or it
-            # stamped the cancelRequested marker before signaling and the child
-            # exited before cancel's post-grace terminal write). Do not
-            # downgrade. Persist cancelled status and the cancel failure reason,
-            # but still record the runner's work summary/output metadata.
+            # Cancel wins both before and after a finalizer's lock attempt. The
+            # replay owner applies the same rule to a WAL published after this
+            # read, so a late cancel cannot be downgraded by success.
             persisted_status = run_registry.STATUS_CANCELLED
             _reconcile_cancel_extra(persisted_extra)
         persisted_exit_code = 1 if persisted_status == run_registry.STATUS_CANCELLED else exit_code
-        write_state(
-            run_path,
-            build_state(
-                ctx,
-                status=persisted_status,
-                exit_code=persisted_exit_code,
-                stdout_bytes=stdout_bytes,
-                stderr_bytes=stderr_bytes,
-                current=accumulator.current,
-                pid=persisted_extra.get("pid"),
-                extra=persisted_extra,
-            ),
+        state = build_state(
+            ctx,
+            status=persisted_status,
+            exit_code=persisted_exit_code,
+            stdout_bytes=stdout_bytes,
+            stderr_bytes=stderr_bytes,
+            current=accumulator.current,
+            pid=persisted_extra.get("pid"),
+            extra=persisted_extra,
         )
         snapshot = build_snapshot(
             ctx,
@@ -713,8 +743,35 @@ def _persist_final_progress(
         )
         snapshot["ok"] = run_registry.run_succeeded(persisted_status, snapshot.get("resultQuality"))
         snapshot["status"] = persisted_status
-        write_snapshot(run_path, snapshot)
-    return persisted_status, persisted_extra
+        return persisted_status, persisted_extra, state, snapshot
+
+    try:
+        with run_registry.registry_lock(
+            ctx.registry_root,
+            timeout_seconds=lock_timeout_seconds,
+        ):
+            persisted_status, persisted_extra, state, snapshot = terminal_payloads(
+                run_registry.load_run_state_or_none(ctx.registry_root, ctx.run_id)
+            )
+            write_state(run_path, state)
+            write_snapshot(run_path, snapshot)
+        return persisted_status, persisted_extra
+    except TimeoutError:
+        # The child has completed and its output/logs are durable. Keep the
+        # caller's real result while publishing an atomic WAL for the next
+        # successful lock holder to fold. Replay re-reads state under the lock,
+        # preserving cancel precedence even if cancellation wins this race.
+        persisted_status, persisted_extra, state, snapshot = terminal_payloads(
+            run_registry.load_run_state_or_none(ctx.registry_root, ctx.run_id)
+        )
+        run_registry.write_finalize_wal(
+            ctx.registry_root,
+            ctx.run_id,
+            status=persisted_status,
+            state=state,
+            snapshot=snapshot,
+        )
+        return persisted_status, persisted_extra
 
 
 def write_completion_report(run_path: Path, text: str) -> bool:
@@ -1739,6 +1796,7 @@ def _launch_tracked_process(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         start_new_session=True,
+        close_fds=True,
     )
 
 
@@ -1774,7 +1832,7 @@ def _record_tracked_launch_failure(
         if prior_capture is not None
         else harness_events.StreamAccumulator(harness=ctx.harness)
     )
-    with run_registry.registry_lock(ctx.registry_root):
+    with _launch_registry_lock(ctx):
         current = run_registry.load_run_state_or_none(ctx.registry_root, ctx.run_id)
         current_status = current.get("status") if isinstance(current, dict) else None
         cancel_requested = isinstance(current, dict) and current.get("cancelRequested") is True
@@ -2821,7 +2879,7 @@ def _run_single_tracked_attempt(
     # transition for both the primary attempt and retries. Cancel therefore
     # observes either its marker blocking a retry or a complete live generation;
     # there is no launched-but-unpublished child it can accidentally miss.
-    with run_registry.registry_lock(ctx.registry_root):
+    with _launch_registry_lock(ctx):
         current = run_registry.load_run_state_or_none(ctx.registry_root, ctx.run_id)
         if (
             prior_capture is not None

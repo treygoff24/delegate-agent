@@ -224,10 +224,18 @@ def _validate_persistent_worktree_request(
     if request.engine == "codex":
         profiles.preflight_codex_request(request, execution.config.get("codex", {}))
 
-    registry_root = run_registry.ensure_registry(
-        Path(execution.source_workspace.path),
-        workspace_kind=execution.source_workspace.kind,
-    )
+    registry_timeout = run_registry.resolve_registry_lock_timeout_seconds(execution.config)
+    try:
+        registry_root = run_registry.ensure_registry(
+            Path(execution.source_workspace.path),
+            workspace_kind=execution.source_workspace.kind,
+            timeout_seconds=registry_timeout,
+        )
+    except TimeoutError as exc:
+        raise PersistentWorktreeError(
+            "registry_lock_timeout",
+            f"Could not start run: registry lock was not acquired within {registry_timeout:g}s.",
+        ) from exc
     retention.run_retention_pass(registry_root, execution.config)
 
     return PersistentWorktreePreflight(
@@ -346,6 +354,7 @@ def _build_persistent_worktree_run_context(
         source_prompt=request.source_prompt,
         progress_requested=request.progress_requested,
         timeout_seconds=request.timeout,
+        registry_lock_timeout_seconds=request.registry_lock_timeout_seconds,
         output_schema_text=request.output_schema_record_text,
         agent=request.agent,
         resumed_from=request.resumed_from,
@@ -384,11 +393,19 @@ def _register_persistent_worktree_run(
         metadata, run_metadata.resolve_initiator_root(request.env_overrides or {})
     )
 
-    run_id, alias = run_registry.register_run(
-        preflight.registry_root,
-        harness=request.engine,
-        metadata=metadata,
-    )
+    registry_timeout = run_registry.resolve_registry_lock_timeout_seconds(execution.config)
+    try:
+        run_id, alias = run_registry.register_run(
+            preflight.registry_root,
+            harness=request.engine,
+            metadata=metadata,
+            timeout_seconds=registry_timeout,
+        )
+    except TimeoutError as exc:
+        raise PersistentWorktreeError(
+            "registry_lock_timeout",
+            f"Could not start run: registry lock was not acquired within {registry_timeout:g}s.",
+        ) from exc
     child_env = request.env_overrides or {}
     if request.mode == "work":
         mail.bind_mail_identity(child_env, run_id, alias)

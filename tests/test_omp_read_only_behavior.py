@@ -18,6 +18,7 @@ PI_FAMILY_SAFE_LOCKDOWN["omp"]:
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -25,24 +26,100 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import tests
 from delegate_agent.argv_builders import PI_FAMILY_SAFE_LOCKDOWN
 
 GATE = os.environ.get("DELEGATE_OMP_BEHAVIOR_TEST") == "1"
+BIN_ENV = "DELEGATE_OMP_BEHAVIOR_BIN"
+MODEL_ENV = "DELEGATE_OMP_BEHAVIOR_MODEL"
+
+
+def _probe_env() -> dict[str, str]:
+    """Environment for the live omp subprocess.
+
+    The suite initializer redirects ``HOME`` to an empty temp dir for
+    hermeticity, but this probe exists to exercise the REAL binary with its
+    real credentials (realm keys and omp auth both live under the real home).
+    Under the hermetic home the shim exits keyless in milliseconds with an
+    empty transcript — indistinguishable from the dead-lane failure this test
+    guards against. Restoring the stashed home is deliberate and scoped to
+    the probe subprocess only.
+    """
+
+    env = os.environ.copy()
+    if tests.ORIGINAL_HOME:
+        env["HOME"] = tests.ORIGINAL_HOME
+    return env
+
+
+def _turn_stop_reason(event: dict[str, object]) -> object:
+    """Extract the OMP/PI turn-end stop reason from either envelope shape."""
+
+    reason = event.get("stopReason")
+    if reason is not None:
+        return reason
+    message = event.get("message")
+    if isinstance(message, dict):
+        return message.get("stopReason")
+    return None
+
+
+def assert_live_turn(transcript: str) -> None:
+    """Reject a probe transcript unless it contains a non-error terminal turn.
+
+    A dead binary can exit quickly without creating the requested file, which
+    made the old deny tests pass vacuously.  The guard deliberately treats a
+    missing terminal event or an explicit ``stopReason=error`` as a failure.
+    """
+
+    terminal_events: list[dict[str, object]] = []
+    for line in transcript.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        event_type = event.get("type")
+        if event_type in {"turn_end", "turn.completed", "turn.failed", "turn.error"}:
+            terminal_events.append(event)
+    if not terminal_events:
+        raise AssertionError("OMP probe produced no terminal turn event; the lane may be dead")
+    last_event = terminal_events[-1]
+    last_reason = _turn_stop_reason(last_event)
+    if last_event.get("type") in {"turn.failed", "turn.error"} or last_reason == "error":
+        raise AssertionError(f"OMP probe turn failed: stopReason=error ({last_reason!r})")
+    if not isinstance(last_reason, str) or not last_reason:
+        raise AssertionError(f"OMP probe terminal event had no stopReason: {terminal_events!r}")
 
 
 @unittest.skipUnless(GATE, "set DELEGATE_OMP_BEHAVIOR_TEST=1 to run the live omp write-probe")
 class OmpReadOnlyBehaviorTests(unittest.TestCase):
     def _omp_bin(self) -> str:
-        omp = shutil.which("omp") or str(Path.home() / ".bun" / "bin" / "omp")
+        omp = (
+            os.environ.get(BIN_ENV)
+            or shutil.which("omp")
+            or str(Path.home() / ".bun" / "bin" / "omp")
+        )
         if not Path(omp).exists():
-            self.skipTest("omp binary not found on PATH or ~/.bun/bin")
+            self.skipTest(f"omp binary not found ({BIN_ENV}, PATH, or ~/.bun/bin)")
         return omp
 
-    def _run_lockdown(self, cwd: str, prompt: str) -> None:
-        argv = [self._omp_bin(), "-p", "--no-session", "--mode", "json"]
+    def _model(self) -> str:
+        model = os.environ.get(MODEL_ENV)
+        if not model:
+            self.skipTest(f"set {MODEL_ENV} to an installed OMP model")
+        return model
+
+    def _run_lockdown(self, cwd: str, prompt: str) -> subprocess.CompletedProcess[str]:
+        argv = [self._omp_bin(), "--model", self._model(), "-p", "--no-session", "--mode", "json"]
         argv.extend(PI_FAMILY_SAFE_LOCKDOWN["omp"])
         argv.append(prompt)
-        subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=180)
+        result = subprocess.run(
+            argv, cwd=cwd, env=_probe_env(), capture_output=True, text=True, timeout=180
+        )
+        assert_live_turn(result.stdout)
+        return result
 
     def test_lockdown_denies_file_write(self):
         with tempfile.TemporaryDirectory() as d:
@@ -73,15 +150,39 @@ class OmpReadOnlyBehaviorTests(unittest.TestCase):
     def test_lockdown_still_permits_reads(self):
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / "target.txt").write_text("SECRET_MARKER_42\n")
-            argv = [self._omp_bin(), "-p", "--no-session", "--mode", "json"]
+            argv = [
+                self._omp_bin(),
+                "--model",
+                self._model(),
+                "-p",
+                "--no-session",
+                "--mode",
+                "json",
+            ]
             argv.extend(PI_FAMILY_SAFE_LOCKDOWN["omp"])
             argv.append("Read target.txt and print the exact marker string it contains.")
-            result = subprocess.run(argv, cwd=d, capture_output=True, text=True, timeout=180)
+            result = subprocess.run(
+                argv, cwd=d, env=_probe_env(), capture_output=True, text=True, timeout=180
+            )
+            assert_live_turn(result.stdout)
             self.assertIn(
                 "SECRET_MARKER_42",
                 result.stdout,
                 "omp could not read a file under lockdown — safe review would be useless",
             )
+
+
+class OmpTranscriptGuardTests(unittest.TestCase):
+    def test_successful_turn_is_live(self) -> None:
+        assert_live_turn('{"type":"turn_end","message":{"stopReason":"stop"}}')
+
+    def test_error_turn_is_not_live(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "stopReason=error"):
+            assert_live_turn('{"type":"turn_end","message":{"stopReason":"error"}}')
+
+    def test_missing_terminal_turn_is_not_live(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "no terminal turn event"):
+            assert_live_turn('{"type":"error","message":"401 Unauthorized"}')
 
 
 if __name__ == "__main__":

@@ -189,6 +189,48 @@ def maybe_run_retention_pass(registry_root: Path, config: JsonObject) -> None:
     delegate_retention.run_retention_pass(registry_root, config)
 
 
+def _launch_registry(
+    source_workspace: ResolvedWorkspace,
+    config: JsonObject,
+) -> tuple[Path, float]:
+    """Acquire the launch registry within budget, before any child exists."""
+    timeout = run_registry.resolve_registry_lock_timeout_seconds(config)
+    try:
+        root = run_registry.ensure_registry(
+            Path(source_workspace.path),
+            workspace_kind=source_workspace.kind,
+            timeout_seconds=timeout,
+        )
+    except TimeoutError as exc:
+        raise DelegateError(
+            "registry_lock_timeout",
+            f"Could not start run: registry lock was not acquired within {timeout:g}s.",
+        ) from exc
+    return root, timeout
+
+
+def _register_launch_run(
+    registry_root: Path,
+    *,
+    harness: str,
+    metadata: JsonObject,
+    timeout: float,
+) -> tuple[str, str]:
+    """Publish the alias/run directory only after the launch lock is held."""
+    try:
+        return run_registry.register_run(
+            registry_root,
+            harness=harness,
+            metadata=metadata,
+            timeout_seconds=timeout,
+        )
+    except TimeoutError as exc:
+        raise DelegateError(
+            "registry_lock_timeout",
+            f"Could not start run: registry lock was not acquired within {timeout:g}s.",
+        ) from exc
+
+
 def emit_snapshot(parsed: ParsedCommand, workspace: ResolvedWorkspace, stdout: TextIO) -> int:
     command = parsed.snapshot
     if command is None:
@@ -670,6 +712,7 @@ def make_run_context(
         progress_interval_sec=request.progress_interval_sec,
         stall_seconds=request.stall_seconds,
         process_group_termination_grace_sec=request.process_group_termination_grace_sec,
+        registry_lock_timeout_seconds=request.registry_lock_timeout_seconds,
         env_overrides=dict(request.env_overrides or {}),
         fallback_env_overrides=profiles.codex_fallback_child_env_overrides(
             request.profile_resolution,
@@ -836,10 +879,7 @@ def _execute_attached_worktree(
     if request.engine == "codex":
         profiles.preflight_codex_request(request, config.get("codex", {}))
 
-    registry_root = run_registry.ensure_registry(
-        Path(source_workspace.path),
-        workspace_kind=source_workspace.kind,
-    )
+    registry_root, registry_timeout = _launch_registry(source_workspace, config)
     maybe_run_retention_pass(registry_root, config)
     if request.mode == MODE_WORK and delegate_config.mail_enabled(config):
         mail.prepare_mail_storage(registry_root)
@@ -860,10 +900,11 @@ def _execute_attached_worktree(
     run_metadata.add_initiator_metadata(
         metadata, run_metadata.resolve_initiator_root(request.env_overrides or {})
     )
-    run_id, alias = run_registry.register_run(
+    run_id, alias = _register_launch_run(
         registry_root,
         harness=request.engine,
         metadata=metadata,
+        timeout=registry_timeout,
     )
     child_env = request.env_overrides or {}
     if request.mode == MODE_WORK:
@@ -1071,10 +1112,7 @@ def execute_request(
             # workflow kill/adopt/group scans can see them; execution stays in
             # the throwaway call cwd. Plain (ungrouped) call stays untracked.
             if request.group is not None:
-                registry_root = run_registry.ensure_registry(
-                    Path(source_workspace.path),
-                    workspace_kind=source_workspace.kind,
-                )
+                registry_root, registry_timeout = _launch_registry(source_workspace, config)
                 maybe_run_retention_pass(registry_root, config)
                 metadata = {
                     "mode": request.mode,
@@ -1086,10 +1124,11 @@ def execute_request(
                     "cwd": source_workspace.path,
                 }
                 run_metadata.add_initiator_metadata(metadata, initiator_root)
-                run_id, alias = run_registry.register_run(
+                run_id, alias = _register_launch_run(
                     registry_root,
                     harness=request.engine,
                     metadata=metadata,
+                    timeout=registry_timeout,
                 )
                 artifact_id = run_id
                 ctx_runner = make_run_context(
@@ -1382,10 +1421,7 @@ def execute_request(
             except delegate_runner.RunnerLaunchError as exc:
                 raise DelegateError(exc.error, exc.message) from exc
             return exit_code, None
-        registry_root = run_registry.ensure_registry(
-            Path(source_workspace.path),
-            workspace_kind=source_workspace.kind,
-        )
+        registry_root, registry_timeout = _launch_registry(source_workspace, config)
         maybe_run_retention_pass(registry_root, config)
         if isolated_request.mode == MODE_WORK and delegate_config.mail_enabled(config):
             mail.prepare_mail_storage(registry_root)
@@ -1406,10 +1442,11 @@ def execute_request(
         if isolated_request.temporary_workspace_cleanup is not None:
             metadata["temporaryWorkspaceCleanup"] = isolated_request.temporary_workspace_cleanup
         run_metadata.add_initiator_metadata(metadata, initiator_root)
-        run_id, alias = run_registry.register_run(
+        run_id, alias = _register_launch_run(
             registry_root,
             harness=isolated_request.engine,
             metadata=metadata,
+            timeout=registry_timeout,
         )
         child_env = isolated_request.env_overrides or {}
         if isolated_request.mode == MODE_WORK:

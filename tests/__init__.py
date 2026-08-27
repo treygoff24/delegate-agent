@@ -25,8 +25,10 @@ later.
 """
 
 import atexit
+import contextlib
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -64,6 +66,80 @@ os.environ.pop("TMP", None)
 os.environ.pop("TEMP", None)
 tempfile.tempdir = None
 
+# Stashed for the rare test that must run a real credentialed binary (the
+# live omp write-probe): everything credential-bearing lives under the real
+# home, so a probe subprocess launched with the hermetic HOME dies keyless in
+# milliseconds and reads as a dead lane.
+ORIGINAL_HOME = os.environ.get("HOME")
+
 _TEST_HOME = tempfile.mkdtemp(prefix="delegate-tests-home-")
 os.environ["HOME"] = _TEST_HOME
 atexit.register(shutil.rmtree, _TEST_HOME, True)
+
+# unittest, which is the CI gate, never imports pytest's conftest.py.  Start
+# the linked-worktree flock watcher at package import so both runners observe
+# the same process tree.  pytest calls assert_linked_worktree_lock_clean below
+# for a normal test failure; unittest receives a non-zero process result at
+# teardown if the watcher recorded an escape.
+from tests.registry_lock_guard import source_lock_for_linked_worktree  # noqa: E402
+
+_LOCK_GUARD_DIR: Path | None = None
+_LOCK_GUARD_REPORT: Path | None = None
+_LOCK_GUARD_STOP: Path | None = None
+_LOCK_GUARD_PROCESS: subprocess.Popen[bytes] | None = None
+
+
+def _start_linked_worktree_lock_guard() -> None:
+    global _LOCK_GUARD_DIR, _LOCK_GUARD_REPORT, _LOCK_GUARD_STOP, _LOCK_GUARD_PROCESS
+    target = source_lock_for_linked_worktree(Path(__file__).resolve().parent.parent)
+    if target is None:
+        return
+    _LOCK_GUARD_DIR = Path(tempfile.mkdtemp(prefix="delegate-lock-guard-"))
+    _LOCK_GUARD_REPORT = _LOCK_GUARD_DIR / "violations.jsonl"
+    _LOCK_GUARD_STOP = _LOCK_GUARD_DIR / "stop"
+    _LOCK_GUARD_PROCESS = subprocess.Popen(
+        [
+            sys.executable,
+            str(Path(__file__).resolve().parent / "registry_lock_guard.py"),
+            "--target",
+            str(target),
+            "--report",
+            str(_LOCK_GUARD_REPORT),
+            "--stop",
+            str(_LOCK_GUARD_STOP),
+        ],
+        close_fds=True,
+    )
+
+
+def assert_linked_worktree_lock_clean() -> None:
+    if _LOCK_GUARD_STOP is not None:
+        _LOCK_GUARD_STOP.touch()
+    if _LOCK_GUARD_PROCESS is not None:
+        try:
+            _LOCK_GUARD_PROCESS.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _LOCK_GUARD_PROCESS.kill()
+            _LOCK_GUARD_PROCESS.wait(timeout=5)
+    if _LOCK_GUARD_REPORT is not None and _LOCK_GUARD_REPORT.exists():
+        details = _LOCK_GUARD_REPORT.read_text(encoding="utf-8").strip()
+        if details:
+            raise AssertionError(
+                "linked-worktree suite flocks source registry lock; offending caller(s): " + details
+            )
+
+
+def _finish_linked_worktree_lock_guard() -> None:
+    try:
+        assert_linked_worktree_lock_clean()
+    except AssertionError as exc:
+        os.write(2, f"{exc}\n".encode("utf-8", "replace"))
+        # atexit suppresses ordinary exceptions, so make unittest's real CI
+        # process fail if the session-wide watcher observed a violation.
+        with contextlib.suppress(OSError):
+            shutil.rmtree(_TEST_HOME, ignore_errors=True)
+        os._exit(1)
+
+
+_start_linked_worktree_lock_guard()
+atexit.register(_finish_linked_worktree_lock_guard)
