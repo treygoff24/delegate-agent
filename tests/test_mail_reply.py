@@ -4,20 +4,18 @@ import io
 import json
 import os
 import shutil
-import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from delegate_agent import mail, private_io, run_registry
 from delegate_agent.errors import DelegateError
+from tests.mail_test_helpers import mail_temporary_directory
 
 
 class MailReplyTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory(
-            prefix="delegate-mail-reply-", dir=str(Path(__file__).resolve().parents[3])
-        )
+        self.temp = mail_temporary_directory(prefix="delegate-mail-reply-")
         self.addCleanup(self.temp.cleanup)
         self.workspace = Path(self.temp.name)
         self.root = run_registry.ensure_registry(self.workspace, workspace_kind="directory")
