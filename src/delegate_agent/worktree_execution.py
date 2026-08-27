@@ -338,6 +338,7 @@ def _build_persistent_worktree_run_context(
         retire_worktree_on_completion=delegate_config.retire_worktree_on_completion(
             execution.config
         ),
+        retirement_ignore_globs=delegate_config.retirement_ignore_globs(execution.config),
         worktree_auto_prune_on_completion=auto_prune_enabled,
         worktree_auto_prune_merged_older_than_days=auto_prune_days,
         mail_push=request.mail_push,
