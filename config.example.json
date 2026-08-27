@@ -122,6 +122,7 @@
     "dataHome": null,
     "poolWarnCount": 20,
     "retireWorktreeOnCompletion": true,
+    "retirementIgnoreGlobs": [".beads/**", ".papercuts.jsonl"],
     "autoPrune": {
       "enabled": false,
       "mergedOlderThanDays": 7

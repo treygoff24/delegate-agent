@@ -1785,7 +1785,13 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "delegate worktree prune --merged",
             "delegate worktree prune --older-than 7 --dry-run",
         ),
-        notes=("Run with --dry-run first to preview the affected worktrees.",),
+        notes=(
+            "Run with --dry-run first to preview the affected worktrees.",
+            "Prune never selects a worktree whose owning Run has not reached a "
+            "terminal status, or whose recorded process group is still alive; "
+            "those are reported as run_active, run_not_terminal, and "
+            "process_group_alive. --force overrides the guard.",
+        ),
         see_also=("worktree list", "worktree remove", "worktree gc"),
         unsupported_global_options=("--isolation", "--auth-profile"),
     ),

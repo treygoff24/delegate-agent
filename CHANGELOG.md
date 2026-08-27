@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Worktree retirement no longer treats the shared `.beads/` and
+  `.papercuts.jsonl` ledgers as lane work, so a run that filed a papercut or
+  closed a bead can retire its worktree instead of stranding it. Configurable
+  via `worktrees.retirementIgnoreGlobs`.
+- `worktree prune` (and the auto-prune that runs at completion) no longer
+  selects a worktree whose owning Run is still alive, reporting `run_active`,
+  `run_not_terminal`, or `process_group_alive` instead. `--force` overrides.
+- `workflow run --dry-run` can no longer hang indefinitely on a script that
+  waits for a human gate: scripts now receive a `dry_run` global, dry-run item
+  threads are disposable, and `workflows.dryRunTimeoutSeconds` (default 300)
+  bounds the run with a `dry_run_timeout` error.
+
 ### Added
 - Structured-output retries now resume in place when the harness supports it,
   retaining a safe temporary workspace across attempts and reaping it from
