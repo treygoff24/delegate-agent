@@ -11,7 +11,7 @@ Session context: full backlog burndown of delegate-agent (Waves 1–3 + W2-P), o
 
 Branch `integration/burndown-w3` (worktree `~/Code/burndown-worktrees/integration-w3`), tip **c6c01b9**, tree clean. Wave-3 ships: W3-O structured-output tolerance + observability (dlg-44w.6, .7a/b), W3-X lane-health advisory (dlg-44w.3), W3-A named soft-park admission (dlg-44w.8, .9).
 
-Cursor Grok review found 9 findings; the Terra fix lane committed them at **14:52Z**:
+Cursor Grok review found 9 findings; the Terra fix lane **completed green** (exit 0 at ~15:12Z; self-reported `bash scripts/gate.sh` → GATE PASS [ruff 0.15.15] 2503 passed / 15 skipped, `scripts/test-parity.sh` → parity ok, `agent(schema=...)` still strict, deck-parity untouched; closed `dlg-44w.12`). Commits (final, tree clean at c6c01b9):
 - `9aee0e9` F1 — nested `soft_park()` was swallowed by pipeline/parallel bare-Exception catch; now `SoftParkExit` propagates.
 - `1b4f895` F2 — string-wrapped INVALID object stored the wrapper string as candidate; now the decoded object is retained with the validation error. (also folds F4/F5 schema unwrap, F6 registry DURABLE_EVENT_TYPES)
 - `328048e` F7 — CLI true-usage-error nonzero-exit test pin.
@@ -19,8 +19,8 @@ Cursor Grok review found 9 findings; the Terra fix lane committed them at **14:5
 - F3 (v1 pipeline scope byte-identity) was verified NOT a code bug — coordinator confirmed via `git diff main...HEAD` that v1 scopes are byte-unchanged; F3 is a golden-scope test only. F9 is a soft_park name-validation nit.
 
 **RESUME HERE — remaining chain (per Trey's gameplan):**
-1. Verify the codex-1 Terra lane's final output (it was still running at wind-down — see Loose ends). Spot-check F1 soft-park propagation + F2 decoded-candidate retention; confirm F3 golden-scope test present, F6 event types added.
-2. Independent full gate: `bash scripts/gate.sh` + `scripts/test-parity.sh` (verbatim PASS).
+1. Lane is DONE (green self-report above). Spot-check the diff anyway: F1 soft-park propagation, F2 decoded-candidate retention, F3 golden-scope test present, F6 event types added, F9 name validation.
+2. **Independent** full gate — do not trust the lane's self-gate; run the canonical gate at coordinator level: `bash scripts/gate.sh` + `scripts/test-parity.sh` (verbatim PASS). Note the lane closed `dlg-44w.12` on the integration branch, so main's beads still show it in_progress until merge.
 3. **Opus native review** of the integrated Wave-3 diff → Terra xhigh for any residuals → coordinator final review.
 4. `--no-ff` merge `integration/burndown-w3` → main → gate on main → push Forgejo → close Wave-3 beads (dlg-44w.12 tracks the fix round; dlg-44w.6/.7a/.7b/.3/.8/.9).
 
