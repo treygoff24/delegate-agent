@@ -59,13 +59,14 @@ class WorkflowPin:
     runtime_root: Path
     import_root: Path
     entrypoint: Path
+    python_executable: str
     personas: JsonObject
     created_at: str
 
     @property
     def cli_argv(self) -> list[str]:
         """The executable + entrypoint used by both supervisor and children."""
-        return [sys.executable, str(self.entrypoint)]
+        return [self.python_executable, str(self.entrypoint)]
 
     @property
     def environment(self) -> dict[str, str]:
@@ -460,7 +461,13 @@ def load_pin(workflow_id: str, *, home: Path | None = None) -> WorkflowPin | Non
         raise WorkflowPinError("invalid_pin", "workflow pin runtime snapshot is incomplete")
     created_at = payload.get("createdAt")
     digest = runtime.get("digest")
-    if not isinstance(created_at, str) or not isinstance(digest, str):
+    python_executable = runtime.get("pythonExecutable")
+    if (
+        not isinstance(created_at, str)
+        or not isinstance(digest, str)
+        or not isinstance(python_executable, str)
+        or not python_executable
+    ):
         raise WorkflowPinError("invalid_pin", "workflow pin metadata is incomplete")
     if _runtime_directory_digest(runtime_root) != digest:
         raise WorkflowPinError("invalid_pin", "workflow pin runtime digest does not match snapshot")
@@ -479,6 +486,7 @@ def load_pin(workflow_id: str, *, home: Path | None = None) -> WorkflowPin | Non
         runtime_root=runtime_root,
         import_root=import_root,
         entrypoint=entrypoint,
+        python_executable=python_executable,
         personas=personas_payload,
         created_at=created_at,
     )
