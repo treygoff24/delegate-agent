@@ -131,6 +131,48 @@ class EngineArgvTests(CommandTestBase):
         self.assertEqual(manifest["capabilityModel"], "gpt-live")
         self.assertEqual(manifest["reasoningCapabilityEvidence"], "exact")
 
+    def test_contextual_snapshot_without_codex_preserves_base_codex_capability(self):
+        base = {
+            "schema": 1,
+            "profile": "default",
+            "capturedAt": "2026-08-27T09:00:00Z",
+            "harnesses": {
+                "codex": {
+                    "defaultModel": "gpt-context",
+                    "models": {
+                        "gpt-context": {"reasoning": {"supported": ["high"], "evidence": "exact"}}
+                    },
+                }
+            },
+        }
+        contextual = {
+            "schema": 1,
+            "profile": "default",
+            "capturedAt": "2026-08-27T09:00:01Z",
+            "harnesses": {},
+        }
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["codex"]["defaultModel"] = "gpt-context"
+
+        with mock.patch.object(
+            self.delegate.harness_discovery,
+            "load_discovery_cache",
+            side_effect=[base, contextual],
+        ):
+            request = self.build_git_request(
+                "codex",
+                "safe",
+                None,
+                "/repo",
+                "review",
+                config,
+                True,
+                reasoning_effort="high",
+            )
+
+        self.assertEqual(request.reasoning_capability_source, "discovery")
+        self.assertIn('model_reasoning_effort="high"', " ".join(request.argv))
+
     def test_selector_drifted_runtime_discovery_is_ignored_without_probing(self):
         discovery = {
             "harnesses": {
@@ -2214,7 +2256,7 @@ class EngineArgvTests(CommandTestBase):
         )
         self.assertIn("<isolated-workspace>", payload["modeMapping"]["droid"]["safe"])
         self.assertFalse(payload["isolation"]["safeNoneAllowed"]["droid"])
-        self.assertTrue(payload["isolation"]["safeNoneAllowed"]["codex"])
+        self.assertFalse(payload["isolation"]["safeNoneAllowed"]["codex"])
         self.assertIn("safeNotes", payload["modeMapping"]["droid"])
         self.assertIn("isolation none", payload["modeMapping"]["droid"]["safeNotes"][2])
         self.assertNotIn("--auto", payload["modeMapping"]["droid"]["safe"])
@@ -2516,10 +2558,29 @@ class EngineArgvTests(CommandTestBase):
             io.StringIO(""),
         )
         self.addCleanup(shutil.rmtree, ro_req.workspace, ignore_errors=True)
-        self.assertIn("auto", ro_req.argv)
-        self.assertIn("--agent-config", ro_req.argv)
+        self.assertEqual(ro_req.argv[ro_req.argv.index("--permission-mode") + 1], "autonomous")
+        self.assertIn("--sandbox", ro_req.argv)
+        self.assertIn("--config", ro_req.argv)
+        self.assertNotIn("--agent-config", ro_req.argv)
         self.assertIsNotNone(ro_req.agent_config_text)
         self.assertTrue(ro_req.prompt_file_text.startswith("You are being called"))
+
+    def test_devin_read_only_transport_requires_known_good_version(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = Path(tmp) / "devin"
+            binary.write_text(
+                "#!/bin/sh\n"
+                'if [ "$1" = "--version" ]; then echo \'devin 3000.4.25\'; exit 0; fi\n'
+                "exit 2\n",
+                encoding="utf-8",
+            )
+            binary.chmod(0o755)
+            self.delegate.validate_devin_read_only_transport([str(binary)])
+            binary.write_text("#!/bin/sh\necho 'devin 3000.3.27'\n", encoding="utf-8")
+            binary.chmod(0o755)
+            with self.assertRaises(self.delegate.DelegateError) as ctx:
+                self.delegate.validate_devin_read_only_transport([str(binary)])
+        self.assertEqual(ctx.exception.error, "devin_read_only_transport_unverified")
 
     def test_devin_reasoning_effort_is_rejected(self):
         with self.assertRaises(self.delegate.DelegateError) as ctx:

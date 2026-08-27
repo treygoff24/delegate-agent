@@ -1386,7 +1386,7 @@ def _safe_isolation_warnings(
     for none and got auto anyway, so the warning explains why the flag was ignored.
 
     The second is the absence of that override, and it is the one that cost us a
-    review. Engines outside that set (today: codex) honour `--isolation none` in
+    review. An engine outside that set honours `--isolation none` in
     safe mode, so the child runs against the real checkout with .git readable,
     protected only by the harness's own read-only sandbox. Nothing said so. A
     lane whose entire purpose was a read firewall silently had none, and the
@@ -2429,6 +2429,24 @@ def build_request(
         expand_env=expand_env,
     )
     discovery = harness_discovery.load_discovery_cache(profile_resolution.name)
+    if (
+        isinstance(discovery, dict)
+        and isinstance(discovery.get("schema"), int)
+        and isinstance(discovery.get("profile"), str)
+    ):
+        contextual = harness_discovery.load_discovery_cache(
+            profile_resolution.name,
+            env=profiles.child_environment(overrides=profile_resolution.env),
+        )
+        # A context miss is a valid empty snapshot. It must not erase a base
+        # record for the engine we are launching: that record still receives
+        # the normal selector-drift check below. Do not merge records -- when
+        # the current context has an engine record, it is authoritative intact.
+        if contextual is not None and (
+            not _discovery_has_engine_record(discovery, engine)
+            or _discovery_has_engine_record(contextual, engine)
+        ):
+            discovery = contextual
     discovery, drift_warnings = _runtime_discovery_for_engine(
         config,
         engine,

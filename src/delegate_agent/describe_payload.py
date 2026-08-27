@@ -966,16 +966,8 @@ def describe_payload(
             "defaults": config["isolation"],
             "supportedValues": list(delegate_config.VALID_ISOLATION_VALUES),
             "safeNoneAllowed": {
-                "cursor": False,
-                "droid": False,
-                "codex": True,
-                "kimi": False,
-                "claude": False,
-                "grok": False,
-                "devin": False,
-                "opencode": False,
-                "pi": False,
-                "omp": False,
+                engine: engine not in delegate_config.SAFE_ISOLATION_REQUIRED_ENGINES
+                for engine in KNOWN_ENGINES
             },
         },
         "safeBackends": {
@@ -1451,6 +1443,18 @@ def emit_models(
     discovery: JsonObject | None = None,
     profile: profiles.ProfileResolution | None = None,
 ) -> int:
+    if (
+        profile is not None
+        and isinstance(discovery, dict)
+        and isinstance(discovery.get("schema"), int)
+        and isinstance(discovery.get("profile"), str)
+    ):
+        contextual = harness_discovery.load_discovery_cache(
+            profile.name,
+            env=profiles.child_environment(overrides=profile.env),
+        )
+        if contextual is not None:
+            discovery = contextual
     legacy_cache = (
         reasoning.load_reasoning_capability_cache(workspace) if workspace is not None else None
     )
@@ -1623,7 +1627,7 @@ Grok:
 Devin:
   - Uses Devin CLI print mode with --prompt-file and -p; Delegate materializes the effective prompt in a temp file.
   - Passes --respect-workspace-trust false because Delegate already selects the execution workspace and Devin cannot show its trust prompt in print mode.
-  - Call --read-only passes a Delegate-generated --agent-config deny-list for edit/write/exec and mcp__* plus --permission-mode auto.
+  - Call --read-only passes a Delegate-generated --config deny-list for edit/write/exec and mcp__* plus --sandbox --permission-mode autonomous.
   - Work and default call mode use --permission-mode dangerous because Devin print mode rejects unapproved edit/exec tools.
   - Model selection uses --model (alias from devin.models or a raw model ID), optional JSON input model, or devin.defaultModel; Delegate lets Devin validate unknown model names.
   - Reasoning effort is unsupported for Devin in v1.

@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import BinaryIO, TextIO, TypeAlias
 
 from delegate_agent import config as delegate_config
-from delegate_agent import private_io, profiles, redaction
+from delegate_agent import private_io, profiles, redaction, run_registry
 from delegate_agent.constants import KNOWN_ENGINES
 from delegate_agent.json_types import JsonObject
 
@@ -44,7 +44,9 @@ CONFIGURED_SELECTOR_MISSING = "configured_selector_missing"
 FUTURE_SCHEMA_CACHE_WARNING = (
     "discovery cache was written by a newer delegate; probing without reading or replacing it"
 )
-_DISCOVERY_CACHE_MEMO: dict[tuple[Path, int, int], JsonObject | None] = {}
+_DISCOVERY_CACHE_MEMO: dict[tuple[Path, int, int, str | None], JsonObject | None] = {}
+_CACHE_CONTEXT_LIMIT = 4
+_CONTEXT_FIELDS = frozenset({"capturedAt", "harnesses"})
 
 
 class FutureCacheSchemaError(ValueError):
@@ -122,7 +124,7 @@ _CURSOR_EFFORT_LABELS = {
     "xhigh": "Extra High",
     "max": "Max",
 }
-_SNAPSHOT_FIELDS = frozenset({"schema", "profile", "capturedAt", "harnesses"})
+_SNAPSHOT_FIELDS = frozenset({"schema", "profile", "capturedAt", "harnesses", "contexts"})
 _HARNESS_FIELDS = frozenset(
     {
         "installed",
@@ -135,6 +137,11 @@ _HARNESS_FIELDS = frozenset(
         "harnessReasoning",
         "personaTransports",
         "warnings",
+        # Attempt-only provenance fields. Failed records are never selected for
+        # persistence, but keeping these fields in the validated shape lets a
+        # refresh carry typed diagnostics without weakening the cache contract.
+        "probeError",
+        "identifiedHarness",
     }
 )
 _MODEL_FIELDS = frozenset({"displayName", "reasoning", "routeFamily", "routeEffort"})
@@ -174,10 +181,53 @@ def validate_snapshot(
         datetime.fromisoformat(captured_at.replace("Z", "+00:00"))
     except ValueError as exc:
         raise ValueError("discovery snapshot capturedAt must be ISO-8601") from exc
+    warnings: list[str] = []
     harnesses = snapshot.get("harnesses")
     if not isinstance(harnesses, dict):
         raise ValueError("discovery snapshot harnesses must be an object")
 
+    warnings.extend(
+        _validate_harnesses(
+            harnesses,
+            allow_unknown_harnesses=allow_unknown_harnesses,
+        )
+    )
+
+    contexts = snapshot.get("contexts")
+    if contexts is not None:
+        if not isinstance(contexts, dict):
+            raise ValueError("discovery snapshot contexts must be an object")
+        for context_key, context in contexts.items():
+            if not _nonempty_string(context_key) or not isinstance(context, dict):
+                raise ValueError("discovery snapshot context entries must be named objects")
+            _reject_extra_fields(context, _CONTEXT_FIELDS, f"discovery context {context_key}")
+            context_captured_at = context.get("capturedAt")
+            if not _nonempty_string(context_captured_at):
+                raise ValueError(
+                    f"discovery context {context_key}.capturedAt must be a non-empty string"
+                )
+            try:
+                datetime.fromisoformat(context_captured_at.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise ValueError(
+                    f"discovery context {context_key}.capturedAt must be ISO-8601"
+                ) from exc
+            nested_harnesses = context.get("harnesses")
+            if not isinstance(nested_harnesses, dict):
+                raise ValueError(f"discovery context {context_key}.harnesses must be an object")
+            warnings.extend(
+                _validate_harnesses(
+                    nested_harnesses,
+                    allow_unknown_harnesses=allow_unknown_harnesses,
+                )
+            )
+
+    return tuple(warnings)
+
+
+def _validate_harnesses(
+    harnesses: dict[object, object], *, allow_unknown_harnesses: bool
+) -> list[str]:
     warnings: list[str] = []
     for harness, record in harnesses.items():
         if not _nonempty_string(harness) or not isinstance(record, dict):
@@ -187,7 +237,7 @@ def validate_snapshot(
                 raise ValueError(f"unsupported discovery harness: {harness}")
             warnings.append(f"ignored unknown discovery harness {harness!r}")
         _validate_harness_record(harness, record)
-    return tuple(warnings)
+    return warnings
 
 
 def _nonempty_string(value: object) -> bool:
@@ -220,6 +270,16 @@ def _validate_harness_record(harness: str, record: JsonObject) -> None:
         raise ValueError(f"discovery harness {harness}.version must be a string or null")
     if record.get("probeStatus") not in PROBE_STATUSES:
         raise ValueError(f"discovery harness {harness}.probeStatus is invalid")
+    probe_error = record.get("probeError")
+    if probe_error is not None and not _nonempty_string(probe_error):
+        raise ValueError(f"discovery harness {harness}.probeError must be a string or null")
+    identified_harness = record.get("identifiedHarness")
+    if identified_harness is not None and (
+        not _nonempty_string(identified_harness) or identified_harness not in KNOWN_ENGINES
+    ):
+        raise ValueError(
+            f"discovery harness {harness}.identifiedHarness must name a known harness or be null"
+        )
     if record.get("modelScope") not in MODEL_SCOPES:
         raise ValueError(f"discovery harness {harness}.modelScope is invalid")
     default_model = record.get("defaultModel")
@@ -354,6 +414,7 @@ class SelectorResolution:
     version: str | None
     error: str | None
     warnings: tuple[str, ...] = ()
+    identified_harness: str | None = None
 
 
 @dataclass(frozen=True)
@@ -491,7 +552,23 @@ def resolve_harness_selector(
                 return SelectorResolution(None, None, probe.error, tuple(warnings))
             continue
         output = "\n".join(part for part in (probe.stdout, probe.stderr) if part)
-        version = _canonical_version(harness, selector, output)
+        identity = _identify_version(harness, selector, output)
+        if identity.status == _VERSION_KNOWN_OTHER:
+            identified = identity.identified or "unknown"
+            warning = (
+                f"selector {' '.join(selector)!r} identifies itself as {identified}, not {harness}"
+            )
+            if explicit:
+                return SelectorResolution(
+                    selector,
+                    None,
+                    "fingerprint_mismatch",
+                    (warning,),
+                    identified,
+                )
+            warnings.append(warning)
+            continue
+        version = identity.version
         if version is None:
             warning = f"selector {' '.join(selector)!r} did not identify as {harness}"
             if explicit:
@@ -1393,8 +1470,10 @@ def _empty_harness_record(
     version: str | None,
     probe_status: str,
     warnings: list[str],
+    probe_error: str | None = None,
+    identified_harness: str | None = None,
 ) -> JsonObject:
-    return {
+    record: JsonObject = {
         "installed": installed,
         "selector": list(selector or ()),
         "version": version,
@@ -1405,6 +1484,11 @@ def _empty_harness_record(
         "harnessReasoning": None,
         "warnings": warnings,
     }
+    if probe_error is not None:
+        record["probeError"] = probe_error
+    if identified_harness is not None:
+        record["identifiedHarness"] = identified_harness
+    return record
 
 
 def probe_harness(
@@ -1416,13 +1500,24 @@ def probe_harness(
 ) -> JsonObject:
     resolution = resolve_harness_selector(config, harness, env=env)
     warnings = list(resolution.warnings)
+    if resolution.error is not None:
+        return _empty_harness_record(
+            installed=False,
+            selector=resolution.selector,
+            version=None,
+            probe_status="missing" if resolution.error == "probe_missing" else "error",
+            warnings=warnings + ([resolution.error] if resolution.error else []),
+            probe_error=resolution.error,
+            identified_harness=resolution.identified_harness,
+        )
     if resolution.selector is None:
         return _empty_harness_record(
             installed=False,
             selector=None,
             version=None,
-            probe_status="missing" if resolution.error == "probe_missing" else "error",
-            warnings=warnings + ([resolution.error] if resolution.error else []),
+            probe_status="missing",
+            warnings=[*warnings, "probe_missing"],
+            probe_error="probe_missing",
         )
     adapter = ADAPTERS[harness]
     try:
@@ -1522,13 +1617,30 @@ def _clear_discovery_cache_memo(path: Path) -> None:
             del _DISCOVERY_CACHE_MEMO[key]
 
 
-def _discovery_cache_memo_key(path: Path) -> tuple[Path, int, int] | None:
+def discovery_context_key(env: Mapping[str, str]) -> str:
+    """Return a stable, secret-free key for one executable resolution context.
+
+    PATH and TMPDIR are the inputs that can make a profile resolve a different
+    executable (including per-session shims).  Hashing them keeps those values
+    out of the shared cache while ensuring one context cannot invalidate another.
+    """
+    payload = json.dumps(
+        {"PATH": env.get("PATH", ""), "TMPDIR": env.get("TMPDIR", "")},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return f"ctx-{hashlib.sha256(payload).hexdigest()[:24]}"
+
+
+def _discovery_cache_memo_key(
+    path: Path, context_key: str | None = None
+) -> tuple[Path, int, int, str | None] | None:
     try:
         stat_result = path.stat()
     except OSError:
         _clear_discovery_cache_memo(path)
         return None
-    key = (path, stat_result.st_mtime_ns, stat_result.st_size)
+    key = (path, stat_result.st_mtime_ns, stat_result.st_size, context_key)
     for cached_key in tuple(_DISCOVERY_CACHE_MEMO):
         if cached_key[0] == path and cached_key != key:
             del _DISCOVERY_CACHE_MEMO[cached_key]
@@ -1558,10 +1670,12 @@ def load_discovery_cache(
     profile_name: str | None,
     *,
     home: Path | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> JsonObject | None:
     """Load a valid profile snapshot; malformed data is treated as absent."""
     path = discovery_cache_path(profile_name, home=home)
-    memo_key = _discovery_cache_memo_key(path)
+    context_key = discovery_context_key(env) if env is not None else None
+    memo_key = _discovery_cache_memo_key(path, context_key)
     if memo_key is None:
         return None
     if memo_key in _DISCOVERY_CACHE_MEMO:
@@ -1579,6 +1693,30 @@ def load_discovery_cache(
     except (private_io.RegistryJsonError, ValueError):
         _DISCOVERY_CACHE_MEMO[memo_key] = None
         return None
+
+    contexts = snapshot.get("contexts")
+    if env is not None and isinstance(contexts, dict):
+        context = contexts.get(context_key)
+        if not isinstance(context, dict):
+            # A cache written by this build has records for other resolution
+            # contexts.  Do not fall back to one of them: doing so recreates
+            # selector drift and makes a read look like a mutual invalidation.
+            selected = empty_snapshot(
+                profile=_normalized_profile_name(profile_name),
+                captured_at=snapshot["capturedAt"],
+            )
+            _DISCOVERY_CACHE_MEMO[memo_key] = copy.deepcopy(selected)
+            return selected
+        selected_harnesses = context.get("harnesses")
+        if not isinstance(selected_harnesses, dict):
+            _DISCOVERY_CACHE_MEMO[memo_key] = None
+            return None
+        selected = empty_snapshot(
+            profile=_normalized_profile_name(profile_name),
+            captured_at=context.get("capturedAt", snapshot["capturedAt"]),
+        )
+        selected["harnesses"] = copy.deepcopy(selected_harnesses)
+        snapshot = selected
 
     harnesses = snapshot["harnesses"]
     if not isinstance(harnesses, dict):  # validate_snapshot already enforces this.
@@ -1598,11 +1736,14 @@ def write_discovery_cache(
     snapshot: JsonObject,
     *,
     home: Path | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> Path:
-    """Atomically replace one whole validated profile snapshot.
+    """Atomically publish a validated profile snapshot.
 
-    Same-profile concurrent refreshes intentionally remain whole-snapshot
-    last-writer-wins. Different profiles never share a writable file. A cache
+    Environment-aware refreshes merge into one bounded context record instead
+    of replacing another PATH/TMPDIR resolution context. Calls without an
+    environment retain the legacy top-level projection (and preserve context
+    records), which keeps setup and older direct callers compatible. A cache
     carrying a newer schema is never among the writes: callers are expected to
     skip persistence via ``cache_schema_is_future``, and this raise is the
     backstop that keeps any path they miss from destroying it.
@@ -1617,11 +1758,60 @@ def write_discovery_cache(
     validate_snapshot(snapshot, expected_profile=_normalized_profile_name(profile_name))
     path = discovery_cache_path(profile_name, home=home)
 
-    def refuse_to_replace_a_newer_cache() -> None:
-        if cache_schema_is_future(profile_name, home=home):
-            raise FutureCacheSchemaError(FUTURE_SCHEMA_CACHE_WARNING)
+    def publish() -> None:
+        # Read and merge while holding the same advisory lock as every other
+        # context-aware writer. Without this critical section, two processes
+        # can both read the old whole snapshot and the later os.replace drops
+        # the first context even though each write is individually atomic.
+        payload = copy.deepcopy(snapshot)
+        existing: JsonObject | None = None
+        try:
+            existing = private_io.read_json_object(path)
+            if existing is not None:
+                validate_snapshot(
+                    existing,
+                    expected_profile=_normalized_profile_name(profile_name),
+                    allow_unknown_harnesses=True,
+                )
+        except (private_io.RegistryJsonError, ValueError):
+            existing = None
 
-    private_io.write_json_atomic(path, snapshot, before_replace=refuse_to_replace_a_newer_cache)
+        if env is not None:
+            context_key = discovery_context_key(env)
+            contexts: dict[str, JsonObject] = {}
+            if existing is not None and isinstance(existing.get("contexts"), dict):
+                contexts = {
+                    key: copy.deepcopy(value)
+                    for key, value in existing["contexts"].items()
+                    if isinstance(key, str) and isinstance(value, dict)
+                }
+            contexts[context_key] = {
+                "capturedAt": snapshot["capturedAt"],
+                "harnesses": copy.deepcopy(snapshot["harnesses"]),
+            }
+            # Contexts are an LRU-by-capture bounded set.  A broken or malicious
+            # timestamp cannot make a record immortal; tie-break by key.
+            retained = sorted(
+                contexts.items(),
+                key=lambda item: (str(item[1].get("capturedAt", "")), item[0]),
+                reverse=True,
+            )[:_CACHE_CONTEXT_LIMIT]
+            payload["contexts"] = dict(retained)
+            # Keep the legacy projection useful to older callers while current
+            # readers select from ``contexts`` by their resolution key.
+        elif existing is not None and isinstance(existing.get("contexts"), dict):
+            # Setup and older direct callers do not pass an environment. Preserve
+            # context records rather than replacing them with a whole-snapshot write.
+            payload["contexts"] = copy.deepcopy(existing["contexts"])
+
+        def refuse_to_replace_a_newer_cache() -> None:
+            if cache_schema_is_future(profile_name, home=home):
+                raise FutureCacheSchemaError(FUTURE_SCHEMA_CACHE_WARNING)
+
+        private_io.write_json_atomic(path, payload, before_replace=refuse_to_replace_a_newer_cache)
+
+    with run_registry.file_lock(path.with_name(f".{path.name}.lock")):
+        publish()
     _clear_discovery_cache_memo(path)
     return path
 
@@ -1777,13 +1967,13 @@ def refresh_discovery(
         raise ValueError(f"unknown discovery harness: {unknown[0]}")
 
     profile_name = _normalized_profile_name(profile.name)
+    env = profiles.child_environment(overrides=profile.env)
     future_schema = cache_schema_is_future(profile.name, home=home)
-    existing = None if future_schema else load_discovery_cache(profile.name, home=home)
+    existing = None if future_schema else load_discovery_cache(profile.name, home=home, env=env)
     snapshot = existing if existing is not None else empty_snapshot(profile=profile_name)
     attempts: JsonObject = {}
     updated: list[str] = []
     stale: list[str] = []
-    env = profiles.child_environment(overrides=profile.env)
 
     for harness in selected:
         if progress is not None:
@@ -1832,7 +2022,7 @@ def refresh_discovery(
     wrote = persist and bool(updated) and not future_schema
     if wrote:
         try:
-            write_discovery_cache(profile.name, snapshot, home=home)
+            write_discovery_cache(profile.name, snapshot, home=home, env=env)
         except FutureCacheSchemaError:
             # A newer delegate published while these probes ran. Its cache
             # wins; the probe results are still valid for this run, so only

@@ -17,10 +17,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from delegate_agent import (  # noqa: E402
+    harness_discovery,
     request_build,
     run_registry,
     safe_workspace,
     sandbox_bwrap,
+    workflow_pinning,
 )
 from delegate_agent.isolation import build_isolation_context  # noqa: E402
 from delegate_agent.request_models import (  # noqa: E402
@@ -57,6 +59,7 @@ class WorkflowCommandTests(unittest.TestCase):
         self.codex_home.mkdir()
         (self.codex_home / "auth.json").write_text('{"token":"test"}\n', encoding="utf-8")
         (self.home / ".delegate").mkdir()
+        (self.home / ".delegate" / "personas").mkdir()
         (self.home / ".delegate" / "config.work.json").write_text("{}\n", encoding="utf-8")
         self.bin_dir = self.workspace / "bin"
         self.bin_dir.mkdir()
@@ -90,9 +93,12 @@ class WorkflowCommandTests(unittest.TestCase):
         devin.write_text(
             "#!/usr/bin/env python3\n"
             "import os, sys\n"
-            "# Read-only lanes must materialize a real agent-config file.\n"
-            "if '--agent-config' in sys.argv:\n"
-            "    cfg = sys.argv[sys.argv.index('--agent-config') + 1]\n"
+            "if sys.argv[1:] == ['--version']:\n"
+            "    print('devin 3000.4.25')\n"
+            "    raise SystemExit(0)\n"
+            "# Read-only lanes must materialize a real config file.\n"
+            "if '--config' in sys.argv:\n"
+            "    cfg = sys.argv[sys.argv.index('--config') + 1]\n"
             "    if not os.path.isfile(cfg):\n"
             "        sys.stderr.write(f'missing agent config: {cfg}\\n')\n"
             "        sys.exit(1)\n"
@@ -697,6 +703,53 @@ class WorkflowCommandTests(unittest.TestCase):
         events = self.run_delegate(["--json", "workflow", "events", wf_id, "--since", "0"])
         event_types = {event["type"] for event in json.loads(events.stdout)["events"]}
         self.assertIn("agent_cache_hit", event_types)
+
+    def test_new_workflow_pins_supervisor_and_child_argv(self) -> None:
+        script = self.write_workflow(
+            """
+            meta = {"name": "pin-argv", "defaults": {"engine": "codex", "mode": "safe"}}
+            return agent("pinned")
+            """
+        )
+        launch = self.run_delegate(["--json", "workflow", "run", str(script)])
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        pin = workflow_pinning.load_pin(wf_id, home=self.home)
+        self.assertIsNotNone(pin)
+        assert pin is not None
+        self.assertEqual(pin.cli_argv[0], sys.executable)
+        self.assertTrue(pin.entrypoint.is_file())
+        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
+        self.assertEqual(waited.returncode, 0, waited.stderr)
+        runs = self.wait_for_group_runs(wf_id)
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0]["group"], wf_id)
+        self.assertIn(str(pin.import_root), pin.environment["PYTHONPATH"])
+
+    def test_workflow_child_uses_persona_bytes_from_launch_pin(self) -> None:
+        persona = self.home / ".delegate" / "personas" / "reviewer.md"
+        persona.write_text("PINNED PERSONA\n", encoding="utf-8")
+        prompt_log = self.workspace / "prompt.log"
+        script = self.write_workflow(
+            """
+            meta = {"name": "pin-persona", "defaults": {"engine": "codex", "mode": "safe"}}
+            return agent("check", persona="reviewer")
+            """
+        )
+        launch = self.run_delegate(
+            ["--json", "workflow", "run", str(script)],
+            env_extra={"FAKE_PROMPT_LOG": str(prompt_log)},
+        )
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        persona.write_text("LIVE PERSONA\n", encoding="utf-8")
+        waited = self.run_delegate(
+            ["--json", "workflow", "wait", wf_id, "--timeout", "10"],
+            env_extra={"FAKE_PROMPT_LOG": str(prompt_log)},
+        )
+        self.assertEqual(waited.returncode, 0, waited.stderr)
+        self.assertIn("PINNED PERSONA", prompt_log.read_text(encoding="utf-8"))
+        self.assertNotIn("LIVE PERSONA", prompt_log.read_text(encoding="utf-8"))
 
     def test_agent_child_events_bind_run_id_to_key_and_label(self) -> None:
         script = self.write_workflow(
@@ -2137,6 +2190,33 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertEqual(result_path.read_bytes(), prior_result)
         self.assertEqual(result_path.stat().st_mode & 0o777, 0o600)
 
+    def test_pre_pinning_workflow_resume_remains_pinless(self) -> None:
+        """A legacy workflow with no pin still uses the current trampoline."""
+        wf_id = "wf_123456789abc"
+        root = self._seed_completed_workflow(
+            wf_id,
+            created_at="2026-01-01T00:00:00Z",
+            result={"value": "old"},
+        )
+        (root / workflow_registry.SCRIPT_FILE).write_text("return 'legacy'\n", encoding="utf-8")
+        observed: list[list[str]] = []
+
+        def capture(argv, **_kwargs):
+            observed.append(list(argv))
+
+        with mock.patch.object(workflow_runtime, "detach_supervisor", side_effect=capture):
+            result = workflow_commands.emit_run(
+                workflow_commands.WorkflowCommand("run", resume=wf_id, json_mode=True),
+                workspace=self.workspace,
+                config={},
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+        self.assertEqual(result, 0)
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(observed[0][:2], workflow_commands._delegate_cli_argv())
+        self.assertFalse(workflow_pinning.pin_path(wf_id, home=self.home).exists())
+
     def test_resume_snapshot_failure_releases_workflow_lock(self) -> None:
         wf_id = "wf_123456789abc"
         root = self._seed_completed_workflow(
@@ -2912,6 +2992,30 @@ class WorkflowCommandTests(unittest.TestCase):
                 "base",
             ],
             check=True,
+        )
+        # A workflow pin changes the child process context.  Keep a legacy/base
+        # Codex capability record while its context-keyed cache has only a
+        # different context, exercising the request-build selection boundary.
+        discovery = harness_discovery.empty_snapshot()
+        discovery["harnesses"] = {
+            "codex": {
+                "installed": True,
+                "selector": [str(self.bin_dir / "codex")],
+                "version": "codex-cli 1.0.0",
+                "probeStatus": "ok",
+                "modelScope": "account",
+                "defaultModel": None,
+                "models": {},
+                "harnessReasoning": None,
+                "warnings": [],
+            }
+        }
+        harness_discovery.write_discovery_cache(None, discovery, home=self.home)
+        harness_discovery.write_discovery_cache(
+            None,
+            discovery,
+            home=self.home,
+            env={"PATH": "/unrelated-context", "TMPDIR": "/unrelated-context"},
         )
         script = self.write_workflow(
             """

@@ -437,10 +437,15 @@ def build_devin_argv(
     if read_only:
         argv.extend(
             [
-                "--agent-config",
+                # Devin 3000.4.x removed --agent-config.  The generated
+                # Delegate permission document is a normal Devin config file;
+                # --config loads it, while --sandbox/autonomous makes the
+                # filesystem boundary enforceable instead of prompt-only.
+                "--config",
                 DEVIN_AGENT_CONFIG_ARG_PLACEHOLDER,
+                "--sandbox",
                 "--permission-mode",
-                "auto",
+                "autonomous",
             ]
         )
     else:

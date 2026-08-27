@@ -3,6 +3,7 @@ import io
 import json
 import os
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -26,6 +27,122 @@ from delegate_agent.config import harness_binary  # noqa: E402
 
 
 class CapabilityCommandTests(unittest.TestCase):
+    @staticmethod
+    def _run_real_cli(args: list[str], *, home: Path, path: Path, tmpdir: Path) -> tuple[int, dict]:
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key not in {"AI_PROFILE", "DELEGATE_PROFILE", "DELEGATE_CONFIG"}
+        }
+        env.update({"HOME": str(home), "PATH": str(path), "TMPDIR": str(tmpdir)})
+        completed = subprocess.run(
+            [sys.executable, str(ROOT / "bin" / "delegate.py"), "--json", *args],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return completed.returncode, json.loads(completed.stdout)
+
+    @staticmethod
+    def _write_codex_probe(path: Path, *, banner: str = "codex-cli 1.0.0") -> None:
+        fixture = (ROOT / "tests/fixtures/discovery/codex_models.json").read_text(encoding="utf-8")
+        path.write_text(
+            "#!" + sys.executable + "\n"
+            "import sys\n"
+            f"banner = {banner!r}\n"
+            f"catalog = {fixture!r}\n"
+            "if sys.argv[1:] == ['--version']:\n"
+            "    print(banner)\n"
+            "elif sys.argv[1:] == ['debug', 'models']:\n"
+            "    print(catalog)\n"
+            "else:\n"
+            "    raise SystemExit(2)\n",
+            encoding="utf-8",
+        )
+        path.chmod(0o755)
+
+    def test_real_cli_refresh_surfaces_typed_identity_mismatch(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            home = root / "home"
+            bindir = root / "bin"
+            home.mkdir()
+            bindir.mkdir()
+            wrong = bindir / "wrong-codex"
+            self._write_codex_probe(wrong, banner="grok 2.4.0")
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps({"codex": {"binary": str(wrong)}}), encoding="utf-8")
+            env = {
+                key: value
+                for key, value in os.environ.items()
+                if key not in {"AI_PROFILE", "DELEGATE_PROFILE"}
+            }
+            env.update(
+                {"HOME": str(home), "PATH": str(bindir), "DELEGATE_CONFIG": str(config_path)}
+            )
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "bin" / "delegate.py"),
+                    "--json",
+                    "capabilities",
+                    "refresh",
+                    "codex",
+                ],
+                cwd=ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            payload = json.loads(completed.stdout)
+
+        self.assertEqual(completed.returncode, 2)
+        self.assertEqual(payload["error"], "harness_identity_mismatch")
+        attempt = payload["diagnostics"]["attempts"]["codex"]
+        self.assertEqual(attempt["probeError"], "fingerprint_mismatch")
+        self.assertEqual(attempt["identifiedHarness"], "grok")
+        self.assertEqual(attempt["selector"], [str(wrong)])
+
+    def test_real_cli_context_refreshes_do_not_mutually_invalidate(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            home = root / "home"
+            home.mkdir()
+            bins = []
+            for label in ("a", "b"):
+                bindir = root / f"bin-{label}"
+                bindir.mkdir()
+                self._write_codex_probe(bindir / "codex")
+                bins.append(bindir)
+            tmpdirs = [root / "tmp-a", root / "tmp-b"]
+            for tmpdir in tmpdirs:
+                tmpdir.mkdir()
+
+            for index in (0, 1, 0, 1):
+                code, payload = self._run_real_cli(
+                    ["capabilities", "refresh", "codex"],
+                    home=home,
+                    path=bins[index],
+                    tmpdir=tmpdirs[index],
+                )
+                self.assertEqual(code, 0, payload)
+                self.assertEqual(payload["updatedHarnesses"], ["codex"])
+
+            for index in (0, 1, 0, 1):
+                code, payload = self._run_real_cli(
+                    ["capabilities"], home=home, path=bins[index], tmpdir=tmpdirs[index]
+                )
+                self.assertEqual(code, 0, payload)
+                self.assertNotIn("driftedHarnesses", payload)
+
+            cache_path = home / ".delegate" / "cache" / "discovery" / "default.json"
+            raw_cache = json.loads(cache_path.read_text(encoding="utf-8"))
+            self.assertEqual(len(raw_cache["contexts"]), 2)
+            self.assertLessEqual(len(raw_cache["contexts"]), 4)
+
     def test_harness_binary_uses_embedded_default_when_section_missing(self):
         self.assertEqual(harness_binary({}, "codex"), "codex")
         self.assertEqual(harness_binary({}, "droid"), "droid")

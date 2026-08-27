@@ -4,8 +4,10 @@ from __future__ import annotations
 import contextlib
 import json  # noqa: F401  # re-exported for tests (delegate.json)
 import os
+import re
 import shlex
 import shutil
+import subprocess
 import sys
 from dataclasses import replace as dc_replace
 from pathlib import Path
@@ -625,6 +627,46 @@ def ensure_binary(
         )
 
 
+_DEVIN_READ_ONLY_TRANSPORT_VERSION = re.compile(r"(?<!\d)3000\.4\.\d+(?!\d)")
+
+
+def validate_devin_read_only_transport(
+    argv: list[str], *, env_overrides: dict[str, str] | None = None
+) -> None:
+    """Refuse a read-only call unless its flag transport is known to this build.
+
+    Devin's permission flags are version-specific.  A non-zero child result is
+    already surfaced as an error by the runner; this preflight closes the more
+    dangerous case where a different Devin version accepts the invocation while
+    silently treating its read-only flags as unknown or advisory.
+    """
+    if not argv:
+        raise DelegateError("devin_read_only_transport_unverified", "Empty Devin argv.")
+    env = profiles.child_environment(overrides=env_overrides)
+    try:
+        result = subprocess.run(
+            [argv[0], "--version"],
+            env=env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise DelegateError(
+            "devin_read_only_transport_unverified",
+            "Could not verify the installed Devin version for read-only transport.",
+        ) from exc
+    banner = f"{result.stdout}\n{result.stderr}"
+    if result.returncode != 0 or _DEVIN_READ_ONLY_TRANSPORT_VERSION.search(banner) is None:
+        raise DelegateError(
+            "devin_read_only_transport_unverified",
+            "Devin call --read-only requires a known-good Devin 3000.4.x transport; "
+            "refusing to run with an unverified version.",
+        )
+
+
 def make_run_context(
     registry_root: Path,
     request: Request,
@@ -1108,6 +1150,10 @@ def execute_request(
                 config_source=config_source,
                 env_overrides=request.env_overrides,
             )
+            if request.engine == "devin" and request.call_read_only:
+                validate_devin_read_only_transport(
+                    request.argv, env_overrides=request.env_overrides
+                )
             # Group-tagged call runs register in the invocation workspace so
             # workflow kill/adopt/group scans can see them; execution stays in
             # the throwaway call cwd. Plain (ungrouped) call stays untracked.
