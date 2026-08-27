@@ -9,6 +9,7 @@ from unittest import mock
 
 from delegate_agent import run_registry
 from delegate_agent.workflows import registry, runtime
+from delegate_agent.workflows import schema as workflow_schema
 
 
 class ChildAttemptOutcomeTests(unittest.TestCase):
@@ -336,6 +337,58 @@ class ChildAttemptOutcomeTests(unittest.TestCase):
                 "lastParsedCandidate": {"ok": "wrong"},
                 "validationError": event["validationError"],
             },
+        )
+
+    def test_structured_json_string_invalid_candidate_carries_decoded_object(self) -> None:
+        dsl = self._dsl()
+        child = runtime._DelegateChildResult(
+            text=json.dumps(json.dumps({"ok": "wrong"})),
+            run_id="del_20260827T040000Z_stringinvalid1",
+            execution_cwd="/tmp/string-invalid-worktree",
+            session_id=None,
+        )
+        schema = {
+            "type": "object",
+            "required": ["ok"],
+            "properties": {"ok": {"type": "boolean"}},
+            "additionalProperties": False,
+        }
+        with mock.patch.object(dsl, "_run_delegate", return_value=child):
+            result = dsl._run_structured_or_text(
+                "codex",
+                "invalid",
+                mode="safe",
+                model=None,
+                effort=None,
+                fast=None,
+                schema=schema,
+                isolation=None,
+                passthrough=False,
+                timeout=None,
+                retries=0,
+                key="string-invalid-key",
+            )
+        self.assertIsNone(result)
+        event = next(
+            event
+            for event in runtime.registry.iter_journal(dsl.state.journal_path)
+            if event.get("type") == "agent_structured_exhausted"
+        )
+        self.assertEqual(event["lastParsedCandidate"], {"ok": "wrong"})
+        self.assertIn("value.ok must be 'boolean'", event["validationError"])
+
+    def test_schema_string_union_preserves_literal_json_string(self) -> None:
+        wrapped = json.dumps({"a": 1})
+        schema = {"type": ["string", "object"]}
+        self.assertEqual(workflow_schema.parse_json_tolerant(json.dumps(wrapped), schema), wrapped)
+
+    def test_typeless_object_schema_unwraps_json_string_in_prose(self) -> None:
+        schema = {"required": ["ok"], "properties": {"ok": {"type": "boolean"}}}
+        self.assertEqual(
+            workflow_schema.parse_json_tolerant(
+                f"report: {json.dumps(json.dumps({'ok': True}))}", schema
+            ),
+            {"ok": True},
         )
 
     def test_text_retry_rejects_changed_workspace_cleanup_metadata(self) -> None:

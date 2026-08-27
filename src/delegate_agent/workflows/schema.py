@@ -130,8 +130,8 @@ def _schema_requires_non_string_value(schema: JsonObject | None) -> bool:
         return False
     schema_type = schema.get("type")
     if isinstance(schema_type, list):
-        return any(item != "string" for item in schema_type)
-    return schema_type is not None and schema_type != "string"
+        return "string" not in schema_type
+    return schema_type not in (None, "string") or "properties" in schema
 
 
 def _decode_string_payload(value: str, schema: JsonObject | None) -> JsonValue:
@@ -142,11 +142,7 @@ def _decode_string_payload(value: str, schema: JsonObject | None) -> JsonValue:
         decoded = json.loads(value)
     except (TypeError, json.JSONDecodeError):
         return value
-    try:
-        validate_value(decoded, schema or {})
-    except SchemaError:
-        return value
-    return decoded
+    return decoded if not isinstance(decoded, str) else value
 
 
 def parse_json_tolerant(text: str, schema: JsonObject | None = None) -> JsonValue:
@@ -177,7 +173,11 @@ def parse_json_tolerant(text: str, schema: JsonObject | None = None) -> JsonValu
         while True:
             starts = [
                 idx
-                for idx in (stripped.find("{", position), stripped.find("[", position))
+                for idx in (
+                    stripped.find("{", position),
+                    stripped.find("[", position),
+                    stripped.find('"', position),
+                )
                 if idx >= 0
             ]
             if not starts:
@@ -188,7 +188,9 @@ def parse_json_tolerant(text: str, schema: JsonObject | None = None) -> JsonValu
             except json.JSONDecodeError:
                 position = start + 1
                 continue
-            candidates.append(value)
+            candidates.append(
+                _decode_string_payload(value, schema) if isinstance(value, str) else value
+            )
             position = start + end
         if not candidates:
             raise first_error
