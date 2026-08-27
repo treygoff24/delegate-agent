@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import BinaryIO, TextIO, TypeAlias
 
 from delegate_agent import config as delegate_config
-from delegate_agent import private_io, profiles, redaction
+from delegate_agent import private_io, profiles, redaction, run_registry
 from delegate_agent.constants import KNOWN_ENGINES
 from delegate_agent.json_types import JsonObject
 
@@ -1758,52 +1758,60 @@ def write_discovery_cache(
     validate_snapshot(snapshot, expected_profile=_normalized_profile_name(profile_name))
     path = discovery_cache_path(profile_name, home=home)
 
-    payload = copy.deepcopy(snapshot)
-    existing: JsonObject | None = None
-    try:
-        existing = private_io.read_json_object(path)
-        if existing is not None:
-            validate_snapshot(
-                existing,
-                expected_profile=_normalized_profile_name(profile_name),
-                allow_unknown_harnesses=True,
-            )
-    except (private_io.RegistryJsonError, ValueError):
-        existing = None
+    def publish() -> None:
+        # Read and merge while holding the same advisory lock as every other
+        # context-aware writer. Without this critical section, two processes
+        # can both read the old whole snapshot and the later os.replace drops
+        # the first context even though each write is individually atomic.
+        payload = copy.deepcopy(snapshot)
+        existing: JsonObject | None = None
+        try:
+            existing = private_io.read_json_object(path)
+            if existing is not None:
+                validate_snapshot(
+                    existing,
+                    expected_profile=_normalized_profile_name(profile_name),
+                    allow_unknown_harnesses=True,
+                )
+        except (private_io.RegistryJsonError, ValueError):
+            existing = None
 
-    if env is not None:
-        context_key = discovery_context_key(env)
-        contexts: dict[str, JsonObject] = {}
-        if existing is not None and isinstance(existing.get("contexts"), dict):
-            contexts = {
-                key: copy.deepcopy(value)
-                for key, value in existing["contexts"].items()
-                if isinstance(key, str) and isinstance(value, dict)
+        if env is not None:
+            context_key = discovery_context_key(env)
+            contexts: dict[str, JsonObject] = {}
+            if existing is not None and isinstance(existing.get("contexts"), dict):
+                contexts = {
+                    key: copy.deepcopy(value)
+                    for key, value in existing["contexts"].items()
+                    if isinstance(key, str) and isinstance(value, dict)
+                }
+            contexts[context_key] = {
+                "capturedAt": snapshot["capturedAt"],
+                "harnesses": copy.deepcopy(snapshot["harnesses"]),
             }
-        contexts[context_key] = {
-            "capturedAt": snapshot["capturedAt"],
-            "harnesses": copy.deepcopy(snapshot["harnesses"]),
-        }
-        # Contexts are an LRU-by-capture bounded set.  A broken or malicious
-        # timestamp cannot make a record immortal; tie-break by key.
-        retained = sorted(
-            contexts.items(),
-            key=lambda item: (str(item[1].get("capturedAt", "")), item[0]),
-            reverse=True,
-        )[:_CACHE_CONTEXT_LIMIT]
-        payload["contexts"] = dict(retained)
-        # Keep the legacy projection useful to older callers while current
-        # readers select from ``contexts`` by their resolution key.
-    elif existing is not None and isinstance(existing.get("contexts"), dict):
-        # Setup and older direct callers do not pass an environment. Preserve
-        # context records rather than replacing them with a whole-snapshot write.
-        payload["contexts"] = copy.deepcopy(existing["contexts"])
+            # Contexts are an LRU-by-capture bounded set.  A broken or malicious
+            # timestamp cannot make a record immortal; tie-break by key.
+            retained = sorted(
+                contexts.items(),
+                key=lambda item: (str(item[1].get("capturedAt", "")), item[0]),
+                reverse=True,
+            )[:_CACHE_CONTEXT_LIMIT]
+            payload["contexts"] = dict(retained)
+            # Keep the legacy projection useful to older callers while current
+            # readers select from ``contexts`` by their resolution key.
+        elif existing is not None and isinstance(existing.get("contexts"), dict):
+            # Setup and older direct callers do not pass an environment. Preserve
+            # context records rather than replacing them with a whole-snapshot write.
+            payload["contexts"] = copy.deepcopy(existing["contexts"])
 
-    def refuse_to_replace_a_newer_cache() -> None:
-        if cache_schema_is_future(profile_name, home=home):
-            raise FutureCacheSchemaError(FUTURE_SCHEMA_CACHE_WARNING)
+        def refuse_to_replace_a_newer_cache() -> None:
+            if cache_schema_is_future(profile_name, home=home):
+                raise FutureCacheSchemaError(FUTURE_SCHEMA_CACHE_WARNING)
 
-    private_io.write_json_atomic(path, payload, before_replace=refuse_to_replace_a_newer_cache)
+        private_io.write_json_atomic(path, payload, before_replace=refuse_to_replace_a_newer_cache)
+
+    with run_registry.file_lock(path.with_name(f".{path.name}.lock")):
+        publish()
     _clear_discovery_cache_memo(path)
     return path
 

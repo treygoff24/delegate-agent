@@ -900,6 +900,37 @@ class DiscoveryCacheTests(unittest.TestCase):
             self.assertEqual(set(work["harnesses"]), {"codex"})
             self.assertEqual(set(personal["harnesses"]), {"droid"})
 
+    def test_concurrent_context_writes_merge_without_losing_a_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir()
+            barrier = threading.Barrier(2)
+
+            def write(env: dict[str, str], harness: str) -> None:
+                barrier.wait()
+                snapshot = self._snapshot("work", harness)
+                self.discovery.write_discovery_cache("work", snapshot, home=home, env=env)
+
+            threads = [
+                threading.Thread(
+                    target=write,
+                    args=({"PATH": "/ctx-a", "TMPDIR": "/tmp-a"}, "codex"),
+                ),
+                threading.Thread(
+                    target=write,
+                    args=({"PATH": "/ctx-b", "TMPDIR": "/tmp-b"}, "droid"),
+                ),
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+            raw = json.loads(
+                self.discovery.discovery_cache_path("work", home=home).read_text(encoding="utf-8")
+            )
+            self.assertEqual(len(raw["contexts"]), 2)
+
     def test_same_profile_writes_are_whole_snapshot_last_writer_wins(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
@@ -1513,7 +1544,10 @@ class FutureSchemaCacheTests(unittest.TestCase):
             # disk: everything but os.replace happens before the decision.
             self.assertEqual(len(staged), 1)
             self.assertTrue(any(name.endswith(".tmp") for name in staged[0]))
-            self.assertEqual(list(path.parent.iterdir()), [])
+            self.assertEqual(
+                [entry for entry in path.parent.iterdir() if not entry.name.endswith(".lock")],
+                [],
+            )
 
     def test_refresh_probes_fresh_and_preserves_the_newer_cache(self):
         with tempfile.TemporaryDirectory() as tmp:
