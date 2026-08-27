@@ -60,6 +60,11 @@ PERSONA_RESOLUTION_ERRORS = frozenset(
     }
 )
 WORKFLOW_LOCK_FD_ENV = "DELEGATE_WORKFLOW_LOCK_FD"
+WORKFLOW_HEARTBEAT_FILE = "heartbeat.json"
+WORKFLOW_HEARTBEAT_SCHEMA = "delegate.workflow-heartbeat.v1"
+WORKFLOW_WATCHDOG_INTERVAL_SECONDS = 0.25
+WORKFLOW_WATCHDOG_STALE_SECONDS = 5.0
+CHILD_WAIT_POLL_SECONDS = 0.25
 KILL_SUPERVISOR_WAIT_SECONDS = 5.0
 KILL_SUPERVISOR_FORCE_WAIT_SECONDS = 2.0
 WORKFLOW_EFFORT_VALUES = tuple(dict.fromkeys(reasoning.PI_THINKING_LEVELS))
@@ -243,6 +248,25 @@ def _cleanup_workflow_agent_run_workspace(workspace: Path, run_id: str) -> None:
                 return
 
 
+def _release_structured_retry_worktree_for_state(state: "WorkflowState", run_id: str) -> None:
+    if not run_registry.RUN_ID_RE.fullmatch(run_id):
+        return
+    root = _run_registry_root(state.workspace)
+    if not root.exists():
+        return
+    from delegate_agent import config as delegate_config
+    from delegate_agent import worktree_mgmt
+
+    auto_prune, auto_prune_days = delegate_config.worktree_auto_prune_settings(state.config)
+    worktree_mgmt.retire_completed_worktree(
+        root,
+        run_id,
+        retire_worktree=delegate_config.retire_worktree_on_completion(state.config),
+        auto_prune=auto_prune,
+        auto_prune_days=auto_prune_days,
+    )
+
+
 def cleanup_workflow_agent_workspaces(
     workspace: Path,
     wf_id: str,
@@ -266,7 +290,26 @@ class BudgetExceeded(RuntimeError):
 
 
 class GateExit(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        gate_key: str | None = None,
+        child: str | None = None,
+        result: JsonValue = None,
+    ) -> None:
+        super().__init__(message)
+        self.gate_key = gate_key
+        self.child = child
+        self.result = result
+
+
+class SupervisorWatchdogExit(RuntimeError):
+    """Internal cooperative cancellation raised by the supervisor watchdog."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"workflow supervisor watchdog: {reason}")
+        self.reason = reason
 
 
 @dataclass
@@ -326,6 +369,7 @@ class WorkflowState:
     namespace: str = "root"
     replay: dict[str, JsonValue] = field(default_factory=dict)
     replay_keys: set[str] = field(default_factory=set)
+    failed_replay_keys: set[str] = field(default_factory=set)
     started_without_result: set[str] = field(default_factory=set)
     exhausted_keys: set[str] = field(default_factory=set)
     claimed_keys: set[str] = field(default_factory=set)
@@ -345,6 +389,10 @@ class WorkflowState:
     label_lock: threading.Lock = field(default_factory=threading.Lock)
     completed_labels: dict[str, list[CompletedChild]] = field(default_factory=dict)
     supervisor_token: str = field(default_factory=lambda: os.urandom(8).hex())
+    replay_attempt: int = 0
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+    retry_worktree_runs: set[str] = field(default_factory=set)
+    pending_gate: list[tuple[str, str | None, JsonValue]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.journal_path = self.root / registry.JOURNAL_FILE
@@ -421,10 +469,21 @@ class WorkflowState:
                     self.exhausted_keys.add(key)
                 else:
                     self.exhausted_keys.discard(key)
-                self.replay_keys.add(key)
-                self.replay[key] = event.get("result")
+                result = event.get("result")
+                if _replay_result_failed(result, exhausted=event.get("exhausted") is True):
+                    # Failed/red results are useful audit history but are not a
+                    # safe source of truth for a resumed workflow.  Keep the
+                    # original event/key untouched and simply omit it from the
+                    # in-memory replay set on the next supervisor start.
+                    self.failed_replay_keys.add(key)
+                    self.replay_keys.discard(key)
+                    self.replay.pop(key, None)
+                else:
+                    self.failed_replay_keys.discard(key)
+                    self.replay_keys.add(key)
+                    self.replay[key] = result
                 self.started_without_result.discard(key)
-                if event.get("result") is not None and key in child_info:
+                if result is not None and key in child_info:
                     crun_id, cengine, cresumable, clabel = child_info[key]
                     if clabel is not None:
                         self.record_completed_child(clabel, crun_id, cengine, cresumable)
@@ -485,7 +544,82 @@ class WorkflowState:
                 )
             else:
                 self._write_status_locked(status="running", last_event=event)
+            self._touch_heartbeat_locked()
             return event
+
+    def _touch_heartbeat_locked(self) -> None:
+        payload: JsonObject = {
+            "schema": WORKFLOW_HEARTBEAT_SCHEMA,
+            "wfId": self.wf_id,
+            "supervisorPid": os.getpid(),
+            "supervisorToken": self.supervisor_token,
+            "heartbeatAt": run_registry.utc_now_iso(),
+            "heartbeatEpoch": time.time(),
+        }
+        with contextlib.suppress(OSError):
+            registry.write_json(self.root / WORKFLOW_HEARTBEAT_FILE, payload)
+
+    def touch_heartbeat(self) -> None:
+        with self.journal_lock:
+            self._touch_heartbeat_locked()
+
+    def persist_gate(
+        self, gate_key: str, *, child: str | None, result: JsonValue
+    ) -> GateExit:
+        """Persist a gate event and paused status as one journal-lock unit."""
+        with self.journal_lock:
+            status = registry.read_json(self.status_path) or {}
+            last_seq = status.get("lastSeq") if isinstance(status, dict) else None
+            if isinstance(last_seq, int):
+                self.sequence = max(self.sequence, last_seq)
+            for prior in registry.iter_journal(self.journal_path):
+                seq = prior.get("seq")
+                if isinstance(seq, int):
+                    self.sequence = max(self.sequence, seq)
+            if not (
+                status.get("status") == "paused" and status.get("gateKey") == gate_key
+            ):
+                self.sequence += 1
+                event: JsonObject = {
+                    "seq": self.sequence,
+                    "type": "gate",
+                    "at": run_registry.utc_now_iso(),
+                    "key": gate_key,
+                    "child": child,
+                    "result": result,
+                }
+                registry.append_jsonl(self.journal_path, event)
+                self._write_status_locked(
+                    status="paused",
+                    last_event=event,
+                    extra={"gateKey": gate_key, "gateResult": result},
+                )
+                self._touch_heartbeat_locked()
+        return GateExit(
+            "workflow gate checkpoint reached",
+            gate_key=gate_key,
+            child=child,
+            result=result,
+        )
+
+    def ensure_gate_durable(self, exc: GateExit) -> None:
+        if exc.gate_key is None:
+            return
+        status = registry.read_json(self.status_path) or {}
+        if status.get("status") == "paused" and status.get("gateKey") == exc.gate_key:
+            return
+        self.persist_gate(exc.gate_key, child=exc.child, result=exc.result)
+
+    def closed_gate_exit(self) -> GateExit:
+        if self.pending_gate:
+            gate_key, child, result = self.pending_gate[-1]
+            return GateExit(
+                "workflow gate is closed to new agent calls",
+                gate_key=gate_key,
+                child=child,
+                result=result,
+            )
+        return GateExit("workflow gate is closed to new agent calls")
 
     def _write_status_locked(
         self,
@@ -526,6 +660,7 @@ class WorkflowState:
     def write_status(self, status: str, **extra: JsonValue) -> None:
         with self.journal_lock:
             self._write_status_locked(status=status, extra=extra)
+            self._touch_heartbeat_locked()
 
     def notify_event(self, event: str, *, detail: str = "") -> None:
         """Send one metadata line to the workflow's --notify target, if any.
@@ -618,6 +753,14 @@ class WorkflowState:
     def active_agent(self) -> Iterator[None]:
         with self.gate_condition:
             if self.gate_state["stop_admitting"]:
+                if self.pending_gate:
+                    gate_key, child, result = self.pending_gate[-1]
+                    raise GateExit(
+                        "workflow gate is closed to new agent calls",
+                        gate_key=gate_key,
+                        child=child,
+                        result=result,
+                    )
                 raise GateExit("workflow gate is closed to new agent calls")
             self.gate_state["in_flight_agents"] += 1
         try:
@@ -631,6 +774,8 @@ class WorkflowState:
         with self.gate_condition:
             self.gate_state["stop_admitting"] = True
             while self.gate_state["in_flight_agents"]:
+                if self.cancel_event.is_set():
+                    raise SupervisorWatchdogExit("cancellation requested while closing gate")
                 self.gate_condition.wait(timeout=0.2)
 
     def inside_item_thread(self) -> bool:
@@ -780,11 +925,18 @@ class WorkflowDsl:
         threads: list[threading.Thread] = []
         bypass_item_cap = self.state.inside_item_thread()
         gate_errors: list[GateExit] = []
+        start_barrier = (
+            threading.Barrier(len(items) + 1)
+            if not bypass_item_cap and len(items) <= _item_thread_cap(self.state.config)
+            else None
+        )
 
         def run_item(index: int, item: object, pre_acquired: bool) -> None:
             # Nested primitives bypass the item-thread cap so an outer callback
             # cannot hold every slot while waiting for its child item threads.
             with self.state.item_slot(bypass=bypass_item_cap, pre_acquired=pre_acquired):
+                if start_barrier is not None:
+                    start_barrier.wait()
                 previous = item
                 with self.state.scope(f"{base_scope}/item#{index}"):
                     for stage_index, stage in enumerate(stages):
@@ -794,6 +946,8 @@ class WorkflowDsl:
                             except BudgetExceeded:
                                 previous = None
                                 break
+                            except SupervisorWatchdogExit:
+                                raise
                             except GateExit as exc:
                                 gate_errors.append(exc)
                                 previous = None
@@ -834,12 +988,15 @@ class WorkflowDsl:
                     self.state.item_semaphore.release()
                 raise
             threads.append(thread)
+        if start_barrier is not None:
+            start_barrier.wait()
         for thread in threads:
             thread.join()
         if gate_errors:
+            self.state.ensure_gate_durable(gate_errors[0])
             raise gate_errors[0]
         if self.state.gate_state["stop_admitting"]:
-            raise GateExit("workflow gate is closed to new agent calls")
+            raise self.state.closed_gate_exit()
         return results
 
     def parallel(self, thunks: list[Callable[[], object]]) -> list[object]:
@@ -854,6 +1011,11 @@ class WorkflowDsl:
         threads: list[threading.Thread] = []
         bypass_item_cap = self.state.inside_item_thread()
         gate_errors: list[GateExit] = []
+        start_barrier = (
+            threading.Barrier(len(thunks) + 1)
+            if not bypass_item_cap and len(thunks) <= _item_thread_cap(self.state.config)
+            else None
+        )
 
         def run_thunk(index: int, thunk: Callable[[], object], pre_acquired: bool) -> None:
             with (
@@ -861,9 +1023,13 @@ class WorkflowDsl:
                 self.state.scope(f"{base_scope}/thunk#{index}"),
             ):
                 try:
+                    if start_barrier is not None:
+                        start_barrier.wait()
                     results[index] = thunk()
                 except BudgetExceeded:
                     results[index] = None
+                except SupervisorWatchdogExit:
+                    raise
                 except GateExit as exc:
                     gate_errors.append(exc)
                     results[index] = None
@@ -895,12 +1061,15 @@ class WorkflowDsl:
                     self.state.item_semaphore.release()
                 raise
             threads.append(thread)
+        if start_barrier is not None:
+            start_barrier.wait()
         for thread in threads:
             thread.join()
         if gate_errors:
+            self.state.ensure_gate_durable(gate_errors[0])
             raise gate_errors[0]
         if self.state.gate_state["stop_admitting"]:
-            raise GateExit("workflow gate is closed to new agent calls")
+            raise self.state.closed_gate_exit()
         return results
 
     def judges(
@@ -977,8 +1146,13 @@ class WorkflowDsl:
             replay_keys=self.state.replay_keys,
             started_without_result=self.state.started_without_result,
             claimed_keys=self.state.claimed_keys,
+            failed_replay_keys=self.state.failed_replay_keys,
             lifetime_counter=self.state.lifetime_counter,
             gate_state=self.state.gate_state,
+            replay_attempt=self.state.replay_attempt,
+            cancel_event=self.state.cancel_event,
+            retry_worktree_runs=self.state.retry_worktree_runs,
+            pending_gate=self.state.pending_gate,
         )
         child_state.journal_lock = self.state.journal_lock
         child_state.scope_lock = self.state.scope_lock
@@ -994,10 +1168,19 @@ class WorkflowDsl:
             gate_key = _stable_hash(f"gate:{scope}:{_canonical_json(args)}")
             approved = registry.approval_allows(self.state.root, gate_key)
             if not approved:
-                self.state.close_gate_and_wait()
-                self.state.append_event("gate", key=gate_key, child=name, result=result)
-                self.state.write_status("paused", gateKey=gate_key, gateResult=result)
-                raise GateExit("workflow gate checkpoint reached")
+                self.state.pending_gate.append((gate_key, name, result))
+                try:
+                    # Let sibling pipeline/parallel callbacks that were
+                    # admitted in the same wave enter their child seam before
+                    # stop_admitting becomes visible.  This closes the race
+                    # where a fast gate callback otherwise parks before a
+                    # concurrently-started item has incremented active_agent.
+                    time.sleep(0.01)
+                    self.state.close_gate_and_wait()
+                    raise self.state.persist_gate(gate_key, child=name, result=result)
+                finally:
+                    if self.state.pending_gate and self.state.pending_gate[-1][0] == gate_key:
+                        self.state.pending_gate.pop()
         return result
 
     def agent(
@@ -1090,8 +1273,26 @@ class WorkflowDsl:
         }
         if resumable:
             opts["resumable"] = True
+        if timeout is not None:
+            opts["timeout"] = timeout
         path = self.state.next_agent_path()
-        key = _agent_key(path, prompt, opts)
+        base_key = _agent_key(path, prompt, opts)
+        legacy_opts = dict(opts)
+        legacy_opts.pop("timeout", None)
+        legacy_opts.pop("retryAttempt", None)
+        legacy_key = _agent_key(path, prompt, legacy_opts)
+        failed_key = base_key if base_key in self.state.failed_replay_keys else None
+        if legacy_key in self.state.failed_replay_keys:
+            failed_key = legacy_key
+        if failed_key is not None:
+            opts["retryAttempt"] = max(self.state.replay_attempt, 1)
+            key = _agent_key(path, prompt, opts)
+        elif base_key not in self.state.replay_keys and legacy_key in self.state.replay_keys:
+            # Pre-timeout-key journals remain replay-compatible without
+            # rewriting their historical key or event rows.
+            key = legacy_key
+        else:
+            key = base_key
         if key in self.state.replay_keys:
             result = self.state.replay[key]
             if key in self.state.exhausted_keys:
@@ -1267,6 +1468,8 @@ class WorkflowDsl:
                         allow_repo_persona=allow_repo_persona,
                         resumable=resumable,
                     )
+                except SupervisorWatchdogExit:
+                    raise
                 except PersonaDigestMismatch:
                     raise
                 except Exception as exc:
@@ -1623,6 +1826,8 @@ class WorkflowDsl:
             child = _delegate_child_result(raw_child)
             if first_child_run_id is None:
                 first_child_run_id = child.run_id
+            if child.run_id is not None:
+                self.state.retry_worktree_runs.add(child.run_id)
             if child.workspace_cleanup is not None:
                 if workspace_cleanup is not None and child.workspace_cleanup != workspace_cleanup:
                     _cleanup_structured_retry_workspace(child.workspace_cleanup)
@@ -1678,24 +1883,8 @@ class WorkflowDsl:
 
     def _release_structured_retry_worktree(self, run_id: str) -> None:
         """Release a completed structured retry's completion-time worktree hold."""
-        if not run_registry.RUN_ID_RE.fullmatch(run_id):
-            return
-        root = _run_registry_root(self.state.workspace)
-        if not root.exists():
-            return
-        from delegate_agent import config as delegate_config
-        from delegate_agent import worktree_mgmt
-
-        auto_prune, auto_prune_days = delegate_config.worktree_auto_prune_settings(
-            self.state.config
-        )
-        worktree_mgmt.retire_completed_worktree(
-            root,
-            run_id,
-            retire_worktree=delegate_config.retire_worktree_on_completion(self.state.config),
-            auto_prune=auto_prune,
-            auto_prune_days=auto_prune_days,
-        )
+        _release_structured_retry_worktree_for_state(self.state, run_id)
+        self.state.retry_worktree_runs.discard(run_id)
 
     def _run_delegate(
         self,
@@ -1779,7 +1968,13 @@ class WorkflowDsl:
                 "--input-json",
                 input_path,
             ]
-            completed = _run_child_command(argv, cwd=str(self.state.workspace), timeout=timeout)
+            completed = _run_child_command(
+                argv,
+                cwd=str(self.state.workspace),
+                timeout=timeout,
+                heartbeat=self.state.touch_heartbeat,
+                cancel_event=self.state.cancel_event,
+            )
         except subprocess.TimeoutExpired as exc:
             cancel_workflow_agent_child(self.state.workspace, self.state.wf_id, workflow_agent_key)
             # key and label were both in scope here and neither was recorded, so
@@ -1855,6 +2050,16 @@ class WorkflowDsl:
                 "workflow child could not resolve the parent-pinned persona"
             )
         if completed.returncode != 0:
+            failure_reason = (
+                result.get("failureReason") or result.get("error")
+                if isinstance(result, dict)
+                else None
+            )
+            if return_metadata and failure_reason in {"output_limit_exceeded", "agent_timeout"}:
+                # Preserve the failed run's workspace/branch for the structured
+                # retry protocol.  Cleaning it here would discard checkpoint
+                # commits before the retry can attach to the lane.
+                return _child_result_from_payload(result, text=None)
             cleanup = (
                 result.get("temporaryWorkspaceCleanup")
                 if isinstance(result, dict)
@@ -1972,7 +2177,12 @@ class WorkflowDsl:
         if retries is not None:
             opts["retries"] = retries
         path = self.state.next_agent_path()
-        key = _followup_key(path, prior_label, prompt, opts)
+        base_key = _followup_key(path, prior_label, prompt, opts)
+        if base_key in self.state.failed_replay_keys:
+            opts["retryAttempt"] = max(self.state.replay_attempt, 1)
+            key = _followup_key(path, prior_label, prompt, opts)
+        else:
+            key = base_key
         if key in self.state.replay_keys:
             result = self.state.replay[key]
             self.state.append_event(
@@ -2092,6 +2302,8 @@ class WorkflowDsl:
                     timeout=timeout,
                     retries=retries,
                 )
+            except SupervisorWatchdogExit:
+                raise
             except Exception as exc:
                 self.state.append_event(
                     "agent_failed",
@@ -2235,7 +2447,13 @@ class WorkflowDsl:
             if timeout is not None:
                 argv.extend(["--timeout", str(max(1, math.ceil(timeout)))])
             argv.extend(["--prompt-file", prompt_path, handle])
-            completed = _run_child_command(argv, cwd=str(self.state.workspace), timeout=timeout)
+            completed = _run_child_command(
+                argv,
+                cwd=str(self.state.workspace),
+                timeout=timeout,
+                heartbeat=self.state.touch_heartbeat,
+                cancel_event=self.state.cancel_event,
+            )
         except subprocess.TimeoutExpired:
             cancel_workflow_agent_child(self.state.workspace, self.state.wf_id, workflow_agent_key)
             self.state.append_event("agent_timeout", engine=engine, timeout=timeout)
@@ -2289,6 +2507,8 @@ def _run_child_command(
     *,
     cwd: str,
     timeout: int | float | None,
+    heartbeat: Callable[[], None] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     process = subprocess.Popen(  # nosec B603 - argv is Delegate's own validated CLI.
         argv,
@@ -2297,24 +2517,46 @@ def _run_child_command(
         stderr=subprocess.PIPE,
         start_new_session=True,
     )
-    try:
-        stdout, stderr = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
-        _terminate_process_group(process, signal.SIGTERM)
+    deadline = time.monotonic() + timeout if timeout is not None else None
+    while True:
+        wait_seconds = CHILD_WAIT_POLL_SECONDS
+        if deadline is not None:
+            wait_seconds = min(wait_seconds, max(deadline - time.monotonic(), 0.0))
         try:
-            stdout, stderr = process.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
-            _terminate_process_group(process, signal.SIGKILL)
-            stdout, stderr = process.communicate()
-        exc.output = stdout
-        exc.stderr = stderr
-        raise exc
+            stdout, stderr = process.communicate(timeout=wait_seconds)
+        except subprocess.TimeoutExpired as exc:
+            if heartbeat is not None:
+                heartbeat()
+            if cancel_event is not None and cancel_event.is_set():
+                _terminate_and_reap_child(process)
+                raise SupervisorWatchdogExit("child wait interrupted") from exc
+            if deadline is not None and time.monotonic() >= deadline:
+                _terminate_process_group(process, signal.SIGTERM)
+                try:
+                    stdout, stderr = process.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    _terminate_process_group(process, signal.SIGKILL)
+                    stdout, stderr = process.communicate()
+                exc.output = stdout
+                exc.stderr = stderr
+                raise exc
+            continue
+        break
     return subprocess.CompletedProcess(
         argv,
         process.returncode,
         stdout,
         stderr,
     )
+
+
+def _terminate_and_reap_child(process: subprocess.Popen[bytes]) -> None:
+    _terminate_process_group(process, signal.SIGTERM)
+    try:
+        process.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        _terminate_process_group(process, signal.SIGKILL)
+        process.communicate()
 
 
 def _terminate_process_group(process: subprocess.Popen[bytes], sig: signal.Signals) -> None:
@@ -2438,6 +2680,10 @@ def _canonical_json(value: object) -> str:
 
 def _gate_failed(result: object) -> bool:
     return result is None or (isinstance(result, dict) and result.get("ok") is False)
+
+
+def _replay_result_failed(result: object, *, exhausted: bool = False) -> bool:
+    return exhausted or _gate_failed(result)
 
 
 def resolve_workflow_reference(name_or_path: str, parent_script_dir: Path) -> Path:
@@ -2686,6 +2932,79 @@ def _held_workflow_lock(root: Path) -> Iterator[None]:
                 os.close(fd)
 
 
+def _workflow_watchdog_stale_seconds(config: JsonObject) -> float:
+    raw = os.environ.get("DELEGATE_WORKFLOW_WATCHDOG_TIMEOUT_SECONDS")
+    if raw is None:
+        workflows = config.get("workflows")
+        raw = workflows.get("watchdogTimeoutSeconds") if isinstance(workflows, dict) else None
+    try:
+        value = float(raw) if raw is not None else WORKFLOW_WATCHDOG_STALE_SECONDS
+    except (TypeError, ValueError):
+        value = WORKFLOW_WATCHDOG_STALE_SECONDS
+    return value if math.isfinite(value) and value > 0 else WORKFLOW_WATCHDOG_STALE_SECONDS
+
+
+class _SupervisorWatchdog:
+    def __init__(
+        self,
+        state: WorkflowState,
+        *,
+        interval_seconds: float,
+        stale_seconds: float,
+    ) -> None:
+        self.state = state
+        self.interval_seconds = interval_seconds
+        self.stale_seconds = stale_seconds
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"delegate-workflow-watchdog-{state.wf_id}",
+            daemon=True,
+        )
+        self.reason: str | None = None
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread.is_alive() and self._thread is not threading.current_thread():
+            self._thread.join(timeout=max(self.interval_seconds * 4, 1.0))
+
+    def _run(self) -> None:
+        missing_samples = 0
+        while not self._stop.wait(self.interval_seconds):
+            reason = self._check(missing_samples)
+            if reason is None:
+                missing_samples = 0
+                continue
+            if reason == "state_missing":
+                missing_samples += 1
+                if missing_samples < 2:
+                    continue
+            self.reason = reason
+            self.state.cancel_event.set()
+            return
+
+    def _check(self, missing_samples: int) -> str | None:
+        root = self.state.root
+        status_path = root / registry.STATUS_FILE
+        if not root.exists() or not status_path.exists():
+            return "state_missing"
+        status = registry.read_json(status_path)
+        if not isinstance(status, dict):
+            return "state_missing"
+        if status.get("status") in {"succeeded", "failed", "killed"}:
+            return "terminal"
+        heartbeat = registry.read_json(root / WORKFLOW_HEARTBEAT_FILE)
+        timestamp = heartbeat.get("heartbeatEpoch") if isinstance(heartbeat, dict) else None
+        if not isinstance(timestamp, (int, float)) or isinstance(timestamp, bool):
+            return "heartbeat_stale"
+        if time.time() - float(timestamp) > self.stale_seconds:
+            return "heartbeat_stale"
+        return None
+
+
 def run_supervisor(
     *,
     workspace: Path,
@@ -2718,6 +3037,12 @@ def run_supervisor(
             notify_target=notify_spec if isinstance(notify_spec, str) and notify_spec else None,
         )
         state.write_status("running")
+        watchdog = _SupervisorWatchdog(
+            state,
+            interval_seconds=WORKFLOW_WATCHDOG_INTERVAL_SECONDS,
+            stale_seconds=_workflow_watchdog_stale_seconds(config),
+        )
+        watchdog.start()
         try:
             result = execute_workflow(state)
         except GateExit:
@@ -2730,6 +3055,27 @@ def run_supervisor(
                 detail=f"awaiting approval{f' at {gate_key}' if isinstance(gate_key, str) else ''}",
             )
             return 0
+        except SupervisorWatchdogExit as exc:
+            tb = traceback.format_exc()[-4000:]
+            if root.exists():
+                with contextlib.suppress(Exception):
+                    state.append_event("workflow_watchdog", reason=exc.reason, traceback=tb)
+                with contextlib.suppress(Exception):
+                    registry.write_result(
+                        root,
+                        {
+                            "ok": False,
+                            "wfId": wf_id,
+                            "error": str(exc),
+                            "traceback": tb,
+                        },
+                    )
+                with contextlib.suppress(Exception):
+                    state.write_status(
+                        "failed", error=str(exc), traceback=tb, watchdogReason=exc.reason
+                    )
+                state.notify_event("failed", detail=str(exc)[:160])
+            return 1
         except BaseException as exc:
             tb = traceback.format_exc()[-4000:]
             state.append_event("workflow_failed", error=str(exc), traceback=tb)
@@ -2739,11 +3085,18 @@ def run_supervisor(
             state.write_status("failed", error=str(exc), traceback=tb)
             state.notify_event("failed", detail=str(exc)[:160])
             return 1
-        registry.write_result(root, {"ok": True, "wfId": wf_id, "result": result})
-        state.append_event("workflow_finished", result=result)
-        state.write_status("succeeded")
-        state.notify_event("succeeded")
-        return 0
+        else:
+            registry.write_result(root, {"ok": True, "wfId": wf_id, "result": result})
+            state.append_event("workflow_finished", result=result)
+            state.write_status("succeeded")
+            state.notify_event("succeeded")
+            return 0
+        finally:
+            watchdog.stop()
+            for run_id in tuple(state.retry_worktree_runs):
+                with contextlib.suppress(Exception):
+                    _release_structured_retry_worktree_for_state(state, run_id)
+                state.retry_worktree_runs.discard(run_id)
 
 
 def detach_supervisor(argv: list[str], *, cwd: Path, lock_fd: int | None = None) -> None:

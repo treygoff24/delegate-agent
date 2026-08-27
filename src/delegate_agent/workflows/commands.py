@@ -241,11 +241,14 @@ def emit_run(
     ]
     try:
         if command.resume:
+            prior_attempt = status.get("replayAttempt")
+            replay_attempt = prior_attempt if isinstance(prior_attempt, int) and prior_attempt >= 0 else 0
             status.update(
                 {
                     "ok": True,
                     "status": "starting",
                     "replayJournal": not resume_from_dry_run,
+                    "replayAttempt": replay_attempt + 1,
                     "updatedAt": run_registry.utc_now_iso(),
                 }
             )
