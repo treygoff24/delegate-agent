@@ -1,7 +1,22 @@
+"""Workspace-scoped run Registry and its advisory-lock durability contract.
+
+Registry mutations serialize through ``registry_lock``. Terminal finalization
+first tries that lock for the configured bounded budget
+(``DELEGATE_REGISTRY_LOCK_TIMEOUT_SECONDS`` or
+``tracking.registryLockTimeoutSec``). If contention outlives the budget, the
+runner atomically publishes ``runs/<runId>/finalize-wal.json`` containing a
+complete state/snapshot pair and returns the child's real result. Direct
+readers continue to see the last canonical pair until the next successful lock
+holder replays the WAL. Replay is owned only by ``registry_lock``, is
+idempotent, and quarantines malformed records; a cancellation marker or
+cancelled state always takes precedence over a WAL success.
+"""
+
 from __future__ import annotations
 
 import fcntl
 import json
+import math
 import os
 import re
 import secrets
@@ -61,8 +76,15 @@ LEGACY_RESUME_SCHEMA_RE = re.compile(r"^resume-schema-(?P<pid>[1-9][0-9]*)-[0-9a
 RUN_PRUNE_ERROR_EXIT_CODE = 1
 REGISTRY_LOCK_NAME = ".registry.lock"
 RETENTION_LOCK_NAME = ".retention.lock"
-REGISTRY_LOCK_TIMEOUT_SECONDS = 30.0
+# Registry mutations normally finish quickly, but worktree cleanup and other
+# independent lanes can legitimately hold this advisory lock for more than the
+# old 30-second ceiling.  Finalization also has a WAL fallback, so this is a
+# bounded wait rather than an assumption that the lock is always available.
+REGISTRY_LOCK_TIMEOUT_SECONDS = 120.0
+REGISTRY_LOCK_TIMEOUT_ENV = "DELEGATE_REGISTRY_LOCK_TIMEOUT_SECONDS"
 REGISTRY_LOCK_POLL_SECONDS = 0.05
+FINALIZE_WAL_FILE = "finalize-wal.json"
+FINALIZE_WAL_SCHEMA = "delegate.finalize-wal.v1"
 PRIVATE_DIR_MODE = private_io.PRIVATE_DIR_MODE
 PRIVATE_FILE_MODE = private_io.PRIVATE_FILE_MODE
 PRIVATE_RECORD_READ_MAX_BYTES = private_io.PRIVATE_RECORD_READ_MAX_BYTES
@@ -108,6 +130,42 @@ def registry_root_if_exists(workspace: Path) -> Path | None:
     if not index_path(root).exists():
         return None
     return root
+
+
+def resolve_registry_lock_timeout_seconds(config: JsonObject | None = None) -> float:
+    """Resolve the bounded registry-lock wait from env, then config.
+
+    ``DELEGATE_REGISTRY_LOCK_TIMEOUT_SECONDS`` is intentionally a process-level
+    override for operators diagnosing contention.  Configuration lives under
+    ``tracking.registryLockTimeoutSec`` (with the plural spelling accepted for
+    compatibility with early adopters).  Invalid values fall back to the safe
+    embedded default; config validation is responsible for rejecting malformed
+    user configuration before a launch.
+    """
+
+    candidates: list[object] = []
+    raw_env = os.environ.get(REGISTRY_LOCK_TIMEOUT_ENV)
+    if raw_env is not None:
+        candidates.append(raw_env)
+    if isinstance(config, dict):
+        tracking = config.get("tracking")
+        if isinstance(tracking, dict):
+            candidates.extend(
+                [tracking.get("registryLockTimeoutSec"), tracking.get("registryLockTimeoutSeconds")]
+            )
+    for value in candidates:
+        try:
+            parsed = float(value) if isinstance(value, str) else value
+        except (TypeError, ValueError):
+            continue
+        if (
+            isinstance(parsed, (int, float))
+            and not isinstance(parsed, bool)
+            and math.isfinite(parsed)
+            and parsed >= 0
+        ):
+            return float(parsed)
+    return REGISTRY_LOCK_TIMEOUT_SECONDS
 
 
 def git_info_exclude_path(git_root: Path) -> Path | None:
@@ -205,9 +263,16 @@ def ensure_git_delegate_exclude(git_root: Path) -> None:
     write_text_atomic(exclude_file, existing + GIT_EXCLUDE_ENTRY + "\n")
 
 
-def ensure_registry(workspace: Path, *, workspace_kind: str) -> Path:
+def ensure_registry(
+    workspace: Path,
+    *,
+    workspace_kind: str,
+    timeout_seconds: float | None = None,
+) -> Path:
     root = delegate_root(workspace)
-    with registry_lock(root):
+    if timeout_seconds is None:
+        timeout_seconds = resolve_registry_lock_timeout_seconds()
+    with registry_lock(root, timeout_seconds=timeout_seconds):
         ensure_private_dir(aliases_dir(root))
         ensure_private_dir(runs_dir(root))
         if workspace_kind == "git":
@@ -252,13 +317,136 @@ def retention_lock_path(registry_root: Path) -> Path:
     return registry_root / RETENTION_LOCK_NAME
 
 
+def finalize_wal_path(registry_root: Path, run_id: str) -> Path:
+    """Return the per-run write-ahead terminal-finalization record path."""
+    return run_directory(registry_root, run_id) / FINALIZE_WAL_FILE
+
+
+def write_finalize_wal(
+    registry_root: Path,
+    run_id: str,
+    *,
+    status: str,
+    state: JsonObject,
+    snapshot: JsonObject,
+) -> None:
+    """Publish a terminal finalization record without taking the registry lock.
+
+    The record is a complete replacement for ``state.json`` and
+    ``snapshot.json``. ``write_json_atomic`` serializes a temporary file and
+    publishes it with one rename, so readers see either the old record or the
+    complete WAL, never a partial JSON document. Readers intentionally continue to see the prior
+    canonical state until a future successful ``registry_lock`` acquisition
+    replays this record.
+    """
+    if not RUN_ID_RE.fullmatch(run_id):
+        raise ValueError(f"run id does not match expected format: {run_id}")
+    payload: JsonObject = {
+        "schema": FINALIZE_WAL_SCHEMA,
+        "runId": run_id,
+        "status": status,
+        "createdAt": utc_now_iso(),
+        "state": state,
+        "snapshot": snapshot,
+    }
+    write_json_atomic(finalize_wal_path(registry_root, run_id), payload)
+
+
+def _quarantine_finalize_wal(path: Path, reason: str) -> None:
+    """Move one unusable WAL aside without allowing replay to fail the lock holder."""
+    stamp = f"{int(time.time() * 1_000_000)}-{os.getpid()}"
+    quarantine = path.with_name(f"{path.name}.corrupt.{stamp}")
+    try:
+        os.replace(path, quarantine)
+    except OSError:
+        return
+    with suppress(OSError):
+        write_private_text_atomic(quarantine.with_suffix(quarantine.suffix + ".reason"), reason)
+
+
+def _replay_finalize_wal_locked(registry_root: Path) -> None:
+    """Fold pending terminal WAL records while ``registry_lock`` is held.
+
+    Replay is deliberately owned here, at the one lock seam shared by every
+    mutator.  It is idempotent: a terminal canonical state wins over a stale
+    duplicate WAL, and successful publication removes the WAL.  A cancelled
+    state or ``cancelRequested`` marker always wins over a WAL success record.
+    Malformed records are quarantined and never abort the caller's mutation.
+    """
+    runs = runs_dir(registry_root)
+    try:
+        candidates = list(runs.iterdir())
+    except OSError:
+        return
+    for run_path in candidates:
+        if run_path.is_symlink() or not run_path.is_dir():
+            continue
+        run_id = run_path.name
+        if not RUN_ID_RE.fullmatch(run_id):
+            continue
+        wal_path = run_path / FINALIZE_WAL_FILE
+        if not wal_path.exists() or wal_path.is_symlink():
+            continue
+        try:
+            wal = read_json_object(wal_path)
+            if not isinstance(wal, dict):
+                raise RegistryJsonError("WAL root is not an object")
+            wal_status = wal.get("status")
+            if (
+                wal.get("schema") != FINALIZE_WAL_SCHEMA
+                or wal.get("runId") != run_id
+                or wal_status not in TERMINAL_STATUSES
+            ):
+                raise RegistryJsonError("WAL schema or run id is invalid")
+            state = wal.get("state")
+            snapshot = wal.get("snapshot")
+            if not isinstance(state, dict) or not isinstance(snapshot, dict):
+                raise RegistryJsonError("WAL state and snapshot must be objects")
+            if state.get("status") != wal_status or snapshot.get("status") != wal_status:
+                raise RegistryJsonError("WAL status does not match state and snapshot")
+            current = load_run_state_or_none(registry_root, run_id)
+            current_status = current.get("status") if isinstance(current, dict) else None
+            if current_status in TERMINAL_STATUSES and current_status != STATUS_CANCELLED:
+                wal_path.unlink(missing_ok=True)
+                continue
+            if current_status == STATUS_CANCELLED or (
+                isinstance(current, dict) and current.get("cancelRequested") is True
+            ):
+                state = dict(state)
+                snapshot = dict(snapshot)
+                state["status"] = STATUS_CANCELLED
+                state["exitCode"] = 1
+                state["failureReason"] = "cancelled_by_user"
+                state.pop("error", None)
+                state.pop("message", None)
+                state.pop("nextActions", None)
+                if isinstance(current, dict):
+                    for key in ("cancelRequested", "cancelRequestedAt"):
+                        if key in current:
+                            state[key] = current[key]
+                snapshot["status"] = STATUS_CANCELLED
+                snapshot["exitCode"] = 1
+                snapshot["ok"] = False
+                snapshot["failureReason"] = "cancelled_by_user"
+                snapshot.pop("error", None)
+                snapshot.pop("message", None)
+                snapshot.pop("nextActions", None)
+            write_json_atomic(run_path / STATE_FILE, state)
+            write_snapshot(run_path, snapshot)
+            wal_path.unlink(missing_ok=True)
+        except (OSError, RegistryJsonError, TypeError, ValueError) as exc:
+            _quarantine_finalize_wal(wal_path, str(exc))
+
+
 @contextmanager
 def file_lock(
     lock_path: Path,
     *,
-    timeout_seconds: float = REGISTRY_LOCK_TIMEOUT_SECONDS,
+    timeout_seconds: float | None = None,
 ) -> Iterator[None]:
     """Acquire a private advisory lock; flock releases it on process exit."""
+    if timeout_seconds is None:
+        timeout_seconds = resolve_registry_lock_timeout_seconds()
     ensure_private_dir(lock_path.parent)
     fd = open_private_file(lock_path, os.O_CREAT | os.O_RDWR)
     try:
@@ -285,10 +473,17 @@ def file_lock(
 def registry_lock(
     registry_root: Path,
     *,
-    timeout_seconds: float = REGISTRY_LOCK_TIMEOUT_SECONDS,
+    timeout_seconds: float | None = None,
 ) -> Iterator[None]:
-    """Serialize registry mutations."""
+    """Serialize registry mutations and replay pending finalization WALs.
+
+    Finalizers that cannot acquire this lock within their bounded budget publish
+    ``runs/<runId>/finalize-wal.json`` instead.  Every later successful lock
+    holder replays those records before its own mutation; direct readers retain
+    the last canonical state until that replay occurs.
+    """
     with file_lock(registry_lock_path(registry_root), timeout_seconds=timeout_seconds):
+        _replay_finalize_wal_locked(registry_root)
         yield
 
 
@@ -298,11 +493,14 @@ def register_run(
     harness: str,
     run_id: str | None = None,
     metadata: JsonObject | None = None,
+    timeout_seconds: float | None = None,
 ) -> tuple[str, str]:
     run_id = run_id or generate_run_id()
     if not RUN_ID_RE.match(run_id):
         raise ValueError(f"run id does not match expected format: {run_id}")
-    with registry_lock(registry_root):
+    if timeout_seconds is None:
+        timeout_seconds = resolve_registry_lock_timeout_seconds()
+    with registry_lock(registry_root, timeout_seconds=timeout_seconds):
         alias = allocate_alias(registry_root, harness)
         index = load_index(registry_root)
         # Stamp an explicit registration ordinal so the latest-run tiebreaker
