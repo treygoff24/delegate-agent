@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import hashlib
+import inspect
 import io
 import json
 import math
@@ -248,7 +249,7 @@ def _cleanup_workflow_agent_run_workspace(workspace: Path, run_id: str) -> None:
                 return
 
 
-def _release_structured_retry_worktree_for_state(state: "WorkflowState", run_id: str) -> None:
+def _release_structured_retry_worktree_for_state(state: WorkflowState, run_id: str) -> None:
     if not run_registry.RUN_ID_RE.fullmatch(run_id):
         return
     root = _run_registry_root(state.workspace)
@@ -470,18 +471,13 @@ class WorkflowState:
                 else:
                     self.exhausted_keys.discard(key)
                 result = event.get("result")
-                if _replay_result_failed(result, exhausted=event.get("exhausted") is True):
-                    # Failed/red results are useful audit history but are not a
-                    # safe source of truth for a resumed workflow.  Keep the
-                    # original event/key untouched and simply omit it from the
-                    # in-memory replay set on the next supervisor start.
-                    self.failed_replay_keys.add(key)
-                    self.replay_keys.discard(key)
-                    self.replay.pop(key, None)
-                else:
-                    self.failed_replay_keys.discard(key)
-                    self.replay_keys.add(key)
-                    self.replay[key] = result
+                # Historical v1 journals replay every completed result,
+                # including an exhausted ``None``.  CP2's explicit reject()
+                # tombstone adds invalidation without reinterpreting these
+                # existing rows.
+                self.failed_replay_keys.discard(key)
+                self.replay_keys.add(key)
+                self.replay[key] = result
                 self.started_without_result.discard(key)
                 if result is not None and key in child_info:
                     crun_id, cengine, cresumable, clabel = child_info[key]
@@ -563,10 +559,32 @@ class WorkflowState:
         with self.journal_lock:
             self._touch_heartbeat_locked()
 
-    def persist_gate(
-        self, gate_key: str, *, child: str | None, result: JsonValue
-    ) -> GateExit:
-        """Persist a gate event and paused status as one journal-lock unit."""
+    def _latest_gate_event_locked(self, gate_key: str) -> JsonObject | None:
+        latest: JsonObject | None = None
+        for event in registry.iter_journal(self.journal_path):
+            if event.get("type") == "gate" and event.get("key") == gate_key:
+                latest = event
+        return latest
+
+    def _write_gate_projection_locked(self, event: JsonObject) -> None:
+        gate_key = event.get("key")
+        if not isinstance(gate_key, str):
+            return
+        self._write_status_locked(
+            status="paused",
+            last_event=event,
+            extra={"gateKey": gate_key, "gateResult": event.get("result")},
+        )
+        self._touch_heartbeat_locked()
+
+    def park_gate(self, gate_key: str, *, child: str | None, result: JsonValue) -> GateExit:
+        """Durably record a gate before closing admission and draining agents.
+
+        The journal is the authority.  ``status.json`` is only a recoverable
+        projection, so a supervisor death while draining cannot lose the gate
+        key.  Re-parking an existing key reuses its journal event and never
+        appends a duplicate.
+        """
         with self.journal_lock:
             status = registry.read_json(self.status_path) or {}
             last_seq = status.get("lastSeq") if isinstance(status, dict) else None
@@ -576,11 +594,10 @@ class WorkflowState:
                 seq = prior.get("seq")
                 if isinstance(seq, int):
                     self.sequence = max(self.sequence, seq)
-            if not (
-                status.get("status") == "paused" and status.get("gateKey") == gate_key
-            ):
+            event = self._latest_gate_event_locked(gate_key)
+            if event is None:
                 self.sequence += 1
-                event: JsonObject = {
+                event = {
                     "seq": self.sequence,
                     "type": "gate",
                     "at": run_registry.utc_now_iso(),
@@ -588,13 +605,23 @@ class WorkflowState:
                     "child": child,
                     "result": result,
                 }
+                # ``gate`` is in DURABLE_EVENT_TYPES, so append_jsonl flushes
+                # and fsyncs before anything below can close admission.
                 registry.append_jsonl(self.journal_path, event)
-                self._write_status_locked(
-                    status="paused",
-                    last_event=event,
-                    extra={"gateKey": gate_key, "gateResult": result},
-                )
-                self._touch_heartbeat_locked()
+
+        # Keep the metadata available to agents that race with the admission
+        # close.  This is intentionally after the durable append above.
+        self.pending_gate.append((gate_key, child, result))
+        try:
+            self.close_gate_and_wait()
+        finally:
+            # A watchdog may interrupt the drain.  The journal event still
+            # exists; make the projection recoverable before propagating the
+            # interruption so approve/resume never depends on status.json.
+            with self.journal_lock:
+                self._write_gate_projection_locked(event)
+            if self.pending_gate and self.pending_gate[-1][0] == gate_key:
+                self.pending_gate.pop()
         return GateExit(
             "workflow gate checkpoint reached",
             gate_key=gate_key,
@@ -602,13 +629,24 @@ class WorkflowState:
             result=result,
         )
 
+    def persist_gate(self, gate_key: str, *, child: str | None, result: JsonValue) -> GateExit:
+        """Backward-compatible alias for the journal-authoritative gate park."""
+        return self.park_gate(gate_key, child=child, result=result)
+
     def ensure_gate_durable(self, exc: GateExit) -> None:
         if exc.gate_key is None:
             return
-        status = registry.read_json(self.status_path) or {}
-        if status.get("status") == "paused" and status.get("gateKey") == exc.gate_key:
-            return
-        self.persist_gate(exc.gate_key, child=exc.child, result=exc.result)
+        with self.journal_lock:
+            event = self._latest_gate_event_locked(exc.gate_key)
+            status = registry.read_json(self.status_path) or {}
+            if event is not None:
+                # Rebuild the projection from the journal, even if a stale
+                # status write raced with the gate drain.
+                self._write_gate_projection_locked(event)
+                return
+            if status.get("status") == "paused" and status.get("gateKey") == exc.gate_key:
+                return
+        self.park_gate(exc.gate_key, child=exc.child, result=exc.result)
 
     def closed_gate_exit(self) -> GateExit:
         if self.pending_gate:
@@ -1006,6 +1044,16 @@ class WorkflowDsl:
             raise ValueError("parallel() item limit is 4096")
         if any(not callable(thunk) for thunk in thunks):
             raise TypeError("parallel() items must be functions")
+        if self.state.dry_run:
+            # Dry-run output is a plan, not concurrent execution.  Preserve
+            # source order so the reported call list is deterministic.
+            results: list[object] = []
+            for thunk in thunks:
+                try:
+                    results.append(thunk())
+                except (BudgetExceeded, GateExit):
+                    results.append(None)
+            return results
         base_scope = self.state.next_child_scope("parallel")
         results: list[object] = [None] * len(thunks)
         threads: list[threading.Thread] = []
@@ -1176,8 +1224,7 @@ class WorkflowDsl:
                     # where a fast gate callback otherwise parks before a
                     # concurrently-started item has incremented active_agent.
                     time.sleep(0.01)
-                    self.state.close_gate_and_wait()
-                    raise self.state.persist_gate(gate_key, child=name, result=result)
+                    raise self.state.park_gate(gate_key, child=name, result=result)
                 finally:
                     if self.state.pending_gate and self.state.pending_gate[-1][0] == gate_key:
                         self.state.pending_gate.pop()
@@ -1276,9 +1323,13 @@ class WorkflowDsl:
         if timeout is not None:
             opts["timeout"] = timeout
         path = self.state.next_agent_path()
-        base_key = _agent_key(path, prompt, opts)
-        legacy_opts = dict(opts)
-        legacy_opts.pop("timeout", None)
+        # v1 cache keys intentionally omit timeout.  The timeout is execution
+        # metadata, not structural identity; changing it must not fork a
+        # paused production workflow.  CP2 adds an explicit v2 key lane.
+        key_opts = dict(opts)
+        key_opts.pop("timeout", None)
+        base_key = _agent_key(path, prompt, key_opts)
+        legacy_opts = dict(key_opts)
         legacy_opts.pop("retryAttempt", None)
         legacy_key = _agent_key(path, prompt, legacy_opts)
         failed_key = base_key if base_key in self.state.failed_replay_keys else None
@@ -1968,13 +2019,7 @@ class WorkflowDsl:
                 "--input-json",
                 input_path,
             ]
-            completed = _run_child_command(
-                argv,
-                cwd=str(self.state.workspace),
-                timeout=timeout,
-                heartbeat=self.state.touch_heartbeat,
-                cancel_event=self.state.cancel_event,
-            )
+            completed = _run_child_command_for_state(argv, state=self.state, timeout=timeout)
         except subprocess.TimeoutExpired as exc:
             cancel_workflow_agent_child(self.state.workspace, self.state.wf_id, workflow_agent_key)
             # key and label were both in scope here and neither was recorded, so
@@ -2447,13 +2492,7 @@ class WorkflowDsl:
             if timeout is not None:
                 argv.extend(["--timeout", str(max(1, math.ceil(timeout)))])
             argv.extend(["--prompt-file", prompt_path, handle])
-            completed = _run_child_command(
-                argv,
-                cwd=str(self.state.workspace),
-                timeout=timeout,
-                heartbeat=self.state.touch_heartbeat,
-                cancel_event=self.state.cancel_event,
-            )
+            completed = _run_child_command_for_state(argv, state=self.state, timeout=timeout)
         except subprocess.TimeoutExpired:
             cancel_workflow_agent_child(self.state.workspace, self.state.wf_id, workflow_agent_key)
             self.state.append_event("agent_timeout", engine=engine, timeout=timeout)
@@ -2500,6 +2539,37 @@ class WorkflowDsl:
         if isinstance(assistant, str):
             return assistant
         return ""
+
+
+def _run_child_command_for_state(
+    argv: list[str],
+    *,
+    state: object,
+    timeout: int | float | None,
+) -> subprocess.CompletedProcess[bytes]:
+    """Invoke the child wait with lifecycle callbacks when the seam supports them.
+
+    A few focused tests replace ``_run_child_command`` with a narrow
+    side-effect function.  Filter only those injected callbacks while keeping
+    the real runtime on the heartbeat/cancellation path.
+    """
+    kwargs: dict[str, object] = {"cwd": str(state.workspace), "timeout": timeout}
+    heartbeat = getattr(state, "touch_heartbeat", None)
+    cancel_event = getattr(state, "cancel_event", None)
+    if callable(heartbeat):
+        kwargs["heartbeat"] = heartbeat
+    if cancel_event is not None and hasattr(cancel_event, "is_set"):
+        kwargs["cancel_event"] = cancel_event
+    side_effect = getattr(_run_child_command, "side_effect", None)
+    if callable(side_effect):
+        try:
+            params = inspect.signature(side_effect).parameters.values()
+        except (TypeError, ValueError):
+            params = ()
+        if not any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params):
+            accepted = {param.name for param in params}
+            kwargs = {key: value for key, value in kwargs.items() if key in accepted}
+    return _run_child_command(argv, **kwargs)
 
 
 def _run_child_command(
@@ -3045,14 +3115,59 @@ def run_supervisor(
         watchdog.start()
         try:
             result = execute_workflow(state)
-        except GateExit:
-            # A checkpoint is the state most worth ringing about: the workflow is
-            # alive, correct, and will sit there indefinitely until a human acts.
+        except GateExit as exc:
+            # A gate must carry metadata all the way to the supervisor.  A
+            # metadata-less unwind is an execution failure, not a successful
+            # pause that an operator can never approve.
+            if exc.gate_key is None:
+                tb = traceback.format_exc()[-4000:]
+                with contextlib.suppress(Exception):
+                    state.append_event(
+                        "workflow_failed",
+                        error="gate exit missing durable gate key",
+                        detail=str(exc),
+                        traceback=tb,
+                    )
+                with contextlib.suppress(Exception):
+                    registry.write_result(
+                        root,
+                        {
+                            "ok": False,
+                            "wfId": wf_id,
+                            "error": "gate exit missing durable gate key",
+                            "traceback": tb,
+                        },
+                    )
+                with contextlib.suppress(Exception):
+                    state.write_status(
+                        "failed", error="gate exit missing durable gate key", traceback=tb
+                    )
+                state.notify_event("failed", detail="gate exit missing durable gate key")
+                return 1
+            # A concurrent unwind may have left status.json stale or absent;
+            # rebuild its projection from the journal-authoritative gate event.
+            state.ensure_gate_durable(exc)
             gate = registry.read_json(root / registry.STATUS_FILE) or {}
             gate_key = gate.get("gateKey")
+            if gate.get("status") != "paused" or gate_key != exc.gate_key:
+                tb = traceback.format_exc()[-4000:]
+                with contextlib.suppress(Exception):
+                    state.append_event(
+                        "workflow_failed",
+                        error="gate exit missing durable gate projection",
+                        detail=str(exc),
+                        traceback=tb,
+                    )
+                with contextlib.suppress(Exception):
+                    state.write_status(
+                        "failed", error="gate exit missing durable gate projection", traceback=tb
+                    )
+                return 1
+            # A checkpoint is the state most worth ringing about: the workflow is
+            # alive, correct, and will sit there indefinitely until a human acts.
             state.notify_event(
                 "paused",
-                detail=f"awaiting approval{f' at {gate_key}' if isinstance(gate_key, str) else ''}",
+                detail=f"awaiting approval at {gate_key}",
             )
             return 0
         except SupervisorWatchdogExit as exc:

@@ -242,7 +242,9 @@ def emit_run(
     try:
         if command.resume:
             prior_attempt = status.get("replayAttempt")
-            replay_attempt = prior_attempt if isinstance(prior_attempt, int) and prior_attempt >= 0 else 0
+            replay_attempt = (
+                prior_attempt if isinstance(prior_attempt, int) and prior_attempt >= 0 else 0
+            )
             status.update(
                 {
                     "ok": True,
@@ -518,14 +520,50 @@ def emit_approve(
 ) -> int:
     root = _workflow_dir_for_command(command, workspace)
     status = registry.read_json(root / registry.STATUS_FILE) or {}
-    gate_key = status.get("gateKey")
+    # status.json is a projection and may have been lost or clobbered while a
+    # supervisor drained a gate.  The durable journal is authoritative: choose
+    # the newest gate event whose key has not already been approved.
+    recovered_gate = _latest_unapproved_gate_event(root)
+    gate_key = recovered_gate.get("key") if recovered_gate is not None else status.get("gateKey")
     if not isinstance(gate_key, str):
         raise DelegateError(
             "workflow_not_gated", f"Workflow is not waiting on a gate: {command.wf_id}"
         )
+    if recovered_gate is not None and (
+        status.get("status") != "paused" or status.get("gateKey") != gate_key
+    ):
+        projected = dict(status)
+        projected.update(
+            {
+                "status": "paused",
+                "ok": True,
+                "gateKey": gate_key,
+                "gateResult": recovered_gate.get("result"),
+                "updatedAt": run_registry.utc_now_iso(),
+            }
+        )
+        registry.write_status(root, projected)
     # Resume acquires the lock before mutating approval/budget state.
     resumed = WorkflowCommand("run", resume=command.wf_id, json_mode=command.json_mode)
     return emit_run(resumed, workspace=workspace, config=config, stdout=stdout, stderr=stdout)
+
+
+def _latest_unapproved_gate_event(root: Path) -> JsonObject | None:
+    approval = registry.read_json(root / registry.APPROVAL_FILE) or {}
+    approved: set[str] = set()
+    if isinstance(approval.get("gateKey"), str):
+        approved.add(approval["gateKey"])
+    keys = approval.get("approvedKeys")
+    if isinstance(keys, list):
+        approved.update(key for key in keys if isinstance(key, str))
+    latest: JsonObject | None = None
+    for event in registry.iter_journal(root / registry.JOURNAL_FILE):
+        if event.get("type") != "gate":
+            continue
+        key = event.get("key")
+        if isinstance(key, str) and key not in approved:
+            latest = event
+    return latest
 
 
 def emit_kill(command: WorkflowCommand, *, workspace: Path, stdout: TextIO) -> int:

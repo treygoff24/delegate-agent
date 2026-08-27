@@ -1040,7 +1040,10 @@ class WorkflowCommandTests(unittest.TestCase):
             for event in events
             if event["type"] == "agent_finished" and event.get("result") == "fake completion"
         )
-        self.assertLess(slow_finish_seq, gate_seq)
+        # The journal gate is authoritative and is fsynced before admission
+        # closes/drain begins; the sibling may therefore finish after the gate
+        # event while the projection is still being parked.
+        self.assertLess(gate_seq, slow_finish_seq)
         status = self.run_delegate(["--json", "workflow", "status", wf_id])
         self.assertEqual(json.loads(status.stdout)["status"], "paused")
         self.assertFalse(
@@ -1052,6 +1055,125 @@ class WorkflowCommandTests(unittest.TestCase):
                 for event in events
             )
         )
+
+    def test_park_gate_fsyncs_journal_before_drain_and_is_idempotent(self) -> None:
+        wf_id = "wf_111111111111"
+        root = workflow_registry.ensure_workflow_dir(self.workspace, wf_id)
+        script_path = root / workflow_registry.SCRIPT_FILE
+        script_path.write_text("return True\n", encoding="utf-8")
+        workflow_registry.write_json(
+            root / workflow_registry.STATUS_FILE,
+            {
+                "wfId": wf_id,
+                "status": "created",
+                "budget": {"total": None, "spent": 0, "remaining": None},
+            },
+        )
+        state = workflow_runtime.WorkflowState(
+            wf_id=wf_id,
+            workspace=self.workspace,
+            root=root,
+            script_path=script_path,
+            config={},
+            cli_argv=[str(CLI)],
+            args=None,
+            budget=workflow_runtime.Budget(None),
+        )
+        observed: list[tuple[str, str]] = []
+
+        def drain() -> None:
+            events = workflow_registry.iter_journal(root / workflow_registry.JOURNAL_FILE)
+            observed.append(
+                (
+                    events[-1].get("type", "") if events else "",
+                    (workflow_registry.read_json(root / workflow_registry.STATUS_FILE) or {}).get(
+                        "status", ""
+                    ),
+                )
+            )
+
+        with mock.patch.object(state, "close_gate_and_wait", side_effect=drain):
+            first = state.park_gate("gate-fixture", child="child", result={"ok": False})
+            second = state.park_gate("gate-fixture", child="child", result={"ok": False})
+
+        self.assertEqual(first.gate_key, "gate-fixture")
+        self.assertEqual(second.gate_key, "gate-fixture")
+        self.assertEqual(observed, [("gate", "created"), ("gate", "paused")])
+        events = workflow_registry.iter_journal(root / workflow_registry.JOURNAL_FILE)
+        self.assertEqual([event["type"] for event in events], ["gate"])
+        status = workflow_registry.read_json(root / workflow_registry.STATUS_FILE) or {}
+        self.assertEqual(status.get("status"), "paused")
+        self.assertEqual(status.get("gateKey"), "gate-fixture")
+
+    def test_metadata_less_gate_exit_fails_supervisor(self) -> None:
+        wf_id = "wf_222222222222"
+        root = workflow_registry.ensure_workflow_dir(self.workspace, wf_id)
+        (root / workflow_registry.SCRIPT_FILE).write_text("return True\n", encoding="utf-8")
+        workflow_registry.write_json(
+            root / workflow_registry.STATUS_FILE,
+            {
+                "wfId": wf_id,
+                "status": "created",
+                "budget": {"total": None, "spent": 0, "remaining": None},
+            },
+        )
+        with mock.patch.object(
+            workflow_runtime,
+            "execute_workflow",
+            side_effect=workflow_runtime.GateExit("missing metadata"),
+        ):
+            rc = workflow_runtime.run_supervisor(
+                workspace=self.workspace,
+                wf_id=wf_id,
+                cli_argv=[str(CLI)],
+                config={},
+            )
+        self.assertEqual(rc, 1)
+        status = workflow_registry.read_json(root / workflow_registry.STATUS_FILE) or {}
+        self.assertEqual(status.get("status"), "failed")
+        events = workflow_registry.iter_journal(root / workflow_registry.JOURNAL_FILE)
+        self.assertTrue(any(event.get("type") == "workflow_failed" for event in events), events)
+
+    def test_approve_recovers_missing_gate_key_from_journal_fixture(self) -> None:
+        child = self.write_saved_workflow(
+            "wf-b43032f7fee5-child",
+            """
+            meta = {"name": "fixture-child"}
+            return {"ok": False}
+            """,
+        )
+        parent = self.write_workflow(
+            f"""
+            meta = {{"name": "fixture-parent"}}
+            return workflow({child!r}, gate="on-failure")
+            """
+        )
+        launch = self.run_delegate(["--json", "workflow", "run", str(parent)])
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        wf_id = json.loads(launch.stdout)["wfId"]
+        waited = self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"])
+        self.assertEqual(waited.returncode, 0, waited.stderr)
+        root = workflow_registry.workflow_dir(self.workspace, wf_id)
+        status = workflow_registry.read_json(root / workflow_registry.STATUS_FILE) or {}
+        self.assertEqual(status.get("status"), "paused")
+        gate_events = [
+            event
+            for event in workflow_registry.iter_journal(root / workflow_registry.JOURNAL_FILE)
+            if event.get("type") == "gate"
+        ]
+        self.assertTrue(gate_events)
+        gate_key = gate_events[-1]["key"]
+        status.update({"status": "running"})
+        status.pop("gateKey", None)
+        status.pop("gateResult", None)
+        workflow_registry.write_json(root / workflow_registry.STATUS_FILE, status)
+
+        approved = self.run_delegate(["--json", "workflow", "approve", wf_id])
+        self.assertEqual(approved.returncode, 0, approved.stderr)
+        final = self.run_delegate(["--json", "workflow", "status", wf_id])
+        self.assertEqual(json.loads(final.stdout).get("status"), "succeeded")
+        approval = workflow_registry.read_json(root / workflow_registry.APPROVAL_FILE) or {}
+        self.assertIn(gate_key, approval.get("approvedKeys", []))
 
     def test_resume_releases_paused_gate(self) -> None:
         child = self.write_saved_workflow(
