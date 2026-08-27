@@ -84,6 +84,36 @@ class PersonaDigestMismatch(RuntimeError):
     """A workflow child resolved different persona bytes than its parent pinned."""
 
 
+CHILD_FAILURE_REASONS = frozenset({"timeout", "output_cap", "stall", "nonzero_exit", "structured"})
+
+
+@dataclass(frozen=True)
+class ChildAttemptOutcome:
+    """Typed, retry-safe identity for one failed child attempt."""
+
+    run_id: str | None
+    failure_reason: str
+    branch: str | None = None
+    worktree: str | None = None
+    cleanup_ownership: JsonObject | None = None
+    execution_cwd: str | None = None
+    session_id: str | None = None
+    session_metadata: JsonObject | None = None
+
+    def as_json(self) -> JsonObject:
+        payload: JsonObject = {
+            "runId": self.run_id,
+            "failureReason": self.failure_reason,
+            "branch": self.branch,
+            "worktree": self.worktree,
+            "executionCwd": self.execution_cwd,
+            "cleanupOwnership": self.cleanup_ownership,
+            "sessionId": self.session_id,
+            "sessionMetadata": self.session_metadata,
+        }
+        return payload
+
+
 @dataclass(frozen=True)
 class _DelegateChildResult:
     text: str | None
@@ -92,6 +122,7 @@ class _DelegateChildResult:
     session_id: str | None
     workspace_cleanup: JsonObject | None = None
     isolation_backend: str | None = None
+    outcome: ChildAttemptOutcome | None = None
 
 
 def _delegate_child_result(value: object) -> _DelegateChildResult:
@@ -107,7 +138,69 @@ def _delegate_child_result(value: object) -> _DelegateChildResult:
     )
 
 
+def _normalize_child_failure_reason(value: object, *, default: str) -> str:
+    if isinstance(value, str):
+        raw = value.strip().lower()
+        aliases = {
+            "agent_timeout": "timeout",
+            "call_timeout": "timeout",
+            "timeout": "timeout",
+            "output_limit_exceeded": "output_cap",
+            "output_cap": "output_cap",
+            "stalled": "stall",
+            "stall": "stall",
+            "harness_cancelled": "stall",
+            "nonzero_exit": "nonzero_exit",
+            "structured": "structured",
+        }
+        normalized = aliases.get(raw)
+        if normalized is not None:
+            return normalized
+    return default
+
+
+def _child_attempt_outcome(
+    payload: JsonObject | None,
+    *,
+    default_reason: str,
+    text: str | None = None,
+) -> ChildAttemptOutcome:
+    data = payload or {}
+    run_id = data.get("runId") if isinstance(data.get("runId"), str) else None
+    cleanup = (
+        data.get("temporaryWorkspaceCleanup")
+        if isinstance(data.get("temporaryWorkspaceCleanup"), dict)
+        else None
+    )
+    session_metadata = (
+        data.get("sessionMetadata") if isinstance(data.get("sessionMetadata"), dict) else None
+    )
+    return ChildAttemptOutcome(
+        run_id=run_id,
+        failure_reason=_normalize_child_failure_reason(
+            data.get("failureReason") or data.get("error"), default=default_reason
+        ),
+        branch=(data.get("branch") if isinstance(data.get("branch"), str) else None),
+        worktree=(
+            data.get("worktree")
+            if isinstance(data.get("worktree"), str)
+            else data.get("executionCwd")
+            if isinstance(data.get("executionCwd"), str)
+            else None
+        ),
+        cleanup_ownership=cleanup,
+        execution_cwd=(
+            data.get("executionCwd") if isinstance(data.get("executionCwd"), str) else None
+        ),
+        session_id=(data.get("sessionId") if isinstance(data.get("sessionId"), str) else None),
+        session_metadata=session_metadata,
+    )
+
+
 def _child_result_from_payload(result: JsonObject, *, text: str | None) -> _DelegateChildResult:
+    outcome = None
+    if result.get("ok") is not True:
+        outcome = _child_attempt_outcome(result, default_reason="nonzero_exit", text=text)
     return _DelegateChildResult(
         text=text,
         run_id=result.get("runId") if isinstance(result.get("runId"), str) else None,
@@ -125,6 +218,43 @@ def _child_result_from_payload(result: JsonObject, *, text: str | None) -> _Dele
             if isinstance(result.get("isolationBackend"), str)
             else None
         ),
+        outcome=outcome,
+    )
+
+
+def _failed_child_result(
+    recovered: _DelegateChildResult | None,
+    *,
+    reason: str,
+    session_id: str | None = None,
+) -> _DelegateChildResult:
+    prior = recovered or _DelegateChildResult(None, None, None, None)
+    outcome = prior.outcome or ChildAttemptOutcome(
+        run_id=prior.run_id,
+        failure_reason=reason,
+        worktree=prior.execution_cwd,
+        cleanup_ownership=prior.workspace_cleanup,
+        execution_cwd=prior.execution_cwd,
+        session_id=prior.session_id,
+    )
+    outcome = ChildAttemptOutcome(
+        run_id=outcome.run_id,
+        failure_reason=reason,
+        branch=outcome.branch,
+        worktree=outcome.worktree,
+        cleanup_ownership=outcome.cleanup_ownership,
+        execution_cwd=outcome.execution_cwd,
+        session_id=session_id or outcome.session_id,
+        session_metadata=outcome.session_metadata,
+    )
+    return _DelegateChildResult(
+        text=None,
+        run_id=prior.run_id,
+        execution_cwd=prior.execution_cwd,
+        session_id=session_id or prior.session_id,
+        workspace_cleanup=prior.workspace_cleanup or outcome.cleanup_ownership,
+        isolation_backend=prior.isolation_backend,
+        outcome=outcome,
     )
 
 
@@ -204,6 +334,15 @@ def _workflow_agent_run_result_metadata(
         ),
         None,
     )
+    branch = next(
+        (
+            value
+            for record in records
+            for value in (record.get("branch"), record.get("plannedBranch"))
+            if isinstance(value, str) and value
+        ),
+        None,
+    )
     session_id = snapshot.get("sessionId") if isinstance(snapshot, dict) else None
     cleanup = next(
         (
@@ -230,6 +369,15 @@ def _workflow_agent_run_result_metadata(
         session_id=session_id if isinstance(session_id, str) else None,
         workspace_cleanup=cleanup if isinstance(cleanup, dict) else None,
         isolation_backend=backend if isinstance(backend, str) else None,
+        outcome=ChildAttemptOutcome(
+            run_id=run_id,
+            failure_reason="nonzero_exit",
+            branch=branch,
+            worktree=execution_cwd,
+            cleanup_ownership=cleanup if isinstance(cleanup, dict) else None,
+            execution_cwd=execution_cwd,
+            session_id=session_id if isinstance(session_id, str) else None,
+        ),
     )
 
 
@@ -1982,7 +2130,19 @@ class WorkflowDsl:
             # Child output is untrusted; parse/validation blowups must not kill the supervisor.
             except Exception as exc:
                 prior_output = text or ""
-                prior_error = str(exc)
+                outcome = child.outcome or ChildAttemptOutcome(
+                    run_id=child.run_id,
+                    failure_reason="structured",
+                    worktree=child.execution_cwd,
+                    cleanup_ownership=child.workspace_cleanup,
+                    execution_cwd=child.execution_cwd,
+                    session_id=child.session_id,
+                )
+                prior_error = (
+                    f"child attempt {outcome.failure_reason}: {exc}"
+                    if child.outcome is not None
+                    else str(exc)
+                )
                 # Same defect the timeout rows had: engine and attempt without
                 # key or label means learning which task burned its retries
                 # still costs a cross-reference against agent_started by time.
@@ -1997,6 +2157,8 @@ class WorkflowDsl:
                         if child.session_id is not None and engine in STRUCTURED_RESUME_ENGINES
                         else "relaunch"
                     ),
+                    "retryAttempt": attempt + 1,
+                    "childAttemptOutcome": outcome.as_json(),
                 }
                 if event["strategy"] == "resume":
                     event["sessionId"] = child.session_id
@@ -2135,7 +2297,9 @@ class WorkflowDsl:
                     isolation_backend=(
                         recovered.isolation_backend if recovered is not None else None
                     ),
+                    outcome=(recovered.outcome if recovered is not None else None),
                 )
+            recovered = _failed_child_result(recovered, reason="timeout", session_id=session_id)
             if return_metadata:
                 return recovered
             if recovered is not None:
@@ -2177,11 +2341,19 @@ class WorkflowDsl:
                 if isinstance(result, dict)
                 else None
             )
-            if return_metadata and failure_reason in {"output_limit_exceeded", "agent_timeout"}:
+            normalized_reason = _normalize_child_failure_reason(
+                failure_reason, default="nonzero_exit"
+            )
+            if return_metadata:
                 # Preserve the failed run's workspace/branch for the structured
                 # retry protocol.  Cleaning it here would discard checkpoint
                 # commits before the retry can attach to the lane.
-                return _child_result_from_payload(result, text=None)
+                child = (
+                    _child_result_from_payload(result, text=None)
+                    if isinstance(result, dict)
+                    else _DelegateChildResult(None, None, None, None)
+                )
+                return _failed_child_result(child, reason=normalized_reason)
             cleanup = (
                 result.get("temporaryWorkspaceCleanup")
                 if isinstance(result, dict)
@@ -2217,6 +2389,8 @@ class WorkflowDsl:
                 self.state.wf_id,
                 workflow_agent_key,
             )
+            if return_metadata:
+                return _failed_child_result(recovered, reason="structured")
             if recovered is not None:
                 _cleanup_structured_retry_workspace(recovered.workspace_cleanup)
             raise RuntimeError(f"delegate child returned invalid JSON: {text[:500]}")
