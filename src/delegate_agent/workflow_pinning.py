@@ -579,12 +579,17 @@ def doctor(*, home: Path | None = None) -> JsonObject:
     """Return the machine-local running-supervisor view with stale entries fixed."""
     index = reconcile_active_supervisors(home=home)
     entries = index.get("supervisors")
-    return {
+    payload: JsonObject = {
         "ok": True,
         "schema": ACTIVE_INDEX_SCHEMA,
         "activeSupervisors": entries if isinstance(entries, dict) else {},
         "promotion": _read_promotion(home=home),
     }
+    if isinstance(entries, dict) and entries:
+        payload["warnings"] = [
+            f"{len(entries)} active supervisor(s) are pinned to launch-time runtimes."
+        ]
+    return payload
 
 
 def _read_promotion(*, home: Path | None = None) -> JsonObject | None:
@@ -619,6 +624,14 @@ def promote(
         "runtimeDigest": runtime_digest,
         "promotedAt": _utc_now(),
     }
+    active_index = reconcile_active_supervisors(home=home)
+    active = active_index.get("supervisors")
+    if isinstance(active, dict):
+        payload["activeSupervisors"] = active
+        if active:
+            payload["warnings"] = [
+                f"{len(active)} active supervisor(s) may still use an older pinned runtime."
+            ]
     path = promotion_path(home)
     run_registry.ensure_private_dir(path.parent)
     run_registry.write_json_atomic(path, payload)
@@ -637,6 +650,9 @@ def emit_doctor(*, home: Path | None = None, stdout: TextIO, json_mode: bool = F
         for workflow_id, entry in active.items() if isinstance(active, dict) else ():
             workspace = entry.get("workspace") if isinstance(entry, dict) else None
             print(f"{workflow_id} {workspace or ''}".rstrip(), file=stdout)
+        for warning in payload.get("warnings", []):
+            if isinstance(warning, str):
+                print(f"warning: {warning}", file=stdout)
     return 0
 
 
