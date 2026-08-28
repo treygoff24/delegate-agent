@@ -686,7 +686,7 @@ def build_codex_argv(
         if bypass_hook_trust:
             argv.append("--dangerously-bypass-hook-trust")
     if resume_session_id is not None and not structured_resume:
-        argv.extend(["exec", "resume", "--cd", workspace])
+        argv.extend(["exec", "resume"])
     else:
         argv.append("exec")
         if resume_session_id is not None:
