@@ -1,3 +1,4 @@
+import contextlib
 import dataclasses
 import io
 import json
@@ -21,6 +22,117 @@ from tests.execution_test_base import (
 
 
 class ExecutionArgvAndPromptTests(ExecutionTestBase):
+    def _announcement_config(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        config["droid"]["models"] = {"reviewer": "model-id"}
+        return config
+
+    def test_human_launch_announces_workspace_origin_before_execution(self):
+        repo = make_git_repo()
+        self.addCleanup(repo.cleanup)
+        config = self._announcement_config()
+
+        for args, expected_origin, cwd in (
+            (["--cwd", repo.name, "droid", "reviewer", "work", "hello"], "--cwd", None),
+            (["droid", "reviewer", "work", "hello"], "cwd", repo.name),
+        ):
+            with self.subTest(expected_origin=expected_origin):
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                observed: dict[str, object] = {}
+
+                def fake_execute_request(
+                    request,
+                    _json_mode,
+                    _observed=observed,
+                    _stdout=stdout,
+                    **_kwargs,
+                ):
+                    _observed["request"] = request
+                    _observed["stdout"] = _stdout.getvalue()
+                    return 0, None
+
+                with (
+                    mock.patch.dict(os.environ, {"AI_PROFILE": ""}, clear=False),
+                    mock.patch.object(self.delegate, "load_config", return_value=(config, "test")),
+                    mock.patch.object(
+                        self.delegate, "execute_request", side_effect=fake_execute_request
+                    ),
+                ):
+                    if cwd is None:
+                        code = self.delegate.main(args, stdout=stdout, stderr=stderr)
+                    else:
+                        with contextlib.chdir(cwd):
+                            code = self.delegate.main(args, stdout=stdout, stderr=stderr)
+
+                self.assertEqual(code, 0)
+                expected_line = (
+                    f"workspace: {Path(repo.name).resolve()} (git, from {expected_origin})\n"
+                )
+                self.assertEqual(stdout.getvalue(), expected_line)
+                self.assertEqual(observed["stdout"], expected_line)
+                request = observed["request"]
+                self.assertIsInstance(request, self.delegate.Request)
+                self.assertNotIn(
+                    self.delegate.INFERRED_NON_GIT_WORKSPACE_WARNING,
+                    request.warnings,
+                )
+
+    def test_inferred_non_git_workspace_warns_without_refusing(self):
+        config = self._announcement_config()
+        with tempfile.TemporaryDirectory() as workspace:
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            observed: dict[str, object] = {}
+
+            def fake_execute_request(request, _json_mode, **_kwargs):
+                observed["request"] = request
+                return 0, None
+
+            with (
+                contextlib.chdir(workspace),
+                mock.patch.dict(os.environ, {"AI_PROFILE": ""}, clear=False),
+                mock.patch.object(self.delegate, "load_config", return_value=(config, "test")),
+                mock.patch.object(
+                    self.delegate, "execute_request", side_effect=fake_execute_request
+                ),
+            ):
+                code = self.delegate.main(
+                    ["droid", "reviewer", "work", "hello"],
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+
+        self.assertEqual(code, 0)
+        self.assertIn(
+            f"workspace: {Path(workspace).resolve()} (directory, from cwd)\n",
+            stdout.getvalue(),
+        )
+        request = observed["request"]
+        self.assertIsInstance(request, self.delegate.Request)
+        self.assertIn(self.delegate.INFERRED_NON_GIT_WORKSPACE_WARNING, request.warnings)
+
+    def test_json_launch_does_not_emit_human_workspace_line(self):
+        repo = make_git_repo()
+        self.addCleanup(repo.cleanup)
+        config = self._announcement_config()
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with (
+            mock.patch.dict(os.environ, {"AI_PROFILE": ""}, clear=False),
+            mock.patch.object(self.delegate, "load_config", return_value=(config, "test")),
+            mock.patch.object(self.delegate, "execute_request", return_value=(0, None)),
+        ):
+            code = self.delegate.main(
+                ["--json", "--cwd", repo.name, "droid", "reviewer", "work", "hello"],
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(stdout.getvalue(), "")
+
     def assert_tracked_child_exited_and_safe_temp_dirs_cleaned(
         self,
         payload: dict,

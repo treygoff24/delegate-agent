@@ -1206,7 +1206,7 @@ class EngineArgvTests(CommandTestBase):
         self.assertIn("resume", argv)
         exec_idx = argv.index("exec")
         self.assertEqual(argv[exec_idx + 1], "resume")
-        self.assertEqual(argv[exec_idx + 2 : exec_idx + 4], ["--cd", "/repo"])
+        self.assertNotIn("--cd", argv[exec_idx + 2 :])
         self.assertIn(session_id, argv)
         session_idx = argv.index(session_id)
         self.assertEqual(argv[session_idx + 1], "fix the bug")

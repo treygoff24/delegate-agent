@@ -175,6 +175,31 @@ MISSING_BINARY_PROBE_DIRS = (
 
 HELP = _call_overview_text()
 
+INFERRED_NON_GIT_WORKSPACE_WARNING = (
+    "resolved workspace is not a git repository and no --cwd was provided; using the process cwd."
+)
+
+
+def _workspace_origin(parsed: ParsedCommand, global_options: GlobalOptions) -> str:
+    """Describe how the launch workspace was selected for human output."""
+    if global_options.cwd is not None:
+        return "--cwd"
+    if parsed.subcommand == "run" and parsed.run_json is not None:
+        raw = _load_input_json_object(Path(parsed.run_json.input_json).expanduser())
+        if isinstance(raw.get("cwd"), str):
+            return "input JSON cwd"
+    return "cwd"
+
+
+def _announce_workspace(
+    workspace: ResolvedWorkspace,
+    *,
+    origin: str,
+    stdout: TextIO,
+) -> None:
+    """Make the resolved launch workspace visible before child startup."""
+    print(f"workspace: {workspace.path} ({workspace.kind}, from {origin})", file=stdout, flush=True)
+
 
 def config_path() -> Path:
     return delegate_config.config_path()
@@ -1213,6 +1238,12 @@ def execute_request(
                     return call_response
                 except delegate_runner.RunnerLaunchError as exc:
                     raise DelegateError(exc.error, exc.message, exc.exit_code) from exc
+            if not json_mode and INFERRED_NON_GIT_WORKSPACE_WARNING in request.warnings:
+                print(
+                    f"warning: {INFERRED_NON_GIT_WORKSPACE_WARNING}",
+                    file=stderr,
+                    flush=True,
+                )
             try:
                 sensitive_texts = [request.prompt]
                 if "--json-schema" in request.argv:
@@ -1334,7 +1365,13 @@ def execute_request(
                     payload["stderrTail"] = result.stderr_tail
                 call_response = (exit_code, payload)
                 return call_response
+            emitted_warnings: set[str] = set()
+            if not json_mode and INFERRED_NON_GIT_WORKSPACE_WARNING in request.warnings:
+                emitted_warnings.add(INFERRED_NON_GIT_WORKSPACE_WARNING)
             for warning in result.warnings:
+                if warning in emitted_warnings:
+                    continue
+                emitted_warnings.add(warning)
                 print(f"warning: {warning}", file=stderr)
             if empty_failure:
                 print(
@@ -1692,6 +1729,7 @@ def main(
     try:
         parsed = parse_cli(argv)
         global_options = parsed.global_options
+        workspace_origin = _workspace_origin(parsed, global_options)
         workspace: ResolvedWorkspace | None = None
         json_mode = global_options.json_mode
         profile_guard.enforce_profile_guard(parsed, stderr=stderr)
@@ -1878,6 +1916,17 @@ def main(
             request = resume_command.apply_resume_to_request(request, resume_plan)
         if followup_plan is not None:
             request = followup_command.apply_followup_to_request(request, followup_plan)
+        if workspace is None:  # pragma: no cover - launch parsing always resolves a workspace
+            raise DelegateError("invalid_workspace", "Could not resolve the launch workspace.")
+        if (
+            workspace.kind != "git"
+            and workspace_origin == "cwd"
+            and INFERRED_NON_GIT_WORKSPACE_WARNING not in request.warnings
+        ):
+            request = dc_replace(
+                request,
+                warnings=(*request.warnings, INFERRED_NON_GIT_WORKSPACE_WARNING),
+            )
         if request.dry_run:
             payload = dry_run_payload(request, config=config)
             if global_options.json_mode:
@@ -1904,6 +1953,9 @@ def main(
                 for warning in payload.get("warnings", ()):
                     print(f"warning: {warning}", file=stdout)
             return EXIT_OK
+
+        if not global_options.json_mode:
+            _announce_workspace(workspace, origin=workspace_origin, stdout=stdout)
 
         completion_report_mode = resolve_completion_report_mode(parsed, config)
         if request.prompt_instruction_mode == PROMPT_INSTRUCTION_MODE_SLASH:
