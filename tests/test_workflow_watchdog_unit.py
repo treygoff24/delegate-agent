@@ -14,6 +14,7 @@ from delegate_agent.workflows.runtime import (
     WorkflowState,
     _SupervisorWatchdog,
 )
+from tests import proc_harness
 
 
 class _WatchdogState:
@@ -28,6 +29,11 @@ class _WatchdogState:
 
 
 class WorkflowWatchdogUnitTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        cls.addClassCleanup(proc_harness.assert_no_live_process_groups)
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
