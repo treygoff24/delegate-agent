@@ -214,6 +214,18 @@ class SnapshotRedactionTests(SnapshotCommandTestBase):
         self.assertEqual(redacted, expected)
         self.assertLess(elapsed, 0.25)
 
+    def test_redact_string_masks_short_final_base64_line(self):
+        payload = (
+            "-----BEGIN PRIVATE KEY-----\n"
+            "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj\n"
+            "Ag==\n"
+            "Verdict: done\n"
+        )
+        self.assertEqual(
+            self.redaction.redact_string(payload),
+            "***PRIVATE KEY REDACTED***\nVerdict: done\n",
+        )
+
     def test_redact_argv_masks_a_flagged_secret_that_begins_with_a_dash(self):
         # A credential flag's value is skipped only when it looks like another
         # flag, and nothing stops a token from starting with a dash.

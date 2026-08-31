@@ -169,14 +169,13 @@ def _pem_material_line(line: str, *, continuation: bool = False) -> bool:
         return True
     if _PEM_BODY.fullmatch(stripped) is None:
         return False
+    if continuation:
+        return True
     if stripped.startswith(("MII", "LS0t", "b3Bl")):
         return True
-    if len(stripped) < 8:
-        return continuation and stripped.isupper()
-    # Real PEM bodies are long, mixed-looking base64 lines.  Keep a little
-    # tolerance for synthetic fixtures and base64url-ish output, while avoiding
+    # The first body line must be long enough to distinguish key material from
     # ordinary single-word prose such as ``notready``.
-    return len(stripped) >= 16 or any(char.isdigit() or char in "+/=_-" for char in stripped)
+    return len(stripped) >= 32
 
 
 def _unterminated_pem_material_end(value: str, begin_end: int) -> int | None:
