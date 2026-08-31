@@ -1236,6 +1236,13 @@ class EngineArgvTests(CommandTestBase):
                 "fix the bug",
             ],
         )
+        # Probe contract (codex-cli 0.151.0): --color, --sandbox, and
+        # --ask-for-approval are rejected after the `resume` subcommand token;
+        # sandbox flags between `exec` and `resume` are accepted.
+        resume_idx = argv.index("resume")
+        resume_tail = argv[resume_idx + 1 :]
+        for exec_only_flag in ("--color", "--sandbox", "--ask-for-approval"):
+            self.assertNotIn(exec_only_flag, resume_tail)
 
     def test_cursor_fixed_effort_default_has_typed_outcome(self):
         fixed_efforts = {
@@ -1325,6 +1332,29 @@ class EngineArgvTests(CommandTestBase):
         with self.assertRaises(self.delegate.DelegateError) as caught:
             request_build.resolve_cursor_reasoning_capability(cursor, "xhigh")
         self.assertEqual(caught.exception.error, "fixed_reasoning_effort")
+
+    def test_codex_followup_argv_sandbox_precedes_exec(self):
+        policy = self.delegate.delegate_config.effective_policy(
+            self.delegate.DEFAULT_CONFIG,
+            engine="codex",
+            mode="work",
+        )
+        argv = self.delegate.build_codex_argv(
+            self.delegate.DEFAULT_CONFIG["codex"],
+            "work",
+            "/repo",
+            "gpt-5",
+            "fix the bug",
+            policy,
+            workspace_kind="git",
+            resume_session_id="th_0123456789abcdef",
+            stream_capture=True,
+        )
+        exec_idx = argv.index("exec")
+        self.assertIn("--sandbox", argv[:exec_idx])
+        self.assertIn("--ask-for-approval", argv[:exec_idx])
+        self.assertNotIn("--color", argv)
+        self.assertIn("--json", argv)
 
     def test_claude_followup_argv_resume_token(self):
         policy = self.delegate.delegate_config.effective_policy(
