@@ -16,6 +16,7 @@ exclusion, atomic writes — are load-bearing; preserve them exactly.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -53,6 +54,8 @@ from delegate_agent.sandbox_bwrap import (
     parity_masks,
     requested_safe_backend,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 # Project .cursor/cli.json is permissions-only; global cli-config examples may
 # include other top-level keys such as "version", but Cursor rejects them here.
@@ -864,11 +867,28 @@ def _unreadable_warnings(
 
 def _make_temporary_tree_owner_writable(temp_base: str) -> None:
     root = Path(temp_base)
-    for path in root.rglob("*"):
+    if not root.exists() or root.is_symlink():
+        return
+
+    def _repair(path: Path, mode: int) -> None:
         if path.is_symlink():
-            continue
-        path.chmod(path.stat().st_mode | stat.S_IWUSR)
-    root.chmod(root.stat().st_mode | stat.S_IWUSR)
+            return
+        try:
+            path.chmod(path.stat().st_mode | mode)
+        except OSError as exc:
+            _LOGGER.warning("safe workspace cleanup could not repair %s: %s", path, exc)
+
+    def _onerror(exc: OSError) -> None:
+        _LOGGER.warning("safe workspace cleanup could not inspect %s: %s", exc.filename, exc)
+
+    directory_mode = stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR
+    _repair(root, directory_mode)
+    for directory, directories, files in os.walk(root, topdown=True, onerror=_onerror):
+        current = Path(directory)
+        for name in directories:
+            _repair(current / name, directory_mode)
+        for name in files:
+            _repair(current / name, stat.S_IWUSR)
 
 
 def create_directory_safe_workspace(
@@ -904,8 +924,13 @@ def create_directory_safe_workspace(
             block_external_symlinks(copy_path, source_workspace),
         )
     except Exception:
-        _make_temporary_tree_owner_writable(temp_base)
-        shutil.rmtree(temp_base)
+        try:
+            if Path(temp_base).exists():
+                _make_temporary_tree_owner_writable(temp_base)
+                if Path(temp_base).exists():
+                    shutil.rmtree(temp_base)
+        except OSError as exc:
+            _LOGGER.warning("safe workspace cleanup failed for %s: %s", temp_base, exc)
         raise
     if include_warnings:
         return copy_path, temp_base, warnings
@@ -944,8 +969,13 @@ def cleanup_safe_isolated_workspace(
         )
     if git_root is not None:
         remove_git_safe_workspace(git_root, isolated_workspace)
-    _make_temporary_tree_owner_writable(temp_base)
-    shutil.rmtree(temp_base)
+    try:
+        if Path(temp_base).exists():
+            _make_temporary_tree_owner_writable(temp_base)
+            if Path(temp_base).exists():
+                shutil.rmtree(temp_base)
+    except OSError as exc:
+        _LOGGER.warning("safe workspace cleanup failed for %s: %s", temp_base, exc)
 
 
 def _refuse_bwrap_initialized_submodules(git_root: str) -> None:
