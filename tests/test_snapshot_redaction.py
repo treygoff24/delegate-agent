@@ -182,6 +182,28 @@ class SnapshotRedactionTests(SnapshotCommandTestBase):
             "***PRIVATE KEY REDACTED***\nVerdict: done\n",
         )
 
+    def test_redact_string_masks_escaped_newline_pem_key(self):
+        payload = (
+            '{"K": "-----BEGIN PRIVATE KEY-----\\n'
+            "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj\\n"
+            'Verdict: done"}'
+        )
+        self.assertEqual(
+            self.redaction.redact_string(payload),
+            '{"K": "***PRIVATE KEY REDACTED***\\nVerdict: done"}',
+        )
+
+    def test_redact_string_masks_pem_marker_with_trailing_space(self):
+        payload = (
+            "-----BEGIN PRIVATE KEY----- \n"
+            "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj\n"
+            "Verdict: done\n"
+        )
+        self.assertEqual(
+            self.redaction.redact_string(payload),
+            "***PRIVATE KEY REDACTED***\nVerdict: done\n",
+        )
+
     def test_redact_argv_masks_a_flagged_secret_that_begins_with_a_dash(self):
         # A credential flag's value is skipped only when it looks like another
         # flag, and nothing stops a token from starting with a dash.

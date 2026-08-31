@@ -181,10 +181,16 @@ def _pem_material_line(line: str, *, continuation: bool = False) -> bool:
 
 def _unterminated_pem_material_end(value: str, begin_end: int) -> int | None:
     """Return the end of contiguous PEM material after an unterminated marker."""
-    if value.startswith("\r\n", begin_end):
-        cursor = begin_end + 2
-    elif value.startswith("\n", begin_end):
-        cursor = begin_end + 1
+    separator_start = begin_end
+    while separator_start < len(value) and value[separator_start] in " \t":
+        separator_start += 1
+    escaped_separator = value.startswith("\\n", separator_start)
+    if escaped_separator:
+        cursor = separator_start + 2
+    elif value.startswith("\r\n", separator_start):
+        cursor = separator_start + 2
+    elif value.startswith("\n", separator_start):
+        cursor = separator_start + 1
     else:
         # A marker embedded in prose is not evidence that the rest is a key.
         return None
@@ -194,10 +200,13 @@ def _unterminated_pem_material_end(value: str, begin_end: int) -> int | None:
     body_seen = False
     blank_line_skipped = False
     while cursor < len(value):
-        line_end = value.find("\n", cursor)
+        line_separator = "\\n" if escaped_separator else "\n"
+        line_end = value.find(line_separator, cursor)
         if line_end < 0:
             line_end = len(value)
-        line = value[cursor:line_end].removesuffix("\r")
+        line = value[cursor:line_end]
+        if not escaped_separator:
+            line = line.removesuffix("\r")
         stripped = line.strip()
         if not stripped:
             if header_seen and not body_seen and not blank_line_skipped and line_end < len(value):
@@ -214,8 +223,10 @@ def _unterminated_pem_material_end(value: str, begin_end: int) -> int | None:
         if line_end == len(value):
             material_end = len(value)
             break
-        next_cursor = line_end + 1
-        content_end = line_end - (1 if value[line_end - 1 : line_end] == "\r" else 0)
+        next_cursor = line_end + len(line_separator)
+        content_end = line_end
+        if not escaped_separator and value[line_end - 1 : line_end] == "\r":
+            content_end -= 1
         material_end = len(value) if next_cursor == len(value) else content_end
         cursor = next_cursor
     return material_end
