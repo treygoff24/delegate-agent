@@ -55,6 +55,11 @@ class ParseJsonTolerant(unittest.TestCase):
         value = workflow_schema.parse_json_tolerant(text, EXECUTE_RESULT)
         self.assertEqual(value["summary"], "ok")
 
+    def test_leading_json_prefix_does_not_shadow_later_fenced_candidate(self) -> None:
+        text = '[]\n\n```json\n{"summary": "done", "verify_results": []}\n```'
+        value = workflow_schema.parse_json_tolerant(text, EXECUTE_RESULT)
+        self.assertEqual(value["summary"], "done")
+
     def test_bare_json_and_fenced_json_still_parse(self) -> None:
         self.assertEqual(workflow_schema.parse_json_tolerant('{"a": 1}'), {"a": 1})
         self.assertEqual(workflow_schema.parse_json_tolerant('```json\n{"a": 1}\n```'), {"a": 1})
