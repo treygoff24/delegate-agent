@@ -1,0 +1,4 @@
+#!/bin/sh
+# Plan-run audit shim: the compiled close verifier invokes bin/delegate-audit
+# relative to this repo; the tool lives in the writing-plans checkout.
+exec "$HOME/Code/writing-plans/bin/delegate-audit" "$@"
