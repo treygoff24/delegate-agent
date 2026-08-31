@@ -331,5 +331,61 @@ class WorkflowWatchdogProcessTests(unittest.TestCase):
                 )
 
 
+class HeldWorkflowLockTests(unittest.TestCase):
+    """The inherited lock fd is only trusted when it maps to the lock file.
+
+    A process spawned with close_fds inherits DELEGATE_WORKFLOW_LOCK_FD
+    without the fd itself, so the number may be closed or reused for an
+    unrelated file; both must fall back to fresh acquisition.
+    """
+
+    def setUp(self) -> None:
+        from delegate_agent.workflows import runtime
+
+        self.runtime = runtime
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name) / "wfroot"
+        self.root.mkdir()
+
+    def _with_lock_fd_env(self, value: str) -> None:
+        os.environ[self.runtime.WORKFLOW_LOCK_FD_ENV] = value
+        self.addCleanup(os.environ.pop, self.runtime.WORKFLOW_LOCK_FD_ENV, None)
+
+    def test_closed_fd_number_falls_back_to_fresh_acquisition(self) -> None:
+        probe = os.open(os.devnull, os.O_RDONLY)
+        os.close(probe)
+        self._with_lock_fd_env(str(probe))
+        with self.runtime._held_workflow_lock(self.root):
+            self.assertTrue((self.root / registry.LOCK_FILE).exists())
+
+    def test_reused_fd_for_unrelated_file_falls_back(self) -> None:
+        stranger = self.root / "stranger.txt"
+        stranger.write_text("not the lock", encoding="utf-8")
+        fd = os.open(stranger, os.O_RDWR)
+
+        def _close() -> None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+        self.addCleanup(_close)
+        self._with_lock_fd_env(str(fd))
+        with self.runtime._held_workflow_lock(self.root):
+            self.assertTrue((self.root / registry.LOCK_FILE).exists())
+        # The stranger fd was neither flocked nor closed by the context manager.
+        os.fstat(fd)
+
+    def test_inherited_fd_matching_lock_file_is_used(self) -> None:
+        fd = registry.acquire_workflow_lock(self.root)
+        self._with_lock_fd_env(str(fd))
+        with self.runtime._held_workflow_lock(self.root):
+            pass
+        # The context manager closed the fd it adopted.
+        with self.assertRaises(OSError):
+            os.fstat(fd)
+
+
 if __name__ == "__main__":
     unittest.main()
