@@ -61,6 +61,9 @@ testpaths = ["tests"]
 line-length = 100
 target-version = "py311"
 src = ["src", "tests", "bin"]
+# Committed forensic artifacts (generated scripts kept as evidence) are
+# exhibits, not source; linting them turns the whole-repo gate red.
+extend-exclude = ["docs/evidence"]
 
 [tool.ruff.lint]
 select = [
