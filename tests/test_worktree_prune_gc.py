@@ -430,6 +430,24 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
             reasons = {entry["alias"]: entry["reason"] for entry in result["skipped"]}
             self.assertEqual(reasons["cursor-live-owner"], "run_active")
 
+    def test_prune_accepts_stale_run_with_dead_process_group(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            run_id = self._seed_prunable_tree(path, fake_home, "cursor-stale-dead")
+            self._set_run_state(
+                path,
+                run_id,
+                status="running",
+                pid=99999999,
+                pgid=99999999,
+            )
+
+            result = self.delegate.worktree_mgmt.prune_worktrees(
+                self._registry_root(path), merged=True, dry_run=True
+            )
+
+            self.assertIn("cursor-stale-dead", {entry["alias"] for entry in result["planned"]})
+
     def test_prune_skips_terminal_run_whose_process_group_is_alive(self):
         _repo, path = self._make_repo()
         with tempfile.TemporaryDirectory() as fake_home:
@@ -1239,6 +1257,60 @@ class WorktreePoolGcTests(WorktreeMgmtTestBase):
                 orphan["safeAction"],
                 "restore_source_root_or_inspect_path_before_manual_cleanup",
             )
+
+    def test_reap_source_gone_path_requires_confirmation_and_reaps_with_yes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = Path(tmp) / "pool"
+            gone = Path(tmp) / "deleted-repo"
+            worktree = self._pool_worktree(
+                pool,
+                "abc123def456",
+                "cursor-1",
+                gitdir=str(gone / ".git" / "worktrees" / "cursor-1"),
+                contents="work.txt",
+            )
+
+            refused = self.delegate.worktree_mgmt.reap_worktrees(
+                None,
+                pool_data_home=pool,
+                path=str(worktree),
+                older_than_days=0,
+                force=True,
+            )
+            self.assertEqual(refused["errors"][0]["code"], "confirmation_required")
+            self.assertTrue(worktree.exists())
+
+            reaped = self.delegate.worktree_mgmt.reap_worktrees(
+                None,
+                pool_data_home=pool,
+                path=str(worktree),
+                older_than_days=0,
+                yes=True,
+            )
+            self.assertEqual(len(reaped["reaped"]), 1)
+            self.assertFalse(worktree.exists())
+
+    def test_reap_path_refuses_live_backlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pool = Path(tmp) / "pool"
+            source = Path(tmp) / "live-repo"
+            worktree = self._pool_worktree(
+                pool,
+                "abc123def456",
+                "cursor-1",
+                gitdir=self._live_gitdir(source, "cursor-1", pool / "abc123def456" / "cursor-1"),
+            )
+            self._settle(worktree)
+
+            result = self.delegate.worktree_mgmt.reap_worktrees(
+                None,
+                pool_data_home=pool,
+                path=str(worktree),
+                older_than_days=0,
+                yes=True,
+            )
+            self.assertEqual(result["skipped"][0]["reason"], "live_backlink")
+            self.assertTrue(worktree.exists())
 
     def test_pool_scan_ignores_live_worktree(self):
         with tempfile.TemporaryDirectory() as tmp:
