@@ -10,11 +10,11 @@ Workflow registries use this file set as needed:
 
 - `script.py`: pinned workflow source for this run (the frozen copy executed on
   every resume).
-- `sourceScript`: user-supplied source path recorded at launch for provenance;
-  it is never used as the resume execution input.
 - `args.json`: launch arguments supplied with `--args`.
 - `journal.jsonl`: append-only workflow events.
-- `status.json`: current supervisor/status snapshot.
+- `status.json`: current supervisor/status snapshot; records `sourceScript`
+  (the launch-time source path, provenance only, never the resume execution
+  input) and `scriptSha256`.
 - `result.json`: final workflow result, present only after success.
 - `approval.json`: gate approval state, present after `workflow approve`. `approvedKeys` accumulates every gate approved so far (a resume replays the whole script and re-fires each passed gate with the same key); `gateKey` is the latest.
 - `workflow.lock`: process lock held while a supervisor is active.

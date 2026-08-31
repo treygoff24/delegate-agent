@@ -464,12 +464,18 @@ class WorkflowCommandTests(unittest.TestCase):
         )
 
     def test_dry_run_text_warns_that_script_writes_are_live(self) -> None:
-        script = self.write_workflow('meta = {"name": "dry-warning"}\nreturn None')
+        script = self.write_workflow(
+            'meta = {"name": "dry-warning"}\nimport random\nreturn random.random()'
+        )
         result = self.run_delegate(["workflow", "run", str(script), "--dry-run"])
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("warning:", result.stdout)
-        self.assertIn("script filesystem writes are live", result.stdout)
-        self.assertIn("scriptPath:", result.stdout)
+        self.assertIn("warning:", result.stderr)
+        self.assertIn("determinism warning", result.stderr)
+        self.assertIn("script filesystem writes are live", result.stderr)
+        self.assertIn("scriptPath:", result.stderr)
+        self.assertIn("sourceScript:", result.stderr)
+        self.assertIn("scriptSha256:", result.stderr)
+        self.assertEqual(json.loads(result.stdout)["counts"], {})
 
     def test_dry_run_exposes_dry_run_flag_to_the_script(self) -> None:
         script = self.write_workflow(
@@ -792,6 +798,45 @@ class WorkflowCommandTests(unittest.TestCase):
         )
         result = self.run_delegate(["--json", "workflow", "result", wf_id])
         self.assertEqual(json.loads(result.stdout)["result"], "frozen result")
+
+    def test_resume_warns_when_frozen_copy_differs_from_recorded_hash(self) -> None:
+        script = self.write_workflow(
+            'meta = {"name": "frozen-provenance"}\nreturn "original frozen"'
+        )
+        launch = self.run_delegate(["--json", "workflow", "run", str(script)])
+        self.assertEqual(launch.returncode, 0, launch.stderr)
+        launch_payload = json.loads(launch.stdout)
+        wf_id = launch_payload["wfId"]
+        recorded_hash = launch_payload["scriptSha256"]
+        self.assertEqual(
+            self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"]).returncode,
+            0,
+        )
+
+        frozen_path = Path(launch_payload["scriptPath"])
+        frozen_path.write_text(
+            'meta = {"name": "frozen-provenance"}\nreturn "edited frozen"\n',
+            encoding="utf-8",
+        )
+        current_hash = workflow_registry.script_sha256(frozen_path.read_bytes())
+        resumed = self.run_delegate(["--json", "workflow", "run", "--resume", wf_id])
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        resumed_payload = json.loads(resumed.stdout)
+        self.assertEqual(resumed_payload["scriptSha256"], recorded_hash)
+        self.assertTrue(
+            any(
+                "frozen script differs from recorded hash" in warning
+                and current_hash in warning
+                and recorded_hash in warning
+                for warning in resumed_payload["warnings"]
+            )
+        )
+        self.assertEqual(
+            self.run_delegate(["--json", "workflow", "wait", wf_id, "--timeout", "10"]).returncode,
+            0,
+        )
+        result = self.run_delegate(["--json", "workflow", "result", wf_id])
+        self.assertEqual(json.loads(result.stdout)["result"], "edited frozen")
 
     def test_resume_warns_when_recorded_source_is_unreadable(self) -> None:
         script = self.write_workflow('meta = {"name": "source-missing"}\nreturn "frozen"')
