@@ -1609,19 +1609,20 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
     ),
     "worktree": CommandSpec(
         name="worktree",
-        summary="Manage persistent isolation worktrees (list, show, remove, prune, gc).",
+        summary="Manage persistent isolation worktrees (list, show, remove, prune, gc, reap).",
         usage=(
             "delegate [--cwd PATH] [--json] worktree list ...",
             "delegate [--cwd PATH] [--json] worktree show ...",
             "delegate [--cwd PATH] [--json] worktree remove ...",
             "delegate [--cwd PATH] [--json] worktree prune ...",
             "delegate [--cwd PATH] [--json] worktree gc ...",
+            "delegate [--cwd PATH] [--json] worktree reap ...",
         ),
         arguments=(
             ArgSpec(
                 "action",
                 True,
-                "One of: list, show, remove, prune, gc.",
+                "One of: list, show, remove, prune, gc, reap.",
             ),
         ),
         notes=(
@@ -1634,6 +1635,7 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "worktree remove",
             "worktree prune",
             "worktree gc",
+            "worktree reap",
         ),
         unsupported_global_options=("--isolation", "--auth-profile"),
     ),
@@ -1829,6 +1831,57 @@ COMMAND_SPECS: dict[str, CommandSpec] = {
             "The pool scan removes nothing at all, including empty pool directories — it reports them so you can clear them yourself.",
         ),
         see_also=("worktree list", "worktree prune", "worktree remove"),
+        unsupported_global_options=("--isolation", "--auth-profile"),
+    ),
+    "worktree reap": CommandSpec(
+        name="worktree reap",
+        summary="Reap old pooled worktrees through an explicit safety gate.",
+        usage=(
+            "delegate [--cwd PATH] [--json] worktree reap "
+            "(--handle HANDLE | --path PATH | --group NAME) --older-than DAYS "
+            "[--dry-run] [--yes] [--force] [--discard-uncommitted]",
+        ),
+        options=(
+            OptionSpec("--handle", "HANDLE", "Select one persistent worktree by run ID or alias."),
+            OptionSpec(
+                "--path", "PATH", "Select one canonical two-level path in the configured pool."
+            ),
+            OptionSpec("--group", "NAME", "Select persistent worktrees tagged with this group."),
+            OptionSpec(
+                "--older-than",
+                "DAYS",
+                "Reap only paths older than DAYS (non-negative integer).",
+            ),
+            OptionSpec("--dry-run", None, "Report eligible paths without changing the pool."),
+            OptionSpec("--yes", None, "Confirm removal of the reported eligible paths."),
+            OptionSpec(
+                "--force",
+                None,
+                "Allow removal when source-gone cleanliness is unknown; branches are preserved.",
+            ),
+            OptionSpec(
+                "--discard-uncommitted",
+                None,
+                "Explicitly accept unknown or uncommitted path contents.",
+            ),
+        ),
+        examples=(
+            "delegate worktree reap --path ~/.delegate/worktrees/abc123def456/cursor-1 --older-than 30 --dry-run",
+            "delegate worktree reap --group wave4 --older-than 14 --yes --force",
+        ),
+        notes=(
+            "Exactly one selector is required; --older-than is always required.",
+            "Without --yes the command reports a confirmation requirement and leaves paths unchanged.",
+            "Source-gone paths have unknown dirt; --yes is required and --force/--discard-uncommitted make that policy explicit. Branches are never touched.",
+            "A --help token anywhere in the args prints help and reaps nothing.",
+        ),
+        see_also=(
+            "worktree list",
+            "worktree show",
+            "worktree remove",
+            "worktree prune",
+            "worktree gc",
+        ),
         unsupported_global_options=("--isolation", "--auth-profile"),
     ),
     "models": CommandSpec(
@@ -2240,6 +2293,8 @@ def render_overview_text() -> str:
         "[--merged] [--older-than DAYS] [--harness HARNESS] [--include-detached] [--dry-run] "
         "[--discard-uncommitted] [--force-branch] [--force]",
         "delegate [--cwd PATH] [--json] worktree gc [--dry-run]",
+        "delegate [--cwd PATH] [--json] worktree reap "
+        "(--handle HANDLE | --path PATH | --group NAME) --older-than DAYS [--dry-run] [--yes]",
         "delegate [--cwd PATH] [--json] workflow run <script.py> "
         "[--args JSON] [--budget N] [--dry-run]",
         "delegate [--cwd PATH] [--json] workflow run --resume <wfId>",
