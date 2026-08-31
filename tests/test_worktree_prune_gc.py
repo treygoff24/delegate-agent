@@ -448,6 +448,26 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
 
             self.assertIn("cursor-stale-dead", {entry["alias"] for entry in result["planned"]})
 
+    def test_prune_skips_stale_run_with_live_process_group(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            run_id = self._seed_prunable_tree(path, fake_home, "cursor-stale-live-pgid")
+            self._set_run_state(
+                path,
+                run_id,
+                status="running",
+                pid=99999999,
+                pgid=os.getpgid(0),
+            )
+
+            result = self.delegate.worktree_mgmt.prune_worktrees(
+                self._registry_root(path), merged=True, dry_run=True
+            )
+
+            self.assertEqual(result["planned"], [])
+            reasons = {entry["alias"]: entry["reason"] for entry in result["skipped"]}
+            self.assertEqual(reasons["cursor-stale-live-pgid"], "process_group_alive")
+
     def test_prune_skips_terminal_run_whose_process_group_is_alive(self):
         _repo, path = self._make_repo()
         with tempfile.TemporaryDirectory() as fake_home:
@@ -474,6 +494,23 @@ class WorktreePruneGcTests(WorktreeMgmtTestBase):
 
             planned = {entry["alias"] for entry in result["planned"]}
             self.assertIn("cursor-forced", planned)
+
+    def test_prune_force_reaches_mutating_remove_owner_recheck(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            alias = "cursor-forced-live-pgid"
+            run_id = self._seed_prunable_tree(path, fake_home, alias)
+            worktree = Path(fake_home) / "wt" / alias
+            self._set_run_state(path, run_id, status="succeeded", pgid=os.getpgid(0))
+
+            result = self.delegate.worktree_mgmt.prune_worktrees(
+                self._registry_root(path), merged=True, force=True
+            )
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual([entry["alias"] for entry in result["removed"]], [alias])
+            self.assertEqual(result["errors"], [])
+            self.assertFalse(worktree.exists())
 
     def test_prune_older_than_filters(self):
         _repo, path = self._make_repo()
