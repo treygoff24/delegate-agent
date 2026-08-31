@@ -210,7 +210,7 @@ def _unterminated_pem_material_end(value: str, begin_end: int) -> int | None:
         if not stripped:
             if header_seen and not body_seen and not blank_line_skipped and line_end < len(value):
                 blank_line_skipped = True
-                cursor = line_end + 1
+                cursor = line_end + len(line_separator)
                 continue
             break
         if not _pem_material_line(line, continuation=material_end is not None):
