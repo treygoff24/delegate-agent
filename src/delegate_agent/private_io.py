@@ -5,6 +5,7 @@ import json
 import os
 import secrets
 import stat
+import time
 from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
@@ -16,7 +17,8 @@ PRIVATE_FILE_MODE = 0o600
 PRIVATE_RECORD_READ_MAX_BYTES = 4 * 1024 * 1024
 _DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 _NOFOLLOW_FLAGS = getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-_PRIVATE_READ_MAX_OPEN_ATTEMPTS = 4
+_PRIVATE_READ_REPLACED_RETRY_SECONDS = 0.25
+_PRIVATE_READ_REPLACED_RETRY_SLEEP_SECONDS = 0.001
 
 
 class RegistryJsonError(ValueError):
@@ -42,9 +44,13 @@ def read_private_text_bounded(path: Path, *, max_bytes: int) -> str:
     Registry record content is potentially child-tampered after write (work
     children run in the workspace that owns ``.delegate``), so every parent
     read of record text refuses symlinks, hard links, non-regular files, oversized
-    content, and invalid UTF-8 instead of trusting the path.
+    content, and invalid UTF-8 instead of trusting the path. A zero-link inode
+    (atomic replacement raced the open) is the one benign signal: the read is
+    retried against the new inode, with the full check set re-run, for at most
+    ``_PRIVATE_READ_REPLACED_RETRY_SECONDS`` before failing closed as ``replaced``.
     """
-    for attempt in range(_PRIVATE_READ_MAX_OPEN_ATTEMPTS):
+    deadline = time.monotonic() + _PRIVATE_READ_REPLACED_RETRY_SECONDS
+    while True:
         try:
             fd = open_private_file(path, os.O_RDONLY)
         except FileNotFoundError:
@@ -62,10 +68,16 @@ def read_private_text_bounded(path: Path, *, max_bytes: int) -> str:
                     "multiple_links", f"record file has {info.st_nlink} links: {path}"
                 )
             if info.st_nlink == 0:
-                if attempt + 1 == _PRIVATE_READ_MAX_OPEN_ATTEMPTS:
+                # A zero-link inode means the file was atomically replaced after
+                # open: benign writer activity, not tamper. Retry within a hard
+                # time budget so a phase-locked replace storm cannot exhaust a
+                # small fixed attempt count, while a malicious replace spinner
+                # still hits a bounded fail-closed refusal.
+                if time.monotonic() >= deadline:
                     raise BoundedReadError(
                         "replaced", f"record file was replaced while reading: {path}"
                     )
+                time.sleep(_PRIVATE_READ_REPLACED_RETRY_SLEEP_SECONDS)
                 continue
             chunks: list[bytes] = []
             total = 0
@@ -92,8 +104,6 @@ def read_private_text_bounded(path: Path, *, max_bytes: int) -> str:
             raise BoundedReadError(
                 "undecodable", f"record file {path} is not valid UTF-8: {exc}"
             ) from exc
-
-    raise AssertionError("bounded private read exhausted without returning or raising")
 
 
 def supports_private_modes() -> bool:
