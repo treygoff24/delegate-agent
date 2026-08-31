@@ -292,6 +292,15 @@ def emit_run(
                     "replayJournal": not resume_from_dry_run,
                     "replayAttempt": replay_attempt + 1,
                     "updatedAt": run_registry.utc_now_iso(),
+                    # A resume starts a new attempt: watchdog markers from a prior
+                    # fire must not survive into it, or a resumed-then-successful
+                    # run reports succeeded with watchdogCancelRequested still
+                    # true (WDB-R4). Explicit None is required — write_status
+                    # preserves these keys only when absent from the payload, so
+                    # a pop-based clear would be silently undone.
+                    "watchdogFiredAt": None,
+                    "watchdogReason": None,
+                    "watchdogCancelRequested": None,
                 }
             )
             # A resume may name a different target, or none; an explicit --notify
