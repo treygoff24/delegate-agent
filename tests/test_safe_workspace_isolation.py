@@ -87,6 +87,40 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
                 )
         self.assertEqual(ctx.exception.error, "source_root_guard")
 
+    def test_directory_copy_exception_cleanup_removes_read_only_tree(self):
+        with tempfile.TemporaryDirectory() as workspace, tempfile.TemporaryDirectory() as parent:
+            read_only = Path(workspace) / "readonly"
+            nested = read_only / "nested"
+            nested.mkdir(parents=True)
+            pinned_file = nested / "pin.py"
+            pinned_file.write_text("pinned\n", encoding="utf-8")
+            pinned_file.chmod(0o400)
+            nested.chmod(0o500)
+            read_only.chmod(0o500)
+            source_modes = {
+                path: path.stat().st_mode & 0o777 for path in (read_only, nested, pinned_file)
+            }
+            temp_base = Path(parent) / "safe"
+
+            with (
+                mock.patch.object(
+                    safe_workspace, "safe_workspace_temp_base", return_value=str(temp_base)
+                ),
+                mock.patch.object(
+                    safe_workspace,
+                    "block_external_symlinks",
+                    side_effect=RuntimeError("copy post-processing failed"),
+                ),
+                self.assertRaisesRegex(RuntimeError, "copy post-processing failed"),
+            ):
+                self.delegate.create_directory_safe_workspace(workspace)
+
+            self.assertFalse(temp_base.exists())
+            self.assertEqual(
+                {path: path.stat().st_mode & 0o777 for path in source_modes},
+                source_modes,
+            )
+
     def _submodule_paths_from_status(self, status: bytes) -> tuple[str, ...]:
         completed = subprocess.CompletedProcess(["git"], 0, status, b"")
         with mock.patch.object(safe_workspace, "_run_git_bytes", return_value=completed):
