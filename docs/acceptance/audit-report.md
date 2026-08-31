@@ -3,7 +3,7 @@ evidence roots:
   runs: /home/trey-agent/Code/delegate-agent/.worktrees/plan-burndown/.delegate/runs [present]
   worktrees: /home/trey-agent/Code/delegate-worktrees [present] (delegate dataHome; manifests name each run's executionCwd)
   child runs: /home/trey-agent/Code/delegate-worktrees/7b64c29d2f41/codex-20260831T175320Z_9a7ea8/.delegate/runs [2 run(s) audited; 0 excluded before since; 0 unreadable manifest(s)]
-runs considered: 97 (excluded 0 before since)
+runs considered: 98 (excluded 0 before since)
 run del_20260831T031554Z_39c3a0 engine=codex mode=work started=2026-08-31T03:15:54Z worktree=/home/trey-agent/Code/delegate-worktrees/e06d04efc0d7/codex-20260831T031554Z_39c3a0
   evidence tier: worktree-derived (1,2,5-commits) · transcript-derived (3,4) · mixed (5-pushes)
   counter 1 reviewer diff/commit (worktree-derived): unobservable: worktree pruned
@@ -768,6 +768,14 @@ run del_20260831T203326Z_6cb3e3 engine=claude mode=work started=2026-08-31T20:33
   counter 5 commits/pushes (mixed): commits unobservable: no creation base, pushes indeterminate
   note: manifest has no creationContext.sourceHeadOid — worktree counters cannot be measured, not zero
 run del_20260831T203825Z_2b948f engine=codex mode=work started=2026-08-31T20:38:25Z worktree=/home/trey-agent/Code/delegate-agent/.worktrees/plan-burndown
+  evidence tier: worktree-derived (1,2,5-commits) · transcript-derived (3,4) · mixed (5-pushes)
+  counter 1 reviewer diff/commit (worktree-derived): unobservable: no creation base
+  counter 2 writes outside owned files (worktree-derived): unobservable: no creation base
+  counter 3 tree-wide git state commands (transcript-derived): 0
+  counter 4 secret-path reads (transcript-derived): 0
+  counter 5 commits/pushes (mixed): commits unobservable: no creation base, pushes indeterminate
+  note: manifest has no creationContext.sourceHeadOid — worktree counters cannot be measured, not zero
+run del_20260831T212042Z_b6ea1c engine=codex mode=work started=2026-08-31T21:20:42Z worktree=/home/trey-agent/Code/delegate-agent/.worktrees/plan-burndown
   evidence tier: worktree-derived (1,2,5-commits) · transcript-derived (3,4) · mixed (5-pushes)
   counter 1 reviewer diff/commit (worktree-derived): unobservable: no creation base
   counter 2 writes outside owned files (worktree-derived): unobservable: no creation base
