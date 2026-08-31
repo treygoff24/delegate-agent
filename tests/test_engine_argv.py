@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from delegate_agent import prompt_instructions
+from delegate_agent import prompt_instructions, request_build
 from tests.delegate_commands_test_base import CommandTestBase, make_git_repo
 from tests.discovery_fakes import write_version_harness
 
@@ -929,11 +929,27 @@ class EngineArgvTests(CommandTestBase):
                 self.delegate.DEFAULT_CONFIG, engine="codex", mode="safe"
             ),
             workspace_kind="git",
+            prompt_transport=self.delegate.PROMPT_TRANSPORT_STDIN,
+            output_schema="/tmp/schema.json",
             persist_session=True,
             resume_session_id="codex-thread",
         )
         self.assertEqual(
-            codex[codex.index("exec") : codex.index("exec") + 3], ["exec", "resume", "codex-thread"]
+            codex,
+            [
+                "codex",
+                "--ask-for-approval",
+                "never",
+                "exec",
+                "--sandbox",
+                "read-only",
+                "resume",
+                "codex-thread",
+                "--output-schema",
+                "/tmp/schema.json",
+                "--json",
+                "-",
+            ],
         )
         self.assertNotIn("--ephemeral", codex)
         self.assertNotIn("--cd", codex)
@@ -1201,16 +1217,83 @@ class EngineArgvTests(CommandTestBase):
             workspace_kind="git",
             resume_session_id=session_id,
         )
-        self.assertNotIn("--ephemeral", argv)
-        self.assertIn("exec", argv)
-        self.assertIn("resume", argv)
-        exec_idx = argv.index("exec")
-        self.assertEqual(argv[exec_idx + 1], "resume")
-        self.assertNotIn("--cd", argv[exec_idx + 2 :])
-        self.assertIn(session_id, argv)
-        session_idx = argv.index(session_id)
-        self.assertEqual(argv[session_idx + 1], "fix the bug")
-        self.assertEqual(session_idx, len(argv) - 2)
+        self.assertEqual(
+            argv,
+            [
+                "codex",
+                "--ask-for-approval",
+                "never",
+                "--model",
+                "gpt-5",
+                "exec",
+                "--sandbox",
+                "workspace-write",
+                "-c",
+                "sandbox_workspace_write.network_access=true",
+                "resume",
+                "--json",
+                session_id,
+                "fix the bug",
+            ],
+        )
+
+    def test_cursor_fixed_effort_default_has_typed_outcome(self):
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        fixed_model = "cursor-grok-4.6-xhigh-fast"
+        config["cursor"]["defaultModel"] = fixed_model
+
+        with self.assertRaises(self.delegate.DelegateError) as matching:
+            self.build_git_request(
+                "cursor",
+                "safe",
+                None,
+                "/repo",
+                "hello",
+                config,
+                True,
+                reasoning_effort="xhigh",
+            )
+        self.assertEqual(matching.exception.error, "fixed_reasoning_effort")
+        self.assertIn(fixed_model, matching.exception.message)
+        self.assertIn("xhigh", matching.exception.message)
+        self.assertIn("omit --reasoning-effort", matching.exception.message)
+        self.assertIn("cursor.reasoningEffortModels", matching.exception.message)
+
+        with self.assertRaises(self.delegate.DelegateError) as mismatched:
+            self.build_git_request(
+                "cursor",
+                "safe",
+                None,
+                "/repo",
+                "hello",
+                config,
+                True,
+                reasoning_effort="high",
+            )
+        self.assertEqual(mismatched.exception.error, "unsupported_reasoning_effort")
+
+        pinned = self.build_git_request(
+            "cursor",
+            "safe",
+            None,
+            "/repo",
+            "hello",
+            config,
+            True,
+            reasoning_effort="xhigh",
+            model_override=fixed_model,
+        )
+        self.assertEqual(pinned.model, fixed_model)
+        self.assertTrue(
+            any("bypassed by the pinned model" in warning for warning in pinned.warnings)
+        )
+
+    def test_cursor_fixed_effort_capability_helper_has_same_typed_outcome(self):
+        cursor = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG["cursor"]))
+        cursor["defaultModel"] = "cursor-grok-4.6-xhigh-fast"
+        with self.assertRaises(self.delegate.DelegateError) as caught:
+            request_build.resolve_cursor_reasoning_capability(cursor, "xhigh")
+        self.assertEqual(caught.exception.error, "fixed_reasoning_effort")
 
     def test_claude_followup_argv_resume_token(self):
         policy = self.delegate.delegate_config.effective_policy(
