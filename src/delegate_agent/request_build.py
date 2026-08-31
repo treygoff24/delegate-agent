@@ -2611,6 +2611,28 @@ def build_request(
         return request
 
 
+_CURSOR_FIXED_REASONING_EFFORTS = {
+    "cursor-grok-4.6-xhigh-fast": "xhigh",
+}
+
+
+def _cursor_fixed_reasoning_effort_error(
+    model: object,
+    requested_effort: str,
+) -> DelegateError | None:
+    if not isinstance(model, str):
+        return None
+    fixed_effort = _CURSOR_FIXED_REASONING_EFFORTS.get(model)
+    if fixed_effort != requested_effort:
+        return None
+    return DelegateError(
+        "fixed_reasoning_effort",
+        f"Cursor model {model!r} has fixed reasoning effort {fixed_effort!r}; "
+        "omit --reasoning-effort to use that selector directly, or configure "
+        f"cursor.reasoningEffortModels.{fixed_effort} to route the explicit effort.",
+    )
+
+
 def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
     _ = build.cache
     cursor = build.config["cursor"]
@@ -2715,15 +2737,20 @@ def _cursor_request_parts(build: EngineBuildInput) -> EngineRequestParts:
         # Config defaults remain mandatory for Cursor, but an effort needs
         # either an explicit map or authoritative routes; never synthesize a
         # selector from a naming convention.
-        error = DelegateError(
-            "unsupported_reasoning_effort",
-            reasoning.format_explicit_reasoning_effort_error(
-                harness="cursor",
-                model=base_model,
-                effort=build.requested_effort,
-                detail="requires configured mappings or authoritative discovered routes",
-            ),
+        error = _cursor_fixed_reasoning_effort_error(
+            base_model,
+            build.requested_effort,
         )
+        if error is None:
+            error = DelegateError(
+                "unsupported_reasoning_effort",
+                reasoning.format_explicit_reasoning_effort_error(
+                    harness="cursor",
+                    model=base_model,
+                    effort=build.requested_effort,
+                    detail="requires configured mappings or authoritative discovered routes",
+                ),
+            )
         if build.effort_source != "config":
             raise error
         warnings.append(_config_default_ignored_warning("cursor", error.message))
@@ -3772,6 +3799,9 @@ def resolve_cursor_reasoning_capability(
     alias = default_model if isinstance(default_model, str) and default_model else None
     mappings = cursor_config.get("reasoningEffortModels")
     if not isinstance(mappings, dict):
+        fixed_error = _cursor_fixed_reasoning_effort_error(default_model, requested_effort)
+        if fixed_error is not None:
+            raise fixed_error
         raise DelegateError(
             "unsupported_reasoning_effort",
             reasoning.format_explicit_reasoning_effort_error(
@@ -3784,6 +3814,9 @@ def resolve_cursor_reasoning_capability(
         )
     model = mappings.get(requested_effort)
     if not isinstance(model, str) or not model:
+        fixed_error = _cursor_fixed_reasoning_effort_error(default_model, requested_effort)
+        if fixed_error is not None:
+            raise fixed_error
         supported = sorted(
             effort
             for effort, mapped_model in mappings.items()
