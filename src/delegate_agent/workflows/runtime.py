@@ -4065,21 +4065,35 @@ class _SupervisorWatchdog:
             self._thread.join(timeout=max(self.interval_seconds * 4, 1.0))
 
     def _run(self) -> None:
-        missing_samples = 0
+        bad_reason: str | None = None
+        bad_samples = 0
         while not self._stop.wait(self.interval_seconds):
-            reason = self._check(missing_samples)
+            reason = self._check()
+            if reason in {"state_missing", "heartbeat_invalid"}:
+                # Atomic replacement can briefly make a just-opened old inode
+                # unreadable.  Retry promptly, then require two bad samples.
+                if self._stop.wait(min(self.interval_seconds / 5, 0.05)):
+                    return
+                reason = self._check()
+            if reason == "terminal":
+                return
             if reason is None:
-                missing_samples = 0
+                bad_reason = None
+                bad_samples = 0
                 continue
-            if reason == "state_missing":
-                missing_samples += 1
-                if missing_samples < 2:
+            if reason in {"state_missing", "heartbeat_invalid"}:
+                if reason == bad_reason:
+                    bad_samples += 1
+                else:
+                    bad_reason = reason
+                    bad_samples = 1
+                if bad_samples < 2:
                     continue
             self.reason = reason
             self.state.cancel_event.set()
             return
 
-    def _check(self, missing_samples: int) -> str | None:
+    def _check(self) -> str | None:
         root = self.state.root
         status_path = root / registry.STATUS_FILE
         if not root.exists() or not status_path.exists():
@@ -4091,8 +4105,12 @@ class _SupervisorWatchdog:
             return "terminal"
         heartbeat = registry.read_json(root / WORKFLOW_HEARTBEAT_FILE)
         timestamp = heartbeat.get("heartbeatEpoch") if isinstance(heartbeat, dict) else None
-        if not isinstance(timestamp, (int, float)) or isinstance(timestamp, bool):
-            return "heartbeat_stale"
+        if (
+            not isinstance(timestamp, (int, float))
+            or isinstance(timestamp, bool)
+            or not math.isfinite(timestamp)
+        ):
+            return "heartbeat_invalid"
         if time.time() - float(timestamp) > self.stale_seconds:
             return "heartbeat_stale"
         return None
@@ -4242,9 +4260,10 @@ def run_supervisor(
             return 0
         except SupervisorWatchdogExit as exc:
             tb = traceback.format_exc()[-4000:]
+            watchdog_reason = watchdog.reason or exc.reason
             if root.exists() and (root / registry.STATUS_FILE).exists():
                 with contextlib.suppress(Exception):
-                    state.append_event("workflow_watchdog", reason=exc.reason, traceback=tb)
+                    state.append_event("workflow_watchdog", reason=watchdog_reason, traceback=tb)
                 gate_event = state.latest_gate_event()
                 if isinstance(gate_event, dict) and isinstance(gate_event.get("key"), str):
                     # A watchdog can interrupt the drain after the gate row was
@@ -4269,7 +4288,7 @@ def run_supervisor(
                     )
                 with contextlib.suppress(Exception):
                     state.write_status(
-                        "failed", error=str(exc), traceback=tb, watchdogReason=exc.reason
+                        "failed", error=str(exc), traceback=tb, watchdogReason=watchdog_reason
                     )
                 state.notify_event("failed", detail=str(exc)[:160])
             return 1
