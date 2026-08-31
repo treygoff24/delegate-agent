@@ -163,7 +163,9 @@ class FollowupCaptureE2ETests(unittest.TestCase):
         self.assertNotIn("--ephemeral", followup_argv)
         self.assertIn("exec", followup_argv)
         exec_idx = followup_argv.index("exec")
-        self.assertEqual(followup_argv[exec_idx + 1], "resume")
+        # Sandbox/config flags may sit between `exec` and the `resume`
+        # subcommand; the real codex parser accepts that (probe-verified).
+        self.assertGreater(followup_argv.index("resume"), exec_idx)
         self.assertIn("th_e2e_fixed_12345", followup_argv)
         session_idx = followup_argv.index("th_e2e_fixed_12345")
         self.assertEqual(session_idx, len(followup_argv) - 2)

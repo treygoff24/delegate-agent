@@ -186,7 +186,9 @@ class FollowupRefusalsTests(unittest.TestCase):
         self.assertIn("exec", argv)
         self.assertIn("resume", argv)
         exec_idx = argv.index("exec")
-        self.assertEqual(argv[exec_idx + 1], "resume")
+        # Sandbox/config flags may sit between `exec` and the `resume`
+        # subcommand; the real codex parser accepts that (probe-verified).
+        self.assertGreater(argv.index("resume"), exec_idx)
         self.assertIn("th_valid12345", argv)
         self.assertNotIn("--ephemeral", argv)
 
