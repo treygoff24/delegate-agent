@@ -602,12 +602,26 @@ def reap_worktrees(
                     if target.is_symlink() or not target.is_dir():
                         errors.append({**entry, "code": "toctou_changed"})
                         continue
+                    record = fresh_record
                     try:
-                        shutil.rmtree(target)
-                    except OSError as exc:
+                        if record is not None and entry.get("sourceGone") is not True:
+                            source = record.get("sourceGitRoot")
+                            execution = record.get("executionCwd")
+                            if not isinstance(source, str) or not isinstance(execution, str):
+                                errors.append({**entry, "code": "metadata_missing"})
+                                continue
+                            wm._remove_worktree_path(
+                                source_git_root=source,
+                                execution_cwd=execution,
+                                discard_uncommitted=force or discard_uncommitted,
+                                record=record,
+                                alias=str(record.get("alias") or record.get("runId")),
+                            )
+                        else:
+                            shutil.rmtree(target)
+                    except (OSError, wm.WorktreeManagementError) as exc:
                         errors.append({**entry, "code": "reap_failed", "message": str(exc)})
                         continue
-                    record = fresh_record
                     if record is not None and registry_root is not None:
                         run_registry.set_worktree_status_locked(
                             registry_root,
