@@ -43,6 +43,29 @@ if _SRC not in sys.path:
 
 os.environ.pop("AI_PROFILE", None)
 os.environ.pop("DELEGATE_CONFIG", None)
+# A workflow-pinned parent leaks PYTHONPATH=<pin src> plus DELEGATE_WORKFLOW_PIN
+# into every child. The pin src ships a sitecustomize.py that, seeing the pin
+# var, imports delegate_agent at interpreter startup -- BEFORE this package can
+# insert _SRC -- so sys.modules holds the pinned (stale) build and every test
+# silently exercises the wrong code (observed 2026-08-31: a compiled-plan close
+# refused 11 green rows because verify subprocesses tested the pre-plan pin).
+# Evict foreign delegate_agent modules so imports resolve from _SRC, and scrub
+# the pin env so subprocesses the suite spawns start clean.
+for _name, _module in list(sys.modules.items()):
+    if _name == "delegate_agent" or _name.startswith("delegate_agent."):
+        _file = getattr(_module, "__file__", None)
+        if _file is not None and not str(_file).startswith(_SRC + os.sep):
+            del sys.modules[_name]
+os.environ.pop("DELEGATE_WORKFLOW_PIN", None)
+_pythonpath = [
+    entry
+    for entry in os.environ.get("PYTHONPATH", "").split(os.pathsep)
+    if entry and entry != _SRC and not (Path(entry) / "sitecustomize.py").exists()
+]
+if _pythonpath:
+    os.environ["PYTHONPATH"] = os.pathsep.join(_pythonpath)
+else:
+    os.environ.pop("PYTHONPATH", None)
 # Initiator-root provenance reads these from os.environ; a suite run inside a
 # Claude Code or Codex session would otherwise make every initiator resolution
 # ambiguous (two native keys present -> None) and fail provenance tests.
