@@ -603,40 +603,6 @@ def build_codex_argv(
 ) -> list[str]:
     _reject_pure("codex", mode, pure)
     binary = str(codex["binary"])
-    if pure:
-        argv = [binary]
-        if model:
-            argv.extend(["--model", model])
-        if reasoning_capability is not None:
-            argv.extend(["-c", f'model_reasoning_effort="{reasoning_capability.effort}"'])
-        if fast is not None:
-            service_tier = "fast" if fast else "default"
-            argv.extend(["-c", f'service_tier="{service_tier}"'])
-            if fast:
-                argv.extend(["-c", "features.fast_mode=true"])
-        if resume_session_id is not None:
-            argv.extend(["exec", "resume"])
-        else:
-            argv.append("exec")
-        argv.extend(
-            [
-                "--ignore-user-config",
-                "--ignore-rules",
-                "--skip-git-repo-check",
-                "--sandbox",
-                "read-only",
-            ]
-        )
-        if output_schema is not None:
-            argv.extend(["--output-schema", output_schema])
-        if stream_capture:
-            argv.extend(["--color", "never", "--json"])
-            if not resumable and resume_session_id is None and codex.get("ephemeral", True) is True:
-                argv.append("--ephemeral")
-        if resume_session_id is not None:
-            argv.append(resume_session_id)
-        argv.append("-")
-        return argv
     argv = [binary]
     # Safe mode is read-only by contract: never emit the dangerous bypass flags,
     # even if a policy block somehow carries them. Config validation rejects such
@@ -648,6 +614,16 @@ def build_codex_argv(
     write_sandbox = mode == MODE_WORK or call_write
     bypass_sandbox = elevated and policy.get("bypassApprovalsAndSandbox") is True
     bypass_hook_trust = elevated and policy.get("bypassHookTrust") is True
+    sandbox_tokens: list[str] = []
+    if bypass_sandbox:
+        sandbox_tokens.append("--dangerously-bypass-approvals-and-sandbox")
+    else:
+        sandbox = codex["workSandbox"] if write_sandbox else "read-only"
+        sandbox_tokens.extend(["--sandbox", str(sandbox)])
+        if write_sandbox and sandbox == "workspace-write" and policy.get("networkAccess") is True:
+            sandbox_tokens.extend(["-c", "sandbox_workspace_write.network_access=true"])
+    if bypass_hook_trust:
+        sandbox_tokens.append("--dangerously-bypass-hook-trust")
     if policy.get("webSearch") is True:
         argv.append("--search")
     if not bypass_sandbox:
@@ -673,19 +649,7 @@ def build_codex_argv(
     structured_resume = resume_session_id is not None and persist_session
     if resume_session_id is not None:
         argv.append("exec")
-        sandbox = codex["workSandbox"] if write_sandbox else "read-only"
-        if bypass_sandbox:
-            argv.append("--dangerously-bypass-approvals-and-sandbox")
-        else:
-            argv.extend(["--sandbox", str(sandbox)])
-            if (
-                write_sandbox
-                and sandbox == "workspace-write"
-                and policy.get("networkAccess") is True
-            ):
-                argv.extend(["-c", "sandbox_workspace_write.network_access=true"])
-        if bypass_hook_trust:
-            argv.append("--dangerously-bypass-hook-trust")
+        argv.extend(sandbox_tokens)
         if codex.get("ignoreUserConfig") is True:
             argv.append("--ignore-user-config")
         if workspace_kind != "git":
@@ -703,19 +667,7 @@ def build_codex_argv(
     if resume_session_id is None and workspace_kind != "git":
         argv.append("--skip-git-repo-check")
     if resume_session_id is None:
-        if bypass_sandbox:
-            argv.append("--dangerously-bypass-approvals-and-sandbox")
-        else:
-            sandbox = codex["workSandbox"] if write_sandbox else "read-only"
-            argv.extend(["--sandbox", str(sandbox)])
-            if (
-                write_sandbox
-                and sandbox == "workspace-write"
-                and policy.get("networkAccess") is True
-            ):
-                argv.extend(["-c", "sandbox_workspace_write.network_access=true"])
-        if bypass_hook_trust:
-            argv.append("--dangerously-bypass-hook-trust")
+        argv.extend(sandbox_tokens)
     if stream_capture:
         if resume_session_id is None:
             argv.extend(["--color", "never"])
