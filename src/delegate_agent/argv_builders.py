@@ -615,22 +615,27 @@ def build_codex_argv(
             if fast:
                 argv.extend(["-c", "features.fast_mode=true"])
         if resume_session_id is not None:
-            argv.extend(["exec", "resume"])
+            # --sandbox and --color are rejected after the `resume` subcommand
+            # (probe-verified 0.151.0); emit --sandbox top-level and drop --color.
+            argv.extend(["--sandbox", "read-only", "exec", "resume"])
+            argv.extend(["--ignore-user-config", "--ignore-rules", "--skip-git-repo-check"])
         else:
             argv.append("exec")
-        argv.extend(
-            [
-                "--ignore-user-config",
-                "--ignore-rules",
-                "--skip-git-repo-check",
-                "--sandbox",
-                "read-only",
-            ]
-        )
+            argv.extend(
+                [
+                    "--ignore-user-config",
+                    "--ignore-rules",
+                    "--skip-git-repo-check",
+                    "--sandbox",
+                    "read-only",
+                ]
+            )
         if output_schema is not None:
             argv.extend(["--output-schema", output_schema])
         if stream_capture:
-            argv.extend(["--color", "never", "--json"])
+            if resume_session_id is None:
+                argv.extend(["--color", "never"])
+            argv.append("--json")
             if not resumable and resume_session_id is None and codex.get("ephemeral", True) is True:
                 argv.append("--ephemeral")
         if resume_session_id is not None:
@@ -671,7 +676,10 @@ def build_codex_argv(
             # in the ambient config; enable it so --fast cannot no-op.
             argv.extend(["-c", "features.fast_mode=true"])
     structured_resume = resume_session_id is not None and persist_session
-    if structured_resume:
+    # On resume, sandbox flags go before `exec`: codex rejects --sandbox and
+    # --ask-for-approval after the `resume` subcommand (probe-verified 0.151.0),
+    # while the top-level position is accepted.
+    if resume_session_id is not None:
         sandbox = codex["workSandbox"] if write_sandbox else "read-only"
         if bypass_sandbox:
             argv.append("--dangerously-bypass-approvals-and-sandbox")
@@ -699,7 +707,7 @@ def build_codex_argv(
         argv.append("--ignore-user-config")
     if workspace_kind != "git":
         argv.append("--skip-git-repo-check")
-    if resume_session_id is None or not structured_resume:
+    if resume_session_id is None:
         if bypass_sandbox:
             argv.append("--dangerously-bypass-approvals-and-sandbox")
         else:
@@ -714,7 +722,11 @@ def build_codex_argv(
         if bypass_hook_trust:
             argv.append("--dangerously-bypass-hook-trust")
     if stream_capture:
-        argv.extend(["--color", "never", "--json"])
+        # `codex exec resume` rejects --color (probe-verified 0.151.0); --json
+        # is accepted in either position.
+        if resume_session_id is None:
+            argv.extend(["--color", "never"])
+        argv.append("--json")
         if (
             not persist_session
             and resume_session_id is None

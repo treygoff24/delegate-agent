@@ -1207,10 +1207,38 @@ class EngineArgvTests(CommandTestBase):
         exec_idx = argv.index("exec")
         self.assertEqual(argv[exec_idx + 1], "resume")
         self.assertNotIn("--cd", argv[exec_idx + 2 :])
+        # codex rejects these after the `resume` subcommand (probe-verified
+        # against codex-cli 0.151.0); they must precede `exec` or be dropped.
+        resume_tail = argv[exec_idx + 2 :]
+        for exec_only_flag in ("--color", "--sandbox", "--ask-for-approval"):
+            self.assertNotIn(exec_only_flag, resume_tail)
         self.assertIn(session_id, argv)
         session_idx = argv.index(session_id)
         self.assertEqual(argv[session_idx + 1], "fix the bug")
         self.assertEqual(session_idx, len(argv) - 2)
+
+    def test_codex_followup_argv_sandbox_precedes_exec(self):
+        policy = self.delegate.delegate_config.effective_policy(
+            self.delegate.DEFAULT_CONFIG,
+            engine="codex",
+            mode="work",
+        )
+        argv = self.delegate.build_codex_argv(
+            self.delegate.DEFAULT_CONFIG["codex"],
+            "work",
+            "/repo",
+            "gpt-5",
+            "fix the bug",
+            policy,
+            workspace_kind="git",
+            resume_session_id="th_0123456789abcdef",
+            stream_capture=True,
+        )
+        exec_idx = argv.index("exec")
+        self.assertIn("--sandbox", argv[:exec_idx])
+        self.assertIn("--ask-for-approval", argv[:exec_idx])
+        self.assertNotIn("--color", argv)
+        self.assertIn("--json", argv)
 
     def test_claude_followup_argv_resume_token(self):
         policy = self.delegate.delegate_config.effective_policy(
