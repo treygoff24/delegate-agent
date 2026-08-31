@@ -168,6 +168,20 @@ class SnapshotRedactionTests(SnapshotCommandTestBase):
             "***PRIVATE KEY REDACTED***\nVerdict: not ready.\n",
         )
 
+    def test_redact_string_masks_encrypted_pem_header_block(self):
+        payload = (
+            "-----BEGIN RSA PRIVATE KEY-----\n"
+            "Proc-Type: 4,ENCRYPTED\n"
+            "DEK-Info: AES-128-CBC,7B3A9C1D2E4F5061\n"
+            "\n"
+            "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj\n"
+            "Verdict: done\n"
+        )
+        self.assertEqual(
+            self.redaction.redact_string(payload),
+            "***PRIVATE KEY REDACTED***\nVerdict: done\n",
+        )
+
     def test_redact_argv_masks_a_flagged_secret_that_begins_with_a_dash(self):
         # A credential flag's value is skipped only when it looks like another
         # flag, and nothing stops a token from starting with a dash.
