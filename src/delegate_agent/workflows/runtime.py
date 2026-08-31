@@ -9,6 +9,7 @@ import json
 import math
 import os
 import queue
+import re
 import signal
 import subprocess
 import tempfile
@@ -70,6 +71,7 @@ CHILD_WAIT_POLL_SECONDS = 0.25
 KILL_SUPERVISOR_WAIT_SECONDS = 5.0
 KILL_SUPERVISOR_FORCE_WAIT_SECONDS = 2.0
 WORKFLOW_EFFORT_VALUES = tuple(dict.fromkeys(reasoning.PI_THINKING_LEVELS))
+_FENCED_JSON_BLOCK_RE = re.compile(r"```(?:json)?[ \t]*\r?\n(.*?)```", re.IGNORECASE | re.DOTALL)
 
 
 class _MissingType:
@@ -139,6 +141,8 @@ class _DelegateChildResult:
     workspace_cleanup: JsonObject | None = None
     isolation_backend: str | None = None
     outcome: ChildAttemptOutcome | None = None
+    completion_report_source: str | None = None
+    completion_report_path: str | None = None
 
 
 def _delegate_child_result(value: object) -> _DelegateChildResult:
@@ -235,6 +239,16 @@ def _child_result_from_payload(result: JsonObject, *, text: str | None) -> _Dele
             else None
         ),
         outcome=outcome,
+        completion_report_source=(
+            result.get("completionReportSource")
+            if isinstance(result.get("completionReportSource"), str)
+            else None
+        ),
+        completion_report_path=(
+            result.get("completionReportPath")
+            if isinstance(result.get("completionReportPath"), str)
+            else None
+        ),
     )
 
 
@@ -271,6 +285,8 @@ def _failed_child_result(
         workspace_cleanup=prior.workspace_cleanup or outcome.cleanup_ownership,
         isolation_backend=prior.isolation_backend,
         outcome=outcome,
+        completion_report_source=prior.completion_report_source,
+        completion_report_path=prior.completion_report_path,
     )
 
 
@@ -378,6 +394,31 @@ def _workflow_agent_run_result_metadata(
         ),
         None,
     )
+    completion_report_source = next(
+        (
+            value
+            for record in records
+            for value in (record.get("completionReportSource"),)
+            if isinstance(value, str)
+        ),
+        None,
+    )
+    completion_report_path = next(
+        (
+            value
+            for record in records
+            for value in (
+                record.get("completionReportPath"),
+                (
+                    record.get("completionReport", {}).get("path")
+                    if isinstance(record.get("completionReport"), dict)
+                    else None
+                ),
+            )
+            if isinstance(value, str)
+        ),
+        None,
+    )
     return _DelegateChildResult(
         text=None,
         run_id=run_id,
@@ -394,6 +435,8 @@ def _workflow_agent_run_result_metadata(
             execution_cwd=execution_cwd,
             session_id=session_id if isinstance(session_id, str) else None,
         ),
+        completion_report_source=completion_report_source,
+        completion_report_path=completion_report_path,
     )
 
 
@@ -1469,6 +1512,7 @@ def execute_workflow(state: WorkflowState) -> object:
         "args": state.args,
         "budget": state.budget,
         "dry_run": state.dry_run,
+        "is_dry_run": state.dry_run,
     }
     exec(code, globals_dict)
     return globals_dict["__delegate_workflow__"]()
@@ -2920,6 +2964,13 @@ class WorkflowDsl:
                 if retry_workspace_run_id is None:
                     retry_workspace_run_id = child.run_id
                 prior_child = child
+        fallback = _structured_completion_report_fallback(child, self.state.workspace, schema)
+        if fallback is not _MISSING:
+            self._record_structured_attempt(key, None)
+            _cleanup_structured_retry_workspace(workspace_cleanup)
+            if first_child_run_id is not None:
+                self._release_structured_retry_worktree(first_child_run_id)
+            return fallback
         outcome = StructuredAttemptOutcome(
             last_parsed_candidate=last_parsed_candidate,
             validation_error=prior_error,
@@ -3067,6 +3118,12 @@ class WorkflowDsl:
                         recovered.isolation_backend if recovered is not None else None
                     ),
                     outcome=(recovered.outcome if recovered is not None else None),
+                    completion_report_source=(
+                        recovered.completion_report_source if recovered is not None else None
+                    ),
+                    completion_report_path=(
+                        recovered.completion_report_path if recovered is not None else None
+                    ),
                 )
             recovered = _failed_child_result(recovered, reason="timeout", session_id=session_id)
             if return_metadata:
@@ -4009,6 +4066,53 @@ def _snapshot_child_completion_report(snapshot: JsonObject, workspace: Path) -> 
     completion = snapshot.get("completionReport")
     report_path = completion.get("path") if isinstance(completion, dict) else None
     return _read_completion_report(report_path, workspace)
+
+
+def _final_child_completion_report(child: _DelegateChildResult, workspace: Path) -> str | None:
+    """Read only the final child-sourced report, never a synthesized report."""
+    if child.completion_report_source == "child":
+        report = _read_completion_report(child.completion_report_path, workspace)
+        if report is not None:
+            return report
+    elif child.completion_report_source is not None:
+        return None
+    if child.run_id is None or not run_registry.RUN_ID_RE.fullmatch(child.run_id):
+        return None
+    snapshot = run_registry.load_run_snapshot_or_none(_run_registry_root(workspace), child.run_id)
+    return (
+        _snapshot_child_completion_report(snapshot, workspace)
+        if isinstance(snapshot, dict)
+        else None
+    )
+
+
+def _last_fenced_json_block(report: str) -> str | None:
+    matches = list(_FENCED_JSON_BLOCK_RE.finditer(report))
+    if matches:
+        return matches[-1].group(1).strip()
+    if "```" in report:
+        return None
+    return report.strip()
+
+
+def _structured_completion_report_fallback(
+    child: _DelegateChildResult, workspace: Path, schema: JsonObject
+) -> JsonValue | _MissingType:
+    try:
+        report = _final_child_completion_report(child, workspace)
+    except Exception:
+        return _MISSING
+    if report is None:
+        return _MISSING
+    candidate = _last_fenced_json_block(report)
+    if candidate is None:
+        return _MISSING
+    try:
+        value = workflow_schema.parse_json_tolerant(candidate, schema)
+        workflow_schema.validate_value(value, schema)
+    except Exception:
+        return _MISSING
+    return value
 
 
 def _read_completion_report(report_path: object, workspace: Path) -> str | None:

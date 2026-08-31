@@ -260,6 +260,155 @@ class ChildAttemptOutcomeTests(unittest.TestCase):
             },
         )
 
+    def test_structured_exhaustion_falls_back_to_child_completion_report(self) -> None:
+        report_path = self.workspace / "completion-report.md"
+        report_path.write_text(
+            'Status: completed.\n\n```json\n{"ok": true}\n```\n', encoding="utf-8"
+        )
+        child = runtime._DelegateChildResult(
+            text="assistant prose, not JSON",
+            run_id="del_20260827T040000Z_fallback1",
+            execution_cwd="/tmp/fallback-worktree",
+            session_id=None,
+            completion_report_source="child",
+            completion_report_path=str(report_path),
+        )
+        dsl = self._dsl()
+        with (
+            mock.patch.object(dsl, "_run_delegate", return_value=child),
+            mock.patch.object(dsl, "_release_structured_retry_worktree"),
+        ):
+            result = dsl._run_structured_or_text(
+                "claude",
+                "fallback",
+                mode="safe",
+                model=None,
+                effort=None,
+                fast=None,
+                schema={"type": "object", "required": ["ok"]},
+                isolation=None,
+                passthrough=False,
+                timeout=None,
+                retries=0,
+                key="fallback-key",
+            )
+        self.assertEqual(result, {"ok": True})
+        self.assertFalse(
+            any(
+                event.get("type") == "agent_structured_exhausted"
+                for event in registry.iter_journal(self.root / registry.JOURNAL_FILE)
+            )
+        )
+
+    def test_structured_fallback_rejects_synthesized_report(self) -> None:
+        report_path = self.workspace / "completion-report.md"
+        report_path.write_text('```json\n{"ok": true}\n```\n', encoding="utf-8")
+        child = runtime._DelegateChildResult(
+            text="not JSON",
+            run_id="del_20260827T040000Z_synth1",
+            execution_cwd="/tmp/synth-worktree",
+            session_id=None,
+            completion_report_source="delegate_synthesized",
+            completion_report_path=str(report_path),
+        )
+        dsl = self._dsl()
+        with (
+            mock.patch.object(dsl, "_run_delegate", return_value=child),
+            mock.patch.object(dsl, "_release_structured_retry_worktree"),
+        ):
+            result = dsl._run_structured_or_text(
+                "claude",
+                "synthesized",
+                mode="safe",
+                model=None,
+                effort=None,
+                fast=None,
+                schema={"type": "object", "required": ["ok"]},
+                isolation=None,
+                passthrough=False,
+                timeout=None,
+                retries=0,
+                key="synth-key",
+            )
+        self.assertIsNone(result)
+
+    def test_structured_fallback_rejects_missing_report(self) -> None:
+        child = runtime._DelegateChildResult(
+            text="not JSON",
+            run_id="del_20260827T040000Z_missing1",
+            execution_cwd="/tmp/missing-worktree",
+            session_id=None,
+            completion_report_source="child",
+            completion_report_path=str(self.workspace / "missing-report.md"),
+        )
+        dsl = self._dsl()
+        with (
+            mock.patch.object(dsl, "_run_delegate", return_value=child),
+            mock.patch.object(dsl, "_release_structured_retry_worktree"),
+        ):
+            result = dsl._run_structured_or_text(
+                "claude",
+                "missing",
+                mode="safe",
+                model=None,
+                effort=None,
+                fast=None,
+                schema={"type": "object", "required": ["ok"]},
+                isolation=None,
+                passthrough=False,
+                timeout=None,
+                retries=0,
+                key="missing-key",
+            )
+        self.assertIsNone(result)
+
+    def test_structured_fallback_uses_last_fenced_block_only(self) -> None:
+        report_path = self.workspace / "completion-report.md"
+        report_path.write_text(
+            '```json\n{"ok": true}\n```\n'
+            "The final block is invalid.\n"
+            '```json\n{"ok": "stale"}\n```\n',
+            encoding="utf-8",
+        )
+        child = runtime._DelegateChildResult(
+            text="not JSON",
+            run_id="del_20260827T040000Z_stale1",
+            execution_cwd="/tmp/stale-worktree",
+            session_id=None,
+            completion_report_source="child",
+            completion_report_path=str(report_path),
+        )
+        dsl = self._dsl()
+        with (
+            mock.patch.object(dsl, "_run_delegate", return_value=child),
+            mock.patch.object(dsl, "_release_structured_retry_worktree"),
+        ):
+            result = dsl._run_structured_or_text(
+                "claude",
+                "stale",
+                mode="safe",
+                model=None,
+                effort=None,
+                fast=None,
+                schema={
+                    "type": "object",
+                    "required": ["ok"],
+                    "properties": {"ok": {"type": "boolean"}},
+                },
+                isolation=None,
+                passthrough=False,
+                timeout=None,
+                retries=0,
+                key="stale-key",
+            )
+        self.assertIsNone(result)
+        event = next(
+            event
+            for event in registry.iter_journal(self.root / registry.JOURNAL_FILE)
+            if event.get("type") == "agent_structured_exhausted"
+        )
+        self.assertIn("Expecting value", event["validationError"])
+
     def test_structured_agent_accepts_json_string_payload_for_object_schema(self) -> None:
         dsl = self._dsl()
         child = runtime._DelegateChildResult(
