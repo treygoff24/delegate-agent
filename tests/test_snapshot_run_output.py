@@ -72,6 +72,43 @@ class SnapshotRunOutputTests(SnapshotCommandTestBase):
         self.assertEqual(code, 0)
         self.assertIn(latest_alias, stdout.getvalue())
 
+    def test_run_output_stale_numbered_alias_reports_newer_run(self):
+        first_run_id, first_alias = self.write_run(
+            harness="codex",
+            status="succeeded",
+            pid=None,
+            started_at="2026-05-20T12:00:00Z",
+        )
+        self.write_run(
+            harness="codex",
+            status="succeeded",
+            pid=None,
+            started_at="2026-05-20T12:05:00Z",
+        )
+        run_path = self.registry.run_directory(self.registry_root, first_run_id)
+        (run_path / "completion-report.md").write_text("done\n", encoding="utf-8")
+        stdout = io.StringIO()
+
+        code = self.delegate.main(
+            [
+                "--json",
+                "--cwd",
+                str(self.workspace),
+                "run-output",
+                first_alias,
+                "--completion-report",
+            ],
+            stdout=stdout,
+        )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["runId"], first_run_id)
+        self.assertEqual(payload["resolvedRunId"], first_run_id)
+        self.assertEqual(payload["resolvedStartedAt"], "2026-05-20T12:00:00Z")
+        self.assertEqual(payload["newerRunCount"], 1)
+        self.assertTrue(any("run_target_stale" in item for item in payload["warnings"]))
+
     def test_snapshot_unknown_handle_returns_suggestions(self):
         _, first_alias = self.write_run()
         self.write_run()
