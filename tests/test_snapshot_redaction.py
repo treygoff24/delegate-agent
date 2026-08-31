@@ -226,6 +226,13 @@ class SnapshotRedactionTests(SnapshotCommandTestBase):
             "***PRIVATE KEY REDACTED***\nVerdict: done\n",
         )
 
+    def test_redact_string_preserves_short_token_after_prose_marker(self):
+        payload = "Grepped for -----BEGIN PRIVATE KEY-----\n2026-08-31\nVerdict: clean.\n"
+        self.assertEqual(
+            self.redaction.redact_string(payload),
+            "Grepped for ***PRIVATE KEY REDACTED***\n2026-08-31\nVerdict: clean.\n",
+        )
+
     def test_redact_argv_masks_a_flagged_secret_that_begins_with_a_dash(self):
         # A credential flag's value is skipped only when it looks like another
         # flag, and nothing stops a token from starting with a dash.
