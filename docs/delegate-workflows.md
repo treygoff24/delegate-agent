@@ -8,7 +8,10 @@ with `--group <wfId>`, so `runs`, `snapshot`, `run-output`, `wait`, and
 
 Workflow registries use this file set as needed:
 
-- `script.py`: pinned workflow source for this run.
+- `script.py`: pinned workflow source for this run (the frozen copy executed on
+  every resume).
+- `sourceScript`: user-supplied source path recorded at launch for provenance;
+  it is never used as the resume execution input.
 - `args.json`: launch arguments supplied with `--args`.
 - `journal.jsonl`: append-only workflow events.
 - `status.json`: current supervisor/status snapshot.
@@ -60,7 +63,8 @@ return {"confirmed": [item for item in findings if item]}
 
 `meta` must be a pure top-level dict literal. Top-level `return` becomes the
 workflow result in `result.json`. Injected globals are `agent`, `followup`,
-`pipeline`, `parallel`, `phase`, `log`, `workflow`, `judges`, `args`, and `budget`.
+`pipeline`, `parallel`, `phase`, `log`, `workflow`, `judges`, `args`, `budget`,
+`dry_run`, and `is_dry_run`.
 
 ## Core DSL
 
@@ -137,6 +141,13 @@ python3 bin/delegate.py workflow run --resume wf_0123abcdef45
 
 Its simulated events remain in `journal.jsonl` for audit, but resume ignores
 them as cached results and resets simulated budget before launching live agents.
+
+### Dry-run write warning
+
+A workflow dry-run stubs **agent calls only**. Filesystem writes made by the
+script itself are live and can change the checkout or other state. Scripts that
+write state should branch on `dry_run` (or its `is_dry_run` alias), or run from a
+disposable checkout. The CLI includes this warning in dry-run output.
 
 ## Limits
 
