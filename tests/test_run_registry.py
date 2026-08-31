@@ -261,6 +261,37 @@ class RunRegistryTests(unittest.TestCase):
             self.assertEqual(payload["resolvedGroup"], "wave4")
             self.assertNotIn("resolutionKind", payload)
 
+    def test_running_numbered_alias_suppresses_newer_sibling_warning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")
+            first_id, first_alias = self.registry.register_run(root, harness="codex")
+            self.registry.write_json_atomic(
+                self.registry.run_directory(root, first_id) / self.registry.STATE_FILE,
+                {"status": "running", "pid": os.getpid()},
+            )
+            self.registry.register_run(root, harness="codex")
+
+            target = self.registry.resolve_run_target(
+                root,
+                handle=first_alias,
+                latest_harness=None,
+            )
+
+            self.assertIsInstance(target, self.registry.RunTarget)
+            self.assertIsNone(target.resolution_warning)
+            self.assertEqual(target.resolution_details["newerRunCount"], 1)
+
+            self.registry.write_json_atomic(
+                self.registry.run_directory(root, first_id) / self.registry.STATE_FILE,
+                {"status": "running", "pid": 999_999_999},
+            )
+            stale_target = self.registry.resolve_run_target(
+                root,
+                handle=first_alias,
+                latest_harness=None,
+            )
+            self.assertIn("run_target_stale", stale_target.resolution_warning)
+
     def test_stale_numbered_alias_warning_supports_legacy_index(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = self.registry.ensure_registry(Path(tmp), workspace_kind="directory")

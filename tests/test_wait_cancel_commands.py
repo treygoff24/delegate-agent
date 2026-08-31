@@ -170,6 +170,15 @@ class WaitCancelCommandTests(unittest.TestCase):
         self.assertIn("warning: run_target_stale:", out)
         self.assertIn("1 newer codex run", out)
 
+    def test_wait_running_numbered_alias_suppresses_resolution_warning(self):
+        _first_run_id, first_alias = self.write_run(status="running", pid=os.getpid())
+        self.write_run(status="running", pid=os.getpid())
+
+        code, out, err = self.run_cli(["wait", first_alias, "--timeout", "1", "--interval", "1"])
+
+        self.assertEqual(code, 124, err)
+        self.assertNotIn("run_target_stale", out)
+
     def test_wait_bare_harness_reports_resolution_workspace_and_stale_warning(self):
         run_id, alias = self.write_run(status="succeeded")
         run_path = run_registry.run_directory(self.registry_root, run_id)
