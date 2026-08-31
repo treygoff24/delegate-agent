@@ -130,6 +130,7 @@ def write_status(root: Path, payload: JsonObject) -> None:
     if isinstance(existing, dict):
         for key in (
             "scriptSha256",
+            "sourceScript",
             "args",
             "watchdogFiredAt",
             "watchdogReason",
