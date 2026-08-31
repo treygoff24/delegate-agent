@@ -185,6 +185,7 @@ def prune_worktrees(
                         discard_uncommitted=discard_uncommitted,
                         force_branch=force_branch,
                         keep_branch=candidate.get("keep_branch", False),
+                        force=force,
                         _merged_check_already_passed=merged_check_already_passed,
                     )
                 )
