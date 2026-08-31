@@ -1,4 +1,5 @@
 import io
+import time
 import unittest
 
 from tests.snapshot_commands_test_base import SnapshotCommandTestBase
@@ -203,6 +204,15 @@ class SnapshotRedactionTests(SnapshotCommandTestBase):
             self.redaction.redact_string(payload),
             "***PRIVATE KEY REDACTED***\nVerdict: done\n",
         )
+
+    def test_redact_string_pem_scan_is_linear_in_marker_count(self):
+        payload = "note -----BEGIN PRIVATE KEY----- absent here\n" * 8_000
+        expected = "note ***PRIVATE KEY REDACTED*** absent here\n" * 8_000
+        started = time.perf_counter()
+        redacted = self.redaction.redact_string(payload)
+        elapsed = time.perf_counter() - started
+        self.assertEqual(redacted, expected)
+        self.assertLess(elapsed, 0.25)
 
     def test_redact_argv_masks_a_flagged_secret_that_begins_with_a_dash(self):
         # A credential flag's value is skipped only when it looks like another
