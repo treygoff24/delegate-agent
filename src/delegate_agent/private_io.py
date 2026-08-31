@@ -16,6 +16,7 @@ PRIVATE_FILE_MODE = 0o600
 PRIVATE_RECORD_READ_MAX_BYTES = 4 * 1024 * 1024
 _DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 _NOFOLLOW_FLAGS = getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+_PRIVATE_READ_MAX_OPEN_ATTEMPTS = 4
 
 
 class RegistryJsonError(ValueError):
@@ -25,8 +26,8 @@ class RegistryJsonError(ValueError):
 class BoundedReadError(ValueError):
     """A record file could not be read within the bounded-trust contract.
 
-    ``reason`` is one of: ``not_found``, ``not_regular``, ``multiple_links``, ``too_large``,
-    ``undecodable``, ``unreadable``. Callers map these onto their own
+    ``reason`` is one of: ``not_found``, ``not_regular``, ``multiple_links``, ``replaced``,
+    ``too_large``, ``undecodable``, ``unreadable``. Callers map these onto their own
     user-facing error codes.
     """
 
@@ -43,43 +44,56 @@ def read_private_text_bounded(path: Path, *, max_bytes: int) -> str:
     read of record text refuses symlinks, hard links, non-regular files, oversized
     content, and invalid UTF-8 instead of trusting the path.
     """
-    try:
-        fd = open_private_file(path, os.O_RDONLY)
-    except FileNotFoundError:
-        raise BoundedReadError("not_found", f"record file not found: {path}") from None
-    except OSError as exc:
-        raise BoundedReadError("unreadable", f"could not open record file {path}: {exc}") from exc
-    try:
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode):
-            raise BoundedReadError("not_regular", f"record file is not a regular file: {path}")
-        if info.st_nlink != 1:
+    for attempt in range(_PRIVATE_READ_MAX_OPEN_ATTEMPTS):
+        try:
+            fd = open_private_file(path, os.O_RDONLY)
+        except FileNotFoundError:
+            raise BoundedReadError("not_found", f"record file not found: {path}") from None
+        except OSError as exc:
             raise BoundedReadError(
-                "multiple_links", f"record file has {info.st_nlink} links: {path}"
-            )
-        chunks: list[bytes] = []
-        total = 0
-        while True:
-            chunk = os.read(fd, 65536)
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > max_bytes:
+                "unreadable", f"could not open record file {path}: {exc}"
+            ) from exc
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise BoundedReadError("not_regular", f"record file is not a regular file: {path}")
+            if info.st_nlink > 1:
                 raise BoundedReadError(
-                    "too_large",
-                    f"record file {path} exceeds the {max_bytes}-byte read bound",
+                    "multiple_links", f"record file has {info.st_nlink} links: {path}"
                 )
-            chunks.append(chunk)
-    except OSError as exc:
-        raise BoundedReadError("unreadable", f"could not read record file {path}: {exc}") from exc
-    finally:
-        os.close(fd)
-    try:
-        return b"".join(chunks).decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise BoundedReadError(
-            "undecodable", f"record file {path} is not valid UTF-8: {exc}"
-        ) from exc
+            if info.st_nlink == 0:
+                if attempt + 1 == _PRIVATE_READ_MAX_OPEN_ATTEMPTS:
+                    raise BoundedReadError(
+                        "replaced", f"record file was replaced while reading: {path}"
+                    )
+                continue
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise BoundedReadError(
+                        "too_large",
+                        f"record file {path} exceeds the {max_bytes}-byte read bound",
+                    )
+                chunks.append(chunk)
+        except OSError as exc:
+            raise BoundedReadError(
+                "unreadable", f"could not read record file {path}: {exc}"
+            ) from exc
+        finally:
+            os.close(fd)
+        try:
+            return b"".join(chunks).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise BoundedReadError(
+                "undecodable", f"record file {path} is not valid UTF-8: {exc}"
+            ) from exc
+
+    raise AssertionError("bounded private read exhausted without returning or raising")
 
 
 def supports_private_modes() -> bool:
