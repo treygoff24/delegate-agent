@@ -41,6 +41,7 @@ DURABLE_EVENT_TYPES = {
     "agent_retry",
     "agent_structured_retry",
     "agent_structured_exhausted",
+    "workflow_watchdog_fired",
     "budget",
     "gate",
     "item_parked",
@@ -127,7 +128,13 @@ def write_status(root: Path, payload: JsonObject) -> None:
         created_at = candidate if isinstance(candidate, str) else run_registry.utc_now_iso()
     merged: JsonObject = {"schema": WORKFLOW_SCHEMA, **payload, "createdAt": created_at}
     if isinstance(existing, dict):
-        for key in ("scriptSha256", "args"):
+        for key in (
+            "scriptSha256",
+            "args",
+            "watchdogFiredAt",
+            "watchdogReason",
+            "watchdogCancelRequested",
+        ):
             if key not in merged and key in existing:
                 merged[key] = existing[key]
     created_ordinal = existing.get("createdOrdinal") if isinstance(existing, dict) else None
