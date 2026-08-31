@@ -184,9 +184,7 @@ def _unterminated_pem_material_end(value: str, begin_end: int) -> int | None:
     while separator_start < len(value) and value[separator_start] in " \t":
         separator_start += 1
     escaped_separator = value.startswith("\\n", separator_start)
-    if escaped_separator:
-        cursor = separator_start + 2
-    elif value.startswith("\r\n", separator_start):
+    if escaped_separator or value.startswith("\r\n", separator_start):
         cursor = separator_start + 2
     elif value.startswith("\n", separator_start):
         cursor = separator_start + 1
