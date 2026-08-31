@@ -1,4 +1,5 @@
 import io
+import time
 import unittest
 
 from tests.snapshot_commands_test_base import SnapshotCommandTestBase
@@ -166,6 +167,70 @@ class SnapshotRedactionTests(SnapshotCommandTestBase):
         self.assertEqual(
             self.redaction.redact_string(payload),
             "***PRIVATE KEY REDACTED***\nVerdict: not ready.\n",
+        )
+
+    def test_redact_string_masks_encrypted_pem_header_block(self):
+        payload = (
+            "-----BEGIN RSA PRIVATE KEY-----\n"
+            "Proc-Type: 4,ENCRYPTED\n"
+            "DEK-Info: AES-128-CBC,7B3A9C1D2E4F5061\n"
+            "\n"
+            "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj\n"
+            "Verdict: done\n"
+        )
+        self.assertEqual(
+            self.redaction.redact_string(payload),
+            "***PRIVATE KEY REDACTED***\nVerdict: done\n",
+        )
+
+    def test_redact_string_masks_escaped_newline_pem_key(self):
+        payload = (
+            '{"K": "-----BEGIN PRIVATE KEY-----\\n'
+            "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj\\n"
+            'Verdict: done"}'
+        )
+        self.assertEqual(
+            self.redaction.redact_string(payload),
+            '{"K": "***PRIVATE KEY REDACTED***\\nVerdict: done"}',
+        )
+
+    def test_redact_string_masks_pem_marker_with_trailing_space(self):
+        payload = (
+            "-----BEGIN PRIVATE KEY----- \n"
+            "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj\n"
+            "Verdict: done\n"
+        )
+        self.assertEqual(
+            self.redaction.redact_string(payload),
+            "***PRIVATE KEY REDACTED***\nVerdict: done\n",
+        )
+
+    def test_redact_string_pem_scan_is_linear_in_marker_count(self):
+        payload = "note -----BEGIN PRIVATE KEY----- absent here\n" * 8_000
+        expected = "note ***PRIVATE KEY REDACTED*** absent here\n" * 8_000
+        started = time.perf_counter()
+        redacted = self.redaction.redact_string(payload)
+        elapsed = time.perf_counter() - started
+        self.assertEqual(redacted, expected)
+        self.assertLess(elapsed, 0.25)
+
+    def test_redact_string_masks_short_final_base64_line(self):
+        payload = (
+            "-----BEGIN PRIVATE KEY-----\n"
+            "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj\n"
+            "Ag==\n"
+            "Verdict: done\n"
+        )
+        self.assertEqual(
+            self.redaction.redact_string(payload),
+            "***PRIVATE KEY REDACTED***\nVerdict: done\n",
+        )
+
+    def test_redact_string_preserves_short_token_after_prose_marker(self):
+        payload = "Grepped for -----BEGIN PRIVATE KEY-----\n2026-08-31\nVerdict: clean.\n"
+        self.assertEqual(
+            self.redaction.redact_string(payload),
+            "Grepped for ***PRIVATE KEY REDACTED***\n2026-08-31\nVerdict: clean.\n",
         )
 
     def test_redact_argv_masks_a_flagged_secret_that_begins_with_a_dash(self):
