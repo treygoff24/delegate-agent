@@ -12,6 +12,18 @@ from tests.worktree_mgmt_test_base import WorktreeMgmtTestBase, git
 
 
 class WorktreeRemoveTests(WorktreeMgmtTestBase):
+    def _set_run_state(self, repo_path: str, run_id: str, **fields) -> None:
+        state_path = (
+            self.delegate.run_registry.run_directory(self._registry_root(repo_path), run_id)
+            / "state.json"
+        )
+        state = self.delegate.run_registry.read_json_object(state_path) or {}
+        for key in ("pid", "pgid"):
+            if fields.get(key) is None:
+                state.pop(key, None)
+        state.update({key: value for key, value in fields.items() if value is not None})
+        self.delegate.run_registry.write_json_atomic(state_path, state)
+
     def test_worktree_remove_refuses_live_owner(self):
         _repo, path = self._make_repo()
         with tempfile.TemporaryDirectory() as fake_home:
@@ -40,6 +52,64 @@ class WorktreeRemoveTests(WorktreeMgmtTestBase):
             self.assertEqual(code, self.delegate.EXIT_USAGE)
             self.assertEqual(json.loads(out)["code"], "run_active")
             self.assertTrue(Path(wt_path).exists())
+
+    def test_worktree_remove_owner_liveness_matrix(self):
+        cases = (
+            ("missing-pid", {"status": "running"}, None, "run_not_terminal"),
+            (
+                "stale-live-pgid",
+                {"status": "running", "pid": 99999999, "pgid": os.getpgid(0)},
+                None,
+                "process_group_alive",
+            ),
+            (
+                "stale-dead-pgid",
+                {"status": "running", "pid": 99999999, "pgid": 99999999},
+                None,
+                None,
+            ),
+            (
+                "terminal-live-pgid",
+                {"status": "succeeded", "pgid": os.getpgid(0)},
+                None,
+                "process_group_alive",
+            ),
+            (
+                "forced-live-owner",
+                {"status": "running", "pid": os.getpid()},
+                "--force",
+                None,
+            ),
+        )
+        for label, state_fields, option, expected_error in cases:
+            with self.subTest(label=label):
+                _repo, path = self._make_repo(prefix=f"delegate-remove-{label}-")
+                with tempfile.TemporaryDirectory() as fake_home:
+                    alias = f"cursor-{label}"
+                    branch = f"delegate/{alias}"
+                    wt_path = str(Path(fake_home) / "wt" / alias)
+                    run_id, _alias = self._seed_persistent_run(
+                        path,
+                        alias=alias,
+                        branch=branch,
+                        execution_cwd=wt_path,
+                    )
+                    self._create_worktree_at(path, branch, wt_path)
+                    self._set_run_state(path, run_id, **state_fields)
+                    args = ["--cwd", path, "--json", "worktree", "remove", alias]
+                    if option is not None:
+                        args.append(option)
+
+                    code, out, _err = self._run_cli(args, home=fake_home)
+
+                    if expected_error is None:
+                        self.assertEqual(code, 0, out)
+                        self.assertTrue(json.loads(out)["pathRemoved"])
+                        self.assertFalse(Path(wt_path).exists())
+                    else:
+                        self.assertEqual(code, self.delegate.EXIT_USAGE, out)
+                        self.assertEqual(json.loads(out)["code"], expected_error)
+                        self.assertTrue(Path(wt_path).exists())
 
     def test_worktree_remove_refuses_source_root_target(self):
         _repo, path = self._make_repo()
