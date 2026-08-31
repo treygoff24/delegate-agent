@@ -187,6 +187,8 @@ class WorkflowWatchdogProcessTests(unittest.TestCase):
         heartbeat.mkdir()
         self._wait_process_gone(pid)
         self.assertFalse(registry.supervisor_alive(root))
+        status = registry.read_json(root / registry.STATUS_FILE) or {}
+        self.assertEqual(status.get("watchdogReason"), "heartbeat_invalid")
 
     def test_healthy_long_child_keeps_heartbeat_and_is_not_killed(self) -> None:
         """Keep the child-wait regression while lease coverage moves to the timer."""
@@ -268,6 +270,37 @@ class WorkflowWatchdogProcessTests(unittest.TestCase):
             ),
             timeout=8,
         )
+
+    def test_one_refused_heartbeat_read_does_not_cancel_supervisor(self) -> None:
+        _, root = self._launch(
+            0,
+            "import time\n"
+            "from pathlib import Path\n"
+            "from delegate_agent.workflows import registry as workflow_registry\n"
+            "meta = {'name': 'heartbeat read retry'}\n"
+            "real_read_json = workflow_registry.read_json\n"
+            "refuse_once = [True]\n"
+            "def read_json_with_one_refusal(path):\n"
+            "    if Path(path).name == 'heartbeat.json' and refuse_once[0]:\n"
+            "        refuse_once[0] = False\n"
+            "        return None\n"
+            "    return real_read_json(path)\n"
+            "workflow_registry.read_json = read_json_with_one_refusal\n"
+            "try:\n"
+            "    time.sleep(0.7)\n"
+            "finally:\n"
+            "    workflow_registry.read_json = real_read_json\n"
+            "return agent('after refused heartbeat read')\n",
+        )
+
+        self._wait_for(
+            lambda: (
+                (registry.read_json(root / registry.STATUS_FILE) or {}).get("status") == "succeeded"
+            ),
+            timeout=8,
+        )
+        events = registry.iter_journal(root / registry.JOURNAL_FILE)
+        self.assertNotIn("workflow_watchdog", {event.get("type") for event in events})
 
     def test_slow_gate_and_soft_park_notifications_keep_lease_alive(self) -> None:
         post = self.bin_dir / "post"
