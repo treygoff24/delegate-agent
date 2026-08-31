@@ -103,7 +103,7 @@ def _is_command_local_global(option: str, command_argv: list[str]) -> bool:
     if subcommand == "mail":
         return len(command_argv) >= 2 and command_argv[1] == "send"
     if subcommand == "worktree":
-        return len(command_argv) >= 2 and command_argv[1] in {"list", "remove", "prune"}
+        return len(command_argv) >= 2 and command_argv[1] in {"list", "remove", "prune", "reap"}
     return False
 
 
@@ -2795,6 +2795,16 @@ WORKTREE_OPTION_SPECS: dict[str, dict[str, WorktreeOptionSpec]] = {
         "--all": ("flag", "all_pools"),
         "--pool": ("str", "pool"),
     },
+    "reap": {
+        "--handle": ("str", "handle"),
+        "--path": ("str", "path"),
+        "--group": ("group", "group"),
+        "--older-than": ("non_negative_int", "older_than_days"),
+        "--dry-run": ("flag", "dry_run"),
+        "--yes": ("flag", "yes"),
+        "--force": ("flag", "force"),
+        "--discard-uncommitted": ("flag", "discard_uncommitted"),
+    },
 }
 
 
@@ -2869,6 +2879,10 @@ def parse_worktree(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedC
         raise DelegateError(
             "unexpected_argument", f"worktree {action} does not accept positional arguments."
         )
+    if action == "reap" and positional:
+        raise DelegateError(
+            "unexpected_argument", "worktree reap does not accept positional arguments."
+        )
     if action == "gc" and options.get("pool") == "":
         raise DelegateError("invalid_option_value", "worktree gc --pool requires a path.")
     if action == "show":
@@ -2893,6 +2907,13 @@ def parse_worktree(rest: list[str], json_mode: bool, cwd: str | None) -> ParsedC
             raise DelegateError("missing_handle", "worktree remove requires an alias or run id.")
         else:
             options["handle"] = positional[0]
+    if action == "reap":
+        selectors = sum(options.get(name) is not None for name in ("handle", "path", "group"))
+        if selectors != 1:
+            raise DelegateError(
+                "reap_selector_required",
+                "worktree reap requires exactly one of --handle, --path, or --group.",
+            )
     if options.get("keep_branch") and (options.get("force_branch") or options.get("force")):
         raise DelegateError(
             "invalid_option_combination",

@@ -12,6 +12,35 @@ from tests.worktree_mgmt_test_base import WorktreeMgmtTestBase, git
 
 
 class WorktreeRemoveTests(WorktreeMgmtTestBase):
+    def test_worktree_remove_refuses_live_owner(self):
+        _repo, path = self._make_repo()
+        with tempfile.TemporaryDirectory() as fake_home:
+            branch = "delegate/cursor-live-remove"
+            wt_path = str(Path(fake_home) / "wt" / "cursor-live-remove")
+            run_id, _alias = self._seed_persistent_run(
+                path,
+                alias="cursor-live-remove",
+                branch=branch,
+                execution_cwd=wt_path,
+            )
+            self._create_worktree_at(path, branch, wt_path)
+            state_path = (
+                self.delegate.run_registry.run_directory(self._registry_root(path), run_id)
+                / "state.json"
+            )
+            state = self.delegate.run_registry.read_json_object(state_path) or {}
+            state.update({"status": "running", "pid": os.getpid()})
+            self.delegate.run_registry.write_json_atomic(state_path, state)
+
+            code, out, _err = self._run_cli(
+                ["--cwd", path, "--json", "worktree", "remove", "cursor-live-remove"],
+                home=fake_home,
+            )
+
+            self.assertEqual(code, self.delegate.EXIT_USAGE)
+            self.assertEqual(json.loads(out)["code"], "run_active")
+            self.assertTrue(Path(wt_path).exists())
+
     def test_worktree_remove_refuses_source_root_target(self):
         _repo, path = self._make_repo()
         with tempfile.TemporaryDirectory() as fake_home:

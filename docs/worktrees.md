@@ -237,6 +237,32 @@ delegate worktree prune --merged --group wave4
 
 `prune` requires at least one of `--merged` or `--older-than DAYS`. It skips dirty, unknown, detached-source, and merge-check-failed entries unless you pass explicit override flags. `--group NAME` limits prune candidates to that launch group.
 
+## Reap old pooled paths
+
+`worktree reap` is the explicit, age-gated cleanup verb for paths retained in
+the machine-wide pool. It requires exactly one selector and an age threshold:
+
+```bash
+delegate worktree reap --handle cursor-4 --older-than 14 --dry-run
+delegate worktree reap --path ~/.delegate/worktrees/abc123def456/cursor-1 --older-than 30 --yes --force
+delegate worktree reap --group wave4 --older-than 14 --yes --force
+```
+
+`--path` is accepted only for an absolute, canonical pool entry exactly one
+fingerprint directory below the configured `worktrees.dataHome`; symlinked
+components and paths outside the pool are refused. A dry run never changes the
+pool. A mutating run also requires `--yes`, acquires the pool lock before the
+registry lock, and re-reads the selected entry immediately before removal.
+
+The same owner-liveness check used by `worktree prune` and `worktree remove`
+blocks active runs, live process groups, and attached resumes. An effective
+`stale` run is eligible only when its child and recorded process group are
+provably gone; a stale record with missing PID information remains blocked.
+Source-gone paths cannot be checked for uncommitted contents, so they report
+unknown dirt. Reaping one requires the explicit `--yes` confirmation (with
+`--force` or `--discard-uncommitted` available when scripting that policy).
+Their branches are preserved and never touched.
+
 ## Repair registry state
 
 ```bash

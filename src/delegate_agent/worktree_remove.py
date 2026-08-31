@@ -552,6 +552,21 @@ def remove_worktree(
         if status == STATUS_REMOVED:
             return _remove_already_removed(record, alias=alias, options=options)
 
+        # Keep direct removal aligned with prune: a clean-looking path is not
+        # safe to retire while its owning run (or process group) is live.
+        # ``force`` is the explicit escape hatch used by prune as well.
+        if not force:
+            owner_block = wm._owner_run_block_reason(registry_root, record)
+            if owner_block is not None:
+                raise wm.WorktreeManagementError(
+                    wm._error_payload(
+                        owner_block,
+                        "Worktree owner is still active; wait for the run to finish before removing.",
+                        record=record,
+                        next_actions=[f"delegate worktree show {alias}"],
+                    )
+                )
+
         execution_cwd = record.get("executionCwd")
         if status in (STATUS_PRESENT, STATUS_UNKNOWN) and isinstance(execution_cwd, str):
             attachments = worktree_records.live_attachments_for_path(registry_root, execution_cwd)

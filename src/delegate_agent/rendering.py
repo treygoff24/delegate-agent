@@ -576,6 +576,27 @@ def render_worktree_prune_text(payload: JsonObject, stdout: TextIO) -> None:
                     print(f"  - {label} {detail}", file=stdout)
 
 
+def render_worktree_reap_text(payload: JsonObject, stdout: TextIO) -> None:
+    selector = payload.get("selector")
+    if isinstance(selector, dict) and selector:
+        key, value = next(iter(selector.items()))
+        print(f"selector: {key}={value}", file=stdout)
+    print(f"older than: {payload.get('olderThanDays', '?')} days", file=stdout)
+    if payload.get("dryRun") is True:
+        print("dry run: pool unchanged", file=stdout)
+    for section in ("planned", "reaped", "skipped", "errors"):
+        items = payload.get(section)
+        count = len(items) if isinstance(items, list) else 0
+        print(f"{section}: {count}", file=stdout)
+        if isinstance(items, list):
+            for item in items[:20]:
+                if not isinstance(item, dict):
+                    continue
+                label = item.get("alias") or item.get("runId") or item.get("worktreePath") or "?"
+                detail = item.get("reason") or item.get("code") or ""
+                print(f"  - {label} {detail}", file=stdout)
+
+
 def render_runs_prune_text(payload: JsonObject, stdout: TextIO) -> None:
     print(f"older than: {payload.get('olderThanDays', '?')} days", file=stdout)
     if payload.get("dryRun") is True:
