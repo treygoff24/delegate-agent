@@ -60,6 +60,20 @@ class ParseJsonTolerant(unittest.TestCase):
         value = workflow_schema.parse_json_tolerant(text, EXECUTE_RESULT)
         self.assertEqual(value["summary"], "done")
 
+    def test_valid_leading_value_wins_over_trailing_decoys(self) -> None:
+        cases = (
+            (
+                '{"result": 42}\n\nNote: {"result": 0} would be wrong.',
+                {"type": "object"},
+                {"result": 42},
+            ),
+            ('"the answer"\n\nSee the "notes" file.', {"type": "string"}, "the answer"),
+            ('{"result": 42}\n\nThe "answer" is above.', None, {"result": 42}),
+        )
+        for text, schema, expected in cases:
+            with self.subTest(schema=schema):
+                self.assertEqual(workflow_schema.parse_json_tolerant(text, schema), expected)
+
     def test_bare_json_and_fenced_json_still_parse(self) -> None:
         self.assertEqual(workflow_schema.parse_json_tolerant('{"a": 1}'), {"a": 1})
         self.assertEqual(workflow_schema.parse_json_tolerant('```json\n{"a": 1}\n```'), {"a": 1})
