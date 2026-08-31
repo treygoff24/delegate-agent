@@ -169,39 +169,61 @@ def _pem_material_line(line: str, *, continuation: bool = False) -> bool:
         return True
     if _PEM_BODY.fullmatch(stripped) is None:
         return False
+    if continuation:
+        return True
     if stripped.startswith(("MII", "LS0t", "b3Bl")):
         return True
-    if len(stripped) < 8:
-        return continuation and stripped.isupper()
-    # Real PEM bodies are long, mixed-looking base64 lines.  Keep a little
-    # tolerance for synthetic fixtures and base64url-ish output, while avoiding
+    # The first body line must be long enough to distinguish key material from
     # ordinary single-word prose such as ``notready``.
-    return len(stripped) >= 16 or any(char.isdigit() or char in "+/=_-" for char in stripped)
+    return len(stripped) >= 32
 
 
 def _unterminated_pem_material_end(value: str, begin_end: int) -> int | None:
     """Return the end of contiguous PEM material after an unterminated marker."""
-    if value.startswith("\r\n", begin_end):
-        cursor = begin_end + 2
-    elif value.startswith("\n", begin_end):
-        cursor = begin_end + 1
+    separator_start = begin_end
+    while separator_start < len(value) and value[separator_start] in " \t":
+        separator_start += 1
+    escaped_separator = value.startswith("\\n", separator_start)
+    if escaped_separator or value.startswith("\r\n", separator_start):
+        cursor = separator_start + 2
+    elif value.startswith("\n", separator_start):
+        cursor = separator_start + 1
     else:
         # A marker embedded in prose is not evidence that the rest is a key.
         return None
 
     material_end: int | None = None
+    header_seen = False
+    body_seen = False
+    blank_line_skipped = False
     while cursor < len(value):
-        line_end = value.find("\n", cursor)
+        line_separator = "\\n" if escaped_separator else "\n"
+        line_end = value.find(line_separator, cursor)
         if line_end < 0:
             line_end = len(value)
-        line = value[cursor:line_end].removesuffix("\r")
+        line = value[cursor:line_end]
+        if not escaped_separator:
+            line = line.removesuffix("\r")
+        stripped = line.strip()
+        if not stripped:
+            if header_seen and not body_seen and not blank_line_skipped and line_end < len(value):
+                blank_line_skipped = True
+                cursor = line_end + len(line_separator)
+                continue
+            break
         if not _pem_material_line(line, continuation=material_end is not None):
             break
+        if _PEM_HEADER.fullmatch(stripped):
+            header_seen = True
+        elif _PEM_BODY.fullmatch(stripped):
+            body_seen = True
         if line_end == len(value):
             material_end = len(value)
             break
-        next_cursor = line_end + 1
-        content_end = line_end - (1 if value[line_end - 1 : line_end] == "\r" else 0)
+        next_cursor = line_end + len(line_separator)
+        content_end = line_end
+        if not escaped_separator and value[line_end - 1 : line_end] == "\r":
+            content_end -= 1
         material_end = len(value) if next_cursor == len(value) else content_end
         cursor = next_cursor
     return material_end
@@ -213,9 +235,15 @@ def _redact_pem_blocks(value: str) -> str:
         return value
     parts: list[str] = []
     pos = 0
+    no_end_from: int | None = None
     while match is not None:
         parts.append(value[pos : match.start()])
-        end = _PEM_END.search(value, match.end())
+        if no_end_from is not None and match.end() >= no_end_from:
+            end = None
+        else:
+            end = _PEM_END.search(value, match.end())
+            if end is None:
+                no_end_from = match.end()
         parts.append(PEM_BLOCK_PLACEHOLDER)
         if end is None:
             material_end = _unterminated_pem_material_end(value, match.end())
