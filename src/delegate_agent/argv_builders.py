@@ -671,7 +671,8 @@ def build_codex_argv(
             # in the ambient config; enable it so --fast cannot no-op.
             argv.extend(["-c", "features.fast_mode=true"])
     structured_resume = resume_session_id is not None and persist_session
-    if structured_resume:
+    if resume_session_id is not None:
+        argv.append("exec")
         sandbox = codex["workSandbox"] if write_sandbox else "read-only"
         if bypass_sandbox:
             argv.append("--dangerously-bypass-approvals-and-sandbox")
@@ -685,21 +686,23 @@ def build_codex_argv(
                 argv.extend(["-c", "sandbox_workspace_write.network_access=true"])
         if bypass_hook_trust:
             argv.append("--dangerously-bypass-hook-trust")
-    if resume_session_id is not None and not structured_resume:
-        argv.extend(["exec", "resume"])
+        if codex.get("ignoreUserConfig") is True:
+            argv.append("--ignore-user-config")
+        if workspace_kind != "git":
+            argv.append("--skip-git-repo-check")
+        argv.append("resume")
+        if structured_resume:
+            argv.append(resume_session_id)
     else:
         argv.append("exec")
-        if resume_session_id is not None:
-            argv.extend(["resume", resume_session_id])
-        else:
-            argv.extend(["--cd", workspace])
+        argv.extend(["--cd", workspace])
     if output_schema is not None:
         argv.extend(["--output-schema", output_schema])
-    if codex.get("ignoreUserConfig") is True:
+    if resume_session_id is None and codex.get("ignoreUserConfig") is True:
         argv.append("--ignore-user-config")
-    if workspace_kind != "git":
+    if resume_session_id is None and workspace_kind != "git":
         argv.append("--skip-git-repo-check")
-    if resume_session_id is None or not structured_resume:
+    if resume_session_id is None:
         if bypass_sandbox:
             argv.append("--dangerously-bypass-approvals-and-sandbox")
         else:
@@ -714,7 +717,9 @@ def build_codex_argv(
         if bypass_hook_trust:
             argv.append("--dangerously-bypass-hook-trust")
     if stream_capture:
-        argv.extend(["--color", "never", "--json"])
+        if resume_session_id is None:
+            argv.extend(["--color", "never"])
+        argv.append("--json")
         if (
             not persist_session
             and resume_session_id is None
