@@ -1238,27 +1238,36 @@ class EngineArgvTests(CommandTestBase):
         )
 
     def test_cursor_fixed_effort_default_has_typed_outcome(self):
-        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+        fixed_efforts = {
+            "cursor-grok-4.6-xhigh-fast": "xhigh",
+            "cursor-grok-4.6-xhigh": "xhigh",
+            "gpt-5.5-high": "high",
+            "claude-opus-4-8-thinking-high": "high",
+        }
+        for fixed_model, fixed_effort in fixed_efforts.items():
+            config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
+            config["cursor"]["defaultModel"] = fixed_model
+            with self.subTest(model=fixed_model, effort=fixed_effort):
+                with self.assertRaises(self.delegate.DelegateError) as matching:
+                    self.build_git_request(
+                        "cursor",
+                        "safe",
+                        None,
+                        "/repo",
+                        "hello",
+                        config,
+                        True,
+                        reasoning_effort=fixed_effort,
+                    )
+                self.assertEqual(matching.exception.error, "fixed_reasoning_effort")
+                self.assertIn(fixed_model, matching.exception.message)
+                self.assertIn(fixed_effort, matching.exception.message)
+                self.assertIn("omit --reasoning-effort", matching.exception.message)
+                self.assertIn("cursor.reasoningEffortModels", matching.exception.message)
+
         fixed_model = "cursor-grok-4.6-xhigh-fast"
+        config = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG))
         config["cursor"]["defaultModel"] = fixed_model
-
-        with self.assertRaises(self.delegate.DelegateError) as matching:
-            self.build_git_request(
-                "cursor",
-                "safe",
-                None,
-                "/repo",
-                "hello",
-                config,
-                True,
-                reasoning_effort="xhigh",
-            )
-        self.assertEqual(matching.exception.error, "fixed_reasoning_effort")
-        self.assertIn(fixed_model, matching.exception.message)
-        self.assertIn("xhigh", matching.exception.message)
-        self.assertIn("omit --reasoning-effort", matching.exception.message)
-        self.assertIn("cursor.reasoningEffortModels", matching.exception.message)
-
         with self.assertRaises(self.delegate.DelegateError) as mismatched:
             self.build_git_request(
                 "cursor",
@@ -1288,8 +1297,30 @@ class EngineArgvTests(CommandTestBase):
             any("bypassed by the pinned model" in warning for warning in pinned.warnings)
         )
 
+        config["cursor"]["defaultModel"] = "composer-2.5"
+        with self.assertRaises(self.delegate.DelegateError) as non_fixed:
+            self.build_git_request(
+                "cursor",
+                "safe",
+                None,
+                "/repo",
+                "hello",
+                config,
+                True,
+                reasoning_effort="high",
+            )
+        self.assertEqual(non_fixed.exception.error, "unsupported_reasoning_effort")
+
     def test_cursor_fixed_effort_capability_helper_has_same_typed_outcome(self):
         cursor = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG["cursor"]))
+        cursor["defaultModel"] = "cursor-grok-4.6-xhigh-fast"
+        with self.assertRaises(self.delegate.DelegateError) as caught:
+            request_build.resolve_cursor_reasoning_capability(cursor, "xhigh")
+        self.assertEqual(caught.exception.error, "fixed_reasoning_effort")
+
+    def test_cursor_fixed_effort_capability_helper_without_mapping_has_typed_outcome(self):
+        cursor = json.loads(json.dumps(self.delegate.DEFAULT_CONFIG["cursor"]))
+        cursor.pop("reasoningEffortModels")
         cursor["defaultModel"] = "cursor-grok-4.6-xhigh-fast"
         with self.assertRaises(self.delegate.DelegateError) as caught:
             request_build.resolve_cursor_reasoning_capability(cursor, "xhigh")
