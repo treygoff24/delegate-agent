@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = str(ROOT / "src")
 sys.path.insert(0, str(ROOT / "src"))
 
-from delegate_agent import workflow_pinning  # noqa: E402
+from delegate_agent import safe_workspace, workflow_pinning  # noqa: E402
 from delegate_agent.workflows import registry as workflow_registry  # noqa: E402
 
 
@@ -63,6 +63,31 @@ class WorkflowPinningTests(unittest.TestCase):
         self.assertEqual(payload["config"]["codex"]["binary"], "/bin/codex")
         self.assertEqual(pin.path.stat().st_mode & 0o777, 0o400)
         self.assertEqual(pin.config_path.stat().st_mode & 0o777, 0o400)
+
+    def test_safe_workspace_cleanup_preserves_pin_store_modes(self) -> None:
+        pin = workflow_pinning.create_pin(
+            "wf_0123456789ab",
+            workspace=self.workspace,
+            config={},
+            home=self.home,
+        )
+        pinned_paths = (pin.runtime_root, pin.import_root, pin.entrypoint)
+        source_modes = {path: path.stat().st_mode & 0o777 for path in pinned_paths}
+
+        copy_path, temp_base = safe_workspace.create_directory_safe_workspace(str(pin.runtime_root))
+        self.assertEqual(Path(copy_path).stat().st_mode & 0o777, 0o500)
+        safe_workspace.cleanup_safe_isolated_workspace(
+            git_root=None,
+            isolated_workspace=copy_path,
+            temp_base=temp_base,
+            source_root=str(pin.runtime_root),
+        )
+
+        self.assertFalse(Path(temp_base).exists())
+        self.assertEqual(
+            {path: path.stat().st_mode & 0o777 for path in pinned_paths},
+            source_modes,
+        )
 
     def test_pinned_runtime_and_persona_are_used_by_child_imports(self) -> None:
         persona = self.home / ".delegate" / "personas" / "reviewer.md"
