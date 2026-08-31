@@ -9,7 +9,6 @@ import json
 import math
 import os
 import queue
-import re
 import signal
 import subprocess
 import tempfile
@@ -71,7 +70,6 @@ CHILD_WAIT_POLL_SECONDS = 0.25
 KILL_SUPERVISOR_WAIT_SECONDS = 5.0
 KILL_SUPERVISOR_FORCE_WAIT_SECONDS = 2.0
 WORKFLOW_EFFORT_VALUES = tuple(dict.fromkeys(reasoning.PI_THINKING_LEVELS))
-_FENCED_JSON_BLOCK_RE = re.compile(r"```(?:json)?[ \t]*\r?\n(.*?)```", re.IGNORECASE | re.DOTALL)
 
 
 class _MissingType:
@@ -2803,6 +2801,7 @@ class WorkflowDsl:
         structured_retry_backend: str | None = None
         workspace_cleanup: JsonObject | None = None
         first_child_run_id: str | None = None
+        child: _DelegateChildResult | None = None
         for attempt in range(attempts + 1):
             resume_session_id = (
                 prior_child.session_id
@@ -2964,7 +2963,9 @@ class WorkflowDsl:
                 if retry_workspace_run_id is None:
                     retry_workspace_run_id = child.run_id
                 prior_child = child
-        fallback = _structured_completion_report_fallback(child, self.state.workspace, schema)
+        fallback: JsonValue | _MissingType = _MISSING
+        if child is not None:
+            fallback = _structured_completion_report_fallback(child, self.state.workspace, schema)
         if fallback is not _MISSING:
             self._record_structured_attempt(key, None)
             _cleanup_structured_retry_workspace(workspace_cleanup)
@@ -4087,10 +4088,28 @@ def _final_child_completion_report(child: _DelegateChildResult, workspace: Path)
 
 
 def _last_fenced_json_block(report: str) -> str | None:
-    matches = list(_FENCED_JSON_BLOCK_RE.finditer(report))
-    if matches:
-        return matches[-1].group(1).strip()
-    if "```" in report:
+    blocks: list[tuple[str, str]] = []
+    info: str | None = None
+    content: list[str] = []
+    saw_fence = False
+    for line in report.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("```"):
+            if info is not None:
+                content.append(line)
+            continue
+        saw_fence = True
+        if info is None:
+            info = stripped[3:].strip()
+            content = []
+        else:
+            blocks.append((info, "\n".join(content).strip()))
+            info = None
+            content = []
+    for info, content in reversed(blocks):
+        if not info or info.casefold() == "json":
+            return content
+    if saw_fence:
         return None
     return report.strip()
 
