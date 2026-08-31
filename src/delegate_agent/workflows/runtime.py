@@ -3969,25 +3969,31 @@ def _read_completion_report(report_path: object, workspace: Path) -> str | None:
 
 @contextlib.contextmanager
 def _held_workflow_lock(root: Path) -> Iterator[None]:
+    fd: int | None = None
     raw_fd = os.environ.get(WORKFLOW_LOCK_FD_ENV)
     if raw_fd is not None:
+        # Trust the inherited fd only when it still refers to this workflow's
+        # lock file. Processes spawned with close_fds (e.g. verify rows under a
+        # live supervisor) inherit the env var without the fd, so the number
+        # may be closed (EBADF) or reused for an unrelated file; both must fall
+        # back to fresh acquisition instead of flocking a stranger.
         try:
-            fd = int(raw_fd)
-        except ValueError:
-            fd = registry.acquire_workflow_lock(root)
-            close_fd = True
+            fd_num = int(raw_fd)
+            fd_stat = os.fstat(fd_num)
+            lock_stat = os.stat(root / registry.LOCK_FILE)
+        except (ValueError, OSError):
+            pass
         else:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            close_fd = True
-    else:
+            if (fd_stat.st_dev, fd_stat.st_ino) == (lock_stat.st_dev, lock_stat.st_ino):
+                fcntl.flock(fd_num, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fd = fd_num
+    if fd is None:
         fd = registry.acquire_workflow_lock(root)
-        close_fd = True
     try:
         yield
     finally:
-        if close_fd:
-            with contextlib.suppress(OSError):
-                os.close(fd)
+        with contextlib.suppress(OSError):
+            os.close(fd)
 
 
 def _workflow_watchdog_stale_seconds(config: JsonObject) -> float:
