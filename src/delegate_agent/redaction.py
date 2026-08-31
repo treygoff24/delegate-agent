@@ -190,13 +190,27 @@ def _unterminated_pem_material_end(value: str, begin_end: int) -> int | None:
         return None
 
     material_end: int | None = None
+    header_seen = False
+    body_seen = False
+    blank_line_skipped = False
     while cursor < len(value):
         line_end = value.find("\n", cursor)
         if line_end < 0:
             line_end = len(value)
         line = value[cursor:line_end].removesuffix("\r")
+        stripped = line.strip()
+        if not stripped:
+            if header_seen and not body_seen and not blank_line_skipped and line_end < len(value):
+                blank_line_skipped = True
+                cursor = line_end + 1
+                continue
+            break
         if not _pem_material_line(line, continuation=material_end is not None):
             break
+        if _PEM_HEADER.fullmatch(stripped):
+            header_seen = True
+        elif _PEM_BODY.fullmatch(stripped):
+            body_seen = True
         if line_end == len(value):
             material_end = len(value)
             break
