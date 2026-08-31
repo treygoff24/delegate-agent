@@ -36,6 +36,10 @@ _CLAUDE_SESSION_LOSS_PATTERNS = (
     ),
     re.compile(r"\bno (?:conversation|session) (?:found|exists?)\b", re.IGNORECASE),
 )
+_BINDING_NOT_ACTIVE_PATTERN = re.compile(
+    r"^estate-harness: binding_not_active: Broker returned HTTP 403: binding_not_active[ \t]*$",
+    re.IGNORECASE | re.MULTILINE,
+)
 _AUTH_PATTERNS = (
     re.compile(r"\btoken_expired\b", re.IGNORECASE),
     re.compile(r"\brefresh token was revoked\b", re.IGNORECASE),
@@ -78,6 +82,13 @@ def classify(text: str) -> ChildFailure | None:
     """Classify trusted child-harness diagnostics, never assistant/model text."""
     if not text.strip():
         return None
+    if _BINDING_NOT_ACTIVE_PATTERN.search(text):
+        return ChildFailure(
+            "binding_not_active",
+            "Broker rejected this launch with HTTP 403: this cell's identity binding is inactive. "
+            "No vendor process ran; rebind the cell or retry from a healthy cell. "
+            "This is not a Codex quota/token failure.",
+        )
     if any(pattern.search(text) for pattern in _THREAD_LOSS_PATTERNS):
         return ChildFailure(
             "codex_thread_lost",
