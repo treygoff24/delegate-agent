@@ -2613,6 +2613,9 @@ def build_request(
 
 _CURSOR_FIXED_REASONING_EFFORTS = {
     "cursor-grok-4.6-xhigh-fast": "xhigh",
+    "cursor-grok-4.6-xhigh": "xhigh",
+    "gpt-5.5-high": "high",
+    "claude-opus-4-8-thinking-high": "high",
 }
 
 
