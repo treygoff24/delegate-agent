@@ -13,16 +13,22 @@ from pathlib import Path
 
 from delegate_agent.workflows import registry
 from delegate_agent.workflows.runtime import WORKFLOW_HEARTBEAT_FILE
+from tests import proc_harness
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "bin" / "delegate.py"
 
 
 class WorkflowWatchdogProcessTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        cls.addClassCleanup(proc_harness.assert_no_live_process_groups)
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.launched_workflows: list[tuple[str, dict[str, str]]] = []
+        self.launched_workflows: list[str] = []
         self.addCleanup(self._cleanup_workflows)
         self.workspace = Path(self.temp.name)
         self.home = self.workspace / "home"
@@ -67,27 +73,9 @@ class WorkflowWatchdogProcessTests(unittest.TestCase):
         return env
 
     def _cleanup_workflows(self) -> None:
-        for wf_id, env in reversed(self.launched_workflows):
-            root = registry.workflow_dir(self.workspace, wf_id)
-            if not registry.supervisor_alive(root):
-                continue
-            subprocess.run(
-                [
-                    sys.executable,
-                    str(CLI),
-                    "--cwd",
-                    str(self.workspace),
-                    "--json",
-                    "workflow",
-                    "kill",
-                    wf_id,
-                ],
-                text=True,
-                capture_output=True,
-                check=False,
-                env=env,
-                timeout=12,
-            )
+        for wf_id in reversed(self.launched_workflows):
+            with proc_harness.workflow_reap(self.workspace, wf_id):
+                pass
 
     def _launch(
         self,
@@ -125,7 +113,7 @@ class WorkflowWatchdogProcessTests(unittest.TestCase):
         )
         self.assertEqual(launched.returncode, 0, launched.stderr)
         wf_id = json.loads(launched.stdout)["wfId"]
-        self.launched_workflows.append((wf_id, env))
+        self.launched_workflows.append(wf_id)
         root = registry.workflow_dir(self.workspace, wf_id)
         self._wait_for(
             lambda: (registry.read_json(root / registry.STATUS_FILE) or {}).get("supervisorPid")
