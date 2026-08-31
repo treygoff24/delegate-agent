@@ -66,3 +66,6 @@ docs/briefs/
 
 # Agent complaint-box ledger; local only, never committed (estate convention).
 .papercuts.jsonl
+
+# plan integration worktrees (writing-plans compiled runs)
+.worktrees/
