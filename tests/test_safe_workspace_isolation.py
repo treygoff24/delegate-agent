@@ -87,6 +87,64 @@ class SafeWorkspaceIsolationTests(CommandTestBase):
                 )
         self.assertEqual(ctx.exception.error, "source_root_guard")
 
+    def test_cleanup_safe_isolated_workspace_is_idempotent_when_temp_base_absent(self):
+        with tempfile.TemporaryDirectory() as parent:
+            isolated = Path(parent) / "isolated"
+            isolated.mkdir()
+            temp_base = Path(parent) / "missing"
+
+            self.delegate.cleanup_safe_isolated_workspace(
+                git_root=None,
+                isolated_workspace=str(isolated),
+                temp_base=str(temp_base),
+            )
+            self.delegate.cleanup_safe_isolated_workspace(
+                git_root=None,
+                isolated_workspace=str(isolated),
+                temp_base=str(temp_base),
+            )
+
+    def test_cleanup_removes_tree_with_unreadable_nested_directories(self):
+        for mode in (0o300, 0o000, 0o400):
+            with self.subTest(mode=oct(mode)), tempfile.TemporaryDirectory() as parent:
+                temp_base = Path(parent) / "safe"
+                nested = temp_base / "nested"
+                nested.mkdir(parents=True)
+                (nested / "payload.txt").write_text("scratch\n", encoding="utf-8")
+                nested.chmod(mode)
+
+                self.delegate.cleanup_safe_isolated_workspace(
+                    git_root=None,
+                    isolated_workspace=str(temp_base / "copy"),
+                    temp_base=str(temp_base),
+                )
+
+                self.assertFalse(temp_base.exists())
+
+    def test_cleanup_failure_does_not_mask_in_flight_exception(self):
+        with tempfile.TemporaryDirectory() as workspace, tempfile.TemporaryDirectory() as parent:
+            temp_base = Path(parent) / "safe"
+            with (
+                mock.patch.object(
+                    safe_workspace, "safe_workspace_temp_base", return_value=str(temp_base)
+                ),
+                mock.patch.object(
+                    safe_workspace,
+                    "block_external_symlinks",
+                    side_effect=RuntimeError("copy post-processing failed"),
+                ),
+                mock.patch.object(
+                    safe_workspace.shutil,
+                    "rmtree",
+                    side_effect=OSError("cleanup failed"),
+                ),
+                self.assertLogs(safe_workspace._LOGGER, level="WARNING") as logs,
+                self.assertRaisesRegex(RuntimeError, "copy post-processing failed"),
+            ):
+                self.delegate.create_directory_safe_workspace(workspace)
+
+            self.assertTrue(any("cleanup failed" in message for message in logs.output))
+
     def test_directory_copy_exception_cleanup_removes_read_only_tree(self):
         with tempfile.TemporaryDirectory() as workspace, tempfile.TemporaryDirectory() as parent:
             read_only = Path(workspace) / "readonly"
