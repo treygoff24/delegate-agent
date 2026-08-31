@@ -181,7 +181,12 @@ def emit_run(
             )
             gate_key = status.get("gateKey")
             if status.get("status") == "paused" and isinstance(gate_key, str):
-                registry.record_approval(root, gate_key)
+                gate_result_hash = status.get("gateResultHash")
+                registry.record_approval(
+                    root,
+                    gate_key,
+                    gate_result_hash if isinstance(gate_result_hash, str) else None,
+                )
             script_path = root / registry.SCRIPT_FILE
             recorded_source_script = status.get("sourceScript")
             source_script = (
@@ -658,8 +663,15 @@ def emit_approve(
         raise DelegateError(
             "workflow_not_gated", f"Workflow is not waiting on a gate: {command.wf_id}"
         )
+    recovered_result_hash = (
+        recovered_gate.get("gateResultHash")
+        if recovered_gate is not None and isinstance(recovered_gate.get("gateResultHash"), str)
+        else None
+    )
     if recovered_gate is not None and (
-        status.get("status") != "paused" or status.get("gateKey") != gate_key
+        status.get("status") != "paused"
+        or status.get("gateKey") != gate_key
+        or status.get("gateResultHash") != recovered_result_hash
     ):
         projected = dict(status)
         projected.update(
@@ -671,6 +683,10 @@ def emit_approve(
                 "updatedAt": run_registry.utc_now_iso(),
             }
         )
+        if recovered_result_hash is not None:
+            projected["gateResultHash"] = recovered_result_hash
+        else:
+            projected.pop("gateResultHash", None)
         registry.write_status(root, projected)
     # Resume acquires the lock before mutating approval/budget state.
     resumed = WorkflowCommand("run", resume=command.wf_id, json_mode=command.json_mode)
@@ -776,19 +792,17 @@ def emit_reject(
 
 
 def _latest_unapproved_gate_event(root: Path) -> JsonObject | None:
-    approval = registry.read_json(root / registry.APPROVAL_FILE) or {}
-    approved: set[str] = set()
-    if isinstance(approval.get("gateKey"), str):
-        approved.add(approval["gateKey"])
-    keys = approval.get("approvedKeys")
-    if isinstance(keys, list):
-        approved.update(key for key in keys if isinstance(key, str))
     latest: JsonObject | None = None
     for event in registry.iter_journal(root / registry.JOURNAL_FILE):
         if event.get("type") != "gate":
             continue
         key = event.get("key")
-        if isinstance(key, str) and key not in approved:
+        result_hash = event.get("gateResultHash")
+        if isinstance(key, str) and not registry.approval_allows(
+            root,
+            key,
+            result_hash if isinstance(result_hash, str) else None,
+        ):
             latest = event
     return latest
 

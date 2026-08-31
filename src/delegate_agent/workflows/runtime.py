@@ -504,11 +504,13 @@ class GateExit(RuntimeError):
         gate_key: str | None = None,
         child: str | None = None,
         result: JsonValue = None,
+        result_hash: str | None = None,
     ) -> None:
         super().__init__(message)
         self.gate_key = gate_key
         self.child = child
         self.result = result
+        self.result_hash = result_hash
 
 
 class SoftParkExit(RuntimeError):
@@ -630,7 +632,7 @@ class WorkflowState:
     replay_attempt: int = 0
     cancel_event: threading.Event = field(default_factory=threading.Event)
     retry_worktree_runs: set[str] = field(default_factory=set)
-    pending_gate: list[tuple[str, str | None, JsonValue]] = field(default_factory=list)
+    pending_gate: list[tuple[str, str | None, JsonValue, str]] = field(default_factory=list)
     soft_parked_items: dict[str, JsonObject] = field(default_factory=dict)
     soft_park_scopes: dict[str, str] = field(default_factory=dict)
 
@@ -818,10 +820,17 @@ class WorkflowState:
                 and status.get("status") == "paused"
                 and isinstance(gate_key, str)
             ):
+                extra: JsonObject = {
+                    "gateKey": gate_key,
+                    "gateResult": status.get("gateResult"),
+                }
+                gate_result_hash = status.get("gateResultHash")
+                if isinstance(gate_result_hash, str):
+                    extra["gateResultHash"] = gate_result_hash
                 self._write_status_locked(
                     status="paused",
                     last_event=event,
-                    extra={"gateKey": gate_key, "gateResult": status.get("gateResult")},
+                    extra=extra,
                 )
             else:
                 self._write_status_locked(status="running", last_event=event)
@@ -867,10 +876,17 @@ class WorkflowState:
                 and status.get("status") == "paused"
                 and isinstance(gate_key, str)
             ):
+                extra: JsonObject = {
+                    "gateKey": gate_key,
+                    "gateResult": status.get("gateResult"),
+                }
+                gate_result_hash = status.get("gateResultHash")
+                if isinstance(gate_result_hash, str):
+                    extra["gateResultHash"] = gate_result_hash
                 self._write_status_locked(
                     status="paused",
                     last_event=event,
-                    extra={"gateKey": gate_key, "gateResult": status.get("gateResult")},
+                    extra=extra,
                 )
             else:
                 self._write_status_locked(status="running", last_event=event)
@@ -900,10 +916,17 @@ class WorkflowState:
         with self.journal_lock:
             self._touch_heartbeat_locked()
 
-    def _latest_gate_event_locked(self, gate_key: str) -> JsonObject | None:
+    def _latest_gate_event_locked(
+        self, gate_key: str, result_hash: str | None = None
+    ) -> JsonObject | None:
         latest: JsonObject | None = None
         for event in registry.iter_journal(self.journal_path):
-            if event.get("type") == "gate" and event.get("key") == gate_key:
+            event_hash = event.get("gateResultHash")
+            if (
+                event.get("type") == "gate"
+                and event.get("key") == gate_key
+                and (event_hash if isinstance(event_hash, str) else None) == result_hash
+            ):
                 latest = event
         return latest
 
@@ -919,11 +942,11 @@ class WorkflowState:
         gate_key = event.get("key")
         if not isinstance(gate_key, str):
             return
-        self._write_status_locked(
-            status="paused",
-            last_event=event,
-            extra={"gateKey": gate_key, "gateResult": event.get("result")},
-        )
+        extra: JsonObject = {"gateKey": gate_key, "gateResult": event.get("result")}
+        result_hash = event.get("gateResultHash")
+        if isinstance(result_hash, str):
+            extra["gateResultHash"] = result_hash
+        self._write_status_locked(status="paused", last_event=event, extra=extra)
         self._touch_heartbeat_locked()
 
     def park_gate(self, gate_key: str, *, child: str | None, result: JsonValue) -> GateExit:
@@ -931,9 +954,10 @@ class WorkflowState:
 
         The journal is the authority.  ``status.json`` is only a recoverable
         projection, so a supervisor death while draining cannot lose the gate
-        key.  Re-parking an existing key reuses its journal event and never
-        appends a duplicate.
+        identity. Re-parking the same key and result reuses its journal event
+        and never appends a duplicate.
         """
+        result_hash = _gate_result_hash(result)
         with self.journal_lock:
             status = registry.read_json(self.status_path) or {}
             last_seq = status.get("lastSeq") if isinstance(status, dict) else None
@@ -943,7 +967,7 @@ class WorkflowState:
                 seq = prior.get("seq")
                 if isinstance(seq, int):
                     self.sequence = max(self.sequence, seq)
-            event = self._latest_gate_event_locked(gate_key)
+            event = self._latest_gate_event_locked(gate_key, result_hash)
             if event is None:
                 self.sequence += 1
                 event = {
@@ -953,6 +977,7 @@ class WorkflowState:
                     "key": gate_key,
                     "child": child,
                     "result": result,
+                    "gateResultHash": result_hash,
                 }
                 # ``gate`` is in DURABLE_EVENT_TYPES, so append_jsonl flushes
                 # and fsyncs before anything below can close admission.
@@ -960,7 +985,7 @@ class WorkflowState:
 
         # Keep the metadata available to agents that race with the admission
         # close.  This is intentionally after the durable append above.
-        self.pending_gate.append((gate_key, child, result))
+        self.pending_gate.append((gate_key, child, result, result_hash))
         try:
             self.close_gate_and_wait()
         finally:
@@ -974,6 +999,7 @@ class WorkflowState:
             gate_key=gate_key,
             child=child,
             result=result,
+            result_hash=result_hash,
         )
 
     def persist_gate(self, gate_key: str, *, child: str | None, result: JsonValue) -> GateExit:
@@ -984,25 +1010,31 @@ class WorkflowState:
         if exc.gate_key is None:
             return
         with self.journal_lock:
-            event = self._latest_gate_event_locked(exc.gate_key)
+            event = self._latest_gate_event_locked(exc.gate_key, exc.result_hash)
             status = registry.read_json(self.status_path) or {}
             if event is not None:
                 # Rebuild the projection from the journal, even if a stale
                 # status write raced with the gate drain.
                 self._write_gate_projection_locked(event)
                 return
-            if status.get("status") == "paused" and status.get("gateKey") == exc.gate_key:
+            status_hash = status.get("gateResultHash")
+            if (
+                status.get("status") == "paused"
+                and status.get("gateKey") == exc.gate_key
+                and (status_hash if isinstance(status_hash, str) else None) == exc.result_hash
+            ):
                 return
         self.park_gate(exc.gate_key, child=exc.child, result=exc.result)
 
     def closed_gate_exit(self) -> GateExit:
         if self.pending_gate:
-            gate_key, child, result = self.pending_gate[-1]
+            gate_key, child, result, result_hash = self.pending_gate[-1]
             return GateExit(
                 "workflow gate is closed to new agent calls",
                 gate_key=gate_key,
                 child=child,
                 result=result,
+                result_hash=result_hash,
             )
         latest = self.latest_gate_event()
         if latest is not None:
@@ -1014,6 +1046,11 @@ class WorkflowState:
                     gate_key=gate_key,
                     child=child if isinstance(child, str) else None,
                     result=latest.get("result"),
+                    result_hash=(
+                        latest.get("gateResultHash")
+                        if isinstance(latest.get("gateResultHash"), str)
+                        else None
+                    ),
                 )
         return GateExit("workflow gate is closed to new agent calls")
 
@@ -1205,6 +1242,9 @@ class WorkflowState:
                     extra["gateKey"] = gate_key
                     if isinstance(status, dict):
                         extra["gateResult"] = status.get("gateResult")
+                        gate_result_hash = status.get("gateResultHash")
+                        if isinstance(gate_result_hash, str):
+                            extra["gateResultHash"] = gate_result_hash
                 elif isinstance(parked_items, list):
                     extra["parkedItems"] = parked_items
                     if isinstance(status, dict):
@@ -2132,7 +2172,8 @@ class WorkflowDsl:
         should_gate = gate is True or (gate == "on-failure" and _gate_failed(result))
         if should_gate:
             gate_key = _stable_hash(f"gate:{scope}:{_canonical_json(args)}")
-            approved = registry.approval_allows(self.state.root, gate_key)
+            result_hash = _gate_result_hash(result)
+            approved = registry.approval_allows(self.state.root, gate_key, result_hash)
             if not approved:
                 # Let sibling pipeline/parallel callbacks that were admitted in
                 # the same wave enter their child seam before stop_admitting
@@ -3850,6 +3891,10 @@ def _canonical_json(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
 
+def _gate_result_hash(result: object) -> str:
+    return _stable_hash(_canonical_json(result))
+
+
 def _gate_failed(result: object) -> bool:
     return result is None or (isinstance(result, dict) and result.get("ok") is False)
 
@@ -4373,6 +4418,11 @@ def run_supervisor(
                             else None
                         ),
                         result=latest_gate.get("result"),
+                        result_hash=(
+                            latest_gate.get("gateResultHash")
+                            if isinstance(latest_gate.get("gateResultHash"), str)
+                            else None
+                        ),
                     )
                 else:
                     tb = traceback.format_exc()[-4000:]
@@ -4404,7 +4454,13 @@ def run_supervisor(
             state.ensure_gate_durable(exc)
             gate = registry.read_json(root / registry.STATUS_FILE) or {}
             gate_key = gate.get("gateKey")
-            if gate.get("status") != "paused" or gate_key != exc.gate_key:
+            gate_result_hash = gate.get("gateResultHash")
+            if (
+                gate.get("status") != "paused"
+                or gate_key != exc.gate_key
+                or (gate_result_hash if isinstance(gate_result_hash, str) else None)
+                != exc.result_hash
+            ):
                 tb = traceback.format_exc()[-4000:]
                 with contextlib.suppress(Exception):
                     state.append_event(
