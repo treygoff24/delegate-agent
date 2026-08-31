@@ -2951,9 +2951,13 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertNotIn('{"ok": "wrong"}', prompts[1])
         retry_argv = json.loads(argv_log.read_text(encoding="utf-8").strip().splitlines()[-1])
         exec_index = retry_argv.index("exec")
+        # Sandbox/config flags may sit between `exec` and the `resume`
+        # subcommand; a structured resume binds the session id right after it.
+        resume_index = retry_argv.index("resume")
+        self.assertGreater(resume_index, exec_index)
         self.assertEqual(
-            retry_argv[exec_index : exec_index + 3],
-            ["exec", "resume", "thread-structured-1"],
+            retry_argv[resume_index : resume_index + 2],
+            ["resume", "thread-structured-1"],
         )
         self.assertNotIn("--ephemeral", retry_argv)
         self.assertNotIn("--cd", retry_argv)
@@ -5367,7 +5371,9 @@ class WorkflowCommandTests(unittest.TestCase):
         self.assertNotIn("--ephemeral", r2_argv)
         self.assertIn("exec", r2_argv)
         exec_idx = r2_argv.index("exec")
-        self.assertEqual(r2_argv[exec_idx + 1], "resume")
+        # Sandbox/config flags may sit between `exec` and the `resume`
+        # subcommand; the real codex parser accepts that (probe-verified).
+        self.assertGreater(r2_argv.index("resume"), exec_idx)
         self.assertIn("th_wf_fixed_12345", r2_argv)
 
     def test_followup_timeout_rounds_up_for_cli(self) -> None:
