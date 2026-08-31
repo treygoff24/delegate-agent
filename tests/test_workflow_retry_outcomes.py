@@ -409,6 +409,104 @@ class ChildAttemptOutcomeTests(unittest.TestCase):
         )
         self.assertIn("Expecting value", event["validationError"])
 
+    def test_structured_fallback_ignores_mixed_fence_examples(self) -> None:
+        report_path = self.workspace / "completion-report.md"
+        report_path.write_text(
+            "```sh\npytest -q\n```\n"
+            '{"ok": false, "note": "STALE EXAMPLE"}\n'
+            '```json\n{"ok": true, "note": "real"}\n```\n',
+            encoding="utf-8",
+        )
+        child = runtime._DelegateChildResult(
+            text="assistant prose, not JSON",
+            run_id="del_20260827T040000Z_mixed1",
+            execution_cwd="/tmp/mixed-worktree",
+            session_id=None,
+            completion_report_source="child",
+            completion_report_path=str(report_path),
+        )
+        dsl = self._dsl()
+        with (
+            mock.patch.object(dsl, "_run_delegate", return_value=child),
+            mock.patch.object(dsl, "_release_structured_retry_worktree"),
+        ):
+            result = dsl._run_structured_or_text(
+                "claude",
+                "mixed",
+                mode="safe",
+                model=None,
+                effort=None,
+                fast=None,
+                schema={
+                    "type": "object",
+                    "required": ["ok", "note"],
+                    "properties": {"ok": {"type": "boolean"}, "note": {"type": "string"}},
+                    "additionalProperties": False,
+                },
+                isolation=None,
+                passthrough=False,
+                timeout=None,
+                retries=0,
+                key="mixed-key",
+            )
+        self.assertEqual(result, {"ok": True, "note": "real"})
+
+    def test_structured_fallback_settles_after_non_json_fenced_report(self) -> None:
+        report_path = self.workspace / "completion-report.md"
+        report_path.write_text(
+            "Ran the gate:\n\n"
+            "```sh\npytest -q\n```\n\n"
+            "Final:\n\n"
+            '```json\n{"ok": true, "note": "real"}\n```\n',
+            encoding="utf-8",
+        )
+        child = runtime._DelegateChildResult(
+            text="assistant prose, not JSON",
+            run_id="del_20260827T040000Z_mixed2",
+            execution_cwd="/tmp/mixed-worktree",
+            session_id=None,
+            completion_report_source="child",
+            completion_report_path=str(report_path),
+        )
+        dsl = self._dsl()
+        with (
+            mock.patch.object(dsl, "_run_delegate", return_value=child),
+            mock.patch.object(dsl, "_release_structured_retry_worktree"),
+        ):
+            result = dsl._run_structured_or_text(
+                "claude",
+                "mixed",
+                mode="safe",
+                model=None,
+                effort=None,
+                fast=None,
+                schema={"type": "object", "required": ["ok"]},
+                isolation=None,
+                passthrough=False,
+                timeout=None,
+                retries=0,
+                key="mixed-key-2",
+            )
+        self.assertEqual(result, {"ok": True, "note": "real"})
+
+    def test_structured_negative_retries_returns_none(self) -> None:
+        dsl = self._dsl()
+        result = dsl._run_structured_or_text(
+            "claude",
+            "no-attempts",
+            mode="safe",
+            model=None,
+            effort=None,
+            fast=None,
+            schema={"type": "object"},
+            isolation=None,
+            passthrough=False,
+            timeout=None,
+            retries=-1,
+            key="negative-retries-key",
+        )
+        self.assertIsNone(result)
+
     def test_structured_agent_accepts_json_string_payload_for_object_schema(self) -> None:
         dsl = self._dsl()
         child = runtime._DelegateChildResult(
