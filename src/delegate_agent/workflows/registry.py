@@ -86,12 +86,12 @@ def write_json(path: Path, payload: JsonObject) -> None:
     run_registry.write_json_atomic(path, payload)
 
 
-def record_approval(root: Path, gate_key: str) -> JsonObject:
+def record_approval(root: Path, gate_key: str, result_hash: str | None = None) -> JsonObject:
     """Approve ``gate_key`` without forgetting earlier approvals.
 
     A resume replays the whole script, so every gate the run already passed
     fires again with the same deterministic key; if the file only held the
-    latest key, approving gate N would re-pause the run at gate N-1.
+    latest key or result, approving gate N would re-pause the run at gate N-1.
     """
     path = root / APPROVAL_FILE
     previous = read_json(path) or {}
@@ -102,14 +102,47 @@ def record_approval(root: Path, gate_key: str) -> JsonObject:
     if gate_key not in keys:
         keys.append(gate_key)
     payload: JsonObject = {"approved": True, "gateKey": gate_key, "approvedKeys": keys}
+    approved_results: list[JsonObject] = []
+    previous_results = previous.get("approvedResults")
+    if isinstance(previous_results, list):
+        for record in previous_results:
+            if (
+                isinstance(record, dict)
+                and isinstance(record.get("key"), str)
+                and isinstance(record.get("resultHash"), str)
+            ):
+                approved_results.append(dict(record))
+    if result_hash is not None and not any(
+        record.get("key") == gate_key and record.get("resultHash") == result_hash
+        for record in approved_results
+    ):
+        approved_results.append({"key": gate_key, "resultHash": result_hash})
+    if approved_results:
+        payload["approvedResults"] = approved_results
     write_json(path, payload)
     return payload
 
 
-def approval_allows(root: Path, gate_key: str) -> bool:
+def approval_allows(root: Path, gate_key: str, result_hash: str | None = None) -> bool:
     payload = read_json(root / APPROVAL_FILE)
     if not isinstance(payload, dict) or payload.get("approved") is not True:
         return False
+    approved_results = payload.get("approvedResults")
+    matching_records = (
+        [
+            record
+            for record in approved_results
+            if isinstance(record, dict)
+            and record.get("key") == gate_key
+            and isinstance(record.get("resultHash"), str)
+        ]
+        if isinstance(approved_results, list)
+        else []
+    )
+    if matching_records:
+        return result_hash is not None and any(
+            record.get("resultHash") == result_hash for record in matching_records
+        )
     if payload.get("gateKey") == gate_key:
         return True
     keys = payload.get("approvedKeys")
