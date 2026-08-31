@@ -7,12 +7,13 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = str(ROOT / "src")
 sys.path.insert(0, str(ROOT / "src"))
 
-from delegate_agent import safe_workspace, workflow_pinning  # noqa: E402
+from delegate_agent import profiles, safe_workspace, workflow_pinning  # noqa: E402
 from delegate_agent.workflows import registry as workflow_registry  # noqa: E402
 
 
@@ -63,6 +64,98 @@ class WorkflowPinningTests(unittest.TestCase):
         self.assertEqual(payload["config"]["codex"]["binary"], "/bin/codex")
         self.assertEqual(pin.path.stat().st_mode & 0o777, 0o400)
         self.assertEqual(pin.config_path.stat().st_mode & 0o777, 0o400)
+
+    def test_applying_pin_environment_twice_does_not_duplicate_pythonpath(self) -> None:
+        pin = workflow_pinning.create_pin(
+            "wf_0123456789ab",
+            workspace=self.workspace,
+            config={},
+            home=self.home,
+        )
+        user_pythonpath = str(self.root / "user-pythonpath")
+
+        with mock.patch.dict(os.environ, {"PYTHONPATH": user_pythonpath}, clear=False):
+            workflow_pinning.temporarily_apply_environment(pin)
+            applied_once = os.environ["PYTHONPATH"]
+            workflow_pinning.temporarily_apply_environment(pin)
+            applied_twice = os.environ["PYTHONPATH"]
+
+        self.assertEqual(applied_once, os.pathsep.join((str(pin.import_root), user_pythonpath)))
+        self.assertEqual(applied_twice, applied_once)
+
+    def test_engine_child_environment_scrubs_pin_without_poisoning_python(self) -> None:
+        pin = workflow_pinning.create_pin(
+            "wf_0123456789ab",
+            workspace=self.workspace,
+            config={},
+            home=self.home,
+        )
+        user_pythonpath = self.root / "user-pythonpath"
+        similar_prefix = self.home / f"{workflow_pinning.PIN_ROOT_DIRNAME}-user"
+        user_pythonpath.mkdir()
+        similar_prefix.mkdir()
+        child_pythonpath = os.pathsep.join(
+            (
+                str(pin.import_root),
+                str(pin.runtime_root),
+                str(user_pythonpath),
+                str(similar_prefix),
+            )
+        )
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "HOME": str(self.home),
+                "DELEGATE_CONFIG": str(pin.config_path),
+            },
+            clear=True,
+        ):
+            child_env = profiles.child_environment(
+                overrides={
+                    "DELEGATE_WORKFLOW_PIN": str(pin.path),
+                    "DELEGATE_WORKFLOW_LOCK_FD": "123",
+                    "PYTHONPATH": child_pythonpath,
+                }
+            )
+
+        self.assertNotIn("DELEGATE_WORKFLOW_PIN", child_env)
+        self.assertNotIn("DELEGATE_WORKFLOW_LOCK_FD", child_env)
+        self.assertEqual(child_env["DELEGATE_CONFIG"], str(pin.config_path))
+        self.assertEqual(
+            child_env["PYTHONPATH"],
+            os.pathsep.join((str(user_pythonpath), str(similar_prefix))),
+        )
+
+        probe = subprocess.run(
+            [sys.executable, "-c", "import sys; print('delegate_agent' in sys.modules)"],
+            cwd=self.workspace,
+            env=child_env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(probe.returncode, 0, probe.stderr)
+        self.assertEqual(probe.stdout.strip(), "False")
+
+    def test_pinned_delegate_cli_child_passes_persona_resolver_guard(self) -> None:
+        pin = workflow_pinning.create_pin(
+            "wf_0123456789ab",
+            workspace=self.workspace,
+            config={},
+            home=self.home,
+        )
+        probe = subprocess.run(
+            [*pin.cli_argv, "--json", "describe"],
+            cwd=self.workspace,
+            env={**os.environ, **pin.environment},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(probe.returncode, 0, probe.stderr)
+        self.assertNotIn("workflow_persona_pin_unavailable", probe.stderr)
 
     def test_safe_workspace_cleanup_preserves_pin_store_modes(self) -> None:
         pin = workflow_pinning.create_pin(
