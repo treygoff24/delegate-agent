@@ -25,6 +25,10 @@ WORKFLOW_COMMAND_SCHEMA = "delegate.workflow-command.v1"
 TERMINAL_WORKFLOW_STATUSES = {"succeeded", "failed", "killed"}
 WAIT_DONE_WORKFLOW_STATUSES = TERMINAL_WORKFLOW_STATUSES | {"dry_run", "paused", "stalled"}
 LIVE_WORKFLOW_STATUSES = {"created", "running", "starting"}
+DRY_RUN_WRITE_WARNING = (
+    "dry-run only stubs agent calls; script filesystem writes are live. "
+    "State-writing scripts must branch on dry_run/is_dry_run or run from a disposable checkout."
+)
 
 
 def _delegate_cli_argv() -> list[str]:
@@ -149,6 +153,8 @@ def emit_run(
     previous_result: bytes | None = None
     previous_result_exists = False
     pin: workflow_pinning.WorkflowPin | None = None
+    source_script: str | None = None
+    script_hash: str | None = None
     if command.resume:
         wf_id = _validate_wf_id(command.resume)
         root = registry.workflow_dir(workspace, wf_id)
@@ -177,6 +183,13 @@ def emit_run(
             if status.get("status") == "paused" and isinstance(gate_key, str):
                 registry.record_approval(root, gate_key)
             script_path = root / registry.SCRIPT_FILE
+            recorded_source_script = status.get("sourceScript")
+            source_script = (
+                recorded_source_script if isinstance(recorded_source_script, str) else None
+            )
+            recorded_script_hash = status.get("scriptSha256")
+            script_hash = recorded_script_hash if isinstance(recorded_script_hash, str) else None
+            warnings.extend(_resume_source_warnings(status))
             args_value = status.get("args")
             budget_total = command.budget
             if budget_total is None:
@@ -213,6 +226,8 @@ def emit_run(
         root = registry.ensure_workflow_dir(workspace, wf_id)
         data = source.read_bytes()
         script_path = root / registry.SCRIPT_FILE
+        source_script = str(source)
+        script_hash = registry.script_sha256(data)
         run_registry.write_private_bytes(script_path, data)
         args_value = _parse_args(command.args_json)
         budget_total = command.budget
@@ -226,9 +241,10 @@ def emit_run(
                 "status": "created",
                 "workspace": str(workspace),
                 "scriptPath": str(script_path),
+                "sourceScript": str(source),
                 "journalPath": str(root / registry.JOURNAL_FILE),
                 "resultPath": str(root / registry.RESULT_FILE),
-                "scriptSha256": registry.script_sha256(data),
+                "scriptSha256": script_hash,
                 "args": args_value,
                 "budget": {"total": budget_total, "spent": 0, "remaining": budget_total},
                 # New workflow launches use v2 keys.  A resumed workflow keeps
@@ -261,6 +277,8 @@ def emit_run(
             wf_id=wf_id,
             root=root,
             script_path=script_path,
+            source_script=source_script,
+            script_hash=script_hash,
             workspace=workspace,
             config=config,
             args_value=args_value,
@@ -349,6 +367,10 @@ def emit_run(
         "journalPath": str(root / registry.JOURNAL_FILE),
         "scriptPath": str(script_path),
     }
+    if source_script is not None:
+        payload["sourceScript"] = source_script
+    if script_hash is not None:
+        payload["scriptSha256"] = script_hash
     if warnings:
         payload["warnings"] = warnings
     if command.json_mode:
@@ -359,6 +381,10 @@ def emit_run(
         print(f"wfId: {wf_id}", file=stdout)
         print(f"journalPath: {payload['journalPath']}", file=stdout)
         print(f"scriptPath: {payload['scriptPath']}", file=stdout)
+        if source_script is not None:
+            print(f"sourceScript: {source_script}", file=stdout)
+        if script_hash is not None:
+            print(f"scriptSha256: {script_hash}", file=stdout)
     return EXIT_OK
 
 
@@ -375,6 +401,8 @@ def emit_dry_run(
     warnings: list[str],
     stdout: TextIO,
     notify: str | None = None,
+    source_script: str | None = None,
+    script_hash: str | None = None,
 ) -> int:
     state = runtime.WorkflowState(
         wf_id=wf_id,
@@ -425,14 +453,24 @@ def emit_dry_run(
         "schema": WORKFLOW_COMMAND_SCHEMA,
         "dryRun": True,
         "wfId": wf_id,
+        "scriptPath": str(script_path),
         "runTree": tree,
         "result": result,
+        "warnings": [*warnings, DRY_RUN_WRITE_WARNING],
     }
-    if warnings:
-        payload["warnings"] = warnings
+    if source_script is not None:
+        payload["sourceScript"] = source_script
+    if script_hash is not None:
+        payload["scriptSha256"] = script_hash
     if json_mode:
         rendering.print_json(payload, stdout)
     else:
+        print(f"warning: {DRY_RUN_WRITE_WARNING}", file=stdout)
+        print(f"scriptPath: {script_path}", file=stdout)
+        if source_script is not None:
+            print(f"sourceScript: {source_script}", file=stdout)
+        if script_hash is not None:
+            print(f"scriptSha256: {script_hash}", file=stdout)
         print(json.dumps(tree, indent=2, sort_keys=True), file=stdout)
     return EXIT_OK
 
@@ -857,6 +895,33 @@ def emit_save(command: WorkflowCommand, *, stdout: TextIO) -> int:
     else:
         print(f"saved: {target}", file=stdout)
     return EXIT_OK
+
+
+def _resume_source_warnings(status: JsonObject) -> list[str]:
+    """Compare the recorded source with the launch-time frozen hash.
+
+    Resume always executes ``root/script.py``.  This read is only provenance:
+    a changed or unavailable source must not alter the frozen execution path.
+    """
+    source_script = status.get("sourceScript")
+    if not isinstance(source_script, str):
+        # Workflows created before source provenance was recorded resume as-is.
+        return []
+    recorded_hash = status.get("scriptSha256")
+    if not isinstance(recorded_hash, str):
+        return [
+            f"unable to compare source script {source_script!r}: recorded frozen hash is missing"
+        ]
+    try:
+        current_hash = registry.script_sha256(Path(source_script).expanduser().read_bytes())
+    except (OSError, ValueError):
+        return [f"unable to compare source script {source_script!r} with frozen copy"]
+    if current_hash == recorded_hash:
+        return []
+    return [
+        f"source script differs from frozen copy: {source_script!r} "
+        f"(current sha256 {current_hash}; recorded {recorded_hash})"
+    ]
 
 
 def check_script(path: Path) -> workflow_script.CheckResult:
