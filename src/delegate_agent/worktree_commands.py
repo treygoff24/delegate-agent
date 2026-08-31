@@ -31,6 +31,8 @@ class WorktreeCommand:
     dry_run: bool = False
     all_pools: bool = False
     pool: str | None = None
+    yes: bool = False
+    path: str | None = None
 
 
 def _list_payload(command: WorktreeCommand, registry_root: Path, config: JsonObject) -> JsonObject:
@@ -179,6 +181,23 @@ def _gc_payload(
     )
 
 
+def _reap_payload(
+    command: WorktreeCommand, registry_root: Path | None, config: JsonObject
+) -> JsonObject:
+    return worktree_mgmt.reap_worktrees(
+        registry_root,
+        pool_data_home=isolation.worktrees_data_home(config),
+        handle=command.handle,
+        path=command.path,
+        group=command.group,
+        older_than_days=command.older_than_days,
+        dry_run=command.dry_run,
+        yes=command.yes,
+        force=command.force,
+        discard_uncommitted=command.discard_uncommitted,
+    )
+
+
 PayloadBuilder = Callable[[WorktreeCommand, Path | None, JsonObject], JsonObject]
 TextRenderer = Callable[[JsonObject, TextIO], None]
 ACTION_DISPATCH: dict[str, tuple[PayloadBuilder, TextRenderer]] = {
@@ -187,6 +206,7 @@ ACTION_DISPATCH: dict[str, tuple[PayloadBuilder, TextRenderer]] = {
     "remove": (_remove_payload, delegate_rendering.render_worktree_remove_text),
     "prune": (_prune_payload, delegate_rendering.render_worktree_prune_text),
     "gc": (_gc_payload, delegate_rendering.render_worktree_gc_text),
+    "reap": (_reap_payload, delegate_rendering.render_worktree_reap_text),
 }
 
 
@@ -201,7 +221,9 @@ def emit(
     # `gc --all` / `gc --pool` scan the machine-global worktree pool, which is
     # exactly the surface that outlives its per-repo registry — requiring one
     # here would make the leak it reports unreportable.
-    scans_pool = command.action == "gc" and (command.all_pools or command.pool is not None)
+    scans_pool = (
+        command.action == "gc" and (command.all_pools or command.pool is not None)
+    ) or command.action == "reap"
     if registry_root is None and not scans_pool:
         raise worktree_mgmt.WorktreeManagementError(
             {
